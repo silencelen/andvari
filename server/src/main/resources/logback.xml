@@ -1,0 +1,18 @@
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level %logger{20} - %msg%n</pattern>
+        </encoder>
+    </appender>
+    <!-- Audit trail as raw single-line JSON on stdout for Alloy/Loki. -->
+    <logger name="andvari.audit" level="INFO" additivity="false">
+        <appender name="AUDIT" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder><pattern>%msg%n</pattern></encoder>
+        </appender>
+    </logger>
+    <logger name="io.ktor" level="INFO"/>
+    <logger name="io.netty" level="WARN"/>
+    <root level="INFO">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>
