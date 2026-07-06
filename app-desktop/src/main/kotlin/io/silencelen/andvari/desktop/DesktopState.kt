@@ -7,22 +7,31 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.java.Java
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
+import io.silencelen.andvari.core.client.ApiException
+import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.ItemDoc
+import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
+import io.silencelen.andvari.core.model.TotpSetupResponse
+import io.silencelen.andvari.core.model.TotpStatus
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 sealed interface DesktopScreen {
     data object Loading : DesktopScreen
     data object Welcome : DesktopScreen
     data class Unlock(val email: String) : DesktopScreen
     data object Vault : DesktopScreen
+    data object Settings : DesktopScreen
 }
 
 /**
@@ -43,9 +52,19 @@ class DesktopState(private val scope: CoroutineScope) {
         private set
     var error by mutableStateOf<String?>(null)
         private set
+    var notice by mutableStateOf<String?>(null)
+        private set
     var baseUrl by mutableStateOf(store.baseUrl)
         private set
     var updateAvailable by mutableStateOf<String?>(null)
+        private set
+    var signInTotpRequired by mutableStateOf(false)
+        private set
+    var totpStatus by mutableStateOf<TotpStatus?>(null)
+        private set
+    var totpSetupInfo by mutableStateOf<TotpSetupResponse?>(null)
+        private set
+    var totpError by mutableStateOf<String?>(null)
         private set
 
     private var api: AndvariApi? = null
@@ -73,15 +92,28 @@ class DesktopState(private val scope: CoroutineScope) {
     }
 
     fun clearError() { error = null }
+    fun clearNotice() { notice = null }
 
-    fun signIn(email: String, password: String) = op {
+    fun signIn(email: String, password: String, totp: String? = null) = op {
         val a = newApi()
         val pre = a.prelogin(email)
         val authKey = Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams)
-        val s = a.login(LoginRequest(email, authKey, Account.deviceInfo(deviceName())))
+        val s = try {
+            a.login(LoginRequest(email, authKey, Account.deviceInfo(deviceName()), totp = totp))
+        } catch (e: ApiException) {
+            a.close()
+            when (e.code) {
+                // Server-TOTP is enrolled: reveal the code field and let the user retry.
+                "totp_required" -> { signInTotpRequired = true; busy = false; return@op }
+                "public_login_requires_totp" ->
+                    throw ApiException(e.status, e.code, "this account has no server-TOTP enrolled; public access is blocked")
+                else -> throw e
+            }
+        }
         val acct = Account.unlock(s.userId, password, s.accountKeys)
         bind(a, acct); engine!!.sync()
         store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+        signInTotpRequired = false
         toVault()
     }
 
@@ -109,20 +141,80 @@ class DesktopState(private val scope: CoroutineScope) {
         toVault()
     }
 
-    fun saveItem(itemId: String?, doc: ItemDoc) = op { engine!!.save(itemId, doc); refreshItems() }
+    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList()) =
+        op { engine!!.saveWithUploads(itemId, doc, uploads); refreshItems() }
     fun deleteItem(itemId: String) = op { engine!!.remove(itemId); refreshItems() }
     fun refresh() = op { engine!!.sync(); refreshItems() }
     fun item(itemId: String): VaultItem? = engine?.item(itemId)
 
+    // ---- attachments ----
+
+    /** Mint the SECRET half of a new attachment: fresh id + random per-file key (spec 02 §6). */
+    fun newAttachmentRef(name: String, size: Long): AttachmentRef {
+        val acct = account ?: throw IllegalStateException("vault is locked")
+        return AttachmentRef(id = acct.newItemId(), name = name, size = size, fileKey = Bytes.toB64(acct.newFileKey()))
+    }
+
+    /** Download + decrypt an attachment off the UI thread and write it to [dest]. */
+    fun saveAttachmentTo(ref: AttachmentRef, dest: File) = op {
+        withContext(Dispatchers.IO) { dest.writeBytes(engine!!.downloadAttachment(ref)) }
+        busy = false
+        notice = "Saved ${ref.name} to ${dest.absolutePath}"
+    }
+
+    // ---- settings / server TOTP ----
+
+    fun openSettings() {
+        totpStatus = null; totpSetupInfo = null; totpError = null
+        screen = DesktopScreen.Settings
+        scope.launch {
+            runCatching { api!!.totpStatus() }
+                .onSuccess { totpStatus = it }
+                .onFailure { totpError = it.message ?: "couldn't load TOTP status" }
+        }
+    }
+
+    fun closeSettings() {
+        totpSetupInfo = null; totpError = null
+        screen = DesktopScreen.Vault
+    }
+
+    fun beginTotpSetup() = totpOp { totpSetupInfo = api!!.totpSetup() }
+
+    fun confirmTotp(code: String) = totpOp {
+        totpStatus = api!!.totpConfirm(code.trim())
+        totpSetupInfo = null
+    }
+
+    fun disableTotp(code: String) = totpOp { totpStatus = api!!.totpDisable(code.trim()) }
+
+    private fun totpOp(block: suspend () -> Unit) {
+        busy = true; totpError = null
+        scope.launch {
+            try { block(); busy = false } catch (t: Throwable) {
+                busy = false
+                totpError = if (t is ApiException && t.code == "bad_totp_code") {
+                    "That code isn't right — check your authenticator and try again."
+                } else t.message ?: "something went wrong"
+            }
+        }
+    }
+
     fun lock() {
         api?.close(); api = null; account = null; engine = null
+        clearSecondary()
         screen = DesktopScreen.Unlock(store.load()?.email ?: ""); items = emptyList()
     }
 
     fun signOut() {
         scope.launch { runCatching { api?.logout() } }
         store.clear(); api?.close(); api = null; account = null; engine = null
+        clearSecondary(); signInTotpRequired = false
         screen = DesktopScreen.Welcome; items = emptyList()
+    }
+
+    private fun clearSecondary() {
+        notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
     }
 
     private fun bind(a: AndvariApi, acct: Account) {
@@ -133,7 +225,7 @@ class DesktopState(private val scope: CoroutineScope) {
     private fun toVault() { screen = DesktopScreen.Vault; items = engine?.items() ?: emptyList(); busy = false; error = null }
 
     private fun op(block: suspend () -> Unit) {
-        busy = true; error = null
+        busy = true; error = null; notice = null
         scope.launch {
             try { block() } catch (t: Throwable) { busy = false; error = t.message ?: "something went wrong" }
         }

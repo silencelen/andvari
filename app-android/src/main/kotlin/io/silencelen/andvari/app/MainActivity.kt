@@ -3,13 +3,18 @@ package io.silencelen.andvari.app
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -24,14 +29,19 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
+import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.PasswordGenerator
 import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val vm: AndvariViewModel by viewModels {
@@ -58,6 +68,7 @@ fun AndvariApp(vm: AndvariViewModel) {
             is Screen.Welcome -> WelcomeScreen(vm, ui)
             is Screen.Unlock -> UnlockScreen(vm, ui, screen.email)
             is Screen.Vault -> VaultScreen(vm, ui)
+            is Screen.Settings -> SettingsScreen(vm, ui)
         }
     }
 }
@@ -80,6 +91,18 @@ private fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
         Card(Modifier.fillMaxWidth().padding(vertical = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = onDismiss) { Text("dismiss") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
+    if (msg != null) {
+        Card(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = onDismiss) { Text("dismiss") }
             }
         }
@@ -111,11 +134,16 @@ fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
 private fun SignInForm(vm: AndvariViewModel, ui: UiState) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var totp by remember { mutableStateOf("") }
     Column(Modifier.fillMaxWidth()) {
         Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
         SecretField("Master password", password) { password = it }
+        if (ui.loginTotpRequired) {
+            Field("One-time code", totp, { totp = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number)
+        }
         Spacer(Modifier.height(12.dp))
-        PrimaryButton("Sign in", enabled = email.isNotBlank() && password.isNotBlank() && !ui.busy, busy = ui.busy) { vm.signIn(email.trim(), password) }
+        val ready = email.isNotBlank() && password.isNotBlank() && (!ui.loginTotpRequired || totp.length == 6)
+        PrimaryButton("Sign in", enabled = ready && !ui.busy, busy = ui.busy) { vm.signIn(email.trim(), password, totp.ifBlank { null }) }
     }
 }
 
@@ -187,6 +215,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                 title = { Text("andvari", style = MaterialTheme.typography.titleLarge) },
                 actions = {
                     IconButton(onClick = { vm.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
+                    IconButton(onClick = { vm.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
                     IconButton(onClick = { vm.lock() }) { Icon(Icons.Default.Lock, "lock") }
                 },
             )
@@ -200,8 +229,8 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
         Box(Modifier.padding(pad).fillMaxSize()) {
             val current = detailId?.let { vm.item(it) }
             when {
-                editing != null -> ItemEditor(editing!!.first, editing!!.second, ui.busy, onSave = { vm.saveItem(editing!!.first, it); editing = null }, onCancel = { editing = null })
-                current != null -> ItemDetail(current, onEdit = { editing = current.itemId to current.doc }, onDelete = { vm.deleteItem(current.itemId); detailId = null }, onBack = { detailId = null })
+                editing != null -> ItemEditor(vm, ui, editing!!.first, editing!!.second, onSave = { doc, uploads -> vm.saveItem(editing!!.first, doc, uploads) { editing = null } }, onCancel = { editing = null })
+                current != null -> ItemDetail(vm, ui, current, onEdit = { editing = current.itemId to current.doc }, onDelete = { vm.deleteItem(current.itemId); detailId = null }, onBack = { detailId = null })
                 else -> Column(Modifier.padding(16.dp)) {
                     OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
                     ErrorBar(ui.error, vm::clearError)
@@ -235,11 +264,24 @@ private fun VaultRow(item: VaultItem, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ItemDetail(item: VaultItem, onEdit: () -> Unit, onDelete: () -> Unit, onBack: () -> Unit) {
+private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdit: () -> Unit, onDelete: () -> Unit, onBack: () -> Unit) {
     val ctx = LocalContextCompat()
     val doc = item.doc
+    var pendingDownload by remember { mutableStateOf<AttachmentRef?>(null) }
+    val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        val ref = pendingDownload
+        pendingDownload = null
+        if (uri != null && ref != null) {
+            vm.saveAttachmentTo(ref) { bytes ->
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                    ?: throw IllegalStateException("could not open the chosen destination")
+            }
+        }
+    }
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
+        ErrorBar(ui.error, vm::clearError)
+        NoticeBar(ui.notice, vm::clearNotice)
         Text(doc.name, style = MaterialTheme.typography.headlineMedium)
         Text(if (doc.type == "login") "Login" else "Secure note", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(16.dp))
@@ -250,6 +292,15 @@ private fun ItemDetail(item: VaultItem, onEdit: () -> Unit, onDelete: () -> Unit
             login.uris.firstOrNull()?.takeIf { it.isNotBlank() }?.let { ReadOnlyRow("Website", it) }
         }
         doc.notes?.takeIf { it.isNotBlank() }?.let { ReadOnlyRow("Notes", it) }
+        if (doc.attachments.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Text("Attachments", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(4.dp))
+            doc.attachments.forEach { ref ->
+                AttachmentRow(ref, enabled = !ui.busy) { pendingDownload = ref; saver.launch(ref.name) }
+                Spacer(Modifier.height(8.dp))
+            }
+        }
         Spacer(Modifier.height(24.dp))
         Row {
             Button(onClick = onEdit, modifier = Modifier.weight(1f)) { Text("Edit") }
@@ -260,7 +311,23 @@ private fun ItemDetail(item: VaultItem, onEdit: () -> Unit, onDelete: () -> Unit
 }
 
 @Composable
-private fun ItemEditor(itemId: String?, initial: ItemDoc, busy: Boolean, onSave: (ItemDoc) -> Unit, onCancel: () -> Unit) {
+private fun AttachmentRow(ref: AttachmentRef, enabled: Boolean, onClick: () -> Unit) {
+    Card(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.AttachFile, null, tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(ref.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                Text(humanSize(ref.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Icon(Icons.Default.FileDownload, "download", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initial: ItemDoc, onSave: (ItemDoc, List<PendingUpload>) -> Unit, onCancel: () -> Unit) {
+    val ctx = LocalContextCompat()
     val isLogin = initial.type == "login"
     var name by remember { mutableStateOf(initial.name) }
     var username by remember { mutableStateOf(initial.login?.username ?: "") }
@@ -268,12 +335,44 @@ private fun ItemEditor(itemId: String?, initial: ItemDoc, busy: Boolean, onSave:
     var website by remember { mutableStateOf(initial.login?.uris?.firstOrNull() ?: "") }
     var totp by remember { mutableStateOf(initial.login?.totp ?: "") }
     var notes by remember { mutableStateOf(initial.notes ?: "") }
+    var attachments by remember { mutableStateOf(initial.attachments) }
+    val pendingUploads = remember { mutableStateListOf<PendingUpload>() }
+    var attachError by remember { mutableStateOf<String?>(null) }
     val crypto = remember { createCryptoProvider() }
+    val scope = rememberCoroutineScope()
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            attachError = null
+            val cap = ui.policy?.attachmentMaxBytes ?: DEFAULT_ATTACHMENT_MAX_BYTES
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val fileName = displayName(ctx, uri)
+                    val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: throw IllegalStateException("could not read the selected file")
+                    fileName to bytes
+                }
+            }.onSuccess { (fileName, bytes) ->
+                when {
+                    bytes.isEmpty() -> attachError = "“$fileName” is empty — nothing to attach."
+                    bytes.size > cap -> attachError = "“$fileName” is ${humanSize(bytes.size.toLong())} — over the ${humanSize(cap)} limit."
+                    else -> when (val ref = vm.newAttachmentRef(fileName, bytes.size.toLong())) {
+                        null -> attachError = "vault is locked"
+                        else -> {
+                            pendingUploads += PendingUpload(ref, bytes)
+                            attachments = attachments + ref
+                        }
+                    }
+                }
+            }.onFailure { attachError = it.message ?: "could not read the selected file" }
+        }
+    }
 
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onCancel) { Text("cancel") }
         Text(if (itemId != null) "Edit" else if (isLogin) "New login" else "New note", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(8.dp))
+        ErrorBar(ui.error, vm::clearError)
         Field("Name", name, { name = it })
         if (isLogin) {
             Field("Username", username, { username = it }, mono = true)
@@ -285,12 +384,34 @@ private fun ItemEditor(itemId: String?, initial: ItemDoc, busy: Boolean, onSave:
             Field("TOTP (otpauth:// or base32)", totp, { totp = normalizeTotp(it) }, mono = true)
         }
         Field("Notes", notes, { notes = it }, singleLine = false)
+        Spacer(Modifier.height(12.dp))
+        Text("Attachments", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        attachments.forEach { ref ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.AttachFile, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(ref.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                    Text(humanSize(ref.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                TextButton(
+                    onClick = {
+                        attachments = attachments.filterNot { it.id == ref.id }
+                        pendingUploads.removeAll { it.ref.id == ref.id }
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Remove") }
+            }
+        }
+        attachError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp)) }
+        TextButton(onClick = { picker.launch(arrayOf("*/*")) }) { Icon(Icons.Default.AttachFile, null); Text(" Attach file") }
         Spacer(Modifier.height(16.dp))
         val doc = ItemDoc(
             type = initial.type, name = name.trim(), notes = notes.ifBlank { null },
             login = if (isLogin) LoginData(username = username, password = password, uris = listOf(website), totp = totp.ifBlank { null }) else null,
+            attachments = attachments,
         )
-        PrimaryButton("Save", enabled = name.isNotBlank() && !busy, busy = busy) { onSave(doc) }
+        PrimaryButton("Save", enabled = name.isNotBlank() && !ui.busy, busy = ui.busy) { onSave(doc, pendingUploads.toList()) }
     }
 }
 
@@ -317,6 +438,99 @@ private fun TotpRow(uri: String, ctx: Context) {
                 Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary)
             }
             Text("${remaining}s", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+// ---- settings / server TOTP ----
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
+    val ctx = LocalContextCompat()
+    var code by remember { mutableStateOf("") }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings", style = MaterialTheme.typography.titleLarge) },
+                navigationIcon = { IconButton(onClick = vm::closeSettings) { Icon(Icons.Default.ArrowBack, "back") } },
+            )
+        },
+    ) { pad ->
+        Column(Modifier.padding(pad).fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Server TOTP", style = MaterialTheme.typography.titleLarge)
+                    Text("A second factor the server checks — protects break-glass/public logins.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(12.dp))
+                    val status = ui.totpStatus
+                    val setup = ui.totpSetup
+                    when {
+                        status == null -> {
+                            if (ui.totpMessage != null) {
+                                InlineError(ui.totpMessage)
+                            } else {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text("Checking status…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                        setup != null -> {
+                            Text("Add this secret to your authenticator app, then confirm with a code.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            SelectableCopyRow("Setup URI (otpauth)", setup.otpauthUri, ctx)
+                            SelectableCopyRow("Secret (base32)", setup.secretBase32, ctx)
+                            Spacer(Modifier.height(4.dp))
+                            Field("6-digit code", code, { code = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number)
+                            InlineError(ui.totpMessage)
+                            Spacer(Modifier.height(8.dp))
+                            PrimaryButton("Confirm", enabled = code.length == 6 && !ui.busy, busy = ui.busy) { vm.totpConfirm(code); code = "" }
+                        }
+                        status.enrolled -> {
+                            Text("Enrolled — one-time codes are active for this account.", style = MaterialTheme.typography.bodyMedium)
+                            Spacer(Modifier.height(8.dp))
+                            Field("6-digit code", code, { code = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number)
+                            InlineError(ui.totpMessage)
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedButton(
+                                onClick = { vm.totpDisable(code); code = "" },
+                                enabled = code.length == 6 && !ui.busy,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                            ) { Text("Disable") }
+                        }
+                        else -> {
+                            Text(
+                                if (status.pendingSetup) "A previous setup was never confirmed — enable to restart it." else "Not enrolled.",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            InlineError(ui.totpMessage)
+                            Spacer(Modifier.height(8.dp))
+                            PrimaryButton("Enable", enabled = !ui.busy, busy = ui.busy) { vm.totpBegin() }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineError(msg: String?) {
+    if (msg != null) Text(msg, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+}
+
+/** Copy row for setup material (not vault secrets): selectable text, copy WITHOUT auto-clear. */
+@Composable
+private fun SelectableCopyRow(label: String, value: String, ctx: Context) {
+    Column(Modifier.padding(vertical = 6.dp)) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SelectionContainer(Modifier.weight(1f)) {
+                Text(value, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            }
+            TextButton(onClick = { copyToClipboard(ctx, label, value, 0) }) { Text("Copy") }
         }
     }
 }
@@ -392,7 +606,26 @@ private fun PrimaryButton(text: String, enabled: Boolean, busy: Boolean, onClick
 
 // ---- non-composable helpers ----
 
+private const val DEFAULT_ATTACHMENT_MAX_BYTES = 25L * 1024 * 1024
+
 private fun groupHex(hex: String): String = hex.chunked(4).joinToString(" ")
+
+private fun humanSize(bytes: Long): String = when {
+    bytes >= 1024L * 1024 * 1024 -> "%.1f GB".format(bytes / (1024.0 * 1024 * 1024))
+    bytes >= 1024L * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024))
+    bytes >= 1024L -> "%.1f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
+}
+
+private fun displayName(ctx: Context, uri: Uri): String {
+    ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+        if (c.moveToFirst()) {
+            val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (i >= 0) c.getString(i)?.let { return it }
+        }
+    }
+    return uri.lastPathSegment ?: "file"
+}
 
 private fun normalizeTotp(input: String): String {
     val t = input.trim()
@@ -404,6 +637,7 @@ private fun normalizeTotp(input: String): String {
 private fun copyToClipboard(ctx: Context, label: String, value: String, clearSeconds: Int) {
     val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     cm.setPrimaryClip(ClipData.newPlainText(label, value))
+    if (clearSeconds <= 0) return // non-secret material (e.g. TOTP setup URI) — no auto-clear
     // Best-effort auto-clear after the policy window.
     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
         val cur = cm.primaryClip?.getItemAt(0)?.text?.toString()

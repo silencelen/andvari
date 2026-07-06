@@ -1,8 +1,14 @@
 package io.silencelen.andvari.core.client
 
+import io.silencelen.andvari.core.crypto.Attachments
+import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.PushRequest
 import io.silencelen.andvari.core.model.WireItem
+
+/** A newly attached file awaiting upload: the doc's AttachmentRef + plaintext bytes. */
+class PendingUpload(val ref: AttachmentRef, val data: ByteArray)
 
 /**
  * Client sync engine (sibling of web/src/vault/store.ts). Pulls deltas since the
@@ -88,12 +94,34 @@ class SyncEngine(
         Mutation(account.newItemId(), "delete", itemId, vaultId, baseItemRev, null)
 
     /** Create or update an item, then reconcile. */
-    suspend fun save(itemId: String?, doc: ItemDoc) {
+    suspend fun save(itemId: String?, doc: ItemDoc) = saveWithUploads(itemId, doc, emptyList())
+
+    /**
+     * Blob-first save (spec 02 §6): encrypt + upload every new attachment under the
+     * (possibly fresh) itemId, THEN push the item that references them.
+     */
+    suspend fun saveWithUploads(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload>) {
         val vaultId = account.personalVaultId
         val existing = itemId?.let { cache.getItem(it) }
         val id = itemId ?: account.newItemId()
+        for (u in uploads) {
+            val enc = Attachments.encrypt(account.cryptoProvider(), Bytes.fromB64(u.ref.fileKey), u.data)
+            api.uploadAttachment(u.ref.id, id, vaultId, enc.header + enc.ciphertext)
+        }
         push(listOf(putMutation(id, vaultId, doc, existing?.rev ?: 0)))
         pull()
+    }
+
+    /** Download + decrypt one attachment (hard failure on any corruption, spec 02 §6). */
+    suspend fun downloadAttachment(ref: AttachmentRef): ByteArray {
+        val bytes = api.downloadAttachment(ref.id)
+        if (bytes.size <= Attachments.HEADER_BYTES) throw CryptoException("attachment response truncated")
+        return Attachments.decrypt(
+            account.cryptoProvider(),
+            Bytes.fromB64(ref.fileKey),
+            bytes.copyOfRange(0, Attachments.HEADER_BYTES),
+            bytes.copyOfRange(Attachments.HEADER_BYTES, bytes.size),
+        )
     }
 
     suspend fun remove(itemId: String) {

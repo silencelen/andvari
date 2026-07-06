@@ -12,7 +12,7 @@ import java.time.Duration
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-const val DESKTOP_VERSION = "0.1.0"
+const val DESKTOP_VERSION = "0.2.0"
 
 private val json = Json { ignoreUnknownKeys = true }
 private val clipboardCleaner = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "andvari-clip").apply { isDaemon = true } }
@@ -45,6 +45,11 @@ private fun compareVersions(a: String, b: String): Int {
         if (x != y) return x.compareTo(y)
     }
     return 0
+}
+
+/** Plain clipboard copy, NO auto-clear — for setup material the user pastes elsewhere (TOTP URI/secret). */
+fun copyPlain(value: String) {
+    Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(value), null)
 }
 
 /** Copy to the system clipboard and auto-clear after [clearSeconds] (best-effort). */
