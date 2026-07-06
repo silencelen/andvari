@@ -1,17 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiClient, ApiError } from "../api/client";
+import { ApiClient } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "../vault/account";
 import { VaultStore } from "../vault/store";
-import { Welcome } from "./Welcome";
+import { Welcome, type LoginMeta } from "./Welcome";
 import { Vault } from "./Vault";
 import {
   clearSession,
   defaultBaseUrl,
   loadSession,
   makeClient,
-  saveSession,
   type Session,
 } from "./session";
 
@@ -19,7 +18,7 @@ type Phase =
   | { kind: "loading" }
   | { kind: "welcome" }
   | { kind: "unlock"; session: Session }
-  | { kind: "vault"; account: Account; store: VaultStore };
+  | { kind: "vault"; account: Account; store: VaultStore; meta: LoginMeta };
 
 export function App() {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
@@ -42,7 +41,8 @@ export function App() {
     })();
   }, [baseUrl]);
 
-  const onUnlocked = (account: Account, store: VaultStore) => setPhase({ kind: "vault", account, store });
+  const onUnlocked = (account: Account, store: VaultStore, meta: LoginMeta) =>
+    setPhase({ kind: "vault", account, store, meta });
 
   const onLoggedOut = () => {
     clearSession();
@@ -62,7 +62,17 @@ export function App() {
   }
 
   if (phase.kind === "vault") {
-    return <Vault account={phase.account} store={phase.store} client={clientRef.current!} policy={policy} onLock={onLoggedOut} />;
+    return (
+      <Vault
+        account={phase.account}
+        store={phase.store}
+        client={clientRef.current!}
+        policy={policy}
+        isAdmin={phase.meta.isAdmin}
+        mustChangePassword={phase.meta.mustChangePassword}
+        onLock={onLoggedOut}
+      />
+    );
   }
 
   return (

@@ -6,12 +6,20 @@ import io.silencelen.andvari.core.model.InviteResponse
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.MutationResult
+import io.silencelen.andvari.core.model.PasswordChangeRequest
 import io.silencelen.andvari.core.model.PreloginResponse
 import io.silencelen.andvari.core.model.PushResponse
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.TokenPair
+import io.silencelen.andvari.core.model.TotpSetupResponse
+import io.silencelen.andvari.core.model.TotpStatus
+import io.silencelen.andvari.core.crypto.Base32
 import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.Totp
+import io.silencelen.andvari.core.crypto.TotpConfig
+import io.silencelen.andvari.core.crypto.createCryptoProvider
+import java.security.MessageDigest
 import java.sql.Connection
 
 /**
@@ -22,8 +30,10 @@ import java.sql.Connection
 class Service(
     val repo: Repo,
     val config: Config,
+    val attachments: AttachmentStore = AttachmentStore(repo, config.blobDir),
     private val onChange: suspend (userIds: Collection<String>, rev: Long) -> Unit = { _, _ -> },
 ) {
+    private val crypto = createCryptoProvider()
     private val accessTtlMs get() = policy().sessionAccessTtlSeconds * 1000
     private val refreshTtlMs get() = policy().sessionRefreshTtlDays * 24 * 3600 * 1000
 
@@ -95,7 +105,7 @@ class Service(
     // ---- login ----
     // Verify OUTSIDE any tx (so a failure's audit persists in its own tx); only the
     // success path opens a write tx to issue the session.
-    fun login(req: LoginRequest, ip: String): SessionResponse {
+    fun login(req: LoginRequest, ip: String, publicOrigin: Boolean = false): SessionResponse {
         val user = repo.userByEmail(req.email)
         if (user == null || user.status != "active") {
             ServerCrypto.verify(DUMMY_VERIFIER, req.authKey) // uniform cost
@@ -105,10 +115,97 @@ class Service(
             repo.audit("login_fail", user.userId, null, ip)
             throw Unauthorized()
         }
+        // Break-glass hardening (spec 03 §2): via the public origin, server-TOTP is
+        // mandatory — an account without it enrolled cannot log in publicly at all.
+        if (publicOrigin) {
+            val secret = user.totpSecret ?: run {
+                repo.audit("login_fail_totp", user.userId, null, ip, "not_enrolled")
+                throw Forbidden("public_login_requires_totp")
+            }
+            val code = req.totp ?: throw Unauthorized("totp_required")
+            val step = verifyTotpCode(secret, code, user.totpLastStep)
+            if (step == null) {
+                repo.audit("login_fail", user.userId, null, ip, "totp")
+                throw Unauthorized()
+            }
+            // Guarded consume: the WHERE clause makes step acceptance atomic, so two
+            // concurrent logins replaying one code can't both win (TOCTOU).
+            val consumed = repo.db.tx { c ->
+                c.exec("UPDATE users SET totpLastStep=? WHERE userId=? AND totpLastStep<?", step, user.userId, step)
+            }
+            if (consumed != 1) {
+                repo.audit("login_fail", user.userId, null, ip, "totp_replay")
+                throw Unauthorized()
+            }
+        }
         return repo.db.tx { c ->
             val session = issueSession(c, user.userId, req.device.platform, req.device.name)
             repo.auditOn(c, "login", user.userId, session.deviceId, ip)
             session.toResponse(user, user.isAdmin, user.mustChangePassword)
+        }
+    }
+
+    // ---- server TOTP (spec 03 §2; secrets are server 2FA, never vault data) ----
+    fun totpStatus(userId: String): TotpStatus {
+        val u = repo.userById(userId) ?: throw Unauthorized()
+        return TotpStatus(enrolled = u.totpSecret != null, pendingSetup = u.totpPendingSecret != null)
+    }
+
+    fun totpSetup(userId: String): TotpSetupResponse {
+        val u = repo.userById(userId) ?: throw Unauthorized()
+        val secret = Base32.encode(crypto.randomBytes(20))
+        repo.db.tx { c -> c.exec("UPDATE users SET totpPendingSecret=? WHERE userId=?", secret, userId) }
+        val label = "andvari:${u.email}"
+        return TotpSetupResponse(secret, "otpauth://totp/$label?secret=$secret&issuer=andvari&algorithm=SHA1&digits=6&period=30")
+    }
+
+    fun totpConfirm(userId: String, code: String, ip: String) {
+        val u = repo.userById(userId) ?: throw Unauthorized()
+        val pending = u.totpPendingSecret ?: throw BadRequest("no_pending_totp")
+        val step = verifyTotpCode(pending, code, 0) ?: throw BadRequest("bad_totp_code")
+        repo.db.tx { c ->
+            c.exec("UPDATE users SET totpSecret=?, totpPendingSecret=NULL, totpEnrolledAt=?, totpLastStep=? WHERE userId=?", pending, now(), step, userId)
+            repo.auditOn(c, "totp_enroll", userId, null, ip)
+        }
+    }
+
+    fun totpDisable(userId: String, code: String, ip: String) {
+        val u = repo.userById(userId) ?: throw Unauthorized()
+        val secret = u.totpSecret ?: throw BadRequest("totp_not_enrolled")
+        if (verifyTotpCode(secret, code, u.totpLastStep) == null) throw BadRequest("bad_totp_code")
+        repo.db.tx { c ->
+            c.exec("UPDATE users SET totpSecret=NULL, totpPendingSecret=NULL, totpEnrolledAt=NULL, totpLastStep=0 WHERE userId=?", userId)
+            repo.auditOn(c, "totp_disable", userId, null, ip)
+        }
+    }
+
+    /** RFC 6238 check over steps now-1..now+1; a step at or before the last accepted one is a replay. */
+    private fun verifyTotpCode(secretBase32: String, code: String, lastStep: Long): Long? {
+        val cfg = TotpConfig(secret = Base32.decode(secretBase32))
+        val nowSec = now() / 1000
+        val step = nowSec / cfg.periodSeconds
+        for (s in longArrayOf(step, step - 1, step + 1)) {
+            if (s <= lastStep) continue
+            val expect = Totp.code(crypto, cfg, s * cfg.periodSeconds)
+            if (MessageDigest.isEqual(expect.encodeToByteArray(), code.trim().encodeToByteArray())) return s
+        }
+        return null
+    }
+
+    // ---- password change (spec 03 §3; also the tail of the recovery flow, spec 04 §4) ----
+    fun changePassword(p: Principal, req: PasswordChangeRequest, ip: String) {
+        val u = repo.userById(p.userId) ?: throw Unauthorized()
+        if (!ServerCrypto.verify(u.verifier, req.currentAuthKey)) {
+            repo.audit("password_change_fail", p.userId, p.deviceId, ip)
+            throw Unauthorized()
+        }
+        repo.db.tx { c ->
+            c.exec(
+                "UPDATE users SET verifier=?, kdfSalt=?, kdfParams=?, wrappedUvk=?, mustChangePassword=0 WHERE userId=?",
+                ServerCrypto.hashVerifier(req.newAuthKey), req.newKdfSalt, encodeParams(req.newKdfParams), req.newWrappedUvk, p.userId,
+            )
+            c.exec("UPDATE sessions SET revokedAt=? WHERE userId=? AND sessionId<>? AND revokedAt IS NULL", now(), p.userId, p.sessionId)
+            repo.auditOn(c, "password_change", p.userId, p.deviceId, ip)
         }
     }
 
@@ -207,6 +304,7 @@ class Service(
 
     private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>): MutationResult {
         val item = m.item ?: throw BadRequest("put_without_item")
+        validateAttachmentRefs(c, m, item.attachmentIds)
         val vaultUsers = vaultMemberIds(c, m.vaultId).also { affected.addAll(it) }
         val t = now()
         if (existing == null) {
@@ -243,8 +341,21 @@ class Service(
         }
         repo.archiveVersion(c, existing)
         val rev = repo.nextRev(c, "item", m.itemId, m.vaultId)
-        c.exec("UPDATE items SET rev=?, updatedAt=?, deleted=1, conflict=0, blob=NULL, blobSize=0 WHERE itemId=?", rev, now(), m.itemId)
+        c.exec("UPDATE items SET rev=?, updatedAt=?, deleted=1, conflict=0, blob=NULL, blobSize=0, attachmentIds='[]' WHERE itemId=?", rev, now(), m.itemId)
+        attachments.deleteForItem(c, m.itemId) // tombstone drops blobs (spec 02 §7)
         return MutationResult(m.mutationId, "applied", rev)
+    }
+
+    /** Every referenced attachment must exist, be bound to this item+vault, and fit the per-item quota. */
+    private fun validateAttachmentRefs(c: Connection, m: Mutation, ids: List<String>) {
+        if (ids.isEmpty()) return
+        var total = 0L
+        for (aid in ids.distinct()) {
+            val row = attachments.rowById(c, aid) ?: throw BadRequest("unknown_attachment")
+            if (row.itemId != m.itemId || row.vaultId != m.vaultId) throw BadRequest("attachment_mismatch")
+            total += row.size
+        }
+        if (total > attachments.maxCipherBytes(policy().itemAttachmentsMaxBytes)) throw PayloadTooLarge("item_attachment_quota")
     }
 
     private fun vaultMemberIds(c: Connection, vaultId: String): Set<String> =
@@ -276,7 +387,7 @@ class Service(
     private fun IssuedSession.toResponse(u: UserRow, isAdmin: Boolean, mustChange: Boolean) = SessionResponse(
         userId = u.userId, deviceId = deviceId, accessToken = access, refreshToken = refresh,
         accountKeys = AccountKeys(u.kdfSalt, u.kdfParams, u.wrappedUvk, u.encryptedIdentitySeed, u.identityPub, config.recoveryFingerprint),
-        isAdmin = isAdmin, mustChangePassword = mustChange,
+        isAdmin = isAdmin, mustChangePassword = mustChange, totpEnrolled = u.totpSecret != null,
     )
 
     companion object {

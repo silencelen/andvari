@@ -10,6 +10,7 @@ export interface Session {
   userId: string;
   personalVaultId: string;
   email: string;
+  isAdmin: boolean;
   tokens: Tokens | null;
 }
 
@@ -19,7 +20,8 @@ export function loadSession(): Session | null {
   const raw = localStorage.getItem(KEY);
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as Session;
+    const s = JSON.parse(raw) as Session;
+    return { ...s, isAdmin: !!s.isAdmin }; // sessions saved before P4 lack the field
   } catch {
     return null;
   }

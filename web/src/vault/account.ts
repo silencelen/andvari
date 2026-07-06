@@ -133,6 +133,28 @@ export class Account {
     return vk;
   }
 
+  /**
+   * Master-password change (spec 01 §6): fresh salt + KDF, new auth/wrap keys, and
+   * the EXISTING UVK re-sealed under the new wrap key. The UVK never rotates —
+   * vault keys, identity seed, and escrow all stay valid.
+   */
+  async buildPasswordChange(
+    newPassword: string,
+    params: KdfParams,
+  ): Promise<{ newKdfSalt: string; newKdfParams: KdfParams; newAuthKey: string; newWrappedUvk: string }> {
+    const newKdfSalt = randomBytes(16);
+    const mk = masterKey(newPassword, newKdfSalt, params);
+    const newAuthKey = await deriveAuthKey(mk);
+    const newWrapKey = await deriveWrapKey(mk);
+    const newWrappedUvk = seal(newWrapKey, this.uvk, adUvk(this.userId));
+    return {
+      newKdfSalt: toB64(newKdfSalt),
+      newKdfParams: params,
+      newAuthKey: toB64(newAuthKey),
+      newWrappedUvk: toB64(newWrappedUvk),
+    };
+  }
+
   encryptItem(vaultId: string, itemId: string, doc: ItemDoc): string {
     const blob = seal(this.vk(vaultId), utf8(JSON.stringify(doc)), adItem(vaultId, itemId, ITEM_FORMAT_VERSION));
     return toB64(blob);

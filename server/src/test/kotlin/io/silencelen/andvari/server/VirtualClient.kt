@@ -11,6 +11,7 @@ import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.DeviceInfo
 import io.silencelen.andvari.core.model.EscrowUpload
 import io.silencelen.andvari.core.model.ItemUpload
+import io.silencelen.andvari.core.model.PasswordChangeRequest
 import io.silencelen.andvari.core.model.PersonalVaultUpload
 import io.silencelen.andvari.core.model.RegisterRequest
 
@@ -89,6 +90,24 @@ class VirtualClient(val email: String, val password: String, fast: Boolean = tru
         recoveredUvk.copyInto(uvk)
         val recoveredVk = Envelope.openB64(crypto, uvk, wrappedVkFromGrant, Ad.vk(personalVaultId, userId))
         recoveredVk.copyInto(vk)
+    }
+
+    /**
+     * Password change payload (spec 03 §3): fresh salt + authKey derived from the new
+     * password, and the SAME UVK re-wrapped under the new wrap key — items must stay
+     * decryptable because nothing below the UVK changes. Pure: this client keeps its
+     * original password; post-change flows use a fresh VirtualClient(newPassword).
+     */
+    fun buildPasswordChange(newPassword: String): PasswordChangeRequest {
+        val newSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
+        val newMk = Keys.masterKey(crypto, newPassword, newSalt, kdfParams)
+        return PasswordChangeRequest(
+            currentAuthKey = authKey,
+            newAuthKey = Bytes.toB64(Keys.authKey(crypto, newMk)),
+            newKdfSalt = Bytes.toB64(newSalt),
+            newKdfParams = kdfParams,
+            newWrappedUvk = Envelope.sealB64(crypto, Keys.wrapKey(crypto, newMk), uvk, Ad.uvk(userId)),
+        )
     }
 
     fun encItem(itemId: String, plaintext: String): ItemUpload {

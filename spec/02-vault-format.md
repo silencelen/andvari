@@ -99,7 +99,7 @@ spec violation.
 
 | Surface | Fields |
 |---|---|
-| users | userId, email, displayName, kdfSalt, kdfParams, verifier(argon2id str), identityPub, isAdmin, status, createdAt |
+| users | userId, email, displayName, kdfSalt, kdfParams, verifier(argon2id str), identityPub, isAdmin, status, createdAt, server-TOTP secret (second factor for break-glass logins — a server-side authenticator secret by design, never vault data; spec 03 §2) |
 | devices | deviceId, userId, platform, clientVersion, createdAt, lastSeenAt, revokedAt |
 | sessions | hashed tokens, deviceId, expiry |
 | vaults | vaultId, type, rev, createdAt (names/icons are ciphertext) |

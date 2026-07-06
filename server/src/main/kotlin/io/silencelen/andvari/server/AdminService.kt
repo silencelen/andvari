@@ -1,8 +1,11 @@
 package io.silencelen.andvari.server
 
+import io.silencelen.andvari.core.model.AdminDeviceSummary
+import io.silencelen.andvari.core.model.AdminStatus
 import io.silencelen.andvari.core.model.AdminUserSummary
 import io.silencelen.andvari.core.model.InviteResponse
 import io.silencelen.andvari.core.model.RecoveryUpload
+import java.io.File
 
 /** Admin operations (spec 03 §7). All callers are already checked isAdmin by the route. */
 class AdminService(private val repo: Repo) {
@@ -64,5 +67,39 @@ class AdminService(private val repo: Repo) {
 
     fun userSealed(userId: String): String? = repo.db.read {
         it.queryOne("SELECT sealed FROM escrow WHERE userId=?", userId) { rs -> rs.getString(1) }
+    }
+
+    fun listDevices(userId: String): List<AdminDeviceSummary> = repo.db.read { c ->
+        c.queryAll("SELECT * FROM devices WHERE userId=? ORDER BY createdAt DESC", userId) { rs ->
+            AdminDeviceSummary(
+                deviceId = rs.getString("deviceId"),
+                platform = rs.getString("platform"),
+                name = rs.getString("name"),
+                clientVersion = rs.getString("clientVersion"),
+                createdAt = rs.getLong("createdAt"),
+                lastSeenAt = rs.getLong("lastSeenAt").let { v -> if (rs.wasNull()) null else v },
+                revokedAt = rs.getLong("revokedAt").let { v -> if (rs.wasNull()) null else v },
+            )
+        }
+    }
+
+    /** spec 03 §7: server version, break-glass state (read-only), storage stats. */
+    fun status(config: Config, attachments: AttachmentStore): AdminStatus = repo.db.read { c ->
+        val (attCount, attBytes) = attachments.stats(c)
+        AdminStatus(
+            serverVersion = SERVER_VERSION,
+            serverTime = now(),
+            escrowConfigured = config.escrowConfigured,
+            recoveryFingerprint = config.recoveryFingerprint,
+            breakGlassConfigured = config.publicHostname != null,
+            lastPublicRequestAt = c.queryOne("SELECT value FROM meta WHERE key='lastPublicRequestAt'") { it.getString(1).toLongOrNull() },
+            userCount = c.queryOne("SELECT COUNT(*) FROM users") { it.getInt(1) } ?: 0,
+            itemCount = c.queryOne("SELECT COUNT(*) FROM items WHERE deleted=0") { it.getInt(1) } ?: 0,
+            attachmentCount = attCount,
+            attachmentBytes = attBytes,
+            dbBytes = File(config.dbPath).length(),
+            totpEnrolledCount = c.queryOne("SELECT COUNT(*) FROM users WHERE totpSecret IS NOT NULL") { it.getInt(1) } ?: 0,
+            downloadsManifest = config.downloadsDir?.let { File(it, "manifest.json").isFile } ?: false,
+        )
     }
 }

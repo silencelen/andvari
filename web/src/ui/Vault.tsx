@@ -1,25 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ApiClient } from "../api/client";
-import type { ClientPolicy, ItemDoc } from "../api/types";
+import { ApiClient, ApiError } from "../api/client";
+import type { AttachmentRef, ClientPolicy, ItemDoc } from "../api/types";
+import { toB64 } from "../crypto/bytes";
 import { generatePassword } from "../crypto/generator";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
+import { randomBytes } from "../crypto/provider";
 import { base32Decode, parseOtpauthUri, totpCode, totpSecondsRemaining } from "../crypto/totp";
 import type { Account } from "../vault/account";
-import type { VaultItem, VaultStore } from "../vault/store";
+import type { PendingUpload, VaultItem, VaultStore } from "../vault/store";
+import { Admin } from "./Admin";
+import { humanSize } from "./format";
+import { Health } from "./Health";
+import { Settings } from "./Settings";
+import { estimateStrength } from "./strength";
+
+type View = "vault" | "health" | "settings" | "admin";
 
 interface Props {
   account: Account;
   store: VaultStore;
   client: ApiClient;
   policy: ClientPolicy | null;
+  isAdmin: boolean;
+  mustChangePassword: boolean;
   onLock: () => void;
 }
 
-export function Vault({ account, store, client, policy, onLock }: Props) {
+export function Vault({ account, store, client, policy, isAdmin, mustChangePassword, onLock }: Props) {
+  const [view, setView] = useState<View>("vault");
   const [items, setItems] = useState<VaultItem[]>(store.list());
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<ItemDoc | null>(null);
+  const [mustChange, setMustChange] = useState(mustChangePassword);
   const [online, setOnline] = useState(true);
 
   const refresh = () => setItems(store.list());
@@ -52,8 +65,8 @@ export function Vault({ account, store, client, policy, onLock }: Props) {
     setEditing(null);
   };
 
-  const save = async (doc: ItemDoc) => {
-    await store.save(selected, doc);
+  const save = async (doc: ItemDoc, newFiles: PendingUpload[], onProgress?: (done: number, total: number) => void) => {
+    await store.save(selected, doc, newFiles, onProgress);
     refresh();
     setEditing(null);
     setSelected(null);
@@ -65,25 +78,57 @@ export function Vault({ account, store, client, policy, onLock }: Props) {
     setSelected(null);
   };
 
+  const goToItem = (itemId: string) => {
+    setView("vault");
+    setEditing(null);
+    setSelected(itemId);
+  };
+
+  const navBtn = (v: View, label: string) => (
+    <button className={`navbtn ${view === v ? "active" : ""}`} onClick={() => { setView(v); setEditing(null); setSelected(null); }}>{label}</button>
+  );
+
   const current = selected ? store.get(selected) : null;
 
   return (
     <div>
       <div className="appbar">
-        <span className="brand"><span className="a-mark">and</span>vari</span>
+        <div className="row">
+          <span className="brand"><span className="a-mark">and</span>vari</span>
+          <nav className="nav">
+            {navBtn("vault", "Vault")}
+            {navBtn("health", "Health")}
+            {navBtn("settings", "Settings")}
+            {isAdmin && navBtn("admin", "Admin")}
+          </nav>
+        </div>
         <div className="row">
           <span className="muted"><span className={`dot ${online ? "on" : "off"}`} />{account.userId.slice(0, 8)}</span>
           <button className="ghost" onClick={onLock}>Lock</button>
         </div>
       </div>
 
+      {mustChange && (
+        <div className="banner">
+          <span>Recovery sign-in — set a new master password now.</span>
+          <button className="link" onClick={() => { setView("settings"); setEditing(null); setSelected(null); }}>Go to Settings →</button>
+        </div>
+      )}
+
       <div className="wrap">
-        {editing ? (
-          <Editor initial={editing} client={client} policy={policy} onSave={save} onCancel={() => setEditing(null)} />
+        {view === "health" ? (
+          <Health store={store} client={client} onOpenItem={goToItem} />
+        ) : view === "settings" ? (
+          <Settings client={client} account={account} policy={policy} onPasswordChanged={() => setMustChange(false)} />
+        ) : view === "admin" && isAdmin ? (
+          <Admin client={client} />
+        ) : editing ? (
+          <Editor initial={editing} policy={policy} onSave={save} onCancel={() => setEditing(null)} />
         ) : current ? (
           <Detail
             item={current}
             client={client}
+            store={store}
             policy={policy}
             onEdit={() => setEditing(current.doc)}
             onDelete={() => remove(current.itemId)}
@@ -137,7 +182,7 @@ function useCopy(clearSeconds: number) {
   return { flash, copy };
 }
 
-function Detail({ item, client, policy, onEdit, onDelete, onBack }: { item: VaultItem; client: ApiClient; policy: ClientPolicy | null; onEdit: () => void; onDelete: () => void; onBack: () => void }) {
+function Detail({ item, client, store, policy, onEdit, onDelete, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; onEdit: () => void; onDelete: () => void; onBack: () => void }) {
   const { flash, copy } = useCopy(policy?.clipboardClearSeconds ?? 30);
   const doc = item.doc;
   return (
@@ -184,10 +229,56 @@ function Detail({ item, client, policy, onEdit, onDelete, onBack }: { item: Vaul
         </div>
       )}
 
+      {(doc.attachments?.length ?? 0) > 0 && <AttachmentList item={item} store={store} />}
+
       <div className="actions">
         <button className="primary" onClick={onEdit}>Edit</button>
         <div className="spacer" />
         <button className="ghost" onClick={onDelete} style={{ color: "var(--danger)" }}>Delete</button>
+      </div>
+    </div>
+  );
+}
+
+/** Detail-view attachments: download → decrypt → hand the browser a one-shot object URL. */
+function AttachmentList({ item, store }: { item: VaultItem; store: VaultStore }) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [err, setErr] = useState("");
+
+  const download = async (ref: AttachmentRef) => {
+    setErr("");
+    setBusyId(ref.id);
+    try {
+      const plain = await store.downloadAttachment(item, ref);
+      const url = URL.createObjectURL(new Blob([plain as BlobPart], { type: "application/octet-stream" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = ref.name || "attachment";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      setErr(`Could not download “${ref.name}” — the blob is missing or failed to decrypt.`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="field">
+      <label>Attachments</label>
+      {err && <div className="msg err">{err}</div>}
+      <div className="attach-list">
+        {item.doc.attachments!.map((ref) => (
+          <div className="attach-row" key={ref.id}>
+            <span className="attach-name">{ref.name}</span>
+            <span className="muted">{humanSize(ref.size)}</span>
+            <button type="button" className="ghost" disabled={busyId === ref.id} onClick={() => download(ref)}>
+              {busyId === ref.id ? "Opening…" : "Download"}
+            </button>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -257,9 +348,14 @@ function HealthLine({ password, client }: { password: string; client: ApiClient 
   );
 }
 
-function Editor({ initial, client, policy, onSave, onCancel }: { initial: ItemDoc; client: ApiClient; policy: ClientPolicy | null; onSave: (d: ItemDoc) => void; onCancel: () => void }) {
+function Editor({ initial, policy, onSave, onCancel }: { initial: ItemDoc; policy: ClientPolicy | null; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void) => Promise<void>; onCancel: () => void }) {
   const [doc, setDoc] = useState<ItemDoc>(structuredClone(initial));
+  const [pending, setPending] = useState<PendingUpload[]>([]);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [fileErr, setFileErr] = useState("");
+  const [saveErr, setSaveErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const fileInput = useRef<HTMLInputElement | null>(null);
   const isLogin = doc.type === "login";
   const login = doc.login ?? {};
 
@@ -267,15 +363,59 @@ function Editor({ initial, client, policy, onSave, onCancel }: { initial: ItemDo
 
   const gen = () => setLogin({ password: generatePassword() });
 
+  const maxBytes = policy?.attachmentMaxBytes ?? 25 * 1024 * 1024;
+
+  const addFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setFileErr("");
+    const errors: string[] = [];
+    const newRefs: AttachmentRef[] = [];
+    const newPending: PendingUpload[] = [];
+    for (const file of Array.from(files)) {
+      if (file.size === 0) {
+        errors.push(`“${file.name}” is empty — empty files can't be attached.`);
+        continue;
+      }
+      if (file.size > maxBytes) {
+        errors.push(`“${file.name}” is ${humanSize(file.size)} — over the ${humanSize(maxBytes)} limit.`);
+        continue;
+      }
+      const data = new Uint8Array(await file.arrayBuffer());
+      const ref: AttachmentRef = { id: crypto.randomUUID(), name: file.name, size: file.size, fileKey: toB64(randomBytes(32)) };
+      newRefs.push(ref);
+      newPending.push({ id: ref.id, data });
+    }
+    if (newRefs.length > 0) {
+      setDoc((d) => ({ ...d, attachments: [...(d.attachments ?? []), ...newRefs] }));
+      setPending((p) => [...p, ...newPending]);
+    }
+    if (errors.length > 0) setFileErr(errors.join(" "));
+    if (fileInput.current) fileInput.current.value = "";
+  };
+
+  const removeAttachment = (id: string) => {
+    // Dropping the doc entry is enough — server-side GC reaps the orphaned blob.
+    setDoc((d) => ({ ...d, attachments: (d.attachments ?? []).filter((a) => a.id !== id) }));
+    setPending((p) => p.filter((f) => f.id !== id));
+  };
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
+    setSaveErr("");
+    setProgress(null);
     try {
-      await onSave(doc);
+      await onSave(doc, pending, (done, total) => setProgress({ done, total }));
+    } catch (err) {
+      setSaveErr(err instanceof ApiError && err.status === 413 ? `Save rejected: ${err.message || "attachment quota exceeded"}.` : "Save failed — nothing was changed.");
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   };
+
+  const attachments = doc.attachments ?? [];
+  const pendingIds = new Set(pending.map((p) => p.id));
 
   return (
     <form className="sheet" onSubmit={submit}>
@@ -313,8 +453,31 @@ function Editor({ initial, client, policy, onSave, onCancel }: { initial: ItemDo
         <label>Notes</label>
         <textarea rows={isLogin ? 3 : 6} value={doc.notes ?? ""} onChange={(e) => setDoc({ ...doc, notes: e.target.value })} />
       </div>
+
+      <div className="field">
+        <label>Attachments</label>
+        {fileErr && <div className="msg err">{fileErr}</div>}
+        {attachments.length > 0 && (
+          <div className="attach-list">
+            {attachments.map((ref) => (
+              <div className="attach-row" key={ref.id}>
+                <span className="attach-name">{ref.name}</span>
+                <span className="muted">{humanSize(ref.size)}{pendingIds.has(ref.id) ? " · new" : ""}</span>
+                <button type="button" className="ghost" onClick={() => removeAttachment(ref.id)} style={{ color: "var(--danger)" }}>Remove</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <input ref={fileInput} type="file" multiple style={{ display: "none" }} onChange={(e) => addFiles(e.target.files)} />
+        <button type="button" className="ghost" onClick={() => fileInput.current?.click()}>+ Attach files</button>
+        <span className="muted" style={{ marginLeft: 10 }}>encrypted on this device · up to {humanSize(maxBytes)} each</span>
+      </div>
+
+      {saveErr && <div className="msg err">{saveErr}</div>}
       <div className="actions">
-        <button className="primary" disabled={busy || !doc.name}>{busy ? "Sealing…" : "Save"}</button>
+        <button className="primary" disabled={busy || !doc.name}>
+          {busy ? (progress && progress.total > 0 ? `Sealing… ${Math.min(progress.done + 1, progress.total)}/${progress.total}` : "Sealing…") : "Save"}
+        </button>
         <button type="button" className="ghost" onClick={onCancel}>Cancel</button>
       </div>
     </form>
@@ -329,21 +492,6 @@ function StrengthBar({ password }: { password: string }) {
       <span style={{ width: `${(score + 1) * 20}%`, background: colors[score] }} />
     </div>
   );
-}
-
-// Rough entropy proxy — length + class diversity (not a substitute for a real estimator).
-function estimateStrength(pw: string): number {
-  let classes = 0;
-  if (/[a-z]/.test(pw)) classes++;
-  if (/[A-Z]/.test(pw)) classes++;
-  if (/[0-9]/.test(pw)) classes++;
-  if (/[^a-zA-Z0-9]/.test(pw)) classes++;
-  const bits = pw.length * (classes <= 1 ? 2 : classes === 2 ? 3.5 : classes === 3 ? 5 : 6);
-  if (bits < 40) return 0;
-  if (bits < 60) return 1;
-  if (bits < 80) return 2;
-  if (bits < 110) return 3;
-  return 4;
 }
 
 /** Accept either a full otpauth URI or a bare base32 secret (wrap the latter). */

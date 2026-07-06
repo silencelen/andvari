@@ -29,6 +29,7 @@ export interface SessionResponse {
   accountKeys: AccountKeys;
   isAdmin: boolean;
   mustChangePassword: boolean;
+  totpEnrolled: boolean;
 }
 
 export interface WireVault {
@@ -106,6 +107,10 @@ export interface ClientPolicy {
   sessionRefreshTtlDays: number;
   recoveryFingerprint: string;
   serverTime: number;
+  /** Attachment quotas (spec 02 §6) — plaintext byte limits. */
+  attachmentMaxBytes: number;
+  itemAttachmentsMaxBytes: number;
+  userAttachmentsMaxBytes: number;
 }
 
 export interface EscrowUpload {
@@ -129,6 +134,103 @@ export interface RegisterRequest {
   device: { platform: string; name: string };
 }
 
+// ---- attachments (spec 02 §6) ----
+
+/** Server bookkeeping for one encrypted blob; filename + fileKey live inside item ciphertext. */
+export interface AttachmentMeta {
+  attachmentId: string;
+  itemId: string;
+  vaultId: string;
+  size: number;
+  sha256: string;
+  createdAt: number;
+}
+
+// ---- server TOTP (spec 03 §2, break-glass hardening) ----
+
+export interface TotpStatus {
+  enrolled: boolean;
+  pendingSetup: boolean;
+}
+
+export interface TotpSetupResponse {
+  secretBase32: string;
+  otpauthUri: string;
+}
+
+// ---- password change ----
+
+export interface PasswordChangeRequest {
+  currentAuthKey: string;
+  newAuthKey: string;
+  newKdfSalt: string;
+  newKdfParams: KdfParams;
+  newWrappedUvk: string;
+}
+
+// ---- admin ----
+
+export interface AdminUserSummary {
+  userId: string;
+  email: string;
+  displayName: string;
+  isAdmin: boolean;
+  status: string;
+  createdAt: number;
+  deviceCount: number;
+  escrowFingerprint: string | null;
+}
+
+export interface InviteResponse {
+  inviteToken: string;
+  email: string;
+  expiresAt: number;
+}
+
+export interface AdminDeviceSummary {
+  deviceId: string;
+  platform: string;
+  name: string;
+  clientVersion: string | null;
+  createdAt: number;
+  lastSeenAt: number | null;
+  revokedAt: number | null;
+}
+
+export interface AdminStatus {
+  serverVersion: string;
+  serverTime: number;
+  escrowConfigured: boolean;
+  recoveryFingerprint: string;
+  breakGlassConfigured: boolean;
+  lastPublicRequestAt: number | null;
+  userCount: number;
+  itemCount: number;
+  attachmentCount: number;
+  attachmentBytes: number;
+  dbBytes: number;
+  totpEnrolledCount: number;
+  downloadsManifest: boolean;
+}
+
+export interface AuditEvent {
+  id: number;
+  at: number;
+  type: string;
+  userId: string | null;
+  deviceId: string | null;
+  ip: string | null;
+  meta: string | null;
+}
+
+/** An attachment reference inside the item plaintext (name + fileKey never leave the client unencrypted). */
+export interface AttachmentRef {
+  id: string;
+  name: string;
+  size: number;
+  fileKey: string;
+}
+
 /** The plaintext item document (spec 02 §3). */
 export interface ItemDoc {
   type: "login" | "note";
@@ -142,5 +244,5 @@ export interface ItemDoc {
     totp?: string;
     passwordHistory?: { password: string; retiredAt: number }[];
   };
-  attachments?: { id: string; name: string; size: number; fileKey: string }[];
+  attachments?: AttachmentRef[];
 }
