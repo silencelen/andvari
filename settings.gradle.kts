@@ -17,4 +17,6 @@ dependencyResolutionManagement {
 rootProject.name = "andvari"
 
 include(":core")
+include(":server")
 include(":tools:vector-gen")
+include(":tools:recovery-cli")

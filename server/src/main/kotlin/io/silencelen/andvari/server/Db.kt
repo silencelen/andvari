@@ -1,0 +1,237 @@
+package io.silencelen.andvari.server
+
+import java.sql.Connection
+import java.sql.DriverManager
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+
+/**
+ * Single-connection SQLite (WAL). One writer is all this deployment needs; the
+ * lock serializes access so transactions never interleave. Route handlers call
+ * through Dispatchers.IO. Deliberately plain JDBC — ~14 tables, hand-auditable SQL
+ * (the client cache in :core will use SQLDelight; the server does not need codegen).
+ */
+class Db(path: String) : AutoCloseable {
+    private val conn: Connection = DriverManager.getConnection("jdbc:sqlite:$path")
+    private val lock = ReentrantLock()
+
+    init {
+        conn.autoCommit = true
+        conn.createStatement().use { st ->
+            st.execute("PRAGMA journal_mode=WAL")
+            st.execute("PRAGMA foreign_keys=ON")
+            st.execute("PRAGMA busy_timeout=5000")
+            st.execute("PRAGMA synchronous=NORMAL")
+        }
+        migrate()
+    }
+
+    /** Serialized read-write transaction. */
+    fun <T> tx(block: (Connection) -> T): T = lock.withLock {
+        conn.autoCommit = false
+        try {
+            val result = block(conn)
+            conn.commit()
+            result
+        } catch (t: Throwable) {
+            conn.rollback()
+            throw t
+        } finally {
+            conn.autoCommit = true
+        }
+    }
+
+    /** Serialized read (WAL snapshot semantics are irrelevant under one connection). */
+    fun <T> read(block: (Connection) -> T): T = lock.withLock { block(conn) }
+
+    override fun close() {
+        lock.withLock { conn.close() }
+    }
+
+    private fun migrate() {
+        val version = conn.createStatement().use { st ->
+            st.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            st.executeQuery("SELECT value FROM meta WHERE key='schemaVersion'").use { rs ->
+                if (rs.next()) rs.getString(1).toInt() else 0
+            }
+        }
+        if (version < 1) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE users(
+                          userId TEXT PRIMARY KEY,
+                          email TEXT UNIQUE NOT NULL,
+                          displayName TEXT NOT NULL,
+                          kdfSalt TEXT NOT NULL,
+                          kdfParams TEXT NOT NULL,
+                          verifier TEXT NOT NULL,
+                          wrappedUvk TEXT NOT NULL,
+                          identityPub TEXT NOT NULL,
+                          encryptedIdentitySeed TEXT NOT NULL,
+                          isAdmin INTEGER NOT NULL DEFAULT 0,
+                          status TEXT NOT NULL DEFAULT 'active',
+                          mustChangePassword INTEGER NOT NULL DEFAULT 0,
+                          createdAt INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE invites(
+                          tokenHash TEXT PRIMARY KEY,
+                          email TEXT NOT NULL,
+                          isAdmin INTEGER NOT NULL DEFAULT 0,
+                          createdAt INTEGER NOT NULL,
+                          expiresAt INTEGER NOT NULL,
+                          usedAt INTEGER
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE devices(
+                          deviceId TEXT PRIMARY KEY,
+                          userId TEXT NOT NULL REFERENCES users(userId),
+                          platform TEXT NOT NULL,
+                          name TEXT NOT NULL,
+                          clientVersion TEXT,
+                          createdAt INTEGER NOT NULL,
+                          lastSeenAt INTEGER,
+                          revokedAt INTEGER
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE sessions(
+                          sessionId TEXT PRIMARY KEY,
+                          deviceId TEXT NOT NULL REFERENCES devices(deviceId),
+                          userId TEXT NOT NULL,
+                          accessHash TEXT UNIQUE NOT NULL,
+                          accessExpiresAt INTEGER NOT NULL,
+                          refreshHash TEXT UNIQUE NOT NULL,
+                          refreshExpiresAt INTEGER NOT NULL,
+                          refreshConsumedAt INTEGER,
+                          createdAt INTEGER NOT NULL,
+                          revokedAt INTEGER
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE vaults(
+                          vaultId TEXT PRIMARY KEY,
+                          type TEXT NOT NULL,
+                          rev INTEGER NOT NULL,
+                          metaBlob TEXT NOT NULL,
+                          createdAt INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE grants(
+                          vaultId TEXT NOT NULL REFERENCES vaults(vaultId),
+                          userId TEXT NOT NULL REFERENCES users(userId),
+                          role TEXT NOT NULL,
+                          wrappedVk TEXT NOT NULL,
+                          rev INTEGER NOT NULL,
+                          revokedAt INTEGER,
+                          PRIMARY KEY(vaultId, userId)
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE items(
+                          itemId TEXT PRIMARY KEY,
+                          vaultId TEXT NOT NULL REFERENCES vaults(vaultId),
+                          rev INTEGER NOT NULL,
+                          createdAt INTEGER NOT NULL,
+                          updatedAt INTEGER NOT NULL,
+                          deleted INTEGER NOT NULL DEFAULT 0,
+                          conflict INTEGER NOT NULL DEFAULT 0,
+                          formatVersion INTEGER NOT NULL,
+                          attachmentIds TEXT NOT NULL DEFAULT '[]',
+                          blob TEXT,
+                          blobSize INTEGER NOT NULL DEFAULT 0
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate("CREATE INDEX idx_items_vault_rev ON items(vaultId, rev)")
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE item_versions(
+                          itemId TEXT NOT NULL,
+                          rev INTEGER NOT NULL,
+                          blob TEXT NOT NULL,
+                          formatVersion INTEGER NOT NULL,
+                          archivedAt INTEGER NOT NULL,
+                          PRIMARY KEY(itemId, rev)
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE changes(
+                          rev INTEGER PRIMARY KEY AUTOINCREMENT,
+                          kind TEXT NOT NULL,
+                          entityId TEXT NOT NULL,
+                          vaultId TEXT,
+                          at INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE mutations(
+                          deviceId TEXT NOT NULL,
+                          mutationId TEXT NOT NULL,
+                          resultJson TEXT NOT NULL,
+                          createdAt INTEGER NOT NULL,
+                          PRIMARY KEY(deviceId, mutationId)
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE escrow(
+                          userId TEXT PRIMARY KEY REFERENCES users(userId),
+                          sealed TEXT NOT NULL,
+                          fingerprint TEXT NOT NULL,
+                          updatedAt INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE audit(
+                          id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          at INTEGER NOT NULL,
+                          type TEXT NOT NULL,
+                          userId TEXT,
+                          deviceId TEXT,
+                          ip TEXT,
+                          meta TEXT
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate("CREATE TABLE policies(id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL)")
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE hibp_cache(
+                          prefix TEXT PRIMARY KEY,
+                          body TEXT NOT NULL,
+                          fetchedAt INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate("INSERT INTO meta(key,value) VALUES('oldestRetainedRev','0')")
+                    st.executeUpdate("INSERT INTO meta(key,value) VALUES('schemaVersion','1')")
+                }
+            }
+        }
+    }
+}

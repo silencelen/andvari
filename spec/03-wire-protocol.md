@@ -117,9 +117,12 @@ front (tailscale serve, cloudflared) pass WebSocket upgrades — verified in P1.
 - `GET/POST /admin/users` — list; create → invite `{ inviteToken (72 h), email }`.
   Registration is **invite-only, always** (even break-glass): `POST /auth/register
   { inviteToken, email, displayName, kdfSalt, kdfParams, authKey, wrappedUvk,
-  identityPub, encryptedIdentitySeed, escrowSealed }` — one shot, atomic. The
-  enrolling client MUST have verified the recovery fingerprint (spec 04) before this
-  call; the server rejects registration whose escrow fingerprint ≠ pinned.
+  identityPub, encryptedIdentitySeed, escrow: { sealed, fingerprint },
+  personalVault: { vaultId, wrappedVk, metaBlob }, device: { platform, name } }` —
+  one shot, atomic (user + escrow + personal vault + owner grant + first device +
+  session; response = the login response). The enrolling client MUST have verified
+  the recovery fingerprint (spec 04) before this call; the server rejects
+  registration whose asserted escrow fingerprint ≠ pinned.
 - `POST /admin/users/{id}/disable`, `POST /admin/devices/{id}/revoke`.
 - `POST /admin/recovery { userId, tempAuthKey, tempWrappedUvk, tempKdfSalt,
   tempKdfParams }` — uploads recovery-cli output (spec 04 §4); sets
