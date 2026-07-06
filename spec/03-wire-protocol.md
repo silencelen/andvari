@@ -87,8 +87,12 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
   - delete over newer edit: delete NOT applied (edit beats delete); `serverItem` =
     current; client drops its local tombstone.
   - delete over tombstone: `applied` (idempotent).
-- `duplicate` — `mutationId` seen before (per-device dedup window ≥ 24 h /
-  1000 mutations): the ORIGINAL result is replayed verbatim; no re-execution.
+- Idempotent replay — when a `mutationId` has been seen before for this device
+  (dedup window ≥ 24 h / 1000 mutations), the server returns the ORIGINAL stored
+  result **verbatim** (same `status`, same `newItemRev`) with no re-execution. A
+  crash-retry therefore observes the identical outcome it would have on first
+  success — the client's state converges the same way. (There is no distinct
+  `duplicate` status code; the replayed status is whatever the original was.)
 - `denied` — role violation (reader pushing to a shared vault) or no grant; nothing
   written; audited.
 

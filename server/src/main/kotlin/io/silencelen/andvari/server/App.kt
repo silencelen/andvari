@@ -22,6 +22,7 @@ import io.ktor.websocket.CloseReason
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
+import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.model.ApiError
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.InviteRequest
@@ -133,6 +134,13 @@ fun Application.andvariModule(services: Services) {
         get("/api/v1/client-policy") {
             val p = service.policy()
             call.respond(p)
+        }
+
+        // Org recovery PUBLIC key (base64url) — public; the client confirms its
+        // fingerprint against the printed sheet before sealing escrow to it.
+        get("/api/v1/recovery-pubkey") {
+            if (!config.escrowConfigured) call.respond(HttpStatusCode.ServiceUnavailable, "escrow_not_configured")
+            else call.respondText(Bytes.toB64(config.recoveryPublicKey))
         }
 
         // ---- auth ----
