@@ -75,6 +75,15 @@ class AndvariViewModel(private val store: SessionStore) : ViewModel() {
     fun setBaseUrl(url: String) {
         store.baseUrl = url.trim().removeSuffix("/")
         _ui.value = _ui.value.copy(baseUrl = store.baseUrl)
+        // Re-fetch policy against the new server so the recovery fingerprint / pins update
+        // immediately (no app restart needed).
+        viewModelScope.launch {
+            val probe = newApi()
+            runCatching { probe.clientPolicy() }
+                .onSuccess { _ui.value = _ui.value.copy(policy = it) }
+                .onFailure { _ui.value = _ui.value.copy(policy = null) }
+            probe.close()
+        }
     }
 
     private fun fail(t: Throwable) {
