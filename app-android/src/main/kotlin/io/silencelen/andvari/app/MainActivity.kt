@@ -54,8 +54,32 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // If the previous run crashed, show the captured trace instead of re-running the
+        // (possibly still-crashing) startup path, so it can be screenshotted.
+        val crashFile = java.io.File(filesDir, AndvariApplication.CRASH_FILE)
+        if (crashFile.exists()) {
+            val text = runCatching { crashFile.readText() }.getOrDefault("(crash file unreadable)")
+            setContent { AndvariTheme { CrashScreen(text) { crashFile.delete(); recreate() } } }
+            return
+        }
         vm.start()
         setContent { AndvariTheme { AndvariApp(vm) } }
+    }
+}
+
+@Composable
+private fun CrashScreen(text: String, onClear: () -> Unit) {
+    Surface(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
+            Text("andvari hit an error", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error)
+            Text("Screenshot the text below and send it, then tap Clear & retry.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+            SelectionContainer(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                Text(text, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            }
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = onClear, modifier = Modifier.fillMaxWidth()) { Text("Clear & retry") }
+        }
     }
 }
 

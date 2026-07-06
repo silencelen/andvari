@@ -1,5 +1,10 @@
 # andvari — changelog
 
+## 0.2.1 (Android diagnostic)
+
+- On-screen crash reporter: if the app hits an unhandled error, the next launch shows
+  the stack trace to screenshot (no adb needed). Diagnostic aid; no feature changes.
+
 ## 0.2.0
 
 - Encrypted file attachments on items: attach from the editor, download+decrypt from
