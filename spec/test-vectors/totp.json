@@ -1,0 +1,207 @@
+{
+    "cases": [
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "algorithm": "SHA1",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 59,
+            "expected": "94287082"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA",
+            "algorithm": "SHA256",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 59,
+            "expected": "46119246"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA",
+            "algorithm": "SHA512",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 59,
+            "expected": "90693936"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "algorithm": "SHA1",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 1111111109,
+            "expected": "07081804"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA",
+            "algorithm": "SHA256",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 1111111109,
+            "expected": "68084774"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA",
+            "algorithm": "SHA512",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 1111111109,
+            "expected": "25091201"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "algorithm": "SHA1",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 1111111111,
+            "expected": "14050471"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA",
+            "algorithm": "SHA256",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 1111111111,
+            "expected": "67062674"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA",
+            "algorithm": "SHA512",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 1111111111,
+            "expected": "99943326"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "algorithm": "SHA1",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 1234567890,
+            "expected": "89005924"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA",
+            "algorithm": "SHA256",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 1234567890,
+            "expected": "91819424"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA",
+            "algorithm": "SHA512",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 1234567890,
+            "expected": "93441116"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "algorithm": "SHA1",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 2000000000,
+            "expected": "69279037"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA",
+            "algorithm": "SHA256",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 2000000000,
+            "expected": "90698825"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA",
+            "algorithm": "SHA512",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 2000000000,
+            "expected": "38618901"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "algorithm": "SHA1",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 20000000000,
+            "expected": "65353130"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA",
+            "algorithm": "SHA256",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 20000000000,
+            "expected": "77737706"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA",
+            "algorithm": "SHA512",
+            "digits": 8,
+            "period": 30,
+            "timeSec": 20000000000,
+            "expected": "47863826"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "algorithm": "SHA1",
+            "digits": 6,
+            "period": 30,
+            "timeSec": 59,
+            "expected": "287082"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "algorithm": "SHA1",
+            "digits": 6,
+            "period": 60,
+            "timeSec": 3600,
+            "expected": "864257"
+        },
+        {
+            "secretBase32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA",
+            "algorithm": "SHA256",
+            "digits": 6,
+            "period": 30,
+            "timeSec": 1751700000,
+            "expected": "836920"
+        }
+    ],
+    "uris": [
+        {
+            "uri": "otpauth://totp/GitHub:jacob%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&algorithm=SHA256&digits=8&period=60",
+            "expect": {
+                "secretBase32": "JBSWY3DPEHPK3PXP",
+                "algorithm": "SHA256",
+                "digits": 8,
+                "period": 60,
+                "label": "GitHub:jacob@example.com",
+                "issuer": "GitHub"
+            }
+        },
+        {
+            "uri": "otpauth://totp/Example?secret=JBSWY3DPEHPK3PXP",
+            "expect": {
+                "secretBase32": "JBSWY3DPEHPK3PXP",
+                "algorithm": "SHA1",
+                "digits": 6,
+                "period": 30,
+                "label": "Example",
+                "issuer": ""
+            }
+        },
+        {
+            "uri": "otpauth://totp/Caf%C3%A9%20Wifi?secret=jbswy3dpehpk3pxp&issuer=Caf%C3%A9",
+            "expect": {
+                "secretBase32": "JBSWY3DPEHPK3PXP",
+                "algorithm": "SHA1",
+                "digits": 6,
+                "period": 30,
+                "label": "Café Wifi",
+                "issuer": "Café"
+            }
+        }
+    ]
+}

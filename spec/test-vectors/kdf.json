@@ -1,0 +1,76 @@
+{
+    "argon2id": [
+        {
+            "passwordUtf8": "test password 1",
+            "saltB64": "EhkgJy41PENKUVhfZm10ew",
+            "ops": 1,
+            "memBytes": 8388608,
+            "outLen": 32,
+            "outB64": "sdwfNja_K8pCptf8gcTTSFmjJViKa-ZMsTHA__h5m5w"
+        },
+        {
+            "passwordUtf8": "παράδειγμα ✓ unicode",
+            "saltB64": "HyYtNDtCSVBXXmVsc3qBiA",
+            "ops": 2,
+            "memBytes": 16777216,
+            "outLen": 32,
+            "outB64": "y4nrCy1lEqb9c10QsSA83Aj2Bs11-mak_jUb3slt_Aw"
+        },
+        {
+            "passwordUtf8": "production default params",
+            "saltB64": "LDM6QUhPVl1ka3J5gIeOlQ",
+            "ops": 3,
+            "memBytes": 67108864,
+            "outLen": 32,
+            "outB64": "w1iuj89NXkicFv8FX5ZC2ifV0UWtqVaVfdoleXJjaos"
+        }
+    ],
+    "hkdf": [
+        {
+            "ikmB64": "OUBHTlVcY2pxeH-GjZSboqmwt77FzNPa4ejv9v0ECxI",
+            "infoUtf8": "andvari/v1/auth",
+            "len": 32,
+            "okmB64": "Ptks6K11YNW5spIPxjYPRwh-TbMB0FwDpfCYXI66GM0"
+        },
+        {
+            "ikmB64": "OUBHTlVcY2pxeH-GjZSboqmwt77FzNPa4ejv9v0ECxI",
+            "infoUtf8": "andvari/v1/wrap",
+            "len": 32,
+            "okmB64": "6enTUV6QmJVd4zPwK_Uwwue16csYYikjOYZ5iXvS8BU"
+        },
+        {
+            "ikmB64": "OUBHTlVcY2pxeH-GjZSboqmwt77FzNPa4ejv9v0ECxI",
+            "infoUtf8": "andvari/test/long",
+            "len": 64,
+            "okmB64": "K6YLz-I4_Qt6GQbdDr_ZMDKVo80R0aKnQ92pp5t-mmk5fDJt7_mfy7iJRg-u0bj3LRg6iVMVcLgt0OoT-6rTdg"
+        }
+    ],
+    "chain": [
+        {
+            "passwordUtf8": "correct horse battery staple",
+            "saltB64": "Rk1UW2JpcHd-hYyTmqGorw",
+            "kdfParams": {
+                "v": 1,
+                "alg": "argon2id13",
+                "ops": 2,
+                "memBytes": 16777216
+            },
+            "mkB64": "7Ldw5rCvFa5pK6Tdz_70ocv8VyPo3KKQhlXzT3qsJ7s",
+            "authKeyB64": "ZdPzN22zoqbgyKUYNb96P1-V37aw4zBV04OZCohehcI",
+            "wrapKeyB64": "qM1wg5BKt4fgWEnukypsdtap0tp_blTz2BXEVvpEor4"
+        },
+        {
+            "passwordUtf8": "🔐 emoji pass phrase 42",
+            "saltB64": "U1phaG92fYSLkpmgp661vA",
+            "kdfParams": {
+                "v": 1,
+                "alg": "argon2id13",
+                "ops": 2,
+                "memBytes": 16777216
+            },
+            "mkB64": "LcgvU8QgChzfOzV10Y-7umCS0JrGShxHE_GfRnDTzus",
+            "authKeyB64": "7PVggEraU_X9vVFjsQScW0udUyc9NwNEjofed5TTgpI",
+            "wrapKeyB64": "IQjxB0uqlJuJsdtf0jOoHOSttCGoPKOAR3kYR3SppUI"
+        }
+    ]
+}

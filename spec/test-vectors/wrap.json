@@ -1,0 +1,32 @@
+{
+    "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "personalVaultId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "itemId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "passwordUtf8": "correct horse battery staple",
+    "kdfSaltB64": "oaivtr3Ey9LZ4Ofu9fwDCg",
+    "kdfParams": {
+        "v": 1,
+        "alg": "argon2id13",
+        "ops": 2,
+        "memBytes": 16777216
+    },
+    "authKeyB64": "RMVBOFwVZh7gAo0x7dcMMrMCWCnFVp4GKmAqeryLEVA",
+    "uvkB64": "rrW8w8rR2N_m7fT7AgkQFx4lLDM6QUhPVl1ka3J5gIc",
+    "uvkNonceB64": "1dzj6vH4_wYNFBsiKTA3PkVMU1phaG92",
+    "wrappedUvkB64": "AQHV3OPq8fj_Bg0UGyIpMDc-RUxTWmFob3aEZ97HCeb_hiiEMONqmM8fEnPATB7BgihnDn3oH7Zimip77z8LUYUS86vsNnLLERw",
+    "identitySeedB64": "u8LJ0Nfe5ezz-gEIDxYdJCsyOUBHTlVcY2pxeH-GjZQ",
+    "identityPubB64": "MClMOujd4Xyt5jsRhZ88uBli-fu-Zrm7SIesgFn5R3M",
+    "identityPrivB64": "ZzuN2t0AoQZ7f6W5MSNBZDC4vLijz1Gq3mjrBw3fALk",
+    "idkeyNonceB64": "4unw9_4FDBMaISgvNj1ES1JZYGdudXyD",
+    "encryptedIdentitySeedB64": "AQHi6fD3_gUMExohKC82PURLUllgZ251fIPv6mBwxJjcjGsqaOwx5z_A5X6swNVccAHEOSYKN_4Ci_FX4c8NvABHRCPO5_-d5ZQ",
+    "vkB64": "yM_W3eTr8vkABw4VHCMqMTg_Rk1UW2JpcHd-hYyTmqE",
+    "vkNonceB64": "7_b9BAsSGSAnLjU8Q0pRWF9mbXR7gomQ",
+    "wrappedVkB64": "AQHv9v0ECxIZICcuNTxDSlFYX2ZtdHuCiZA0n-qK3v6tV90IDnwJiFPcAW35HnzwSANliYmN7La1yySSVzJdH204SCFl1IFCfBg",
+    "vaultMetaPlaintextUtf8": "{\"name\":\"Personal\"}",
+    "vaultMetaNonceB64": "_AMKERgfJi00O0JJUFdeZWxzeoGIj5ad",
+    "vaultMetaBlobB64": "AQH8AwoRGB8mLTQ7QklQV15lbHN6gYiPlp2EWtqga0GBluMMaPq8oud-bVwHhxORBJ8rZ0eZPd-2yZe9jg",
+    "itemFormatVersion": 1,
+    "itemPlaintextUtf8": "{\"type\":\"login\",\"name\":\"GitHub\",\"login\":{\"username\":\"jacob\",\"password\":\"hunter2\",\"uris\":[\"https://github.com/login\"]}}",
+    "itemNonceB64": "CRAXHiUsMzpBSE9WXWRrcnmAh46VnKOq",
+    "itemEnvelopeB64": "AQEJEBceJSwzOkFIT1ZdZGtyeYCHjpWco6ovz2fpSaHGGnajvgZFsT_KQG7HSggXQDokfuPs6AA-TnLilzvsEn6MGXkzXlE38Q64gGJ4NaBr0t6FRV51-WnKxlO59TW_AQGFHjZZb2T4TPQSPZRqxvgzpgaWb9Jf7f_BR2GM8cwfO_YUD4idjnE9G4yMrhhWkxCQv4HgK2uj6jKgNUdzZg"
+}
