@@ -63,6 +63,8 @@ class MainActivity : ComponentActivity() {
             showCrash(trace) { crashFile.delete(); recreate() }
             return
         }
+        // One-time: bump an old LAN-default server URL to the tailnet HTTPS default.
+        SessionStore(applicationContext).migrateDefaultOnce()
         vm.start()
         setContent { AndvariTheme { AndvariApp(vm) } }
     }

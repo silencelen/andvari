@@ -1,5 +1,12 @@
 # andvari — changelog
 
+## 0.2.4 — default to the tailnet server
+
+- Default server URL is now https://andvari.taila2dff2.ts.net (reachable from any
+  Tailscale device; the old .2.122 LAN IP isn't, from off-VLAN-2). Existing installs
+  on the old default auto-migrate once. Changing the server now reloads the recovery
+  key immediately (no restart).
+
 ## 0.2.3 — boot crash FIXED
 
 - Fixed the ClassNotFoundException that crashed the app on launch since v0.1.0: the

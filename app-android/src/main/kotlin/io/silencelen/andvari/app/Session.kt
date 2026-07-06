@@ -55,7 +55,21 @@ class SessionStore(context: Context) {
         prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").apply()
     }
 
+    /**
+     * One-time bump of the persisted server URL from the old VLAN-2 LAN default to the
+     * tailnet HTTPS default (reachable from any Tailscale device; the LAN IP isn't, off-VLAN-2).
+     * Only rewrites the exact legacy default, so a deliberate custom URL is left alone.
+     */
+    fun migrateDefaultOnce() {
+        if (prefs.getBoolean("baseUrlMigratedTailnet", false)) return
+        if (prefs.getString("baseUrl", null) == LEGACY_LAN_DEFAULT) {
+            prefs.edit().putString("baseUrl", DEFAULT_BASE_URL).apply()
+        }
+        prefs.edit().putBoolean("baseUrlMigratedTailnet", true).apply()
+    }
+
     companion object {
-        const val DEFAULT_BASE_URL = "http://192.168.2.122:8080"
+        const val DEFAULT_BASE_URL = "https://andvari.taila2dff2.ts.net"
+        private const val LEGACY_LAN_DEFAULT = "http://192.168.2.122:8080"
     }
 }
