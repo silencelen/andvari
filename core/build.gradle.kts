@@ -15,6 +15,10 @@ kotlin {
             api(libs.kotlinx.coroutines.core)
             api(libs.kotlinx.serialization.json)
             api(libs.kotlinx.datetime)
+            // Client networking (the HTTP engine is provided per platform).
+            api(libs.ktor.client.core)
+            implementation(libs.ktor.client.content.negotiation)
+            implementation(libs.ktor.serialization.kotlinx.json)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
@@ -26,13 +30,18 @@ kotlin {
             dependencies {
                 implementation(libs.lazysodium.java)
                 implementation(libs.jna)
+                api(libs.ktor.client.java)
             }
+        }
+        jvmTest.dependencies {
+            implementation(libs.ktor.client.java)
         }
         androidMain {
             kotlin.srcDir("src/jvmShared/kotlin")
             dependencies {
                 implementation(libs.lazysodium.android)
                 implementation("${libs.jna.get()}@aar")
+                api(libs.ktor.client.okhttp)
             }
         }
     }
