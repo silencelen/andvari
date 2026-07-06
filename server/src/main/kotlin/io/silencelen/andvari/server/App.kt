@@ -335,6 +335,8 @@ fun Application.andvariModule(services: Services) {
                     "INSERT INTO escrow(userId,sealed,fingerprint,updatedAt) VALUES(?,?,?,?) ON CONFLICT(userId) DO UPDATE SET sealed=excluded.sealed, fingerprint=excluded.fingerprint, updatedAt=excluded.updatedAt",
                     p.userId, body.sealed, body.fingerprint, now(),
                 )
+                // Escrow is the sole recovery path (spec 04); replacing it is security-relevant.
+                services.repo.auditOn(c, "escrow_self_upload", p.userId, p.deviceId, call.clientIp(), body.fingerprint)
             }
             call.respondText("ok")
         }

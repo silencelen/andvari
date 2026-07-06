@@ -120,11 +120,15 @@ class AttachmentStore(private val repo: Repo, blobDirPath: String) {
         }
     }
 
-    /** Delete all attachment rows + blobs for a tombstoned item. Call inside the item's tx. */
-    fun deleteForItem(c: Connection, itemId: String): List<String> {
+    /**
+     * Delete the attachment ROWS for a tombstoned item inside the item's tx and return
+     * their ids. The blob FILES are deliberately NOT unlinked here — the caller unlinks
+     * them only after the batch tx commits, so a later mutation that rolls the tx back
+     * (restoring the item) does not leave the item referencing a vanished blob.
+     */
+    fun deleteRowsForItem(c: Connection, itemId: String): List<String> {
         val ids = c.queryAll("SELECT attachmentId FROM attachments WHERE itemId=?", itemId) { it.getString(1) }
         if (ids.isNotEmpty()) c.exec("DELETE FROM attachments WHERE itemId=?", itemId)
-        ids.forEach { file(it).delete() }
         return ids
     }
 

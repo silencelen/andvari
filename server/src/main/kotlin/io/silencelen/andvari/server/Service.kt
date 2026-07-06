@@ -16,6 +16,7 @@ import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import io.silencelen.andvari.core.crypto.Base32
 import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.TotpConfig
 import io.silencelen.andvari.core.crypto.createCryptoProvider
@@ -58,6 +59,7 @@ class Service(
     fun register(req: RegisterRequest, ip: String): SessionResponse = repo.db.tx { c ->
         if (!config.escrowConfigured) throw BadRequest("escrow_not_configured")
         if (req.escrow.fingerprint != config.recoveryFingerprint) throw BadRequest("escrow_fingerprint_mismatch")
+        requireKdfFloor(req.kdfParams)
 
         val tokenHash = ServerCrypto.hashToken(req.inviteToken)
         val invite = c.queryOne("SELECT email,isAdmin,expiresAt,usedAt FROM invites WHERE tokenHash=?", tokenHash) { rs ->
@@ -192,6 +194,16 @@ class Service(
         return null
     }
 
+    /**
+     * Reject enrollment/re-key params below the org KDF floor before they are persisted
+     * (spec 01 §9 / spec 05 T8). The clients take params from server policy, so this is the
+     * authoritative gate against a weak-policy server persisting brute-forceable verifiers.
+     * Off (floor 0/0) under the test config; production sets 64 MiB / ops 3 via fromEnv.
+     */
+    private fun requireKdfFloor(p: KdfParams) {
+        if (p.memBytes < config.minKdfMemBytes || p.ops < config.minKdfOps) throw BadRequest("kdf_too_weak")
+    }
+
     // ---- password change (spec 03 §3; also the tail of the recovery flow, spec 04 §4) ----
     fun changePassword(p: Principal, req: PasswordChangeRequest, ip: String) {
         val u = repo.userById(p.userId) ?: throw Unauthorized()
@@ -199,6 +211,7 @@ class Service(
             repo.audit("password_change_fail", p.userId, p.deviceId, ip)
             throw Unauthorized()
         }
+        requireKdfFloor(req.newKdfParams)
         repo.db.tx { c ->
             c.exec(
                 "UPDATE users SET verifier=?, kdfSalt=?, kdfParams=?, wrappedUvk=?, mustChangePassword=0 WHERE userId=?",
@@ -225,11 +238,22 @@ class Service(
         if (s.refreshExpiresAt < now()) throw Unauthorized("refresh_expired")
 
         return repo.db.tx { c ->
+            // Guarded consume (CAS): the reuse check above ran on a snapshot outside this tx,
+            // so two concurrent uses of one token could both pass it. Consuming only when
+            // still-null and checking the affected-row count makes exactly one winner; a
+            // loser means a concurrent consume already happened → treat as reuse (spec 03 §2:
+            // reuse revokes the whole device), mirroring the TOTP guarded-step at login.
+            val consumed = c.exec(
+                "UPDATE sessions SET refreshConsumedAt=? WHERE sessionId=? AND refreshConsumedAt IS NULL",
+                now(), s.sessionId,
+            )
+            if (consumed != 1) {
+                c.exec("UPDATE sessions SET revokedAt=? WHERE deviceId=? AND revokedAt IS NULL", now(), s.deviceId)
+                repo.auditOn(c, "refresh_reuse", s.userId, s.deviceId, ip)
+                throw Unauthorized("refresh_reuse")
+            }
             val newAccess = ServerCrypto.newToken()
             val newRefresh = ServerCrypto.newToken()
-            // Mark the old refresh CONSUMED only (not revoked): a later replay of it must
-            // reach the reuse branch → revoke the whole device chain (spec 03 §2).
-            c.exec("UPDATE sessions SET refreshConsumedAt=? WHERE sessionId=?", now(), s.sessionId)
             c.exec(
                 """INSERT INTO sessions(sessionId,deviceId,userId,accessHash,accessExpiresAt,refreshHash,refreshExpiresAt,createdAt)
                    VALUES(?,?,?,?,?,?,?,?)""",
@@ -270,15 +294,20 @@ class Service(
     suspend fun push(principal: Principal, mutations: List<Mutation>, ip: String): PushResponse {
         if (mutations.size > 200) throw BadRequest("batch_too_large")
         val affectedUsers = mutableSetOf<String>()
+        // Attachment blobs of tombstoned items are unlinked ONLY after the batch tx commits.
+        // Unlinking mid-tx would orphan the file if a later mutation throws and rolls the tx
+        // back (item restored, ciphertext gone). Empty on any rollback (nothing committed).
+        val filesToUnlink = mutableListOf<String>()
         val results = repo.db.tx { c ->
-            mutations.map { m -> applyMutation(c, principal, m, affectedUsers) }
+            mutations.map { m -> applyMutation(c, principal, m, affectedUsers, filesToUnlink, ip) }
         }
+        filesToUnlink.forEach { attachments.file(it).delete() }
         val rev = repo.db.read { repo.currentRev(it) }
         if (affectedUsers.isNotEmpty()) onChange(affectedUsers, rev)
         return PushResponse(rev, results)
     }
 
-    private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>): MutationResult {
+    private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>, filesToUnlink: MutableList<String>, ip: String): MutationResult {
         // Idempotency: replay the stored result verbatim.
         c.queryOne("SELECT resultJson FROM mutations WHERE deviceId=? AND mutationId=?", principal.deviceId, m.mutationId) { rs ->
             rs.getString(1)
@@ -286,12 +315,14 @@ class Service(
 
         val role = repo.grantRole(c, principal.userId, m.vaultId)
         val result = if (role == null || role == "reader") {
+            // spec 03 §5: a denied write is an intrusion event and MUST be audited.
+            repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, "${m.vaultId}:${m.itemId}")
             MutationResult(m.mutationId, "denied")
         } else {
             val existing = repo.itemById(c, m.itemId)
             when (m.op) {
                 "put" -> applyPut(c, m, existing, affected)
-                "delete" -> applyDelete(c, m, existing, affected)
+                "delete" -> applyDelete(c, m, existing, affected, filesToUnlink)
                 else -> throw BadRequest("bad_op")
             }
         }
@@ -332,7 +363,7 @@ class Service(
         }
     }
 
-    private fun applyDelete(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>): MutationResult {
+    private fun applyDelete(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, filesToUnlink: MutableList<String>): MutationResult {
         if (existing == null || existing.deleted) return MutationResult(m.mutationId, "applied") // idempotent
         val vaultUsers = vaultMemberIds(c, m.vaultId).also { affected.addAll(it) }
         // Edit-beats-delete: a delete against a stale rev loses to the newer edit.
@@ -342,7 +373,8 @@ class Service(
         repo.archiveVersion(c, existing)
         val rev = repo.nextRev(c, "item", m.itemId, m.vaultId)
         c.exec("UPDATE items SET rev=?, updatedAt=?, deleted=1, conflict=0, blob=NULL, blobSize=0, attachmentIds='[]' WHERE itemId=?", rev, now(), m.itemId)
-        attachments.deleteForItem(c, m.itemId) // tombstone drops blobs (spec 02 §7)
+        // Drop the attachment ROWS in-tx (spec 02 §7); defer the file unlink to post-commit.
+        filesToUnlink += attachments.deleteRowsForItem(c, m.itemId)
         return MutationResult(m.mutationId, "applied", rev)
     }
 
