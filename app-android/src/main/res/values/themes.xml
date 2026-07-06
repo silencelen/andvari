@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose owns the visual theme; this is the boot/window theme. Dark treasury
+         charcoal so there's no white flash before Compose paints. -->
+    <style name="Theme.Andvari" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#14120E</item>
+        <item name="android:statusBarColor">#14120E</item>
+        <item name="android:navigationBarColor">#14120E</item>
+    </style>
+</resources>
