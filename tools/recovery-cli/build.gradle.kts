@@ -13,7 +13,12 @@ kotlin {
 // Only :core (crypto) + lazysodium + zxing (QR rendering). A network dependency
 // creeping in here is a review-blocking regression.
 dependencies {
-    implementation(project(":core"))
+    // Exclude the network stack that :core carries for the online clients — the
+    // offline tool must have NO HTTP client on its classpath (enforced by test).
+    implementation(project(":core")) {
+        exclude(group = "io.ktor")
+        exclude(group = "com.squareup.okhttp3")
+    }
     implementation(libs.lazysodium.java)
     implementation(libs.jna)
     implementation(libs.kotlinx.serialization.json)
