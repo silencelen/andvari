@@ -54,32 +54,49 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // If the previous run crashed, show the captured trace instead of re-running the
-        // (possibly still-crashing) startup path, so it can be screenshotted.
+        // If the previous run crashed, show the captured trace using a PLAIN Android view
+        // (no Compose/theme), so even a crash in the Compose layer itself is still visible
+        // to screenshot. Skips the (possibly still-crashing) normal startup path.
         val crashFile = java.io.File(filesDir, AndvariApplication.CRASH_FILE)
         if (crashFile.exists()) {
-            val text = runCatching { crashFile.readText() }.getOrDefault("(crash file unreadable)")
-            setContent { AndvariTheme { CrashScreen(text) { crashFile.delete(); recreate() } } }
+            val trace = runCatching { crashFile.readText() }.getOrDefault("(crash file unreadable)")
+            showCrash(trace) { crashFile.delete(); recreate() }
             return
         }
         vm.start()
         setContent { AndvariTheme { AndvariApp(vm) } }
     }
-}
 
-@Composable
-private fun CrashScreen(text: String, onClear: () -> Unit) {
-    Surface(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().padding(16.dp)) {
-            Text("andvari hit an error", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error)
-            Text("Screenshot the text below and send it, then tap Clear & retry.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(12.dp))
-            SelectionContainer(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                Text(text, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-            }
-            Spacer(Modifier.height(12.dp))
-            Button(onClick = onClear, modifier = Modifier.fillMaxWidth()) { Text("Clear & retry") }
+    /** Deliberately uses only android.widget — no Compose — so a Compose crash still renders. */
+    private fun showCrash(trace: String, onClear: () -> Unit) {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val root = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setBackgroundColor(0xFF14120E.toInt())
+            setPadding(pad, pad, pad, pad)
         }
+        root.addView(android.widget.TextView(this).apply {
+            text = "andvari hit an error — screenshot this and send it"
+            setTextColor(0xFFCF6B5A.toInt())
+            textSize = 15f
+        })
+        val scroll = android.widget.ScrollView(this).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(-1, 0, 1f)
+        }
+        scroll.addView(android.widget.TextView(this).apply {
+            text = trace
+            setTextColor(0xFFEDE4D0.toInt())
+            typeface = android.graphics.Typeface.MONOSPACE
+            textSize = 11f
+            setTextIsSelectable(true)
+            setPadding(0, pad, 0, pad)
+        })
+        root.addView(scroll)
+        root.addView(android.widget.Button(this).apply {
+            text = "Clear & retry"
+            setOnClickListener { onClear() }
+        })
+        setContentView(root)
     }
 }
 
