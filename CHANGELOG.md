@@ -1,5 +1,12 @@
 # andvari — changelog
 
+## 0.2.2 (Android boot-crash diagnostic)
+
+- Disable ProfileInstaller auto-init (a pre-Application startup step that can crash on
+  some Android 15/OEM builds) — perf-only, safe to drop.
+- Crash reporter now renders with a plain Android view (no Compose), so a crash in the
+  Compose layer itself is still shown on the next launch to screenshot.
+
 ## 0.2.1 (Android diagnostic)
 
 - On-screen crash reporter: if the app hits an unhandled error, the next launch shows
