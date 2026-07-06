@@ -13,6 +13,7 @@ class Config(
     val dbPath: String,
     val blobDir: String,
     val webDir: String?,
+    val downloadsDir: String? = null,
     val recoveryPublicKey: ByteArray,
     val recoveryFingerprint: String,
     val enumSecret: ByteArray,
@@ -33,6 +34,7 @@ class Config(
                 dbPath = env("ANDVARI_DB") ?: "andvari.db",
                 blobDir = env("ANDVARI_BLOB_DIR") ?: "blobs",
                 webDir = env("ANDVARI_WEB_DIR"),
+                downloadsDir = env("ANDVARI_DOWNLOADS_DIR"),
                 recoveryPublicKey = recoveryPub,
                 recoveryFingerprint = env("ANDVARI_RECOVERY_FINGERPRINT") ?: "",
                 // Deterministic fake-prelogin salts need a stable secret; prod MUST set one.

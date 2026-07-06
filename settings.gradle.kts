@@ -19,6 +19,6 @@ rootProject.name = "andvari"
 include(":core")
 include(":server")
 include(":app-android")
+include(":app-desktop")
 include(":tools:vector-gen")
 include(":tools:recovery-cli")
-// (:app-desktop joins at P3)

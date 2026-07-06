@@ -16,6 +16,7 @@ shadow = "8.3.5"
 compose-bom = "2024.12.01"
 activity-compose = "1.9.3"
 lifecycle = "2.8.7"
+compose-multiplatform = "1.7.3"
 
 [libraries]
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -63,4 +64,5 @@ androidLibrary = { id = "com.android.library", version.ref = "agp" }
 androidApplication = { id = "com.android.application", version.ref = "agp" }
 kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlinCompose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "compose-multiplatform" }
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
