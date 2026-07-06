@@ -42,6 +42,7 @@ cat > "$MANIFEST" <<EOF
   "versionName": "$VERSIONNAME",
   "apk": "$(basename "$DIST_APK")",
   "sha256": "$SHA",
+  "timestamp": $(( VERSIONCODE + 1767225600 )),
   "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "sizeBytes": $(stat -c%s "$DIST_APK")
 }
