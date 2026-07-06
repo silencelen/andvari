@@ -39,8 +39,15 @@ kotlin {
         androidMain {
             kotlin.srcDir("src/jvmShared/kotlin")
             dependencies {
-                implementation(libs.lazysodium.android)
-                implementation("${libs.jna.get()}@aar")
+                // lazysodium-android pulls JNA as a plain .jar; Android needs the .aar
+                // (it carries the native libs). Exclude the transitive jar to avoid a
+                // duplicate-class clash, then add the aar explicitly. String coordinates
+                // (versions match the catalog: lazysodium-android + jna) because the KMP
+                // source-set DSL doesn't accept a catalog provider with a configure lambda.
+                implementation("com.goterl:lazysodium-android:5.1.0") {
+                    exclude(group = "net.java.dev.jna", module = "jna")
+                }
+                implementation("net.java.dev.jna:jna:5.14.0@aar")
                 api(libs.ktor.client.okhttp)
             }
         }
