@@ -7,10 +7,11 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCK=/tmp/andvari-gradle.lock
 
-echo "==> Kotlin: :core JVM tests (RFC pins + vector consumption)"
-(cd "$REPO_DIR" && flock "$LOCK" ./gradlew :core:jvmTest --console=plain -q)
+echo "==> Kotlin: :core + :server + recovery-cli tests (RFC pins, vectors, full server integration)"
+(cd "$REPO_DIR" && flock "$LOCK" ./gradlew :core:jvmTest :server:test :tools:recovery-cli:test --console=plain -q)
 
 echo "==> TypeScript: web vitest (RFC pins + vector consumption) + typecheck"
 (cd "$REPO_DIR/web" && npx vitest run --silent && npx tsc --noEmit)
 
-echo "==> verify: BOTH implementations green off spec/test-vectors"
+echo "==> verify: Kotlin + TypeScript green off the same spec/test-vectors; server + crypto suites pass"
+echo "    (run scripts/e2e.sh for the live server + WebSocket + crash-idempotency E2E)"
