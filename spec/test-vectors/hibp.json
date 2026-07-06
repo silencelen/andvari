@@ -1,0 +1,20 @@
+{
+    "cases": [
+        {
+            "passwordUtf8": "password123",
+            "sha1UpperHex": "CBFDAC6008F9CAB4083784CBD1874F76618D2A97",
+            "prefix": "CBFDA",
+            "suffix": "C6008F9CAB4083784CBD1874F76618D2A97",
+            "rangeResponse": "0000000000000000000000000000000000A:3\r\nC6008F9CAB4083784CBD1874F76618D2A97:12345\r\nFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF:9",
+            "expectedCount": 12345
+        },
+        {
+            "passwordUtf8": "tr0ub4dor&3",
+            "sha1UpperHex": "281397B1F7880ADE0F53530A55D9AF0210B9AD7B",
+            "prefix": "28139",
+            "suffix": "7B1F7880ADE0F53530A55D9AF0210B9AD7B",
+            "rangeResponse": "0000000000000000000000000000000000A:3\r\nFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF:9",
+            "expectedCount": 0
+        }
+    ]
+}

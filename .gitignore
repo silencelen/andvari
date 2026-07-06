@@ -1,0 +1,28 @@
+# Gradle
+.gradle/
+build/
+.kotlin/
+
+# Local config (SDK paths, signing)
+local.properties
+keystore.properties
+*.keystore
+!app-android/debug.keystore
+
+# IDE
+.idea/
+*.iml
+
+# Node / web
+node_modules/
+web/dist/
+web/coverage/
+
+# Artifacts
+dist/
+*.apk
+*.aab
+*.msi
+
+# OS noise
+.DS_Store

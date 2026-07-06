@@ -1,0 +1,27 @@
+{
+    "recoverySeedB64": "Fh0kKzI5QEdOVVxjanF4f4aNlJuiqbC3vsXM09rh6O8",
+    "recoveryPubB64": "yTbaxHYCIrhdBRcIyqfS0R-zQrm-2FWT8WjsYSRDi0M",
+    "recoveryPrivB64": "57x35aaUkVgeqETQnGQBMIf_HqfPClOMGmiTaRjXNHc",
+    "fingerprint": "14f1bf4220e132f39314cabd75e7fa8d88348a699154a7965e64e76321b54f49",
+    "shortFingerprint": "14f1bf4220e132f3",
+    "open": [
+        {
+            "sealedB64": "SN2Jp4Aa_bKAX6gPr3Ren9fRpBkjtMqQ6JNUFAVxsjBAAa5frTzaRZNhAAuj39FjQU4IueKfCBHALENdUUbo_w",
+            "plaintextB64": "aGVsbG8gc2VhbGVkIGJveA"
+        }
+    ],
+    "escrowUvk": {
+        "userId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "uvkB64": "IyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZ4Ofu9fw",
+        "sealedB64": "xyq5ayig7gRNrEvuah67aXXKzjxuJG8DmC6t0roHxls_cKY7doV5EksP8uqVIuDiF3Fe_sdQhhwxZhUbly1H7nUFsVhDKRC2d64kLPzhnhk58r45hcwsA_mMFNMJe47Wmzhn32xrqZWeJ7-aOqRKrsov-ttRnqMYgDSBieUrlqEJddrqnA_f0CUL9-2EZDaAS_Gw6HZZLDBH5WKX3zTTqD03RSWR-_bCnP85dBOu3nbOni8Ehu7fzYwS0UEYwFXuH8huflWN0lqKTOSxDEc_2CXulRV05zlUnwMgL-gevhbDkg"
+    },
+    "canary": {
+        "sealedB64": "4Nr6G1usggmkWWLzHWv3gpEWlVdiih5k__XpR3O8_AUA0aKS4BhEWTUZZwdXarZi83GqFS675_F8zBJSMFdy9O9VUtLXDI9ICPQ8GtIfAGiYyUMWVKrUqGipMssoKsBmPdoFdy-OZYv3AI01tac_BuWMFC8F9Zs3BFhKhxp9b3yXxuMLOXErYUCH5xU24hexIhJaWW_Xl2DTauxEMhCFSw19O3rHaWDxNJ67n82g2uVcZdgSH6_J1NJNL3DlrRAZkPzzHntXqBP1uPcmKXm1LGSbR0eiBuiM8MNMJ0oI-7Y6_dZHfA",
+        "expectedKeyB64": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+        "expectedUserId": "00000000-0000-0000-0000-000000000000"
+    },
+    "rejectWrongKey": {
+        "wrongSeedB64": "MDc-RUxTWmFob3Z9hIuSmaCnrrW8w8rR2N_m7fT7Agk",
+        "sealedB64": "J-cjLWodes13OdvIBS8CFdmq5w7XC_0TtINOQeaaUzZdyQiGuNhRQIPcOwpejmqJetXFww"
+    }
+}

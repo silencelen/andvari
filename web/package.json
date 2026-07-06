@@ -1,0 +1,20 @@
+{
+  "name": "andvari-web",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "andvari web client — independent TypeScript implementation of spec/",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "libsodium-wrappers-sumo": "^0.7.15"
+  },
+  "devDependencies": {
+    "@types/libsodium-wrappers-sumo": "^0.7.8",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}
