@@ -147,6 +147,31 @@ fun Application.andvariModule(services: Services) {
             else call.respondText(Bytes.toB64(config.recoveryPublicKey))
         }
 
+        // Desktop distribution + in-app update check (spec P3). The manifest and the
+        // installer files live in ANDVARI_DOWNLOADS_DIR; the desktop client fetches
+        // manifest.json on launch and compares versions.
+        config.downloadsDir?.let { dir ->
+            val root = File(dir)
+            get("/downloads/manifest.json") {
+                val manifest = File(root, "manifest.json")
+                if (manifest.isFile) {
+                    call.response.headers.append("Content-Type", "application/json", false)
+                    call.respondBytes(manifest.readBytes())
+                } else {
+                    call.respond(HttpStatusCode.NotFound, "no manifest")
+                }
+            }
+            get("/downloads/{file}") {
+                val name = call.parameters["file"] ?: return@get call.respond(HttpStatusCode.BadRequest, "no file")
+                if (name.contains("..") || name.contains("/") || name.contains("\\")) {
+                    return@get call.respond(HttpStatusCode.BadRequest, "bad name")
+                }
+                val f = File(root, name)
+                if (f.isFile && f.parentFile == root) call.respondFileContent(f)
+                else call.respond(HttpStatusCode.NotFound, "not found")
+            }
+        }
+
         // ---- auth ----
         post("/api/v1/auth/prelogin") {
             if (!limiter.allow("prelogin:${call.clientIp()}", 10, 60_000)) throw RateLimited()
