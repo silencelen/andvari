@@ -233,5 +233,35 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 2) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Attachments (spec 02 §6): ciphertext chunks live on disk in blobDir;
+                    // this row is the server-visible plaintext contract (spec 02 §5).
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE attachments(
+                          attachmentId TEXT PRIMARY KEY,
+                          itemId TEXT NOT NULL,
+                          vaultId TEXT NOT NULL,
+                          size INTEGER NOT NULL,
+                          sha256 TEXT NOT NULL,
+                          header TEXT NOT NULL,
+                          createdAt INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate("CREATE INDEX idx_attachments_item ON attachments(itemId)")
+                    st.executeUpdate("CREATE INDEX idx_attachments_vault ON attachments(vaultId)")
+                    // Server-side TOTP second factor (spec 03 §2, break-glass hardening).
+                    // These are server 2FA secrets, NOT vault data — documented in spec 02 §5.
+                    st.executeUpdate("ALTER TABLE users ADD COLUMN totpSecret TEXT")
+                    st.executeUpdate("ALTER TABLE users ADD COLUMN totpPendingSecret TEXT")
+                    st.executeUpdate("ALTER TABLE users ADD COLUMN totpEnrolledAt INTEGER")
+                    st.executeUpdate("ALTER TABLE users ADD COLUMN totpLastStep INTEGER NOT NULL DEFAULT 0")
+                    st.executeUpdate("UPDATE meta SET value='2' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }

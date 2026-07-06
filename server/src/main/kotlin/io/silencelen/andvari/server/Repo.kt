@@ -72,6 +72,9 @@ class UserRow(
     val status: String,
     val mustChangePassword: Boolean,
     val createdAt: Long,
+    val totpSecret: String?,
+    val totpPendingSecret: String?,
+    val totpLastStep: Long,
 )
 
 fun userRowPublic(rs: ResultSet) = userRow(rs)
@@ -90,6 +93,9 @@ private fun userRow(rs: ResultSet) = UserRow(
     status = rs.getString("status"),
     mustChangePassword = rs.getInt("mustChangePassword") != 0,
     createdAt = rs.getLong("createdAt"),
+    totpSecret = rs.getString("totpSecret"),
+    totpPendingSecret = rs.getString("totpPendingSecret"),
+    totpLastStep = rs.getLong("totpLastStep"),
 )
 
 class SessionRow(

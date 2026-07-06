@@ -8,11 +8,17 @@ import { saveSession, type Session } from "./session";
 
 type Mode = { unlock: Session } | { fresh: true };
 
+/** What the vault shell needs to know about how this session came to be. */
+export interface LoginMeta {
+  isAdmin: boolean;
+  mustChangePassword: boolean;
+}
+
 interface Props {
   client: ApiClient;
   policy: ClientPolicy | null;
   mode: Mode;
-  onReady: (account: Account, store: VaultStore) => void;
+  onReady: (account: Account, store: VaultStore, meta: LoginMeta) => void;
   onForget: () => void;
 }
 
@@ -24,7 +30,7 @@ export function Welcome({ client, policy, mode, onReady, onForget }: Props) {
 }
 
 /** Reload with an existing session: master password re-derives keys. */
-function Unlock({ client, session, onReady, onForget }: { client: ApiClient; session: Session; onReady: (a: Account, s: VaultStore) => void; onForget: () => void }) {
+function Unlock({ client, session, onReady, onForget }: { client: ApiClient; session: Session; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForget: () => void }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -38,7 +44,7 @@ function Unlock({ client, session, onReady, onForget }: { client: ApiClient; ses
       const account = await Account.unlock(session.userId, password, keys);
       const store = new VaultStore(client, account);
       await store.sync(); // rediscovers the personal vault id
-      onReady(account, store);
+      onReady(account, store, { isAdmin: session.isAdmin, mustChangePassword: false });
     } catch (e) {
       setErr(e instanceof ApiError && e.status === 401 ? "Session expired — sign in again." : "Wrong master password.");
     } finally {
@@ -69,7 +75,7 @@ function Unlock({ client, session, onReady, onForget }: { client: ApiClient; ses
 }
 
 /** No session: sign in to an existing account, or enroll with an invite. */
-function FreshStart({ client, policy, onReady }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore) => void }) {
+function FreshStart({ client, policy, onReady }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
   const [tab, setTab] = useState<"signin" | "enroll">("signin");
   return (
     <div className="auth-shell">
@@ -89,9 +95,11 @@ function FreshStart({ client, policy, onReady }: { client: ApiClient; policy: Cl
   );
 }
 
-function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, s: VaultStore) => void }) {
+function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [totp, setTotp] = useState("");
+  const [totpNeeded, setTotpNeeded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -102,7 +110,8 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
     try {
       const pre = await client.prelogin(email);
       const authKey = await Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams);
-      const s = await client.login(email, authKey, deviceName());
+      const code = totp.replace(/\s/g, "");
+      const s = await client.login(email, authKey, deviceName(), totpNeeded && code ? code : undefined);
       const account = await Account.unlock(s.userId, password, s.accountKeys);
       const store = new VaultStore(client, account);
       await store.sync(); // discovers the personal vault id from grants
@@ -111,11 +120,23 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
         userId: s.userId,
         personalVaultId: account.personalVaultId,
         email,
+        isAdmin: s.isAdmin,
         tokens: { accessToken: s.accessToken, refreshToken: s.refreshToken },
       });
-      onReady(account, store);
+      onReady(account, store, { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword });
     } catch (e) {
-      setErr(e instanceof ApiError && e.status === 401 ? "Wrong email or master password." : "Sign-in failed.");
+      if (e instanceof ApiError && e.code === "totp_required") {
+        // Break-glass origin (spec 03 §2): the password checked out; the server
+        // additionally wants the account's server-TOTP code.
+        setTotpNeeded(true);
+        setErr("");
+      } else if (e instanceof ApiError && e.code === "public_login_requires_totp") {
+        setErr("This account has no TOTP enrolled — sign-in from the public address is blocked. Connect from inside (VPN/LAN), enroll TOTP in Settings, then retry.");
+      } else if (e instanceof ApiError && e.status === 401) {
+        setErr(totpNeeded ? "Wrong email, master password, or one-time code." : "Wrong email or master password.");
+      } else {
+        setErr("Sign-in failed.");
+      }
     } finally {
       setBusy(false);
     }
@@ -132,12 +153,27 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
         <label>Master password</label>
         <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
       </div>
-      <button className="primary" disabled={busy || !email || !password}>{busy ? "Unsealing…" : "Sign in"}</button>
+      {totpNeeded && (
+        <div className="field">
+          <label>One-time code</label>
+          <input
+            className="mono"
+            autoFocus
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            placeholder="123 456"
+            value={totp}
+            onChange={(e) => setTotp(e.target.value)}
+          />
+          <span className="muted">You are connecting via the public address — enter the code from your authenticator app.</span>
+        </div>
+      )}
+      <button className="primary" disabled={busy || !email || !password || (totpNeeded && !totp.trim())}>{busy ? "Unsealing…" : "Sign in"}</button>
     </form>
   );
 }
 
-function Enroll({ client, policy, onReady }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore) => void }) {
+function Enroll({ client, policy, onReady }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
   const [invite, setInvite] = useState("");
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
@@ -172,11 +208,12 @@ function Enroll({ client, policy, onReady }: { client: ApiClient; policy: Client
         userId: s.userId,
         personalVaultId: request.personalVault.vaultId,
         email,
+        isAdmin: s.isAdmin,
         tokens: { accessToken: s.accessToken, refreshToken: s.refreshToken },
       });
       const store = new VaultStore(client, account);
       await store.sync();
-      onReady(account, store);
+      onReady(account, store, { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword });
     } catch (e) {
       setErr(e instanceof ApiError ? enrollError(e.code) : "Enrollment failed.");
     } finally {

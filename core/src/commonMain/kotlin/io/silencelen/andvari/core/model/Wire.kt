@@ -73,6 +73,7 @@ data class SessionResponse(
     val accountKeys: AccountKeys,
     val isAdmin: Boolean,
     val mustChangePassword: Boolean = false,
+    val totpEnrolled: Boolean = false,
 )
 
 @Serializable
@@ -165,6 +166,30 @@ data class MutationResult(
 @Serializable
 data class PushResponse(val rev: Long, val results: List<MutationResult>)
 
+// ---- attachments (spec 02 §6) ----
+
+/** Server bookkeeping for one encrypted attachment blob; filename + fileKey live inside item ciphertext. */
+@Serializable
+data class AttachmentMeta(
+    val attachmentId: String,
+    val itemId: String,
+    val vaultId: String,
+    val size: Long,
+    val sha256: String,
+    val createdAt: Long = 0,
+)
+
+// ---- server TOTP (spec 03 §2, break-glass hardening) ----
+
+@Serializable
+data class TotpSetupResponse(val secretBase32: String, val otpauthUri: String)
+
+@Serializable
+data class TotpCodeRequest(val code: String)
+
+@Serializable
+data class TotpStatus(val enrolled: Boolean, val pendingSetup: Boolean)
+
 // ---- admin ----
 
 @Serializable
@@ -195,6 +220,34 @@ data class RecoveryUpload(
 )
 
 @Serializable
+data class AdminDeviceSummary(
+    val deviceId: String,
+    val platform: String,
+    val name: String,
+    val clientVersion: String?,
+    val createdAt: Long,
+    val lastSeenAt: Long?,
+    val revokedAt: Long?,
+)
+
+@Serializable
+data class AdminStatus(
+    val serverVersion: String,
+    val serverTime: Long,
+    val escrowConfigured: Boolean,
+    val recoveryFingerprint: String,
+    val breakGlassConfigured: Boolean,
+    val lastPublicRequestAt: Long? = null,
+    val userCount: Int,
+    val itemCount: Int,
+    val attachmentCount: Int,
+    val attachmentBytes: Long,
+    val dbBytes: Long,
+    val totpEnrolledCount: Int,
+    val downloadsManifest: Boolean,
+)
+
+@Serializable
 data class AuditEvent(
     val id: Long,
     val at: Long,
@@ -216,4 +269,8 @@ data class ClientPolicy(
     val sessionRefreshTtlDays: Long = 30,
     val recoveryFingerprint: String = "",
     val serverTime: Long = 0,
+    // Attachment quotas (spec 02 §6) — plaintext byte limits, enforced server-side on ciphertext with overhead allowance.
+    val attachmentMaxBytes: Long = 25L * 1024 * 1024,
+    val itemAttachmentsMaxBytes: Long = 100L * 1024 * 1024,
+    val userAttachmentsMaxBytes: Long = 1024L * 1024 * 1024,
 )

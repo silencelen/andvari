@@ -38,16 +38,36 @@ import io.ktor.client.engine.java.Java
 import io.ktor.http.ContentType
 import io.ktor.http.defaultForFile
 import io.ktor.server.application.ApplicationCall
+import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.metrics.micrometer.MicrometerMetrics
+import io.ktor.server.request.receiveChannel
 import io.ktor.server.response.respondBytes
+import io.ktor.server.response.respondOutputStream
 import io.micrometer.prometheusmetrics.PrometheusConfig
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry
+import io.silencelen.andvari.core.model.PasswordChangeRequest
+import io.silencelen.andvari.core.model.TotpCodeRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.minutes
 
 /** Bootstrap invite email sentinel: matches whatever email the first admin registers with. */
 const val BOOTSTRAP_ANY_EMAIL = "*"
+
+const val SERVER_VERSION = "0.2.0"
+
+private val UUID_PATH_RE = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+/** Path/query ids that name files or rows MUST be canonical UUIDs (also kills traversal). */
+fun requireUuid(value: String?, field: String): String {
+    val v = value ?: throw BadRequest("missing_$field")
+    if (!UUID_PATH_RE.matches(v)) throw BadRequest("bad_$field")
+    return v
+}
 
 class Services(
     val repo: Repo,
@@ -107,6 +127,7 @@ fun Application.andvariModule(services: Services) {
                 is BadRequest -> call.respond(HttpStatusCode.BadRequest, ApiError(cause.reason, "bad request"))
                 is ResyncRequired -> call.respond(HttpStatusCode.Gone, ApiError("resync_required", "cursor predates retained history"))
                 is RateLimited -> call.respond(HttpStatusCode.TooManyRequests, ApiError("rate_limited", "slow down"))
+                is PayloadTooLarge -> call.respond(HttpStatusCode.PayloadTooLarge, ApiError(cause.reason, "quota exceeded"))
                 else -> {
                     call.application.environment.log.error("unhandled", cause)
                     call.respond(HttpStatusCode.InternalServerError, ApiError("internal", "internal error"))
@@ -116,6 +137,31 @@ fun Application.andvariModule(services: Services) {
     }
 
     val limiter = RateLimiter()
+
+    // Break-glass observability: count public-origin traffic + stamp the last-seen
+    // time (admin status + the andvari_public_origin_requests metric).
+    val publicCounter = services.metrics.counter("andvari.public.origin.requests")
+    var lastPublicMetaWrite = 0L
+    intercept(ApplicationCallPipeline.Monitoring) {
+        if (context.isPublicOrigin(config)) {
+            publicCounter.increment()
+            val t = now()
+            if (t - lastPublicMetaWrite > 60_000) {
+                lastPublicMetaWrite = t
+                runCatching { services.repo.setMeta("lastPublicRequestAt", t.toString()) }
+            }
+        }
+    }
+
+    // Attachment orphan GC (spec 02 §6): hourly sweep, first pass shortly after boot.
+    launch(Dispatchers.IO) {
+        delay(10.minutes)
+        while (true) {
+            runCatching { service.attachments.sweepOrphans() }
+                .onFailure { environment.log.warn("attachment GC failed", it) }
+            delay(1.hours)
+        }
+    }
 
     routing {
         get("/healthz") {
@@ -185,13 +231,16 @@ fun Application.andvariModule(services: Services) {
             call.respond(service.register(req, call.clientIp()))
         }
         post("/api/v1/auth/login") {
-            if (!limiter.allow("login:${call.clientIp()}", 10, 60_000)) throw RateLimited()
+            val publicOrigin = call.isPublicOrigin(config)
+            // Public origin is rate-limited harder (spec 03 §8: 5/min vs 10/min).
+            if (!limiter.allow("login:${call.clientIp()}", if (publicOrigin) 5 else 10, 60_000)) throw RateLimited()
             enforceVersion(call, service)
-            if (call.isPublicOrigin(config)) throw Forbidden("public_login_requires_totp") // P4 wires TOTP
             val req = call.receive<LoginRequest>()
-            call.respond(service.login(req, call.clientIp()))
+            call.respond(service.login(req, call.clientIp(), publicOrigin))
         }
         post("/api/v1/auth/refresh") {
+            // spec 03 §8: no refresh via the public origin — break-glass sessions re-login (with TOTP).
+            if (call.isPublicOrigin(config)) throw Forbidden("public_refresh_disabled")
             val req = call.receive<RefreshRequest>()
             call.respond(service.refresh(req.refreshToken, call.clientIp()))
         }
@@ -205,6 +254,61 @@ fun Application.andvariModule(services: Services) {
         get("/api/v1/account/keys") {
             val p = requirePrincipal(call, service)
             call.respond(service.accountKeys(p.userId))
+        }
+        put("/api/v1/account/password") {
+            val p = requirePrincipal(call, service)
+            service.changePassword(p, call.receive<PasswordChangeRequest>(), call.clientIp())
+            call.respondText("ok")
+        }
+
+        // ---- server TOTP (spec 03 §2; required for public-origin logins) ----
+        get("/api/v1/account/totp") {
+            val p = requirePrincipal(call, service)
+            call.respond(service.totpStatus(p.userId))
+        }
+        post("/api/v1/account/totp/setup") {
+            val p = requirePrincipal(call, service)
+            call.respond(service.totpSetup(p.userId))
+        }
+        post("/api/v1/account/totp/confirm") {
+            val p = requirePrincipal(call, service)
+            service.totpConfirm(p.userId, call.receive<TotpCodeRequest>().code, call.clientIp())
+            call.respond(service.totpStatus(p.userId))
+        }
+        post("/api/v1/account/totp/disable") {
+            val p = requirePrincipal(call, service)
+            service.totpDisable(p.userId, call.receive<TotpCodeRequest>().code, call.clientIp())
+            call.respond(service.totpStatus(p.userId))
+        }
+
+        // ---- attachments (spec 02 §6: blob first, then the item update referencing it) ----
+        post("/api/v1/attachments/{id}") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            val id = requireUuid(call.parameters["id"], "attachment_id")
+            val vaultId = requireUuid(call.request.queryParameters["vaultId"], "vault_id")
+            val itemId = requireUuid(call.request.queryParameters["itemId"], "item_id")
+            val role = services.repo.db.read { c -> services.repo.grantRole(c, p.userId, vaultId) }
+            if (role == null || role == "reader") throw Forbidden("no_write_grant")
+            val meta = withContext(Dispatchers.IO) {
+                service.attachments.store(p.userId, id, itemId, vaultId, call.receiveChannel(), service.policy())
+            }
+            call.respond(meta)
+        }
+        get("/api/v1/attachments/{id}") {
+            val p = requirePrincipal(call, service)
+            val id = requireUuid(call.parameters["id"], "attachment_id")
+            val row = services.repo.db.read { c -> service.attachments.rowById(c, id) }
+                ?: throw Forbidden("no_grant") // hidden-as-403 for cross-tenant probes (spec 03 §8)
+            services.repo.db.read { c -> services.repo.grantRole(c, p.userId, row.vaultId) }
+                ?: throw Forbidden("no_grant")
+            val blob = service.attachments.file(id)
+            if (!blob.isFile) throw Forbidden("no_grant")
+            val header = Bytes.fromB64(row.header)
+            call.respondOutputStream(ContentType.Application.OctetStream, contentLength = header.size + blob.length()) {
+                write(header)
+                blob.inputStream().use { it.copyTo(this) }
+            }
         }
 
         // ---- sync ----
@@ -279,6 +383,14 @@ fun Application.andvariModule(services: Services) {
             val user = call.request.queryParameters["userId"]
             val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 200
             call.respond(services.repo.auditQuery(since, type, user, limit))
+        }
+        get("/api/v1/admin/users/{id}/devices") {
+            requireAdmin(call, service)
+            call.respond(services.admin.listDevices(requireUuid(call.parameters["id"], "user_id")))
+        }
+        get("/api/v1/admin/status") {
+            requireAdmin(call, service)
+            call.respond(services.admin.status(config, service.attachments))
         }
         get("/api/v1/admin/policy") {
             requireAdmin(call, service)

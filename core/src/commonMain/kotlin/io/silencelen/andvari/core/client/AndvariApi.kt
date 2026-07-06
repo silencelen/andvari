@@ -16,8 +16,10 @@ import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ApiError
+import io.silencelen.andvari.core.model.AttachmentMeta
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
+import io.silencelen.andvari.core.model.PasswordChangeRequest
 import io.silencelen.andvari.core.model.PreloginRequest
 import io.silencelen.andvari.core.model.PreloginResponse
 import io.silencelen.andvari.core.model.PushRequest
@@ -27,13 +29,16 @@ import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.SyncResponse
 import io.silencelen.andvari.core.model.TokenPair
+import io.silencelen.andvari.core.model.TotpCodeRequest
+import io.silencelen.andvari.core.model.TotpSetupResponse
+import io.silencelen.andvari.core.model.TotpStatus
 import kotlinx.serialization.json.Json
 
 class ApiException(val status: Int, val code: String, message: String) : Exception(message)
 
 data class Tokens(val accessToken: String, val refreshToken: String)
 
-const val ANDVARI_CLIENT_VERSION = "0.1.0"
+const val ANDVARI_CLIENT_VERSION = "0.2.0"
 
 /**
  * Kotlin API client (sibling of web/src/api/client.ts). Auto-refreshes the access
@@ -142,6 +147,39 @@ class AndvariApi(
     suspend fun sync(since: Long): SyncResponse = call("GET", "/api/v1/sync?since=$since")
 
     suspend fun push(req: PushRequest): PushResponse = call("POST", "/api/v1/sync/push", req)
+
+    // ---- attachments (spec 02 §6: body = header || ciphertext chunks) ----
+
+    suspend fun uploadAttachment(attachmentId: String, itemId: String, vaultId: String, body: ByteArray): AttachmentMeta {
+        val path = "/api/v1/attachments/$attachmentId?vaultId=$vaultId&itemId=$itemId"
+        suspend fun send(): HttpResponse = http.post(baseUrl + path) {
+            common(auth = true)
+            contentType(ContentType.Application.OctetStream)
+            setBody(body)
+        }
+        var resp = send()
+        if (resp.status == HttpStatusCode.Unauthorized && tokens != null && tryRefresh()) resp = send()
+        if (!resp.status.isSuccess()) throw errorFrom(resp)
+        return resp.body()
+    }
+
+    suspend fun downloadAttachment(attachmentId: String): ByteArray {
+        val resp = request("GET", "/api/v1/attachments/$attachmentId")
+        if (!resp.status.isSuccess()) throw errorFrom(resp)
+        return resp.body()
+    }
+
+    // ---- server TOTP + password change ----
+
+    suspend fun totpStatus(): TotpStatus = call("GET", "/api/v1/account/totp")
+    suspend fun totpSetup(): TotpSetupResponse = call("POST", "/api/v1/account/totp/setup")
+    suspend fun totpConfirm(code: String): TotpStatus = call("POST", "/api/v1/account/totp/confirm", TotpCodeRequest(code))
+    suspend fun totpDisable(code: String): TotpStatus = call("POST", "/api/v1/account/totp/disable", TotpCodeRequest(code))
+
+    suspend fun changePassword(req: PasswordChangeRequest) {
+        val resp = request("PUT", "/api/v1/account/password", req)
+        if (!resp.status.isSuccess()) throw errorFrom(resp)
+    }
 
     suspend fun logout() {
         try {

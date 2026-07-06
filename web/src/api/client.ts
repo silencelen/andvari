@@ -1,15 +1,24 @@
 import type {
+  AdminDeviceSummary,
+  AdminStatus,
+  AdminUserSummary,
+  AttachmentMeta,
+  AuditEvent,
   ClientPolicy,
+  InviteResponse,
+  PasswordChangeRequest,
   PreloginResponse,
   PushResponse,
   RegisterRequest,
   SessionResponse,
   SyncResponse,
+  TotpSetupResponse,
+  TotpStatus,
   Mutation,
   AccountKeys,
 } from "./types";
 
-export const CLIENT_VERSION = "0.1.0";
+export const CLIENT_VERSION = "0.2.0";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
 
 export class ApiError extends Error {
@@ -76,22 +85,43 @@ export class ApiClient {
     return true;
   }
 
+  /** Like raw() but with a binary request body (attachments). */
+  private async rawBytes(method: string, path: string, body: Uint8Array | undefined, retry = true): Promise<Response> {
+    const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
+    if (body !== undefined) headers["Content-Type"] = "application/octet-stream";
+    if (this.tokens) headers["Authorization"] = `Bearer ${this.tokens.accessToken}`;
+    const resp = await fetch(this.baseUrl + path, { method, headers, body: body as BodyInit | undefined });
+    if (resp.status === 401 && retry && this.tokens) {
+      if (await this.tryRefresh()) return this.rawBytes(method, path, body, false);
+    }
+    return resp;
+  }
+
+  private async throwApiError(resp: Response): Promise<never> {
+    let code = `http_${resp.status}`;
+    let message = resp.statusText;
+    try {
+      const err = await resp.json();
+      code = err.error ?? code;
+      message = err.message ?? message;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(resp.status, code, message);
+  }
+
   private async json<T>(method: string, path: string, body?: unknown, auth = true): Promise<T> {
     const resp = await this.raw(method, path, body, auth);
-    if (!resp.ok) {
-      let code = `http_${resp.status}`;
-      let message = resp.statusText;
-      try {
-        const err = await resp.json();
-        code = err.error ?? code;
-        message = err.message ?? message;
-      } catch {
-        /* non-JSON error body */
-      }
-      throw new ApiError(resp.status, code, message);
-    }
+    if (!resp.ok) await this.throwApiError(resp);
     const text = await resp.text();
     return (text ? JSON.parse(text) : undefined) as T;
+  }
+
+  /** For endpoints that answer plain text ("ok") — errors still surface as ApiError. */
+  private async text(method: string, path: string, body?: unknown): Promise<string> {
+    const resp = await this.raw(method, path, body);
+    if (!resp.ok) await this.throwApiError(resp);
+    return resp.text();
   }
 
   prelogin(email: string) {
@@ -102,11 +132,11 @@ export class ApiClient {
     return this.json<SessionResponse>("POST", "/api/v1/auth/register", req, false);
   }
 
-  async login(email: string, authKey: string, deviceName: string): Promise<SessionResponse> {
+  async login(email: string, authKey: string, deviceName: string, totp?: string): Promise<SessionResponse> {
     const s = await this.json<SessionResponse>(
       "POST",
       "/api/v1/auth/login",
-      { email, authKey, device: { platform: "web", name: deviceName } },
+      { email, authKey, device: { platform: "web", name: deviceName }, ...(totp ? { totp } : {}) },
       false,
     );
     this.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
@@ -135,6 +165,87 @@ export class ApiClient {
 
   putEscrow(sealed: string, fingerprint: string) {
     return this.raw("PUT", "/api/v1/escrow/self", { sealed, fingerprint });
+  }
+
+  // ---- attachments (spec 02 §6: body = 24-byte header ‖ ciphertext chunks) ----
+
+  async uploadAttachment(id: string, itemId: string, vaultId: string, body: Uint8Array): Promise<AttachmentMeta> {
+    const q = `vaultId=${encodeURIComponent(vaultId)}&itemId=${encodeURIComponent(itemId)}`;
+    const resp = await this.rawBytes("POST", `/api/v1/attachments/${id}?${q}`, body);
+    if (!resp.ok) await this.throwApiError(resp);
+    return (await resp.json()) as AttachmentMeta;
+  }
+
+  async downloadAttachment(id: string): Promise<Uint8Array> {
+    const resp = await this.rawBytes("GET", `/api/v1/attachments/${id}`, undefined);
+    if (!resp.ok) await this.throwApiError(resp);
+    return new Uint8Array(await resp.arrayBuffer());
+  }
+
+  // ---- server TOTP + password change ----
+
+  totpStatus() {
+    return this.json<TotpStatus>("GET", "/api/v1/account/totp");
+  }
+
+  totpSetup() {
+    return this.json<TotpSetupResponse>("POST", "/api/v1/account/totp/setup");
+  }
+
+  totpConfirm(code: string) {
+    return this.json<TotpStatus>("POST", "/api/v1/account/totp/confirm", { code });
+  }
+
+  totpDisable(code: string) {
+    return this.json<TotpStatus>("POST", "/api/v1/account/totp/disable", { code });
+  }
+
+  changePassword(req: PasswordChangeRequest) {
+    return this.text("PUT", "/api/v1/account/password", req);
+  }
+
+  // ---- admin ----
+
+  adminUsers() {
+    return this.json<AdminUserSummary[]>("GET", "/api/v1/admin/users");
+  }
+
+  adminInvite(email: string, isAdmin: boolean) {
+    return this.json<InviteResponse>("POST", "/api/v1/admin/users", { email, isAdmin });
+  }
+
+  adminDisableUser(userId: string) {
+    return this.text("POST", `/api/v1/admin/users/${userId}/disable`);
+  }
+
+  adminDevices(userId: string) {
+    return this.json<AdminDeviceSummary[]>("GET", `/api/v1/admin/users/${userId}/devices`);
+  }
+
+  adminRevokeDevice(deviceId: string) {
+    return this.text("POST", `/api/v1/admin/devices/${deviceId}/revoke`);
+  }
+
+  adminAudit(params: { since?: number; type?: string; userId?: string; limit?: number }) {
+    const q = new URLSearchParams();
+    if (params.since !== undefined) q.set("since", String(params.since));
+    if (params.type) q.set("type", params.type);
+    if (params.userId) q.set("userId", params.userId);
+    if (params.limit !== undefined) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return this.json<AuditEvent[]>("GET", `/api/v1/admin/audit${qs ? "?" + qs : ""}`);
+  }
+
+  adminPolicy() {
+    return this.json<ClientPolicy>("GET", "/api/v1/admin/policy");
+  }
+
+  adminSetPolicy(policy: ClientPolicy) {
+    return this.json<ClientPolicy>("PUT", "/api/v1/admin/policy", policy);
+  }
+
+  adminStatus() {
+    return this.json<AdminStatus>("GET", "/api/v1/admin/status");
   }
 
   async hibpRange(prefix: string): Promise<string> {

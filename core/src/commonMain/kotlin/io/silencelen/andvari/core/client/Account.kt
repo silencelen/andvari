@@ -32,6 +32,10 @@ data class LoginData(
 @kotlinx.serialization.Serializable
 data class PasswordHistoryEntry(val password: String, val retiredAt: Long)
 
+/** Mirrors the plaintext attachment entry (spec 02 §3) — the SECRET half of attachmentIds. */
+@kotlinx.serialization.Serializable
+data class AttachmentRef(val id: String, val name: String, val size: Long, val fileKey: String)
+
 @kotlinx.serialization.Serializable
 data class ItemDoc(
     val type: String, // "login" | "note"
@@ -39,6 +43,7 @@ data class ItemDoc(
     val notes: String? = null,
     val favorite: Boolean = false,
     val login: LoginData? = null,
+    val attachments: List<AttachmentRef> = emptyList(),
 )
 
 /**
@@ -158,8 +163,13 @@ class Account private constructor(
 
     fun encryptItem(vaultId: String, itemId: String, doc: ItemDoc): ItemUpload {
         val blob = Envelope.sealB64(crypto, vk(vaultId), json.encodeToString(ItemDoc.serializer(), doc).encodeToByteArray(), Ad.item(vaultId, itemId, ITEM_FORMAT_VERSION))
-        return ItemUpload(formatVersion = ITEM_FORMAT_VERSION, blob = blob)
+        return ItemUpload(formatVersion = ITEM_FORMAT_VERSION, attachmentIds = doc.attachments.map { it.id }, blob = blob)
     }
+
+    /** Random per-file key (spec 02 §6) — lives only inside item ciphertext. */
+    fun newFileKey(): ByteArray = crypto.randomBytes(32)
+
+    fun cryptoProvider(): CryptoProvider = crypto
 
     fun decryptItem(item: WireItem): ItemDoc {
         val blob = item.blob ?: throw CryptoException("item has no blob (tombstone?)")

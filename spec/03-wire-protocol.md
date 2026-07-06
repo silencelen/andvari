@@ -28,6 +28,12 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
   refresh token revokes the whole device session (theft signal, audited).
 - `POST /auth/logout` revokes the device session. Admin device-revocation: §7.
 - AuthN header: `Authorization: Bearer <accessToken>`.
+- **Server-TOTP management** (authenticated): `GET /account/totp` → `{ enrolled,
+  pendingSetup }`; `POST /account/totp/setup` → `{ secretBase32, otpauthUri }`
+  (pending until confirmed); `POST /account/totp/confirm { code }`;
+  `POST /account/totp/disable { code }`. Codes are RFC 6238 SHA-1/6-digit/30 s with a
+  ±1-step window; an accepted step is single-use (replay-rejected), so a code that
+  just confirmed enrollment cannot immediately re-authenticate — wait one step.
 
 ## 3. Account key material
 
@@ -127,7 +133,8 @@ front (tailscale serve, cloudflared) pass WebSocket upgrades — verified in P1.
   session; response = the login response). The enrolling client MUST have verified
   the recovery fingerprint (spec 04) before this call; the server rejects
   registration whose asserted escrow fingerprint ≠ pinned.
-- `POST /admin/users/{id}/disable`, `POST /admin/devices/{id}/revoke`.
+- `POST /admin/users/{id}/disable`, `POST /admin/devices/{id}/revoke`,
+  `GET /admin/users/{id}/devices` — per-user device list (feeds the revocation UI).
 - `POST /admin/recovery { userId, tempAuthKey, tempWrappedUvk, tempKdfSalt,
   tempKdfParams }` — uploads recovery-cli output (spec 04 §4); sets
   `mustChangePassword`; revokes all the user's sessions.
@@ -153,4 +160,23 @@ front (tailscale serve, cloudflared) pass WebSocket upgrades — verified in P1.
   TOTP required, register/refresh disabled unless policy explicitly enables.
 - Errors: `{ "error": "<machine_code>", "message": "<human>" }`; 401 uniform for
   auth, 403 role, 404 hidden-as-403 for cross-tenant probes, 409 never used for sync
-  (conflicts are 200-with-status), 410 resync, 426 upgrade, 429 rate.
+  (conflicts are 200-with-status), 410 resync, 413 attachment/user/item quota,
+  426 upgrade, 429 rate.
+
+## 9. Attachments (data model: spec 02 §6)
+
+- `POST /attachments/{attachmentId}?vaultId=…&itemId=…` — writer/owner grant
+  required; ids are canonical UUIDs. Raw body = `header (24 B) || ciphertext chunks`
+  exactly as stored. The server streams to disk under the quota caps (413 over
+  policy `attachmentMaxBytes` / `userAttachmentsMaxBytes`), records
+  `{ size, sha256(ciphertext), header }`, and never parses content. Idempotent per
+  attachmentId: identical bytes → the stored meta; different bytes →
+  `400 attachment_id_taken`.
+- `GET /attachments/{attachmentId}` — any grant on the owning vault; raw body
+  identical to the upload shape. Unknown/foreign ids answer 403 (hidden-as-403, §8).
+- Item pushes referencing `attachmentIds` are validated: every id must exist and be
+  bound to that exact (itemId, vaultId) (`400 unknown_attachment` /
+  `400 attachment_mismatch`), and the referenced total must fit
+  `itemAttachmentsMaxBytes` (413). A validation failure fails the whole push batch.
+- Tombstoning an item deletes its blobs immediately; uploads never referenced by a
+  live item are GC'd after 24 h (spec 02 §6).

@@ -1,6 +1,8 @@
 import type { ApiClient } from "../api/client";
 import { ApiError } from "../api/client";
-import type { ItemDoc, Mutation, WireItem } from "../api/types";
+import type { AttachmentRef, ItemDoc, Mutation, WireItem } from "../api/types";
+import { HEADER_BYTES, decryptAttachment, encryptAttachment } from "../crypto/attachments";
+import { concat, fromB64 } from "../crypto/bytes";
 import type { Account } from "./account";
 
 export interface VaultItem {
@@ -9,6 +11,12 @@ export interface VaultItem {
   rev: number;
   updatedAt: number;
   doc: ItemDoc;
+}
+
+/** A newly attached file awaiting upload: plaintext bytes + the id its doc entry carries. */
+export interface PendingUpload {
+  id: string;
+  data: Uint8Array;
 }
 
 /**
@@ -116,7 +124,11 @@ export class VaultStore {
       itemId,
       vaultId,
       baseItemRev,
-      item: { formatVersion: 1, attachmentIds: [], blob: this.account.encryptItem(vaultId, itemId, doc) },
+      item: {
+        formatVersion: 1,
+        attachmentIds: doc.attachments?.map((a) => a.id) ?? [],
+        blob: this.account.encryptItem(vaultId, itemId, doc),
+      },
     };
   }
 
@@ -124,14 +136,41 @@ export class VaultStore {
     return { mutationId: crypto.randomUUID(), op: "delete", itemId, vaultId, baseItemRev };
   }
 
-  /** Create or update an item; returns after the server confirms + local state updates. */
-  async save(itemId: string | null, doc: ItemDoc): Promise<void> {
+  /**
+   * Create or update an item; returns after the server confirms + local state updates.
+   * New attachment blobs upload FIRST (spec 02 §6: blob before the item that
+   * references it), so the itemId is fixed before any upload starts.
+   */
+  async save(
+    itemId: string | null,
+    doc: ItemDoc,
+    newFiles: PendingUpload[] = [],
+    onUploadProgress?: (done: number, total: number) => void,
+  ): Promise<void> {
     const vaultId = this.account.personalVaultId;
     const existing = itemId ? this.itemsById.get(itemId) : undefined;
     const id = itemId ?? this.account.newItemId();
+
+    let done = 0;
+    for (const file of newFiles) {
+      const ref = doc.attachments?.find((a) => a.id === file.id);
+      if (!ref) throw new Error(`pending upload ${file.id} has no attachment entry in the doc`);
+      onUploadProgress?.(done, newFiles.length);
+      const enc = encryptAttachment(fromB64(ref.fileKey), file.data);
+      await this.api.uploadAttachment(file.id, id, vaultId, concat(enc.header, enc.ciphertext));
+      onUploadProgress?.(++done, newFiles.length);
+    }
+
     const m = this.putMutation(id, vaultId, doc, existing?.rev ?? 0);
     await this.push([m]);
     await this.sync();
+  }
+
+  /** Fetch + decrypt one attachment blob (24-byte secretstream header ‖ chunks). */
+  async downloadAttachment(item: VaultItem, ref: AttachmentRef): Promise<Uint8Array> {
+    if (!item.doc.attachments?.some((a) => a.id === ref.id)) throw new Error("attachment does not belong to this item");
+    const bytes = await this.api.downloadAttachment(ref.id);
+    return decryptAttachment(fromB64(ref.fileKey), bytes.subarray(0, HEADER_BYTES), bytes.subarray(HEADER_BYTES));
   }
 
   async remove(itemId: string): Promise<void> {

@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ApiClient } from "../api/client";
-import { fromB64 } from "../crypto/bytes";
+import { fromB64, toB64 } from "../crypto/bytes";
+import { randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { Account, deviceName } from "../vault/account";
 import { VaultStore } from "../vault/store";
@@ -85,6 +86,20 @@ describe.skipIf(!BASE)("live server e2e", () => {
     expect(seen, "client B decrypted A's item").toBeDefined();
     expect(seen!.doc.login?.password).toBe("s3cret-e2e");
     closeWs();
+
+    // Attachment E2E (P4): A saves an item with an encrypted attachment; B syncs,
+    // downloads, and decrypts it byte-for-byte.
+    const attData = randomBytes(100_000); // crosses the 64 KiB chunk boundary
+    const attRef = { id: crypto.randomUUID(), name: "e2e-blob.bin", size: attData.length, fileKey: toB64(randomBytes(32)) };
+    await storeA.save(null, { type: "note", name: "with attachment", attachments: [attRef] }, [{ id: attRef.id, data: attData }]);
+    await storeB.sync();
+    const withAtt = storeB.list().find((i) => i.doc.name === "with attachment");
+    expect(withAtt, "client B sees the attachment item").toBeDefined();
+    expect(withAtt!.doc.attachments?.[0]?.id).toBe(attRef.id);
+    const refB = withAtt!.doc.attachments![0]!;
+    const roundtripped = await storeB.downloadAttachment(withAtt!, refB);
+    expect(roundtripped.length, "attachment decrypts to the original size").toBe(attData.length);
+    expect(Buffer.from(roundtripped).equals(Buffer.from(attData)), "attachment bytes survive the roundtrip").toBe(true);
 
     const state: State = {
       email, password, userId: session.userId, personalVaultId: account.personalVaultId,
