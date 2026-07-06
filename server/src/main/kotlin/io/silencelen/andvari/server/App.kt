@@ -6,6 +6,7 @@ import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.plugins.origin
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.header
 import io.ktor.server.request.receive
@@ -123,8 +124,11 @@ fun Application.andvariModule(services: Services) {
         }
 
         get("/metrics") {
-            // Loopback-only; Alloy scrapes locally. Never trust XFF here.
-            if (call.clientIp() !in setOf("127.0.0.1", "0:0:0:0:0:0:0:1", "::1")) {
+            // Loopback-only; Alloy scrapes locally. Use the raw peer address (not the
+            // reverse-resolved host) and test it as a loopback address. Never trust XFF.
+            val peer = call.request.origin.remoteAddress
+            val isLoopback = runCatching { java.net.InetAddress.getByName(peer).isLoopbackAddress }.getOrDefault(false)
+            if (!isLoopback) {
                 call.respond(HttpStatusCode.Forbidden, "metrics are loopback-only")
             } else {
                 call.respondText(services.metricsScrape())
