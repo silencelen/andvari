@@ -1,5 +1,15 @@
 # andvari — changelog
 
+## 0.2.0
+
+- Encrypted file attachments on items: attach from the editor, download+decrypt from
+  the detail view. Per-file keys; the server only ever stores ciphertext chunks.
+- Server-TOTP (Settings): enroll an authenticator as the second factor that
+  break-glass/public logins require. Sign-in now prompts for a code when the server
+  asks for one.
+- Matches server/web 0.2.0 (admin console, password health, password change live in
+  the web app).
+
 ## 0.1.0 (first release)
 
 First Android client for the in-house andvari password manager.
