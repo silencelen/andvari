@@ -1,5 +1,13 @@
 # andvari — changelog
 
+## 0.2.3 — boot crash FIXED
+
+- Fixed the ClassNotFoundException that crashed the app on launch since v0.1.0: the
+  manifest referenced MainActivity/Application by relative name (resolved against the
+  `com.silencelen.andvari` namespace) while the classes live in package
+  `io.silencelen.andvari.app`. Now fully-qualified. The app launches to the Welcome
+  screen (verified on-device). Crash reporter + ProfileInstaller changes from 0.2.1–0.2.2 kept.
+
 ## 0.2.2 (Android boot-crash diagnostic)
 
 - Disable ProfileInstaller auto-init (a pre-Application startup step that can crash on
