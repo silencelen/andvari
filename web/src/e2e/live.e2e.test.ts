@@ -101,13 +101,55 @@ describe.skipIf(!BASE)("live server e2e", () => {
     expect(roundtripped.length, "attachment decrypts to the original size").toBe(attData.length);
     expect(Buffer.from(roundtripped).equals(Buffer.from(attData)), "attachment bytes survive the roundtrip").toBe(true);
 
+    // Invite flow (P4): the admin generates an invite; a BRAND-NEW user registers with
+    // it (needs the invite once), then that user's SECOND device only needs email+password.
+    const inviteEmail = `e2e-invitee-${Date.now()}@monahanhosting.com`;
+    const invite = await clientA.adminInvite(inviteEmail, false);
+    expect(invite.inviteToken, "admin got a one-time invite token").toBeTruthy();
+    expect(invite.email).toBe(inviteEmail);
+
+    const inviteePw = "invitee master password e2e";
+    const clientC = new ApiClient(BASE!);
+    const enrolled = await Account.enroll({
+      inviteToken: invite.inviteToken,
+      email: inviteEmail,
+      displayName: "E2E Invitee",
+      password: inviteePw,
+      kdfParams: policy.kdfParams,
+      recoveryPublicKey: recoveryPub,
+      recoveryFingerprint: policy.recoveryFingerprint,
+    });
+    const sessionC = await clientC.register(enrolled.request);
+    expect(sessionC.userId, "invitee enrolled a fresh account").toBeTruthy();
+    expect(sessionC.isAdmin, "invitee is NOT an admin").toBe(false);
+
+    // Reusing the same invite must fail (one-time).
+    const clientDup = new ApiClient(BASE!);
+    const dup = await Account.enroll({
+      inviteToken: invite.inviteToken, email: inviteEmail, displayName: "dup", password: "x",
+      kdfParams: policy.kdfParams, recoveryPublicKey: recoveryPub, recoveryFingerprint: policy.recoveryFingerprint,
+    });
+    let inviteReused = false;
+    try { await clientDup.register(dup.request); } catch { inviteReused = true; }
+    expect(inviteReused, "a consumed invite cannot be reused").toBe(true);
+
+    // The invitee's SECOND device: email + password only, no invite. Vault syncs.
+    const clientC2 = new ApiClient(BASE!);
+    const preC = await clientC2.prelogin(inviteEmail);
+    const authKeyC = await Account.deriveAuthKey(inviteePw, preC.kdfSalt, preC.kdfParams);
+    const sessionC2 = await clientC2.login(inviteEmail, authKeyC, "invitee-device-2");
+    expect(sessionC2.userId, "invitee's 2nd device signs in with just email+password").toBe(sessionC.userId);
+    const accountC2 = await Account.unlock(sessionC2.userId, inviteePw, sessionC2.accountKeys);
+    const storeC2 = new VaultStore(clientC2, accountC2);
+    await storeC2.sync(); // proves the fresh device can pull + decrypt its own (empty) vault
+
     const state: State = {
       email, password, userId: session.userId, personalVaultId: account.personalVaultId,
       tokens: { accessToken: session.accessToken, refreshToken: session.refreshToken },
       item1Id, item1MutationId: m1.mutationId,
     };
     writeFileSync(STATE, JSON.stringify(state));
-  });
+  }, 30_000); // several real argon2id (64 MiB) derivations — well past vitest's 5 s default
 
   it("phase B: after SIGKILL+restart, re-pushing the same mutationId is idempotent", async () => {
     if (PHASE !== "b") return;
