@@ -19,6 +19,11 @@ class Config(
     val enumSecret: ByteArray,
     val publicHostname: String?,
     val bootstrapToken: String?,
+    // Minimum Argon2id strength the server will PERSIST at enrollment / re-key (spec 01 §9,
+    // spec 05 T8: "policy enforces minimum strength at enrollment"). Default 0/0 = off so
+    // fast-param integration tests are unaffected; fromEnv() sets the production floor.
+    val minKdfMemBytes: Long = 0,
+    val minKdfOps: Long = 0,
 ) {
     val escrowConfigured: Boolean get() = recoveryPublicKey.size == 32 && recoveryFingerprint.isNotEmpty()
 
@@ -28,6 +33,12 @@ class Config(
             require(recoveryPub.isEmpty() || recoveryPub.size == 32) {
                 "ANDVARI_RECOVERY_PUBKEY must be a 32-byte X25519 public key"
             }
+            // Deterministic fake-prelogin salts (anti-enumeration, spec 01 §3) rest ENTIRELY
+            // on this secret being unknown. A missing/blank var used to default to 32 zero
+            // bytes silently, making fake salts computable. Fail closed instead.
+            val enumSecret = env("ANDVARI_ENUM_SECRET")?.takeIf { it.isNotBlank() }?.let { Bytes.fromB64(it) }
+                ?: error("ANDVARI_ENUM_SECRET must be set (>=32 random bytes, base64url) — refusing to start with a guessable enumeration secret")
+            require(enumSecret.size >= 32) { "ANDVARI_ENUM_SECRET must decode to >=32 bytes" }
             return Config(
                 host = env("ANDVARI_HOST") ?: "127.0.0.1",
                 port = env("ANDVARI_PORT")?.toInt() ?: 8080,
@@ -37,10 +48,12 @@ class Config(
                 downloadsDir = env("ANDVARI_DOWNLOADS_DIR"),
                 recoveryPublicKey = recoveryPub,
                 recoveryFingerprint = env("ANDVARI_RECOVERY_FINGERPRINT") ?: "",
-                // Deterministic fake-prelogin salts need a stable secret; prod MUST set one.
-                enumSecret = env("ANDVARI_ENUM_SECRET")?.let { Bytes.fromB64(it) } ?: ByteArray(32),
+                enumSecret = enumSecret,
                 publicHostname = env("ANDVARI_PUBLIC_HOSTNAME"),
                 bootstrapToken = env("ANDVARI_BOOTSTRAP_TOKEN"),
+                // Production KDF floor (spec 01 §9's hard rule: never below 64 MiB / ops 3).
+                minKdfMemBytes = env("ANDVARI_MIN_KDF_MEM")?.toLong() ?: 67_108_864L,
+                minKdfOps = env("ANDVARI_MIN_KDF_OPS")?.toLong() ?: 3L,
             )
         }
     }
