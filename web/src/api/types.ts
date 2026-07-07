@@ -172,7 +172,10 @@ export interface RegisterRequest {
   encryptedIdentitySeed: string;
   escrow: EscrowUpload;
   personalVault: { vaultId: string; wrappedVk: string; metaBlob: string };
-  device: { platform: string; name: string };
+  /** installId (F28) is web-additive: a stable per-browser id the server currently
+   *  ignores (DeviceInfo has only platform+name; its Json is ignoreUnknownKeys) —
+   *  the intended upsert key once the server stops inserting a device row per login. */
+  device: { platform: string; name: string; installId?: string };
 }
 
 // ---- attachments (spec 02 §6) ----

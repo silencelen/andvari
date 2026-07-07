@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ApiError, type ApiClient } from "../api/client";
 import type { ItemDoc, Mutation, PushResponse, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
 import { concat } from "../crypto/bytes";
@@ -8,7 +8,7 @@ import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { type BackupPayload, buildBackup, openBackup } from "../export/export";
 import { Account } from "./account";
-import { VaultStore, conflictCopyId } from "./store";
+import { SyncIntegrityError, VaultStore, conflictCopyId } from "./store";
 
 /**
  * Store-level unit tests for family sharing (P5) against the REAL Account crypto and a
@@ -23,10 +23,18 @@ const emptySync = (rev: number): SyncResponse => ({ rev, full: false, vaults: []
 class FakeApi {
   queue: SyncResponse[] = [];
   pushes: Mutation[][] = [];
+  /** `since` of every sync call — lets tests assert the store's cursor did not move. */
+  sinceLog: number[] = [];
   rev = 1;
 
-  async sync(_since: number): Promise<SyncResponse> {
-    return this.queue.shift() ?? emptySync(this.rev);
+  async sync(since: number): Promise<SyncResponse> {
+    this.sinceLog.push(since);
+    const resp = this.queue.shift() ?? emptySync(this.rev);
+    // A real server's rev never goes below what it already served (the F31 rollback
+    // guard exists precisely for servers that break this) — keep the fake honest so
+    // a post-push reconcile doesn't fabricate a regression.
+    this.rev = Math.max(this.rev, resp.rev);
+    return resp;
   }
 
   async push(mutations: Mutation[]): Promise<PushResponse> {
@@ -413,5 +421,239 @@ describe("VaultStore undecryptable retention (spec 07 §2.4)", () => {
     api.queue.push({ rev: 6, full: true, vaults: [s.vault], grants: [s.grant], items: [{ ...s.item, formatVersion: 2 }], removedGrants: [] });
     await store.sync();
     expect(store.undecryptable()).toEqual([{ itemId: s.itemId, vaultId: s.vaultId, formatVersion: 2 }]);
+  });
+});
+
+/**
+ * F31 rollback guards (spec 05 T1, core SyncEngine.pull parity): a non-full response
+ * below the cursor, or a full snapshot we did not ask for via the 410 path, is a
+ * server rollback/replay signal and must be REJECTED — nothing applied, cursor
+ * unmoved — so a rolled-back server can never delete or overwrite newer local state.
+ */
+describe("VaultStore rollback guards (F31)", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  /** Seed a store at cursor 5 holding the scenario item. */
+  async function seeded() {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+    await store.sync();
+    return { s, api, store };
+  }
+
+  it("rejects a non-full response whose rev is below the cursor — nothing applied, cursor kept", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { s, api, store } = await seeded();
+      const stamped = store.lastSyncAt;
+
+      // A rolled-back server re-serves rev 3 — including a tombstone for our item. If
+      // the guard failed, the item would vanish and the cursor would move backwards.
+      api.queue.push({
+        rev: 3,
+        full: false,
+        vaults: [],
+        grants: [],
+        items: [{ ...s.item, rev: 3, deleted: true, blob: null }],
+        removedGrants: [],
+      });
+      await expect(store.sync()).rejects.toBeInstanceOf(SyncIntegrityError);
+
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/went backwards/)); // surfaced, not silent
+      expect(store.get(s.itemId)?.doc).toEqual(DOC); // the tombstone was NOT applied
+      expect(store.lastSyncAt).toBe(stamped); // not stamped as a successful sync
+      api.queue.push(emptySync(5));
+      await store.sync();
+      expect(api.sinceLog).toEqual([0, 5, 5]); // the next pull still asked from the KEPT cursor
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("rejects an unsolicited full snapshot once the cursor has advanced", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { s, api, store } = await seeded();
+
+      // full=true with rev AHEAD of the cursor — still rejected: outside the 410 path a
+      // snapshot means the server lost its delta history (rollback / replaced DB), and
+      // applying this EMPTY one would wipe the local working set.
+      api.queue.push({ rev: 9, full: true, vaults: [], grants: [], items: [], removedGrants: [] });
+      await expect(store.sync()).rejects.toThrow(/unsolicited full snapshot/);
+
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/unsolicited full snapshot/));
+      expect(store.get(s.itemId)?.doc).toEqual(DOC); // store not wiped
+      api.queue.push(emptySync(5));
+      await store.sync();
+      expect(api.sinceLog).toEqual([0, 5, 5]); // cursor never moved to 9
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("accepts an equal-rev empty delta (a quiet server is not a rollback)", async () => {
+    const { api, store } = await seeded();
+    api.queue.push(emptySync(5));
+    await expect(store.sync()).resolves.toBeUndefined();
+  });
+
+  it("still accepts the full snapshot that follows a 410 resync", async () => {
+    const { s, api, store } = await seeded();
+
+    let failedOnce = false;
+    const realSync = api.sync.bind(api);
+    api.sync = async (since: number) => {
+      if (!failedOnce) {
+        failedOnce = true;
+        throw new ApiError(410, "cursor_gone", "resync required");
+      }
+      return realSync(since);
+    };
+    api.queue.push({ rev: 8, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+    await store.sync(); // must NOT trip the unsolicited-snapshot guard
+    expect(store.get(s.itemId)?.doc).toEqual(DOC);
+    api.queue.push(emptySync(8));
+    await store.sync();
+    expect(api.sinceLog.at(-1)).toBe(8); // cursor followed the resync snapshot
+  });
+
+  it("keeps the working set when the 410 refetch itself fails (fetch-first, core parity)", async () => {
+    const { s, api, store } = await seeded();
+
+    let calls = 0;
+    api.sync = async () => {
+      calls++;
+      if (calls === 1) throw new ApiError(410, "cursor_gone", "resync required");
+      throw new TypeError("network down"); // the replacement snapshot dies mid-flight
+    };
+    await expect(store.sync()).rejects.toThrow(/network down/);
+    // The store was NOT emptied ahead of a snapshot that never arrived.
+    expect(store.get(s.itemId)?.doc).toEqual(DOC);
+    expect(store.list()).toHaveLength(1);
+  });
+
+  it("rejects a 410 resync whose replacement is NOT a full snapshot — working set intact", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { s, api, store } = await seeded();
+
+      let failedOnce = false;
+      const realSync = api.sync.bind(api);
+      api.sync = async (since: number) => {
+        if (!failedOnce) {
+          failedOnce = true;
+          throw new ApiError(410, "cursor_gone", "resync required");
+        }
+        return realSync(since);
+      };
+      // The server said our cursor is gone, then answered the from-0 pull with a
+      // PARTIAL response. Applying it would wipe the store and repopulate a sliver.
+      api.queue.push({ rev: 8, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
+      await expect(store.sync()).rejects.toBeInstanceOf(SyncIntegrityError);
+
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/resync returned a non-full/));
+      expect(store.get(s.itemId)?.doc).toEqual(DOC); // nothing wiped, nothing applied
+      expect(store.list()).toHaveLength(1);
+      api.queue.push(emptySync(5));
+      await store.sync();
+      expect(api.sinceLog.at(-1)).toBe(5); // cursor unmoved by the rejected resync
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+/** Overlapping pulls could apply an older response after a newer one and move the
+ *  cursor backwards — the very corruption the rollback guards reject — so sync() is
+ *  single-flight: concurrent callers (bell, poll, Sync-now, reconciles) join one pull. */
+describe("VaultStore sync single-flight", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  it("concurrent sync() calls share ONE underlying api.sync", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+
+    await Promise.all([store.sync(), store.sync(), store.sync()]);
+    expect(api.sinceLog).toEqual([0]); // three callers, one pull
+
+    // The handle is released after settling: a later sync pulls again…
+    api.queue.push(emptySync(6));
+    await store.sync();
+    expect(api.sinceLog).toEqual([0, 5]);
+  });
+
+  it("all joiners see the same rejection; the flight is released afterwards", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    api.sync = async () => {
+      throw new TypeError("offline");
+    };
+    const [a, b] = await Promise.allSettled([store.sync(), store.sync()]);
+    expect(a.status).toBe("rejected");
+    expect(b.status).toBe("rejected");
+
+    // Released: the next call really pulls (and succeeds).
+    api.sync = FakeApi.prototype.sync.bind(api);
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+    await store.sync();
+    expect(store.get(s.itemId)?.doc).toEqual(DOC);
+  });
+});
+
+/** A push that reached the server is COMMITTED — the save must never be reported as
+ *  failed afterwards (the Editor would say "nothing was changed" about a live write,
+ *  and a user retry would commit a SECOND copy since put mutationIds are fresh). */
+describe("VaultStore save() post-push reconcile (mirror of remove())", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  it("a reconcile rejected by the rollback guard does not fail the save — local apply instead", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const s = await scenario("writer");
+      const api = new FakeApi();
+      const store = new VaultStore(api.asClient(), s.member);
+      api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+      await store.sync();
+
+      // The post-push reconcile pull will be REJECTED by the F31 rev-regression guard.
+      api.queue.push({ rev: 3, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
+      await expect(store.save(s.itemId, { ...DOC, name: "renamed" })).resolves.toBeUndefined();
+
+      expect(api.pushes).toHaveLength(1); // committed exactly once — no retry bait
+      expect(store.get(s.itemId)?.doc.name).toBe("renamed"); // optimistic local apply
+      expect(warn).toHaveBeenCalled(); // the integrity problem is surfaced, not hidden
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a reconcile that dies on the network does not fail the save either", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const s = await scenario("writer");
+      const api = new FakeApi();
+      const store = new VaultStore(api.asClient(), s.member);
+      api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+      await store.sync();
+
+      api.sync = async () => {
+        throw new TypeError("offline");
+      };
+      await expect(store.save(s.itemId, { ...DOC, name: "renamed offline" })).resolves.toBeUndefined();
+      expect(store.get(s.itemId)?.doc.name).toBe("renamed offline");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

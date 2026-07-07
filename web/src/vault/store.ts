@@ -1,6 +1,6 @@
 import type { ApiClient } from "../api/client";
 import { ApiError } from "../api/client";
-import type { AttachmentRef, ItemDoc, Mutation, WireItem, WireVault } from "../api/types";
+import type { AttachmentRef, ItemDoc, Mutation, PushResponse, WireItem, WireVault } from "../api/types";
 import { HEADER_BYTES, decryptAttachment, encryptAttachment } from "../crypto/attachments";
 import { concat, fromB64, toHexLower, utf8 } from "../crypto/bytes";
 import { sha256 } from "../crypto/provider";
@@ -48,6 +48,21 @@ export async function conflictCopyId(itemId: string, rev: number): Promise<strin
 export interface PendingUpload {
   id: string;
   data: Uint8Array;
+}
+
+/**
+ * F31 (spec 05 T1 / core `rev_regression` parity): the server's sync response failed a
+ * rollback guard — nothing was applied and the cursor did not move. Typed so callers'
+ * existing catch paths (Vault's syncNow flips the offline dot) absorb it without
+ * mistaking it for a transport error, and distinct from ApiError because the server
+ * DID answer — we refused the answer.
+ */
+export class SyncIntegrityError extends Error {
+  readonly code = "rev_regression";
+  constructor(message: string) {
+    super(message);
+    this.name = "SyncIntegrityError";
+  }
 }
 
 /**
@@ -118,21 +133,68 @@ export class VaultStore {
     );
   }
 
-  /** Pull everything new since the cursor. Handles 410 (resync from 0). */
-  async sync(): Promise<void> {
+  private syncInFlight: Promise<void> | null = null;
+
+  /**
+   * Pull everything new since the cursor. Handles 410 (resync from 0).
+   *
+   * SINGLE-FLIGHT: concurrent callers (WS bell, socket reopen, the offline poll, the
+   * Sync-now button, save/remove reconciles) all join the ONE in-flight pull —
+   * overlapping pulls could apply an older response after a newer one and move the
+   * cursor backwards, the very corruption the rollback guards below exist to reject.
+   */
+  sync(): Promise<void> {
+    this.syncInFlight ??= this.syncOnce().finally(() => {
+      this.syncInFlight = null;
+    });
+    return this.syncInFlight;
+  }
+
+  private async syncOnce(): Promise<void> {
+    const since = this.cursor;
+    let resyncing = false;
     let resp;
     try {
-      resp = await this.api.sync(this.cursor);
+      resp = await this.api.sync(since);
     } catch (e) {
       if (e instanceof ApiError && e.status === 410) {
-        this.cursor = 0;
-        this.itemsById.clear();
-        this.vaultsById.clear();
-        this.undecryptableById.clear(); // resync-from-0 re-delivers — never double-count
+        // Fetch the replacement snapshot FIRST (core SyncEngine parity): the working
+        // set is wiped only once the full response is in hand, so a failed or
+        // rejected refetch never leaves an emptied store behind.
+        resyncing = true;
         resp = await this.api.sync(0);
       } else {
         throw e;
       }
+    }
+
+    // Rollback guards BEFORE anything is applied (F31, mirrors core SyncEngine.pull /
+    // spec 05 T1: warn, never overwrite local newer state; spec 03 §4). A non-full
+    // response below our cursor, or a full snapshot we did not ask for via the 410
+    // path, signals a server rollback/replay — reject it, keep the cursor and local
+    // state, and let the caller's failure path (Vault's offline dot) surface it.
+    if (resyncing && !resp.full) {
+      // We were told our cursor is gone (410) — the ONLY valid continuation is a full
+      // snapshot. Applying a partial one would first wipe the working set and then
+      // repopulate a sliver of it: most of the vault silently vanishes.
+      console.warn("sync rejected: 410 resync returned a non-full response — local state kept");
+      throw new SyncIntegrityError("410 resync did not return a full snapshot — local state kept");
+    }
+    if (!resp.full && resp.rev < since) {
+      console.warn(`sync rejected: server rev ${resp.rev} went backwards from cursor ${since} — possible rollback; local state kept`);
+      throw new SyncIntegrityError("server rev went backwards — possible rollback; local state kept");
+    }
+    if (resp.full && since > 0 && !resyncing) {
+      console.warn(`sync rejected: unsolicited full snapshot at cursor ${since} — possible rollback; local state kept`);
+      throw new SyncIntegrityError("unsolicited full snapshot — possible rollback; local state kept");
+    }
+
+    if (resyncing) {
+      // resync-from-0 re-delivers everything — reset so nothing double-counts.
+      this.cursor = 0;
+      this.itemsById.clear();
+      this.vaultsById.clear();
+      this.undecryptableById.clear();
     }
 
     // EVERY grant goes through addGrant: the role update always applies (a role change
@@ -281,8 +343,29 @@ export class VaultStore {
     }
 
     const m = this.putMutation(id, targetVaultId, doc, existing?.rev ?? 0);
-    await this.push([m]);
-    await this.sync();
+    const pushResp = await this.push([m]);
+    // Past this point the put is COMMITTED server-side (mirror remove()): a failed or
+    // rejected reconcile pull must NOT fail the save — the Editor would then claim
+    // "Save failed — nothing was changed" about a write the server already holds, and
+    // a user retry would commit it a SECOND time (putMutation mints a fresh
+    // mutationId, so the retry is not idempotent). Apply the confirmed write locally
+    // FIRST — sync() is single-flight, so the reconcile below may legitimately join a
+    // pull that started BEFORE our push and does not contain it — then reconcile,
+    // letting the next successful sync (and the connectivity dot) surface whatever
+    // made a failed reconcile fail (offline, or an F31 integrity rejection).
+    this.itemsById.set(id, {
+      itemId: id,
+      vaultId: targetVaultId,
+      rev: pushResp.results[0]?.newItemRev ?? (existing?.rev ?? 0) + 1,
+      updatedAt: Date.now(),
+      doc,
+    });
+    this.undecryptableById.delete(id); // it decrypts by construction — we wrote it
+    try {
+      await this.sync();
+    } catch (e) {
+      console.warn("save committed but the reconcile pull failed — local apply kept; a later sync trues up", e);
+    }
   }
 
   /**
@@ -342,11 +425,12 @@ export class VaultStore {
     }
   }
 
-  private async push(mutations: Mutation[]): Promise<void> {
+  private async push(mutations: Mutation[]): Promise<PushResponse> {
     const resp = await this.api.push(mutations);
     // Apply confirmed revs locally where we can (best-effort; sync() reconciles fully).
     for (const r of resp.results) {
       if (r.status === "denied") throw new ApiError(403, "denied", "write denied");
     }
+    return resp;
   }
 }
