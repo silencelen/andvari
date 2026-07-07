@@ -38,6 +38,18 @@ removal in v1 is server-side revocation only; future-secrecy loss only, the serv
 still holds only ciphertext. Shared-vault membership topology (which userId holds which
 role on which vaultId) is server-visible metadata, subsumed by A6/R4.
 
+## Autofill (client-side, Android)
+
+The autofill service honors a fill request's web domain only from a browser it verifies by
+**signing certificate** (package name alone is spoofable — an app can install under an
+absent browser's package id). A package that is not pinned, not installed, or whose cert
+does not match its pin **fails closed**: no web-domain trust → only `androidapp://<pkg>`
+URIs match it, never web items. Residual: a browser whose release cert we have not pinned
+won't offer autofill until its digest is added (safe, functionality-only); and the match
+rule is label-boundary suffix, not eTLD+1/PSL (strictly safer, misses sibling subdomains).
+Digital Asset Links verification + PSL are the P6 loosening. The service never reads field
+values and never logs field content, item names, or URIs.
+
 ## Non-goals
 Nation-state adversaries; side-channel resistance beyond libsodium's own; protection
 of an unlocked session from its own OS; multi-org tenancy; plausible deniability.

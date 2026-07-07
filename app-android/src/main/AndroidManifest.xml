@@ -25,6 +25,29 @@
             </intent-filter>
         </activity>
 
+        <!-- Autofill (Phase 6, fill-only). Fully-qualified android:name — the source
+             package io.silencelen.andvari.app is NOT the manifest namespace
+             com.silencelen.andvari (burned gotcha: relative names crash pre-main). -->
+        <service
+            android:name="io.silencelen.andvari.app.autofill.AndvariAutofillService"
+            android:exported="true"
+            android:label="andvari"
+            android:permission="android.permission.BIND_AUTOFILL_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.autofill.AutofillService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.autofill"
+                android:resource="@xml/autofill_service" />
+        </service>
+        <activity
+            android:name="io.silencelen.andvari.app.autofill.AutofillUnlockActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Andvari.Translucent" />
+
         <!-- ProfileInstaller auto-init runs in the androidx.startup provider BEFORE
              Application.onCreate and has caused immediate startup crashes on some Android 15
              / OEM builds. It is a perf-only optimization (baseline profiles); disable the

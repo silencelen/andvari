@@ -34,7 +34,11 @@ class DesktopSessionStore {
     val cacheDir: File get() = dir
 
     @Serializable
-    private data class Prefs(val baseUrl: String = DEFAULT_BASE_URL, val cacheAllowed: Boolean = true)
+    private data class Prefs(
+        val baseUrl: String = DEFAULT_BASE_URL,
+        val cacheAllowed: Boolean = true,
+        val baseUrlMigratedTailnet: Boolean = false,
+    )
 
     private fun prefs(): Prefs = runCatching { json.decodeFromString(Prefs.serializer(), prefsFile.readText()) }.getOrDefault(Prefs())
     private fun writePrefs(p: Prefs) { dir.mkdirs(); prefsFile.writeText(json.encodeToString(Prefs.serializer(), p)) }
@@ -42,6 +46,17 @@ class DesktopSessionStore {
     var baseUrl: String
         get() = prefs().baseUrl
         set(v) { writePrefs(prefs().copy(baseUrl = v)) }
+
+    /**
+     * One-time bump of an old VLAN-2 LAN default to the tailnet HTTPS default (reachable
+     * from anywhere a Tailscale node runs; the LAN IP is off-VLAN-2-only). Rewrites ONLY the
+     * exact legacy default, so a deliberately-set custom URL is untouched. Mirrors Android.
+     */
+    fun migrateDefaultOnce() {
+        val p = prefs()
+        if (p.baseUrlMigratedTailnet) return
+        writePrefs(p.copy(baseUrl = if (p.baseUrl == LEGACY_LAN_DEFAULT) DEFAULT_BASE_URL else p.baseUrl, baseUrlMigratedTailnet = true))
+    }
 
     /** Last-known org offlineCacheAllowed — honored when a cold start is offline (spec 02 §8). */
     var cacheAllowed: Boolean
@@ -78,6 +93,7 @@ class DesktopSessionStore {
     fun clear() { file.delete(); keysFile.delete() }
 
     companion object {
-        const val DEFAULT_BASE_URL = "http://192.168.2.122:8080"
+        const val DEFAULT_BASE_URL = "https://andvari.taila2dff2.ts.net"
+        private const val LEGACY_LAN_DEFAULT = "http://192.168.2.122:8080"
     }
 }

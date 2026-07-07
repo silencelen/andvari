@@ -44,6 +44,12 @@ sealed interface DesktopScreen {
 class DesktopState(private val scope: CoroutineScope) {
     private val store = DesktopSessionStore()
 
+    init {
+        // One-time: bump an old LAN-default server URL to the tailnet default before any
+        // state reads it (mirrors Android's MainActivity.migrateDefaultOnce).
+        store.migrateDefaultOnce()
+    }
+
     var screen by mutableStateOf<DesktopScreen>(DesktopScreen.Loading)
         private set
     var items by mutableStateOf<List<VaultItem>>(emptyList())
