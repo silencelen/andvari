@@ -23,6 +23,46 @@ batches; entries added as each ships.
   after the first (VACUUM INTO refused to overwrite — PBS/B2 had been carrying a frozen
   first-night copy); the snapshot is now `600` from creation and failures escalate to
   journald instead of unwatched cron mail.
+- **Errors that tell the truth (web).** A VPN blip no longer reads as "Wrong master
+  password"; a transient policy-fetch failure no longer claims the escrow ceremony isn't
+  done (Retry with feedback instead); item deletes can't lie in either direction
+  (permission vs connectivity vs server error, and a committed delete is never reported
+  as "nothing was removed"); sharing errors drop raw wire codes; enrolling can't strand
+  you on a consumed invite after a network hiccup.
+- **Release & update truth.** One version constant now feeds the server, desktop, and the
+  build gate (0.4.0 shipped with two modules still self-reporting 0.3.0); desktop
+  identifies itself as `windows`/`linux` on the wire (it said `android`, so a desktop
+  update-pin could never reach it); the "update available" banner shows above every
+  desktop screen with the download link (it only showed on a screen signed-in users never
+  see, and Linux compared itself against the Windows manifest); a 426 minVersion refusal
+  is a real blocking "Update required" screen on desktop.
+- **Safety rails.** The last active administrator can no longer be disabled (one
+  unconfirmed click used to lock the whole instance, recoverable only by DB surgery) —
+  refusals are audited; the admin Users list confirms before disabling; the spec's
+  server-knowledge table now matches the real schema exactly; the conflict-copy and
+  password-strength derivations are vector-pinned across both implementations; the
+  annual escrow-drill reminder actually exists now (n8n `wf-escrowdrill-001`).
+- **Session & sync integrity (web).** Token refresh is single-flighted per tab and
+  coordinated across tabs (two concurrent refreshes used to trip the server's theft
+  heuristic and revoke the whole device); a transient 502 during refresh no longer signs
+  every tab out with a false "revoked" message; Lock and auto-lock keep the session and
+  land on the lighter "Welcome back" unlock with a reason line (locking one tab locks
+  them all); plain session expiry says so instead of claiming revocation; with the live
+  socket down the vault polls over HTTP and offers a manual "Sync now" (it used to freeze
+  silently); the client now enforces the spec's tamper checks (server identity-key
+  cross-check at unlock, rollback/replay rejection, and a resync must be a full snapshot
+  before local state is replaced).
+- **Native data-safety.** Rotating or folding the phone mid-edit no longer wipes typed
+  work (and a save finishing mid-fold closes the editor it should); unlock no longer
+  freezes the UI for seconds (argon2 off the main thread); screens are excluded from
+  Recents thumbnails/recordings (except the Autofill status screen, which stays
+  screenshot-able on purpose); clipboard secrets are marked sensitive and cleared without
+  ever clobbering something you copied later; sign-out revokes the device server-side
+  even from the locked screen; a mispicked huge attachment can't crash the app; TOTP
+  secrets can actually be typed by hand on all three clients (the field used to rewrite
+  itself on the first keystroke); read-only members no longer see Edit/Delete buttons
+  whose work the server would destroy; and items written by a future app version show as
+  "N items need an app update" instead of silently vanishing from lists.
 
 ## 0.4.0 — backups & export, auto-lock, forward-compat, sync liveness
 
