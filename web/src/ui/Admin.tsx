@@ -33,7 +33,14 @@ export function Admin({ client }: { client: ApiClient }) {
 }
 
 function errText(e: unknown): string {
-  if (e instanceof ApiError) return e.code === "admin_only" ? "This account is not an administrator." : `${e.code}: ${e.message}`;
+  if (e instanceof ApiError) {
+    switch (e.code) {
+      case "admin_only": return "This account is not an administrator.";
+      case "last_admin": return "That's the only active administrator — disabling it would lock everyone out of this console. Make another account an admin first.";
+      case "no_such_user": return "That account no longer exists — the list has been refreshed.";
+    }
+    return `${e.code}: ${e.message}`;
+  }
   return "Request failed.";
 }
 
@@ -77,6 +84,9 @@ function UsersTab({ client }: { client: ApiClient }) {
       await load();
     } catch (e) {
       setErr(errText(e));
+      // A stale/ghost row (no_such_user) can't be acted on — reload so it disappears,
+      // making the "the list has been refreshed" copy true.
+      if (e instanceof ApiError && e.code === "no_such_user") await load().catch(() => {});
     } finally {
       setBusy(false);
     }
@@ -144,6 +154,10 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
   onDisable: () => void;
   onRevoke: (deviceId: string) => void;
 }) {
+  // Disabling is drastic (revokes every session; sign-in then fails like a wrong
+  // password) — never fire it off a single click. The server additionally refuses to
+  // disable the last active admin (last_admin).
+  const [confirming, setConfirming] = useState(false);
   return (
     <>
       <tr>
@@ -156,9 +170,15 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
         <td><button type="button" className="link" onClick={onToggleDevices}>{u.deviceCount} device{u.deviceCount === 1 ? "" : "s"} {expanded ? "▴" : "▾"}</button></td>
         <td className="mono muted" title={u.escrowFingerprint ?? undefined}>{u.escrowFingerprint ? u.escrowFingerprint.slice(0, 12) + "…" : "—"}</td>
         <td>
-          {u.status === "active" && (
-            <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy} onClick={onDisable}>Disable</button>
-          )}
+          {u.status === "active" && (confirming ? (
+            <span style={{ whiteSpace: "nowrap" }}>
+              <span className="muted">Disable {u.email}?&nbsp;</span>
+              <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy} onClick={() => { setConfirming(false); onDisable(); }}>Yes, disable</button>{" "}
+              <button type="button" className="ghost" disabled={busy} onClick={() => setConfirming(false)}>Keep</button>
+            </span>
+          ) : (
+            <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy} onClick={() => setConfirming(true)}>Disable</button>
+          ))}
         </td>
       </tr>
       {expanded && (

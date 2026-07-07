@@ -175,7 +175,7 @@ class AutofillUnlockActivity : ComponentActivity() {
         }
 
     private suspend fun unlockLocked(store: SessionStore, session: Session, password: String): VaultSession.Unlocked {
-        val api = AndvariApi(store.baseUrl, HttpClient(OkHttp), session.tokens()) { store.updateTokens(it) }
+        val api = AndvariApi(store.baseUrl, HttpClient(OkHttp), session.tokens(), { store.updateTokens(it) }) // platform "android"
         val keys = try {
             api.accountKeys().also { if (store.cacheAllowed) store.saveAccountKeys(it) else store.clearAccountKeys() }
         } catch (e: IOException) {

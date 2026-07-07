@@ -165,14 +165,10 @@ class SyncEngine(
         }
     }
 
-    /** UUIDv4-shaped id derived from sha256("conflict|itemId|rev") — stable across retries. */
-    private fun deterministicCopyId(itemId: String, rev: Long): String {
-        val h = account.cryptoProvider().sha256("conflict|$itemId|$rev".encodeToByteArray()).copyOf(16)
-        h[6] = ((h[6].toInt() and 0x0F) or 0x40).toByte()
-        h[8] = ((h[8].toInt() and 0x3F) or 0x80).toByte()
-        val hex = Bytes.toHexLower(h)
-        return "${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}"
-    }
+    /** UUIDv4-shaped id derived from sha256("conflict|itemId|rev") — stable across retries.
+     *  Delegates to the vector-pinned shared derivation (spec/test-vectors/conflictcopy.json). */
+    private fun deterministicCopyId(itemId: String, rev: Long): String =
+        ConflictCopy.id(account.cryptoProvider(), itemId, rev)
 
     fun putMutation(itemId: String, vaultId: String, doc: ItemDoc, baseItemRev: Long): Mutation =
         Mutation(

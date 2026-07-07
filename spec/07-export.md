@@ -109,7 +109,10 @@ exportKey = HKDF-SHA-256(ikm = MKx, salt = empty, info = "andvari/v1/export", L 
 Same shape as spec 01 §2's auth/wrap split; `andvari/v1/export` collides with no
 existing info string. The passphrase is taken **as typed** (no Unicode
 normalization, spec 01 §1; warn on non-ASCII). It is user-chosen with a strength
-floor (`estimateStrength ≥ 3`, both impls' shared estimator) and a mandatory confirm
+floor (`estimateStrength ≥ 3`, both impls' shared estimator: `bits = length × {≤1
+class:2.0, 2:3.5, 3:5.0, 4:6.0}` over lower/upper/digit/other classes, scored 0..4 at
+40/60/80/110-bit thresholds, length in UTF-16 units; vector-pinned in
+`spec/test-vectors/strength.json`) and a mandatory confirm
 field. UI guidance (not enforceable — the client retains neither the master password
 nor MK after unlock): *"Tip: your master password is a fine choice — the backup is
 then exactly as protected as your vault (spec 05 T8). A different passphrase belongs

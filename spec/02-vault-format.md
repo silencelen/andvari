@@ -150,20 +150,26 @@ spec violation.
 
 | Surface | Fields |
 |---|---|
-| users | userId, email, displayName, kdfSalt, kdfParams, verifier(argon2id str), identityPub, isAdmin, status, createdAt, server-TOTP secret (second factor for break-glass logins — a server-side authenticator secret by design, never vault data; spec 03 §2) |
-| devices | deviceId, userId, platform, clientVersion, createdAt, lastSeenAt, revokedAt |
-| sessions | hashed tokens, deviceId, expiry |
+| users | userId, email, displayName, kdfSalt, kdfParams, verifier(argon2id str), **wrappedUvk** (UVK ciphertext under the master key — opaque to the server, stored so a fresh device can unlock), identityPub, **encryptedIdentitySeed** (identity-seed ciphertext under the UVK — same story), isAdmin, status, mustChangePassword, createdAt, server-TOTP columns (totpSecret, totpPendingSecret, totpEnrolledAt, totpLastStep — a server-side authenticator secret by design, never vault data; spec 03 §2) |
+| invites | tokenHash, **invitee email in plaintext** (a person who may not have an account yet — accepted: invites are short-lived and admin-created), isAdmin, createdAt, expiresAt, usedAt |
+| devices | deviceId, userId, platform, **name (user-chosen device label, plaintext)**, clientVersion, createdAt, lastSeenAt, revokedAt |
+| sessions | sessionId, userId, deviceId, hashed access+refresh tokens, access/refresh expiries, refreshConsumedAt, createdAt, revokedAt |
 | vaults | vaultId, type, rev, createdAt (names/icons are ciphertext) |
-| grants | vaultId, userId, role, wrapped/sealed VK ciphertext |
+| grants | vaultId, userId, role, wrapped/sealed VK ciphertext, rev, revokedAt (revoked rows are retained — the server sees WHEN a member lost access) |
 | items | the Item row of §1 — ids, rev, server timestamps, flags, formatVersion, attachmentIds, ciphertext blob, ciphertext byte size |
-| item_versions | itemId, rev, blob (bounded history, §7) |
+| item_versions | itemId, rev, blob, formatVersion, archivedAt (bounded to the newest 10 per item, §7) |
+| changes | rev, kind, entityId, vaultId, at — the global sync feed (pure metadata; reveals per-vault write timing/volume) |
+| mutations | (deviceId, mutationId) → resultJson, createdAt — idempotency replay cache; resultJson holds per-mutation status/rev, no vault content |
 | attachments | attachmentId, itemId, vaultId, ciphertext size, sha256(ciphertext), header, createdAt (filenames + file keys are inside item ciphertext) |
 | escrow | userId, sealed blob, recoveryKeyFingerprint, updatedAt |
-| audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, or any decrypted content) |
+| audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, emails of existing users, or any decrypted content) |
 | policies | org policy JSON (min versions, KDF policy, lock timeouts…) |
+| hibp_cache | sha1-prefix → upstream HIBP range body + fetchedAt (public breach data, no user linkage stored) |
+| meta | key/value operational markers (schemaVersion, lastPublicRequestAt…) |
 
 Traffic analysis (who syncs when, item counts, sizes) is visible to the server by
-nature and accepted (spec 05).
+nature and accepted (spec 05). This table describes **schema v3 exactly** — adding any
+table or plaintext column requires updating it in the same change.
 
 ## 6. Attachments
 
@@ -179,6 +185,16 @@ nature and accepted (spec 05).
   from policy (v1 defaults: 25 MiB/attachment, 100 MiB/item, 1 GiB/user).
 
 ## 7. Tombstones, versions, conflicts
+
+> **Status note (v5):** two kinds of pruning must not be confused. **item_versions IS
+> capped live** — every overwrite keeps only the newest 10 versions per item and
+> hard-deletes the rest (`Repo.archiveVersion`), so an 11th-oldest version is already
+> unrecoverable. What is **dormant** is the *tombstone/oldestRetainedRev* GC and its
+> 410-resync trigger: nothing advances `oldestRetainedRev`, so 410 cannot fire in
+> production and deleted-item tombstones are retained indefinitely. The shared-vault
+> lifecycle design (docs/design/2026-07-07-shared-vault-lifecycle-skipti.md) relies on
+> that tombstone retention (rows carrying sync meaning are never hard-deleted) and records
+> the preconditions any future tombstone-GC activation must satisfy.
 
 - **Delete** = tombstone (`deleted=true`, blob dropped, attachments GC'd). Tombstones
   are GC'd after **90 days**; a client whose cursor predates the oldest retained

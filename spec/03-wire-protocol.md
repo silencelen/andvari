@@ -127,16 +127,20 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
 - `denied` — role violation (reader pushing to a shared vault) or no grant; nothing
   written; audited.
 
-Batch limit 200 mutations; server applies the batch in order, atomically per
-mutation (not per batch). Clients maintain a durable outbound queue and MUST retry
-with the SAME mutationIds after connectivity loss.
+Batch limit 200 mutations; server applies the batch in order inside ONE transaction:
+a thrown validation failure (e.g. bad attachment refs) rolls back the WHOLE batch,
+while per-mutation `denied` results are recorded without aborting the rest. Clients
+maintain a durable outbound queue and MUST retry with the SAME mutationIds after
+connectivity loss.
 
 **Conflict-copy materialization (client duty):** on seeing `conflict=true` with a
 decryptable displaced version, create a new item `{name: "<name> (conflict
 YYYY-MM-DD)"}` carrying the losing content, then push it plus a flag-clearing rewrite of
 the winner (both normal `put`s). The copy's itemId is derived **deterministically** from
-`(itemId, conflictedRev)` so that if several members materialize the same conflict
-concurrently they converge on one copy id (the server's idempotent existing-item path
+`(itemId, conflictedRev)` — specifically a UUIDv4-shaped id from the first 16 bytes of
+`sha256("conflict|" + itemId + "|" + conflictedRev)` with the version/variant nibbles
+forced (vector-pinned, `spec/test-vectors/conflictcopy.json`) — so that if several members
+materialize the same conflict concurrently they converge on one copy id (the server's idempotent existing-item path
 absorbs the duplicates) rather than each creating their own. A **`reader`-role** member
 MUST NOT materialize (its push would be `denied`); the flag waits for a writer/owner.
 
@@ -177,8 +181,12 @@ proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — veri
   session; response = the login response). The enrolling client MUST have verified
   the recovery fingerprint (spec 04) before this call; the server rejects
   registration whose asserted escrow fingerprint ≠ pinned.
-- `POST /admin/users/{id}/disable`, `POST /admin/devices/{id}/revoke`,
-  `GET /admin/users/{id}/devices` — per-user device list (feeds the revocation UI).
+- `POST /admin/users/{id}/disable` — disables the account + revokes its sessions.
+  Refuses with `400 last_admin` if the target is the only ACTIVE admin (an
+  instance-wide lockout, recoverable only by DB surgery) and `400 no_such_user` for an
+  unknown target; both refusals are audited (`user_disable_denied`). `POST
+  /admin/devices/{id}/revoke`, `GET /admin/users/{id}/devices` — per-user device list
+  (feeds the revocation UI).
 - `POST /admin/recovery { userId, tempAuthKey, tempWrappedUvk, tempKdfSalt,
   tempKdfParams }` — uploads recovery-cli output (spec 04 §4); sets
   `mustChangePassword`; revokes all the user's sessions.
@@ -199,9 +207,12 @@ proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — veri
 - `GET /downloads` — web UI + manifest `{ windows: { version, url, sha256 } }`.
 - `GET /healthz` (200 when DB writable) — Kuma target. `GET /metrics` — Prometheus,
   bound to localhost for Alloy only.
-- Rate limits (per IP + per account): prelogin/login 10/min then backoff;
-  public-origin (CF-Connecting-IP present + configured public hostname): 5/min,
-  TOTP required, register/refresh disabled unless policy explicitly enables.
+- Rate limits: prelogin/login are **per IP** 10/min (fixed window; per-account keys
+  exist only on vault-create and user-lookup today — per-account login keys are a
+  deferred hardening item);
+  on the public origin (CF-Connecting-IP present + configured public hostname)
+  **login** drops to 5/min (prelogin stays 10/min), TOTP is required, and
+  register/refresh are disabled unless policy explicitly enables them.
 - Client IP (rate keys + audit rows): derived from `CF-Connecting-IP`, else the
   **rightmost** `X-Forwarded-For` entry, **only when the direct TCP peer is
   loopback** (both front-ends terminate there). Any other peer uses the socket
@@ -247,7 +258,7 @@ sit-at-home operation). Every call is audited (ids/roles only, never names).
 - `POST /api/v1/users/lookup { email }` → `{ userId, displayName, identityPub }` or
   `404 no_such_user`. Deliberately confirms account existence **to authenticated,
   invited household members** so an owner can find whom to share with; rate-limited
-  20/min/account, audited `user_lookup` (target email in meta). The unauthenticated
+  20/min/account, audited `user_lookup` (meta = target **userId**, never the email — 0.4.0 PII fix). The unauthenticated
   anti-enumeration guarantees of §2 are unchanged — this is an authed-only path.
 - `GET /api/v1/vaults/{vaultId}/members` → `[{ userId, email, displayName, role,
   identityPub, addedAt }]` (active grants only). Any active member may call (transparency:

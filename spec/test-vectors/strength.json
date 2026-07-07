@@ -1,0 +1,99 @@
+{
+    "cases": [
+        {
+            "password": "",
+            "utf16Length": 0,
+            "score": 0
+        },
+        {
+            "password": "a",
+            "utf16Length": 1,
+            "score": 0
+        },
+        {
+            "password": "password",
+            "utf16Length": 8,
+            "score": 0
+        },
+        {
+            "password": "aaaaaaaaaaaaaaaaaaa",
+            "utf16Length": 19,
+            "score": 0
+        },
+        {
+            "password": "aaaaaaaaaaaaaaaaaaaa",
+            "utf16Length": 20,
+            "score": 1
+        },
+        {
+            "password": "passwordpasswordpassword",
+            "utf16Length": 24,
+            "score": 1
+        },
+        {
+            "password": "Password1",
+            "utf16Length": 9,
+            "score": 1
+        },
+        {
+            "password": "Password12",
+            "utf16Length": 10,
+            "score": 1
+        },
+        {
+            "password": "Passw0rd!",
+            "utf16Length": 9,
+            "score": 1
+        },
+        {
+            "password": "correct horse battery staple",
+            "utf16Length": 28,
+            "score": 3
+        },
+        {
+            "password": "Tr0ub4dour&3",
+            "utf16Length": 12,
+            "score": 2
+        },
+        {
+            "password": "aA1!aA1!aA1!aA1!aA1!",
+            "utf16Length": 20,
+            "score": 4
+        },
+        {
+            "password": "0123456789012345678",
+            "utf16Length": 19,
+            "score": 0
+        },
+        {
+            "password": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm",
+            "utf16Length": 39,
+            "score": 4
+        },
+        {
+            "password": "pässwörd pässwörd",
+            "utf16Length": 17,
+            "score": 1
+        },
+        {
+            "password": "😀😀😀😀😀😀😀😀",
+            "utf16Length": 16,
+            "score": 0
+        },
+        {
+            "password": "  spaces  count  too  ",
+            "utf16Length": 22,
+            "score": 2
+        },
+        {
+            "password": "xX9# ",
+            "utf16Length": 5,
+            "score": 0
+        },
+        {
+            "password": "the quick brown fox jumps over the lazy dog 42 TIMES!",
+            "utf16Length": 53,
+            "score": 4
+        }
+    ]
+}

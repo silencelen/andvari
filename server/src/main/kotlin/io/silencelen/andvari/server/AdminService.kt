@@ -44,10 +44,38 @@ class AdminService(private val repo: Repo) {
         InviteResponse(token, email.lowercase(), expiresAt) to token
     }
 
-    fun disableUser(userId: String, byUserId: String) = repo.db.tx { c ->
-        c.exec("UPDATE users SET status='disabled' WHERE userId=?", userId)
-        c.exec("UPDATE sessions SET revokedAt=? WHERE userId=? AND revokedAt IS NULL", now(), userId)
-        repo.auditOn(c, "user_disable", byUserId, null, null, userId)
+    fun disableUser(userId: String, byUserId: String) {
+        // The whole decision + audit + mutation happens in ONE tx so (a) two concurrent
+        // disables can't both slip past the last-admin count, and (b) EVERY call is
+        // audited — success and refusal alike (spec 03 §7: "every call audited"; the
+        // refusals are exactly the anomalous attempts the audit log exists to catch).
+        // A refusal writes its audit row inside the tx (which commits) and returns a
+        // reason; the BadRequest is thrown OUTSIDE, so it can't roll the audit row back.
+        val refusal: String? = repo.db.tx { c ->
+            val target = c.queryOne("SELECT isAdmin, status FROM users WHERE userId=?", userId) { rs ->
+                (rs.getInt("isAdmin") != 0) to rs.getString("status")
+            }
+            if (target == null) {
+                repo.auditOn(c, "user_disable_denied", byUserId, null, null, "$userId/no_such_user")
+                return@tx "no_such_user"
+            }
+            // Lockout guard: refuse to disable the LAST active admin — with no active
+            // admin left, nobody can reach the Admin console or re-enable anyone, the
+            // disabled admin's own login fails with a misleading "wrong email or
+            // password", and the only way back is sqlite surgery on the container.
+            if (target.first && target.second == "active") {
+                val activeAdmins = c.queryOne("SELECT COUNT(*) FROM users WHERE isAdmin=1 AND status='active'") { it.getInt(1) } ?: 0
+                if (activeAdmins <= 1) {
+                    repo.auditOn(c, "user_disable_denied", byUserId, null, null, "$userId/last_admin")
+                    return@tx "last_admin"
+                }
+            }
+            c.exec("UPDATE users SET status='disabled' WHERE userId=?", userId)
+            c.exec("UPDATE sessions SET revokedAt=? WHERE userId=? AND revokedAt IS NULL", now(), userId)
+            repo.auditOn(c, "user_disable", byUserId, null, null, userId)
+            null
+        }
+        if (refusal != null) throw BadRequest(refusal)
     }
 
     fun revokeDevice(deviceId: String, byUserId: String) = repo.db.tx { c ->

@@ -42,7 +42,8 @@ covered by quick-unlock (§8).
 
 - Client → server at login: `authKey` (base64url) over TLS. The server never sees the
   master password or wrapKey; authKey cannot decrypt anything.
-- Server stores `verifier = crypto_pwhash_str(authKey, ops = 2, memBytes = 16777216)`
+- Server stores `verifier = crypto_pwhash_str(authKey, ops = 2, memBytes = 67108864)`
+  (libsodium `OPSLIMIT_INTERACTIVE`/`MEMLIMIT_INTERACTIVE` = 2 ops / 64 MiB)
   (libsodium's argon2id string format) and verifies with
   `crypto_pwhash_str_verify`. A leaked server DB therefore does not allow login
   replay. Server-side only — not vector-pinned across implementations.
@@ -117,6 +118,9 @@ covered by quick-unlock (§8).
 - **KDF upgrade**: if prelogin's kdfParams are weaker than current policy, the client
   (after a successful unlock) re-derives with policy params and performs the same
   atomic update with the password unchanged. `kdfParams.v` gates format changes.
+  **Status (v5): implemented in no client yet** — the server enforces the KDF floor at
+  register/password-change only, so raising the org default does not migrate existing
+  accounts until this ships. Deferred; tracked in the v5 findings tail (F61).
 
 ## 8. Quick unlock (platform-local, never server-visible)
 
