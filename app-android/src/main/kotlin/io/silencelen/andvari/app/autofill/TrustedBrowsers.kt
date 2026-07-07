@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Base64
+import io.silencelen.andvari.core.client.autofill.BrowserCertPins
 import java.security.MessageDigest
 
 /**
@@ -22,48 +23,45 @@ import java.security.MessageDigest
  *   adb shell dumpsys package <pkg> | grep -A1 'signatures'.
  */
 object TrustedBrowsers {
-    // Well-known release-signing certs. Chrome (Google-signed) + Firefox are high-confidence;
-    // the rest are best-effort published values — fail-closed if any is stale.
-    private val GOOGLE = setOf("8P1sW0EPJcslw7UzRsiXL64w+O50Ed+RBICtay1g24=")
-    private val MOZILLA = setOf("p4tipRZbRJSy/q2edqKA0i2Tf+5iUa7OWZRGsuoxmwA=")
-    private val SAMSUNG = setOf("ABi2fbt8vkzj7SJ8aD5jDS6NAd5w6Rj0FfJqLnBiHmM=")
+    // The pin table (package → accepted cert digests) lives in :core so its format is
+    // gate-tested (BrowserCertPinsTest); the manifest <queries> block MUST list the same
+    // package ids or getPackageInfo throws NameNotFound on API 30+ and the check fails closed.
+    private val PINS: Map<String, Set<String>> get() = BrowserCertPins.TABLE
 
-    private val PINS: Map<String, Set<String>> = buildMap {
-        // Chrome + channels (Google-signed)
-        for (p in listOf("com.android.chrome", "com.chrome.beta", "com.chrome.dev", "com.chrome.canary", "com.google.android.apps.chrome")) put(p, GOOGLE)
-        // Firefox + channels (Mozilla-signed)
-        for (p in listOf("org.mozilla.firefox", "org.mozilla.firefox_beta", "org.mozilla.fenix", "org.mozilla.focus", "org.mozilla.klar")) put(p, MOZILLA)
-        // Samsung Internet
-        for (p in listOf("com.sec.android.app.sbrowser", "com.sec.android.app.sbrowser.beta")) put(p, SAMSUNG)
-        // Others the household may add a verified digest for (fail-closed until then). Their
-        // package ids are recorded so a future pin only needs the digest, not a code change.
-        for (p in listOf(
-            "com.microsoft.emmx", "com.brave.browser", "com.opera.browser", "com.opera.gx",
-            "com.vivaldi.browser", "com.duckduckgo.mobile.android", "com.kiwibrowser.browser",
-            "org.torproject.torbrowser",
-        )) putIfAbsent(p, emptySet())
+    /** Observed standard-base64 SHA-256 of [pkg]'s installed signing cert, or null if the
+     *  package isn't installed / isn't visible. Powers the Autofill-status diagnostic's
+     *  cert-mismatch surface: it prints exactly what to add to [BrowserCertPins] for the
+     *  owner's real browser. Never trusts this value — only [isTrusted] gates fills. */
+    fun observedCertDigest(context: Context, pkg: String): String? {
+        val sig = signingCerts(context, pkg) ?: return null
+        val md = MessageDigest.getInstance("SHA-256")
+        return sig.firstOrNull()?.let { Base64.encodeToString(md.digest(it.toByteArray()), Base64.NO_WRAP) }
     }
 
     /** True iff [pkg] is a pinned browser AND its installed signing cert matches a pinned digest. */
     fun isTrusted(context: Context, pkg: String): Boolean {
         val pins = PINS[pkg] ?: return false
         if (pins.isEmpty()) return false // known browser, no verified digest yet → fail closed
-        val signatures = try {
+        val signatures = signingCerts(context, pkg) ?: return false
+        val md = MessageDigest.getInstance("SHA-256")
+        return signatures.any { Base64.encodeToString(md.digest(it.toByteArray()), Base64.NO_WRAP) in pins }
+    }
+
+    private fun signingCerts(context: Context, pkg: String): Array<android.content.pm.Signature>? {
+        return try {
             val pm = context.packageManager
             if (Build.VERSION.SDK_INT >= 28) {
                 val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
-                val si = info.signingInfo ?: return false
+                val si = info.signingInfo ?: return null
                 if (si.hasMultipleSigners()) si.apkContentsSigners else si.signingCertificateHistory
             } else {
                 @Suppress("DEPRECATION")
                 pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES).signatures
             }
         } catch (e: PackageManager.NameNotFoundException) {
-            return false // not installed
+            null // not installed, or not visible (missing <queries> entry) on API 30+
         } catch (t: Throwable) {
-            return false
-        } ?: return false
-        val md = MessageDigest.getInstance("SHA-256")
-        return signatures.any { Base64.encodeToString(md.digest(it.toByteArray()), Base64.NO_WRAP) in pins }
+            null
+        }
     }
 }

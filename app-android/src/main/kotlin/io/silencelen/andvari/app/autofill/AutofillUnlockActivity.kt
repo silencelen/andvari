@@ -73,13 +73,19 @@ class AutofillUnlockActivity : ComponentActivity() {
     private var busy by mutableStateOf(false)
     private var errorText by mutableStateOf<String?>(null)
 
+    /** Per-launch diagnostic trace (see AutofillDebugLog) — terminal events only, no values. */
+    private val trace = AutofillDebugLog.FillTrace(origin = "unlock")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Default result is CANCELED (back / dismiss returns cleanly with no fill).
         setResult(RESULT_CANCELED)
 
         val structure = intent.assistStructure()
-        if (structure == null) { finish(); return }
+        if (structure == null) {
+            trace.finish(applicationContext, AutofillDebugLog.FillReason.NO_STRUCTURE)
+            finish(); return
+        }
         val inlineRequest = intent.inlineRequest()
 
         // Cold-process safety: arm the auto-lock gate with the persisted policy window
@@ -93,15 +99,18 @@ class AutofillUnlockActivity : ComponentActivity() {
         VaultSession.getIfFresh()?.let { unlocked ->
             // Any throwable building the response must degrade to CANCELED, never crash the
             // host app's fill flow (an uncaught throw in this callback path kills the process).
-            finishWithResponse(runCatching {
-                DatasetBuilder.responseForUnlocked(this, structure, unlocked.engine.items(), inlineRequest)
-            }.getOrNull())
+            finishAfterUnlock(runCatching {
+                DatasetBuilder.responseForUnlocked(this, structure, unlocked.engine.items(), inlineRequest, trace)
+            }.onFailure { recordException(it) }.getOrNull())
             return
         }
 
         val store = SessionStore(applicationContext)
         val session = store.load()
-        if (session == null || session.accessToken.isEmpty()) { finish(); return } // signed out
+        if (session == null || session.accessToken.isEmpty()) { // signed out
+            trace.finish(applicationContext, AutofillDebugLog.FillReason.SIGNED_OUT)
+            finish(); return
+        }
 
         setContent {
             AndvariTheme {
@@ -136,11 +145,11 @@ class AutofillUnlockActivity : ComponentActivity() {
             result.onSuccess { unlocked ->
                 // Rebuild datasets exactly as the service would, from the durable cache.
                 // Any throwable here degrades to CANCELED rather than crashing the host app.
-                finishWithResponse(runCatching {
+                finishAfterUnlock(runCatching {
                     DatasetBuilder.responseForUnlocked(
-                        this@AutofillUnlockActivity, structure, unlocked.engine.items(), inlineRequest,
+                        this@AutofillUnlockActivity, structure, unlocked.engine.items(), inlineRequest, trace,
                     )
-                }.getOrNull())
+                }.onFailure { recordException(it) }.getOrNull())
             }.onFailure { t ->
                 busy = false
                 errorText = friendly(t)
@@ -195,6 +204,37 @@ class AutofillUnlockActivity : ComponentActivity() {
         VaultSession.bind(api, acct, engine, cache) // now THE token-holder; the main app reuses it
         runCatching { engine.sync() } // best-effort; hydrate already gave cached items
         return VaultSession.get() ?: VaultSession.Unlocked(api, acct, engine, cache)
+    }
+
+    /** Terminal EXCEPTION event for a throw while (re)building datasets; trace records
+     *  once, so a later finishFromBuild becomes a no-op instead of mislabeling it.
+     *  CLASS name only — exception messages echo their input (never-log rule). */
+    private fun recordException(t: Throwable) {
+        trace.finish(applicationContext, AutofillDebugLog.FillReason.EXCEPTION, AutofillDebugLog.exceptionDetail(t))
+    }
+
+    /**
+     * Post-unlock finish. The FillResponse is delivered IMMEDIATELY — this activity is
+     * noHistory, so ANY deferral window (screen-off, home, a call) can cancel the
+     * coroutine and silently drop the response, incl. the "Open andvari" fallback row;
+     * correctness of delivery beats an acknowledgement card. The no-match acknowledgement
+     * is therefore a Toast (fires-and-forgets past finish(), gates nothing) and is shown
+     * ONLY for a KNOWN no-match (counts computed, zero credential datasets, no exception
+     * recorded) — an internal error must never masquerade as "no login matches".
+     */
+    private fun finishAfterUnlock(response: android.service.autofill.FillResponse?) {
+        val knownNoMatch = trace.datasetCount == 0 && trace.loginItemCount >= 0
+        trace.finishFromBuild(applicationContext)
+        if (knownNoMatch) {
+            runCatching {
+                android.widget.Toast.makeText(
+                    applicationContext,
+                    "Unlocked — no saved login matches this app or site",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+        finishWithResponse(response)
     }
 
     private fun finishWithResponse(response: android.service.autofill.FillResponse?) {

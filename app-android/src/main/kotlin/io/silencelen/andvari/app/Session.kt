@@ -62,6 +62,16 @@ class SessionStore(context: Context) {
         get() = prefs.getLong("lastSyncAt", 0L)
         set(v) = prefs.edit().putLong("lastSyncAt", v).apply()
 
+    /**
+     * Absolute expiry (unix ms; 0 = off) of the "Debug autofill (24h)" toggle on the
+     * Autofill-status screen. While `> now`, AutofillDebugLog appends fill events to its
+     * ring buffer; past it the toggle self-disarms — recording is checked against the
+     * clock on every event, so no alarm/job is needed. Value-free diagnostics only.
+     */
+    var autofillDebugUntil: Long
+        get() = prefs.getLong("autofillDebugUntil", 0L)
+        set(v) = prefs.edit().putLong("autofillDebugUntil", v).apply()
+
     fun load(): Session? {
         val userId = prefs.getString("userId", null) ?: return null
         return Session(

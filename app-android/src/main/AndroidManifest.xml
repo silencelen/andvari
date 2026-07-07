@@ -5,6 +5,38 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Package visibility (API 30+): without this, PackageManager.getPackageInfo throws
+         NameNotFound for every browser, so the autofill signing-cert check (TrustedBrowsers)
+         always fails closed and NOTHING ever fills. One <package> per key in
+         core BrowserCertPins.TABLE — keep the two lists in lockstep. A fixed allowlist, so
+         no QUERY_ALL_PACKAGES (that carries Play-policy weight and isn't needed here). -->
+    <queries>
+        <!-- Chrome + channels -->
+        <package android:name="com.android.chrome" />
+        <package android:name="com.chrome.beta" />
+        <package android:name="com.chrome.dev" />
+        <package android:name="com.chrome.canary" />
+        <package android:name="com.google.android.apps.chrome" />
+        <!-- Firefox + channels -->
+        <package android:name="org.mozilla.firefox" />
+        <package android:name="org.mozilla.firefox_beta" />
+        <package android:name="org.mozilla.fenix" />
+        <package android:name="org.mozilla.focus" />
+        <package android:name="org.mozilla.klar" />
+        <!-- Samsung Internet -->
+        <package android:name="com.sec.android.app.sbrowser" />
+        <package android:name="com.sec.android.app.sbrowser.beta" />
+        <!-- Others (fail-closed until a digest is captured on-device) -->
+        <package android:name="com.microsoft.emmx" />
+        <package android:name="com.brave.browser" />
+        <package android:name="com.opera.browser" />
+        <package android:name="com.opera.gx" />
+        <package android:name="com.vivaldi.browser" />
+        <package android:name="com.duckduckgo.mobile.android" />
+        <package android:name="com.kiwibrowser.browser" />
+        <package android:name="org.torproject.torbrowser" />
+    </queries>
+
     <application
         android:name="io.silencelen.andvari.app.AndvariApplication"
         android:allowBackup="false"

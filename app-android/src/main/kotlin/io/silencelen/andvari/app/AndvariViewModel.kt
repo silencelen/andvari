@@ -45,6 +45,7 @@ sealed interface Screen {
     data class Unlock(val email: String) : Screen
     data object Vault : Screen
     data object Settings : Screen
+    data object AutofillStatus : Screen
 }
 
 data class UiState(
@@ -315,7 +316,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         val s = _ui.value
         if (VaultSession.get() == null) {
             // Locked underneath us (autofill gate) — reflect it in the UI.
-            if (s.screen is Screen.Vault || s.screen is Screen.Settings) lock()
+            if (s.screen is Screen.Vault || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus) lock()
             return
         }
         if (s.busy || s.importBusy) return
@@ -805,6 +806,16 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
 
     fun closeSettings() {
         _ui.value = _ui.value.copy(screen = Screen.Vault, totpSetup = null, totpMessage = null)
+    }
+
+    // ---- autofill status (diagnostic surface; reached from Settings) ----
+
+    fun openAutofillStatus() {
+        _ui.value = _ui.value.copy(screen = Screen.AutofillStatus)
+    }
+
+    fun closeAutofillStatus() {
+        _ui.value = _ui.value.copy(screen = Screen.Settings)
     }
 
     fun totpBegin() = totpOp {

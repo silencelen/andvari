@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Autofill service metadata. settingsActivity opens the main app (no dedicated autofill
-     settings UI in v1). Fully-qualified name: source package io.silencelen.andvari.app
-     differs from the manifest namespace com.silencelen.andvari. -->
+<!-- Autofill service metadata. settingsActivity opens the main app (the Autofill status
+     screen is reachable from Settings). Fully-qualified name: source package
+     io.silencelen.andvari.app differs from the manifest namespace com.silencelen.andvari.
+     supportsInlineSuggestions makes Android build an InlineSuggestionsRequest (keyboard-strip
+     chips) — without it the whole inline path in DatasetBuilder is dead code and the Fold
+     only ever gets the dropdown. -->
 <autofill-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsInlineSuggestions="true"
     android:settingsActivity="io.silencelen.andvari.app.MainActivity" />

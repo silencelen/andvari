@@ -67,6 +67,10 @@ object VaultSession {
     fun idleExpired(): Boolean =
         state != null && autoLockMs > 0 && SystemClock.elapsedRealtime() - lastInteractionElapsedMs >= autoLockMs
 
+    /** Seconds since the last recorded interaction — diagnostic display only
+     *  (Autofill-status screen); [idleExpired]/[getIfFresh] remain the enforcement. */
+    fun idleSeconds(): Long = (SystemClock.elapsedRealtime() - lastInteractionElapsedMs) / 1000
+
     // ---- in-flight operation deferral ----
     //
     // Invariant: an idle-expiry-driven lock() must NEVER close the engine/api while a
