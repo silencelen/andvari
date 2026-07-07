@@ -30,54 +30,128 @@ class SyncEngine(
         pull()
     }
 
+    /**
+     * Rebuild the account + decrypted working set from the durable cache — called once
+     * after Account.unlock, before the first sync(). Grants/vaults are pull DELTAS
+     * (spec 03 §4): once the cursor moved past them they never re-send, so cold start
+     * MUST reconstruct keys purely from persisted rows. Undecryptable envelopes are
+     * retried here on every launch (e.g. after an upgrade or a later-opened grant).
+     */
+    fun hydrate() {
+        for (g in cache.grants()) {
+            if (g.role.isNotEmpty() && !account.hasVault(g.vaultId)) runCatching { account.addPersonalGrant(g) }
+        }
+        for (v in cache.vaults()) {
+            if (v.type == "personal" && account.hasVault(v.vaultId)) account.setPersonalVault(v.vaultId)
+        }
+        for (w in cache.envelopes()) {
+            if (w.deleted || !account.hasVault(w.vaultId)) continue
+            runCatching {
+                cache.upsertItem(w, VaultItem(w.itemId, w.vaultId, w.rev, w.updatedAt, account.decryptItem(w)))
+            }
+        }
+    }
+
+    /** Close the underlying cache (must precede deleting its DB file — Windows file locks). */
+    fun close() = cache.close()
+
     private suspend fun pull() {
+        val since = cache.cursor()
+        var resyncing = false
         val resp = try {
-            api.sync(cache.cursor())
+            api.sync(since)
         } catch (e: ApiException) {
             if (e.status == 410) {
-                cache.clear()
+                // Fetch the replacement snapshot FIRST; the durable cache is wiped only
+                // once the full response is in hand (a failed fetch must not leave an
+                // empty cache behind — that would regress offline durability).
+                resyncing = true
                 api.sync(0)
             } else throw e
         }
 
-        for (grant in resp.grants) {
-            if (grant.role.isNotEmpty() && !account.hasVault(grant.vaultId)) {
-                runCatching { account.addPersonalGrant(grant) }
-            }
+        // Rollback guards BEFORE anything is applied (spec 05 T1: warn, never delete or
+        // overwrite local newer state; spec 03 §4). A non-full response below our cursor,
+        // or an unsolicited full snapshot, is a server rollback / replay signal.
+        if (!resp.full && resp.rev < since) {
+            throw ApiException(409, "rev_regression", "server rev went backwards — possible rollback; local state kept")
         }
-        for (vault in resp.vaults) {
-            if (vault.type == "personal" && account.hasVault(vault.vaultId)) account.setPersonalVault(vault.vaultId)
+        if (resp.full && since > 0 && !resyncing) {
+            throw ApiException(409, "rev_regression", "unsolicited full snapshot — possible rollback; local state kept")
         }
 
-        val conflicts = mutableListOf<WireItem>()
-        for (item in resp.items) {
-            if (!account.hasVault(item.vaultId)) continue
-            if (item.deleted) {
-                cache.deleteItem(item.itemId)
-                continue
+        cache.atomically {
+            if (resyncing) cache.clear() // resets cursor + rows; PRESERVES the queue (spec 03 §4)
+            for (grant in resp.grants) {
+                // Persist UNCONDITIONALLY (ciphertext rows; deltas never re-send) — the
+                // in-memory key-open below may fail/skip, hydrate() retries from disk.
+                cache.upsertGrant(grant)
+                if (grant.role.isNotEmpty() && !account.hasVault(grant.vaultId)) {
+                    runCatching { account.addPersonalGrant(grant) }
+                }
             }
-            runCatching {
-                val doc = account.decryptItem(item)
-                cache.upsertItem(VaultItem(item.itemId, item.vaultId, item.rev, item.updatedAt, doc))
-                if (item.conflict) conflicts += item
+            for (vault in resp.vaults) {
+                cache.upsertVault(vault)
+                if (vault.type == "personal" && account.hasVault(vault.vaultId)) account.setPersonalVault(vault.vaultId)
             }
+            for (vaultId in resp.removedGrants) {
+                cache.dropVault(vaultId)
+                cache.dropPending(vaultId) // a revoked member's unsynced edits are discarded (spec 03 §4)
+                account.removeVault(vaultId)
+            }
+            for (item in resp.items) {
+                if (item.deleted) {
+                    cache.deleteItem(item.itemId)
+                    continue
+                }
+                // Envelope persists even when the VK is missing or decrypt fails — the
+                // rev has passed the cursor and will never re-send; hydrate() retries.
+                val decrypted = if (account.hasVault(item.vaultId)) {
+                    runCatching {
+                        VaultItem(item.itemId, item.vaultId, item.rev, item.updatedAt, account.decryptItem(item))
+                    }.getOrNull()
+                } else null
+                cache.upsertItem(item, decrypted)
+            }
+            cache.setCursor(resp.rev)
         }
-        cache.setCursor(resp.rev)
 
-        for (item in conflicts) materializeConflict(item)
+        materializeOutstandingConflicts()
     }
 
-    private suspend fun materializeConflict(item: WireItem) {
-        val winner = cache.getItem(item.itemId) ?: return
-        val copyId = account.newItemId()
-        val stamp = isoDate(item.updatedAt)
-        val copyDoc = winner.doc.copy(name = "${winner.doc.name} (conflict $stamp)")
-        push(
-            listOf(
-                putMutation(copyId, item.vaultId, copyDoc, 0),
-                putMutation(item.itemId, item.vaultId, winner.doc, winner.rev), // clears the flag
-            ),
-        )
+    /**
+     * Conflict copies derive from PERSISTED state, not a transient in-loop list: a crash
+     * between cursor-advance and materialization must not bury a displaced version
+     * forever (spec 03 §5). The copy's itemId is deterministic over (itemId, rev) so
+     * concurrent/restarted materializers converge on one copy; an already-present copy
+     * means someone (possibly us, pre-crash) materialized — skip, the flag-clear is
+     * theirs to land.
+     */
+    private suspend fun materializeOutstandingConflicts() {
+        val envelopes = cache.envelopes()
+        val known = envelopes.mapTo(HashSet()) { it.itemId }
+        for (item in envelopes) {
+            if (!item.conflict || item.deleted) continue
+            val winner = cache.getItem(item.itemId) ?: continue // undecryptable → wait
+            val copyId = deterministicCopyId(item.itemId, item.rev)
+            if (copyId in known || cache.getItem(copyId) != null) continue
+            val copyDoc = winner.doc.copy(name = "${winner.doc.name} (conflict ${isoDate(item.updatedAt)})")
+            push(
+                listOf(
+                    putMutation(copyId, item.vaultId, copyDoc, 0),
+                    putMutation(item.itemId, item.vaultId, winner.doc, winner.rev), // clears the flag
+                ),
+            )
+        }
+    }
+
+    /** UUIDv4-shaped id derived from sha256("conflict|itemId|rev") — stable across retries. */
+    private fun deterministicCopyId(itemId: String, rev: Long): String {
+        val h = account.cryptoProvider().sha256("conflict|$itemId|$rev".encodeToByteArray()).copyOf(16)
+        h[6] = ((h[6].toInt() and 0x0F) or 0x40).toByte()
+        h[8] = ((h[8].toInt() and 0x3F) or 0x80).toByte()
+        val hex = Bytes.toHexLower(h)
+        return "${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}"
     }
 
     fun putMutation(itemId: String, vaultId: String, doc: ItemDoc, baseItemRev: Long): Mutation =

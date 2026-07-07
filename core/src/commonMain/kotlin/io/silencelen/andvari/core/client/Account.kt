@@ -158,6 +158,11 @@ class Account private constructor(
 
     fun hasVault(vaultId: String): Boolean = vaultKeys.containsKey(vaultId)
 
+    /** Drop a vault's key (removedGrants purge) so later writes fail fast client-side. */
+    fun removeVault(vaultId: String) {
+        vaultKeys.remove(vaultId)
+    }
+
     private fun vk(vaultId: String): ByteArray =
         vaultKeys[vaultId] ?: throw CryptoException("no key for vault $vaultId")
 

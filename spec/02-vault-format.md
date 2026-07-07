@@ -146,3 +146,41 @@ nature and accepted (spec 05).
   `conflict=true`. The next syncing client that can decrypt materializes a visible
   "(conflict copy)" item — new itemId, fresh envelope — then clears the flag with a
   normal push.
+
+## 8. Client offline cache (native clients)
+
+Native clients (Android/desktop) MAY persist, per account, in a local SQLite DB
+(`vault-<userId>.db`), so the working set + sync cursor + outbound queue survive
+process death. **Every persisted field is a subset of the §5 server-visible table —
+the client-at-rest surface is ⊆ the server-at-rest surface by construction:**
+
+- the sync cursor (a rev number);
+- item rows exactly as received on the wire (ids, revs, timestamps, flags,
+  formatVersion, attachmentIds, `blob` AEAD ciphertext);
+- grant rows (vaultId, userId, role, `wrappedVk`/`sealedVk` ciphertext, rev);
+- vault rows (vaultId, type, rev, `metaBlob` ciphertext, createdAt);
+- the outbound mutation queue (mutationId, op, ids, baseItemRev, `ItemUpload`
+  ciphertext);
+- for offline unlock, a copy of the server's `accountKeys` payload (kdfSalt,
+  kdfParams, wrappedUvk, encryptedIdentitySeed, identityPub, escrowFingerprint).
+
+Clients MUST NOT persist: the master password, MK, authKey, UVK, VK, identity seed,
+decrypted `ItemDoc`s, attachment plaintext, or fileKeys outside item ciphertext.
+Decryption happens only in memory after the user supplies the master password; lock
+and relaunch drop all key material.
+
+- The DB file gets no extra encryption in v1 (envelopes are already AEAD; DB-file
+  wrapping is the spec 01 §8 quick-unlock follow-up — Android Keystore / DPAPI+PIN).
+- Clients MUST honor `ClientPolicy.offlineCacheAllowed`: when false, no durable cache
+  is created and any existing cache file for the account is deleted (re-evaluated on
+  every successful policy fetch).
+- The cache is deleted on **sign-out** and on any **definitive server rejection**
+  (device revoked, or an invalid-session 401 that survives a refresh) — the latter
+  also drops the cached `accountKeys`. It is **retained on lock** (spec 05 T3 already
+  accepts ciphertext-at-rest on a stolen locked device).
+- **Offline unlock** accepts the master password that was current at the last online
+  contact; a remote revocation or password change only takes effect at next
+  connectivity (spec 05 T3).
+- Native cache files SHOULD be excluded from OS cloud backup (Android
+  `dataExtractionRules`/`fullBackupContent`) so no cloud copy of the ciphertext DB or
+  token store exists. The **web** client keeps no at-rest cache in v1 (spec 01 §8).

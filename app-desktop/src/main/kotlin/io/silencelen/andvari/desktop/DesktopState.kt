@@ -10,6 +10,7 @@ import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.InMemoryVaultCache
+import io.silencelen.andvari.core.client.sqliteVaultCache
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.SyncEngine
@@ -77,7 +78,12 @@ class DesktopState(private val scope: CoroutineScope) {
     fun start() {
         scope.launch {
             val probe = newApi()
-            runCatching { probe.clientPolicy() }.onSuccess { policy = it }
+            runCatching { probe.clientPolicy() }.onSuccess { p ->
+                policy = p
+                // Policy may forbid the durable cache; purge any existing file the moment
+                // we learn it (spec 02 §8), even before unlock — mirrors the Android client.
+                if (p.offlineCacheAllowed == false) store.load()?.let { deleteCache(it.userId) }
+            }
             probe.close()
             runCatching { checkForUpdate(store.baseUrl) }.onSuccess { updateAvailable = it }
             val session = store.load()
@@ -111,8 +117,9 @@ class DesktopState(private val scope: CoroutineScope) {
             }
         }
         val acct = Account.unlock(s.userId, password, s.accountKeys)
-        bind(a, acct); engine!!.sync()
         store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+        store.saveAccountKeys(s.accountKeys)
+        bind(a, acct); engine!!.sync()
         signInTotpRequired = false
         toVault()
     }
@@ -120,9 +127,21 @@ class DesktopState(private val scope: CoroutineScope) {
     fun unlock(email: String, password: String) = op {
         val session = store.load() ?: error("no session")
         val a = newApi(session.tokens())
-        val keys = a.accountKeys()
+        // Offline unlock (spec 02 §8): cached keys when the network is down; wipe on a
+        // definitive auth rejection.
+        val keys = try {
+            a.accountKeys().also { store.saveAccountKeys(it) }
+        } catch (e: java.io.IOException) {
+            store.loadAccountKeys() ?: throw e
+        } catch (e: ApiException) {
+            if (e.status == 401) { deleteCache(session.userId); store.clear() }
+            throw e
+        }
         val acct = Account.unlock(session.userId, password, keys)
-        bind(a, acct); engine!!.sync()
+        bind(a, acct)
+        runCatching { engine!!.sync() }.onFailure {
+            if (it is java.io.IOException) notice = "Offline — showing cached data" else throw it
+        }
         toVault()
     }
 
@@ -136,8 +155,9 @@ class DesktopState(private val scope: CoroutineScope) {
             recoveryPublicKey = recoveryPub, recoveryFingerprint = pol.recoveryFingerprint, deviceName = deviceName(),
         )
         val s = a.register(req)
-        bind(a, acct); engine!!.sync()
         store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+        store.saveAccountKeys(s.accountKeys)
+        bind(a, acct); engine!!.sync()
         toVault()
     }
 
@@ -201,14 +221,19 @@ class DesktopState(private val scope: CoroutineScope) {
     }
 
     fun lock() {
-        api?.close(); api = null; account = null; engine = null
+        // Retain the ciphertext cache on lock (spec 05 T3); close its handle.
+        engine?.close(); api?.close(); api = null; account = null; engine = null
         clearSecondary()
         screen = DesktopScreen.Unlock(store.load()?.email ?: ""); items = emptyList()
     }
 
     fun signOut() {
+        val userId = store.load()?.userId
         scope.launch { runCatching { api?.logout() } }
-        store.clear(); api?.close(); api = null; account = null; engine = null
+        // Close the engine (releases the DB handle — Windows won't delete an open file) first.
+        engine?.close(); api?.close(); api = null; account = null; engine = null
+        userId?.let { deleteCache(it) }
+        store.clear()
         clearSecondary(); signInTotpRequired = false
         screen = DesktopScreen.Welcome; items = emptyList()
     }
@@ -217,8 +242,35 @@ class DesktopState(private val scope: CoroutineScope) {
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
     }
 
+    private fun cacheFile(userId: String) = File(store.cacheDir, "vault-$userId.db")
+
+    private fun deleteCache(userId: String) {
+        for (suffix in listOf("", "-wal", "-shm")) {
+            val f = File(store.cacheDir, "vault-$userId.db$suffix")
+            // Windows: a straggler handle (AV/indexer) can defeat the unlink — retry at JVM exit.
+            if (!f.delete() && f.exists()) f.deleteOnExit()
+        }
+    }
+
     private fun bind(a: AndvariApi, acct: Account) {
-        api = a; account = acct; engine = SyncEngine(a, acct, InMemoryVaultCache())
+        engine?.close()
+        api = a; account = acct
+        val allowed = policy?.offlineCacheAllowed != false
+        val cache = if (allowed) {
+            val db = cacheFile(acct.userId)
+            sqliteVaultCache(db.absolutePath, acct.userId).also {
+                // 0600 on POSIX, best-effort on Windows — same handling as session.json.
+                for (suffix in listOf("", "-wal", "-shm")) restrictToOwner(File("${db.path}$suffix"))
+            }
+        } else {
+            deleteCache(acct.userId); InMemoryVaultCache()
+        }
+        engine = SyncEngine(a, acct, cache).also { it.hydrate() }
+    }
+
+    private fun restrictToOwner(f: File) {
+        if (!f.exists()) return
+        runCatching { f.setReadable(false, false); f.setReadable(true, true); f.setWritable(false, false); f.setWritable(true, true) }
     }
 
     private fun refreshItems() { items = engine?.items() ?: emptyList(); busy = false; error = null }

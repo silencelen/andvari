@@ -2,6 +2,8 @@ package io.silencelen.andvari.app
 
 import android.content.Context
 import io.silencelen.andvari.core.client.Tokens
+import io.silencelen.andvari.core.model.AccountKeys
+import kotlinx.serialization.json.Json
 
 /**
  * Non-secret session persisted across launches (SharedPreferences). Tokens are here
@@ -20,6 +22,7 @@ data class Session(
 
 class SessionStore(context: Context) {
     private val prefs = context.getSharedPreferences("andvari", Context.MODE_PRIVATE)
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     var baseUrl: String
         get() = prefs.getString("baseUrl", DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
@@ -51,8 +54,20 @@ class SessionStore(context: Context) {
         prefs.edit().putString("accessToken", t.accessToken).putString("refreshToken", t.refreshToken).apply()
     }
 
+    /**
+     * The server's accountKeys payload — all ciphertext/public (wrappedUvk,
+     * encryptedIdentitySeed, identityPub) + salts/params, same trust class as the tokens
+     * already here. Enables offline unlock (spec 02 §8); wiped on sign-out / revocation.
+     */
+    fun saveAccountKeys(keys: AccountKeys) {
+        prefs.edit().putString("accountKeys", json.encodeToString(AccountKeys.serializer(), keys)).apply()
+    }
+
+    fun loadAccountKeys(): AccountKeys? =
+        prefs.getString("accountKeys", null)?.let { runCatching { json.decodeFromString(AccountKeys.serializer(), it) }.getOrNull() }
+
     fun clear() {
-        prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").apply()
+        prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove("accountKeys").apply()
     }
 
     /**
