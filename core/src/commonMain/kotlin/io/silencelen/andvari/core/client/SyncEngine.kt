@@ -21,6 +21,10 @@ class SyncEngine(
     private val account: Account,
     private val cache: VaultCache,
 ) {
+    private companion object {
+        const val SERVER_BATCH_MAX = 200 // server rejects a push batch larger than this (Service.push)
+    }
+
     fun items(): List<VaultItem> = cache.allItems().sortedBy { it.doc.name.lowercase() }
     fun item(itemId: String): VaultItem? = cache.getItem(itemId)
 
@@ -204,6 +208,33 @@ class SyncEngine(
         pull()
     }
 
+    /**
+     * Bulk import into the personal vault (spec 06): chunked pushes at the server batch
+     * cap, one pull at the end. Each [PlannedItem] carries an itemId minted at plan time,
+     * and the push mutationId is derived from it, so re-running the SAME plan after an
+     * interruption replays idempotently (server key = deviceId+mutationId) instead of
+     * duplicating. With the durable cache (spec 02 §8) the queue also survives a crash.
+     */
+    suspend fun importAll(
+        items: List<CsvImport.PlannedItem>,
+        onProgress: ((done: Int, total: Int) -> Unit)? = null,
+    ) {
+        val vaultId = account.personalVaultId
+        var done = 0
+        for (chunk in items.chunked(SERVER_BATCH_MAX)) {
+            push(chunk.map {
+                Mutation(
+                    mutationId = it.itemId, // stable id → idempotent retry of the same plan
+                    op = "put", itemId = it.itemId, vaultId = vaultId, baseItemRev = 0,
+                    item = account.encryptItem(vaultId, it.itemId, it.doc),
+                )
+            })
+            done += chunk.size
+            onProgress?.invoke(done, items.size)
+        }
+        pull()
+    }
+
     /** Download + decrypt one attachment (hard failure on any corruption, spec 02 §6). */
     suspend fun downloadAttachment(ref: AttachmentRef): ByteArray {
         val bytes = api.downloadAttachment(ref.id)
@@ -229,21 +260,28 @@ class SyncEngine(
     }
 
     private suspend fun flushQueue() {
-        val pending = cache.pending()
-        if (pending.isEmpty()) return
-        val resp = api.push(PushRequest(pending))
-        val byId = resp.results.associateBy { it.mutationId }
-        for (m in pending) {
-            val r = byId[m.mutationId] ?: continue
-            // Any definitive server outcome removes it from the queue (idempotent replay
-            // returns the original result, so a duplicate is also "done").
-            if (r.status != "denied") cache.dequeue(m.mutationId)
+        var deniedCount = 0
+        // Drain the queue in server-cap-sized batches. The server rejects a >200 batch
+        // outright (batch_too_large), so a queue that grew past 200 (e.g. a partially-failed
+        // bulk import) must be chunked here — otherwise every flush wedges. Fixes the queue
+        // for ALL callers, not just import.
+        while (true) {
+            val chunk = cache.pending().take(SERVER_BATCH_MAX)
+            if (chunk.isEmpty()) break
+            val resp = api.push(PushRequest(chunk))
+            val byId = resp.results.associateBy { it.mutationId }
+            var progressed = false
+            for (m in chunk) {
+                val r = byId[m.mutationId] ?: continue
+                if (r.status == "denied") deniedCount++
+                // Any definitive server outcome removes it from the queue (idempotent replay
+                // returns the original result; denied is un-retryable) — both drop it.
+                cache.dequeue(m.mutationId)
+                progressed = true
+            }
+            if (!progressed) break // defensive: no results matched (server returns one per mutation)
         }
-        val denied = resp.results.filter { it.status == "denied" }
-        if (denied.isNotEmpty()) {
-            denied.forEach { cache.dequeue(it.mutationId) } // drop un-retryable
-            throw ApiException(403, "denied", "write denied for ${denied.size} mutation(s)")
-        }
+        if (deniedCount > 0) throw ApiException(403, "denied", "write denied for $deniedCount mutation(s)")
     }
 
     private fun isoDate(epochMillis: Long): String {

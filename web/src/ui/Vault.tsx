@@ -8,6 +8,7 @@ import { randomBytes } from "../crypto/provider";
 import { base32Decode, parseOtpauthUri, totpCode, totpSecondsRemaining } from "../crypto/totp";
 import type { Account } from "../vault/account";
 import type { PendingUpload, VaultInfo, VaultItem, VaultStore } from "../vault/store";
+import { ImportError, type ImportFormat, type ImportPlan, parseCsvImport, planImport } from "../import/csv";
 import { Admin } from "./Admin";
 import { humanSize } from "./format";
 import { Health } from "./Health";
@@ -33,6 +34,7 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<ItemDoc | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const [mustChange, setMustChange] = useState(mustChangePassword);
   const [online, setOnline] = useState(true);
 
@@ -74,11 +76,13 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
 
   const startNew = (type: "login" | "note") => {
     setSelected(null);
+    setImportOpen(false);
     setEditing(type === "login" ? { type, name: "", login: { username: "", password: "", uris: [""] } } : { type, name: "", notes: "" });
   };
 
   const openItem = (it: VaultItem) => {
     setSelected(it.itemId);
+    setImportOpen(false);
     setEditing(null);
   };
 
@@ -98,11 +102,12 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   const goToItem = (itemId: string) => {
     setView("vault");
     setEditing(null);
+    setImportOpen(false);
     setSelected(itemId);
   };
 
   const navBtn = (v: View, label: string) => (
-    <button className={`navbtn ${view === v ? "active" : ""}`} onClick={() => { setView(v); setEditing(null); setSelected(null); }}>{label}</button>
+    <button className={`navbtn ${view === v ? "active" : ""}`} onClick={() => { setView(v); setEditing(null); setImportOpen(false); setSelected(null); }}>{label}</button>
   );
 
   const current = selected ? store.get(selected) : null;
@@ -142,6 +147,12 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
           <Settings client={client} account={account} policy={policy} onPasswordChanged={() => setMustChange(false)} />
         ) : view === "admin" && isAdmin ? (
           <Admin client={client} />
+        ) : importOpen ? (
+          <ImportPanel
+            store={store}
+            onClose={() => setImportOpen(false)}
+            onDone={() => { setImportOpen(false); refresh(); }}
+          />
         ) : editing ? (
           <Editor
             initial={editing}
@@ -168,6 +179,7 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
               <input placeholder="Search vault…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus />
               <button className="ghost" onClick={() => startNew("login")}>+ Login</button>
               <button className="ghost" onClick={() => startNew("note")}>+ Note</button>
+              <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setImportOpen(true); }}>Import CSV</button>
             </div>
             {filtered.length === 0 ? (
               <div className="empty">
@@ -557,4 +569,212 @@ function normalizeTotp(input: string): string {
   } catch {
     return t;
   }
+}
+
+// ---- CSV import (spec 06) ----
+
+function friendlyParseError(e: unknown): string {
+  if (e instanceof ImportError) {
+    switch (e.code) {
+      case "too_large":
+        return "That file is larger than 10 MiB — far bigger than any real browser password export. Double-check you picked the right file.";
+      case "too_many_rows":
+        return "That file has more than 10,000 logins. Split it into smaller files and import them one at a time.";
+      case "unrecognized_header":
+        return "This doesn’t look like a Chrome, Edge, or Firefox password export. In your browser’s password manager choose “Export passwords” and import the CSV it saves.";
+      default:
+        return `That file could not be read (${e.code}).`;
+    }
+  }
+  return "That file could not be read. Make sure it’s the CSV your browser exported.";
+}
+
+function problemLabel(code: string): string {
+  switch (code) {
+    case "wrong_field_count":
+      return "Wrong number of columns";
+    case "bad_quote":
+      return "Malformed quoting";
+    default:
+      return code;
+  }
+}
+
+const FORMAT_LABEL: Record<ImportFormat, string> = { chrome: "Chrome / Edge", firefox: "Firefox" };
+
+/**
+ * Import a browser CSV export entirely on this device (spec 06): parse + plan locally,
+ * preview, then encrypt-and-push. The file never leaves the browser. The plan's itemIds
+ * are minted once, so a mid-import failure is fixed with Retry (idempotent replay of the
+ * SAME plan) rather than re-parsing — re-parsing would mint new ids and duplicate.
+ */
+function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: () => void; onDone: () => void }) {
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [format, setFormat] = useState<ImportFormat | null>(null);
+  const [plan, setPlan] = useState<ImportPlan | null>(null);
+  const [parseErr, setParseErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [importErr, setImportErr] = useState("");
+  const [finished, setFinished] = useState(false);
+
+  const reset = () => {
+    setPlan(null);
+    setFormat(null);
+    setParseErr("");
+    setImportErr("");
+    setFinished(false);
+    setProgress(null);
+  };
+
+  const onFile = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const file = files[0]!;
+    reset();
+    setFileName(file.name);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const parsed = parseCsvImport(bytes);
+      setFormat(parsed.format);
+      setPlan(planImport(parsed, () => crypto.randomUUID())); // ids minted ONCE, reused on retry
+    } catch (e) {
+      setParseErr(friendlyParseError(e));
+    } finally {
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  };
+
+  const runImport = async () => {
+    if (!plan) return;
+    setBusy(true);
+    setImportErr("");
+    setProgress({ done: 0, total: plan.items.length });
+    try {
+      // Reuse plan.items on every attempt: each carries its own itemId, used as the push
+      // mutationId → the server dedupes an already-applied put, so Retry never duplicates.
+      await store.importDocs(plan.items, (done, total) => setProgress({ done, total }));
+      setFinished(true);
+    } catch {
+      setImportErr(
+        "The import was interrupted before it finished. Everything that already landed is safe in your vault — press Retry to import the rest (it won’t create duplicates).",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const report = plan?.report;
+  const nothingToImport = plan !== null && plan.items.length === 0;
+
+  return (
+    <div className="sheet">
+      <button type="button" className="link" onClick={onClose}>← back to vault</button>
+      <h2 style={{ marginTop: 12 }}>Import from browser CSV</h2>
+      <div className="muted" style={{ marginBottom: 18 }}>Chrome, Edge, or Firefox exported passwords · everything stays on this device</div>
+
+      {/* Always-visible plaintext caution. */}
+      <div className="msg info" style={{ display: "block" }}>
+        <strong>⚠ This file holds every password in plaintext.</strong> Nothing about it is
+        uploaded — parsing happens here in your browser and each login is encrypted before it
+        is saved. After importing, delete the CSV and empty your trash. Importing the same file
+        again creates duplicate copies.
+      </div>
+
+      <input
+        ref={fileInput}
+        type="file"
+        accept=".csv,text/csv,text/plain"
+        style={{ display: "none" }}
+        onChange={(e) => onFile(e.target.files)}
+      />
+
+      {finished ? (
+        <>
+          <div className="tiles" style={{ marginTop: 4 }}>
+            <div className="tile"><div className="tile-value tone-good">{report?.imported ?? 0}</div><div className="tile-label">Imported</div></div>
+            {(report?.collapsed ?? 0) > 0 && <div className="tile"><div className="tile-value">{report!.collapsed}</div><div className="tile-label">Merged</div></div>}
+            {(report?.flagged.length ?? 0) > 0 && <div className="tile"><div className="tile-value tone-mid">{report!.flagged.length}</div><div className="tile-label">Renamed</div></div>}
+            {(report?.skippedEmpty ?? 0) > 0 && <div className="tile"><div className="tile-value">{report!.skippedEmpty}</div><div className="tile-label">Skipped</div></div>}
+            {(report?.errors.length ?? 0) > 0 && <div className="tile"><div className="tile-value tone-bad">{report!.errors.length}</div><div className="tile-label">Errors</div></div>}
+          </div>
+          <div className="msg info" style={{ display: "block" }}>
+            Added {report?.imported ?? 0} {(report?.imported ?? 0) === 1 ? "login" : "logins"} to your personal vault.
+            Now delete <strong>{fileName || "the CSV file"}</strong> and empty your trash.
+          </div>
+          <div className="actions">
+            <button type="button" className="primary" onClick={onDone}>Done</button>
+          </div>
+        </>
+      ) : plan ? (
+        <>
+          <div className="muted" style={{ marginBottom: 12 }}>
+            {fileName && <>“{fileName}” · </>}detected {format ? FORMAT_LABEL[format] : "browser"} export
+          </div>
+          <div className="tiles" style={{ marginTop: 4 }}>
+            <div className="tile"><div className="tile-value tone-good">{report!.imported}</div><div className="tile-label">To import</div></div>
+            <div className="tile"><div className="tile-value">{report!.collapsed}</div><div className="tile-label">Merged (dupes)</div></div>
+            <div className="tile"><div className="tile-value tone-mid">{report!.flagged.length}</div><div className="tile-label">Renamed</div></div>
+            <div className="tile"><div className="tile-value">{report!.skippedEmpty}</div><div className="tile-label">Skipped (empty)</div></div>
+          </div>
+
+          {report!.flagged.length > 0 && (
+            <div className="msg info" style={{ display: "block" }}>
+              Same site with different passwords — imported separately and renamed for you to review:{" "}
+              {report!.flagged.join(", ")}.
+            </div>
+          )}
+
+          {report!.errors.length > 0 && (
+            <div className="field">
+              <label>Rows skipped ({report!.errors.length})</label>
+              <div className="table-scroll">
+                <table className="table">
+                  <thead><tr><th>Line</th><th>Problem</th></tr></thead>
+                  <tbody>
+                    {report!.errors.map((err, idx) => (
+                      <tr key={`${err.line}-${idx}`}><td className="mono">{err.line}</td><td>{problemLabel(err.code)}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {nothingToImport && <div className="msg info" style={{ display: "block" }}>Nothing to import from this file.</div>}
+          {importErr && <div className="msg err">{importErr}</div>}
+
+          {busy && progress && (
+            <div className="field" style={{ marginTop: 16 }}>
+              <label>Importing… {Math.min(progress.done, progress.total)} / {progress.total}</label>
+              <div className="strength" style={{ height: 6 }}>
+                <span style={{ width: `${progress.total > 0 ? (progress.done / progress.total) * 100 : 0}%`, background: "var(--gold)" }} />
+              </div>
+            </div>
+          )}
+
+          <div className="actions">
+            {importErr ? (
+              <button type="button" className="primary" disabled={busy} onClick={runImport}>{busy ? "Retrying…" : "Retry"}</button>
+            ) : (
+              <button type="button" className="primary" disabled={busy || nothingToImport} onClick={runImport}>
+                {busy ? "Importing…" : `Import ${report!.imported} ${report!.imported === 1 ? "login" : "logins"}`}
+              </button>
+            )}
+            <div className="spacer" />
+            <button type="button" className="ghost" disabled={busy} onClick={() => { reset(); setFileName(""); }}>Choose a different file</button>
+          </div>
+        </>
+      ) : (
+        <>
+          {parseErr && <div className="msg err">{parseErr}</div>}
+          <div className="actions">
+            <button type="button" className="primary" onClick={() => fileInput.current?.click()}>Choose CSV file…</button>
+            <div className="spacer" />
+            <button type="button" className="ghost" onClick={onClose}>Cancel</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }

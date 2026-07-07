@@ -8,12 +8,14 @@ import io.silencelen.andvari.core.crypto.Hibp
 import io.silencelen.andvari.core.crypto.Hkdf
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
+import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.TotpAlgorithm
 import io.silencelen.andvari.core.crypto.TotpConfig
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
@@ -57,7 +59,9 @@ fun main(args: Array<String>) {
     write(outDir, "totp.json", totp())
     write(outDir, "hibp.json", hibp())
     write(outDir, "sharedgrant.json", sharedGrant())
-    println("vector-gen: wrote 8 files to ${outDir.absolutePath}")
+    write(outDir, "import.json", importVectors())
+    write(outDir, "urimatch.json", uriMatch())
+    println("vector-gen: wrote 10 files to ${outDir.absolutePath}")
 }
 
 /** Argon2id timing on this host (spec 01 §9 benchmark table). */
@@ -272,6 +276,206 @@ private fun sharedGrant(): JsonObject = buildJsonObject {
         val wrongVaultId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
         put("expectedVaultId", vaultId)
         put("sealedB64", b64(SharedGrant.seal(crypto, member.publicKey, wrongVaultId, vk)))
+    }
+}
+
+/** spec 06 — CSV import. Expectations are produced by the :core reference impl. */
+private fun importVectors(): JsonObject {
+    val bom = "﻿"
+    // name is a plain counter so the docs list is order-stable (itemId is not pinned).
+    var counter = 0
+    fun newId(): String = "id-${counter++}"
+
+    fun caseObj(name: String, content: String): JsonObject = buildJsonObject {
+        val bytes = content.encodeToByteArray()
+        counter = 0
+        val parsed = CsvImport.parse(bytes)
+        val plan = CsvImport.plan(parsed, ::newId)
+        put("name", name)
+        put("contentB64", Bytes.toB64(bytes))
+        putJsonObject("expect") {
+            put("format", parsed.format.name.lowercase())
+            putJsonArray("rows") {
+                for (r in parsed.rows) addJsonObject {
+                    put("name", r.name); put("url", r.url); put("username", r.username)
+                    put("password", r.password); put("notes", r.notes)
+                    r.timePasswordChangedMs?.let { put("timePasswordChangedMs", it) }
+                }
+            }
+            putJsonArray("errors") { for (e in parsed.errors) addJsonObject { put("line", e.line); put("code", e.code) } }
+            putJsonArray("docs") {
+                for (it in plan.items) addJsonObject {
+                    put("name", it.doc.name)
+                    put("username", it.doc.login?.username ?: "")
+                    put("password", it.doc.login?.password ?: "")
+                    put("uri", it.doc.login?.uris?.firstOrNull() ?: "")
+                    put("notes", it.doc.notes ?: "")
+                }
+            }
+            putJsonObject("report") {
+                put("imported", plan.report.imported); put("skippedEmpty", plan.report.skippedEmpty)
+                put("collapsed", plan.report.collapsed)
+                putJsonArray("flagged") { for (n in plan.report.flagged) add(n) }
+            }
+        }
+    }
+
+    val chromeHeader = "name,url,username,password,note"
+    val files = listOf(
+        caseObj("chrome-basic", "$chromeHeader\nGitHub,https://github.com/login,jacob,s3cret,my note\n"),
+        caseObj("chrome-old-4col", "name,url,username,password\nBank,https://bank.example,jo,pw\n"),
+        caseObj(
+            "chrome-quoting",
+            "$chromeHeader\r\n\"Acme, Inc\",https://acme.test,\"user,name\",\"p\"\"w\",\"line1\nline2\"\r\n",
+        ),
+        caseObj("chrome-bom", "$bom$chromeHeader\r\nSite,https://site.test,u,p,n\r\n"),
+        caseObj("chrome-skip-empty", "$chromeHeader\nkeep,https://a.test,u,p,\njunk,https://b.test,,,\n"),
+        caseObj(
+            "chrome-name-fallback",
+            "$chromeHeader\n" +
+                ",https://user:pw@Host.Example:8443/path?q,alice,a,\n" +
+                ",https://[2001:db8::1]:443/,bob,b,\n" +
+                ",ftp://bare.host,carol,c,\n",
+        ),
+        caseObj(
+            "chrome-dupes",
+            "$chromeHeader\n" +
+                "Mail,https://mail.test,me,pw1,\n" +
+                "Mail,https://mail.test,me,pw1,\n" + // exact dupe → collapsed
+                "Mail,https://mail.test,me,pw2,\n" + // same url+user, diff pw → "(2)"
+                "Mail,https://mail.test,me,pw3,\n",   // → "(3)"
+        ),
+        caseObj(
+            "firefox-basic",
+            "url,username,password,httpRealm,formActionOrigin,guid,timeCreated,timeLastUsed,timePasswordChanged\n" +
+                "https://ff.test/login,fox,pw,,https://ff.test,{abc},1700000000000,1700000001000,1700000002000\n",
+        ),
+        caseObj(
+            "firefox-httprealm",
+            "url,username,password,httpRealm,formActionOrigin,guid,timeCreated,timeLastUsed,timePasswordChanged\n" +
+                "https://router.test/,admin,pw,\"Router Login\",,{x},0,0,0\n",
+        ),
+        caseObj(
+            "errors-bad-rows",
+            "$chromeHeader\n" +
+                "ok,https://ok.test,u,p,n\n" +
+                "toofew,https://few.test,u\n" +               // wrong_field_count
+                "bad,\"https://q.test,u,p,n\n" +               // unterminated quote → bad_quote at its line
+                "ok2,https://ok2.test,u2,p2,n2\n",
+        ),
+    )
+
+    return buildJsonObject {
+        putJsonArray("files") { for (c in files) add(c) }
+        putJsonArray("reject") {
+            addJsonObject {
+                put("name", "unrecognized-header")
+                put("reason", "unrecognized_header")
+                put("contentB64", Bytes.toB64("foo,bar,baz\n1,2,3\n".encodeToByteArray()))
+            }
+            addJsonObject {
+                put("name", "too-many-rows")
+                put("reason", "too_many_rows")
+                putJsonObject("construct") {
+                    put("header", chromeHeader)
+                    put("row", "n,https://x.test,u,p,c")
+                    put("count", CsvImport.MAX_ROWS + 1)
+                }
+            }
+            addJsonObject {
+                put("name", "too-large")
+                put("reason", "too_large")
+                putJsonObject("construct") {
+                    put("header", chromeHeader)
+                    put("row", "n,https://x.test,u,p,c")
+                    // rows needed to exceed 10 MiB with this row width
+                    put("count", CsvImport.MAX_BYTES / ("n,https://x.test,u,p,c\n".length) + 2)
+                }
+            }
+        }
+    }
+}
+
+/** spec 02 §3.1 — autofill URI matching + field classification. Expected values are
+ *  hand-authored (NOT produced by the impl) so neither impl self-certifies. */
+private fun uriMatch(): JsonObject = buildJsonObject {
+    // match: {savedUri, webHost?, packageName, expected}. webHost is the caller-gated
+    // per-field trusted-browser domain (null when the requester isn't a trusted browser).
+    fun m(saved: String, webHost: String?, pkg: String, expected: Boolean) = buildJsonObject {
+        put("savedUri", saved); if (webHost != null) put("webHost", webHost) else put("webHost", JsonNull)
+        put("packageName", pkg); put("expected", expected)
+    }
+    putJsonArray("match") {
+        // exact + scheme-less + www + case + trailing dot
+        add(m("https://example.com/login", "example.com", "com.android.chrome", true))
+        add(m("example.com", "example.com", "com.android.chrome", true))
+        add(m("https://www.example.com", "example.com", "com.android.chrome", true))
+        add(m("https://example.com", "www.example.com", "com.android.chrome", true))
+        add(m("https://Example.COM", "example.com", "com.android.chrome", true))
+        add(m("https://example.com./", "example.com", "com.android.chrome", true))
+        add(m("https://example.com:8443/path?q#f", "example.com", "com.android.chrome", true)) // port/path ignored
+        // label-boundary subdomain suffix
+        add(m("https://example.com", "login.example.com", "com.android.chrome", true))
+        add(m("https://example.com", "a.b.example.com", "com.android.chrome", true))
+        // label-boundary ATTACKS — must NOT match
+        add(m("https://example.com", "evil-example.com", "com.android.chrome", false))
+        add(m("https://example.com", "example.com.evil.net", "com.android.chrome", false))
+        add(m("https://example.com", "notexample.com", "com.android.chrome", false))
+        // ≥2-label guard: a single-label / TLD saved host is exact-only
+        add(m("com", "evil.com", "com.android.chrome", false))
+        add(m("router", "router", "com.android.chrome", true))
+        add(m("router", "a.router", "com.android.chrome", false))
+        add(m("localhost", "localhost", "com.android.chrome", true))
+        // IP literals: exact only
+        add(m("https://10.0.0.5", "10.0.0.5", "com.android.chrome", true))
+        add(m("https://10.0.0.5", "a.10.0.0.5", "com.android.chrome", false))
+        // userinfo stripped
+        add(m("https://user:pw@example.com", "example.com", "com.android.chrome", true))
+        // no trusted webHost → web item never matches by package
+        add(m("https://example.com", null, "com.android.chrome", false))
+        // androidapp exact
+        add(m("androidapp://com.spotify.music", null, "com.spotify.music", true))
+        add(m("androidapp://com.spotify.music", null, "com.evil.clone", false))
+        add(m("androidapp://com.spotify.music", "example.com", "com.spotify.music", true))
+        // garbage / empty
+        add(m("", "example.com", "com.android.chrome", false))
+        add(m("androidapp://", null, "com.x", false))
+    }
+
+    // classify: {hints[], inputTypeClass, inputTypeVariation, htmlType?, htmlNameOrId?, expected}
+    fun c(hints: List<String>, cls: Int, varn: Int, htmlType: String?, nameId: String?, expected: String) = buildJsonObject {
+        putJsonArray("hints") { for (h in hints) add(h) }
+        put("inputTypeClass", cls); put("inputTypeVariation", varn)
+        if (htmlType != null) put("htmlType", htmlType) else put("htmlType", JsonNull)
+        if (nameId != null) put("htmlNameOrId", nameId) else put("htmlNameOrId", JsonNull)
+        put("expected", expected)
+    }
+    val TEXT = 0x1; val NUMBER = 0x2; val V_PW = 0x80; val V_WEBPW = 0xe0; val V_VISPW = 0x90; val V_EMAIL = 0x20; val N_PW = 0x10
+    putJsonArray("classify") {
+        // hints win
+        add(c(listOf("username"), 0, 0, null, null, "username"))
+        add(c(listOf("emailAddress"), 0, 0, null, null, "username"))
+        add(c(listOf("password"), 0, 0, null, null, "password"))
+        add(c(listOf("smsOTPCode"), TEXT, V_PW, "password", "otp", "none")) // negative hint beats password type
+        add(c(listOf("creditCardNumber"), 0, 0, null, null, "none"))
+        // html type
+        add(c(emptyList(), TEXT, 0, "password", "pw", "password"))
+        add(c(emptyList(), TEXT, 0, "email", "email", "username"))
+        add(c(emptyList(), TEXT, 0, "search", "q", "none"))
+        add(c(emptyList(), TEXT, 0, "text", "username", "username"))
+        add(c(emptyList(), TEXT, 0, "text", "user_password", "password"))
+        add(c(emptyList(), TEXT, 0, "text", "search_query", "none"))
+        // android inputType
+        add(c(emptyList(), TEXT, V_PW, null, null, "password"))
+        add(c(emptyList(), TEXT, V_WEBPW, null, null, "password"))
+        add(c(emptyList(), TEXT, V_VISPW, null, null, "password"))
+        add(c(emptyList(), TEXT, V_EMAIL, null, null, "username"))
+        add(c(emptyList(), NUMBER, N_PW, null, null, "password"))
+        // name-only fallback
+        add(c(emptyList(), TEXT, 0, null, "login", "username"))
+        add(c(emptyList(), TEXT, 0, null, "passwd", "password"))
+        add(c(emptyList(), TEXT, 0, null, "captcha", "none"))
+        add(c(emptyList(), TEXT, 0, null, null, "none"))
     }
 }
 

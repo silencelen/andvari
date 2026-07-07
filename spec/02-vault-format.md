@@ -79,6 +79,38 @@ Unknown fields MUST be preserved on rewrite (forward compatibility within a
 formatVersion). TOTP presentation: RFC 6238, SHA-1, 6 digits, 30 s step unless the
 otpauth URI overrides.
 
+### 3.1 login.uris — semantics & client match rules (autofill / browser fill)
+
+`login.uris` entries are either web URIs (scheme optional, default `https`) or the
+native-app convention **`androidapp://<packageName>`** (Bitwarden-compatible).
+
+**Normalization** (both impls, identical): lowercase the host; strip one leading
+`www.`; strip a trailing dot; **path, query, fragment, userinfo, and port are ignored
+for matching** (Android's `ViewNode.getWebDomain()` exposes only the domain — two
+services on one host are indistinguishable, so give services distinct hostnames).
+
+**Match rules (normative, all clients).** A page host matches a saved host iff:
+- **exact equality**, OR
+- the saved host has **≥ 2 labels** (contains at least one dot) AND the page host ends
+  with `"." + savedHost` (**label-boundary subdomain suffix**). Saved `example.com`
+  matches `login.example.com`; it does NOT match `evil-example.com` or
+  `example.com.evil.net`. A **single-label / bare-TLD** saved host (`com`, `router`,
+  `localhost`) matches **exact-only** — never as a suffix — so junk like an imported
+  `com` entry can never fill every `*.com` site.
+- **IP-literal** hosts match exact-only. `androidapp://<pkg>` matches by exact package
+  string. An unparseable / empty saved URI never matches. Cross-registrable-domain fill
+  is impossible by construction (no PSL in v1; eTLD+1 base-domain matching is a v2
+  loosening).
+
+**webDomain trust.** A fill request's web domain is honored ONLY when the requesting
+package is an allowlisted trusted browser; otherwise clients match by package name
+only (any app can populate its own structure with an attacker-chosen `webDomain`).
+A structure carrying **more than one distinct web domain** (cross-origin iframes) is
+treated per-field: a dataset is built only over fields whose own frame domain matches
+the saved item, and a form mixing domains yields no fill rather than filling a
+credential into a foreign-origin field. (Client-side only; the spec 02 §5 server
+plaintext table is unchanged — matching reads the existing `login.uris` ciphertext.)
+
 ## 4. Vaults
 
 ```

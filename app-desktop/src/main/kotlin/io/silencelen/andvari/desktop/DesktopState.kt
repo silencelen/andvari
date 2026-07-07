@@ -9,6 +9,7 @@ import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.AttachmentRef
+import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.sqliteVaultCache
 import io.silencelen.andvari.core.client.ItemDoc
@@ -66,6 +67,22 @@ class DesktopState(private val scope: CoroutineScope) {
     var totpSetupInfo by mutableStateOf<TotpSetupResponse?>(null)
         private set
     var totpError by mutableStateOf<String?>(null)
+        private set
+    // CSV import (spec 06): a preview/plan kept across a retry so an interrupted import
+    // replays the SAME itemIds idempotently instead of duplicating.
+    var importPlan by mutableStateOf<CsvImport.ImportPlan?>(null)
+        private set
+    var importFormat by mutableStateOf<CsvImport.ImportFormat?>(null)
+        private set
+    var importReport by mutableStateOf<CsvImport.ImportReport?>(null)
+        private set
+    var importError by mutableStateOf<String?>(null)
+        private set
+    var importProgress by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+    var importBusy by mutableStateOf(false)
+        private set
+    var importDone by mutableStateOf(false)
         private set
 
     private var api: AndvariApi? = null
@@ -167,6 +184,58 @@ class DesktopState(private val scope: CoroutineScope) {
     fun deleteItem(itemId: String) = op { engine!!.remove(itemId); refreshItems() }
     fun refresh() = op { engine!!.sync(); refreshItems() }
     fun item(itemId: String): VaultItem? = engine?.item(itemId)
+
+    // ---- CSV import (spec 06) ----
+
+    /** Length precheck (never read a multi-GB file) → parse + plan a browser CSV on-device. */
+    fun importFromFile(file: File) {
+        val acct = account ?: return
+        importDismiss()
+        if (file.length() > CsvImport.MAX_BYTES) { importError = friendlyImport("too_large"); return }
+        val bytes = try { file.readBytes() } catch (t: Throwable) { importError = "Couldn't read ${file.name}: ${t.message}"; return }
+        try {
+            val parsed = CsvImport.parse(bytes)
+            importFormat = parsed.format
+            importPlan = CsvImport.plan(parsed) { acct.newItemId() }
+        } catch (e: CsvImport.ImportException) {
+            importError = friendlyImport(e.code)
+        } catch (t: Throwable) {
+            importError = t.message ?: "could not read that file"
+        }
+    }
+
+    /**
+     * Encrypt-and-push the planned items. Reuses plan.items on every call so a mid-import
+     * failure is fixed with Retry (idempotent replay of the same itemIds), NOT a re-parse.
+     */
+    fun importConfirm() {
+        val plan = importPlan ?: return
+        importBusy = true; importError = null; importProgress = 0 to plan.items.size
+        scope.launch {
+            try {
+                engine!!.importAll(plan.items) { done, total -> importProgress = done to total }
+                importReport = plan.report
+                importDone = true
+                importBusy = false
+                items = engine?.items() ?: emptyList()
+            } catch (t: Throwable) {
+                importBusy = false
+                importError = "Import interrupted — press Retry to finish (no duplicates will be created)."
+            }
+        }
+    }
+
+    fun importDismiss() {
+        importPlan = null; importFormat = null; importReport = null
+        importError = null; importProgress = null; importBusy = false; importDone = false
+    }
+
+    private fun friendlyImport(code: String): String = when (code) {
+        "too_large" -> "That file is larger than 10 MiB — far bigger than any real browser password export."
+        "too_many_rows" -> "That file has more than 10,000 logins. Split it into smaller files and import each."
+        "unrecognized_header" -> "This doesn’t look like a Chrome, Edge, or Firefox password export."
+        else -> "That file could not be read ($code)."
+    }
 
     /** Seed-derived identity short code (spec 01 §5) — read out during sharing verification. */
     fun identityCode(): String? = account?.identityFingerprintShort()

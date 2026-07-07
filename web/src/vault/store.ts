@@ -47,6 +47,8 @@ export interface PendingUpload {
  * mutations with stable mutationIds. Web MVP keeps decrypted items in memory only.
  */
 export class VaultStore {
+  /** Server rejects a push batch larger than this (Service.push → batch_too_large). */
+  private static readonly SERVER_BATCH_MAX = 200;
   private cursor = 0;
   private itemsById = new Map<string, VaultItem>();
   private vaultsById = new Map<string, WireVault>();
@@ -225,6 +227,41 @@ export class VaultStore {
 
     const m = this.putMutation(id, targetVaultId, doc, existing?.rev ?? 0);
     await this.push([m]);
+    await this.sync();
+  }
+
+  /**
+   * Bulk CSV import (spec 06): push planned items into the personal vault in chunks of
+   * SERVER_BATCH_MAX, then one sync at the end. Each mutation's mutationId IS its itemId
+   * (minted once at plan time) so re-running the SAME plan after a mid-import failure
+   * replays idempotently server-side (idempotency key = deviceId+mutationId) instead of
+   * duplicating. Mirrors core SyncEngine.importAll. Re-PARSING the file mints new ids.
+   */
+  async importDocs(
+    items: { itemId: string; doc: ItemDoc }[],
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<void> {
+    const vaultId = this.account.personalVaultId;
+    const total = items.length;
+    let done = 0;
+    for (let start = 0; start < items.length; start += VaultStore.SERVER_BATCH_MAX) {
+      const chunk = items.slice(start, start + VaultStore.SERVER_BATCH_MAX);
+      const mutations: Mutation[] = chunk.map(({ itemId, doc }) => ({
+        mutationId: itemId, // stable id → idempotent retry of the same plan
+        op: "put",
+        itemId,
+        vaultId,
+        baseItemRev: 0,
+        item: {
+          formatVersion: 1,
+          attachmentIds: doc.attachments?.map((a) => a.id) ?? [],
+          blob: this.account.encryptItem(vaultId, itemId, doc),
+        },
+      }));
+      await this.push(mutations);
+      done += chunk.length;
+      onProgress?.(done, total);
+    }
     await this.sync();
   }
 

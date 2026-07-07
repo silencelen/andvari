@@ -3,6 +3,7 @@ package io.silencelen.andvari.server
 import io.ktor.server.testing.testApplication
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
+import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
@@ -101,5 +102,46 @@ class ClientEngineTest {
         engine.save(null, ItemDoc(type = "note", name = "queued"))
         assertTrue(cache.pending().isEmpty(), "queue drains after a successful push")
         assertEquals(1, engine.items().size)
+    }
+
+    @Test
+    fun csvImport_multiChunk_freshDeviceDecrypts() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val api = AndvariApi("", createClient { })
+        val policy = api.clientPolicy()
+        val recoveryPub = Bytes.fromB64(api.recoveryPubkey())
+        val (req, account) = Account.enroll(
+            "client-bootstrap", "csv@x.com", "CSV", "csv import password value",
+            policy.kdfParams, recoveryPub, policy.recoveryFingerprint, "csv-device", crypto,
+        )
+        api.register(req)
+        val engine = SyncEngine(api, account, InMemoryVaultCache())
+        engine.sync()
+
+        // 250 rows (forces >1 chunk at the 200 cap) + one exact dupe that must collapse.
+        val header = "name,url,username,password,note\n"
+        val body = buildString {
+            for (i in 0 until 250) append("site$i,https://s$i.test,user$i,pw$i,\n")
+            append("site0,https://s0.test,user0,pw0,\n") // exact dupe of row 0 → collapsed
+        }
+        val plan = CsvImport.plan(CsvImport.parse((header + body).encodeToByteArray())) { account.newItemId() }
+        assertEquals(250, plan.items.size)
+        assertEquals(1, plan.report.collapsed)
+        engine.importAll(plan.items)
+        assertEquals(250, engine.items().size)
+
+        // Re-running the SAME plan is idempotent (stable mutationIds) — no duplicates.
+        engine.importAll(plan.items)
+        assertEquals(250, engine.items().size, "re-running the same import plan must not duplicate")
+
+        // A fresh device decrypts every imported item.
+        val api2 = AndvariApi("", createClient { })
+        val pre = api2.prelogin("csv@x.com")
+        val s2 = api2.login(LoginRequest("csv@x.com", Account.deriveAuthKey("csv import password value", pre.kdfSalt, pre.kdfParams, crypto), Account.deviceInfo("fresh")))
+        val account2 = Account.unlock(s2.userId, "csv import password value", s2.accountKeys, crypto)
+        val engine2 = SyncEngine(api2, account2, InMemoryVaultCache())
+        engine2.sync()
+        assertEquals(250, engine2.items().size, "fresh device pulled + decrypted all imported items")
+        assertTrue(engine2.items().any { it.doc.login?.password == "pw123" })
     }
 }

@@ -1,0 +1,326 @@
+{
+    "match": [
+        {
+            "savedUri": "https://example.com/login",
+            "webHost": "example.com",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "example.com",
+            "webHost": "example.com",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://www.example.com",
+            "webHost": "example.com",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://example.com",
+            "webHost": "www.example.com",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://Example.COM",
+            "webHost": "example.com",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://example.com./",
+            "webHost": "example.com",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://example.com:8443/path?q#f",
+            "webHost": "example.com",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://example.com",
+            "webHost": "login.example.com",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://example.com",
+            "webHost": "a.b.example.com",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://example.com",
+            "webHost": "evil-example.com",
+            "packageName": "com.android.chrome",
+            "expected": false
+        },
+        {
+            "savedUri": "https://example.com",
+            "webHost": "example.com.evil.net",
+            "packageName": "com.android.chrome",
+            "expected": false
+        },
+        {
+            "savedUri": "https://example.com",
+            "webHost": "notexample.com",
+            "packageName": "com.android.chrome",
+            "expected": false
+        },
+        {
+            "savedUri": "com",
+            "webHost": "evil.com",
+            "packageName": "com.android.chrome",
+            "expected": false
+        },
+        {
+            "savedUri": "router",
+            "webHost": "router",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "router",
+            "webHost": "a.router",
+            "packageName": "com.android.chrome",
+            "expected": false
+        },
+        {
+            "savedUri": "localhost",
+            "webHost": "localhost",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://10.0.0.5",
+            "webHost": "10.0.0.5",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://10.0.0.5",
+            "webHost": "a.10.0.0.5",
+            "packageName": "com.android.chrome",
+            "expected": false
+        },
+        {
+            "savedUri": "https://user:pw@example.com",
+            "webHost": "example.com",
+            "packageName": "com.android.chrome",
+            "expected": true
+        },
+        {
+            "savedUri": "https://example.com",
+            "webHost": null,
+            "packageName": "com.android.chrome",
+            "expected": false
+        },
+        {
+            "savedUri": "androidapp://com.spotify.music",
+            "webHost": null,
+            "packageName": "com.spotify.music",
+            "expected": true
+        },
+        {
+            "savedUri": "androidapp://com.spotify.music",
+            "webHost": null,
+            "packageName": "com.evil.clone",
+            "expected": false
+        },
+        {
+            "savedUri": "androidapp://com.spotify.music",
+            "webHost": "example.com",
+            "packageName": "com.spotify.music",
+            "expected": true
+        },
+        {
+            "savedUri": "",
+            "webHost": "example.com",
+            "packageName": "com.android.chrome",
+            "expected": false
+        },
+        {
+            "savedUri": "androidapp://",
+            "webHost": null,
+            "packageName": "com.x",
+            "expected": false
+        }
+    ],
+    "classify": [
+        {
+            "hints": [
+                "username"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "username"
+        },
+        {
+            "hints": [
+                "emailAddress"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "username"
+        },
+        {
+            "hints": [
+                "password"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "password"
+        },
+        {
+            "hints": [
+                "smsOTPCode"
+            ],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 128,
+            "htmlType": "password",
+            "htmlNameOrId": "otp",
+            "expected": "none"
+        },
+        {
+            "hints": [
+                "creditCardNumber"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "pw",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "email",
+            "htmlNameOrId": "email",
+            "expected": "username"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "search",
+            "htmlNameOrId": "q",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "username",
+            "expected": "username"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "user_password",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "search_query",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 128,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 224,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 144,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 32,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "username"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 2,
+            "inputTypeVariation": 16,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": "login",
+            "expected": "username"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": "passwd",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": "captcha",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "none"
+        }
+    ]
+}

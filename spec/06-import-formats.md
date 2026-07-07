@@ -39,3 +39,56 @@ only). `guid` is NOT preserved as itemId (always mint fresh UUIDs).
 - Vector coverage: `test-vectors/import.json` carries sample Chrome and Firefox
   files (quoting edge cases: embedded commas, quotes, newlines, BOM) with expected
   parsed rows. Both implementations must parse identically.
+
+## 4. Normative parsing algorithm
+
+Both impls MUST follow this exactly (checked order), so they agree byte-for-byte:
+
+1. **Limits (before decode):** raw length > 10 MiB → reject `too_large`. After parsing,
+   data rows (excluding header) > 10 000 → reject `too_many_rows`.
+2. **Decode:** UTF-8, lenient (invalid sequences → U+FFFD). Strip one leading BOM
+   (`EF BB BF`).
+3. **RFC 4180 state machine:** records end at `CRLF`, bare `LF`, **or a lone `CR`**
+   (a `CR` not followed by `LF` is a record terminator, equivalent to `LF`); one
+   trailing newline is ignored. `"` opens a quoted field only at field start; `""`
+   inside quotes is a literal quote; quoted fields may contain commas/CR/LF.
+   **Lenient rules:** a `"` inside an *unquoted* field is a literal character; content
+   after a closing quote before the next delimiter → per-row error `bad_quote` (row
+   skipped, import continues); **EOF while inside a quoted field** (unterminated quote)
+   → per-row error `bad_quote` at the row's opening line (row skipped, prior rows still
+   import).
+4. **Header detection** (row 1, names trimmed + lowercased): contains
+   `name,url,username,password` → Chrome/Edge (a `note` **or** `notes` column is
+   optional; Chrome emits `note`); else contains `url,username,password` plus any of
+   `guid|httprealm|formactionorigin` → Firefox; else reject `unrecognized_header`.
+   Columns are mapped **by header name, not position**.
+5. **Row errors:** field count ≠ header count → `wrong_field_count`. Errors report the
+   **1-based physical line number of the row's first character** (embedded newlines
+   make row index ≠ line number).
+6. **Skip:** empty username AND empty password → counted `skippedEmpty`.
+7. **Name fallback host extraction** (pinned; no URL library): trim → strip
+   `scheme://` (`[A-Za-z][A-Za-z0-9+.-]*://`) → cut at the first `/ ? #` → drop
+   userinfo up to the last `@` → if it starts `[`, host = the bracket contents (IPv6)
+   else strip a trailing `:digits` → lowercase. Empty → the trimmed raw url → else
+   `"Imported login"`. Chrome: only when `name` is empty; Firefox: always.
+8. **Dedupe / rename** (file-internal, in row order after skips/errors): an exact
+   `(url, username, password)` repeat is dropped (`collapsed++`); the same
+   `(url, username)` with a *different* password imports with name `"<name> (n)"`
+   (n = the 2-based index of the distinct password within the group) and is recorded in
+   `flagged`.
+9. **Report:** `imported`, `skippedEmpty`, `collapsed`, `flagged: [names]`,
+   `errors: [{line, code}]`. Firefox `timePasswordChanged` is parsed but NOT
+   materialized into `passwordHistory` in v1 (no retired password value exists).
+
+**Idempotent retry (client duty):** the itemId + push mutationId for each planned row
+are minted ONCE at plan time and reused on every retry of the SAME plan, so re-running
+an interrupted import replays server-side (idempotency key = deviceId+mutationId) rather
+than duplicating. Re-*parsing* the file mints a fresh plan (new ids) → duplicates; the
+UI MUST warn of this. There is no dedupe against items already in the vault (v1).
+
+## 5. Test vectors
+
+`test-vectors/import.json` (emitted by `tools/vector-gen` from the `:core` reference
+impl) has a `files[]` array (each `{name, contentB64, expect:{format, rows, errors,
+docs, report}}`) and a `reject[]` array (`{name, reason, ...}`, some recipe-constructed
+— e.g. `too_many_rows`, `too_large` — to keep the file small). Both impls consume it.
