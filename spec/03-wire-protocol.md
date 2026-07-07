@@ -76,6 +76,18 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
 - `removedGrants` client duty: purge that vault's items from the local cache, drop the VK,
   and discard any unsynced queued mutations targeting that vault (a revoked member's
   offline edits to the vault are lost — the push would be `denied` regardless).
+- **Durable cursor rule (spec 02 §8):** vaults/grants/items/removedGrants are all deltas
+  over the same global rev, so a client that persists its cursor MUST also persist the
+  grant rows, vault rows, and item envelopes it has applied (grant/vault rows never
+  re-send once the cursor passes them) — otherwise it MUST discard the cursor and pull
+  from 0. The offline queue survives a `410` resync and replays on top of the fresh
+  snapshot; the resync MUST be transactional (the durable cache is replaced only once the
+  full snapshot is in hand, never left empty by a failed re-pull).
+- **Rev-regression rule (spec 05 T1):** a client MUST NOT apply a non-full response whose
+  `rev` is below its cursor, nor an unsolicited `full` snapshot when it pulled with
+  `since>0`; it surfaces a server-rollback warning and keeps local state (never deletes or
+  overwrites local newer state). `rev` is not in item AD (spec 02 §2), so this is the
+  client's defense against a server replaying old-but-AD-valid envelopes.
 - `410 Gone` when `since` predates retained history (tombstone GC, spec 02 §7) →
   client discards cursor and re-pulls with `since=0`, then reconciles its offline
   queue on top.

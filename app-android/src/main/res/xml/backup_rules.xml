@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup rules for API 30 and below (allowBackup is "false", so this is
+  defense in depth should that ever flip). Excludes the session prefs (tokens +
+  cached accountKeys); the vault cache DB is in noBackupFilesDir and never enters
+  a backup domain. API 31+ uses data_extraction_rules.xml instead.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="andvari.xml" />
+</full-backup-content>

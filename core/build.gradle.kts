@@ -31,6 +31,8 @@ kotlin {
                 implementation(libs.lazysodium.java)
                 implementation(libs.jna)
                 api(libs.ktor.client.java)
+                // Durable client cache (spec 02 §8) — same driver the server proves.
+                implementation(libs.sqlite.jdbc)
             }
         }
         jvmTest.dependencies {

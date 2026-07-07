@@ -48,7 +48,10 @@ class MainActivity : ComponentActivity() {
         object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
-                AndvariViewModel(SessionStore(applicationContext)) as T
+                // Cache DBs live in no_backup/ — the platform keeps that dir out of Auto
+                // Backup AND device-to-device transfer on every API level (backup rules
+                // can't glob the per-user vault-<userId>.db names, so location does the job).
+                AndvariViewModel(SessionStore(applicationContext), applicationContext.noBackupFilesDir) as T
         }
     }
 

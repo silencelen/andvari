@@ -14,6 +14,9 @@ import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.core.client.sqliteVaultCache
+import java.io.File
+import java.io.IOException
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
@@ -48,9 +51,15 @@ data class UiState(
     val totpMessage: String? = null,
 )
 
-class AndvariViewModel(private val store: SessionStore) : ViewModel() {
+class AndvariViewModel(private val store: SessionStore, private val cacheDir: File) : ViewModel() {
     private val _ui = MutableStateFlow(UiState(baseUrl = store.baseUrl))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
+
+    private fun cacheFile(userId: String) = File(cacheDir, "vault-$userId.db")
+
+    private fun deleteCache(userId: String) {
+        for (suffix in listOf("", "-wal", "-shm")) File(cacheDir, "vault-$userId.db$suffix").delete()
+    }
 
     private var api: AndvariApi? = null
     private var account: Account? = null
@@ -63,7 +72,12 @@ class AndvariViewModel(private val store: SessionStore) : ViewModel() {
         viewModelScope.launch {
             val session = store.load()
             val probe = newApi()
-            runCatching { probe.clientPolicy() }.onSuccess { _ui.value = _ui.value.copy(policy = it) }
+            runCatching { probe.clientPolicy() }.onSuccess { p ->
+                _ui.value = _ui.value.copy(policy = p)
+                // Policy may forbid the durable cache; honor it the moment we learn it,
+                // deleting any existing file (spec 02 §8), even before unlock.
+                if (p.offlineCacheAllowed == false && session != null) deleteCache(session.userId)
+            }
             probe.close()
             _ui.value = _ui.value.copy(
                 screen = if (session != null && session.accessToken.isNotEmpty()) Screen.Unlock(session.email) else Screen.Welcome,
@@ -80,7 +94,11 @@ class AndvariViewModel(private val store: SessionStore) : ViewModel() {
         viewModelScope.launch {
             val probe = newApi()
             runCatching { probe.clientPolicy() }
-                .onSuccess { _ui.value = _ui.value.copy(policy = it) }
+                .onSuccess { p ->
+                    _ui.value = _ui.value.copy(policy = p)
+                    // Same policy enforcement as start(): a forbidding server purges the cache.
+                    if (p.offlineCacheAllowed == false) store.load()?.let { deleteCache(it.userId) }
+                }
                 .onFailure { _ui.value = _ui.value.copy(policy = null) }
             probe.close()
         }
@@ -117,19 +135,33 @@ class AndvariViewModel(private val store: SessionStore) : ViewModel() {
             }
         }
         val acct = Account.unlock(s.userId, password, s.accountKeys)
+        store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+        store.saveAccountKeys(s.accountKeys)
         bind(a, acct)
         engine!!.sync()
-        store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
         toVault()
     }
 
     fun unlock(email: String, password: String) = op {
         val session = store.load() ?: throw IllegalStateException("no session")
         val a = newApi(session.tokens())
-        val keys = a.accountKeys()
+        // Offline unlock (spec 02 §8): fall back to the cached accountKeys when the
+        // network is unreachable; a definitive auth rejection wipes the cache instead.
+        val keys = try {
+            a.accountKeys().also { store.saveAccountKeys(it) }
+        } catch (e: IOException) {
+            store.loadAccountKeys() ?: throw e
+        } catch (e: ApiException) {
+            if (e.status == 401) { deleteCache(session.userId); store.clear() }
+            throw e
+        }
         val acct = Account.unlock(session.userId, password, keys)
         bind(a, acct)
-        engine!!.sync()
+        // Tolerate an offline sync — hydrate() already populated the cached vault.
+        runCatching { engine!!.sync() }.onFailure {
+            if (it is IOException) _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
+            else throw it
+        }
         toVault()
     }
 
@@ -144,9 +176,10 @@ class AndvariViewModel(private val store: SessionStore) : ViewModel() {
             deviceName = android.os.Build.MODEL ?: "android",
         )
         val s = a.register(req)
+        store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+        store.saveAccountKeys(s.accountKeys)
         bind(a, acct)
         engine!!.sync()
-        store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
         toVault()
     }
 
@@ -187,7 +220,9 @@ class AndvariViewModel(private val store: SessionStore) : ViewModel() {
     }
 
     fun lock() {
-        api?.close(); api = null; account = null; engine = null
+        // Close the engine (and its cache DB handle) but KEEP the file — the ciphertext
+        // cache is retained on lock (spec 05 T3); a relaunch hydrates it.
+        engine?.close(); api?.close(); api = null; account = null; engine = null
         _ui.value = _ui.value.copy(
             screen = Screen.Unlock(store.load()?.email ?: ""), items = emptyList(),
             notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
@@ -195,8 +230,12 @@ class AndvariViewModel(private val store: SessionStore) : ViewModel() {
     }
 
     fun signOut() {
+        val userId = store.load()?.userId
         viewModelScope.launch { runCatching { api?.logout() } }
-        store.clear(); api?.close(); api = null; account = null; engine = null
+        // Engine close MUST precede deleting the DB (Windows/holders); then wipe the file.
+        engine?.close(); api?.close(); api = null; account = null; engine = null
+        userId?.let { deleteCache(it) }
+        store.clear()
         _ui.value = _ui.value.copy(
             screen = Screen.Welcome, items = emptyList(),
             notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
@@ -246,8 +285,17 @@ class AndvariViewModel(private val store: SessionStore) : ViewModel() {
 
     // ---- helpers ----
     private fun bind(a: AndvariApi, acct: Account) {
+        engine?.close() // defensive: never leave two connections on one file
         api = a; account = acct
-        engine = SyncEngine(a, acct, InMemoryVaultCache())
+        // Durable cache unless policy forbids it (then delete any existing file). Hydrate
+        // the working set from disk BEFORE the first sync so a cold/offline start shows data.
+        val allowed = _ui.value.policy?.offlineCacheAllowed != false
+        val cache = if (allowed) {
+            sqliteVaultCache(cacheFile(acct.userId).absolutePath, acct.userId)
+        } else {
+            deleteCache(acct.userId); InMemoryVaultCache()
+        }
+        engine = SyncEngine(a, acct, cache).also { it.hydrate() }
     }
 
     private fun refreshItems() {
