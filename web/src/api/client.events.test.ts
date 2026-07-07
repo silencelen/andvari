@@ -162,6 +162,9 @@ describe("ApiClient.events reconnection", () => {
     const close = makeClient().events(vi.fn(), onRevoked);
     await flush();
     expect(onRevoked).toHaveBeenCalledTimes(1);
+    // A dead session at mint is plain EXPIRY as far as we can tell — the consumer's
+    // copy must not claim the device was revoked.
+    expect(onRevoked).toHaveBeenCalledWith("expired");
     expect(FakeWS.instances).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(600_000);
     await flush();
@@ -190,6 +193,7 @@ describe("ApiClient.events reconnection", () => {
     sock(0).onopen?.();
     sock(0).onmessage?.({ data: JSON.stringify({ type: "revoked" }) });
     expect(onRevoked).toHaveBeenCalledTimes(1);
+    expect(onRevoked).toHaveBeenCalledWith("revoked"); // the explicit frame IS a revocation
     sock(0).onclose?.(); // server closes the socket after revoking
     await vi.advanceTimersByTimeAsync(600_000);
     await flush();

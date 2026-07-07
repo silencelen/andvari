@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ApiClient, ApiError } from "../api/client";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ApiClient, ApiError, type SessionEndKind } from "../api/client";
 import type { AttachmentRef, ClientPolicy, ItemDoc } from "../api/types";
 import { toB64 } from "../crypto/bytes";
 import { generatePassword } from "../crypto/generator";
@@ -27,10 +27,14 @@ interface Props {
   policy: ClientPolicy | null;
   isAdmin: boolean;
   mustChangePassword: boolean;
+  /** F26: locks — keeps the persisted session; the user gets the Unlock card. */
   onLock: () => void;
+  /** F26: the session died server-side — full sign-out, not a lock. `kind` says
+   *  whether it was an explicit revocation or plain expiry (the copy differs). */
+  onRevoked: (kind: SessionEndKind) => void;
 }
 
-export function Vault({ account, store, client, policy, isAdmin, mustChangePassword, onLock }: Props) {
+export function Vault({ account, store, client, policy, isAdmin, mustChangePassword, onLock, onRevoked }: Props) {
   const [view, setView] = useState<View>("vault");
   const [items, setItems] = useState<VaultItem[]>(store.list());
   const [query, setQuery] = useState("");
@@ -39,10 +43,18 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   const [importOpen, setImportOpen] = useState(false);
   const [exportMode, setExportMode] = useState<ExportMode | null>(null);
   const [mustChange, setMustChange] = useState(mustChangePassword);
-  // Connectivity dot: optimistic (green) so a healthy unlock never flashes grey and a
-  // WS-stripping proxy where REST still works doesn't sit falsely grey; a *sustained*
-  // drop turns it grey (onDown is debounced ~2.5s in ApiClient.events).
-  const [online, setOnline] = useState(true);
+  // Connectivity, split in two so F29's fallback poll has an honest gate:
+  //  - wsUp: the dirty-bell socket state (onOpen/onDown from ApiClient.events);
+  //  - syncOk: whether the LAST sync attempt landed (marked PENDING at socket open
+  //    until the catch-up pull succeeds — green never sits over missed bells).
+  // The dot shows their conjunction. Both start optimistic (green) so a healthy unlock
+  // never flashes grey; a *sustained* WS drop turns it grey (onDown is debounced ~2.5s).
+  const [wsUp, setWsUp] = useState(true);
+  const [syncOk, setSyncOk] = useState(true);
+  const online = wsUp && syncOk;
+  const degraded = !wsUp || !syncOk;
+  // Manual "Sync now" (F29): disabled while a click-driven sync is in flight.
+  const [syncBusy, setSyncBusy] = useState(false);
   // Type-to-search on unlock is a desktop convenience; autofocusing on touch pops the
   // keyboard over the vault on every open, so gate it to fine (mouse/trackpad) pointers.
   const finePointer = useMemo(
@@ -62,31 +74,74 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
 
   const refresh = () => setItems(store.list());
 
+  // One sync path for the dirty-bell, every (re)open, the F29 offline poll, and the
+  // manual "Sync now" button. It never throws (the WS callbacks run un-awaited inside
+  // ApiClient.events), and it marks the sync healthy only AFTER a successful pull — so
+  // the dot never shows "Connected" over data we failed to fetch. A SyncIntegrityError
+  // (store's F31 rollback guard) lands in the same catch: state was kept, dot goes grey.
+  const syncNow = useCallback(async () => {
+    try {
+      await store.sync();
+      setItems(store.list());
+      setSyncOk(true);
+    } catch {
+      setSyncOk(false);
+    }
+  }, [store]);
+
   // WS dirty-bell → pull. The bell auto-reconnects (client.ts: backoff + fresh ticket per
   // attempt) and onOpen fires on EVERY (re)open, so the sync there catches both the mint
   // round-trip window and any bells missed while the socket was down (no replay server-side).
   // The returned close fn is the effect cleanup — no socket leaks across lock/unlock cycles.
   useEffect(() => {
-    // One sync path for both the dirty-bell and every (re)open. It never throws (the
-    // callbacks run un-awaited inside ApiClient.events), and it marks the dot green only
-    // AFTER a successful sync — so we never show "Connected" over data we failed to pull.
-    const syncNow = async () => {
-      try {
-        await store.sync();
-        refresh();
-        setOnline(true);
-      } catch {
-        setOnline(false);
-      }
-    };
     const close = client.events(
       () => void syncNow(), // dirty bell
-      () => onLock(), // revoked
-      () => void syncNow(), // (re)open — catch bells missed while the socket was down
-      () => setOnline(false), // sustained drop (debounced)
+      (kind) => onRevoked(kind), // session died server-side — full sign-out (F26)
+      () => {
+        setWsUp(true);
+        // PENDING until the catch-up pull lands: bells missed while the socket was
+        // down aren't caught yet, so the dot must not go green on open alone.
+        setSyncOk(false);
+        void syncNow();
+      },
+      () => setWsUp(false), // sustained drop (debounced)
     );
     return close;
-  }, [client, store, onLock]);
+  }, [client, syncNow, onRevoked]);
+
+  // F29: with the socket down (WS-stripping proxy, blocked ticket mint) the bell can't
+  // ring — and a bell-pull that FAILED with the socket healthy would otherwise never
+  // retry. While either is unhealthy, poll over plain HTTP: first tick ~5 s after the
+  // socket drops (a normal reconnect blip usually beats it) or ~10 s after a failed
+  // sync, then every 60 s. Gating on the combined `degraded` keeps the chain
+  // undisturbed across failures (a fail flips no state, so the cadence stays 60 s);
+  // it stops the moment both are healthy again (effect cleanup). Timeouts are
+  // chained, not an interval, so a slow sync never overlaps the next tick.
+  useEffect(() => {
+    if (!degraded) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const tick = async () => {
+      await syncNow();
+      if (!cancelled) timer = window.setTimeout(() => void tick(), 60_000);
+    };
+    timer = window.setTimeout(() => void tick(), wsUp ? 10_000 : 5_000);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+    // wsUp only picks the first delay — re-arming on its change would reset the chain.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [degraded, syncNow]);
+
+  const manualSync = async () => {
+    setSyncBusy(true);
+    try {
+      await syncNow();
+    } finally {
+      setSyncBusy(false);
+    }
+  };
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -160,10 +215,26 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
           </nav>
         </div>
         <div className="row">
-          <span className="muted" title={online ? "Connected" : "Offline — reconnecting"}>
+          <span
+            className="muted"
+            title={
+              online
+                ? "Connected"
+                : wsUp
+                  ? "Last sync failed — will retry"
+                  : "Live updates down — checking for changes every 60 s"
+            }
+          >
             <span className={`dot ${online ? "on" : "off"}`} />
             <span className="userid">{account.userId.slice(0, 8)}</span>
           </span>
+          {/* F29: while degraded, let the user pull over plain HTTP right now instead
+              of waiting out the poll window. */}
+          {!online && (
+            <button className="ghost" disabled={syncBusy} onClick={() => void manualSync()}>
+              {syncBusy ? "Syncing…" : "Sync now"}
+            </button>
+          )}
           <button className="ghost" onClick={onLock}>Lock</button>
         </div>
       </div>
