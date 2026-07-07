@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { AttachmentRef, ClientPolicy, ItemDoc } from "../api/types";
 import { toB64 } from "../crypto/bytes";
@@ -39,7 +39,16 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   const [importOpen, setImportOpen] = useState(false);
   const [exportMode, setExportMode] = useState<ExportMode | null>(null);
   const [mustChange, setMustChange] = useState(mustChangePassword);
+  // Connectivity dot: optimistic (green) so a healthy unlock never flashes grey and a
+  // WS-stripping proxy where REST still works doesn't sit falsely grey; a *sustained*
+  // drop turns it grey (onDown is debounced ~2.5s in ApiClient.events).
   const [online, setOnline] = useState(true);
+  // Type-to-search on unlock is a desktop convenience; autofocusing on touch pops the
+  // keyboard over the vault on every open, so gate it to fine (mouse/trackpad) pointers.
+  const finePointer = useMemo(
+    () => typeof window !== "undefined" && !!window.matchMedia && window.matchMedia("(pointer: fine)").matches,
+    [],
+  );
 
   // spec 07 (SHOULD): sessions arriving via the break-glass PUBLIC origin hide both
   // export entry points (T6/T11 posture — don't advertise bulk extraction on the
@@ -58,16 +67,23 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   // round-trip window and any bells missed while the socket was down (no replay server-side).
   // The returned close fn is the effect cleanup — no socket leaks across lock/unlock cycles.
   useEffect(() => {
+    // One sync path for both the dirty-bell and every (re)open. It never throws (the
+    // callbacks run un-awaited inside ApiClient.events), and it marks the dot green only
+    // AFTER a successful sync — so we never show "Connected" over data we failed to pull.
+    const syncNow = async () => {
+      try {
+        await store.sync();
+        refresh();
+        setOnline(true);
+      } catch {
+        setOnline(false);
+      }
+    };
     const close = client.events(
-      async () => {
-        await store.sync();
-        refresh();
-      },
-      () => onLock(),
-      async () => {
-        await store.sync();
-        refresh();
-      },
+      () => void syncNow(), // dirty bell
+      () => onLock(), // revoked
+      () => void syncNow(), // (re)open — catch bells missed while the socket was down
+      () => setOnline(false), // sustained drop (debounced)
     );
     return close;
   }, [client, store, onLock]);
@@ -144,7 +160,10 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
           </nav>
         </div>
         <div className="row">
-          <span className="muted"><span className={`dot ${online ? "on" : "off"}`} />{account.userId.slice(0, 8)}</span>
+          <span className="muted" title={online ? "Connected" : "Offline — reconnecting"}>
+            <span className={`dot ${online ? "on" : "off"}`} />
+            <span className="userid">{account.userId.slice(0, 8)}</span>
+          </span>
           <button className="ghost" onClick={onLock}>Lock</button>
         </div>
       </div>
@@ -202,16 +221,17 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
         ) : (
           <>
             <div className="toolbar">
-              <input placeholder="Search vault…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus />
+              <input placeholder="Search vault…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus={finePointer} />
               <button className="ghost" onClick={() => startNew("login")}>+ Login</button>
               <button className="ghost" onClick={() => startNew("note")}>+ Note</button>
               <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setExportMode(null); setImportOpen(true); }}>Import CSV</button>
-              {/* Hidden on the public break-glass origin (spec 07 — see exportAllowed). */}
+              {/* Hidden on the public break-glass origin (spec 07 — see exportAllowed). The two
+                  export destinations live under one menu so the toolbar can't crush the search box. */}
               {exportAllowed && (
-                <>
-                  <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("backup"); }}>Back up vault…</button>
-                  <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("csv"); }}>Export for another password manager…</button>
-                </>
+                <ExportMenu
+                  onBackup={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("backup"); }}
+                  onCsv={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("csv"); }}
+                />
               )}
             </div>
             {filtered.length === 0 ? (
@@ -239,6 +259,76 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Toolbar "Export ▾" disclosure — folds the two export destinations under one
+ *  button (they were the widest toolbar items and crushed the search box in 0.4.0).
+ *  Closes on outside-click, Escape, or scroll; supports arrow-key menu navigation;
+ *  flips its horizontal anchor so it never renders off the viewport edge on a phone. */
+function ExportMenu({ onBackup, onCsv }: { onBackup: () => void; onCsv: () => void }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  const close = (returnFocus: boolean) => {
+    setOpen(false);
+    if (returnFocus) btnRef.current?.focus();
+  };
+
+  const toggle = () => setOpen((o) => !o);
+
+  // Clamp the (possibly wider-than-button) menu into the viewport regardless of where the
+  // wrapped toolbar put the trigger — the long "Export…" label makes it ~315px, which
+  // overflows a phone if simply anchored to one side. Runs pre-paint so there's no flicker.
+  useLayoutEffect(() => {
+    const m = menuRef.current;
+    if (!open || !m) return;
+    m.style.transform = "";
+    const r = m.getBoundingClientRect();
+    let shift = 0;
+    if (r.right > window.innerWidth - 8) shift = window.innerWidth - 8 - r.right;
+    if (r.left + shift < 8) shift = 8 - r.left;
+    if (shift) m.style.transform = `translateX(${Math.round(shift)}px)`;
+  }, [open]);
+
+  // Focus the first item when the menu opens (keyboard menu semantics).
+  useEffect(() => {
+    if (open) itemRefs.current[0]?.focus();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => { if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false); };
+    const onScroll = () => setOpen(false);
+    document.addEventListener("mousedown", onDoc);
+    // Scroll (esp. touch) would otherwise slide the open menu over the sticky appbar.
+    window.addEventListener("scroll", onScroll, true);
+    return () => { document.removeEventListener("mousedown", onDoc); window.removeEventListener("scroll", onScroll, true); };
+  }, [open]);
+
+  const onMenuKey = (e: React.KeyboardEvent) => {
+    const items = itemRefs.current.filter(Boolean) as HTMLButtonElement[];
+    const idx = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === "Escape") { e.preventDefault(); close(true); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); items[(idx + 1 + items.length) % items.length]?.focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); items[(idx - 1 + items.length) % items.length]?.focus(); }
+  };
+
+  const choose = (fn: () => void) => { close(false); fn(); };
+
+  return (
+    <div className="menu-wrap" ref={wrapRef}>
+      <button ref={btnRef} type="button" className="ghost" aria-haspopup="menu" aria-expanded={open} onClick={toggle}>Export ▾</button>
+      {open && (
+        <div ref={menuRef} className="menu" role="menu" onKeyDown={onMenuKey}>
+          <button ref={(el) => { itemRefs.current[0] = el; }} type="button" role="menuitem" onClick={() => choose(onBackup)}>Back up vault…</button>
+          <button ref={(el) => { itemRefs.current[1] = el; }} type="button" role="menuitem" onClick={() => choose(onCsv)}>Export for another password manager…</button>
+        </div>
+      )}
     </div>
   );
 }
