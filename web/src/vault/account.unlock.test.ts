@@ -74,6 +74,16 @@ describe("Account.unlock identityPub cross-check (F31 / spec 01 §5)", () => {
     expect(err).toBeInstanceOf(IdentityMismatchError);
   });
 
+  it('a MALFORMED identityPub ("AAAA=") is tampering — never "wrong master password"', async () => {
+    // fromB64 throws CryptoError on undecodable base64url; unguarded, that would ride
+    // Welcome's fallback branch and blame the user's password for server tampering.
+    const { userId, keys } = await enrolledKeys();
+    const err = await Account.unlock(userId, PASSWORD, { ...keys, identityPub: "AAAA=" }).catch((e) => e);
+    expect(err).toBeInstanceOf(IdentityMismatchError);
+    expect(err).not.toBeInstanceOf(CryptoError);
+    expect((err as Error).message).not.toMatch(/password/i);
+  });
+
   it("a plain wrong password still reads as CryptoError, not tampering", async () => {
     const { userId, keys } = await enrolledKeys();
     const err = await Account.unlock(userId, "not the password", keys).catch((e) => e);

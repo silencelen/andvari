@@ -42,11 +42,14 @@ function fakeAuthServer(current: Tokens, opts: { beforeRotate?: () => Promise<vo
     refreshPosts: 0,
     reuseDetected: false,
     dataAuths: [] as string[],
+    /** When set, the refresh endpoint answers this status WITHOUT rotating (transient 502 etc.). */
+    refreshFailStatus: null as number | null,
   };
   const fetchImpl = async (url: string | URL, init?: RequestInit): Promise<Response> => {
     const u = String(url);
     if (u.endsWith("/api/v1/auth/refresh")) {
       state.refreshPosts++;
+      if (state.refreshFailStatus !== null) return jsonResp(state.refreshFailStatus, { error: "unavailable" });
       const body = JSON.parse(String(init?.body)) as { refreshToken: string };
       if (body.refreshToken !== state.current.refreshToken) {
         state.reuseDetected = true; // server heuristic: replayed token → device revoked
@@ -138,12 +141,14 @@ describe("ApiClient single-flight token refresh (F25)", () => {
     vi.stubGlobal("fetch", vi.fn(server.fetchImpl));
     vi.stubGlobal("navigator", {
       locks: {
-        request: vi.fn(async (name: string, cb: (lock: unknown) => Promise<boolean>) => {
-          events.push(`lock:${name}`);
-          const out = await cb(null);
-          events.push("unlock");
-          return out;
-        }),
+        request: vi.fn(
+          async (name: string, o: { signal?: AbortSignal }, cb: (lock: unknown) => Promise<boolean>) => {
+            events.push(`lock:${name}${o?.signal ? ":bounded" : ""}`);
+            const out = await cb(null);
+            events.push("unlock");
+            return out;
+          },
+        ),
       },
     });
     const client = new ApiClient("http://server", { ...STALE }, () => {}, () => {
@@ -153,8 +158,72 @@ describe("ApiClient single-flight token refresh (F25)", () => {
 
     await client.sync(0);
 
-    expect(events).toEqual(["lock:andvari-refresh", "read-persisted", "unlock"]);
+    // The wait is BOUNDED (a signal is passed) and the re-read happens inside the lock.
+    expect(events).toEqual(["lock:andvari-refresh:bounded", "read-persisted", "unlock"]);
     expect(server.state.rotations).toBe(1);
+    expect(server.state.reuseDetected).toBe(false);
+  });
+
+  it("a timed-out wait for another tab's lock falls back to an unlocked rotation (no fleet stall)", async () => {
+    const server = fakeAuthServer({ accessToken: "a0", refreshToken: "r0" });
+    vi.stubGlobal("fetch", vi.fn(server.fetchImpl));
+    // A wedged holder: the lock request rejects (as the aborted bounded wait does)
+    // WITHOUT ever granting — this tab must still recover on its own.
+    vi.stubGlobal("navigator", {
+      locks: { request: vi.fn(() => Promise.reject(new DOMException("timed out", "TimeoutError"))) },
+    });
+    const client = new ApiClient("http://server", { ...STALE });
+
+    await client.sync(0);
+    expect(server.state.rotations).toBe(1); // rotated anyway, without cross-tab exclusion
+    expect(server.state.reuseDetected).toBe(false);
+  });
+
+  it("a failure INSIDE the granted lock propagates — never retried as a second rotation", async () => {
+    // If refreshNow's own fetch dies (e.g. its 15 s timeout) the POST may have LANDED
+    // server-side; blindly re-running it unlocked would replay the rotation → revoked.
+    let refreshPosts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        if (String(url).endsWith("/api/v1/auth/refresh")) {
+          refreshPosts++;
+          throw new DOMException("timed out", "TimeoutError");
+        }
+        return jsonResp(401, { error: "unauthorized" });
+      }),
+    );
+    vi.stubGlobal("navigator", {
+      locks: {
+        request: vi.fn(async (_n: string, _o: unknown, cb: (lock: unknown) => Promise<boolean>) => cb(null)),
+      },
+    });
+    const client = new ApiClient("http://server", { ...STALE });
+
+    await expect(client.sync(0)).rejects.toThrow(/timed out/);
+    expect(refreshPosts).toBe(1); // the granted-path failure was NOT re-run unlocked
+    expect(client.getTokens()).toEqual(STALE); // and the pair survives a transport failure
+  });
+
+  it("a transient non-2xx refresh (502) keeps the pair — a later retry still rotates", async () => {
+    const server = fakeAuthServer({ accessToken: "a0", refreshToken: "r0" });
+    vi.stubGlobal("fetch", vi.fn(server.fetchImpl));
+    const onTokens = vi.fn();
+    const client = new ApiClient("http://server", { ...STALE }, onTokens);
+
+    server.state.refreshFailStatus = 502; // proxy having a moment — NOT a refusal
+    const err = await client.sync(0).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(401); // the original data 401 surfaces to the caller
+    expect(client.getTokens()).toEqual(STALE); // the still-valid pair was NOT destroyed
+    // …and null was never persisted (that would 401 the next WS ticket mint and
+    // cascade a false "session ended" sign-out across every tab).
+    expect(onTokens).not.toHaveBeenCalled();
+
+    server.state.refreshFailStatus = null; // server recovers
+    await client.sync(0);
+    expect(server.state.rotations).toBe(1); // the SAME pair still rotates fine
+    expect(client.getTokens()).toEqual({ accessToken: "a1", refreshToken: "r1" });
     expect(server.state.reuseDetected).toBe(false);
   });
 

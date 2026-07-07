@@ -62,15 +62,26 @@ export function installId(): string {
 }
 
 export function makeClient(session: Session | null, baseUrl: string): ApiClient {
+  // SAME-USER guard: capture WHO this client was created for. On a shared browser the
+  // persisted session can come to belong to a DIFFERENT account (user X's frozen tab
+  // wakes after user Y signed in) — X's client must neither adopt Y's token pair nor
+  // write X's rotations into Y's persisted session. A client created without a session
+  // (fresh sign-in form) never adopts; its post-login rotations still persist because
+  // by then the persisted session is its own (sign-in replaces it atomically).
+  const userId = session?.userId ?? null;
   return new ApiClient(
     baseUrl,
     session?.tokens ?? null,
     (tokens) => {
       const cur = loadSession();
-      if (cur) saveSession({ ...cur, tokens });
+      if (cur && (userId === null || cur.userId === userId)) saveSession({ ...cur, tokens });
     },
     // F25 cross-tab refresh dedup: lets the client re-read, inside the Web Lock, a
-    // pair another tab already rotated and adopt it instead of replaying ours.
-    () => loadSession()?.tokens ?? null,
+    // pair another tab already rotated and adopt it instead of replaying ours —
+    // only when that pair belongs to the SAME user this client was created for.
+    () => {
+      const cur = loadSession();
+      return userId !== null && cur?.userId === userId ? cur.tokens : null;
+    },
   );
 }
