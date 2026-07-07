@@ -34,11 +34,19 @@ class DesktopSessionStore {
     val cacheDir: File get() = dir
 
     @Serializable
-    private data class Prefs(val baseUrl: String = DEFAULT_BASE_URL)
+    private data class Prefs(val baseUrl: String = DEFAULT_BASE_URL, val cacheAllowed: Boolean = true)
+
+    private fun prefs(): Prefs = runCatching { json.decodeFromString(Prefs.serializer(), prefsFile.readText()) }.getOrDefault(Prefs())
+    private fun writePrefs(p: Prefs) { dir.mkdirs(); prefsFile.writeText(json.encodeToString(Prefs.serializer(), p)) }
 
     var baseUrl: String
-        get() = runCatching { json.decodeFromString(Prefs.serializer(), prefsFile.readText()).baseUrl }.getOrDefault(DEFAULT_BASE_URL)
-        set(v) { dir.mkdirs(); prefsFile.writeText(json.encodeToString(Prefs.serializer(), Prefs(v))) }
+        get() = prefs().baseUrl
+        set(v) { writePrefs(prefs().copy(baseUrl = v)) }
+
+    /** Last-known org offlineCacheAllowed — honored when a cold start is offline (spec 02 §8). */
+    var cacheAllowed: Boolean
+        get() = prefs().cacheAllowed
+        set(v) { writePrefs(prefs().copy(cacheAllowed = v)) }
 
     fun load(): DesktopSession? =
         runCatching { json.decodeFromString(DesktopSession.serializer(), file.readText()) }.getOrNull()
@@ -64,6 +72,8 @@ class DesktopSessionStore {
 
     fun loadAccountKeys(): AccountKeys? =
         runCatching { json.decodeFromString(AccountKeys.serializer(), keysFile.readText()) }.getOrNull()
+
+    fun clearAccountKeys() { keysFile.delete() }
 
     fun clear() { file.delete(); keysFile.delete() }
 

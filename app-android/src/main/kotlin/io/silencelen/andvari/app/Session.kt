@@ -28,6 +28,15 @@ class SessionStore(context: Context) {
         get() = prefs.getString("baseUrl", DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
         set(v) = prefs.edit().putString("baseUrl", v).apply()
 
+    /**
+     * Last-known org `offlineCacheAllowed`, persisted so a forbidding policy is still
+     * honored when the app cold-starts OFFLINE (policy fetch fails → this is the fallback,
+     * spec 02 §8). Fail-open default true until the first policy is seen.
+     */
+    var cacheAllowed: Boolean
+        get() = prefs.getBoolean("cacheAllowed", true)
+        set(v) = prefs.edit().putBoolean("cacheAllowed", v).apply()
+
     fun load(): Session? {
         val userId = prefs.getString("userId", null) ?: return null
         return Session(
@@ -65,6 +74,8 @@ class SessionStore(context: Context) {
 
     fun loadAccountKeys(): AccountKeys? =
         prefs.getString("accountKeys", null)?.let { runCatching { json.decodeFromString(AccountKeys.serializer(), it) }.getOrNull() }
+
+    fun clearAccountKeys() { prefs.edit().remove("accountKeys").apply() }
 
     fun clear() {
         prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove("accountKeys").apply()

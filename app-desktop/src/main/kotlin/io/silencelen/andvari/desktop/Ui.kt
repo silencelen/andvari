@@ -376,6 +376,22 @@ private fun SettingsScreen(state: DesktopState) {
         TextButton(onClick = state::closeSettings) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
         Text("Settings", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(16.dp))
+        state.identityCode()?.let { idCode ->
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("My identity code", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "Someone sharing a vault with you will ask you to read this out (in person or by phone) before they send you the key.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    SelectionContainer {
+                        Text(idCode.chunked(4).joinToString(" "), style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Monospace)
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
                 Text("Server TOTP", style = MaterialTheme.typography.titleLarge)

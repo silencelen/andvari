@@ -39,7 +39,7 @@ class SyncEngine(
      */
     fun hydrate() {
         for (g in cache.grants()) {
-            if (g.role.isNotEmpty() && !account.hasVault(g.vaultId)) runCatching { account.addPersonalGrant(g) }
+            runCatching { account.addGrant(g) } // role applies unconditionally; key opens if missing
         }
         for (v in cache.vaults()) {
             if (v.type == "personal" && account.hasVault(v.vaultId)) account.setPersonalVault(v.vaultId)
@@ -80,15 +80,30 @@ class SyncEngine(
             throw ApiException(409, "rev_regression", "unsolicited full snapshot — possible rollback; local state kept")
         }
 
+        try {
+            applyPull(resp, resyncing)
+        } catch (t: Throwable) {
+            // The DB tx rolled back to a consistent state, but the in-memory working set +
+            // Account key map were mutated eagerly. Rebuild them from the (rolled-back)
+            // durable rows so the live session matches disk (data is intact; the next sync
+            // re-applies the delta since the cursor also rolled back).
+            runCatching { cache.evictDecrypted(); hydrate() }
+            throw t
+        }
+
+        materializeOutstandingConflicts()
+    }
+
+    private fun applyPull(resp: io.silencelen.andvari.core.model.SyncResponse, resyncing: Boolean) {
         cache.atomically {
             if (resyncing) cache.clear() // resets cursor + rows; PRESERVES the queue (spec 03 §4)
             for (grant in resp.grants) {
                 // Persist UNCONDITIONALLY (ciphertext rows; deltas never re-send) — the
                 // in-memory key-open below may fail/skip, hydrate() retries from disk.
                 cache.upsertGrant(grant)
-                if (grant.role.isNotEmpty() && !account.hasVault(grant.vaultId)) {
-                    runCatching { account.addPersonalGrant(grant) }
-                }
+                // addGrant applies role changes even when the VK is already held (a role
+                // change re-delivers the grant precisely for this).
+                runCatching { account.addGrant(grant) }
             }
             for (vault in resp.vaults) {
                 cache.upsertVault(vault)
@@ -115,8 +130,6 @@ class SyncEngine(
             }
             cache.setCursor(resp.rev)
         }
-
-        materializeOutstandingConflicts()
     }
 
     /**
@@ -132,6 +145,9 @@ class SyncEngine(
         val known = envelopes.mapTo(HashSet()) { it.itemId }
         for (item in envelopes) {
             if (!item.conflict || item.deleted) continue
+            // A reader must not materialize (its push would be denied, spec 03 §5) — the
+            // flag waits for a writer/owner on some other device.
+            if (account.roleFor(item.vaultId) == "reader") continue
             val winner = cache.getItem(item.itemId) ?: continue // undecryptable → wait
             val copyId = deterministicCopyId(item.itemId, item.rev)
             if (copyId in known || cache.getItem(copyId) != null) continue
@@ -167,22 +183,24 @@ class SyncEngine(
     fun deleteMutation(itemId: String, vaultId: String, baseItemRev: Long): Mutation =
         Mutation(account.newItemId(), "delete", itemId, vaultId, baseItemRev, null)
 
-    /** Create or update an item, then reconcile. */
-    suspend fun save(itemId: String?, doc: ItemDoc) = saveWithUploads(itemId, doc, emptyList())
+    /** Create or update an item, then reconcile. New items go to [vaultId] (default personal). */
+    suspend fun save(itemId: String?, doc: ItemDoc, vaultId: String? = null) = saveWithUploads(itemId, doc, emptyList(), vaultId)
 
     /**
      * Blob-first save (spec 02 §6): encrypt + upload every new attachment under the
-     * (possibly fresh) itemId, THEN push the item that references them.
+     * (possibly fresh) itemId, THEN push the item that references them. An EXISTING item
+     * never changes vaults (its blob AD binds to the vault; the server enforces
+     * vault_mismatch) — edits always target the item's own vault, wherever it lives.
      */
-    suspend fun saveWithUploads(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload>) {
-        val vaultId = account.personalVaultId
+    suspend fun saveWithUploads(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload>, vaultId: String? = null) {
         val existing = itemId?.let { cache.getItem(it) }
+        val effectiveVault = existing?.vaultId ?: vaultId ?: account.personalVaultId
         val id = itemId ?: account.newItemId()
         for (u in uploads) {
             val enc = Attachments.encrypt(account.cryptoProvider(), Bytes.fromB64(u.ref.fileKey), u.data)
-            api.uploadAttachment(u.ref.id, id, vaultId, enc.header + enc.ciphertext)
+            api.uploadAttachment(u.ref.id, id, effectiveVault, enc.header + enc.ciphertext)
         }
-        push(listOf(putMutation(id, vaultId, doc, existing?.rev ?: 0)))
+        push(listOf(putMutation(id, effectiveVault, doc, existing?.rev ?: 0)))
         pull()
     }
 

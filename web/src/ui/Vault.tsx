@@ -7,14 +7,15 @@ import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import { randomBytes } from "../crypto/provider";
 import { base32Decode, parseOtpauthUri, totpCode, totpSecondsRemaining } from "../crypto/totp";
 import type { Account } from "../vault/account";
-import type { PendingUpload, VaultItem, VaultStore } from "../vault/store";
+import type { PendingUpload, VaultInfo, VaultItem, VaultStore } from "../vault/store";
 import { Admin } from "./Admin";
 import { humanSize } from "./format";
 import { Health } from "./Health";
 import { Settings } from "./Settings";
+import { Sharing } from "./Sharing";
 import { estimateStrength } from "./strength";
 
-type View = "vault" | "health" | "settings" | "admin";
+type View = "vault" | "sharing" | "health" | "settings" | "admin";
 
 interface Props {
   account: Account;
@@ -60,6 +61,17 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
     return items.filter((it) => it.doc.name.toLowerCase().includes(q) || (it.doc.login?.username ?? "").toLowerCase().includes(q) || (it.doc.login?.uris?.[0] ?? "").toLowerCase().includes(q));
   }, [items, query]);
 
+  // Vault metadata for badges + the new-item picker (recomputed whenever items refresh).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const vaultsInfo = useMemo(() => store.vaults(), [store, items]);
+  const vaultNameById = useMemo(() => new Map(vaultsInfo.map((v) => [v.vaultId, v.name])), [vaultsInfo]);
+  // New items may target the personal vault or any shared vault we can write to.
+  const newItemVaultChoices = useMemo(
+    () => vaultsInfo.filter((v) => v.type === "personal" || v.role === "owner" || v.role === "writer"),
+    [vaultsInfo],
+  );
+  const hasWritableShared = newItemVaultChoices.some((v) => v.type !== "personal");
+
   const startNew = (type: "login" | "note") => {
     setSelected(null);
     setEditing(type === "login" ? { type, name: "", login: { username: "", password: "", uris: [""] } } : { type, name: "", notes: "" });
@@ -70,8 +82,8 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
     setEditing(null);
   };
 
-  const save = async (doc: ItemDoc, newFiles: PendingUpload[], onProgress?: (done: number, total: number) => void) => {
-    await store.save(selected, doc, newFiles, onProgress);
+  const save = async (doc: ItemDoc, newFiles: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => {
+    await store.save(selected, doc, newFiles, onProgress, vaultId);
     refresh();
     setEditing(null);
     setSelected(null);
@@ -102,6 +114,7 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
           <span className="brand"><span className="a-mark">and</span>vari</span>
           <nav className="nav">
             {navBtn("vault", "Vault")}
+            {navBtn("sharing", "Sharing")}
             {navBtn("health", "Health")}
             {navBtn("settings", "Settings")}
             {isAdmin && navBtn("admin", "Admin")}
@@ -123,18 +136,28 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
       <div className="wrap">
         {view === "health" ? (
           <Health store={store} client={client} onOpenItem={goToItem} />
+        ) : view === "sharing" ? (
+          <Sharing account={account} store={store} client={client} onSynced={refresh} />
         ) : view === "settings" ? (
           <Settings client={client} account={account} policy={policy} onPasswordChanged={() => setMustChange(false)} />
         ) : view === "admin" && isAdmin ? (
           <Admin client={client} />
         ) : editing ? (
-          <Editor initial={editing} policy={policy} onSave={save} onCancel={() => setEditing(null)} />
+          <Editor
+            initial={editing}
+            policy={policy}
+            vaultChoices={selected === null && hasWritableShared ? newItemVaultChoices : undefined}
+            onSave={save}
+            onCancel={() => setEditing(null)}
+          />
         ) : current ? (
           <Detail
             item={current}
             client={client}
             store={store}
             policy={policy}
+            readOnly={account.roleFor(current.vaultId) === "reader"}
+            vaultName={current.vaultId !== account.personalVaultId ? vaultNameById.get(current.vaultId) : undefined}
             onEdit={() => setEditing(current.doc)}
             onDelete={() => remove(current.itemId)}
             onBack={() => setSelected(null)}
@@ -160,6 +183,9 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
                       <div className="name">{it.doc.name || "(untitled)"}</div>
                       <div className="sub">{it.doc.type === "login" ? it.doc.login?.username || it.doc.login?.uris?.[0] || "login" : "secure note"}</div>
                     </span>
+                    {it.vaultId !== account.personalVaultId && (
+                      <span className="tag" style={{ color: "var(--gold)" }}>{vaultNameById.get(it.vaultId) ?? "shared"}</span>
+                    )}
                     <span className="tag">{it.doc.type}</span>
                   </button>
                 ))}
@@ -187,14 +213,18 @@ function useCopy(clearSeconds: number) {
   return { flash, copy };
 }
 
-function Detail({ item, client, store, policy, onEdit, onDelete, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; onEdit: () => void; onDelete: () => void; onBack: () => void }) {
+function Detail({ item, client, store, policy, readOnly, vaultName, onEdit, onDelete, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; onEdit: () => void; onDelete: () => void; onBack: () => void }) {
   const { flash, copy } = useCopy(policy?.clipboardClearSeconds ?? 30);
   const doc = item.doc;
   return (
     <div className="sheet">
       <button className="link" onClick={onBack}>← back to vault</button>
       <h2 style={{ marginTop: 12 }}>{doc.name}</h2>
-      <div className="muted" style={{ marginBottom: 18 }}>{doc.type === "login" ? "Login" : "Secure note"}</div>
+      <div className="muted" style={{ marginBottom: 18 }}>
+        {doc.type === "login" ? "Login" : "Secure note"}
+        {vaultName && <> · in “{vaultName}”</>}
+        {readOnly && <> · view only</>}
+      </div>
 
       {doc.type === "login" && doc.login && (
         <>
@@ -236,11 +266,14 @@ function Detail({ item, client, store, policy, onEdit, onDelete, onBack }: { ite
 
       {(doc.attachments?.length ?? 0) > 0 && <AttachmentList item={item} store={store} />}
 
-      <div className="actions">
-        <button className="primary" onClick={onEdit}>Edit</button>
-        <div className="spacer" />
-        <button className="ghost" onClick={onDelete} style={{ color: "var(--danger)" }}>Delete</button>
-      </div>
+      {/* A reader-role member cannot edit/delete/attach — the push would be denied. */}
+      {!readOnly && (
+        <div className="actions">
+          <button className="primary" onClick={onEdit}>Edit</button>
+          <div className="spacer" />
+          <button className="ghost" onClick={onDelete} style={{ color: "var(--danger)" }}>Delete</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -353,8 +386,10 @@ function HealthLine({ password, client }: { password: string; client: ApiClient 
   );
 }
 
-function Editor({ initial, policy, onSave, onCancel }: { initial: ItemDoc; policy: ClientPolicy | null; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void) => Promise<void>; onCancel: () => void }) {
+function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: ItemDoc; policy: ClientPolicy | null; vaultChoices?: VaultInfo[]; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => Promise<void>; onCancel: () => void }) {
   const [doc, setDoc] = useState<ItemDoc>(structuredClone(initial));
+  // New items only: which vault to create in (existing items never move vaults).
+  const [vaultId, setVaultId] = useState<string | undefined>(vaultChoices?.[0]?.vaultId);
   const [pending, setPending] = useState<PendingUpload[]>([]);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [fileErr, setFileErr] = useState("");
@@ -410,7 +445,7 @@ function Editor({ initial, policy, onSave, onCancel }: { initial: ItemDoc; polic
     setSaveErr("");
     setProgress(null);
     try {
-      await onSave(doc, pending, (done, total) => setProgress({ done, total }));
+      await onSave(doc, pending, (done, total) => setProgress({ done, total }), vaultId);
     } catch (err) {
       setSaveErr(err instanceof ApiError && err.status === 413 ? `Save rejected: ${err.message || "attachment quota exceeded"}.` : "Save failed — nothing was changed.");
     } finally {
@@ -426,6 +461,18 @@ function Editor({ initial, policy, onSave, onCancel }: { initial: ItemDoc; polic
     <form className="sheet" onSubmit={submit}>
       <button type="button" className="link" onClick={onCancel}>← cancel</button>
       <h2 style={{ marginTop: 12 }}>{initial.name ? "Edit" : isLogin ? "New login" : "New note"}</h2>
+      {vaultChoices && vaultChoices.length > 1 && (
+        <div className="field">
+          <label>Vault</label>
+          <select value={vaultId} onChange={(e) => setVaultId(e.target.value)}>
+            {vaultChoices.map((v) => (
+              <option key={v.vaultId} value={v.vaultId}>
+                {v.name}{v.type === "personal" ? "" : " (shared)"}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className="field">
         <label>Name</label>
         <input autoFocus value={doc.name} onChange={(e) => setDoc({ ...doc, name: e.target.value })} />

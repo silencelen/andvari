@@ -5,6 +5,8 @@ import type {
   AttachmentMeta,
   AuditEvent,
   ClientPolicy,
+  CreateVaultRequest,
+  CreateVaultResponse,
   InviteResponse,
   PasswordChangeRequest,
   PreloginResponse,
@@ -16,6 +18,9 @@ import type {
   TotpStatus,
   Mutation,
   AccountKeys,
+  UserLookupResponse,
+  VaultMemberAdd,
+  VaultMemberSummary,
   WsTicketResponse,
 } from "./types";
 
@@ -162,6 +167,32 @@ export class ApiClient {
 
   push(mutations: Mutation[]) {
     return this.json<PushResponse>("POST", "/api/v1/sync/push", { mutations });
+  }
+
+  // ---- shared vaults (spec 03 §10) — refused on the public break-glass origin ----
+
+  createVault(req: CreateVaultRequest) {
+    return this.json<CreateVaultResponse>("POST", "/api/v1/vaults", req);
+  }
+
+  lookupUser(email: string) {
+    return this.json<UserLookupResponse>("POST", "/api/v1/users/lookup", { email });
+  }
+
+  vaultMembers(vaultId: string) {
+    return this.json<VaultMemberSummary[]>("GET", `/api/v1/vaults/${vaultId}/members`);
+  }
+
+  addVaultMember(vaultId: string, body: VaultMemberAdd) {
+    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${vaultId}/members`, body);
+  }
+
+  setVaultMemberRole(vaultId: string, userId: string, role: string) {
+    return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${vaultId}/members/${userId}`, { role });
+  }
+
+  removeVaultMember(vaultId: string, userId: string) {
+    return this.json<CreateVaultResponse>("DELETE", `/api/v1/vaults/${vaultId}/members/${userId}`);
   }
 
   putEscrow(sealed: string, fingerprint: string) {

@@ -59,6 +59,13 @@ interface VaultCache {
     /** Runs [block] atomically where the impl can (single SQLite tx); default = plain call. */
     fun atomically(block: () -> Unit) = block()
 
+    /**
+     * Drop the in-memory decrypted working set WITHOUT touching the durable rows —
+     * used to reconcile the live view back to disk after a rolled-back [atomically]
+     * (the DB is consistent; the caller re-decrypts from [envelopes]).
+     */
+    fun evictDecrypted() {}
+
     fun close() {}
 
     /** Durable outbound queue — mutations survive restart until the server confirms. */
@@ -109,6 +116,8 @@ class InMemoryVaultCache : VaultCache {
     override fun clear() {
         items.clear(); wire.clear(); grantRows.clear(); vaultRows.clear(); cursor = 0
     }
+
+    override fun evictDecrypted() { items.clear() } // envelopes (wire) retained for re-decrypt
 
     override fun enqueue(mutation: Mutation) { queue[mutation.mutationId] = mutation }
     override fun pending(): List<Mutation> = queue.values.toList()

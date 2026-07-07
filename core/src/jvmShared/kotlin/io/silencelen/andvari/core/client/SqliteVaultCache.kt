@@ -152,6 +152,8 @@ class SqliteVaultCache(private val db: SqlBox, private val accountUserId: String
 
     override fun atomically(block: () -> Unit): Unit = lock.withLock { db.tx(block) }
 
+    override fun evictDecrypted(): Unit = lock.withLock { items.clear() } // durable rows kept
+
     override fun close(): Unit = lock.withLock { db.close() }
 
     override fun enqueue(mutation: Mutation): Unit = lock.withLock {
