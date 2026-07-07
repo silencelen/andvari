@@ -264,9 +264,11 @@ class Repo(val db: Db) {
 
     // policy
     fun policyJson(): String? = db.read { it.queryOne("SELECT json FROM policies WHERE id=1") { rs -> rs.getString(1) } }
-    fun setPolicyJson(value: String) = db.tx {
-        it.exec("INSERT INTO policies(id,json) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json", value)
+    fun setPolicyJsonOn(c: Connection, value: String) {
+        c.exec("INSERT INTO policies(id,json) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json", value)
     }
+
+    fun setPolicyJson(value: String) = db.tx { setPolicyJsonOn(it, value) }
 
     // hibp cache
     fun hibpCached(prefix: String, maxAgeMs: Long): String? = db.read {

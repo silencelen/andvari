@@ -9,6 +9,7 @@ import io.ktor.utils.io.readAvailable
 import java.io.File
 import java.security.MessageDigest
 import java.sql.Connection
+import java.util.concurrent.ConcurrentHashMap
 
 class PayloadTooLarge(val reason: String) : Exception()
 
@@ -18,8 +19,26 @@ class PayloadTooLarge(val reason: String) : Exception()
  * ciphertext chunk stream lives on disk at blobDir/{attachmentId}. Upload is
  * blob-first: rows/files that no live item references are GC'd after 24 h.
  */
-class AttachmentStore(private val repo: Repo, blobDirPath: String) {
+class AttachmentStore(
+    private val repo: Repo,
+    blobDirPath: String,
+    private val maxConcurrentUploadsPerUser: Int = 4,
+) {
     private val dir = File(blobDirPath).apply { mkdirs() }
+
+    /**
+     * Per-user in-flight upload accounting (LOW-6): a concurrency cap plus streamed-but-
+     * uncommitted bytes counted toward the user quota mid-stream. One entry per userId
+     * for the process lifetime — bounded by the user table; deliberately never evicted
+     * (removing an entry another upload still holds would fork the semaphore and double
+     * the effective cap).
+     */
+    private class InFlight(max: Int) {
+        val sem = java.util.concurrent.Semaphore(max)
+        val bytes = java.util.concurrent.atomic.AtomicLong()
+    }
+
+    private val inFlight = ConcurrentHashMap<String, InFlight>()
 
     var orphanTtlMs = 24L * 3600 * 1000 // mutable so tests can force an immediate sweep
 
@@ -60,10 +79,22 @@ class AttachmentStore(private val repo: Repo, blobDirPath: String) {
         policy: ClientPolicy,
     ): AttachmentMeta {
         val maxCipher = maxCipherBytes(policy.attachmentMaxBytes)
+        val userMaxCipher = maxCipherBytes(policy.userAttachmentsMaxBytes)
+        val fl = inFlight.computeIfAbsent(userId) { InFlight(maxConcurrentUploadsPerUser) }
+        // Acquire BEFORE the try — a failed acquire must never reach the release in finally.
+        if (!fl.sem.tryAcquire()) throw RateLimited()
+        // An idempotent re-upload of an already-committed id is EXEMPT from the user quota
+        // (the authoritative commit path returns the stored meta before its quota check),
+        // so the mid-stream bound must exempt it too — else a retry near quota double-counts
+        // the existing bytes against itself and false-413s a request the commit path allows.
+        val (preexisting, committedBytes) = repo.db.read { c ->
+            (rowById(c, attachmentId) != null) to userBytes(c, userId)
+        }
         val tmp = File(dir, "$attachmentId.part")
         val digest = MessageDigest.getInstance("SHA-256")
         var header: ByteArray? = null
         var cipherBytes = 0L
+        var inFlightAdded = 0L
         try {
             tmp.outputStream().use { out ->
                 val buf = ByteArray(64 * 1024)
@@ -81,8 +112,18 @@ class AttachmentStore(private val repo: Repo, blobDirPath: String) {
                         if (headerFill == Attachments.HEADER_BYTES) header = headerBuf
                     }
                     if (n - off > 0) {
-                        cipherBytes += n - off
+                        val delta = (n - off).toLong()
+                        cipherBytes += delta
                         if (cipherBytes > maxCipher) throw PayloadTooLarge("attachment_too_large")
+                        if (!preexisting) {
+                            inFlightAdded += delta
+                            // Mid-stream bound over committed + ALL of this user's in-flight
+                            // bytes. The commit-time check stays authoritative (serialized in
+                            // the tx); this only caps .part growth while bodies stream.
+                            if (committedBytes + fl.bytes.addAndGet(delta) > userMaxCipher) {
+                                throw PayloadTooLarge("user_attachment_quota")
+                            }
+                        }
                         digest.update(buf, off, n - off)
                         out.write(buf, off, n - off)
                     }
@@ -91,6 +132,10 @@ class AttachmentStore(private val repo: Repo, blobDirPath: String) {
             val hdr = header ?: throw BadRequest("attachment_truncated")
             if (cipherBytes <= Attachments.STREAM_ABYTES) throw BadRequest("attachment_truncated")
             val sha = Bytes.toHexLower(digest.digest())
+            // Streaming done: hand this upload's bytes off to the commit's own userBytes
+            // read. Keeping them in fl.bytes THROUGH the commit tx would double-count them
+            // (committed row + fl.bytes) for a concurrent same-user upload → spurious 413.
+            if (inFlightAdded > 0) { fl.bytes.addAndGet(-inFlightAdded); inFlightAdded = 0 }
 
             return repo.db.tx { c ->
                 val existing = rowById(c, attachmentId)
@@ -116,6 +161,8 @@ class AttachmentStore(private val repo: Repo, blobDirPath: String) {
                 AttachmentMeta(attachmentId, itemId, vaultId, cipherBytes, sha, t)
             }
         } finally {
+            if (inFlightAdded > 0) fl.bytes.addAndGet(-inFlightAdded)
+            fl.sem.release()
             tmp.delete()
         }
     }

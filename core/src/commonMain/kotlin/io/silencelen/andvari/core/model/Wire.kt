@@ -274,3 +274,7 @@ data class ClientPolicy(
     val itemAttachmentsMaxBytes: Long = 100L * 1024 * 1024,
     val userAttachmentsMaxBytes: Long = 1024L * 1024 * 1024,
 )
+
+/** Single-use WS auth ticket (spec 03 §6): minted over authenticated REST, ~30 s TTL. */
+@Serializable
+data class WsTicketResponse(val ticket: String, val expiresInSeconds: Long)

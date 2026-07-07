@@ -61,3 +61,13 @@ export async function fingerprint(publicKey: Uint8Array): Promise<string> {
 export async function shortFingerprint(publicKey: Uint8Array): Promise<string> {
   return (await fingerprint(publicKey)).slice(0, 16);
 }
+
+/**
+ * spec 04 §2(3): at enrollment the user must TYPE the first 16 hex chars of the org
+ * recovery fingerprint from the PRINTED sheet (the UI deliberately does not display
+ * them first). Separators/whitespace are tolerated; exactly 16 hex chars required.
+ */
+export function shortFormMatches(entry: string, fullFingerprintHex: string): boolean {
+  const norm = entry.toLowerCase().replace(/[^0-9a-f]/g, "");
+  return norm.length === 16 && fullFingerprintHex.toLowerCase().slice(0, 16) === norm;
+}

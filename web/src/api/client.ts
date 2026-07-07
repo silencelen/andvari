@@ -16,6 +16,7 @@ import type {
   TotpStatus,
   Mutation,
   AccountKeys,
+  WsTicketResponse,
 } from "./types";
 
 export const CLIENT_VERSION = "0.2.0";
@@ -254,19 +255,38 @@ export class ApiClient {
     return resp.text();
   }
 
-  /** WebSocket dirty-bell. Returns a close fn. */
-  events(onRev: (rev: number) => void, onRevoked: () => void): () => void {
-    const wsUrl = this.baseUrl.replace(/^http/, "ws") + `/api/v1/events?access=${encodeURIComponent(this.tokens?.accessToken ?? "")}`;
-    const ws = new WebSocket(wsUrl);
-    ws.onmessage = (ev) => {
+  /**
+   * WebSocket dirty-bell. Auth = a single-use ~30 s ticket minted over the
+   * authenticated REST channel (spec 03 §6) — the long-lived access token never
+   * appears in a URL. Returns a close fn; `onOpen` fires once the socket is up
+   * (the mint adds a round-trip, so callers racing a push should await it).
+   */
+  events(onRev: (rev: number) => void, onRevoked: () => void, onOpen?: () => void): () => void {
+    let ws: WebSocket | null = null;
+    let closed = false;
+    void (async () => {
       try {
-        const msg = JSON.parse(ev.data);
-        if (msg.type === "rev") onRev(msg.rev);
-        else if (msg.type === "revoked") onRevoked();
+        const t = await this.json<WsTicketResponse>("POST", "/api/v1/events/ticket");
+        if (closed) return;
+        const sock = new WebSocket(this.baseUrl.replace(/^http/, "ws") + `/api/v1/events?ticket=${encodeURIComponent(t.ticket)}`);
+        ws = sock;
+        sock.onopen = () => onOpen?.();
+        sock.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "rev") onRev(msg.rev);
+            else if (msg.type === "revoked") onRevoked();
+          } catch {
+            /* ignore */
+          }
+        };
       } catch {
-        /* ignore */
+        /* bell unavailable (offline / expired session) — sync still works on demand */
       }
+    })();
+    return () => {
+      closed = true;
+      ws?.close();
     };
-    return () => ws.close();
   }
 }

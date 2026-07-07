@@ -25,7 +25,11 @@ items, sizes, timing).
 ## Accepted risks (signed off by owner at hardening gate)
 R1 JVM/JS cannot guarantee secret zeroization (GC copies) — industry-standard gap.
 R2 Web client page-load trust (T6). R3 Escrow key holder can decrypt all (deliberate
-— the recovery feature). R4 Server metadata visibility (A6). R5 Single server on
+— the recovery feature). R4 Server metadata visibility (A6) — includes a residual
+prelogin oracle: after a KDF-policy change, an account whose stored params differ
+from the current default answers prelogin with diverged params (existence confirmed)
+until it re-keys via password change; unknown emails always answer the current
+org-default params. R5 Single server on
 heimdall — availability via offline-first + PBS/shadow-2122, not HA. R6 TOTP seeds
 co-located with passwords (accepted eggs-in-one-basket, user decision).
 

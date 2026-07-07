@@ -27,9 +27,13 @@ The recovery **public key + fingerprint** are pinned in THREE places that must a
    fingerprint differs.
 2. Client builds/policy (`client-policy` carries the fingerprint; native clients also
    bake it in at build time).
-3. The printed sheet — at enrollment every client DISPLAYS the fingerprint and the
-   user confirms it against a sheet (checkbox + short-form entry). Never TOFU from
-   the server alone.
+3. The printed sheet — at enrollment the user confirms the recovery key against the
+   sheet: the client requires **short-form entry** (type the first 16 hex chars from
+   the sheet) plus a checkbox. To keep this an out-of-band comparison rather than
+   transcription, a client SHOULD NOT display the fingerprint it is asking the user to
+   type until after a correct entry (the web client reveals the full grouped
+   fingerprint only once the typed short form matches); native clients MAY additionally
+   show a baked-in build-time fingerprint. Never TOFU from the server alone.
 
 ## 3. Escrow blob
 

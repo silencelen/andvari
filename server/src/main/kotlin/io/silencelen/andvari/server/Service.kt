@@ -31,7 +31,7 @@ import java.sql.Connection
 class Service(
     val repo: Repo,
     val config: Config,
-    val attachments: AttachmentStore = AttachmentStore(repo, config.blobDir),
+    val attachments: AttachmentStore = AttachmentStore(repo, config.blobDir, config.uploadMaxConcurrentPerUser),
     private val onChange: suspend (userIds: Collection<String>, rev: Long) -> Unit = { _, _ -> },
 ) {
     private val crypto = createCryptoProvider()
@@ -43,15 +43,27 @@ class Service(
         return stored.copy(recoveryFingerprint = config.recoveryFingerprint, serverTime = now())
     }
 
-    fun setPolicy(p: ClientPolicy) = repo.setPolicyJson(json.encodeToString(ClientPolicy.serializer(), p.copy(serverTime = 0)))
+    fun setPolicy(p: ClientPolicy, byUserId: String? = null, ip: String? = null) = repo.db.tx { c ->
+        // The audit row rides the SAME tx as the policy write (INFO-5): no crash window
+        // where the org policy changed with no policy_update row.
+        repo.setPolicyJsonOn(c, json.encodeToString(ClientPolicy.serializer(), p.copy(serverTime = 0)))
+        repo.auditOn(c, "policy_update", byUserId, null, ip)
+    }
 
     // ---- prelogin ----
     fun prelogin(email: String): PreloginResponse {
+        // policy() (a DB read + decode) is computed on BOTH branches so the unknown-email
+        // path is not measurably heavier than the known one — an asymmetric cost here would
+        // be a timing oracle that partly defeats the fake-salt anti-enumeration (spec 05 T11).
+        val defaultParams = policy().kdfParams
         val user = repo.userByEmail(email)
         return if (user != null) {
             PreloginResponse(user.kdfSalt, user.kdfParams)
         } else {
-            PreloginResponse(Bytes.toB64(ServerCrypto.fakeSalt(config.enumSecret, email)), ClientPolicy().kdfParams)
+            // Unknown email: fake salt + the CURRENT stored org-default params, not the
+            // compile-time default — a policy bump must not mark every unknown email with
+            // stale params (INFO-3). Residual per-user divergence oracle: spec 05 R4.
+            PreloginResponse(Bytes.toB64(ServerCrypto.fakeSalt(config.enumSecret, email)), defaultParams)
         }
     }
 
@@ -100,7 +112,9 @@ class Service(
         c.exec("UPDATE invites SET usedAt=? WHERE tokenHash=?", t, tokenHash)
 
         val session = issueSession(c, userId, req.device.platform, req.device.name)
-        repo.auditOn(c, "register", userId, session.deviceId, ip, req.email)
+        // Meta = invite token-hash prefix, not the email (INFO-1): joins this row to its
+        // invite_create without copying PII into the central log store.
+        repo.auditOn(c, "register", userId, session.deviceId, ip, tokenHash.take(12))
         session.toResponse(user(c, userId), invAdmin, false)
     }
 

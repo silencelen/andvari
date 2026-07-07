@@ -32,12 +32,15 @@ class AdminService(private val repo: Repo) {
     fun createInvite(email: String, isAdmin: Boolean, byUserId: String): Pair<InviteResponse, String> = repo.db.tx { c ->
         if (repo.userByEmail(email) != null) throw BadRequest("email_taken")
         val token = ServerCrypto.newToken()
+        val tokenHash = ServerCrypto.hashToken(token)
         val expiresAt = now() + inviteTtlMs
         c.exec(
             "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES(?,?,?,?,?)",
-            ServerCrypto.hashToken(token), email.lowercase(), isAdmin, now(), expiresAt,
+            tokenHash, email.lowercase(), isAdmin, now(), expiresAt,
         )
-        repo.auditOn(c, "invite_create", byUserId, null, null, email)
+        // Meta = token-hash prefix, not the email (INFO-1): the register row logs the same
+        // prefix, so create↔redeem stays correlatable with zero PII in Loki.
+        repo.auditOn(c, "invite_create", byUserId, null, null, tokenHash.take(12))
         InviteResponse(token, email.lowercase(), expiresAt) to token
     }
 

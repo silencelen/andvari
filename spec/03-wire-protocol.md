@@ -14,8 +14,12 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
 
 ## 2. Auth & sessions
 
-- `POST /auth/prelogin { email }` → `{ kdfSalt, kdfParams }` (fake-but-deterministic
-  for unknown emails, spec 01 §3; rate-limited).
+- `POST /auth/prelogin { email }` → `{ kdfSalt, kdfParams }` (rate-limited). Unknown
+  emails get a fake-but-deterministic salt (spec 01 §3) + the **current org-default**
+  kdfParams — never the compile-time default. Known accounts answer their real
+  per-user params (clients need them pre-auth to derive the auth key); the residual
+  params-divergence oracle after a policy bump is recorded in spec 05 R4 and heals
+  when the account re-keys.
 - `POST /auth/login { email, authKey, device: { platform, name } , totp? }` →
   `201 { userId, deviceId, accessToken, refreshToken, accountKeys }` where
   `accountKeys = { wrappedUvk, kdfParams, encryptedIdentitySeed, identityPub,
@@ -115,12 +119,22 @@ flag-clear makes later syncers skip.
 
 ## 6. Events (WS)
 
-`GET /api/v1/events` upgrades to WebSocket (same Bearer auth). Server → client
-frames: `{"type":"rev","rev":N}` (something changed — pull if N > local),
-`{"type":"policy"}`, `{"type":"revoked"}` (session killed — drop to lock screen).
-Nothing else rides the socket; it is a dirty-bell, not a data plane. Clients without
-WS poll `/sync` on foreground + every 5 min. Server pings every 30 s; both proxies in
-front (tailscale serve, cloudflared) pass WebSocket upgrades — verified in P1.
+`GET /api/v1/events` upgrades to WebSocket. **Auth:** browser clients first call
+`POST /api/v1/events/ticket` (Bearer-authenticated) → `{ ticket, expiresInSeconds }`,
+then connect as `GET /api/v1/events?ticket=…`. Tickets are 256-bit random, held
+server-side as sha256 hashes **in memory only**, TTL 30 s, strictly single-use (a
+restart drops pending tickets; clients re-mint). `Authorization: Bearer` on the
+upgrade request remains valid for non-browser callers. **Raw access tokens in the
+query are NOT accepted** — long-lived bearers must never ride URLs into edge logs.
+A ticket authenticates the account at mint time; if the session is revoked within the
+ticket's ≤30 s TTL, the already-minted ticket may still open the bell for that window
+(accepted: the socket carries only rev/policy/revoked signalling, never vault data, and
+the session's access token is rejected on its next `/sync`).
+Server → client frames: `{"type":"rev","rev":N}` (something changed — pull if N >
+local), `{"type":"policy"}`, `{"type":"revoked"}` (session killed — drop to lock
+screen). Nothing else rides the socket; it is a dirty-bell, not a data plane. Clients
+without WS poll `/sync` on foreground + every 5 min. Server pings every 30 s; both
+proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — verified in P1.
 
 ## 7. Admin (isAdmin only; every call audited)
 
@@ -158,6 +172,12 @@ front (tailscale serve, cloudflared) pass WebSocket upgrades — verified in P1.
 - Rate limits (per IP + per account): prelogin/login 10/min then backoff;
   public-origin (CF-Connecting-IP present + configured public hostname): 5/min,
   TOTP required, register/refresh disabled unless policy explicitly enables.
+- Client IP (rate keys + audit rows): derived from `CF-Connecting-IP`, else the
+  **rightmost** `X-Forwarded-For` entry, **only when the direct TCP peer is
+  loopback** (both front-ends terminate there). Any other peer uses the socket
+  address and forwarded headers are ignored entirely (spoof-proof). The trusted
+  header list is operator-configurable (`ANDVARI_TRUSTED_IP_HEADERS`); `/metrics`
+  never trusts forwarded headers.
 - Errors: `{ "error": "<machine_code>", "message": "<human>" }`; 401 uniform for
   auth, 403 role, 404 hidden-as-403 for cross-tenant probes, 409 never used for sync
   (conflicts are 200-with-status), 410 resync, 413 attachment/user/item quota,
@@ -172,6 +192,9 @@ front (tailscale serve, cloudflared) pass WebSocket upgrades — verified in P1.
   `{ size, sha256(ciphertext), header }`, and never parses content. Idempotent per
   attachmentId: identical bytes → the stored meta; different bytes →
   `400 attachment_id_taken`.
+- Uploads are additionally bounded per user by a concurrent-upload cap (429 when
+  exceeded) and by in-flight `.part` bytes counted toward `userAttachmentsMaxBytes`
+  mid-stream (413); the commit-time quota check remains authoritative.
 - `GET /attachments/{attachmentId}` — any grant on the owning vault; raw body
   identical to the upload shape. Unknown/foreign ids answer 403 (hidden-as-403, §8).
 - Item pushes referencing `attachmentIds` are validated: every id must exist and be

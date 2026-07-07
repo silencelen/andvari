@@ -24,7 +24,55 @@ fun ApplicationCall.clientId(): ClientId {
     return if (slash < 0) ClientId(raw, "0.0.0") else ClientId(raw.take(slash), raw.substring(slash + 1))
 }
 
-fun ApplicationCall.clientIp(): String = request.origin.remoteHost
+/**
+ * Client IP for rate keys + audit rows (spec 03 §8). Both front-ends (tailscale serve,
+ * cloudflared) terminate TLS on loopback, so the raw peer address would collapse every
+ * remote caller to 127.0.0.1. Forwarded-IP headers are trusted ONLY when the direct
+ * peer is loopback; a non-loopback peer (LAN client) can never spoof via XFF.
+ * The /metrics loopback gate deliberately does NOT use this (raw peer only).
+ */
+/**
+ * True when the DIRECT TCP peer is a loopback address (both front-ends terminate on
+ * 127.0.0.1). The single authority for "is this a local proxy?" — shared by clientIp()'s
+ * forwarded-header trust gate and the /metrics access gate so the two can never drift.
+ */
+fun ApplicationCall.peerIsLoopback(): Boolean =
+    runCatching { java.net.InetAddress.getByName(request.origin.remoteAddress).isLoopbackAddress }.getOrDefault(false)
+
+fun ApplicationCall.clientIp(config: Config): String =
+    pickClientIp(peerIsLoopback(), { request.header(it) }, config.trustedIpHeaders, request.origin.remoteHost)
+
+/**
+ * Pure header selection: the first trusted header bearing a non-loopback IP LITERAL wins.
+ * X-Forwarded-For contributes only its RIGHTMOST entry (the one appended by the trusted
+ * loopback proxy — deeper entries are client-forgeable). Literal-only because
+ * InetAddress.getByName would DNS-resolve hostnames.
+ */
+internal fun pickClientIp(
+    peerIsLoopback: Boolean,
+    header: (String) -> String?,
+    trustedHeaders: List<String>,
+    fallback: String,
+): String {
+    if (!peerIsLoopback) return fallback
+    for (name in trustedHeaders) {
+        val raw = header(name) ?: continue
+        val candidate = (if (name.equals("X-Forwarded-For", ignoreCase = true)) raw.substringAfterLast(',') else raw).trim()
+        if (candidate.isEmpty() || !isIpLiteral(candidate)) continue
+        val addr = runCatching { java.net.InetAddress.getByName(candidate) }.getOrNull() ?: continue
+        // Reject loopback (127.0.0.1/::1) and wildcard/unspecified (0.0.0.0/"::") literals —
+        // they name no client and would just poison rate keys + audit rows.
+        if (!addr.isLoopbackAddress && !addr.isAnyLocalAddress) return candidate
+    }
+    return fallback
+}
+
+private val IPV4_RE = Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$""")
+
+internal fun isIpLiteral(s: String): Boolean {
+    if (IPV4_RE.matchEntire(s) != null) return s.split('.').all { o -> o.toInt() in 0..255 }
+    return s.contains(':') && s.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' || it == ':' || it == '.' }
+}
 
 /**
  * True when the request arrived via the configured public (break-glass) hostname.
