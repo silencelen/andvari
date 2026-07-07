@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ApiClient, ApiError } from "../api/client";
+import { ApiClient, ApiError, type SessionEndKind } from "../api/client";
 import type { AttachmentRef, ClientPolicy, ItemDoc } from "../api/types";
 import { toB64 } from "../crypto/bytes";
 import { generatePassword } from "../crypto/generator";
@@ -29,8 +29,9 @@ interface Props {
   mustChangePassword: boolean;
   /** F26: locks — keeps the persisted session; the user gets the Unlock card. */
   onLock: () => void;
-  /** F26: the server revoked this device's session — full sign-out, not a lock. */
-  onRevoked: () => void;
+  /** F26: the session died server-side — full sign-out, not a lock. `kind` says
+   *  whether it was an explicit revocation or plain expiry (the copy differs). */
+  onRevoked: (kind: SessionEndKind) => void;
 }
 
 export function Vault({ account, store, client, policy, isAdmin, mustChangePassword, onLock, onRevoked }: Props) {
@@ -44,12 +45,14 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   const [mustChange, setMustChange] = useState(mustChangePassword);
   // Connectivity, split in two so F29's fallback poll has an honest gate:
   //  - wsUp: the dirty-bell socket state (onOpen/onDown from ApiClient.events);
-  //  - syncOk: whether the LAST sync attempt landed.
+  //  - syncOk: whether the LAST sync attempt landed (marked PENDING at socket open
+  //    until the catch-up pull succeeds — green never sits over missed bells).
   // The dot shows their conjunction. Both start optimistic (green) so a healthy unlock
   // never flashes grey; a *sustained* WS drop turns it grey (onDown is debounced ~2.5s).
   const [wsUp, setWsUp] = useState(true);
   const [syncOk, setSyncOk] = useState(true);
   const online = wsUp && syncOk;
+  const degraded = !wsUp || !syncOk;
   // Manual "Sync now" (F29): disabled while a click-driven sync is in flight.
   const [syncBusy, setSyncBusy] = useState(false);
   // Type-to-search on unlock is a desktop convenience; autofocusing on touch pops the
@@ -93,10 +96,13 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   useEffect(() => {
     const close = client.events(
       () => void syncNow(), // dirty bell
-      () => onRevoked(), // server revoked this device — full sign-out (F26)
+      (kind) => onRevoked(kind), // session died server-side — full sign-out (F26)
       () => {
         setWsUp(true);
-        void syncNow(); // (re)open — catch bells missed while the socket was down
+        // PENDING until the catch-up pull lands: bells missed while the socket was
+        // down aren't caught yet, so the dot must not go green on open alone.
+        setSyncOk(false);
+        void syncNow();
       },
       () => setWsUp(false), // sustained drop (debounced)
     );
@@ -104,25 +110,29 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   }, [client, syncNow, onRevoked]);
 
   // F29: with the socket down (WS-stripping proxy, blocked ticket mint) the bell can't
-  // ring, so nothing would ever pull — the vault silently freezes while REST may be
-  // fine. While wsUp is false, poll over plain HTTP: first after ~5 s (a normal
-  // reconnect blip usually beats it), then every 60 s. The chain stops the moment the
-  // socket reopens (effect cleanup); timeouts are chained, not an interval, so a slow
-  // sync never overlaps the next tick.
+  // ring — and a bell-pull that FAILED with the socket healthy would otherwise never
+  // retry. While either is unhealthy, poll over plain HTTP: first tick ~5 s after the
+  // socket drops (a normal reconnect blip usually beats it) or ~10 s after a failed
+  // sync, then every 60 s. Gating on the combined `degraded` keeps the chain
+  // undisturbed across failures (a fail flips no state, so the cadence stays 60 s);
+  // it stops the moment both are healthy again (effect cleanup). Timeouts are
+  // chained, not an interval, so a slow sync never overlaps the next tick.
   useEffect(() => {
-    if (wsUp) return;
+    if (!degraded) return;
     let cancelled = false;
     let timer: number | undefined;
     const tick = async () => {
       await syncNow();
       if (!cancelled) timer = window.setTimeout(() => void tick(), 60_000);
     };
-    timer = window.setTimeout(() => void tick(), 5_000);
+    timer = window.setTimeout(() => void tick(), wsUp ? 10_000 : 5_000);
     return () => {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [wsUp, syncNow]);
+    // wsUp only picks the first delay — re-arming on its change would reset the chain.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [degraded, syncNow]);
 
   const manualSync = async () => {
     setSyncBusy(true);

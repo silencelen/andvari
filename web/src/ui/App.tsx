@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiClient } from "../api/client";
+import { ApiClient, type SessionEndKind } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "../vault/account";
@@ -108,9 +108,24 @@ export function App() {
   // Stable identities: Vault's WS-subscription effect depends on onRevoked — a fresh
   // closure per render would tear down and re-mint the events socket every render.
   const onManualLock = useCallback(() => lock("Locked."), [lock]);
-  // WS "revoked" frame / dead session at ticket mint: the device's server-side session
-  // is gone, so a mere unlock could never succeed — this stays a full sign-out (F26).
-  const onRevoked = useCallback(() => signOut("This device's access was revoked."), [signOut]);
+  // The session died server-side, so a mere unlock could never succeed — both kinds
+  // are a full sign-out (F26) — but the COPY must be truthful: only the server's
+  // explicit WS `revoked` frame is a revocation; a dead session at ticket mint is
+  // ordinary expiry (laptop asleep past the refresh lifetime) and saying "revoked"
+  // there would be a false alarm.
+  const onRevoked = useCallback(
+    (kind: SessionEndKind) =>
+      signOut(kind === "revoked" ? "This device's access was revoked." : "Your session ended — sign in again."),
+    [signOut],
+  );
+
+  // Which account is live in THIS tab (vault/unlock phases) — read by the storage
+  // listener below, via a ref so the mount-once listener never sees a stale phase.
+  const activeUserIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeUserIdRef.current =
+      phase.kind === "vault" ? phase.account.userId : phase.kind === "unlock" ? phase.session.userId : null;
+  });
 
   // F27: one tab locking or signing out must land EVERY tab on the same screen.
   //  - lock → BroadcastChannel message (the session stays, storage can't carry it);
@@ -129,9 +144,19 @@ export function App() {
           p.kind === "vault" || p.kind === "unlock" ? { kind: "welcome", notice: "Signed out in another tab." } : p,
         );
       } else {
-        const t = loadSession()?.tokens;
-        const cur = clientRef.current?.getTokens();
-        if (t && clientRef.current && (!cur || cur.refreshToken !== t.refreshToken)) {
+        // SAME-USER guard (shared browser): the persisted session may now belong to a
+        // DIFFERENT account (someone signed in as Y while X's tab was frozen) — never
+        // graft Y's pair into X's live client.
+        const cur = loadSession();
+        const t = cur?.tokens;
+        const have = clientRef.current?.getTokens();
+        if (
+          cur &&
+          t &&
+          clientRef.current &&
+          cur.userId === activeUserIdRef.current &&
+          (!have || have.refreshToken !== t.refreshToken)
+        ) {
           clientRef.current.setTokens(t);
         }
       }

@@ -535,4 +535,125 @@ describe("VaultStore rollback guards (F31)", () => {
     expect(store.get(s.itemId)?.doc).toEqual(DOC);
     expect(store.list()).toHaveLength(1);
   });
+
+  it("rejects a 410 resync whose replacement is NOT a full snapshot — working set intact", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { s, api, store } = await seeded();
+
+      let failedOnce = false;
+      const realSync = api.sync.bind(api);
+      api.sync = async (since: number) => {
+        if (!failedOnce) {
+          failedOnce = true;
+          throw new ApiError(410, "cursor_gone", "resync required");
+        }
+        return realSync(since);
+      };
+      // The server said our cursor is gone, then answered the from-0 pull with a
+      // PARTIAL response. Applying it would wipe the store and repopulate a sliver.
+      api.queue.push({ rev: 8, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
+      await expect(store.sync()).rejects.toBeInstanceOf(SyncIntegrityError);
+
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/resync returned a non-full/));
+      expect(store.get(s.itemId)?.doc).toEqual(DOC); // nothing wiped, nothing applied
+      expect(store.list()).toHaveLength(1);
+      api.queue.push(emptySync(5));
+      await store.sync();
+      expect(api.sinceLog.at(-1)).toBe(5); // cursor unmoved by the rejected resync
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+/** Overlapping pulls could apply an older response after a newer one and move the
+ *  cursor backwards — the very corruption the rollback guards reject — so sync() is
+ *  single-flight: concurrent callers (bell, poll, Sync-now, reconciles) join one pull. */
+describe("VaultStore sync single-flight", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  it("concurrent sync() calls share ONE underlying api.sync", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+
+    await Promise.all([store.sync(), store.sync(), store.sync()]);
+    expect(api.sinceLog).toEqual([0]); // three callers, one pull
+
+    // The handle is released after settling: a later sync pulls again…
+    api.queue.push(emptySync(6));
+    await store.sync();
+    expect(api.sinceLog).toEqual([0, 5]);
+  });
+
+  it("all joiners see the same rejection; the flight is released afterwards", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    api.sync = async () => {
+      throw new TypeError("offline");
+    };
+    const [a, b] = await Promise.allSettled([store.sync(), store.sync()]);
+    expect(a.status).toBe("rejected");
+    expect(b.status).toBe("rejected");
+
+    // Released: the next call really pulls (and succeeds).
+    api.sync = FakeApi.prototype.sync.bind(api);
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+    await store.sync();
+    expect(store.get(s.itemId)?.doc).toEqual(DOC);
+  });
+});
+
+/** A push that reached the server is COMMITTED — the save must never be reported as
+ *  failed afterwards (the Editor would say "nothing was changed" about a live write,
+ *  and a user retry would commit a SECOND copy since put mutationIds are fresh). */
+describe("VaultStore save() post-push reconcile (mirror of remove())", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  it("a reconcile rejected by the rollback guard does not fail the save — local apply instead", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const s = await scenario("writer");
+      const api = new FakeApi();
+      const store = new VaultStore(api.asClient(), s.member);
+      api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+      await store.sync();
+
+      // The post-push reconcile pull will be REJECTED by the F31 rev-regression guard.
+      api.queue.push({ rev: 3, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
+      await expect(store.save(s.itemId, { ...DOC, name: "renamed" })).resolves.toBeUndefined();
+
+      expect(api.pushes).toHaveLength(1); // committed exactly once — no retry bait
+      expect(store.get(s.itemId)?.doc.name).toBe("renamed"); // optimistic local apply
+      expect(warn).toHaveBeenCalled(); // the integrity problem is surfaced, not hidden
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a reconcile that dies on the network does not fail the save either", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const s = await scenario("writer");
+      const api = new FakeApi();
+      const store = new VaultStore(api.asClient(), s.member);
+      api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+      await store.sync();
+
+      api.sync = async () => {
+        throw new TypeError("offline");
+      };
+      await expect(store.save(s.itemId, { ...DOC, name: "renamed offline" })).resolves.toBeUndefined();
+      expect(store.get(s.itemId)?.doc.name).toBe("renamed offline");
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });

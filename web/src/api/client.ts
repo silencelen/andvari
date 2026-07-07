@@ -42,6 +42,30 @@ export interface Tokens {
 /** A request retries after at most this many refresh/adopt rounds (see raw()). */
 const MAX_AUTH_ATTEMPTS = 2;
 
+/** Abort a hung refresh POST after this long — other tabs queue behind our web lock. */
+const REFRESH_FETCH_TIMEOUT_MS = 15_000;
+/** Give up WAITING for another tab's refresh lock after this long (> the fetch timeout,
+ *  so a healthy holder always finishes or times out first) and proceed without
+ *  cross-tab exclusion rather than stall every tab behind one wedged fetch. */
+const REFRESH_LOCK_WAIT_MS = 20_000;
+
+/**
+ * Why the session ended (events() → onRevoked): an explicit server `revoked` frame is
+ * a real revocation; a 401/403 at ticket mint after a refused refresh is ordinary
+ * EXPIRY (laptop asleep past the refresh lifetime) and must not be presented as
+ * "your device was revoked".
+ */
+export type SessionEndKind = "revoked" | "expired";
+
+/** AbortSignal.timeout where it exists (Chrome 103+/FF 100+/Safari 16+) — some
+ *  browsers HAVE Web Locks but not this; a missing timeout must degrade to an
+ *  unbounded wait, never crash the refresh path. */
+function timeoutSignal(ms: number): AbortSignal | undefined {
+  return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+    ? AbortSignal.timeout(ms)
+    : undefined;
+}
+
 /**
  * REST client for the andvari server. Holds the token pair, refreshes the access
  * token on 401 and retries, and surfaces 426 (upgrade) / 410 (resync) as typed
@@ -98,10 +122,13 @@ export class ApiClient {
    * refresh token:
    *  - in-tab: every concurrent caller awaits the ONE in-flight refresh promise;
    *  - cross-tab: the rotation runs inside the `andvari-refresh` Web Lock (where
-   *    available), and INSIDE the lock the persisted session is re-read first — if
-   *    another tab already rotated, its pair is adopted and no POST happens.
+   *    available, waited on for a BOUNDED time), and INSIDE the lock the persisted
+   *    session is re-read first — if another tab already rotated, its pair is
+   *    adopted and no POST happens.
    * A transport failure rejects every waiter without clearing tokens (transient);
-   * only a server "no" (!resp.ok) kills the pair.
+   * only a definitive server refusal (401/403 from the refresh endpoint) kills the
+   * pair — a 502/503/429 is the server having a moment, and destroying the pair on
+   * it would cascade into a false fleet-wide "revoked" sign-out.
    */
   private tryRefresh(): Promise<boolean> {
     this.refreshInFlight ??= this.refreshExclusive().finally(() => {
@@ -115,10 +142,29 @@ export class ApiClient {
     // (older browsers, non-window contexts) proceed unlocked — the persisted-pair
     // re-read in refreshNow still catches most cross-tab races, and in-tab callers
     // are already deduped by the shared promise.
-    if (typeof navigator !== "undefined" && navigator.locks?.request) {
-      return await navigator.locks.request("andvari-refresh", () => this.refreshNow());
+    const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+    if (!locks?.request) return this.refreshNow();
+    // `granted` disambiguates a rejected lock WAIT from a failure of refreshNow
+    // itself: post-grant errors must propagate untouched (re-running refreshNow after
+    // its own fetch timed out could replay a rotation that DID land server-side).
+    let granted = false;
+    try {
+      return await locks.request(
+        "andvari-refresh",
+        { signal: timeoutSignal(REFRESH_LOCK_WAIT_MS) },
+        () => {
+          granted = true;
+          return this.refreshNow();
+        },
+      );
+    } catch (e) {
+      if (granted) throw e; // refreshNow's own failure — not a lock problem
+      // The wait for another tab's (hung) refresh timed out, or Web Locks glitched:
+      // proceed WITHOUT cross-tab exclusion. Per-tab single-flight still holds and
+      // the persisted re-read still runs; the worst case is a rare double-rotation —
+      // strictly better than every tab stalling behind one wedged fetch.
+      return this.refreshNow();
     }
-    return this.refreshNow();
   }
 
   private async refreshNow(): Promise<boolean> {
@@ -136,9 +182,16 @@ export class ApiClient {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Andvari-Client": CLIENT_HEADER },
       body: JSON.stringify({ refreshToken: spending.refreshToken }),
+      // A hung refresh must not wedge this tab's recovery — nor, via the web lock,
+      // every OTHER tab's (they queue behind us for up to REFRESH_LOCK_WAIT_MS).
+      signal: timeoutSignal(REFRESH_FETCH_TIMEOUT_MS),
     });
     if (!resp.ok) {
-      this.setTokens(null);
+      // Only a definitive refusal means the pair is dead. Anything else (502/503/504/
+      // 429, a proxy error page) is transient: keep the pair — clearing it here would
+      // persist tokens:null, fail the next WS ticket mint with 401, and cascade a
+      // FALSE "session ended" sign-out across every tab.
+      if (resp.status === 401 || resp.status === 403) this.setTokens(null);
       return false;
     }
     const pair = (await resp.json()) as Tokens;
@@ -372,8 +425,10 @@ export class ApiClient {
    * consumers use it to `/sync` and catch bells missed while the socket was down (the
    * notifier has no replay). A 401/403 at ticket mint means the session itself is dead
    * (the client already tried a token refresh): reconnection stops and `onRevoked`
-   * fires so the consumer drops to the lock screen. On tab-visible, a dead socket
-   * reconnects immediately instead of waiting out the backoff.
+   * fires so the consumer drops to the lock screen — with kind "expired", because a
+   * dead session is usually plain expiry; only the server's explicit `revoked` frame
+   * reports kind "revoked". On tab-visible, a dead socket reconnects immediately
+   * instead of waiting out the backoff.
    *
    * Returns a close fn — tears down the socket, any pending retry timer, and the
    * visibility listener (callers MUST invoke it on lock/unmount or sockets leak).
@@ -383,7 +438,7 @@ export class ApiClient {
    * the dot) and `onOpen` is the paired "back up" signal. Start the UI as offline and
    * let the first `onOpen` turn it green.
    */
-  events(onRev: (rev: number) => void, onRevoked: () => void, onOpen?: () => void, onDown?: () => void): () => void {
+  events(onRev: (rev: number) => void, onRevoked: (kind: SessionEndKind) => void, onOpen?: () => void, onDown?: () => void): () => void {
     let ws: WebSocket | null = null;
     let closed = false;
     let connecting = false;
@@ -440,7 +495,7 @@ export class ApiClient {
             if (msg.type === "rev") onRev(msg.rev);
             else if (msg.type === "revoked") {
               closed = true; // don't race a reconnect against the consumer's teardown
-              onRevoked();
+              onRevoked("revoked"); // explicit server frame — a REAL revocation
             }
           } catch {
             /* ignore */
@@ -458,9 +513,11 @@ export class ApiClient {
         if (closed) return;
         if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
           // Session died (refresh already attempted inside json()) — surface it via the
-          // consumer's existing session-expiry path and stop retrying.
+          // consumer's existing session-expiry path and stop retrying. This is plain
+          // EXPIRY as far as we can tell (laptop asleep past the refresh lifetime) —
+          // never present it as a device revocation.
           closed = true;
-          onRevoked();
+          onRevoked("expired");
           return;
         }
         signalDown();

@@ -132,8 +132,17 @@ export class Account {
     // spec 01 §5 (core parity): fingerprints and sealed-grant opening use the
     // SEED-derived keypair, which the server cannot forge — so a server-sent
     // identityPub that does not equal the derived key is a substitution attempt.
-    // Hard-fail with a distinct error; this must NEVER read as "wrong password".
-    if (!ctEquals(identity.publicKey, fromB64(keys.identityPub))) {
+    // Hard-fail with a distinct error; this must NEVER read as "wrong password" —
+    // including when the field is MALFORMED (fromB64 throws CryptoError, which the
+    // auth surfaces map to "wrong master password"): garbage where the identity key
+    // belongs is tampering/corruption, the very thing this check exists to name.
+    let serverIdentityPub: Uint8Array | null = null;
+    try {
+      serverIdentityPub = fromB64(keys.identityPub);
+    } catch {
+      /* undecodable → treated as a mismatch below */
+    }
+    if (serverIdentityPub === null || !ctEquals(identity.publicKey, serverIdentityPub)) {
       throw new IdentityMismatchError();
     }
     return new Account(userId, uvk, identity.privateKey, identity.publicKey, "", new Map());
