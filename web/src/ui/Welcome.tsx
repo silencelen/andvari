@@ -5,6 +5,7 @@ import { fromB64 } from "../crypto/bytes";
 import { shortFormMatches } from "../crypto/escrow";
 import { Account, deviceName } from "../vault/account";
 import { VaultStore } from "../vault/store";
+import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
 import { saveSession, type Session } from "./session";
 
 type Mode = { unlock: Session } | { fresh: true };
@@ -18,16 +19,18 @@ export interface LoginMeta {
 interface Props {
   client: ApiClient;
   policy: ClientPolicy | null;
+  policyError: boolean;
+  onRetryPolicy: () => Promise<void>;
   mode: Mode;
   onReady: (account: Account, store: VaultStore, meta: LoginMeta) => void;
   onForget: () => void;
 }
 
-export function Welcome({ client, policy, mode, onReady, onForget }: Props) {
+export function Welcome({ client, policy, policyError, onRetryPolicy, mode, onReady, onForget }: Props) {
   if ("unlock" in mode) {
     return <Unlock client={client} session={mode.unlock} onReady={onReady} onForget={onForget} />;
   }
-  return <FreshStart client={client} policy={policy} onReady={onReady} />;
+  return <FreshStart client={client} policy={policy} policyError={policyError} onRetryPolicy={onRetryPolicy} onReady={onReady} />;
 }
 
 /** Reload with an existing session: master password re-derives keys. */
@@ -41,13 +44,27 @@ function Unlock({ client, session, onReady, onForget }: { client: ApiClient; ses
     setBusy(true);
     setErr("");
     try {
-      const keys = await client.accountKeys();
+      // net() tags transport failures so a VPN drop / server restart can't be mistaken for
+      // a bad password. Account.unlock is the only crypto step and is left un-wrapped, so a
+      // throw from it (and only it) is unambiguously "wrong master password".
+      const keys = await net(client.accountKeys());
       const account = await Account.unlock(session.userId, password, keys);
       const store = new VaultStore(client, account);
-      await store.sync(); // rediscovers the personal vault id
+      await net(store.sync()); // rediscovers the personal vault id
       onReady(account, store, { isAdmin: session.isAdmin, mustChangePassword: false });
     } catch (e) {
-      setErr(e instanceof ApiError && e.status === 401 ? "Session expired — sign in again." : "Wrong master password.");
+      // Only a throw from Account.unlock (the sole un-wrapped, non-ApiError step) may be
+      // blamed on the password. A server that responded with an error is a server
+      // problem — the user's password may be perfectly fine.
+      setErr(
+        e instanceof NetworkError
+          ? UNREACHABLE
+          : e instanceof ApiError && e.status === 401
+            ? "Session expired — sign in again."
+            : e instanceof ApiError
+              ? "The server had a problem answering — your password may be fine. Try again in a moment."
+              : "Wrong master password.",
+      );
     } finally {
       setBusy(false);
     }
@@ -76,7 +93,7 @@ function Unlock({ client, session, onReady, onForget }: { client: ApiClient; ses
 }
 
 /** No session: sign in to an existing account, or enroll with an invite. */
-function FreshStart({ client, policy, onReady }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
+function FreshStart({ client, policy, policyError, onRetryPolicy, onReady }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
   const [tab, setTab] = useState<"signin" | "enroll">("signin");
   return (
     <div className="auth-shell">
@@ -90,7 +107,7 @@ function FreshStart({ client, policy, onReady }: { client: ApiClient; policy: Cl
           <button className={tab === "signin" ? "active" : ""} onClick={() => setTab("signin")}>Sign in</button>
           <button className={tab === "enroll" ? "active" : ""} onClick={() => setTab("enroll")}>Enroll</button>
         </div>
-        {tab === "signin" ? <SignIn client={client} onReady={onReady} /> : <Enroll client={client} policy={policy} onReady={onReady} />}
+        {tab === "signin" ? <SignIn client={client} onReady={onReady} /> : <Enroll client={client} policy={policy} policyError={policyError} onRetryPolicy={onRetryPolicy} onReady={onReady} />}
       </div>
     </div>
   );
@@ -109,13 +126,13 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
     setBusy(true);
     setErr("");
     try {
-      const pre = await client.prelogin(email);
+      const pre = await net(client.prelogin(email));
       const authKey = await Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams);
       const code = totp.replace(/\s/g, "");
-      const s = await client.login(email, authKey, deviceName(), totpNeeded && code ? code : undefined);
+      const s = await net(client.login(email, authKey, deviceName(), totpNeeded && code ? code : undefined));
       const account = await Account.unlock(s.userId, password, s.accountKeys);
       const store = new VaultStore(client, account);
-      await store.sync(); // discovers the personal vault id from grants
+      await net(store.sync()); // discovers the personal vault id from grants
       saveSession({
         baseUrl: client.baseUrl,
         userId: s.userId,
@@ -133,10 +150,14 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
         setErr("");
       } else if (e instanceof ApiError && e.code === "public_login_requires_totp") {
         setErr("This account has no TOTP enrolled — sign-in from the public address is blocked. Connect from inside (VPN/LAN), enroll TOTP in Settings, then retry.");
+      } else if (e instanceof NetworkError) {
+        setErr(UNREACHABLE);
       } else if (e instanceof ApiError && e.status === 401) {
         setErr(totpNeeded ? "Wrong email, master password, or one-time code." : "Wrong email or master password.");
+      } else if (e instanceof ApiError) {
+        setErr("The server had a problem answering — your details may be fine. Try again in a moment.");
       } else {
-        setErr("Sign-in failed.");
+        setErr("Sign-in failed. Please try again.");
       }
     } finally {
       setBusy(false);
@@ -174,7 +195,7 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
   );
 }
 
-function Enroll({ client, policy, onReady }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
+function Enroll({ client, policy, policyError, onRetryPolicy, onReady }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
   const [invite, setInvite] = useState("");
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
@@ -184,6 +205,18 @@ function Enroll({ client, policy, onReady }: { client: ApiClient; policy: Client
   const [shortFp, setShortFp] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [retrying, setRetrying] = useState(false);
+
+  // Visible feedback for the policy Retry: the label flips to "Retrying…" while the fetch
+  // runs; if it fails again the policyError branch simply re-renders (label back to Retry).
+  const retryPolicy = async () => {
+    setRetrying(true);
+    try {
+      await onRetryPolicy();
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   const fp = policy?.recoveryFingerprint ?? "";
   // shortFormMatches is false whenever fp is empty (nothing to match), so shortOk already
@@ -193,7 +226,7 @@ function Enroll({ client, policy, onReady }: { client: ApiClient; policy: Client
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!policy || !fp) return setErr("Server has no recovery key configured — enrollment is disabled.");
+    if (!policy || !fp) return setErr(policyError ? POLICY_UNAVAILABLE : "Server has no recovery key configured — enrollment is disabled.");
     setBusy(true);
     setErr("");
     try {
@@ -203,10 +236,10 @@ function Enroll({ client, policy, onReady }: { client: ApiClient; policy: Client
         displayName: name || email.split("@")[0]!,
         password,
         kdfParams: policy.kdfParams,
-        recoveryPublicKey: await recoveryPubFromServer(client),
+        recoveryPublicKey: await net(recoveryPubFromServer(client)),
         recoveryFingerprint: fp,
       });
-      const s = await client.register(request);
+      const s = await net(client.register(request));
       client.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
       saveSession({
         baseUrl: client.baseUrl,
@@ -217,10 +250,14 @@ function Enroll({ client, policy, onReady }: { client: ApiClient; policy: Client
         tokens: { accessToken: s.accessToken, refreshToken: s.refreshToken },
       });
       const store = new VaultStore(client, account);
-      await store.sync();
+      // register() succeeded: the account exists and the invite is CONSUMED. From here on,
+      // failure must not bounce back to the enroll form — a resubmit could only ever yield
+      // "invite already used". A failed first sync just means an empty view until the vault
+      // shell's reconnect logic pulls; proceed.
+      await store.sync().catch(() => {});
       onReady(account, store, { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword });
     } catch (e) {
-      setErr(e instanceof ApiError ? enrollError(e.code) : "Enrollment failed.");
+      setErr(e instanceof NetworkError ? UNREACHABLE : e instanceof ApiError ? enrollError(e.code) : "Enrollment failed.");
     } finally {
       setBusy(false);
     }
@@ -277,7 +314,16 @@ function Enroll({ client, policy, onReady }: { client: ApiClient; policy: Client
             <span>This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.</span>
           </label>
         </>
+      ) : policyError ? (
+        // The policy fetch FAILED — don't claim the ceremony isn't done (it may well be),
+        // and don't blame the network (the server may have answered with an error).
+        <div className="msg err" style={{ display: "block" }}>
+          {POLICY_UNAVAILABLE}{" "}
+          <button type="button" className="link" disabled={retrying} onClick={retryPolicy}>{retrying ? "Retrying…" : "Retry"}</button>
+        </div>
       ) : (
+        // Policy loaded and the fingerprint is genuinely empty → the recovery key really
+        // isn't configured on this server.
         <div className="msg err">Server has no recovery key configured; enrollment is disabled until the escrow ceremony is done.</div>
       )}
       <button className="primary" disabled={busy || !canSubmit}>{busy ? "Forging your vault…" : "Create vault"}</button>

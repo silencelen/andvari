@@ -5,6 +5,7 @@ import { fromB64 } from "../crypto/bytes";
 import { shortIdentityFingerprint } from "../crypto/sharedgrant";
 import type { Account } from "../vault/account";
 import type { VaultInfo, VaultStore } from "../vault/store";
+import { UNREACHABLE } from "./errors";
 
 interface Props {
   account: Account;
@@ -65,13 +66,25 @@ export function Sharing({ account, store, client, onSynced }: Props) {
 
 function friendlyError(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.code === "no_such_user") return "No account with that email address — they need to be invited and enrolled first.";
-    if (e.code === "already_member") return "That person is already a member of this vault.";
-    if (e.code === "sharing_public_disabled") return "Sharing can only be managed from the home network, not over the public address.";
-    if (e.status === 429) return "Too many requests — wait a minute and try again.";
-    return `${e.code}: ${e.message}`;
+    switch (e.code) {
+      case "no_such_user": return "No account with that email address — they need to be invited and enrolled first.";
+      case "already_member": return "That person is already a member of this vault.";
+      case "cannot_target_self": return "That's your own account — you already own this vault.";
+      case "user_inactive": return "That account has been disabled — ask your admin to re-enable it first.";
+      case "not_vault_owner": return "Only the vault's owner can manage its members.";
+      case "sharing_public_disabled": return "Sharing can only be managed from the home network, not over the public address.";
+    }
+    // The server uses one generic "rate_limited" code for every limit; callers with a
+    // known window (e.g. vault-create's 5/hour) refine the copy at the call site.
+    if (e.status === 429) return "Too many requests — please wait a bit and try again.";
+    if (e.status === 401) return "Your session has expired — lock and sign in again.";
+    return "Something went wrong on the server — please try again.";
   }
-  return "Request failed.";
+  // Only a fetch() rejection (TypeError) means the server was unreachable. Anything else
+  // thrown in these flows is a local decode/crypto failure — retrying or VPN-debugging
+  // can't fix it, so say what it is.
+  if (e instanceof TypeError) return UNREACHABLE;
+  return "Something unexpected went wrong in the app — reload the page and try again.";
 }
 
 function NewVaultForm({ account, store, client, onCreated }: { account: Account; store: VaultStore; client: ApiClient; onCreated: () => void }) {
@@ -91,7 +104,12 @@ function NewVaultForm({ account, store, client, onCreated }: { account: Account;
       onCreated();
     } catch (err) {
       account.removeVault(vaultId); // roll back the optimistic local registration
-      setErr(friendlyError(err));
+      // vault-create's rate limit is 5 per hour — say so instead of the generic "wait a bit".
+      setErr(
+        err instanceof ApiError && err.status === 429
+          ? "You can create up to 5 new shared vaults per hour — try again later."
+          : friendlyError(err),
+      );
     } finally {
       setBusy(false);
     }
@@ -242,6 +260,11 @@ function AddMember({ vaultId, account, client, onAdded }: { vaultId: string; acc
     reset();
     try {
       const u = await client.lookupUser(email.trim());
+      if (u.userId === account.userId) {
+        // You're already the owner — adding yourself would just fail server-side.
+        setErr("That's your own account — you already own this vault.");
+        return;
+      }
       const fp = await shortIdentityFingerprint(fromB64(u.identityPub));
       setFound({ ...u, code: fp.match(/.{4}/g)!.join(" ") });
     } catch (err) {

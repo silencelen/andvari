@@ -29,8 +29,23 @@ type Phase =
 export function App() {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [policy, setPolicy] = useState<ClientPolicy | null>(null);
+  // Distinct from `policy === null`: true means the policy fetch FAILED (can't reach the
+  // server), false means it succeeded (so an empty recoveryFingerprint genuinely means no
+  // recovery key). Without this, a transient fetch failure shows the scary — and now false —
+  // "escrow ceremony isn't done" message during enrollment.
+  const [policyError, setPolicyError] = useState(false);
   const [baseUrl] = useState(defaultBaseUrl());
   const clientRef = useRef<ApiClient | null>(null);
+
+  const loadPolicy = useCallback(async () => {
+    try {
+      setPolicy(await clientRef.current!.clientPolicy());
+      setPolicyError(false);
+    } catch {
+      setPolicy(null);
+      setPolicyError(true);
+    }
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -38,20 +53,17 @@ export function App() {
       const session = loadSession();
       const client = makeClient(session, baseUrl);
       clientRef.current = client;
-      try {
-        setPolicy(await client.clientPolicy());
-      } catch {
-        setPolicy(null);
-      }
+      await loadPolicy();
       setPhase(session?.tokens ? { kind: "unlock", session } : { kind: "welcome" });
     })();
-  }, [baseUrl]);
+  }, [baseUrl, loadPolicy]);
 
   const onUnlocked = (account: Account, store: VaultStore, meta: LoginMeta) => {
     setPhase({ kind: "vault", account, store, meta });
     // Refresh policy at unlock so the auto-lock/clipboard windows reflect the CURRENT
-    // org policy, not whatever was live when the tab first loaded.
-    void clientRef.current?.clientPolicy().then(setPolicy).catch(() => {});
+    // org policy — via loadPolicy so a success also clears a stale policyError from a
+    // failed boot-time fetch (otherwise Enroll later shows a false "couldn't reach").
+    void loadPolicy();
   };
 
   // Stable identity: Vault's WS-subscription effect depends on this — a fresh closure per
@@ -112,6 +124,8 @@ export function App() {
     <Welcome
       client={clientRef.current!}
       policy={policy}
+      policyError={policyError}
+      onRetryPolicy={loadPolicy}
       mode={phase.kind === "unlock" ? { unlock: phase.session } : { fresh: true }}
       onReady={onUnlocked}
       onForget={onLoggedOut}

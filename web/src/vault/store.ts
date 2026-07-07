@@ -331,7 +331,15 @@ export class VaultStore {
     const existing = this.itemsById.get(itemId);
     if (!existing) return;
     await this.push([this.deleteMutation(itemId, existing.vaultId, existing.rev)]);
-    await this.sync();
+    // Past this point the delete is COMMITTED server-side. A failed reconcile must not
+    // resurface the item locally or make remove() report failure (the UI would then tell
+    // the user "nothing was removed" about an item that is gone fleet-wide) — drop it
+    // from the working set now and let the next successful sync true everything up.
+    try {
+      await this.sync();
+    } catch {
+      this.itemsById.delete(itemId);
+    }
   }
 
   private async push(mutations: Mutation[]): Promise<void> {
