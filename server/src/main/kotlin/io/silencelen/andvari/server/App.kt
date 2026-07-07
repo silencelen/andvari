@@ -60,7 +60,9 @@ import kotlin.time.Duration.Companion.minutes
 /** Bootstrap invite email sentinel: matches whatever email the first admin registers with. */
 const val BOOTSTRAP_ANY_EMAIL = "*"
 
-const val SERVER_VERSION = "0.3.0"
+// Aliases the single release-version source in :core — Admin Status and the update
+// check lied for a whole release when this was a separate hand-bumped literal.
+const val SERVER_VERSION = io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
 
 private val UUID_PATH_RE = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 

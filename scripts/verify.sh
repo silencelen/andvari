@@ -7,6 +7,20 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCK=/tmp/andvari-gradle.lock
 
+echo "==> Release-version consistency (one source of truth: ANDVARI_CLIENT_VERSION)"
+# 0.4.0 shipped with SERVER_VERSION and DESKTOP_VERSION still hardcoded to 0.3.0. Those
+# Kotlin constants now alias the core const; the Gradle-side literals (android versionName,
+# desktop packageVersion) can't import it, so assert they match here — one skew fails the gate.
+CORE_VER=$(grep -oE 'ANDVARI_CLIENT_VERSION = "[^"]+"' "$REPO_DIR/core/src/commonMain/kotlin/io/silencelen/andvari/core/client/AndvariApi.kt" | grep -oE '"[^"]+"' | tr -d '"')
+AND_VER=$(grep -oE 'versionName = "[^"]+"' "$REPO_DIR/app-android/build.gradle.kts" | grep -oE '"[^"]+"' | tr -d '"')
+DESK_VER=$(grep -oE 'packageVersion = "[^"]+"' "$REPO_DIR/app-desktop/build.gradle.kts" | grep -oE '"[^"]+"' | tr -d '"')
+WEB_VER=$(grep -oE 'CLIENT_VERSION = "[^"]+"' "$REPO_DIR/web/src/api/client.ts" | grep -oE '"[^"]+"' | tr -d '"')
+if [ "$CORE_VER" != "$AND_VER" ] || [ "$CORE_VER" != "$DESK_VER" ] || [ "$CORE_VER" != "$WEB_VER" ]; then
+  echo "    VERSION SKEW: core=$CORE_VER android=$AND_VER desktop=$DESK_VER web=$WEB_VER — bump all to match." >&2
+  exit 1
+fi
+echo "    all clients report $CORE_VER"
+
 echo "==> Kotlin: :core + :server + recovery-cli tests (RFC pins, vectors, full server integration)"
 (cd "$REPO_DIR" && flock "$LOCK" ./gradlew :core:jvmTest :server:test :tools:recovery-cli:test --console=plain -q)
 
