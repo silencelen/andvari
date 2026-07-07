@@ -24,10 +24,22 @@ class Config(
     // fast-param integration tests are unaffected; fromEnv() sets the production floor.
     val minKdfMemBytes: Long = 0,
     val minKdfOps: Long = 0,
+    // Forwarded-IP headers trusted for rate keys + audit ip ONLY when the direct peer is
+    // loopback (tailscale serve / cloudflared both terminate on 127.0.0.1); raw XFF from
+    // a non-loopback peer is never trusted (spec 03 §8).
+    val trustedIpHeaders: List<String> = DEFAULT_TRUSTED_IP_HEADERS,
+    // Cap on concurrent streaming uploads per user; in-flight .part bytes also count
+    // toward the user quota mid-stream (LOW-6).
+    val uploadMaxConcurrentPerUser: Int = 4,
+    // Netty request-read timeout, seconds (0 = off). Stays OFF until idle-WS survival
+    // under the timeout is verified on the deployment (ping keepalive vs Netty reaper).
+    val requestReadTimeoutSeconds: Int = 0,
 ) {
     val escrowConfigured: Boolean get() = recoveryPublicKey.size == 32 && recoveryFingerprint.isNotEmpty()
 
     companion object {
+        val DEFAULT_TRUSTED_IP_HEADERS = listOf("CF-Connecting-IP", "X-Forwarded-For")
+
         fun fromEnv(env: (String) -> String? = System::getenv): Config {
             val recoveryPub = env("ANDVARI_RECOVERY_PUBKEY")?.let { Bytes.fromB64(it) } ?: ByteArray(0)
             require(recoveryPub.isEmpty() || recoveryPub.size == 32) {
@@ -54,6 +66,11 @@ class Config(
                 // Production KDF floor (spec 01 §9's hard rule: never below 64 MiB / ops 3).
                 minKdfMemBytes = env("ANDVARI_MIN_KDF_MEM")?.toLong() ?: 67_108_864L,
                 minKdfOps = env("ANDVARI_MIN_KDF_OPS")?.toLong() ?: 3L,
+                trustedIpHeaders = env("ANDVARI_TRUSTED_IP_HEADERS")
+                    ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
+                    ?: DEFAULT_TRUSTED_IP_HEADERS,
+                uploadMaxConcurrentPerUser = env("ANDVARI_UPLOAD_MAX_CONCURRENT")?.toInt() ?: 4,
+                requestReadTimeoutSeconds = env("ANDVARI_REQUEST_READ_TIMEOUT_S")?.toInt() ?: 0,
             )
         }
     }

@@ -37,7 +37,8 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
 
   const refresh = () => setItems(store.list());
 
-  // WS dirty-bell → pull.
+  // WS dirty-bell → pull. The ticket mint adds a round-trip before the socket exists, so
+  // sync once on open to catch any rev pushed during that window (the notifier has no replay).
   useEffect(() => {
     const close = client.events(
       async () => {
@@ -45,6 +46,10 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
         refresh();
       },
       () => onLock(),
+      async () => {
+        await store.sync();
+        refresh();
+      },
     );
     return close;
   }, [client, store, onLock]);

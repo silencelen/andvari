@@ -10,21 +10,41 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.websocket.WebSockets
+import io.ktor.client.plugins.websocket.webSocket
+import io.ktor.http.encodeURLParameter
+import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.testing.testApplication
+import io.ktor.utils.io.ByteChannel
+import io.ktor.utils.io.writeFully
+import io.ktor.websocket.CloseReason
+import io.ktor.websocket.Frame
+import io.ktor.websocket.readText
 import io.silencelen.andvari.core.crypto.Attachments
 import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.model.AuditEvent
+import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.EscrowUpload
 import io.silencelen.andvari.core.model.InviteRequest
 import io.silencelen.andvari.core.model.InviteResponse
 import io.silencelen.andvari.core.model.Mutation
+import io.silencelen.andvari.core.model.PreloginRequest
+import io.silencelen.andvari.core.model.PreloginResponse
 import io.silencelen.andvari.core.model.RefreshRequest
 import io.silencelen.andvari.core.model.TokenPair
+import io.silencelen.andvari.core.model.WsTicketResponse
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.builtins.ListSerializer
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -250,5 +270,335 @@ class AuditHardeningTest : P4TestSupport() {
             rows.any { it.userId == admin.userId },
             "replacing self escrow (sole recovery path) must be audited",
         )
+    }
+
+    // ---- LOW-3: forwarded client IP is trusted only from a loopback peer ----
+
+    /** Route-level plumbing: audit rows record the forwarded IP (testApplication's peer is loopback). */
+    @Test
+    fun clientIp_forwardedHeaders_reachAuditRows() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("ip@x.com", "client ip audit password", fast = true)
+        client.register(admin, bootstrapToken)
+
+        suspend fun escrowWith(vararg headers: Pair<String, String>): String? {
+            val resp = client.put("/api/v1/escrow/self") {
+                contentType(ContentType.Application.Json); authed(admin)
+                headers.forEach { (k, v) -> header(k, v) }
+                setBody(EscrowUpload(Bytes.toB64(crypto.randomBytes(48)), fingerprint))
+            }
+            assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+            return client.auditRows(admin, "escrow_self_upload").first().ip // DESC → latest
+        }
+
+        // CF-Connecting-IP wins outright over XFF.
+        assertEquals("203.0.113.9", escrowWith("CF-Connecting-IP" to "203.0.113.9", "X-Forwarded-For" to "6.6.6.6, 100.101.102.103"))
+        // No CF header → RIGHTMOST XFF entry (proxy-appended), never the forgeable left one.
+        assertEquals("100.101.102.103", escrowWith("X-Forwarded-For" to "6.6.6.6, 100.101.102.103"))
+        // Garbage header falls back to the raw peer — no crash, no garbage in the audit.
+        val fallback = escrowWith("X-Forwarded-For" to "not-an-ip")
+        assertTrue(fallback == null || !fallback.contains("not-an-ip"), "garbage header must not reach audit: $fallback")
+    }
+
+    /** Pure selection rules (no ktor): loopback gating, rightmost-XFF, literal-only, loopback-literal skip. */
+    @Test
+    fun pickClientIp_pureRules() {
+        val trusted = listOf("CF-Connecting-IP", "X-Forwarded-For")
+        fun of(vararg h: Pair<String, String>): (String) -> String? = { name -> h.toMap()[name] }
+
+        // Non-loopback peer: headers are NEVER trusted (LAN spoof-proof).
+        assertEquals("10.0.0.5", pickClientIp(false, of("CF-Connecting-IP" to "203.0.113.9"), trusted, "10.0.0.5"))
+        // Loopback peer: first trusted header wins; XFF contributes its rightmost entry.
+        assertEquals("203.0.113.9", pickClientIp(true, of("CF-Connecting-IP" to "203.0.113.9", "X-Forwarded-For" to "6.6.6.6, 198.51.100.7"), trusted, "127.0.0.1"))
+        assertEquals("198.51.100.7", pickClientIp(true, of("X-Forwarded-For" to "6.6.6.6, 198.51.100.7"), trusted, "127.0.0.1"))
+        // Hostnames (would DNS-resolve), blanks, and loopback literals all fall through.
+        assertEquals("127.0.0.1", pickClientIp(true, of("X-Forwarded-For" to "evil.example.com"), trusted, "127.0.0.1"))
+        assertEquals("127.0.0.1", pickClientIp(true, of("CF-Connecting-IP" to "   "), trusted, "127.0.0.1"))
+        assertEquals("127.0.0.1", pickClientIp(true, of("X-Forwarded-For" to "127.0.0.1"), trusted, "127.0.0.1"))
+        // IPv6 literal accepted; bad IPv4 octet rejected.
+        assertEquals("2001:db8::7", pickClientIp(true, of("CF-Connecting-IP" to "2001:db8::7"), trusted, "127.0.0.1"))
+        assertEquals("127.0.0.1", pickClientIp(true, of("CF-Connecting-IP" to "999.1.1.1"), trusted, "127.0.0.1"))
+    }
+
+    // ---- LOW-6: per-user in-flight upload cap + quota accounting (drives store() directly:
+    // testApplication cannot hold a request body open) ----
+
+    private fun bareStore(maxConcurrent: Int): Pair<AttachmentStore, File> {
+        val repo = Repo(Db(File(tmpDir, "inflight-${System.nanoTime()}.db").absolutePath))
+        val dir = File(tmpDir, "inflight-blobs-${System.nanoTime()}")
+        return AttachmentStore(repo, dir.absolutePath, maxConcurrent) to dir
+    }
+
+    @Test
+    fun uploadCap_secondConcurrentUploadRejected_capReleasesOnCompletion() {
+        val (store, _) = bareStore(maxConcurrent = 1)
+        val policy = ClientPolicy()
+        runBlocking {
+            val ch1 = ByteChannel(autoFlush = true)
+            val first = async(Dispatchers.IO) { runCatching { store.store("user-1", uuid(), uuid(), uuid(), ch1, policy) } }
+            ch1.writeFully(ByteArray(Attachments.HEADER_BYTES + 100) { 1 }) // header + some ciphertext, then HOLD open
+            delay(250) // let the first store acquire its permit and enter the read loop
+
+            // Same user, concurrent → semaphore full → 429. The failed acquire must NOT
+            // release a permit it never took (over-release would corrupt the cap).
+            val second = runCatching { store.store("user-1", uuid(), uuid(), uuid(), ByteChannel(autoFlush = true), policy) }
+            assertTrue(second.exceptionOrNull() is RateLimited, "expected RateLimited, got $second")
+            // Still rejected (permit count uncorrupted by the failed acquire above).
+            val secondAgain = runCatching { store.store("user-1", uuid(), uuid(), uuid(), ByteChannel(autoFlush = true), policy) }
+            assertTrue(secondAgain.exceptionOrNull() is RateLimited)
+
+            // A DIFFERENT user is unaffected (the cap is per-user).
+            val chOther = ByteChannel(autoFlush = true)
+            val other = async(Dispatchers.IO) { runCatching { store.store("user-2", uuid(), uuid(), uuid(), chOther, policy) } }
+            chOther.writeFully(ByteArray(Attachments.HEADER_BYTES + 64) { 2 })
+            chOther.flushAndClose()
+            assertTrue(other.await().isSuccess, "other user's upload: ${other.await()}")
+
+            // Completing the first upload releases the permit → a third same-user upload works.
+            ch1.flushAndClose()
+            assertTrue(first.await().isSuccess, "first upload: ${first.await()}")
+            val ch3 = ByteChannel(autoFlush = true)
+            val third = async(Dispatchers.IO) { runCatching { store.store("user-1", uuid(), uuid(), uuid(), ch3, policy) } }
+            ch3.writeFully(ByteArray(Attachments.HEADER_BYTES + 64) { 3 })
+            ch3.flushAndClose()
+            assertTrue(third.await().isSuccess, "cap must release after completion: ${third.await()}")
+        }
+    }
+
+    @Test
+    fun uploadQuota_idempotentReUpload_atQuota_isExempt_not413() {
+        val (store, _) = bareStore(maxConcurrent = 4)
+        val policy = ClientPolicy(userAttachmentsMaxBytes = 4096)
+        runBlocking {
+            val userId = "user-r"; val itemId = uuid(); val vaultId = uuid(); val attId = uuid()
+            // First upload fills most of the tiny quota and commits.
+            val body = ByteArray(Attachments.HEADER_BYTES + 3000) { 9 }
+            val ch = ByteChannel(autoFlush = true); ch.writeFully(body); ch.flushAndClose()
+            val meta = store.store(userId, attId, itemId, vaultId, ch, policy)
+            assertEquals(attId, meta.attachmentId)
+
+            // Idempotent RE-upload of the SAME id+bytes (a normal retry). The bytes already
+            // count in committedBytes; the mid-stream bound must NOT re-count them and 413.
+            val ch2 = ByteChannel(autoFlush = true); ch2.writeFully(body); ch2.flushAndClose()
+            val again = runCatching { store.store(userId, attId, itemId, vaultId, ch2, policy) }
+            assertTrue(again.isSuccess, "idempotent re-upload near quota must return stored meta, not 413: $again")
+            assertEquals(attId, again.getOrThrow().attachmentId)
+        }
+    }
+
+    @Test
+    fun uploadQuota_countsInFlightBytes_beforeCommit() {
+        val (store, dir) = bareStore(maxConcurrent = 4)
+        val policy = ClientPolicy(userAttachmentsMaxBytes = 4096) // tiny per-user budget
+        runBlocking {
+            // First upload streams ~3 KiB and stays OPEN — nothing committed yet.
+            val ch1 = ByteChannel(autoFlush = true)
+            val first = async(Dispatchers.IO) { runCatching { store.store("user-q", uuid(), uuid(), uuid(), ch1, policy) } }
+            ch1.writeFully(ByteArray(Attachments.HEADER_BYTES + 3072) { 1 })
+            delay(250)
+
+            // Second upload crosses committed+in-flight mid-stream → 413 BEFORE any commit.
+            val attId2 = uuid()
+            val ch2 = ByteChannel(autoFlush = true)
+            val second = async(Dispatchers.IO) { runCatching { store.store("user-q", attId2, uuid(), uuid(), ch2, policy) } }
+            ch2.writeFully(ByteArray(Attachments.HEADER_BYTES + 3072) { 2 })
+            ch2.flushAndClose()
+            val err = second.await().exceptionOrNull()
+            assertTrue(err is PayloadTooLarge && err.reason == "user_attachment_quota", "expected mid-stream quota, got $err")
+            assertTrue(!File(dir, "$attId2.part").exists(), "rejected upload's .part must be cleaned up")
+
+            // Draining: finish the first (fits alone); accounting returns; a small upload succeeds.
+            ch1.flushAndClose()
+            assertTrue(first.await().isSuccess, "first upload: ${first.await()}")
+            val ch3 = ByteChannel(autoFlush = true)
+            val third = async(Dispatchers.IO) { runCatching { store.store("user-q", uuid(), uuid(), uuid(), ch3, policy) } }
+            ch3.writeFully(ByteArray(Attachments.HEADER_BYTES + 128) { 3 })
+            ch3.flushAndClose()
+            assertTrue(third.await().isSuccess, "in-flight accounting must drain: ${third.await()}")
+        }
+    }
+
+    // ---- LOW-9: WS auth via single-use ticket; raw access token in query removed ----
+
+    @Test
+    fun wsTicket_mint_connect_singleUse_bearerStays_accessQueryRemoved() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val ws = createClient {
+            install(ContentNegotiation) { json(json) }
+            install(WebSockets)
+        }
+        val admin = VirtualClient("ws@x.com", "ws ticket password one", fast = true)
+        ws.register(admin, bootstrapToken)
+
+        suspend fun mint(): String {
+            val resp = ws.post("/api/v1/events/ticket") { authed(admin) }
+            assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+            return json.decodeFromString(WsTicketResponse.serializer(), resp.bodyAsText()).ticket
+        }
+
+        // Mint → connect → live socket (ping/pong).
+        val ticket = mint()
+        ws.webSocket("/api/v1/events?ticket=${ticket.encodeURLParameter()}") {
+            outgoing.send(Frame.Text("ping"))
+            assertEquals("pong", (incoming.receive() as Frame.Text).readText())
+        }
+
+        // Strictly single-use: replaying the SAME ticket is refused.
+        ws.webSocket("/api/v1/events?ticket=${ticket.encodeURLParameter()}") {
+            assertEquals(CloseReason.Codes.VIOLATED_POLICY.code, closeReason.await()?.code)
+        }
+
+        // The removed ?access= path stays removed — even with a VALID access token.
+        ws.webSocket("/api/v1/events?access=${admin.accessToken.encodeURLParameter()}") {
+            assertEquals(CloseReason.Codes.VIOLATED_POLICY.code, closeReason.await()?.code)
+        }
+
+        // Authorization: Bearer on the upgrade still works (non-browser callers).
+        ws.webSocket("/api/v1/events", request = { authed(admin) }) {
+            outgoing.send(Frame.Text("ping"))
+            assertEquals("pong", (incoming.receive() as Frame.Text).readText())
+        }
+    }
+
+    @Test
+    fun wsTicket_expiry_and_atomicRedeem() {
+        val expired = WsTicketStore(ttlMs = 1)
+        val t = expired.mint("user-x")
+        Thread.sleep(10)
+        assertNull(expired.redeem(t), "an expired ticket must not redeem")
+
+        val store = WsTicketStore()
+        val t2 = store.mint("user-y")
+        assertEquals("user-y", store.redeem(t2))
+        assertNull(store.redeem(t2), "a redeemed ticket must not redeem twice")
+        assertNull(store.redeem("garbage"))
+    }
+
+    // ---- INFO-1: no PII in audit meta; create↔redeem correlate via token-hash prefix ----
+
+    @Test
+    fun auditMeta_carriesTokenHashPrefix_notEmail() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("meta@x.com", "audit meta password one", fast = true)
+        client.register(admin, bootstrapToken)
+
+        val inviteResp = client.post("/api/v1/admin/users") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(InviteRequest("second@x.com", isAdmin = false))
+        }
+        assertEquals(HttpStatusCode.OK, inviteResp.status, inviteResp.bodyAsText())
+        val invite = json.decodeFromString(InviteResponse.serializer(), inviteResp.bodyAsText())
+        val second = VirtualClient("second@x.com", "second user password xyz", fast = true)
+        client.register(second, invite.inviteToken)
+
+        val creates = client.auditRows(admin, "invite_create")
+        val registers = client.auditRows(admin, "register")
+        assertTrue((creates + registers).none { it.meta?.contains("@") == true }, "no email may appear in audit meta")
+        val createMeta = creates.first().meta
+        assertEquals(12, createMeta?.length)
+        assertTrue(
+            registers.any { it.userId == second.userId && it.meta == createMeta },
+            "the register row must carry the SAME token-hash prefix as its invite_create",
+        )
+    }
+
+    // ---- INFO-3: prelogin answers the STORED org-default params for unknown emails ----
+
+    @Test
+    fun prelogin_unknownEmail_reflectsStoredPolicyParams() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("pol@x.com", "prelogin policy password", fast = true)
+        client.register(admin, bootstrapToken)
+
+        // Bump the org default params (the KDF floor is off in the test config).
+        val put = client.put("/api/v1/admin/policy") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(ClientPolicy(kdfParams = KdfParams(ops = 2, memBytes = 32L * 1024 * 1024)))
+        }
+        assertEquals(HttpStatusCode.OK, put.status, put.bodyAsText())
+
+        suspend fun prelogin(email: String): PreloginResponse {
+            val resp = client.post("/api/v1/auth/prelogin") {
+                contentType(ContentType.Application.Json); header("X-Andvari-Client", "test/1.0.0")
+                setBody(PreloginRequest(email))
+            }
+            assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+            return json.decodeFromString(PreloginResponse.serializer(), resp.bodyAsText())
+        }
+
+        // Unknown email → the CURRENT stored default, not the compile-time one.
+        val unknown = prelogin("nobody@x.com")
+        assertEquals(2, unknown.kdfParams.ops)
+        assertEquals(32L * 1024 * 1024, unknown.kdfParams.memBytes)
+        // Known account → its own real params (clients need them pre-auth).
+        assertEquals(1, prelogin("pol@x.com").kdfParams.ops)
+    }
+
+    // ---- INFO-5: policy_update audit rides the policy tx (exactly one row) ----
+
+    @Test
+    fun policyUpdate_auditedExactlyOnce_inTx() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("ptx@x.com", "policy tx audit password", fast = true)
+        client.register(admin, bootstrapToken)
+
+        val put = client.put("/api/v1/admin/policy") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(ClientPolicy(autoLockSeconds = 123))
+        }
+        assertEquals(HttpStatusCode.OK, put.status, put.bodyAsText())
+        val rows = client.auditRows(admin, "policy_update")
+        assertEquals(1, rows.size, "exactly one policy_update row per change")
+        assertEquals(admin.userId, rows.first().userId)
+        val pol = client.get("/api/v1/admin/policy") { authed(admin) }
+        assertTrue(pol.bodyAsText().contains("\"autoLockSeconds\":123"), "the change itself must land")
+    }
+
+    // ---- INFO-6: admin ids are UUID-validated (400, not a silent no-op UPDATE) ----
+
+    @Test
+    fun adminIds_rejectNonUuid() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("uuid@x.com", "admin uuid guard password", fast = true)
+        client.register(admin, bootstrapToken)
+
+        val disable = client.post("/api/v1/admin/users/not-a-uuid/disable") { authed(admin) }
+        assertEquals(HttpStatusCode.BadRequest, disable.status)
+        assertEquals("bad_user_id", errorOf(disable))
+        val revoke = client.post("/api/v1/admin/devices/zzz/revoke") { authed(admin) }
+        assertEquals(HttpStatusCode.BadRequest, revoke.status)
+        assertEquals("bad_device_id", errorOf(revoke))
+        val escrow = client.get("/api/v1/admin/users/123/escrow") { authed(admin) }
+        assertEquals(HttpStatusCode.BadRequest, escrow.status)
+        assertEquals("bad_user_id", errorOf(escrow))
+    }
+
+    // ---- INFO-8: CSP on static web gains object-src / form-action ----
+
+    @Test
+    fun csp_includesObjectSrcAndFormAction() = testApplication {
+        val webDir = File(tmpDir, "web-${System.nanoTime()}").apply { mkdirs() }
+        File(webDir, "index.html").writeText("<!doctype html><title>andvari</title>")
+        val cfg = Config(
+            host = "127.0.0.1", port = 0,
+            dbPath = File(tmpDir, "csp-${System.nanoTime()}.db").absolutePath,
+            blobDir = File(tmpDir, "csp-blobs-${System.nanoTime()}").absolutePath,
+            webDir = webDir.absolutePath,
+            recoveryPublicKey = recovery.publicKey, recoveryFingerprint = fingerprint,
+            enumSecret = ByteArray(32) { 7 }, publicHostname = null, bootstrapToken = bootstrapToken,
+        )
+        application { andvariModule(buildServices(cfg, Notifier())) }
+        val client = jsonClient(this)
+        val resp = client.get("/")
+        assertEquals(HttpStatusCode.OK, resp.status)
+        val csp = resp.headers["Content-Security-Policy"] ?: ""
+        assertTrue(csp.contains("object-src 'none'"), csp)
+        assertTrue(csp.contains("form-action 'none'"), csp)
+        assertTrue(csp.contains("script-src 'self' 'wasm-unsafe-eval'"), csp)
     }
 }

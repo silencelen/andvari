@@ -68,8 +68,14 @@ describe.skipIf(!BASE)("live server e2e", () => {
     await storeB.sync();
 
     let bellRev = 0;
-    const closeWs = clientB.events((rev) => { bellRev = rev; }, () => {});
-    await new Promise((r) => setTimeout(r, 300)); // let the socket connect
+    let wsOpen = false;
+    const closeWs = clientB.events((rev) => { bellRev = rev; }, () => {}, () => { wsOpen = true; });
+    // The ticket mint adds a REST round-trip before the upgrade — await the actual
+    // socket-open signal (a push that beats registration rings no bell; the notifier
+    // has no replay), instead of a blind settle window.
+    const openDeadline = Date.now() + 5000;
+    while (!wsOpen && Date.now() < openDeadline) await new Promise((r) => setTimeout(r, 25));
+    expect(wsOpen, "client B's WebSocket opened (ticket mint + upgrade)").toBe(true);
 
     // A pushes an item.
     const item1Id = account.newItemId();

@@ -12,6 +12,12 @@ export interface PreloginResponse {
   kdfParams: KdfParams;
 }
 
+/** Single-use WS auth ticket (spec 03 §6): minted over authenticated REST, ~30 s TTL. */
+export interface WsTicketResponse {
+  ticket: string;
+  expiresInSeconds: number;
+}
+
 export interface AccountKeys {
   kdfSalt: string;
   kdfParams: KdfParams;

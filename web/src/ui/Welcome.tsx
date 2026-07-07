@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { fromB64 } from "../crypto/bytes";
+import { shortFormMatches } from "../crypto/escrow";
 import { Account, deviceName } from "../vault/account";
 import { VaultStore } from "../vault/store";
 import { saveSession, type Session } from "./session";
@@ -180,11 +181,15 @@ function Enroll({ client, policy, onReady }: { client: ApiClient; policy: Client
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [fpConfirmed, setFpConfirmed] = useState(false);
+  const [shortFp, setShortFp] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
   const fp = policy?.recoveryFingerprint ?? "";
-  const canSubmit = invite && email && password.length >= 8 && password === confirm && fpConfirmed && fp;
+  // shortFormMatches is false whenever fp is empty (nothing to match), so shortOk already
+  // encodes the "server has a recovery key" precondition — no separate `&& fp` needed.
+  const shortOk = shortFormMatches(shortFp, fp);
+  const canSubmit = invite && email && password.length >= 8 && password === confirm && shortOk && fpConfirmed;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -250,10 +255,25 @@ function Enroll({ client, policy, onReady }: { client: ApiClient; policy: Client
       </div>
       {fp ? (
         <>
-          <label>Recovery key fingerprint — confirm it matches your printed sheet</label>
-          <div className="fingerprint" style={{ marginBottom: 10 }}>{groupHex(fp)}</div>
+          {/* spec 04 §2(3): the fingerprint is deliberately NOT displayed until it has been
+              typed — showing it above the input would reduce the check to transcription. */}
+          <div className="field">
+            <label>Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet</label>
+            <input
+              className="mono"
+              placeholder="from the sheet, not this screen"
+              value={shortFp}
+              onChange={(e) => setShortFp(e.target.value)}
+            />
+            {shortFp.trim() && !shortOk && (
+              <span className="muted" style={{ color: "var(--danger)" }}>
+                doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin
+              </span>
+            )}
+            {shortOk && <span className="muted">matches — full fingerprint: {groupHex(fp)}</span>}
+          </div>
           <label className="check">
-            <input type="checkbox" checked={fpConfirmed} onChange={(e) => setFpConfirmed(e.target.checked)} />
+            <input type="checkbox" checked={fpConfirmed} onChange={(e) => setFpConfirmed(e.target.checked)} disabled={!shortOk} />
             <span>This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.</span>
           </label>
         </>

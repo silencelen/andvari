@@ -51,6 +51,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import io.silencelen.andvari.core.model.WsTicketResponse
 import java.io.File
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
@@ -77,6 +78,7 @@ class Services(
     val notifier: Notifier,
     val config: Config,
     val metrics: PrometheusMeterRegistry,
+    val wsTickets: WsTicketStore = WsTicketStore(),
 ) {
     fun metricsScrape(): String = metrics.scrape()
 }
@@ -116,7 +118,13 @@ fun Application.andvariModule(services: Services) {
     val service = services.service
 
     install(ContentNegotiation) { json(json) }
-    install(WebSockets)
+    // Ping keepalive (spec 03 §6 "server pings every 30 s" — now true): browsers auto-pong,
+    // so a healthy idle dirty-bell has recurring inbound traffic and survives any Netty
+    // request-read timeout (LOW-6) comfortably above the 60 s frame timeout.
+    install(WebSockets) {
+        pingPeriodMillis = 30_000
+        timeoutMillis = 60_000
+    }
     install(MicrometerMetrics) { registry = services.metrics }
     install(StatusPages) {
         exception<Throwable> { call, cause ->
@@ -170,11 +178,9 @@ fun Application.andvariModule(services: Services) {
         }
 
         get("/metrics") {
-            // Loopback-only; Alloy scrapes locally. Use the raw peer address (not the
-            // reverse-resolved host) and test it as a loopback address. Never trust XFF.
-            val peer = call.request.origin.remoteAddress
-            val isLoopback = runCatching { java.net.InetAddress.getByName(peer).isLoopbackAddress }.getOrDefault(false)
-            if (!isLoopback) {
+            // Loopback-only; Alloy scrapes locally. Shares peerIsLoopback() with clientIp()
+            // so the two peer gates can't drift. Never trusts forwarded headers.
+            if (!call.peerIsLoopback()) {
                 call.respond(HttpStatusCode.Forbidden, "metrics are loopback-only")
             } else {
                 call.respondText(services.metricsScrape())
@@ -220,7 +226,7 @@ fun Application.andvariModule(services: Services) {
 
         // ---- auth ----
         post("/api/v1/auth/prelogin") {
-            if (!limiter.allow("prelogin:${call.clientIp()}", 10, 60_000)) throw RateLimited()
+            if (!limiter.allow("prelogin:${call.clientIp(config)}", 10, 60_000)) throw RateLimited()
             val req = call.receive<PreloginRequest>()
             call.respond(service.prelogin(req.email))
         }
@@ -228,21 +234,21 @@ fun Application.andvariModule(services: Services) {
             enforceVersion(call, service)
             if (call.isPublicOrigin(config)) throw Forbidden("register_public_disabled")
             val req = call.receive<RegisterRequest>()
-            call.respond(service.register(req, call.clientIp()))
+            call.respond(service.register(req, call.clientIp(config)))
         }
         post("/api/v1/auth/login") {
             val publicOrigin = call.isPublicOrigin(config)
             // Public origin is rate-limited harder (spec 03 §8: 5/min vs 10/min).
-            if (!limiter.allow("login:${call.clientIp()}", if (publicOrigin) 5 else 10, 60_000)) throw RateLimited()
+            if (!limiter.allow("login:${call.clientIp(config)}", if (publicOrigin) 5 else 10, 60_000)) throw RateLimited()
             enforceVersion(call, service)
             val req = call.receive<LoginRequest>()
-            call.respond(service.login(req, call.clientIp(), publicOrigin))
+            call.respond(service.login(req, call.clientIp(config), publicOrigin))
         }
         post("/api/v1/auth/refresh") {
             // spec 03 §8: no refresh via the public origin — break-glass sessions re-login (with TOTP).
             if (call.isPublicOrigin(config)) throw Forbidden("public_refresh_disabled")
             val req = call.receive<RefreshRequest>()
-            call.respond(service.refresh(req.refreshToken, call.clientIp()))
+            call.respond(service.refresh(req.refreshToken, call.clientIp(config)))
         }
         post("/api/v1/auth/logout") {
             val p = requirePrincipal(call, service)
@@ -257,7 +263,7 @@ fun Application.andvariModule(services: Services) {
         }
         put("/api/v1/account/password") {
             val p = requirePrincipal(call, service)
-            service.changePassword(p, call.receive<PasswordChangeRequest>(), call.clientIp())
+            service.changePassword(p, call.receive<PasswordChangeRequest>(), call.clientIp(config))
             call.respondText("ok")
         }
 
@@ -272,12 +278,12 @@ fun Application.andvariModule(services: Services) {
         }
         post("/api/v1/account/totp/confirm") {
             val p = requirePrincipal(call, service)
-            service.totpConfirm(p.userId, call.receive<TotpCodeRequest>().code, call.clientIp())
+            service.totpConfirm(p.userId, call.receive<TotpCodeRequest>().code, call.clientIp(config))
             call.respond(service.totpStatus(p.userId))
         }
         post("/api/v1/account/totp/disable") {
             val p = requirePrincipal(call, service)
-            service.totpDisable(p.userId, call.receive<TotpCodeRequest>().code, call.clientIp())
+            service.totpDisable(p.userId, call.receive<TotpCodeRequest>().code, call.clientIp(config))
             call.respond(service.totpStatus(p.userId))
         }
 
@@ -322,7 +328,7 @@ fun Application.andvariModule(services: Services) {
             val p = requirePrincipal(call, service)
             enforceVersion(call, service)
             val req = call.receive<PushRequest>()
-            call.respond(service.push(p, req.mutations, call.clientIp()))
+            call.respond(service.push(p, req.mutations, call.clientIp(config)))
         }
 
         // ---- escrow ----
@@ -336,7 +342,7 @@ fun Application.andvariModule(services: Services) {
                     p.userId, body.sealed, body.fingerprint, now(),
                 )
                 // Escrow is the sole recovery path (spec 04); replacing it is security-relevant.
-                services.repo.auditOn(c, "escrow_self_upload", p.userId, p.deviceId, call.clientIp(), body.fingerprint)
+                services.repo.auditOn(c, "escrow_self_upload", p.userId, p.deviceId, call.clientIp(config), body.fingerprint)
             }
             call.respondText("ok")
         }
@@ -360,17 +366,17 @@ fun Application.andvariModule(services: Services) {
         }
         post("/api/v1/admin/users/{id}/disable") {
             val p = requireAdmin(call, service)
-            services.admin.disableUser(call.parameters["id"]!!, p.userId)
+            services.admin.disableUser(requireUuid(call.parameters["id"], "user_id"), p.userId)
             call.respondText("ok")
         }
         post("/api/v1/admin/devices/{id}/revoke") {
             val p = requireAdmin(call, service)
-            services.admin.revokeDevice(call.parameters["id"]!!, p.userId)
+            services.admin.revokeDevice(requireUuid(call.parameters["id"], "device_id"), p.userId)
             call.respondText("ok")
         }
         get("/api/v1/admin/users/{id}/escrow") {
             requireAdmin(call, service)
-            val sealed = services.admin.userSealed(call.parameters["id"]!!) ?: throw BadRequest("no_escrow")
+            val sealed = services.admin.userSealed(requireUuid(call.parameters["id"], "user_id")) ?: throw BadRequest("no_escrow")
             call.respondText(sealed)
         }
         post("/api/v1/admin/recovery") {
@@ -400,27 +406,36 @@ fun Application.andvariModule(services: Services) {
         }
         put("/api/v1/admin/policy") {
             val p = requireAdmin(call, service)
-            service.setPolicy(call.receive<ClientPolicy>())
-            services.repo.audit("policy_update", p.userId, null, call.clientIp())
+            // Audited inside the policy tx (INFO-5) — no standalone audit call here.
+            service.setPolicy(call.receive<ClientPolicy>(), p.userId, call.clientIp(config))
             call.respond(service.policy())
         }
 
         // ---- events (WS dirty-bell) ----
+        // Browsers can't set headers on a WS upgrade, so web clients mint a single-use 30 s
+        // ticket over the authenticated REST channel and connect with THAT (LOW-9): the
+        // long-lived access token never rides a query string into edge logs. Raw access
+        // tokens in the query are NOT accepted; the Bearer header path stays for non-browser
+        // callers.
+        post("/api/v1/events/ticket") {
+            val p = requirePrincipal(call, service)
+            call.respond(WsTicketResponse(services.wsTickets.mint(p.userId), 30))
+        }
         webSocket("/api/v1/events") {
-            val token = call.request.queryParameters["access"]
-                ?: call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ")
-            val principal = token?.let { service.authenticate(it) }
-            if (principal == null) {
+            val userId = call.request.queryParameters["ticket"]?.let { services.wsTickets.redeem(it) }
+                ?: call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ")?.trim()
+                    ?.let { service.authenticate(it)?.userId }
+            if (userId == null) {
                 close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "unauthorized"))
                 return@webSocket
             }
-            services.notifier.register(principal.userId, this)
+            services.notifier.register(userId, this)
             try {
                 for (frame in incoming) {
                     if (frame is Frame.Text && frame.readText() == "ping") outgoing.send(Frame.Text("pong"))
                 }
             } finally {
-                services.notifier.unregister(principal.userId, this)
+                services.notifier.unregister(userId, this)
             }
         }
 
@@ -433,9 +448,13 @@ fun Application.andvariModule(services: Services) {
                 val file = File(root, safe.ifEmpty { "index.html" })
                 val target = if (file.isFile) file else File(root, "index.html")
                 if (target.isFile) {
+                    // style-src 'unsafe-inline' is deliberate (audit INFO-8, document-and-keep):
+                    // React inline style={{…}} is used across web/src/ui, there is no
+                    // HTML-injection sink, and script-src already blocks inline JS — dropping
+                    // it is a styling refactor with no exploitability win today.
                     call.response.headers.append(
                         "Content-Security-Policy",
-                        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
+                        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; form-action 'none'",
                         false,
                     )
                     call.respondFileContent(target)
