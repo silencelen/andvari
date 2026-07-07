@@ -8,8 +8,10 @@ import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
+import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
+import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.DeviceInfo
 import io.silencelen.andvari.core.model.EscrowUpload
 import io.silencelen.andvari.core.model.ItemUpload
@@ -18,6 +20,10 @@ import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 /** Item plaintext document (spec 02 §3) — shared client model. */
 @kotlinx.serialization.Serializable
@@ -57,8 +63,10 @@ class Account private constructor(
     val userId: String,
     private val uvk: ByteArray,
     val identityPub: ByteArray,
+    private val identityPriv: ByteArray,
     var personalVaultId: String,
     private val vaultKeys: MutableMap<String, ByteArray>,
+    private val vaultRoles: MutableMap<String, String> = mutableMapOf(),
 ) {
     companion object {
         private const val ITEM_FORMAT_VERSION = 1
@@ -118,7 +126,10 @@ class Account private constructor(
                 ),
                 device = DeviceInfo("android", deviceName),
             )
-            val account = Account(crypto, userId, uvk, identity.publicKey, personalVaultId, mutableMapOf(personalVaultId to vk))
+            val account = Account(
+                crypto, userId, uvk, identity.publicKey, identity.privateKey, personalVaultId,
+                mutableMapOf(personalVaultId to vk), mutableMapOf(personalVaultId to "owner"),
+            )
             return req to account
         }
 
@@ -131,10 +142,19 @@ class Account private constructor(
             } catch (e: CryptoException) {
                 throw CryptoException("wrong master password")
             }
-            // identity seed unwrap validates UVK; pubkey comes from the server.
-            Envelope.openB64(crypto, uvk, keys.encryptedIdentitySeed, Ad.idkey(userId))
-            val identityPub = Bytes.fromB64(keys.identityPub)
-            return Account(crypto, userId, uvk, identityPub, "", mutableMapOf())
+            // The identity keypair is DERIVED from the UVK-sealed seed — which the server
+            // cannot forge. Fingerprints and sealed-grant opening must use this derived
+            // keypair, never a server-sent value; a mismatching server identityPub is a
+            // pubkey-substitution attempt (spec 01 §5) and unlock hard-fails.
+            val identitySeed = Envelope.openB64(crypto, uvk, keys.encryptedIdentitySeed, Ad.idkey(userId))
+            val identity = crypto.boxKeypairFromSeed(identitySeed)
+            if (!identity.publicKey.contentEquals(Bytes.fromB64(keys.identityPub))) {
+                throw CryptoException(
+                    "identity key mismatch — the server returned an identity public key that " +
+                        "your account's sealed seed does not derive; possible server compromise. Do not proceed.",
+                )
+            }
+            return Account(crypto, userId, uvk, identity.publicKey, identity.privateKey, "", mutableMapOf())
         }
 
         private fun uuid(crypto: CryptoProvider): String {
@@ -147,10 +167,27 @@ class Account private constructor(
         }
     }
 
-    fun addPersonalGrant(grant: WireGrant) {
-        val vk = Envelope.openB64(crypto, uvk, grant.wrappedVk, Ad.vk(grant.vaultId, userId))
+    /**
+     * Apply an incoming grant (spec 01 §6). The ROLE update is unconditional — a role
+     * change re-delivers the grant with a bumped rev and must take effect even though the
+     * VK is already held; the key itself is opened only when missing. Member grants carry
+     * sealedVk (crypto_box_seal to our identity); owner/personal grants carry wrappedVk
+     * (under UVK).
+     */
+    fun addGrant(grant: WireGrant) {
+        if (grant.role.isNotEmpty()) vaultRoles[grant.vaultId] = grant.role
+        if (vaultKeys.containsKey(grant.vaultId)) return
+        val sealed = grant.sealedVk
+        val vk = if (!sealed.isNullOrEmpty()) {
+            SharedGrant.open(crypto, identityPub, identityPriv, grant.vaultId, Bytes.fromB64(sealed))
+        } else {
+            Envelope.openB64(crypto, uvk, grant.wrappedVk, Ad.vk(grant.vaultId, userId))
+        }
         vaultKeys[grant.vaultId] = vk
     }
+
+    @Deprecated("shared grants exist now — use addGrant", ReplaceWith("addGrant(grant)"))
+    fun addPersonalGrant(grant: WireGrant) = addGrant(grant)
 
     fun setPersonalVault(vaultId: String) {
         if (personalVaultId.isEmpty()) personalVaultId = vaultId
@@ -158,10 +195,47 @@ class Account private constructor(
 
     fun hasVault(vaultId: String): Boolean = vaultKeys.containsKey(vaultId)
 
-    /** Drop a vault's key (removedGrants purge) so later writes fail fast client-side. */
+    /** Server-declared role for a vault we hold (null when unknown). */
+    fun roleFor(vaultId: String): String? = vaultRoles[vaultId]
+
+    /** Drop a vault's key + role (removedGrants purge) so later writes fail fast client-side. */
     fun removeVault(vaultId: String) {
         vaultKeys.remove(vaultId)
+        vaultRoles.remove(vaultId)
     }
+
+    // ---- shared vaults (spec 01 §6 / spec 03 §10) ----
+
+    class NewSharedVault(val request: CreateVaultRequest, val vaultId: String)
+
+    /** Create a shared vault locally: fresh VK, meta under VK, owner grant under OUR UVK. */
+    fun buildCreateSharedVault(name: String): NewSharedVault {
+        val vaultId = uuid(crypto)
+        val svk = crypto.randomBytes(32)
+        val metaPlain = buildJsonObject { put("name", name) }.toString()
+        val req = CreateVaultRequest(
+            vaultId = vaultId,
+            metaBlob = Envelope.sealB64(crypto, svk, metaPlain.encodeToByteArray(), Ad.vaultMeta(vaultId)),
+            wrappedVk = Envelope.sealB64(crypto, uvk, svk, Ad.vk(vaultId, userId)),
+        )
+        vaultKeys[vaultId] = svk
+        vaultRoles[vaultId] = "owner"
+        return NewSharedVault(req, vaultId)
+    }
+
+    /** Seal a vault's VK to a member's (out-of-band verified!) identity pubkey. */
+    fun wrapVkForMember(memberIdentityPub: ByteArray, vaultId: String): String =
+        Bytes.toB64(SharedGrant.seal(crypto, memberIdentityPub, vaultId, vk(vaultId)))
+
+    /** Short identity fingerprint over the SEED-DERIVED pubkey (spec 01 §5) — what a
+     *  family member reads out when someone shares a vault with them. */
+    fun identityFingerprintShort(): String = SharedGrant.shortFingerprint(crypto, identityPub)
+
+    /** Decrypt a vault's display name from its metaBlob (null when the VK is missing). */
+    fun decryptVaultName(vaultId: String, metaBlob: String): String? = runCatching {
+        val plain = Envelope.openB64(crypto, vk(vaultId), metaBlob, Ad.vaultMeta(vaultId)).decodeToString()
+        Json.parseToJsonElement(plain).jsonObject["name"]?.jsonPrimitive?.content
+    }.getOrNull()
 
     private fun vk(vaultId: String): ByteArray =
         vaultKeys[vaultId] ?: throw CryptoException("no key for vault $vaultId")

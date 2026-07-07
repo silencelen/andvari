@@ -3,6 +3,7 @@ package io.silencelen.andvari.core.client
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -18,7 +19,14 @@ import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ApiError
 import io.silencelen.andvari.core.model.AttachmentMeta
 import io.silencelen.andvari.core.model.ClientPolicy
+import io.silencelen.andvari.core.model.CreateVaultRequest
+import io.silencelen.andvari.core.model.CreateVaultResponse
 import io.silencelen.andvari.core.model.LoginRequest
+import io.silencelen.andvari.core.model.UserLookupRequest
+import io.silencelen.andvari.core.model.UserLookupResponse
+import io.silencelen.andvari.core.model.VaultMemberAdd
+import io.silencelen.andvari.core.model.VaultMemberRole
+import io.silencelen.andvari.core.model.VaultMemberSummary
 import io.silencelen.andvari.core.model.PasswordChangeRequest
 import io.silencelen.andvari.core.model.PreloginRequest
 import io.silencelen.andvari.core.model.PreloginResponse
@@ -76,6 +84,7 @@ class AndvariApi(
             "GET" -> http.get(baseUrl + path) { common(auth) }
             "POST" -> http.post(baseUrl + path) { common(auth); if (body != null) { contentType(ContentType.Application.Json); setBody(body) } }
             "PUT" -> http.put(baseUrl + path) { common(auth); if (body != null) { contentType(ContentType.Application.Json); setBody(body) } }
+            "DELETE" -> http.delete(baseUrl + path) { common(auth) }
             else -> error("unsupported method $method")
         }
         if (resp.status == HttpStatusCode.Unauthorized && auth && retry && tokens != null) {
@@ -147,6 +156,23 @@ class AndvariApi(
     suspend fun sync(since: Long): SyncResponse = call("GET", "/api/v1/sync?since=$since")
 
     suspend fun push(req: PushRequest): PushResponse = call("POST", "/api/v1/sync/push", req)
+
+    // ---- shared vaults (spec 03 §10) ----
+
+    suspend fun createVault(req: CreateVaultRequest): CreateVaultResponse = call("POST", "/api/v1/vaults", req)
+
+    suspend fun lookupUser(email: String): UserLookupResponse = call("POST", "/api/v1/users/lookup", UserLookupRequest(email))
+
+    suspend fun vaultMembers(vaultId: String): List<VaultMemberSummary> = call("GET", "/api/v1/vaults/$vaultId/members")
+
+    suspend fun addVaultMember(vaultId: String, req: VaultMemberAdd): CreateVaultResponse =
+        call("POST", "/api/v1/vaults/$vaultId/members", req)
+
+    suspend fun setVaultMemberRole(vaultId: String, userId: String, role: String): CreateVaultResponse =
+        call("PUT", "/api/v1/vaults/$vaultId/members/$userId", VaultMemberRole(role))
+
+    suspend fun removeVaultMember(vaultId: String, userId: String): CreateVaultResponse =
+        call("DELETE", "/api/v1/vaults/$vaultId/members/$userId")
 
     // ---- attachments (spec 02 §6: body = header || ciphertext chunks) ----
 

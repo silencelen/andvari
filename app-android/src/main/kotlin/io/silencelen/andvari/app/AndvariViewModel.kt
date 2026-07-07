@@ -61,6 +61,17 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         for (suffix in listOf("", "-wal", "-shm")) File(cacheDir, "vault-$userId.db$suffix").delete()
     }
 
+    /** Live policy if known, else the persisted last-known value (offline cold start). */
+    private fun cacheAllowed(): Boolean = _ui.value.policy?.offlineCacheAllowed ?: store.cacheAllowed
+
+    /** Persist accountKeys for offline unlock ONLY when the policy permits it (spec 02 §8). */
+    private fun persistAccountKeys(keys: io.silencelen.andvari.core.model.AccountKeys) {
+        if (cacheAllowed()) store.saveAccountKeys(keys) else store.clearAccountKeys()
+    }
+
+    /** Enforce offlineCacheAllowed=false: drop BOTH the vault DB and the cached keys. */
+    private fun purgeOfflineData(userId: String) { deleteCache(userId); store.clearAccountKeys() }
+
     private var api: AndvariApi? = null
     private var account: Account? = null
     private var engine: SyncEngine? = null
@@ -74,9 +85,10 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             val probe = newApi()
             runCatching { probe.clientPolicy() }.onSuccess { p ->
                 _ui.value = _ui.value.copy(policy = p)
+                store.cacheAllowed = p.offlineCacheAllowed // persist for offline cold starts
                 // Policy may forbid the durable cache; honor it the moment we learn it,
                 // deleting any existing file (spec 02 §8), even before unlock.
-                if (p.offlineCacheAllowed == false && session != null) deleteCache(session.userId)
+                if (!p.offlineCacheAllowed && session != null) purgeOfflineData(session.userId)
             }
             probe.close()
             _ui.value = _ui.value.copy(
@@ -96,8 +108,9 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             runCatching { probe.clientPolicy() }
                 .onSuccess { p ->
                     _ui.value = _ui.value.copy(policy = p)
+                    store.cacheAllowed = p.offlineCacheAllowed
                     // Same policy enforcement as start(): a forbidding server purges the cache.
-                    if (p.offlineCacheAllowed == false) store.load()?.let { deleteCache(it.userId) }
+                    if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
                 }
                 .onFailure { _ui.value = _ui.value.copy(policy = null) }
             probe.close()
@@ -136,7 +149,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         }
         val acct = Account.unlock(s.userId, password, s.accountKeys)
         store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
-        store.saveAccountKeys(s.accountKeys)
+        persistAccountKeys(s.accountKeys)
         bind(a, acct)
         engine!!.sync()
         toVault()
@@ -148,11 +161,11 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         // Offline unlock (spec 02 §8): fall back to the cached accountKeys when the
         // network is unreachable; a definitive auth rejection wipes the cache instead.
         val keys = try {
-            a.accountKeys().also { store.saveAccountKeys(it) }
+            a.accountKeys().also { persistAccountKeys(it) }
         } catch (e: IOException) {
             store.loadAccountKeys() ?: throw e
         } catch (e: ApiException) {
-            if (e.status == 401) { deleteCache(session.userId); store.clear() }
+            if (e.status == 401) { purgeOfflineData(session.userId); store.clear() }
             throw e
         }
         val acct = Account.unlock(session.userId, password, keys)
@@ -177,7 +190,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         )
         val s = a.register(req)
         store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
-        store.saveAccountKeys(s.accountKeys)
+        persistAccountKeys(s.accountKeys)
         bind(a, acct)
         engine!!.sync()
         toVault()
@@ -197,6 +210,9 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     fun refresh() = op { engine!!.sync(); refreshItems() }
 
     fun item(itemId: String): VaultItem? = engine?.item(itemId)
+
+    /** Seed-derived identity short code (spec 01 §5) — read out during sharing verification. */
+    fun identityCode(): String? = account?.identityFingerprintShort()
 
     /** Mint the ref for a newly picked file: random id + random per-file key (never logged). */
     fun newAttachmentRef(name: String, size: Long): AttachmentRef? = account?.let {
@@ -289,7 +305,9 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         api = a; account = acct
         // Durable cache unless policy forbids it (then delete any existing file). Hydrate
         // the working set from disk BEFORE the first sync so a cold/offline start shows data.
-        val allowed = _ui.value.policy?.offlineCacheAllowed != false
+        // Prefer the live policy; fall back to the persisted last-known value when offline
+        // (a policy-forbidden device cold-starting offline must NOT recreate the cache).
+        val allowed = _ui.value.policy?.offlineCacheAllowed ?: store.cacheAllowed
         val cache = if (allowed) {
             sqliteVaultCache(cacheFile(acct.userId).absolutePath, acct.userId)
         } else {

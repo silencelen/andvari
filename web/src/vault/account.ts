@@ -4,8 +4,9 @@ import { open, seal } from "../crypto/envelope";
 import { fingerprint as recoveryFingerprint, sealUvk } from "../crypto/escrow";
 import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
+import { openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
 import { CryptoError } from "../crypto/sodium";
-import type { AccountKeys, ItemDoc, RegisterRequest, WireGrant, WireItem } from "../api/types";
+import type { AccountKeys, CreateVaultRequest, ItemDoc, RegisterRequest, WireGrant, WireItem } from "../api/types";
 
 const ITEM_FORMAT_VERSION = 1;
 
@@ -19,6 +20,9 @@ function uuidv4(): string {
  * itemId) per spec 02 §2. Nothing here is persisted in the clear.
  */
 export class Account {
+  /** vaultId → role from the latest grant seen (spec 03 §10: role changes re-deliver the grant). */
+  private readonly vaultRoles = new Map<string, string>();
+
   private constructor(
     readonly userId: string,
     private readonly uvk: Uint8Array,
@@ -85,6 +89,7 @@ export class Account {
 
     const vaultKeys = new Map([[personalVaultId, vk]]);
     const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, personalVaultId, vaultKeys);
+    account.vaultRoles.set(personalVaultId, "owner");
     return { request, account };
   }
 
@@ -112,10 +117,69 @@ export class Account {
     return new Account(userId, uvk, identity.privateKey, identity.publicKey, "", new Map());
   }
 
-  /** Add a vault key from its grant (personal-vault VK wrapped under UVK). */
-  addPersonalGrant(grant: WireGrant) {
-    const vk = open(this.uvk, fromB64(grant.wrappedVk), adVk(grant.vaultId, this.userId));
+  /**
+   * Apply a grant from sync (spec 01 §6). The role update is UNCONDITIONAL — a role
+   * change re-delivers the grant while the VK is already held, and MUST still take
+   * effect; the key-open is attempted only when the VK is missing. Member grants carry
+   * `sealedVk` (crypto_box_seal to our identity key); personal/owner grants carry
+   * `wrappedVk` under the UVK.
+   */
+  addGrant(grant: WireGrant) {
+    if (grant.role) this.vaultRoles.set(grant.vaultId, grant.role);
+    if (this.vaultKeys.has(grant.vaultId)) return;
+    const vk = grant.sealedVk
+      ? openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk))
+      : open(this.uvk, fromB64(grant.wrappedVk), adVk(grant.vaultId, this.userId));
     this.vaultKeys.set(grant.vaultId, vk);
+  }
+
+  /** Role from the latest grant for this vault, or null if none seen. */
+  roleFor(vaultId: string): string | null {
+    return this.vaultRoles.get(vaultId) ?? null;
+  }
+
+  /** Membership revoked (sync `removedGrants`): forget the VK and the role. */
+  removeVault(vaultId: string) {
+    this.vaultKeys.delete(vaultId);
+    this.vaultRoles.delete(vaultId);
+  }
+
+  /**
+   * Seal this vault's VK to a member's identity key (spec 01 §6 member grant). The
+   * caller MUST have verified `memberIdentityPub`'s fingerprint out of band first.
+   * Throws if we do not hold the vault key.
+   */
+  wrapVkForMember(memberIdentityPub: Uint8Array, vaultId: string): string {
+    return toB64(sealSharedGrant(memberIdentityPub, vaultId, this.vk(vaultId)));
+  }
+
+  /**
+   * Build a shared-vault create request (spec 03 §10): fresh vaultId + VK, metaBlob
+   * under VK, and the owner's wrappedVk under the UVK — the same formula as the
+   * personal vault at enrollment. Registers the VK + owner role locally so the vault
+   * is usable immediately; call removeVault(vaultId) if the server rejects the create.
+   */
+  buildCreateSharedVault(name: string): { request: CreateVaultRequest; vaultId: string } {
+    const vaultId = uuidv4();
+    const vk = randomBytes(32);
+    const request: CreateVaultRequest = {
+      vaultId,
+      metaBlob: toB64(seal(vk, utf8(JSON.stringify({ name })), adVaultMeta(vaultId))),
+      wrappedVk: toB64(seal(this.uvk, vk, adVk(vaultId, this.userId))),
+    };
+    this.vaultKeys.set(vaultId, vk);
+    this.vaultRoles.set(vaultId, "owner");
+    return { request, vaultId };
+  }
+
+  /**
+   * Short identity fingerprint (spec 01 §5), grouped by the UI as `xxxx xxxx xxxx xxxx`.
+   * Computed over the SEED-DERIVED identityPub this class holds — enroll/unlock derive
+   * it via boxKeypairFromSeed(identitySeed), never from a server-sent value — so a
+   * malicious server cannot pass the out-of-band check with a substituted key.
+   */
+  identityFingerprintShort(): Promise<string> {
+    return shortIdentityFingerprint(this.identityPub);
   }
 
   /** The store calls this when it sees the personal vault among synced vaults. */

@@ -5,6 +5,7 @@ import { fromB64, toB64 } from "../crypto/bytes";
 import { randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { Account, deviceName } from "../vault/account";
+import { shortIdentityFingerprint } from "../crypto/sharedgrant";
 import { VaultStore } from "../vault/store";
 
 /**
@@ -148,6 +149,42 @@ describe.skipIf(!BASE)("live server e2e", () => {
     const accountC2 = await Account.unlock(sessionC2.userId, inviteePw, sessionC2.accountKeys);
     const storeC2 = new VaultStore(clientC2, accountC2);
     await storeC2.sync(); // proves the fresh device can pull + decrypt its own (empty) vault
+
+    // Family sharing (P5) over the real routes + WebSocket: admin A creates a shared vault,
+    // adds invitee C as writer after the out-of-band fingerprint check, C's dirty-bell fires,
+    // C decrypts A's shared item; A removes C; C's next sync purges the vault.
+    const share = account.buildCreateSharedVault("Family");
+    await clientA.createVault(share.request);
+    await storeA.sync();
+    await storeA.save(null, { type: "login", name: "shared-wifi", login: { username: "home", password: "sh4red" } }, [], undefined, share.vaultId);
+
+    const lookedUp = await clientA.lookupUser(inviteEmail);
+    expect(lookedUp.userId).toBe(sessionC.userId);
+    // The fingerprint the owner verifies must equal what the member's own client shows.
+    expect(await accountC2.identityFingerprintShort()).toBe(await shortIdentityFingerprint(fromB64(lookedUp.identityPub)));
+    const sealedVk = account.wrapVkForMember(fromB64(lookedUp.identityPub), share.vaultId);
+    await clientA.addVaultMember(share.vaultId, { userId: sessionC.userId, role: "writer", sealedVk });
+
+    let shareBell = 0;
+    let cOpen = false;
+    const closeC = clientC2.events((rev) => { shareBell = rev; }, () => {}, () => { cOpen = true; });
+    const openBy = Date.now() + 5000;
+    while (!cOpen && Date.now() < openBy) await new Promise((r) => setTimeout(r, 25));
+    // A already added C above; a fresh push rings C's bell within 2 s.
+    await storeA.save(null, { type: "note", name: "shared-note" }, [], undefined, share.vaultId);
+    const shareDeadline = Date.now() + 2000;
+    while (shareBell === 0 && Date.now() < shareDeadline) await new Promise((r) => setTimeout(r, 50));
+    expect(shareBell, "invitee got a WebSocket bell for the shared vault").toBeGreaterThan(0);
+    closeC();
+
+    await storeC2.sync();
+    expect(storeC2.list().some((i) => i.doc.name === "shared-wifi"), "invitee decrypted the owner's shared item").toBe(true);
+    expect(accountC2.roleFor(share.vaultId), "invitee holds the writer role").toBe("writer");
+
+    await clientA.removeVaultMember(share.vaultId, sessionC.userId);
+    await storeC2.sync();
+    expect(storeC2.list().some((i) => i.vaultId === share.vaultId), "removed member's shared items are purged").toBe(false);
+    expect(accountC2.roleFor(share.vaultId), "removed member lost the vault key/role").toBeNull();
 
     const state: State = {
       email, password, userId: session.userId, personalVaultId: account.personalVaultId,

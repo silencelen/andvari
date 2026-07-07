@@ -80,9 +80,10 @@ class DesktopState(private val scope: CoroutineScope) {
             val probe = newApi()
             runCatching { probe.clientPolicy() }.onSuccess { p ->
                 policy = p
+                store.cacheAllowed = p.offlineCacheAllowed // persist for offline cold starts
                 // Policy may forbid the durable cache; purge any existing file the moment
                 // we learn it (spec 02 §8), even before unlock — mirrors the Android client.
-                if (p.offlineCacheAllowed == false) store.load()?.let { deleteCache(it.userId) }
+                if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
             }
             probe.close()
             runCatching { checkForUpdate(store.baseUrl) }.onSuccess { updateAvailable = it }
@@ -118,7 +119,7 @@ class DesktopState(private val scope: CoroutineScope) {
         }
         val acct = Account.unlock(s.userId, password, s.accountKeys)
         store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
-        store.saveAccountKeys(s.accountKeys)
+        persistAccountKeys(s.accountKeys)
         bind(a, acct); engine!!.sync()
         signInTotpRequired = false
         toVault()
@@ -130,11 +131,11 @@ class DesktopState(private val scope: CoroutineScope) {
         // Offline unlock (spec 02 §8): cached keys when the network is down; wipe on a
         // definitive auth rejection.
         val keys = try {
-            a.accountKeys().also { store.saveAccountKeys(it) }
+            a.accountKeys().also { persistAccountKeys(it) }
         } catch (e: java.io.IOException) {
             store.loadAccountKeys() ?: throw e
         } catch (e: ApiException) {
-            if (e.status == 401) { deleteCache(session.userId); store.clear() }
+            if (e.status == 401) { purgeOfflineData(session.userId); store.clear() }
             throw e
         }
         val acct = Account.unlock(session.userId, password, keys)
@@ -156,7 +157,7 @@ class DesktopState(private val scope: CoroutineScope) {
         )
         val s = a.register(req)
         store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
-        store.saveAccountKeys(s.accountKeys)
+        persistAccountKeys(s.accountKeys)
         bind(a, acct); engine!!.sync()
         toVault()
     }
@@ -166,6 +167,9 @@ class DesktopState(private val scope: CoroutineScope) {
     fun deleteItem(itemId: String) = op { engine!!.remove(itemId); refreshItems() }
     fun refresh() = op { engine!!.sync(); refreshItems() }
     fun item(itemId: String): VaultItem? = engine?.item(itemId)
+
+    /** Seed-derived identity short code (spec 01 §5) — read out during sharing verification. */
+    fun identityCode(): String? = account?.identityFingerprintShort()
 
     // ---- attachments ----
 
@@ -252,10 +256,20 @@ class DesktopState(private val scope: CoroutineScope) {
         }
     }
 
+    private fun cacheAllowed(): Boolean = policy?.offlineCacheAllowed ?: store.cacheAllowed
+
+    /** Persist accountKeys for offline unlock ONLY when the policy permits it (spec 02 §8). */
+    private fun persistAccountKeys(keys: io.silencelen.andvari.core.model.AccountKeys) {
+        if (cacheAllowed()) store.saveAccountKeys(keys) else store.clearAccountKeys()
+    }
+
+    /** Enforce offlineCacheAllowed=false: drop BOTH the vault DB and the cached keys. */
+    private fun purgeOfflineData(userId: String) { deleteCache(userId); store.clearAccountKeys() }
+
     private fun bind(a: AndvariApi, acct: Account) {
         engine?.close()
         api = a; account = acct
-        val allowed = policy?.offlineCacheAllowed != false
+        val allowed = policy?.offlineCacheAllowed ?: store.cacheAllowed
         val cache = if (allowed) {
             val db = cacheFile(acct.userId)
             sqliteVaultCache(db.absolutePath, acct.userId).also {

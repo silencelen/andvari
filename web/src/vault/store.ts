@@ -1,8 +1,9 @@
 import type { ApiClient } from "../api/client";
 import { ApiError } from "../api/client";
-import type { AttachmentRef, ItemDoc, Mutation, WireItem } from "../api/types";
+import type { AttachmentRef, ItemDoc, Mutation, WireItem, WireVault } from "../api/types";
 import { HEADER_BYTES, decryptAttachment, encryptAttachment } from "../crypto/attachments";
-import { concat, fromB64 } from "../crypto/bytes";
+import { concat, fromB64, toHexLower, utf8 } from "../crypto/bytes";
+import { sha256 } from "../crypto/provider";
 import type { Account } from "./account";
 
 export interface VaultItem {
@@ -11,6 +12,27 @@ export interface VaultItem {
   rev: number;
   updatedAt: number;
   doc: ItemDoc;
+}
+
+/** A vault we hold the key for — for pickers, badges, and the Sharing view. */
+export interface VaultInfo {
+  vaultId: string;
+  type: string;
+  name: string;
+  role: string | null;
+}
+
+/**
+ * UUIDv4-shaped id from sha256("conflict|itemId|rev") (spec 03 §5): concurrent
+ * materializers across members/devices converge on ONE copy id, absorbed by the
+ * server's idempotent existing-item path. Mirrors core SyncEngine byte-for-byte.
+ */
+export async function conflictCopyId(itemId: string, rev: number): Promise<string> {
+  const h = (await sha256(utf8(`conflict|${itemId}|${rev}`))).slice(0, 16);
+  h[6] = (h[6]! & 0x0f) | 0x40; // version nibble 4
+  h[8] = (h[8]! & 0x3f) | 0x80; // variant 10
+  const hex = toHexLower(h);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /** A newly attached file awaiting upload: plaintext bytes + the id its doc entry carries. */
@@ -27,6 +49,7 @@ export interface PendingUpload {
 export class VaultStore {
   private cursor = 0;
   private itemsById = new Map<string, VaultItem>();
+  private vaultsById = new Map<string, WireVault>();
 
   constructor(
     private api: ApiClient,
@@ -41,6 +64,24 @@ export class VaultStore {
     return this.itemsById.get(itemId);
   }
 
+  /** Vaults whose key we hold, personal first then shared by name. */
+  vaults(): VaultInfo[] {
+    const out: VaultInfo[] = [];
+    for (const v of this.vaultsById.values()) {
+      if (!this.account.hasVault(v.vaultId)) continue; // no key → nothing usable
+      const name = this.account.decryptVaultName(v.vaultId, v.metaBlob);
+      out.push({
+        vaultId: v.vaultId,
+        type: v.type,
+        name: name && name !== "(vault)" ? name : v.type === "personal" ? "Personal" : "Shared",
+        role: this.account.roleFor(v.vaultId),
+      });
+    }
+    return out.sort((a, b) =>
+      a.type === b.type ? a.name.localeCompare(b.name) : a.type === "personal" ? -1 : 1,
+    );
+  }
+
   /** Pull everything new since the cursor. Handles 410 (resync from 0). */
   async sync(): Promise<void> {
     let resp;
@@ -50,23 +91,26 @@ export class VaultStore {
       if (e instanceof ApiError && e.status === 410) {
         this.cursor = 0;
         this.itemsById.clear();
+        this.vaultsById.clear();
         resp = await this.api.sync(0);
       } else {
         throw e;
       }
     }
 
+    // EVERY grant goes through addGrant: the role update always applies (a role change
+    // re-delivers the grant while the VK is already held); the key-open only runs when
+    // the VK is missing (sealed member grants or UVK-wrapped personal/owner grants).
     for (const grant of resp.grants) {
-      if (grant.role && !this.account.hasVault(grant.vaultId)) {
-        try {
-          this.account.addPersonalGrant(grant);
-        } catch {
-          /* shared-vault grants (sealed to identity key) come in P5 */
-        }
+      try {
+        this.account.addGrant(grant);
+      } catch {
+        /* undecryptable grant — this vault's items stay skipped below */
       }
     }
-    // Discover the personal vault so save()/encrypt target it.
     for (const vault of resp.vaults) {
+      this.vaultsById.set(vault.vaultId, vault);
+      // Discover the personal vault so save()/encrypt default to it.
       if (vault.type === "personal" && this.account.hasVault(vault.vaultId)) {
         this.account.setPersonalVault(vault.vaultId);
       }
@@ -96,8 +140,20 @@ export class VaultStore {
 
     this.cursor = resp.rev;
 
+    // Revoked memberships: purge the vault's items locally and forget its key + role.
+    for (const vaultId of resp.removedGrants) {
+      for (const it of [...this.itemsById.values()]) {
+        if (it.vaultId === vaultId) this.itemsById.delete(it.itemId);
+      }
+      this.vaultsById.delete(vaultId);
+      this.account.removeVault(vaultId);
+    }
+
     // Materialize a visible conflict copy for each flagged item, then clear the flag.
     for (const item of conflictsToMaterialize) {
+      // A reader must not materialize — its push would be denied (spec 03 §5); the
+      // flag waits for a writer/owner on some device.
+      if (this.account.roleFor(item.vaultId) === "reader") continue;
       await this.materializeConflict(item);
     }
   }
@@ -107,8 +163,10 @@ export class VaultStore {
     if (!winner) return;
     // The server returned the losing version on the conflicting push; but on a plain
     // pull we only see the winner flagged. Create a dated copy of the winner's current
-    // content so nothing is lost, then clear the flag with a normal rewrite.
-    const copyId = this.account.newItemId();
+    // content so nothing is lost, then clear the flag with a normal rewrite. The copy
+    // id is deterministic (spec 03 §5) so concurrent materializers converge on one copy.
+    const copyId = await conflictCopyId(item.itemId, item.rev);
+    if (this.itemsById.has(copyId)) return; // already materialized (by us or a peer)
     const stamp = new Date(item.updatedAt).toISOString().slice(0, 10);
     const copyDoc: ItemDoc = { ...winner.doc, name: `${winner.doc.name} (conflict ${stamp})` };
     await this.push([
@@ -140,15 +198,19 @@ export class VaultStore {
    * Create or update an item; returns after the server confirms + local state updates.
    * New attachment blobs upload FIRST (spec 02 §6: blob before the item that
    * references it), so the itemId is fixed before any upload starts.
+   *
+   * An EXISTING item always stays in its own vault (the server enforces
+   * `vault_mismatch`); a new item goes to [vaultId] when given, else the personal vault.
    */
   async save(
     itemId: string | null,
     doc: ItemDoc,
     newFiles: PendingUpload[] = [],
     onUploadProgress?: (done: number, total: number) => void,
+    vaultId?: string,
   ): Promise<void> {
-    const vaultId = this.account.personalVaultId;
     const existing = itemId ? this.itemsById.get(itemId) : undefined;
+    const targetVaultId = existing?.vaultId ?? vaultId ?? this.account.personalVaultId;
     const id = itemId ?? this.account.newItemId();
 
     let done = 0;
@@ -157,11 +219,11 @@ export class VaultStore {
       if (!ref) throw new Error(`pending upload ${file.id} has no attachment entry in the doc`);
       onUploadProgress?.(done, newFiles.length);
       const enc = encryptAttachment(fromB64(ref.fileKey), file.data);
-      await this.api.uploadAttachment(file.id, id, vaultId, concat(enc.header, enc.ciphertext));
+      await this.api.uploadAttachment(file.id, id, targetVaultId, concat(enc.header, enc.ciphertext));
       onUploadProgress?.(++done, newFiles.length);
     }
 
-    const m = this.putMutation(id, vaultId, doc, existing?.rev ?? 0);
+    const m = this.putMutation(id, targetVaultId, doc, existing?.rev ?? 0);
     await this.push([m]);
     await this.sync();
   }

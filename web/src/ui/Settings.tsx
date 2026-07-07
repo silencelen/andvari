@@ -14,8 +14,34 @@ export function Settings({ client, account, policy, onPasswordChanged }: Props) 
   return (
     <div>
       <h2 className="view-title" style={{ margin: "22px 0 4px" }}>Settings</h2>
+      <IdentityCard account={account} />
       <TotpCard client={client} />
       <PasswordCard client={client} account={account} policy={policy} onPasswordChanged={onPasswordChanged} />
+    </div>
+  );
+}
+
+// ---- identity code (spec 01 §5 — seed-derived fingerprint, for sharing verification) ----
+
+function IdentityCard({ account }: { account: Account }) {
+  const [code, setCode] = useState("");
+  useEffect(() => {
+    // Derived on this device from the decrypted identity seed — never a server value.
+    account.identityFingerprintShort().then((fp) => setCode(fp.match(/.{4}/g)!.join(" ")));
+  }, [account]);
+  return (
+    <div className="sheet">
+      <h2>Identity code</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Someone sharing a vault with you will ask you to read this out.
+      </p>
+      <div className="field">
+        <label>My identity code</label>
+        <div className="secret-row">
+          <input readOnly className="mono" value={code || "…"} />
+          <CopyButton value={code} />
+        </div>
+      </div>
     </div>
   );
 }
