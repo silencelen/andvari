@@ -12,7 +12,7 @@ import java.time.Duration
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-const val DESKTOP_VERSION = "0.2.0"
+const val DESKTOP_VERSION = "0.3.0"
 
 private val json = Json { ignoreUnknownKeys = true }
 private val clipboardCleaner = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "andvari-clip").apply { isDaemon = true } }

@@ -7,4 +7,16 @@
         <item name="android:statusBarColor">#14120E</item>
         <item name="android:navigationBarColor">#14120E</item>
     </style>
+
+    <!-- Overlay theme for AutofillUnlockActivity: the target app stays visible behind a
+         dimmed, non-floating translucent window while the small unlock card is shown. -->
+    <style name="Theme.Andvari.Translucent" parent="Theme.Andvari">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
 </resources>

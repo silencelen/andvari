@@ -46,7 +46,7 @@ class ApiException(val status: Int, val code: String, message: String) : Excepti
 
 data class Tokens(val accessToken: String, val refreshToken: String)
 
-const val ANDVARI_CLIENT_VERSION = "0.2.0"
+const val ANDVARI_CLIENT_VERSION = "0.3.0"
 
 /**
  * Kotlin API client (sibling of web/src/api/client.ts). Auto-refreshes the access

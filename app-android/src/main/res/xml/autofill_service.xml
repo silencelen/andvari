@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Autofill service metadata. settingsActivity opens the main app (no dedicated autofill
+     settings UI in v1). Fully-qualified name: source package io.silencelen.andvari.app
+     differs from the manifest namespace com.silencelen.andvari. -->
+<autofill-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:settingsActivity="io.silencelen.andvari.app.MainActivity" />

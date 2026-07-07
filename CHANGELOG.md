@@ -1,5 +1,30 @@
 # andvari — changelog
 
+## 0.3.0 — family sharing, offline cache, CSV import, autofill
+
+- **Family sharing.** Create shared vaults and add household members. Each member grant
+  seals the vault key to that member's identity key (`crypto_box_seal`); before sending it
+  you verify their short **identity code** out of band (in person / by phone) — that code is
+  derived from a key the server can't forge. Web has a full Sharing screen (create, add by
+  email with the fingerprint check, change role, remove); native apps open shared vaults and
+  show your own identity code. Removing a member is revocation-only in v1 (they keep anything
+  they already saw; key rotation is a later release).
+- **Durable offline cache** (native). Android/desktop keep an encrypted on-device copy of the
+  vault, so the app opens instantly and works **offline** (read + queue edits) until it
+  reconnects. Only ciphertext is stored; the master password is still required to unlock.
+- **CSV import.** Import from Chrome/Edge or Firefox password exports (web + native). Parsing
+  is fully on-device; the file never leaves your machine. Handles quoting/dedupe/rename and
+  warns that the export holds plaintext — delete it after. An interrupted import resumes
+  without creating duplicates.
+- **Android autofill** (fill-only). andvari can fill logins in Chrome and other apps. Matching
+  is strict (exact host or a true subdomain — never a look-alike or a whole TLD) and honors a
+  web domain only from a trusted browser. Locked → tap to unlock in place. Enable it in
+  Settings → Passwords & autofill.
+- **Security hardening.** Real client IPs behind the proxy for rate-limits/audit; per-user
+  upload caps; WebSocket auth via a single-use ticket (no token in URLs); no emails in audit
+  logs; tighter CSP. Desktop now defaults to the tailnet URL (auto-migrates once).
+- Fielded 0.2.4 (Android) / 0.2.0 (desktop) clients keep working against the upgraded server.
+
 ## 0.2.4 — default to the tailnet server
 
 - Default server URL is now https://andvari.taila2dff2.ts.net (reachable from any

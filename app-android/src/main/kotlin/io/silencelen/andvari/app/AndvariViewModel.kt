@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 sealed interface Screen {
@@ -82,29 +83,41 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     /** Enforce offlineCacheAllowed=false: drop BOTH the vault DB and the cached keys. */
     private fun purgeOfflineData(userId: String) { deleteCache(userId); store.clearAccountKeys() }
 
-    private var api: AndvariApi? = null
-    private var account: Account? = null
-    private var engine: SyncEngine? = null
+    // Unlocked state (api/account/engine) now lives in the process-wide VaultSession, shared
+    // with the autofill service. These are read-only snapshots over it — nothing is stored on
+    // the ViewModel; moving where they live is the only change (all call sites keep working).
+    private val api: AndvariApi? get() = VaultSession.get()?.api
+    private val account: Account? get() = VaultSession.get()?.account
+    private val engine: SyncEngine? get() = VaultSession.get()?.engine
 
     private fun newApi(tokens: Tokens? = null): AndvariApi =
         AndvariApi(store.baseUrl, HttpClient(OkHttp), tokens) { store.updateTokens(it) }
 
     fun start() {
         viewModelScope.launch {
+            // If the vault was already unlocked in this process (autofill unlocked it first,
+            // or the activity was recreated while the process lived), show it straight away.
+            val bound = VaultSession.get() != null
+            if (bound) {
+                _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), baseUrl = store.baseUrl)
+            }
             val session = store.load()
             val probe = newApi()
             runCatching { probe.clientPolicy() }.onSuccess { p ->
                 _ui.value = _ui.value.copy(policy = p)
                 store.cacheAllowed = p.offlineCacheAllowed // persist for offline cold starts
                 // Policy may forbid the durable cache; honor it the moment we learn it,
-                // deleting any existing file (spec 02 §8), even before unlock.
-                if (!p.offlineCacheAllowed && session != null) purgeOfflineData(session.userId)
+                // deleting any existing file (spec 02 §8) — but only when no live engine holds
+                // it (when bound, a later lock/rebind enforces the purge safely).
+                if (!p.offlineCacheAllowed && session != null && !bound) purgeOfflineData(session.userId)
             }
             probe.close()
-            _ui.value = _ui.value.copy(
-                screen = if (session != null && session.accessToken.isNotEmpty()) Screen.Unlock(session.email) else Screen.Welcome,
-                baseUrl = store.baseUrl,
-            )
+            if (!bound) {
+                _ui.value = _ui.value.copy(
+                    screen = if (session != null && session.accessToken.isNotEmpty()) Screen.Unlock(session.email) else Screen.Welcome,
+                    baseUrl = store.baseUrl,
+                )
+            }
         }
     }
 
@@ -167,19 +180,29 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
 
     fun unlock(email: String, password: String) = op {
         val session = store.load() ?: throw IllegalStateException("no session")
-        val a = newApi(session.tokens())
-        // Offline unlock (spec 02 §8): fall back to the cached accountKeys when the
-        // network is unreachable; a definitive auth rejection wipes the cache instead.
-        val keys = try {
-            a.accountKeys().also { persistAccountKeys(it) }
-        } catch (e: IOException) {
-            store.loadAccountKeys() ?: throw e
-        } catch (e: ApiException) {
-            if (e.status == 401) { purgeOfflineData(session.userId); store.clear() }
-            throw e
+        // Serialize with the autofill unlock path: both reuse this session's refresh token,
+        // and a concurrent refresh would consume it twice → whole-device revocation.
+        VaultSession.unlockMutex.withLock {
+            // If autofill (or another tap) already unlocked while we waited, adopt that
+            // session instead of building a second token-holder.
+            VaultSession.get()?.let { toVault(); return@op }
+            val a = newApi(session.tokens())
+            // Offline unlock (spec 02 §8): fall back to the cached accountKeys when the
+            // network is unreachable; a definitive auth rejection wipes the cache instead.
+            val keys = try {
+                a.accountKeys().also { persistAccountKeys(it) }
+            } catch (e: IOException) {
+                store.loadAccountKeys() ?: run { a.close(); throw e }
+            } catch (e: ApiException) {
+                a.close()
+                if (e.status == 401) { purgeOfflineData(session.userId); store.clear() }
+                throw e
+            }
+            val acct = try {
+                Account.unlock(session.userId, password, keys)
+            } catch (t: Throwable) { a.close(); throw t }
+            bind(a, acct)
         }
-        val acct = Account.unlock(session.userId, password, keys)
-        bind(a, acct)
         // Tolerate an offline sync — hydrate() already populated the cached vault.
         runCatching { engine!!.sync() }.onFailure {
             if (it is IOException) _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
@@ -303,7 +326,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     fun lock() {
         // Close the engine (and its cache DB handle) but KEEP the file — the ciphertext
         // cache is retained on lock (spec 05 T3); a relaunch hydrates it.
-        engine?.close(); api?.close(); api = null; account = null; engine = null
+        VaultSession.lock()
         _ui.value = _ui.value.copy(
             screen = Screen.Unlock(store.load()?.email ?: ""), items = emptyList(),
             notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
@@ -312,9 +335,10 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
 
     fun signOut() {
         val userId = store.load()?.userId
-        viewModelScope.launch { runCatching { api?.logout() } }
-        // Engine close MUST precede deleting the DB (Windows/holders); then wipe the file.
-        engine?.close(); api?.close(); api = null; account = null; engine = null
+        val current = VaultSession.get()
+        viewModelScope.launch { runCatching { current?.api?.logout() } }
+        // VaultSession.lock() closes the engine BEFORE we delete the DB (holders), then the api.
+        VaultSession.lock()
         userId?.let { deleteCache(it) }
         store.clear()
         _ui.value = _ui.value.copy(
@@ -366,8 +390,6 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
 
     // ---- helpers ----
     private fun bind(a: AndvariApi, acct: Account) {
-        engine?.close() // defensive: never leave two connections on one file
-        api = a; account = acct
         // Durable cache unless policy forbids it (then delete any existing file). Hydrate
         // the working set from disk BEFORE the first sync so a cold/offline start shows data.
         // Prefer the live policy; fall back to the persisted last-known value when offline
@@ -378,7 +400,9 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         } else {
             deleteCache(acct.userId); InMemoryVaultCache()
         }
-        engine = SyncEngine(a, acct, cache).also { it.hydrate() }
+        val newEngine = SyncEngine(a, acct, cache).also { it.hydrate() }
+        // VaultSession closes any previously-bound engine/api (defensive: never two conns).
+        VaultSession.bind(a, acct, newEngine)
     }
 
     private fun refreshItems() {

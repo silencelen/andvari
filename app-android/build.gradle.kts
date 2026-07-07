@@ -25,7 +25,7 @@ android {
         minSdk = 29
         targetSdk = 35
         versionCode = (System.getenv("ANDVARI_VERSIONCODE") ?: "1").toInt()
-        versionName = "0.2.4"
+        versionName = "0.3.0"
         // lazysodium-android bundles native .so — limit to the phone's ABI.
         ndk { abiFilters += "arm64-v8a" }
     }
@@ -75,5 +75,6 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.autofill)
     implementation(libs.kotlinx.coroutines.core)
 }

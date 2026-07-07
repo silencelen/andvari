@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dropdown (menu) presentation for one autofill suggestion. RemoteViews inflates in the
+     platform autofill UI process, so it uses only literal colors (no theme attrs) in the
+     treasury palette: gold title on charcoal, dim subtitle. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:background="#1E1B15"
+    android:paddingStart="16dp"
+    android:paddingEnd="16dp"
+    android:paddingTop="12dp"
+    android:paddingBottom="12dp">
+
+    <ImageView
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_marginEnd="12dp"
+        android:src="@drawable/ic_autofill"
+        android:contentDescription="andvari" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/andvari_autofill_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#D0A94A"
+            android:textSize="15sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:text="andvari" />
+
+        <TextView
+            android:id="@+id/andvari_autofill_subtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#A79C85"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end" />
+    </LinearLayout>
+</LinearLayout>
