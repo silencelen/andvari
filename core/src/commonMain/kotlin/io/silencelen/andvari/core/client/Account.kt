@@ -155,7 +155,9 @@ class Account private constructor(
         private const val ITEM_FORMAT_VERSION = 1
         private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-        fun deviceInfo(name: String): DeviceInfo = DeviceInfo("android", name)
+        // platform must match the AndvariApi wire tag ("android" | "windows" | "linux") so
+        // device rows and audit entries agree with the minVersion gate's view of the client.
+        fun deviceInfo(name: String, platform: String = "android"): DeviceInfo = DeviceInfo(platform, name)
 
         /** Derive the login authKey a fresh device sends after prelogin. */
         fun deriveAuthKey(password: String, kdfSaltB64: String, params: KdfParams, crypto: CryptoProvider = createCryptoProvider()): String {

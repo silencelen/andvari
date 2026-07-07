@@ -11,6 +11,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -37,12 +38,39 @@ private const val DEFAULT_ATTACHMENT_MAX_BYTES = 25L * 1024 * 1024
 
 @Composable
 fun DesktopApp(state: DesktopState) {
-    when (val s = state.screen) {
-        is DesktopScreen.Loading -> Center { Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary) }
-        is DesktopScreen.Welcome -> Welcome(state)
-        is DesktopScreen.Unlock -> Unlock(state, s.email)
-        is DesktopScreen.Vault -> Vault(state)
-        is DesktopScreen.Settings -> SettingsScreen(state)
+    // A 426 blocks everything: this build is too old for the server's minVersion pin.
+    state.upgradeRequired?.let { msg ->
+        Center {
+            Sigil()
+            Spacer(Modifier.height(16.dp))
+            Text("Update required", style = MaterialTheme.typography.titleMedium)
+            Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 380.dp).padding(top = 8.dp))
+            Text(downloadsUrl(state.baseUrl), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
+        }
+        return
+    }
+    Column(Modifier.fillMaxSize()) {
+        // A found update is a soft nudge — a thin bar above whatever screen is showing, so
+        // a signed-in user (who never sees the Welcome screen) actually learns about it.
+        state.updateAvailable?.let { v ->
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Version $v is available — download from ${downloadsUrl(state.baseUrl)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
+        }
+        Box(Modifier.weight(1f)) {
+            when (val s = state.screen) {
+                is DesktopScreen.Loading -> Center { Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary) }
+                is DesktopScreen.Welcome -> Welcome(state)
+                is DesktopScreen.Unlock -> Unlock(state, s.email)
+                is DesktopScreen.Vault -> Vault(state)
+                is DesktopScreen.Settings -> SettingsScreen(state)
+            }
+        }
     }
 }
 
@@ -82,7 +110,7 @@ private fun Welcome(state: DesktopState) {
     var tab by remember { mutableStateOf(0) }
     Column(Modifier.fillMaxSize().padding(28.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(24.dp)); Sigil(); Spacer(Modifier.height(20.dp))
-        state.updateAvailable?.let { Text("Update available: $it", color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall) }
+        // (update banner now renders once at the app root, above every screen)
         TabRow(selectedTabIndex = tab) {
             Tab(tab == 0, { tab = 0 }, text = { Text("Sign in") })
             Tab(tab == 1, { tab = 1 }, text = { Text("Enroll") })

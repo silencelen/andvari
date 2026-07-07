@@ -12,7 +12,10 @@ import java.time.Duration
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-const val DESKTOP_VERSION = "0.3.0"
+// Aliases the single release-version source in :core (a hand-bumped literal skewed to
+// 0.3.0 while the build shipped 0.4.0, giving a freshly-installed MSI a perpetual
+// "update available" nag against itself).
+const val DESKTOP_VERSION = io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
 
 private val json = Json { ignoreUnknownKeys = true }
 private val clipboardCleaner = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "andvari-clip").apply { isDaemon = true } }
@@ -23,9 +26,14 @@ private data class DownloadsManifest(val windows: PlatformBuild? = null, val lin
 @Serializable
 private data class PlatformBuild(val version: String = "", val url: String = "", val sha256: String = "")
 
+/** Where to download an update — surfaced to the user next to the banner. */
+fun downloadsUrl(baseUrl: String): String = "$baseUrl/downloads"
+
 /**
  * In-app update check (spec P3): fetch {base}/downloads/manifest.json and return the
  * available version string if it's newer than this build, else null. No auto-install.
+ * Selects the manifest entry for THIS OS — a Linux build must not compare itself against
+ * the Windows MSI's version (and vice-versa).
  */
 fun checkForUpdate(baseUrl: String): String? {
     val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4)).build()
@@ -33,7 +41,8 @@ fun checkForUpdate(baseUrl: String): String? {
     val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
     if (resp.statusCode() != 200) return null
     val manifest = json.decodeFromString(DownloadsManifest.serializer(), resp.body())
-    val available = manifest.windows?.version?.takeIf { it.isNotBlank() } ?: return null
+    val isWindows = System.getProperty("os.name").orEmpty().lowercase().contains("win")
+    val available = (if (isWindows) manifest.windows else manifest.linux)?.version?.takeIf { it.isNotBlank() } ?: return null
     return if (compareVersions(available, DESKTOP_VERSION) > 0) available else null
 }
 

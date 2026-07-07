@@ -8,6 +8,7 @@ import io.ktor.client.engine.java.Java
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
+import io.silencelen.andvari.core.client.UpgradeRequiredException
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.Backup
@@ -93,6 +94,10 @@ class DesktopState(private val scope: CoroutineScope) {
         private set
     var updateAvailable by mutableStateOf<String?>(null)
         private set
+    // Set when the server 426s this build (minVersion pin) — the UI shows a blocking
+    // "update required" screen. Advisory: the gate is a nudge for honest clients.
+    var upgradeRequired by mutableStateOf<String?>(null)
+        private set
     var signInTotpRequired by mutableStateOf(false)
         private set
     var totpStatus by mutableStateOf<TotpStatus?>(null)
@@ -135,7 +140,7 @@ class DesktopState(private val scope: CoroutineScope) {
     private var cache: VaultCache? = null
 
     private fun newApi(tokens: Tokens? = null) =
-        AndvariApi(store.baseUrl, HttpClient(Java), tokens) { store.updateTokens(it) }
+        AndvariApi(store.baseUrl, HttpClient(Java), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
 
     fun start() {
         scope.launch {
@@ -167,7 +172,7 @@ class DesktopState(private val scope: CoroutineScope) {
         val pre = a.prelogin(email)
         val authKey = Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams)
         val s = try {
-            a.login(LoginRequest(email, authKey, Account.deviceInfo(deviceName()), totp = totp))
+            a.login(LoginRequest(email, authKey, Account.deviceInfo(deviceName(), desktopPlatform()), totp = totp))
         } catch (e: ApiException) {
             a.close()
             when (e.code) {
@@ -764,11 +769,24 @@ class DesktopState(private val scope: CoroutineScope) {
     private fun op(block: suspend () -> Unit) {
         busy = true; error = null; notice = null
         scope.launch {
-            try { block() } catch (t: Throwable) { busy = false; error = t.message ?: "something went wrong" }
+            try {
+                block()
+            } catch (e: UpgradeRequiredException) {
+                // A 426 is not a per-action error — this desktop build is too old for the
+                // server's pin. Surface the blocking upgrade screen instead of a toast.
+                busy = false
+                upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${store.baseUrl}/downloads."
+            } catch (t: Throwable) {
+                busy = false; error = t.message ?: "something went wrong"
+            }
         }
     }
 
     private fun deviceName(): String = "${System.getProperty("os.name")} desktop"
+
+    /** Wire platform tag from the JVM OS: "windows" or "linux" (the only jpackage targets). */
+    private fun desktopPlatform(): String =
+        if (System.getProperty("os.name").orEmpty().lowercase().contains("win")) "windows" else "linux"
 
     private companion object {
         const val POLL_INTERVAL_MS = 5L * 60 * 1000 // spec 03 §6 poll interval

@@ -47,27 +47,40 @@ open class ApiException(val status: Int, val code: String, message: String) : Ex
 /**
  * Typed 426 surface (spec 03 §1): the server's policy pins minVersion above this build.
  * A subclass of [ApiException] so every existing `catch (e: ApiException)` keeps working;
- * UI layers can catch this specifically to show a blocking "update required" screen
- * instead of a generic error toast. UI wiring is a follow-up — this is the detection.
+ * UI layers catch this specifically to show a blocking "update required" screen (both
+ * natives wire it via their state holders' upgradeRequired surface).
  */
 class UpgradeRequiredException(code: String, message: String) : ApiException(426, code, message)
 
 data class Tokens(val accessToken: String, val refreshToken: String)
 
+/**
+ * THE release version — the single Kotlin source of truth. SERVER_VERSION and
+ * DESKTOP_VERSION alias this constant, and verify.sh asserts the Gradle-side copies
+ * (android versionName, desktop packageVersion) stay equal to it, so a release bump can't
+ * skew across artifacts again (0.4.0 shipped with two modules still claiming 0.3.0).
+ */
 const val ANDVARI_CLIENT_VERSION = "0.4.0"
 
 /**
  * Kotlin API client (sibling of web/src/api/client.ts). Auto-refreshes the access
  * token once on 401 and retries. The HttpClient engine is provided per platform
  * (okhttp on Android, java on JVM) — commonMain stays engine-free.
+ *
+ * [platform] is the wire platform tag (X-Andvari-Client = "<platform>/<version>") that the
+ * server's per-platform minVersion gate keys on. Defaults to "android" — the historical
+ * value every fielded client sends; desktop passes "windows"/"linux" so a desktop pin is
+ * actually addressable. Client-reported and therefore advisory-only: the 426 gate nudges
+ * honest clients toward updating and must never be treated as a security control.
  */
 class AndvariApi(
     val baseUrl: String,
     engine: HttpClient,
     private var tokens: Tokens? = null,
     private val onTokens: (Tokens?) -> Unit = {},
+    platform: String = "android",
 ) {
-    private val clientHeader = "android/$ANDVARI_CLIENT_VERSION"
+    private val clientHeader = "$platform/$ANDVARI_CLIENT_VERSION"
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     private val http = engine.config {
