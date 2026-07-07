@@ -348,10 +348,34 @@ function useCopy(clearSeconds: number) {
   return { flash, copy };
 }
 
-function Detail({ item, client, store, policy, readOnly, vaultName, onEdit, onDelete, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; onEdit: () => void; onDelete: () => void; onBack: () => void }) {
+function Detail({ item, client, store, policy, readOnly, vaultName, onEdit, onDelete, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; onEdit: () => void; onDelete: () => Promise<void>; onBack: () => void }) {
   const { flash, copy } = useCopy(policy?.clipboardClearSeconds ?? 30);
   const [deleting, setDeleting] = useState(false);
+  const [delBusy, setDelBusy] = useState(false);
+  const [delErr, setDelErr] = useState("");
   const doc = item.doc;
+
+  // Mirror the Editor's save path: await the delete, and on failure keep the confirm open
+  // with a message instead of silently closing it while the item still exists everywhere.
+  // store.remove only throws when the delete did NOT commit (a post-commit reconcile
+  // failure is swallowed there), so "nothing was removed" is truthful in every branch —
+  // but a 403 is a permissions problem, not a connectivity one, and must say so.
+  const confirmDelete = async () => {
+    setDelErr("");
+    setDelBusy(true);
+    try {
+      await onDelete(); // resolves → parent unmounts this Detail; no need to reset busy
+    } catch (e) {
+      setDelErr(
+        e instanceof ApiError && e.status === 403
+          ? `You don't have permission to delete “${doc.name}” — your access to this vault may have been changed to view-only. Nothing was removed.`
+          : e instanceof ApiError
+            ? `The server refused to delete “${doc.name}” — nothing was removed. Try again in a moment.`
+            : `Couldn't reach the server to delete “${doc.name}” — nothing was removed. Try again when you're connected.`,
+      );
+      setDelBusy(false);
+    }
+  };
   return (
     <div className="sheet">
       <button className="link" onClick={onBack}>← back to vault</button>
@@ -404,22 +428,25 @@ function Detail({ item, client, store, policy, readOnly, vaultName, onEdit, onDe
 
       {/* A reader-role member cannot edit/delete/attach — the push would be denied. */}
       {!readOnly && (
-        <div className="actions">
-          {deleting ? (
-            <>
-              <span className="muted">Delete “{doc.name}” from every device?</span>
-              <div className="spacer" />
-              <button className="ghost" onClick={() => { setDeleting(false); onDelete(); }} style={{ color: "var(--danger)" }}>Confirm delete</button>
-              <button className="ghost" onClick={() => setDeleting(false)}>Keep</button>
-            </>
-          ) : (
-            <>
-              <button className="primary" onClick={onEdit}>Edit</button>
-              <div className="spacer" />
-              <button className="ghost" onClick={() => setDeleting(true)} style={{ color: "var(--danger)" }}>Delete</button>
-            </>
-          )}
-        </div>
+        <>
+          {delErr && <div className="msg err" style={{ marginTop: 18 }}>{delErr}</div>}
+          <div className="actions">
+            {deleting ? (
+              <>
+                <span className="muted">Delete “{doc.name}” from every device?</span>
+                <div className="spacer" />
+                <button className="ghost" disabled={delBusy} onClick={confirmDelete} style={{ color: "var(--danger)" }}>{delBusy ? "Deleting…" : "Confirm delete"}</button>
+                <button className="ghost" disabled={delBusy} onClick={() => { setDeleting(false); setDelErr(""); }}>Keep</button>
+              </>
+            ) : (
+              <>
+                <button className="primary" onClick={onEdit}>Edit</button>
+                <div className="spacer" />
+                <button className="ghost" onClick={() => setDeleting(true)} style={{ color: "var(--danger)" }}>Delete</button>
+              </>
+            )}
+          </div>
+        </>
       )}
     </div>
   );
@@ -732,7 +759,7 @@ function problemLabel(code: string): string {
     case "bad_quote":
       return "Malformed quoting";
     default:
-      return code;
+      return "Couldn't read this row";
   }
 }
 
