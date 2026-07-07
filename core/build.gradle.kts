@@ -37,6 +37,7 @@ kotlin {
         }
         jvmTest.dependencies {
             implementation(libs.ktor.client.java)
+            implementation(libs.ktor.client.mock) // fake engine for AndvariApi refresh tests
         }
         androidMain {
             kotlin.srcDir("src/jvmShared/kotlin")

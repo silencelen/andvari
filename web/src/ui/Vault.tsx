@@ -615,11 +615,28 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // TOTP normalizes ONCE here (never per keystroke); un-decodable text blocks the save.
+    let toSave = doc;
+    if (isLogin) {
+      const rawTotp = (login.totp ?? "").trim();
+      if (rawTotp) {
+        const totp = normalizeTotp(rawTotp);
+        if (!isValidTotp(totp)) {
+          setSaveErr("TOTP secret isn't valid base32 or an otpauth:// link");
+          return;
+        }
+        toSave = { ...doc, login: { ...login, totp } };
+      } else if (login.totp) {
+        // Field is blank or whitespace-only — persist it as absent, never a " " string the
+        // Detail view would treat as truthy and render as a broken TOTP row.
+        toSave = { ...doc, login: { ...login, totp: undefined } };
+      }
+    }
     setBusy(true);
     setSaveErr("");
     setProgress(null);
     try {
-      await onSave(doc, pending, (done, total) => setProgress({ done, total }), vaultId);
+      await onSave(toSave, pending, (done, total) => setProgress({ done, total }), vaultId);
     } catch (err) {
       setSaveErr(err instanceof ApiError && err.status === 413 ? `Save rejected: ${err.message || "attachment quota exceeded"}.` : "Save failed — nothing was changed.");
     } finally {
@@ -672,7 +689,9 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
           </div>
           <div className="field">
             <label>TOTP secret (otpauth:// URI or base32)</label>
-            <input className="mono" value={login.totp ?? ""} onChange={(e) => setLogin({ totp: normalizeTotp(e.target.value) })} placeholder="optional" />
+            {/* RAW text while typing — normalizing per keystroke rewrote the field to an
+                otpauth:// URI on the first character. Normalized once, in submit. */}
+            <input className="mono" value={login.totp ?? ""} onChange={(e) => setLogin({ totp: e.target.value })} placeholder="optional" />
           </div>
         </>
       )}
@@ -731,6 +750,17 @@ function normalizeTotp(input: string): string {
     return `otpauth://totp/andvari?secret=${t.replace(/\s/g, "")}`;
   } catch {
     return t;
+  }
+}
+
+/** True when [normalizeTotp]'s output is a parseable otpauth URI — the save-time gate
+ *  (the Detail view would otherwise render the stored value as "invalid" forever). */
+function isValidTotp(normalized: string): boolean {
+  try {
+    parseOtpauthUri(normalized);
+    return true;
+  } catch {
+    return false;
   }
 }
 

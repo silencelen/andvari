@@ -20,6 +20,32 @@ const val DESKTOP_VERSION = io.silencelen.andvari.core.client.ANDVARI_CLIENT_VER
 private val json = Json { ignoreUnknownKeys = true }
 private val clipboardCleaner = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "andvari-clip").apply { isDaemon = true } }
 
+// Last vault secret handed to [copyWithAutoClear] — lets lock/sign-out/exit clear the
+// clipboard without ever stomping an unrelated value the user copied since.
+@Volatile
+private var lastSecretCopied: String? = null
+
+// The cleaner is a daemon thread: pending clears die silently at JVM exit, leaving the
+// secret on the clipboard after the app closes. This hook covers exit (still ==-guarded).
+private val exitClipGuard: Thread = Thread { runCatching { clearVaultClipboard() } }.also {
+    Runtime.getRuntime().addShutdownHook(it)
+}
+
+/**
+ * Clear the system clipboard iff it still holds the last secret copied via
+ * [copyWithAutoClear]. Called on lock/sign-out (DesktopState) and at JVM exit — a vault
+ * secret must not outlive the session, but an unrelated user clipboard is never touched.
+ */
+fun clearVaultClipboard() {
+    val secret = lastSecretCopied ?: return
+    runCatching {
+        val clipboard = Toolkit.getDefaultToolkit().systemClipboard
+        val current = clipboard.getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String
+        if (current == secret) clipboard.setContents(StringSelection(""), null)
+    }
+    lastSecretCopied = null
+}
+
 @Serializable
 private data class DownloadsManifest(val windows: PlatformBuild? = null, val linux: PlatformBuild? = null)
 
@@ -69,10 +95,12 @@ fun copyPlain(value: String) {
 fun copyWithAutoClear(value: String, clearSeconds: Int = 30) {
     val clipboard = Toolkit.getDefaultToolkit().systemClipboard
     clipboard.setContents(StringSelection(value), null)
+    lastSecretCopied = value
     clipboardCleaner.schedule({
         runCatching {
             val current = clipboard.getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String
             if (current == value) clipboard.setContents(StringSelection(""), null)
         }
+        if (lastSecretCopied == value) lastSecretCopied = null // cleared (or superseded elsewhere)
     }, clearSeconds.toLong(), TimeUnit.SECONDS)
 }

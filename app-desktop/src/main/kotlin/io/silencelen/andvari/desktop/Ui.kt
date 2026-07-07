@@ -231,6 +231,9 @@ private fun Vault(state: DesktopState) {
                 }
                 ErrorBar(state.error, state::clearError)
                 NoticeBar(state.notice, state::clearNotice)
+                if (state.needsUpdateCount > 0) {
+                    Text(needsUpdateLine(state.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 4.dp))
+                }
                 Spacer(Modifier.height(8.dp))
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     if (filtered.isEmpty()) {
@@ -318,6 +321,9 @@ private fun Row(item: VaultItem, onClick: () -> Unit) {
 @Composable
 private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onDelete: () -> Unit, onBack: () -> Unit) {
     val doc = item.doc
+    // Reader-role members get no Edit/Delete affordances (mirrors web): the push would be
+    // denied server-side and the denied mutation's typed work destroyed.
+    val readOnly = state.roleFor(item.vaultId) == "reader"
     // Vault-secret copies clear after the org policy window, clamped to >=1 s exactly like
     // web's useCopy (Math.max(1, n)): a policy of 0 still clears — never "keep forever" for
     // secrets. 30 s fallback while the policy hasn't loaded (matches web).
@@ -325,7 +331,7 @@ private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onD
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
         Text(doc.name, style = MaterialTheme.typography.headlineMedium)
-        Text(if (doc.type == "login") "Login" else "Secure note", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text((if (doc.type == "login") "Login" else "Secure note") + (if (readOnly) " · view only" else ""), color = MaterialTheme.colorScheme.onSurfaceVariant)
         ErrorBar(state.error, state::clearError)
         NoticeBar(state.notice, state::clearNotice)
         Spacer(Modifier.height(16.dp))
@@ -352,20 +358,22 @@ private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onD
             }
         }
         Spacer(Modifier.height(24.dp))
-        var confirmDelete by remember { mutableStateOf(false) }
-        androidx.compose.foundation.layout.Row {
-            Button(onClick = onEdit, modifier = Modifier.weight(1f)) { Text("Edit") }
-            Spacer(Modifier.width(12.dp))
-            OutlinedButton(onClick = { confirmDelete = true }, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
-        }
-        if (confirmDelete) {
-            AlertDialog(
-                onDismissRequest = { confirmDelete = false },
-                title = { Text("Delete \"${doc.name}\"?") },
-                text = { Text("This removes the item from every device and every family member who can see it.") },
-                confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") } },
-                dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
-            )
+        if (!readOnly) {
+            var confirmDelete by remember { mutableStateOf(false) }
+            androidx.compose.foundation.layout.Row {
+                Button(onClick = onEdit, modifier = Modifier.weight(1f)) { Text("Edit") }
+                Spacer(Modifier.width(12.dp))
+                OutlinedButton(onClick = { confirmDelete = true }, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
+            }
+            if (confirmDelete) {
+                AlertDialog(
+                    onDismissRequest = { confirmDelete = false },
+                    title = { Text("Delete \"${doc.name}\"?") },
+                    text = { Text("This removes the item from every device and every family member who can see it.") },
+                    confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") } },
+                    dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
+                )
+            }
         }
     }
 }
@@ -390,6 +398,7 @@ private fun Editor(
     var attachments by remember { mutableStateOf(initial.attachments) }
     var pending by remember { mutableStateOf(listOf<PendingUpload>()) }
     var attachError by remember { mutableStateOf<String?>(null) }
+    var totpError by remember { mutableStateOf<String?>(null) }
     val crypto = remember { createCryptoProvider() }
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onCancel) { Text("cancel") }
@@ -400,7 +409,11 @@ private fun Editor(
             Secret("Password", password) { password = it }
             TextButton(onClick = { password = PasswordGenerator.generate(crypto, GeneratorOptions(length = 20)) }) { Icon(Icons.Default.Refresh, null); Text(" Generate") }
             Field("Website", website, { website = it })
-            Field("TOTP (otpauth:// or base32)", totp, { totp = normalizeTotp(it) }, mono = true)
+            // RAW text while typing — normalizeTotp per keystroke rewrote the field to an
+            // otpauth:// URI on the first character and the clamped cursor then garbled all
+            // further typing. Normalization + validation happen once, on Save.
+            Field("TOTP (otpauth:// or base32)", totp, { totp = it; totpError = null }, mono = true)
+            totpError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp)) }
         }
         Field("Notes", notes, { notes = it }, singleLine = false)
         Spacer(Modifier.height(8.dp))
@@ -435,14 +448,21 @@ private fun Editor(
         Spacer(Modifier.height(16.dp))
         // copy()-based edit, never a field-by-field rebuild: carries favorite, passwordHistory,
         // extra URIs beyond the first, and unknown-field extras (spec 02 §3) through the save.
-        val doc = initial.copy(name = name.trim(), notes = notes.ifBlank { null },
+        fun builtDoc(totpValue: String) = initial.copy(name = name.trim(), notes = notes.ifBlank { null },
             login = if (isLogin) (initial.login ?: LoginData()).copy(
                 username = username, password = password,
                 uris = buildList { if (website.isNotBlank()) add(website); addAll(initial.login?.uris.orEmpty().drop(1)) },
-                totp = totp.ifBlank { null },
+                totp = totpValue.ifBlank { null },
             ) else null,
             attachments = attachments)
-        Primary("Save", name.isNotBlank() && !busy, busy) { onSave(doc, pending) }
+        Primary("Save", name.isNotBlank() && !busy, busy) {
+            val normalizedTotp = if (isLogin) normalizeTotp(totp) else ""
+            if (isLogin && totp.isNotBlank() && runCatching { Totp.parseUri(normalizedTotp) }.isFailure) {
+                totpError = "TOTP secret isn't valid base32 or an otpauth:// link"
+            } else {
+                onSave(builtDoc(normalizedTotp), pending)
+            }
+        }
     }
 }
 
@@ -872,3 +892,6 @@ private fun normalizeTotp(input: String): String {
     if (t.startsWith("otpauth://", ignoreCase = true)) return t
     return runCatching { Base32.decode(t); "otpauth://totp/andvari?secret=${t.replace(" ", "")}" }.getOrDefault(t)
 }
+
+private fun needsUpdateLine(n: Int): String =
+    if (n == 1) "1 item needs an app update to display." else "$n items need an app update to display."

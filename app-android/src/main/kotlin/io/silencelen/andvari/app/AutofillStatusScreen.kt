@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import android.view.autofill.AutofillManager
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -58,6 +59,7 @@ import io.silencelen.andvari.core.client.autofill.UriMatch
 @Composable
 fun AutofillStatusScreen(vm: AndvariViewModel, ui: UiState) {
     val ctx = LocalContext.current
+    BackHandler(onBack = vm::closeAutofillStatus) // back = return to Settings, not background the app
     var tick by remember { mutableIntStateOf(0) } // bump to re-read everything below
 
     val afm = remember { runCatching { ctx.getSystemService(AutofillManager::class.java) }.getOrNull() }
