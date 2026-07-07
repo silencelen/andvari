@@ -1,0 +1,43 @@
+{
+    "vk": "oKeutbzDytHY3-bt9PsCCRAXHiUsMzpBSE9WXWRrcnk",
+    "lifecycleKey": "9s9phQFsv_dnDqk76Vvsa80QwZOjxsv9TkV4F2VhdUM",
+    "cases": [
+        {
+            "op": "delete",
+            "vaultId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
+            "deleteId": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+            "proof": "RaQQ_IXwXVPnnJQ0Pu3wZeaoAUjaagEDx2vQVeDBKXk"
+        },
+        {
+            "op": "restore",
+            "vaultId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
+            "deleteId": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+            "proof": "PU4e8hDjOcdo2BMxL7j6ozUBwzzPCPnG1WsB8cMK3X8"
+        },
+        {
+            "op": "offer",
+            "vaultId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
+            "offerId": "e3c0418f-1118-4a5a-8888-b26efdd3eafc",
+            "toUserId": "f42e08cb-8cd4-435c-9599-83b519815789",
+            "expiresAt": 1752000000000,
+            "seq": 1,
+            "proof": "SLoV2pPK9i2oZ9Tx2xR8uIihkUpz3FqQ_zGqrNBDmgc"
+        },
+        {
+            "op": "accept",
+            "vaultId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
+            "offerId": "e3c0418f-1118-4a5a-8888-b26efdd3eafc",
+            "newOwnerUserId": "f42e08cb-8cd4-435c-9599-83b519815789",
+            "seq": 1,
+            "wrappedVk": "AQFabc_deFGhijkLMnop-qrstuvwxyz0123456789ABCDEFGH",
+            "proof": "MLmu6JhFRITMsrBGQl-6-AhvJi30Xi3LW7rSadbIG9Q"
+        },
+        {
+            "op": "remove",
+            "vaultId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
+            "targetUserId": "f42e08cb-8cd4-435c-9599-83b519815789",
+            "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+            "proof": "77OOwg_Vz7zdfBgeaUI3IqUGzXlgB7vjbkGHRpuMt0w"
+        }
+    ]
+}

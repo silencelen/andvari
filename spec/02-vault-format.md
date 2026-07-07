@@ -132,11 +132,21 @@ plaintext table is unchanged — matching reads the existing `login.uris` cipher
 Vault { id uuid, type "personal"|"shared", rev, createdAt, metaBlob base64url }
 ```
 `metaBlob` = envelope under VK with AD `andvari/v1|vaultmeta|{vaultId}`, plaintext
-`{"name":"Family","icon":"…"}` — vault display names are ciphertext; the server
-knows vaults only as ids. Grants (per member): `{ vaultId, userId, role
-"owner"|"writer"|"reader", rev, revokedAt, wrappedVk XOR sealedVk }` per spec 01 §6 —
-exactly one of `wrappedVk` (owner/personal, under UVK) or `sealedVk` (member,
-`crypto_box_seal` to the member identityPub) is set; the other is empty. Roles are
+`{"name":"Family","icon":"…","metaV":N}` — vault display names are ciphertext; the server
+knows vaults only as ids. `metaBlob` is **owner-rewritable** (rename, spec 03 §11) under the
+same VK/AD; its plaintext carries a monotonic `metaV` counter (clients warn-and-keep-newer
+when a delivered metaBlob's counter regresses); the AD deliberately excludes `rev`. Grants
+(per member): `{ vaultId, userId, role "owner"|"writer"|"reader", rev, revokedAt,
+revokedReason, wrappedVk XOR sealedVk }` per spec 01 §6 — normally exactly one of
+`wrappedVk` (owner/personal, under UVK) or `sealedVk` (member, `crypto_box_seal` to the
+member identityPub) is set; the other is empty (a post-transfer owner grant MAY carry both).
+`revokedReason ∈ member_remove|member_leave|vault_delete` (NULL, pre-v4, reads as
+`member_remove`); vault RESTORE resurrects only `vault_delete` revocations made at the
+matching `deletedAt`. Vault rows also carry lifecycle state:
+`deletedAt/purgeAt/purgedAt/deletedBy/deleteId/deleteProof/restoreProof` (soft-delete +
+grace + purge — vault rows are NEVER hard-deleted; `vaultId` is never recycled, normative)
+and `transferSeq/pendingOwnerId/pendingOfferId/pendingOfferProof/pendingOfferExpiresAt/
+pendingOfferSetAt/lastTransferOfferId/lastTransferAcceptProof`. Roles are
 **server-enforced only** (crypto cannot stop a reader who has VK from encrypting; the
 server rejects writes without writer role). Membership (which userId holds which role on
 which vaultId) is server-visible via the grants row; membership-management audit events
@@ -154,8 +164,8 @@ spec violation.
 | invites | tokenHash, **invitee email in plaintext** (a person who may not have an account yet — accepted: invites are short-lived and admin-created), isAdmin, createdAt, expiresAt, usedAt |
 | devices | deviceId, userId, platform, **name (user-chosen device label, plaintext)**, clientVersion, createdAt, lastSeenAt, revokedAt |
 | sessions | sessionId, userId, deviceId, hashed access+refresh tokens, access/refresh expiries, refreshConsumedAt, createdAt, revokedAt |
-| vaults | vaultId, type, rev, createdAt (names/icons are ciphertext) |
-| grants | vaultId, userId, role, wrapped/sealed VK ciphertext, rev, revokedAt (revoked rows are retained — the server sees WHEN a member lost access) |
+| vaults | vaultId, type, rev, createdAt (names/icons are ciphertext); **lifecycle** — deletedAt/purgeAt/purgedAt/deletedBy/deleteId, transferSeq, pendingOwnerId/pendingOfferId/pendingOfferExpiresAt/pendingOfferSetAt/lastTransferOfferId (ids + epoch times), and opaque VK-derived MACs deleteProof/restoreProof/pendingOfferProof/lastTransferAcceptProof (PRF outputs — reveal nothing about VK) |
+| grants | vaultId, userId, role, wrapped/sealed VK ciphertext, rev, revokedAt, revokedReason (revoked rows are retained — the server sees WHEN and WHY a member lost access: remove / leave / vault-delete) |
 | items | the Item row of §1 — ids, rev, server timestamps, flags, formatVersion, attachmentIds, ciphertext blob, ciphertext byte size |
 | item_versions | itemId, rev, blob, formatVersion, archivedAt (bounded to the newest 10 per item, §7) |
 | changes | rev, kind, entityId, vaultId, at — the global sync feed (pure metadata; reveals per-vault write timing/volume) |
@@ -195,6 +205,23 @@ table or plaintext column requires updating it in the same change.
 > lifecycle design (docs/design/2026-07-07-shared-vault-lifecycle-skipti.md) relies on
 > that tombstone retention (rows carrying sync meaning are never hard-deleted) and records
 > the preconditions any future tombstone-GC activation must satisfy.
+
+**Vault deletion (spec 03 §11):** a soft-delete with a 7-day grace
+(`ANDVARI_VAULT_GRACE_DAYS`) — all rows stay intact and every grant is revoked
+(`revokedReason='vault_delete'`); RESTORE within grace un-revokes exactly those grants and
+re-opens the vault. After the grace the daily **janitor** purges (per-vault tx that
+re-checks `deletedAt/purgeAt` inside every destructive statement): `item_versions` and
+attachment rows/files are deleted, item rows are reduced to permanent ciphertext-free
+**skeletal tombstones** (`deleted=1, blob=NULL`, no rev bump — retained so the
+`vault_mismatch`/edit-over-tombstone fences outlive the ciphertext for every stale client,
+incl. the 0.2.x MSI), `metaBlob` is blanked, and **every** grant's key material is wiped
+(`wrappedVk=''` — the `NOT NULL` sentinel — and `sealedVk=NULL`, active and
+previously-revoked alike). Vault tombstone rows, all grant rows, and skeletal item rows are
+retained indefinitely; `vaultId` is never recycled. The janitor's v1 scope is **vault purge
++ transfer-offer expiry ONLY** — the general retention machinery above stays dormant; when
+it eventually activates it MUST satisfy the (a)–(d) invariants of that note plus a
+quiet-server integration test (delete → 90d idle → full janitor cycle → all client
+generations converge without 409/410 loops).
 
 - **Delete** = tombstone (`deleted=true`, blob dropped, attachments GC'd). Tombstones
   are GC'd after **90 days**; a client whose cursor predates the oldest retained

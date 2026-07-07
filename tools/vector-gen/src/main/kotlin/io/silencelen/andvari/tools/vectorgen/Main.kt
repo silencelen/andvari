@@ -7,6 +7,7 @@ import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.Hibp
 import io.silencelen.andvari.core.crypto.Hkdf
 import io.silencelen.andvari.core.crypto.KdfParams
+import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.client.Backup
 import io.silencelen.andvari.core.client.BackupItem
@@ -76,7 +77,8 @@ fun main(args: Array<String>) {
     write(outDir, "export.json", exportVectors())
     write(outDir, "strength.json", strength())
     write(outDir, "conflictcopy.json", conflictCopy())
-    println("vector-gen: wrote 14 files to ${outDir.absolutePath}")
+    write(outDir, "lifecycleproof.json", lifecycleProof())
+    println("vector-gen: wrote 15 files to ${outDir.absolutePath}")
 }
 
 /** Argon2id timing on this host (spec 01 §9 benchmark table). */
@@ -997,6 +999,49 @@ private fun conflictCopy(): JsonObject = buildJsonObject {
                 put("rev", rev)
                 put("copyId", ConflictCopy.id(crypto, itemId, rev))
             }
+        }
+    }
+}
+
+
+/**
+ * Lifecycle-proof vectors (spec 03 §11): the HKDF lifecycleKey derivation + one HMAC proof
+ * per op domain string. A divergence between the JVM and TS mints means a member's client
+ * would reject a genuine owner action (or accept a forged one), so every domain string is
+ * pinned here — including the accept proof's wrappedVk-hash binding.
+ */
+private fun lifecycleProof(): JsonObject = buildJsonObject {
+    val vk = pat(32, 71)
+    val key = LifecycleProof.lifecycleKey(crypto, vk)
+    put("vk", b64(vk))
+    put("lifecycleKey", b64(key))
+    val vaultId = "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10"
+    val deleteId = "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60"
+    val offerId = "e3c0418f-1118-4a5a-8888-b26efdd3eafc"
+    val toUser = "f42e08cb-8cd4-435c-9599-83b519815789"
+    val wrappedVk = "AQFabc_deFGhijkLMnop-qrstuvwxyz0123456789ABCDEFGH"
+    putJsonArray("cases") {
+        addJsonObject {
+            put("op", "delete"); put("vaultId", vaultId); put("deleteId", deleteId)
+            put("proof", LifecycleProof.delete(crypto, key, vaultId, deleteId))
+        }
+        addJsonObject {
+            put("op", "restore"); put("vaultId", vaultId); put("deleteId", deleteId)
+            put("proof", LifecycleProof.restore(crypto, key, vaultId, deleteId))
+        }
+        addJsonObject {
+            put("op", "offer"); put("vaultId", vaultId); put("offerId", offerId)
+            put("toUserId", toUser); put("expiresAt", 1752000000000L); put("seq", 1L)
+            put("proof", LifecycleProof.offer(crypto, key, vaultId, offerId, toUser, 1752000000000L, 1L))
+        }
+        addJsonObject {
+            put("op", "accept"); put("vaultId", vaultId); put("offerId", offerId)
+            put("newOwnerUserId", toUser); put("seq", 1L); put("wrappedVk", wrappedVk)
+            put("proof", LifecycleProof.accept(crypto, key, vaultId, offerId, toUser, 1L, wrappedVk))
+        }
+        addJsonObject {
+            put("op", "remove"); put("vaultId", vaultId); put("targetUserId", toUser); put("nonce", deleteId)
+            put("proof", LifecycleProof.remove(crypto, key, vaultId, toUser, deleteId))
         }
     }
 }
