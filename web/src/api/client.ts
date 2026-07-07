@@ -302,13 +302,35 @@ export class ApiClient {
    *
    * Returns a close fn — tears down the socket, any pending retry timer, and the
    * visibility listener (callers MUST invoke it on lock/unmount or sockets leak).
+   *
+   * `onDown` (optional) reports live connectivity for the UI's status dot: it fires
+   * ~2.5 s after the socket drops (debounced so a normal reconnect blip never flips
+   * the dot) and `onOpen` is the paired "back up" signal. Start the UI as offline and
+   * let the first `onOpen` turn it green.
    */
-  events(onRev: (rev: number) => void, onRevoked: () => void, onOpen?: () => void): () => void {
+  events(onRev: (rev: number) => void, onRevoked: () => void, onOpen?: () => void, onDown?: () => void): () => void {
     let ws: WebSocket | null = null;
     let closed = false;
     let connecting = false;
     let attempts = 0; // consecutive failed cycles since the last successful open
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let downTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Debounce the "offline" signal: only report down if we stay down past the window,
+    // so a 1 s server-deploy reconnect doesn't strobe the status dot.
+    const signalDown = () => {
+      if (closed || !onDown || downTimer !== null) return;
+      downTimer = setTimeout(() => {
+        downTimer = null;
+        if (!closed) onDown();
+      }, 2_500);
+    };
+    const clearDown = () => {
+      if (downTimer !== null) {
+        clearTimeout(downTimer);
+        downTimer = null;
+      }
+    };
 
     const scheduleReconnect = () => {
       if (closed || timer !== null) return;
@@ -334,6 +356,7 @@ export class ApiClient {
         ws = sock;
         sock.onopen = () => {
           attempts = 0; // healthy again — future drops restart the backoff from 1 s
+          clearDown();
           onOpen?.();
         };
         sock.onmessage = (ev) => {
@@ -350,6 +373,7 @@ export class ApiClient {
         };
         sock.onclose = () => {
           if (ws === sock) ws = null;
+          signalDown();
           scheduleReconnect();
         };
         sock.onerror = () => {
@@ -364,6 +388,7 @@ export class ApiClient {
           onRevoked();
           return;
         }
+        signalDown();
         scheduleReconnect(); // offline / server down — keep trying quietly
       } finally {
         connecting = false;
@@ -393,6 +418,7 @@ export class ApiClient {
         clearTimeout(timer);
         timer = null;
       }
+      clearDown();
       if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible);
       ws?.close();
       ws = null;
