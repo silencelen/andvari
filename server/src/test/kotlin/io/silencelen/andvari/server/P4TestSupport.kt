@@ -120,6 +120,15 @@ abstract class P4TestSupport {
     protected suspend fun errorOf(resp: HttpResponse): String =
         json.decodeFromString(ApiError.serializer(), resp.bodyAsText()).error
 
+    protected suspend fun HttpClient.auditRows(admin: VirtualClient, type: String): List<io.silencelen.andvari.core.model.AuditEvent> {
+        val resp = get("/api/v1/admin/audit?type=$type") { authed(admin) }
+        assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+        return json.decodeFromString(
+            kotlinx.serialization.builtins.ListSerializer(io.silencelen.andvari.core.model.AuditEvent.serializer()),
+            resp.bodyAsText(),
+        )
+    }
+
     protected suspend fun HttpClient.totpStatus(vc: VirtualClient): TotpStatus {
         val resp = get("/api/v1/account/totp") { authed(vc) }
         assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())

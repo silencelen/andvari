@@ -1,0 +1,15 @@
+{
+    "memberSeedB64": "DRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3-Y",
+    "memberIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+    "memberIdentityPrivB64": "xgCSeAaCx0OYKRMrA77NCpgreo4ocPjPwMwsdYg5wiw",
+    "fingerprint": "ab2fa2ebe95dbddf0f6aaccedbcdd89d57142a368d2a495c3bc9048711cc4eda",
+    "shortFingerprint": "ab2fa2ebe95dbddf",
+    "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "vkB64": "GiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsnQ197l7PM",
+    "payloadUtf8": "{\"v\":1,\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"vk\":\"GiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsnQ197l7PM\"}",
+    "sealedB64": "IxzqNABBJCDOqexixdcwxdOehkLJfqS-oWWjkMLMclh6hCRDwfUn0L_TsbEL2ZuFPj-g4hGjUt2xUVcOm4ZgWCIPTufXUuXvwSG0YJ0i6AVUQmY5oSxAcWp--GZXWuXAhc9DkgA2Z3OTiig_3gMNYC99FdiKx1wNyN_vaf5eZ4fS9VD_Elf5XfJPrzXKR4jq6wq1ZEmXaJ1bwzo",
+    "rejectVaultMismatch": {
+        "expectedVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "sealedB64": "NiHTbbwxdqPCROwgHtcdpadRky4O5OAkqYn0zi83h0cH9kdao8YiZLOL6aSs7t5pdCxtBIlOh0tBzW3fYst6yxqBDLACIapZElYxdd7UApy28onKDmng29vMke80GLCH191A2saomJVo1_zEOlTX0EmtC8aozWA45HIwSV8bwneSlX8zNPwXmo5-vsiPxl0bSKM-Y7DINlqzAqs"
+    }
+}

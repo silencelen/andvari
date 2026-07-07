@@ -68,10 +68,20 @@ covered by quick-unlock (§8).
 - Server stores `identityPub` in plaintext (it is public) and
   `encryptedIdentitySeed = Envelope(key = UVK, plaintext = identitySeed,
   ad = "andvari/v1|idkey|{userId}")`.
-- Used to receive shared-vault key grants (§6) and nothing else in v1. Pubkey
-  substitution by a malicious server is a real attack against future sharing; the
-  sharing UX (P5) MUST verify member pubkey fingerprints out-of-band. Recorded in
-  spec 05.
+- Used to receive shared-vault key grants (§6) and nothing else in v1.
+- **Identity fingerprint** = lowercase-hex `SHA-256(identityPub)` (same construction as
+  the recovery fingerprint, spec 04 §1); short form = first 16 hex chars, displayed
+  grouped `xxxx xxxx xxxx xxxx`. It MUST be computed over the **seed-derived** public key
+  (`boxKeypairFromSeed(identitySeed).publicKey`), NEVER over the `identityPub` the server
+  returns in account keys. The server cannot forge `identitySeed` (it is UVK-sealed), so a
+  client unlocking MUST derive the pubkey from the decrypted seed and treat a mismatch
+  against the server-sent `identityPub` as a security fault. Displaying a hash of the
+  server-supplied value would let a malicious server pass an out-of-band check while
+  substituting a key it controls.
+- **Out-of-band verification (sharing, P5):** before an owner seals a shared VK to a
+  member, the member reads their short fingerprint from their own client and the owner
+  confirms it over an out-of-band channel (in person / phone). This closes the
+  pubkey-substitution attack; it is only sound because the fingerprint is seed-derived.
 
 ## 6. Vault keys — everything is a vault
 
@@ -79,13 +89,23 @@ covered by quick-unlock (§8).
   Vault Key `VK`. Items encrypt under VK (spec 02), never directly under UVK.
 - **Personal vault** (`type=personal`, one per user, created at enrollment):
   `wrappedVk = Envelope(key = UVK, plaintext = VK, ad = "andvari/v1|vk|{vaultId}|{userId}")`.
-- **Shared vault** (`type=shared`, crypto in v1, UX in P5): per-member grant
-  `sealedVk = crypto_box_seal(recipient = member identityPub, plaintext =
-  canonical-JSON {"v":1,"vaultId":"{vaultId}","vk":"{base64url(VK)}"})`. Sealed boxes
-  carry no AD; context lives inside the payload, and the recipient MUST verify
-  `vaultId` matches the grant row it arrived on.
-- Member removal = VK rotation + lazy re-encryption of items by the next online
-  writer (future-secrecy only; a removed member already saw the plaintext).
+- **Shared vault** (`type=shared`): the creator generates `vaultId`, `VK`, `metaBlob`.
+  - The **creator's own grant** uses `wrappedVk = Envelope(key = UVK, plaintext = VK,
+    ad = "andvari/v1|vk|{vaultId}|{userId}")` — identical to the personal-vault wrap. The
+    creator already holds their UVK, so there is no reason to seal to self, and it keeps
+    already-deployed clients able to open vaults they create.
+  - **Member grants** use `sealedVk = crypto_box_seal(recipient = member identityPub,
+    plaintext = canonical-JSON {"v":1,"vaultId":"{vaultId}","vk":"{base64url(VK)}"})`.
+    Sealed boxes carry no AD; context lives inside the payload, and the recipient MUST
+    verify the payload's `vaultId` matches the grant row it arrived on.
+  - A grant carries **exactly one** of `wrappedVk` / `sealedVk`.
+  - Roles: `owner` (creator, immutable, exactly one per vault in v1), `writer`, `reader`;
+    only the owner manages membership. Roles are server-enforced (spec 02 §4).
+- **Member removal (v1)** is server-side revocation only — the server stops serving the
+  vault and its items to the removed user. **Accepted risk (spec 05 R7):** a removed
+  member who copied the VK or ciphertext while granted can still decrypt ciphertext they
+  already hold (and any future leak of *unchanged* items). VK rotation + lazy
+  re-encryption by the next online writer is the forward path, deferred to **P6**.
 
 ## 7. Password change and KDF upgrade
 

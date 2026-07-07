@@ -67,6 +67,15 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
 - Ordering: one **global monotonic rev** from the server's `changes` sequence; every
   create/update/delete of any object bumps it. Responses are consistent snapshots
   (single read transaction).
+- **New-member / grant-change backfill:** a vault and its items are delivered when the
+  object's rev **or the caller's grant rev on that vault** exceeds `since`. So a member
+  added at a high rev whose cursor is already past the vault's/items' own revs still
+  receives the vault row and all pre-existing items; a role change (which bumps the grant
+  rev) likewise re-delivers that vault's items (idempotent client-side upsert). Without
+  this, a new grant would sync as "exists" but be unusable.
+- `removedGrants` client duty: purge that vault's items from the local cache, drop the VK,
+  and discard any unsynced queued mutations targeting that vault (a revoked member's
+  offline edits to the vault are lost — the push would be `denied` regardless).
 - `410 Gone` when `since` predates retained history (tombstone GC, spec 02 §7) →
   client discards cursor and re-pulls with `since=0`, then reconciles its offline
   queue on top.
@@ -112,10 +121,12 @@ with the SAME mutationIds after connectivity loss.
 
 **Conflict-copy materialization (client duty):** on seeing `conflict=true` with a
 decryptable displaced version, create a new item `{name: "<name> (conflict
-YYYY-MM-DD)"}` with a fresh itemId carrying the losing content, then push it plus a
-flag-clearing rewrite of the winner (both normal `put`s). Exactly-one materializer:
-whoever holds the displaced version from `serverItem` or item_versions does it; the
-flag-clear makes later syncers skip.
+YYYY-MM-DD)"}` carrying the losing content, then push it plus a flag-clearing rewrite of
+the winner (both normal `put`s). The copy's itemId is derived **deterministically** from
+`(itemId, conflictedRev)` so that if several members materialize the same conflict
+concurrently they converge on one copy id (the server's idempotent existing-item path
+absorbs the duplicates) rather than each creating their own. A **`reader`-role** member
+MUST NOT materialize (its push would be `denied`); the flag waits for a writer/owner.
 
 ## 6. Events (WS)
 
@@ -203,3 +214,34 @@ proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — veri
   `itemAttachmentsMaxBytes` (413). A validation failure fails the whole push batch.
 - Tombstoning an item deletes its blobs immediately; uploads never referenced by a
   live item are GC'd after 24 h (spec 02 §6).
+
+## 10. Shared vaults (family sharing)
+
+All authenticated + version-checked; membership management is owner-only. These routes
+are **refused on the public break-glass origin** (sharing administration is a
+sit-at-home operation). Every call is audited (ids/roles only, never names).
+
+- `POST /api/v1/vaults { vaultId, metaBlob, wrappedVk }` → `201 { rev }`. Creates a
+  `type=shared` vault and the caller's `owner` grant (`wrappedVk` under the caller's UVK,
+  `sealedVk` empty). Client-chosen UUID `vaultId`. `metaBlob` ≤ 4 KiB and `wrappedVk` ≤ 1
+  KiB base64url; vault creation rate-limited (5/hour/account). Audited `vault_create`.
+- `POST /api/v1/users/lookup { email }` → `{ userId, displayName, identityPub }` or
+  `404 no_such_user`. Deliberately confirms account existence **to authenticated,
+  invited household members** so an owner can find whom to share with; rate-limited
+  20/min/account, audited `user_lookup` (target email in meta). The unauthenticated
+  anti-enumeration guarantees of §2 are unchanged — this is an authed-only path.
+- `GET /api/v1/vaults/{vaultId}/members` → `[{ userId, email, displayName, role,
+  identityPub, addedAt }]` (active grants only). Any active member may call (transparency:
+  every member can re-verify who holds the VK). Foreign vaultId → 403 (hidden-as-403).
+- `POST /api/v1/vaults/{vaultId}/members { userId, role: "writer"|"reader", sealedVk }` →
+  `201`. Owner only; target must be an `active` user, not self, with no active grant (a
+  previously-revoked grant row is resurrected). `sealedVk` opaque to the server, validated
+  only as base64url ≤ 1 KiB. Audited `vault_member_add`.
+- `PUT /api/v1/vaults/{vaultId}/members/{userId} { role }` → `200`. Owner only; not self.
+  Bumps the grant rev (re-delivers the grant so clients update the role). Audited
+  `vault_member_role`.
+- `DELETE /api/v1/vaults/{vaultId}/members/{userId}` → `200`. Owner only; not self. Sets
+  `revokedAt`, bumps the grant rev → the victim's next pull carries `removedGrants`;
+  sync/push/attachment access stops immediately. **No VK rotation in v1** (spec 01 §6 /
+  spec 05 R7). Audited `vault_member_remove`.
+- All five ring the WS dirty-bell for every affected member.

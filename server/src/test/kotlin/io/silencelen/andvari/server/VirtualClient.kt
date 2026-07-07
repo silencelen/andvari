@@ -6,8 +6,10 @@ import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
+import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
+import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.DeviceInfo
 import io.silencelen.andvari.core.model.EscrowUpload
 import io.silencelen.andvari.core.model.ItemUpload
@@ -119,4 +121,44 @@ class VirtualClient(val email: String, val password: String, fast: Boolean = tru
         Envelope.openB64(crypto, vk, blobB64, Ad.item(personalVaultId, itemId, 1)).decodeToString()
 
     fun newItemId() = uuidV4()
+
+    // ---- shared vaults (spec 01 §6 / spec 03 §10) ----
+
+    /** The client's X25519 identity keys (server stores identityPub; identitySeed is UVK-sealed). */
+    val identityPub: ByteArray get() = identity.publicKey
+    val identityPriv: ByteArray get() = identity.privateKey
+
+    class SharedVaultHandle(val vaultId: String, val vk: ByteArray)
+
+    /** Owner creates a shared vault: fresh vaultId+VK, owner grant wrapped under this client's UVK. */
+    fun buildCreateSharedVault(): Pair<CreateVaultRequest, SharedVaultHandle> {
+        val svId = uuidV4()
+        val svk = crypto.randomBytes(32)
+        val wrappedVk = Envelope.sealB64(crypto, uvk, svk, Ad.vk(svId, userId))
+        val metaBlob = Envelope.sealB64(crypto, svk, """{"name":"Shared"}""".encodeToByteArray(), Ad.vaultMeta(svId))
+        return CreateVaultRequest(svId, metaBlob, wrappedVk) to SharedVaultHandle(svId, svk)
+    }
+
+    /** Owner re-opens its own shared-vault grant (wrappedVk under UVK) → the VK. */
+    fun openOwnGrant(vaultId: String, wrappedVkB64: String): ByteArray =
+        Envelope.openB64(crypto, uvk, wrappedVkB64, Ad.vk(vaultId, userId))
+
+    /** Owner seals a shared VK to a member's identity pubkey (base64url sealedVk). */
+    fun sealVkFor(memberIdentityPub: ByteArray, vaultId: String, vk: ByteArray): String =
+        Bytes.toB64(SharedGrant.seal(crypto, memberIdentityPub, vaultId, vk))
+
+    /** Member opens a sealed grant with its own identity keys → the VK. */
+    fun openSharedGrant(vaultId: String, sealedVkB64: String): ByteArray =
+        SharedGrant.open(crypto, identity.publicKey, identity.privateKey, vaultId, Bytes.fromB64(sealedVkB64))
+
+    /** The client's seed-derived identity fingerprint (what the sharing UX verifies out-of-band). */
+    fun identityShortFingerprint(): String = SharedGrant.shortFingerprint(crypto, identity.publicKey)
+
+    fun encItemIn(vaultId: String, vaultKey: ByteArray, itemId: String, plaintext: String): ItemUpload {
+        val blob = Envelope.sealB64(crypto, vaultKey, plaintext.encodeToByteArray(), Ad.item(vaultId, itemId, 1))
+        return ItemUpload(formatVersion = 1, blob = blob)
+    }
+
+    fun decItemIn(vaultId: String, vaultKey: ByteArray, itemId: String, blobB64: String): String =
+        Envelope.openB64(crypto, vaultKey, blobB64, Ad.item(vaultId, itemId, 1)).decodeToString()
 }

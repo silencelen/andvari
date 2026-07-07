@@ -87,9 +87,13 @@ Vault { id uuid, type "personal"|"shared", rev, createdAt, metaBlob base64url }
 `metaBlob` = envelope under VK with AD `andvari/v1|vaultmeta|{vaultId}`, plaintext
 `{"name":"Family","icon":"…"}` — vault display names are ciphertext; the server
 knows vaults only as ids. Grants (per member): `{ vaultId, userId, role
-"owner"|"writer"|"reader", wrappedVk-or-sealedVk }` per spec 01 §6. Roles are
+"owner"|"writer"|"reader", rev, revokedAt, wrappedVk XOR sealedVk }` per spec 01 §6 —
+exactly one of `wrappedVk` (owner/personal, under UVK) or `sealedVk` (member,
+`crypto_box_seal` to the member identityPub) is set; the other is empty. Roles are
 **server-enforced only** (crypto cannot stop a reader who has VK from encrypting; the
-server rejects writes without writer role).
+server rejects writes without writer role). Membership (which userId holds which role on
+which vaultId) is server-visible via the grants row; membership-management audit events
+record only ids and roles, never names or decrypted content.
 
 ## 5. Server-visible plaintext — the zero-knowledge contract
 

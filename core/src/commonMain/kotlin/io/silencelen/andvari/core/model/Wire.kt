@@ -109,6 +109,10 @@ data class WireGrant(
     val role: String,
     val wrappedVk: String,
     val rev: Long,
+    // Exactly one of wrappedVk (owner/personal, under UVK) or sealedVk (member,
+    // crypto_box_seal to the member identityPub) is set (spec 01 §6). Additive: old
+    // clients ignore it (Json ignoreUnknownKeys), and member grants carry wrappedVk="".
+    val sealedVk: String? = null,
 )
 
 @Serializable
@@ -133,6 +137,36 @@ data class SyncResponse(
     val grants: List<WireGrant>,
     val items: List<WireItem>,
     val removedGrants: List<String>,
+)
+
+// ---- shared vaults (spec 03 §10) ----
+
+@Serializable
+data class CreateVaultRequest(val vaultId: String, val metaBlob: String, val wrappedVk: String)
+
+@Serializable
+data class CreateVaultResponse(val rev: Long)
+
+@Serializable
+data class UserLookupRequest(val email: String)
+
+@Serializable
+data class UserLookupResponse(val userId: String, val displayName: String, val identityPub: String)
+
+@Serializable
+data class VaultMemberAdd(val userId: String, val role: String, val sealedVk: String)
+
+@Serializable
+data class VaultMemberRole(val role: String)
+
+@Serializable
+data class VaultMemberSummary(
+    val userId: String,
+    val email: String,
+    val displayName: String,
+    val role: String,
+    val identityPub: String,
+    val addedAt: Long,
 )
 
 @Serializable

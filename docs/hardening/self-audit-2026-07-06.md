@@ -173,4 +173,22 @@ The audit's **fix-first list** (server-side hardening to land before real-secret
 | **LOW-7** denied push not audited | `push_denied` audit row now written in-tx on the denied branch. | `Service.applyMutation` |
 | **LOW-8** escrow self-upload not audited | `escrow_self_upload` audit row now written in the escrow tx. | `App.kt` `/escrow/self` |
 
-**Threat-model conformance** (§5 gate) is now unblocked: the spec 05 T8 mitigation ("policy enforces minimum strength at enrollment") is implemented. The remaining LOW/INFO items (LOW-3 proxy client-IP, LOW-6 in-flight upload quota, LOW-9 WS token-in-URL, and the INFO set) are defense-in-depth / hygiene, tracked for a later pass. The **operational** gate items (escrow genesis + recovery drill, PBS restore drill, min-version-pin exercise, 30-day soak) remain owner/ops work and still gate real-secret migration.
+**Threat-model conformance** (§5 gate) is now unblocked: the spec 05 T8 mitigation ("policy enforces minimum strength at enrollment") is implemented. The **operational** gate items (escrow genesis + recovery drill, PBS restore drill, min-version-pin exercise, 30-day soak) remain owner/ops work and still gate real-secret migration.
+
+### 6b. Remaining LOW/INFO — done 2026-07-06 (second hardening pass, deployed CT 122)
+
+The defense-in-depth / hygiene items are now implemented, tested, and live (an 11-agent code-review pass verified the batch and caught two accounting bugs, folded in):
+
+| Finding | Fix | Where |
+|---|---|---|
+| **LOW-3** proxy client-IP | `clientIp()` trusts `CF-Connecting-IP` / rightmost `X-Forwarded-For` **only when the direct peer is loopback** (shared `peerIsLoopback()` with the `/metrics` gate); IP-literal + non-wildcard guard; `ANDVARI_TRUSTED_IP_HEADERS` env-configurable. | `Auth.kt`, `App.kt`, `Config.kt` |
+| **LOW-6** in-flight upload quota | Per-user concurrency semaphore + streamed `.part` bytes counted toward the user quota mid-stream (idempotent re-uploads exempt; bytes handed off before commit); Netty `requestReadTimeoutSeconds` (default **off** until idle-WS survival is verified live). | `AttachmentStore.kt`, `Config.kt`, `Main.kt` |
+| **LOW-9** WS token-in-URL | Single-use ~30 s ticket minted over authenticated REST (`POST /events/ticket`); raw `?access=` token removed; Bearer-header path kept. ≤30 s revoked-ticket window recorded in spec 03 §6. | `WsTicketStore.kt`, `App.kt`, web `client.ts` |
+| **INFO-1** email in audit meta | Meta carries the invite token-hash prefix, never the email (create↔redeem still correlate). | `Service.kt`, `AdminService.kt` |
+| **INFO-2** web escrow short-form entry | Enroll requires typing the fingerprint short form from the printed sheet before it is revealed; spec 04 §2(3) updated to match (entry-first, not display-first). | web `Welcome.tsx`, `escrow.ts` |
+| **INFO-3** prelogin params | Unknown emails get the current org-default params, computed at uniform cost across both branches (no timing oracle); residual per-user divergence recorded in spec 05 R4. | `Service.kt` |
+| **INFO-5** policy audit atomicity | `policy_update` audited inside the policy write tx. | `Service.kt`, `Repo.kt`, `App.kt` |
+| **INFO-6** admin id validation | `requireUuid` on disable / revoke / escrow-GET ids. | `App.kt` |
+| **INFO-8** CSP | `object-src 'none'` + `form-action 'none'` added; `style-src 'unsafe-inline'` documented-and-kept. | `App.kt` |
+
+**Owner smoke follow-up (non-blocking):** confirm which forwarded header `tailscale serve` sets (a tailnet login should show a `100.x` address in the audit `ip`); if the request-read timeout is later enabled, confirm an idle web WebSocket survives past it (ping keepalive).

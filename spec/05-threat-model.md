@@ -31,7 +31,12 @@ from the current default answers prelogin with diverged params (existence confir
 until it re-keys via password change; unknown emails always answer the current
 org-default params. R5 Single server on
 heimdall — availability via offline-first + PBS/shadow-2122, not HA. R6 TOTP seeds
-co-located with passwords (accepted eggs-in-one-basket, user decision).
+co-located with passwords (accepted eggs-in-one-basket, user decision). R7 removed
+shared-vault member retains decryption capability for ciphertext they held while granted
+(and future leaks of *unchanged* items) until P6 VK rotation + lazy re-encryption —
+removal in v1 is server-side revocation only; future-secrecy loss only, the server itself
+still holds only ciphertext. Shared-vault membership topology (which userId holds which
+role on which vaultId) is server-visible metadata, subsumed by A6/R4.
 
 ## Non-goals
 Nation-state adversaries; side-channel resistance beyond libsodium's own; protection

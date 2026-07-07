@@ -180,10 +180,14 @@ class Repo(val db: Db) {
     // sync pull (single read transaction for snapshot consistency)
     fun pull(userId: String, since: Long): io.silencelen.andvari.core.model.SyncResponse = db.read { c ->
         val rev = currentRev(c)
+        // Backfill (spec 03 §4): deliver a vault/its items when the object's rev OR the
+        // caller's grant rev on that vault exceeds `since`. A member added at a high rev
+        // whose cursor already passed the vault's/items' own revs still gets them; a role
+        // change (bumps grant rev) re-delivers the vault's items (idempotent upsert).
         val vaults = c.queryAll(
             """SELECT v.* FROM vaults v JOIN grants g ON g.vaultId=v.vaultId
-               WHERE g.userId=? AND g.revokedAt IS NULL AND v.rev>?""",
-            userId, since,
+               WHERE g.userId=? AND g.revokedAt IS NULL AND (v.rev>? OR g.rev>?)""",
+            userId, since, since,
         ) { rs ->
             WireVault(
                 vaultId = rs.getString("vaultId"), type = rs.getString("type"),
@@ -197,12 +201,13 @@ class Repo(val db: Db) {
             WireGrant(
                 vaultId = rs.getString("vaultId"), userId = rs.getString("userId"),
                 role = rs.getString("role"), wrappedVk = rs.getString("wrappedVk"), rev = rs.getLong("rev"),
+                sealedVk = rs.getString("sealedVk"),
             )
         }
         val items = c.queryAll(
             """SELECT i.* FROM items i JOIN grants g ON g.vaultId=i.vaultId
-               WHERE g.userId=? AND g.revokedAt IS NULL AND i.rev>?""",
-            userId, since,
+               WHERE g.userId=? AND g.revokedAt IS NULL AND (i.rev>? OR g.rev>?)""",
+            userId, since, since,
         ) { rs -> itemRow(rs) }
         val removed = c.queryAll(
             "SELECT vaultId FROM grants WHERE userId=? AND revokedAt IS NOT NULL AND rev>?",
@@ -219,6 +224,9 @@ class Repo(val db: Db) {
             "SELECT role FROM grants WHERE userId=? AND vaultId=? AND revokedAt IS NULL",
             userId, vaultId,
         ) { it.getString(1) }
+
+    fun vaultType(c: Connection, vaultId: String): String? =
+        c.queryOne("SELECT type FROM vaults WHERE vaultId=?", vaultId) { it.getString(1) }
 
     fun itemById(c: Connection, itemId: String): WireItem? =
         c.queryOne("SELECT * FROM items WHERE itemId=?", itemId) { itemRow(it) }

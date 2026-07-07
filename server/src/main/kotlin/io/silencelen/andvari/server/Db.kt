@@ -263,5 +263,20 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 3) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Shared vaults (spec 01 §6 / spec 03 §10). Additive + O(1) on the live
+                    // v2 DB: ALTER ADD COLUMN with no default rewrite; existing grants read
+                    // back sealedVk=NULL → wire null → identical semantics to today. The
+                    // member-grant carrier; wrappedVk stays NOT NULL ('' for member grants).
+                    st.executeUpdate("ALTER TABLE grants ADD COLUMN sealedVk TEXT")
+                    // Join-time (epoch ms). Pre-v3 rows read back NULL → summaries COALESCE to 0.
+                    st.executeUpdate("ALTER TABLE grants ADD COLUMN addedAt INTEGER")
+                    st.executeUpdate("CREATE INDEX idx_grants_user ON grants(userId)")
+                    st.executeUpdate("UPDATE meta SET value='3' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }
