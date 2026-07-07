@@ -35,8 +35,21 @@ co-located with passwords (accepted eggs-in-one-basket, user decision). R7 remov
 shared-vault member retains decryption capability for ciphertext they held while granted
 (and future leaks of *unchanged* items) until P6 VK rotation + lazy re-encryption —
 removal in v1 is server-side revocation only; future-secrecy loss only, the server itself
-still holds only ciphertext. Shared-vault membership topology (which userId holds which
-role on which vaultId) is server-visible metadata, subsumed by A6/R4.
+still holds only ciphertext. **R7 extended (vault lifecycle, spec 03 §11):** vault deletion
+removes the server's copies after a 7-day grace and triggers fleet-wide client purge, but is
+NOT cryptographic erasure toward ex-members — anyone granted while the vault lived may retain
+ciphertext + the VK they already held, and encrypted server backups (PBS/B2) keep copies
+until their own retention expires (~30 d); the ex-owner after a transfer retains VK likewise.
+True erasure needs P6 VK rotation. **Lifecycle threat posture (T1):** lifecycle ops on
+existing vaults are member-verifiable — the server never holds VK and cannot mint proofs; it
+can still WITHHOLD, delay, or serve stale state (availability-class, accepted). Replay is
+bounded by expiry+seq binding and by soft-hide-until-purgeAt; residuals: a device offline
+since before the newest verified seq may be shown stale-but-genuine older state; proofs are
+keyholder-forgeable (server authz is the gate). Grant injection for NEW vaults (F16) remains
+an accepted residual until P6 owner-signed grants — the "you were added to <vault>" notice is
+transparency for honest servers only and is NOT an F16 defense. Shared-vault membership
+topology (which userId holds which role on which vaultId) is server-visible metadata,
+subsumed by A6/R4.
 
 ## Autofill (client-side, Android)
 

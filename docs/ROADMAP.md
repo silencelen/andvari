@@ -101,9 +101,17 @@ Prioritized; each is additive and back-compatible.
   user types into an unrecognized form.
 - **Browser extension** — reuses the `:core`/web `UriMatch` + `FieldClassifier` (already
   built + vector-tested for exactly this) and the same-origin API. Chromium + Firefox.
+- **Owner-signed grants** (Ed25519 signing identity) — closes F16 fully: grants and lifecycle
+  ops carry a sender signature under a per-account signing key, so a malicious server can no
+  longer inject vaults/credentials or forge a transfer even to a client that holds no VK. The
+  0.5.0 lifecycle proofs (spec 03 §11) remove the *server* from the forgery set; this removes
+  keyholders too. A new signing identity touches enrollment/escrow/every grant path — hence
+  deferred here, not into v5.
 - **VK lazy rotation on member removal** (closes accepted risk R7) — the next online writer
   re-keys the vault and re-seals grants; removed members lose access to future ciphertext,
   not just server delivery. Needs a rotation protocol fenced against concurrent writers.
+  **Trigger extended (v5): also fire after an ownership transfer and after a restore whose
+  vault had members removed before the delete.**
 - ~~**ItemDoc unknown-field round-trip**~~ **DONE in 0.4.0** (ExtrasOverlaySerializer + the
   `itemdoc.json` vector) — a future additive field now survives a mixed-fleet edit, so new
   optional ItemDoc fields are safe to add.

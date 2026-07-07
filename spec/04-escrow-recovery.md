@@ -52,6 +52,15 @@ across password changes.
 
 ## 4. Ceremony & flows (runbooks live in ops/, these are the normative steps)
 
+**Escrow ⊥ vault lifecycle (spec 03 §11).** Escrow seals the UVK only — no VKs, no items.
+`applyRecovery` rewrites verifier / wrappedUvk / kdf and sets `status='active'`, touching
+neither grants nor pending transfers, so a recovered account retains every membership,
+ownership, and pending offer. Recovery therefore **doubles as vault succession** for a
+lost/disabled owner (no admin lifecycle route exists — that would be the F16 forgery class):
+recover the owner account → sign in as owner → transfer or delete the orphaned vaults →
+re-secure (`ops/runbooks/vault-succession.md`). A vault deleted during a lockout reconciles
+on the recovered account's next sync like any offline device.
+
 **Genesis ceremony (before ANY real account):**
 1. Offline machine → `recovery-cli keygen` → sheet ×2 + USB; verify both printouts
    scan back to the same seed.

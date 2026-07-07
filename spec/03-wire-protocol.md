@@ -60,7 +60,8 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
   "vaults":  [ Vault… ],             // changed vaults (incl. metaBlob)
   "grants":  [ Grant… ],             // caller's grants only
   "items":   [ Item… ],              // changed items in granted vaults (incl. tombstones)
-  "removedGrants": [ vaultId… ]      // caller lost access → client purges local copies
+  "removedGrants": [ vaultId… ],     // caller lost access → client purges local copies
+  "removedGrantsInfo": [ RemovedGrantInfo… ]  // additive (§11); companion detail, never the trigger
 }
 ```
 
@@ -76,6 +77,19 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
 - `removedGrants` client duty: purge that vault's items from the local cache, drop the VK,
   and discard any unsynced queued mutations targeting that vault (a revoked member's
   offline edits to the vault are lost — the push would be `denied` regardless).
+- **`removedGrantsInfo`** (additive, spec 03 §11) is the companion detail for `removedGrants`
+  (which remains the SOLE purge trigger for old clients): `{vaultId, reason:
+  'removed'|'left'|'deleted'|'transferred', deletedAt?, purgeAt?, deleteId?, deleteProof?,
+  restoreProof?, removeProof?, removeNonce?}`. `reason` derives from the caller's OWN grant's
+  `revokedReason` (a member removed *before* a later vault delete sees `removed`, not
+  `deleted`). 0.5.0+ client duties: verify the proof under the still-held `lifecycleKey`
+  BEFORE any destructive local action; tri-state — *valid* → act with an attributed notice;
+  *invalid, or bare revocation of a locally-held vault* → move to the holding area + warn;
+  *unverifiable* (no VK / vault unknown locally) → silent no-op. Notices fire ONLY for
+  vaults present locally before the pull (no ghost banners on fresh devices / `since=0`).
+  A denied-mutation failure MUST NOT abort the pull that delivers `removedGrants` (F21);
+  denied mutations for in-grace vaults SHOULD be parked and replayed on restore. Clients
+  MUST ignore unknown response fields (pins the additivity contract).
 - **Durable cursor rule (spec 02 §8):** vaults/grants/items/removedGrants are all deltas
   over the same global rev, so a client that persists its cursor MUST also persist the
   grant rows, vault rows, and item envelopes it has applied (grant/vault rows never
@@ -261,8 +275,11 @@ sit-at-home operation). Every call is audited (ids/roles only, never names).
   20/min/account, audited `user_lookup` (meta = target **userId**, never the email — 0.4.0 PII fix). The unauthenticated
   anti-enumeration guarantees of §2 are unchanged — this is an authed-only path.
 - `GET /api/v1/vaults/{vaultId}/members` → `[{ userId, email, displayName, role,
-  identityPub, addedAt }]` (active grants only). Any active member may call (transparency:
-  every member can re-verify who holds the VK). Foreign vaultId → 403 (hidden-as-403).
+  identityPub, addedAt, status? }]` (active grants only). Any active member may call
+  (transparency: every member can re-verify who holds the VK). Foreign vaultId → 403
+  (hidden-as-403). **Refused on the public break-glass origin** (§11 closed a drift where
+  this alone leaked household emails/identity keys from the internet). `status` (additive)
+  surfaces a disabled account (feeds the transfer target picker).
 - `POST /api/v1/vaults/{vaultId}/members { userId, role: "writer"|"reader", sealedVk }` →
   `201`. Owner only; target must be an `active` user, not self, with no active grant (a
   previously-revoked grant row is resurrected). `sealedVk` opaque to the server, validated
@@ -271,7 +288,84 @@ sit-at-home operation). Every call is audited (ids/roles only, never names).
   Bumps the grant rev (re-delivers the grant so clients update the role). Audited
   `vault_member_role`.
 - `DELETE /api/v1/vaults/{vaultId}/members/{userId}` → `200`. Owner only; not self. Sets
-  `revokedAt`, bumps the grant rev → the victim's next pull carries `removedGrants`;
-  sync/push/attachment access stops immediately. **No VK rotation in v1** (spec 01 §6 /
-  spec 05 R7). Audited `vault_member_remove`.
+  `revokedAt`, `revokedReason='member_remove'`, bumps the grant rev → the victim's next pull
+  carries `removedGrants`; sync/push/attachment access stops immediately. **No VK rotation
+  in v1** (spec 01 §6 / spec 05 R7). Gains an **optional** body `{proof, nonce}` (removal
+  proof, §11) delivered to the victim via `removedGrantsInfo` so a 0.5.0 client can verify
+  the removal was a real owner action. Removing (or role-changing) the **pending transfer
+  target** clears the pending offer. Audited `vault_member_remove`.
 - All five ring the WS dirty-bell for every affected member.
+
+## 11. Vault lifecycle (delete / restore / leave / transfer / rename)
+
+Owner gripe 1: a created shared vault was immortal. Full design + adversarial breaks:
+`docs/design/2026-07-07-shared-vault-lifecycle-skipti.md`. Target: server schema v4 (spec
+02 §4) + client 0.5.0. **All wire changes are additive; fielded 0.4.0 and 0.2.x clients
+require zero changes and cannot 404 mid-sync** (sync is grant-driven; the only vault-scoped
+calls — members GET, attachments — already 403-handle non-fatally; 410 stays dormant; no
+minVersion pin is armed).
+
+**Common rules.** All lifecycle routes are authenticated + `enforceVersion` + **refused on
+the public break-glass origin** + audited ids-only. **Guard order: resolve the caller's
+grant FIRST** (including revoked rows) → an outsider gets a uniform `403 not_vault_owner` /
+`no_grant` regardless of vault existence (no tombstone existence oracle). Deleted-vault
+special-case errors are returned only to grant-holders. Lifecycle ops are foreground REST
+and are **never queued durably offline**. Rate buckets: `vault_destructive:{userId}` 10/h
+(delete, transfer offer, rename); `vault_recovery:{userId}` 30/h (restore, cancel, accept,
+leave) — restore is never blocked by the delete spree it undoes. Idempotency is by
+**operation identity** (deleteId / offerId), not by row state. Grace/expiry:
+`ANDVARI_VAULT_GRACE_DAYS=7`, `ANDVARI_TRANSFER_TTL_DAYS=14` (env, not schema).
+
+**Proofs** (spec 01 §6, vectors `spec/test-vectors/lifecycleproof.json`): `lifecycleKey =
+HKDF-SHA-256(VK, "andvari/v1|lifecycle")`; the server STORES and RELAYS proofs but cannot
+mint or verify them (no VK) — verification is a CLIENT duty. Domain strings (base64url
+HMAC-SHA-256 value; `|`-joined UTF-8; integers decimal):
+- delete/restore: `andvari/v1|lifecycle|{delete,restore}|{vaultId}|{deleteId}`
+- offer: `andvari/v1|lifecycle|transfer|{vaultId}|{offerId}|{toUserId}|{expiresAt}|{seq}`
+- accept: `andvari/v1|lifecycle|transfer-accept|{vaultId}|{offerId}|{newOwnerUserId}|{seq}|{hexLower(sha256(utf8(wrappedVk)))}`
+- remove: `andvari/v1|lifecycle|remove|{vaultId}|{targetUserId}|{nonce}`
+
+**Routes:**
+- `POST /vaults/{id}/delete {deleteId, proof}` → `200 {rev, purgeAt}`. Owner of a shared
+  vault, unlocked. One tx: capture active `memberIds` BEFORE revoking; clear any pending
+  transfer; revoke every active grant (`revokedReason='vault_delete'`, keeping key wraps for
+  restore); set `deletedAt/purgeAt=now+GRACE/deletedBy/deleteId/deleteProof`, `restoreProof=NULL`,
+  bump vault rev. Idempotent by `deleteId` (mismatched deleteId on an already-deleted vault
+  → `409 vault_state_changed`, never a fresh delete). Bell the captured members.
+- `POST /vaults/{id}/restore {deleteId, proof}` → `200 {rev}`. Deleting owner (via revoked
+  owner grant), `purgedAt IS NULL`, `deleteId` matches (else `vault_gone` / `vault_state_changed`).
+  Un-revoke ONLY grants `revokedReason='vault_delete' AND revokedAt=deletedAt` (members
+  removed before the delete stay removed), clear lifecycle fields, store `restoreProof`
+  (consumes the deleteId — a later tombstone bearing it is stale/forged), bump revs.
+- `GET /vaults/deleted` → `200 [DeletedVaultSummary{vaultId, metaBlob, wrappedVk, deletedAt,
+  purgeAt, deleteId}]` — the caller's own in-grace vaults (ciphertext they already owned).
+- `POST /vaults/{id}/leave {}` → `200 {rev}`. Any non-owner active member;
+  `owner → 400 owner_must_transfer_or_delete`. `revokedReason='member_leave'`; if caller ==
+  `pendingOwnerId`, clear the pending offer. Idempotent by reason.
+- `POST /vaults/{id}/transfer {toUserId, offerId, expiresAt, proof}` → `201 {rev, expiresAt}`.
+  Owner; target = an existing **active** member with an active grant, status active, ≠ self;
+  one pending max (overwrite audits a cancel). `seq = transferSeq+1`. Stores pending fields +
+  bumps vault rev → `WireVault.pendingTransfer` re-delivers to every member.
+- `DELETE /vaults/{id}/transfer` → `200 {rev}`. Owner cancel or target decline.
+- `POST /vaults/{id}/transfer/accept {offerId, wrappedVk, proof}` → `200 {rev}`. The
+  `pendingOwnerId` only, on a 0.5.0+ client that verified the offer proof and round-trip-
+  verified its own minted `wrappedVk` before posting; `acceptProof` binds `sha256(wrappedVk)`.
+  Tx re-checks pending/expiry/grant-predates-offer; old owner → `writer` (wrappedVk kept),
+  new owner → `owner` with posted `wrappedVk` **and retained `sealedVk`** (fallback key
+  material — spec 01's exactly-one rule is relaxed here; both wiped together at purge);
+  `transferSeq=seq`. Idempotent when the caller is already owner for this `offerId`.
+- `PUT /vaults/{id}/meta {metaBlob, baseVaultRev?}` → `200 {rev}`. Owner; shared vaults;
+  not deleted; `≤4 KiB` b64. `baseVaultRev < vaults.rev → 409 stale_meta`. Rename only
+  (name is ciphertext — server audits ids). Personal-vault rename deferred.
+
+**Errors:** `vault_deleted, vault_gone, vault_state_changed, owner_must_transfer_or_delete,
+transfer_not_pending, not_transfer_target, stale_meta, no_grant, not_vault_owner,
+user_inactive`. **Audit types** (ids only): `vault_delete, vault_restore, vault_purge,
+vault_member_leave, vault_transfer_{offer,accept,cancel,expire}, vault_rename`; `push_denied`
+gains a `deleted:` meta prefix for tombstoned vaults (excludes routine lifecycle fallout
+from intrusion review). **Janitor** (daily 04:30 + delayed on-boot; log-only dry-run its
+first armed week): purge vaults past grace (spec 02 §7) and expire transfer offers past
+`expiresAt`; a Grafana/Loki alert fires on any vault with `purgeAt < now-2d AND purgedAt IS
+NULL`. **Admin succession: no admin lifecycle route exists BY DESIGN** (a server route that
+reassigns owner rows *is* the F16 forgery class) — a lost/disabled owner is recovered via
+spec 04 §4 escrow recovery, then acts as owner (`ops/runbooks/vault-succession.md`).

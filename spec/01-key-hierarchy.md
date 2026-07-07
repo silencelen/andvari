@@ -99,14 +99,30 @@ covered by quick-unlock (§8).
     plaintext = canonical-JSON {"v":1,"vaultId":"{vaultId}","vk":"{base64url(VK)}"})`.
     Sealed boxes carry no AD; context lives inside the payload, and the recipient MUST
     verify the payload's `vaultId` matches the grant row it arrived on.
-  - A grant carries **exactly one** of `wrappedVk` / `sealedVk`.
-  - Roles: `owner` (creator, immutable, exactly one per vault in v1), `writer`, `reader`;
-    only the owner manages membership. Roles are server-enforced (spec 02 §4).
+  - A grant normally carries **exactly one** of `wrappedVk` / `sealedVk`; after an
+    ownership transfer (spec 03 §11) the new owner's grant MAY carry both (`wrappedVk`
+    current, `sealedVk` retained as fallback key material until vault purge).
+  - Roles: `owner` (exactly one per vault at every instant; reassignable ONLY via the
+    two-phase offer/accept transfer of spec 03 §11, in which the new owner's client
+    re-wraps VK under its own UVK and the old owner demotes to `writer`, retaining VK —
+    R7 applies), `writer`, `reader`; only the owner manages membership. Roles are
+    server-enforced (spec 02 §4). Non-owner members may self-revoke (**leave**, spec 03
+    §11); the owner may NOT leave — only transfer or delete.
 - **Member removal (v1)** is server-side revocation only — the server stops serving the
   vault and its items to the removed user. **Accepted risk (spec 05 R7):** a removed
   member who copied the VK or ciphertext while granted can still decrypt ciphertext they
   already hold (and any future leak of *unchanged* items). VK rotation + lazy
   re-encryption by the next online writer is the forward path, deferred to **P6**.
+- **Vault deletion** (spec 03 §11) is revocation of every grant plus server-side
+  destruction of the vault's ciphertext after a grace window (spec 02 §7); it is NOT
+  cryptographic erasure toward anyone who held VK (R7).
+- **Lifecycle proofs** (spec 03 §11): destructive shared-vault ops carry an
+  `HMAC-SHA-256` under `lifecycleKey = HKDF-SHA-256(ikm = VK, info = "andvari/v1|lifecycle",
+  32)` — domain-separated from the AEAD key, and material the server never holds. A member's
+  0.5.0 client verifies the proof under its held VK before treating a delete/transfer/remove
+  as a genuine owner action. Proofs are MACs, not signatures — any current VK holder can
+  mint one, so they remove only the *server* from the forgery set (server-side owner authz
+  stays the real gate). Vectors: `spec/test-vectors/lifecycleproof.json`.
 
 ## 7. Password change and KDF upgrade
 
