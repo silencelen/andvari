@@ -40,12 +40,14 @@ importing any real password:
    prestige; canary make+verify PASSED from the printed sheet; CT122 pinned + restarted and
    now serves fingerprint `b26efdd3eafc9dad…` (TEST key `e3c0418f…` retired, backed up).
    Seed on 2 sheets + USB, offline only. Owner-verified canary at
-   `/etc/andvari/escrow-canary.b64`. **TODO before soak:** purge the 1 pre-swap TEST account
-   (0 items; its escrow is orphaned to the old key) so `recovery-cli verify` reads all-PASS.
-2. **Enroll the first admin** (bootstrap token in andvari.env) + **enroll server-TOTP**
-   immediately after (break-glass public login is impossible without it).
-3. **Windows MSI rebuild** on the owner box (desktop 0.3.0 — the tailnet-default URL + version
-   bump are in the tree; only the owner can run jpackage/WiX). See `ops/windows-build.md`.
+   `/etc/andvari/escrow-canary.b64`. The pre-swap TEST account is already gone — CT122 reads
+   `users=1, escrow=1` (owner only), so `recovery-cli verify` is all-PASS.
+2. ~~**Enroll the first admin**~~ **DONE** (bootstrap token consumed + stripped; owner admin
+   enrolled against the real key). **Still open: enroll server-TOTP** (web → Settings) —
+   break-glass public login is impossible without it, and CT122 shows it not yet enrolled.
+3. **Windows MSI rebuild** on the owner box (desktop **0.4.0** — the tailnet-default URL +
+   version bump are in the tree; only the owner can run jpackage/WiX). See
+   `ops/windows-build.md`. (Batch B4 makes the update banner + 426 path honest first.)
 4. **On-device smoke tests** — attachments + TOTP on the Fold + desktop; the autofill Fold-7
    checklist (design §6.4); a CSV dry-run with a synthetic export; a shared-vault invite
    round-trip web↔Fold with the printed-sheet fingerprint check.
@@ -77,10 +79,9 @@ Prioritized; each is additive and back-compatible.
 - **VK lazy rotation on member removal** (closes accepted risk R7) — the next online writer
   re-keys the vault and re-seals grants; removed members lose access to future ciphertext,
   not just server delivery. Needs a rotation protocol fenced against concurrent writers.
-- **ItemDoc unknown-field round-trip** — decode to a JsonObject overlay so a future additive
-  field (e.g. `neverAutofill`, `sensitive`) survives a mixed-fleet edit (spec 02 §3 already
-  mandates preservation; the fixed data classes currently strip unknowns). Do this BEFORE
-  adding any such field.
+- ~~**ItemDoc unknown-field round-trip**~~ **DONE in 0.4.0** (ExtrasOverlaySerializer + the
+  `itemdoc.json` vector) — a future additive field now survives a mixed-fleet edit, so new
+  optional ItemDoc fields are safe to add.
 - **eTLD+1 / PSL matching** for autofill (v1's label-boundary rule is strictly safer but
   misses sibling-subdomain matches); **Digital Asset Links** for the native-app-with-web-creds
   case (v1 uses `androidapp://` exact + a browser allowlist).
