@@ -6,6 +6,7 @@ import { Account } from "../vault/account";
 import { VaultStore } from "../vault/store";
 import { Welcome, type LoginMeta } from "./Welcome";
 import { Vault } from "./Vault";
+import { inactivityNotice } from "./format";
 import {
   readPersistedAutoLockSeconds,
   resolveAutoLockSeconds,
@@ -17,13 +18,16 @@ import {
   defaultBaseUrl,
   loadSession,
   makeClient,
+  SESSION_STORAGE_KEY,
   type Session,
 } from "./session";
 
+/** `notice` (F26): one-line reason rendered on the auth card — why the user is looking
+ *  at a lock/sign-in screen ("Locked.", "This device's access was revoked.", …). */
 type Phase =
   | { kind: "loading" }
-  | { kind: "welcome" }
-  | { kind: "unlock"; session: Session }
+  | { kind: "welcome"; notice?: string }
+  | { kind: "unlock"; session: Session; notice?: string }
   | { kind: "vault"; account: Account; store: VaultStore; meta: LoginMeta };
 
 export function App() {
@@ -66,16 +70,82 @@ export function App() {
     void loadPolicy();
   };
 
-  // Stable identity: Vault's WS-subscription effect depends on this — a fresh closure per
-  // render would tear down and re-mint the events socket on every App re-render.
-  const onLoggedOut = useCallback(() => {
+  // F26: sign-out (and server-side revocation) is the DESTRUCTIVE path — the persisted
+  // session is removed and the next visit is a full email+password sign-in. A mere
+  // LOCK is not this; see lock() below.
+  const signOut = useCallback((notice?: string) => {
     clearSession();
     clientRef.current?.setTokens(null);
-    setPhase({ kind: "welcome" });
+    setPhase({ kind: "welcome", notice });
   }, []);
 
+  // F26/F27 lock propagation channel: locking KEEPS the persisted session, so the
+  // `storage` event can no longer signal it — locks are announced explicitly.
+  const lockChannelRef = useRef<BroadcastChannel | null>(null);
+
+  // F26: lock drops this tab's keys (the phase change unmounts Vault, releasing the
+  // Account/VaultStore) but KEEPS the persisted session and tokens, so the user lands
+  // on the lighter master-password-only Unlock card with a reason line. Same ZK
+  // posture as sign-out: unlock re-derives every key from the password; no secret is
+  // ever persisted (spec 01 §8).
+  const lockLocal = useCallback((notice: string) => {
+    setPhase((p) => {
+      if (p.kind !== "vault") return p; // nothing unlocked here — nothing to lock
+      const session = loadSession();
+      // No persisted session to come back to (shouldn't happen) — fall back to sign-in.
+      return session?.tokens ? { kind: "unlock", session, notice } : { kind: "welcome", notice };
+    });
+  }, []);
+
+  const lock = useCallback(
+    (notice: string) => {
+      lockLocal(notice);
+      lockChannelRef.current?.postMessage("locked"); // F27: bring the other tabs along
+    },
+    [lockLocal],
+  );
+
+  // Stable identities: Vault's WS-subscription effect depends on onRevoked — a fresh
+  // closure per render would tear down and re-mint the events socket every render.
+  const onManualLock = useCallback(() => lock("Locked."), [lock]);
+  // WS "revoked" frame / dead session at ticket mint: the device's server-side session
+  // is gone, so a mere unlock could never succeed — this stays a full sign-out (F26).
+  const onRevoked = useCallback(() => signOut("This device's access was revoked."), [signOut]);
+
+  // F27: one tab locking or signing out must land EVERY tab on the same screen.
+  //  - lock → BroadcastChannel message (the session stays, storage can't carry it);
+  //  - sign-out/revocation → the session key's REMOVAL arrives as a `storage` event;
+  //  - a token pair rotated by another tab → adopt it, so this tab never replays the
+  //    spent refresh token (belt to ApiClient.tryRefresh's in-lock re-read braces).
+  useEffect(() => {
+    const ch = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("andvari-lock") : null;
+    lockChannelRef.current = ch;
+    if (ch) ch.onmessage = () => lockLocal("Locked in another tab.");
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== SESSION_STORAGE_KEY) return;
+      if (e.newValue === null) {
+        clientRef.current?.setTokens(null);
+        setPhase((p) =>
+          p.kind === "vault" || p.kind === "unlock" ? { kind: "welcome", notice: "Signed out in another tab." } : p,
+        );
+      } else {
+        const t = loadSession()?.tokens;
+        const cur = clientRef.current?.getTokens();
+        if (t && clientRef.current && (!cur || cur.refreshToken !== t.refreshToken)) {
+          clientRef.current.setTokens(t);
+        }
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      lockChannelRef.current = null;
+      ch?.close();
+    };
+  }, [lockLocal]);
+
   // Inactivity auto-lock (spec 01 §8): active only while a vault is open; drives the
-  // SAME path as the manual Lock button (session cleared, keys dropped with the phase).
+  // SAME path as the manual Lock button (F26: session kept → Unlock card + reason).
   // The window comes from the CURRENT policy when one was fetched; when the fetch
   // failed (policy null — e.g. a transient 5xx right after login) the last
   // successfully fetched value persisted for this user takes over, so a fetch failure
@@ -88,12 +158,11 @@ export function App() {
     const { persist } = resolveAutoLockSeconds(fetchedAutoLock, null);
     if (persist !== null) writePersistedAutoLockSeconds(vaultUserId, persist);
   }, [vaultUserId, fetchedAutoLock]);
-  useAutoLock(
+  const autoLockSeconds =
     vaultUserId === null
       ? 0
-      : resolveAutoLockSeconds(fetchedAutoLock, readPersistedAutoLockSeconds(vaultUserId)).seconds,
-    onLoggedOut,
-  );
+      : resolveAutoLockSeconds(fetchedAutoLock, readPersistedAutoLockSeconds(vaultUserId)).seconds;
+  useAutoLock(autoLockSeconds, () => lock(inactivityNotice(autoLockSeconds)));
 
   if (phase.kind === "loading") {
     return (
@@ -115,7 +184,8 @@ export function App() {
         policy={policy}
         isAdmin={phase.meta.isAdmin}
         mustChangePassword={phase.meta.mustChangePassword}
-        onLock={onLoggedOut}
+        onLock={onManualLock}
+        onRevoked={onRevoked}
       />
     );
   }
@@ -127,8 +197,9 @@ export function App() {
       policyError={policyError}
       onRetryPolicy={loadPolicy}
       mode={phase.kind === "unlock" ? { unlock: phase.session } : { fresh: true }}
+      notice={phase.notice}
       onReady={onUnlocked}
-      onForget={onLoggedOut}
+      onForget={() => signOut()}
     />
   );
 }

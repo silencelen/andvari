@@ -3,10 +3,10 @@ import { ApiClient, ApiError } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { fromB64 } from "../crypto/bytes";
 import { shortFormMatches } from "../crypto/escrow";
-import { Account, deviceName } from "../vault/account";
+import { Account, IdentityMismatchError, deviceName } from "../vault/account";
 import { VaultStore } from "../vault/store";
 import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
-import { saveSession, type Session } from "./session";
+import { installId, saveSession, type Session } from "./session";
 
 type Mode = { unlock: Session } | { fresh: true };
 
@@ -22,19 +22,21 @@ interface Props {
   policyError: boolean;
   onRetryPolicy: () => Promise<void>;
   mode: Mode;
+  /** F26: one-line reason this screen is showing ("Locked.", revoked, …) — rendered on the card. */
+  notice?: string;
   onReady: (account: Account, store: VaultStore, meta: LoginMeta) => void;
   onForget: () => void;
 }
 
-export function Welcome({ client, policy, policyError, onRetryPolicy, mode, onReady, onForget }: Props) {
+export function Welcome({ client, policy, policyError, onRetryPolicy, mode, notice, onReady, onForget }: Props) {
   if ("unlock" in mode) {
-    return <Unlock client={client} session={mode.unlock} onReady={onReady} onForget={onForget} />;
+    return <Unlock client={client} session={mode.unlock} notice={notice} onReady={onReady} onForget={onForget} />;
   }
-  return <FreshStart client={client} policy={policy} policyError={policyError} onRetryPolicy={onRetryPolicy} onReady={onReady} />;
+  return <FreshStart client={client} policy={policy} policyError={policyError} onRetryPolicy={onRetryPolicy} notice={notice} onReady={onReady} />;
 }
 
-/** Reload with an existing session: master password re-derives keys. */
-function Unlock({ client, session, onReady, onForget }: { client: ApiClient; session: Session; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForget: () => void }) {
+/** Reload or F26 lock with an existing session: master password re-derives keys. */
+function Unlock({ client, session, notice, onReady, onForget }: { client: ApiClient; session: Session; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForget: () => void }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -54,16 +56,20 @@ function Unlock({ client, session, onReady, onForget }: { client: ApiClient; ses
       onReady(account, store, { isAdmin: session.isAdmin, mustChangePassword: false });
     } catch (e) {
       // Only a throw from Account.unlock (the sole un-wrapped, non-ApiError step) may be
-      // blamed on the password. A server that responded with an error is a server
-      // problem — the user's password may be perfectly fine.
+      // blamed on the password — EXCEPT its IdentityMismatchError (F31/spec 01 §5),
+      // which is a tampering signal and must never be softened into "wrong password".
+      // A server that responded with an error is a server problem — the user's
+      // password may be perfectly fine.
       setErr(
-        e instanceof NetworkError
-          ? UNREACHABLE
-          : e instanceof ApiError && e.status === 401
-            ? "Session expired — sign in again."
-            : e instanceof ApiError
-              ? "The server had a problem answering — your password may be fine. Try again in a moment."
-              : "Wrong master password.",
+        e instanceof IdentityMismatchError
+          ? e.message
+          : e instanceof NetworkError
+            ? UNREACHABLE
+            : e instanceof ApiError && e.status === 401
+              ? "Session expired — sign in again."
+              : e instanceof ApiError
+                ? "The server had a problem answering — your password may be fine. Try again in a moment."
+                : "Wrong master password.",
       );
     } finally {
       setBusy(false);
@@ -78,6 +84,8 @@ function Unlock({ client, session, onReady, onForget }: { client: ApiClient; ses
           <h1>Welcome back</h1>
           <p>{session.email}</p>
         </div>
+        {/* F26: why the user is here ("Locked after N minutes of inactivity.", …). */}
+        {notice && !err && <div className="msg info">{notice}</div>}
         {err && <div className="msg err">{err}</div>}
         <div className="field">
           <label>Master password</label>
@@ -93,7 +101,7 @@ function Unlock({ client, session, onReady, onForget }: { client: ApiClient; ses
 }
 
 /** No session: sign in to an existing account, or enroll with an invite. */
-function FreshStart({ client, policy, policyError, onRetryPolicy, onReady }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
+function FreshStart({ client, policy, policyError, onRetryPolicy, notice, onReady }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; onRetryPolicy: () => Promise<void>; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
   const [tab, setTab] = useState<"signin" | "enroll">("signin");
   return (
     <div className="auth-shell">
@@ -103,6 +111,8 @@ function FreshStart({ client, policy, policyError, onRetryPolicy, onReady }: { c
           <h1 className="brand"><span className="a-mark">and</span>vari</h1>
           <p>the keeper of the hoard</p>
         </div>
+        {/* F26: why a full sign-in is required ("This device's access was revoked."). */}
+        {notice && <div className="msg info">{notice}</div>}
         <div className="tabs">
           <button className={tab === "signin" ? "active" : ""} onClick={() => setTab("signin")}>Sign in</button>
           <button className={tab === "enroll" ? "active" : ""} onClick={() => setTab("enroll")}>Enroll</button>
@@ -129,7 +139,13 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
       const pre = await net(client.prelogin(email));
       const authKey = await Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams);
       const code = totp.replace(/\s/g, "");
-      const s = await net(client.login(email, authKey, deviceName(), totpNeeded && code ? code : undefined));
+      // installId (F28): stable per-browser id so repeat sign-ins can share a device row.
+      const s = await net(
+        client.login(email, authKey, deviceName(), {
+          totp: totpNeeded && code ? code : undefined,
+          installId: installId(),
+        }),
+      );
       const account = await Account.unlock(s.userId, password, s.accountKeys);
       const store = new VaultStore(client, account);
       await net(store.sync()); // discovers the personal vault id from grants
@@ -150,6 +166,10 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
         setErr("");
       } else if (e instanceof ApiError && e.code === "public_login_requires_totp") {
         setErr("This account has no TOTP enrolled — sign-in from the public address is blocked. Connect from inside (VPN/LAN), enroll TOTP in Settings, then retry.");
+      } else if (e instanceof IdentityMismatchError) {
+        // F31/spec 01 §5: the password DID check out (login succeeded) — the server sent
+        // an identity key our sealed seed does not derive. Never blame the password.
+        setErr(e.message);
       } else if (e instanceof NetworkError) {
         setErr(UNREACHABLE);
       } else if (e instanceof ApiError && e.status === 401) {
@@ -238,6 +258,7 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady }: { clien
         kdfParams: policy.kdfParams,
         recoveryPublicKey: await net(recoveryPubFromServer(client)),
         recoveryFingerprint: fp,
+        installId: installId(), // F28: same stable id as sign-in
       });
       const s = await net(client.register(request));
       client.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
