@@ -8,6 +8,7 @@ import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.AttachmentRef
+import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.PendingUpload
@@ -49,6 +50,15 @@ data class UiState(
     val totpStatus: TotpStatus? = null,
     val totpSetup: TotpSetupResponse? = null,
     val totpMessage: String? = null,
+    // CSV import (spec 06) — a preview/plan kept across a retry so an interrupted import
+    // replays the SAME itemIds idempotently instead of duplicating.
+    val importPlan: CsvImport.ImportPlan? = null,
+    val importFormat: CsvImport.ImportFormat? = null,
+    val importReport: CsvImport.ImportReport? = null,
+    val importError: String? = null,
+    val importProgress: Pair<Int, Int>? = null,
+    val importBusy: Boolean = false,
+    val importDone: Boolean = false,
 )
 
 class AndvariViewModel(private val store: SessionStore, private val cacheDir: File) : ViewModel() {
@@ -210,6 +220,61 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     fun refresh() = op { engine!!.sync(); refreshItems() }
 
     fun item(itemId: String): VaultItem? = engine?.item(itemId)
+
+    // ---- CSV import (spec 06) ----
+
+    /** Parse + plan a browser CSV entirely on-device (no upload). [bytes] is read by the UI. */
+    fun importParse(bytes: ByteArray) {
+        val acct = account ?: return
+        try {
+            val parsed = CsvImport.parse(bytes)
+            _ui.value = _ui.value.copy(
+                importFormat = parsed.format,
+                importPlan = CsvImport.plan(parsed) { acct.newItemId() },
+                importReport = null, importError = null, importProgress = null, importBusy = false, importDone = false,
+            )
+        } catch (e: CsvImport.ImportException) {
+            _ui.value = _ui.value.copy(importError = friendlyImport(e.code), importPlan = null, importDone = false)
+        } catch (t: Throwable) {
+            _ui.value = _ui.value.copy(importError = t.message ?: "could not read that file", importPlan = null, importDone = false)
+        }
+    }
+
+    /** Reject a file without parsing (e.g. the UI's bounded read hit the size cap). */
+    fun importReject(message: String) {
+        _ui.value = _ui.value.copy(importError = message, importPlan = null, importDone = false)
+    }
+
+    /**
+     * Encrypt-and-push the planned items. Reuses plan.items on every call so a mid-import
+     * failure is fixed with Retry (idempotent replay of the same itemIds), NOT a re-parse.
+     */
+    fun importConfirm() {
+        val plan = _ui.value.importPlan ?: return
+        _ui.value = _ui.value.copy(importBusy = true, importError = null, importProgress = 0 to plan.items.size)
+        viewModelScope.launch {
+            try {
+                engine!!.importAll(plan.items) { done, total -> _ui.value = _ui.value.copy(importProgress = done to total) }
+                _ui.value = _ui.value.copy(importBusy = false, importDone = true, importReport = plan.report, items = engine?.items() ?: emptyList())
+            } catch (t: Throwable) {
+                _ui.value = _ui.value.copy(importBusy = false, importError = "Import interrupted — press Retry to finish (no duplicates will be created).")
+            }
+        }
+    }
+
+    fun importDismiss() {
+        _ui.value = _ui.value.copy(
+            importPlan = null, importFormat = null, importReport = null, importError = null,
+            importProgress = null, importBusy = false, importDone = false,
+        )
+    }
+
+    private fun friendlyImport(code: String): String = when (code) {
+        "too_large" -> "That file is larger than 10 MiB — far bigger than any real browser password export."
+        "too_many_rows" -> "That file has more than 10,000 logins. Split it into smaller files and import each."
+        "unrecognized_header" -> "This doesn’t look like a Chrome, Edge, or Firefox password export."
+        else -> "That file could not be read ($code)."
+    }
 
     /** Seed-derived identity short code (spec 01 §5) — read out during sharing verification. */
     fun identityCode(): String? = account?.identityFingerprintShort()

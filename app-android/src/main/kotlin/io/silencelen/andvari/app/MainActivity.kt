@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.silencelen.andvari.core.client.AttachmentRef
+import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
@@ -249,6 +250,24 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
     var query by remember { mutableStateOf("") }
     var editing by remember { mutableStateOf<Pair<String?, ItemDoc>?>(null) }
     var detailId by remember { mutableStateOf<String?>(null) }
+    val ctx = LocalContextCompat()
+    val scope = rememberCoroutineScope()
+
+    // CSV import: OpenDocument → BOUNDED read (never buffer a multi-GB file) → parse on-device.
+    val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    ctx.contentResolver.openInputStream(uri)?.use { readBounded(it, CsvImport.MAX_BYTES) }
+                        ?: throw IllegalStateException("could not read the selected file")
+                }
+            }
+            result.onSuccess { bytes ->
+                if (bytes == null) vm.importReject("That file is larger than 10 MiB — far bigger than any real browser password export.")
+                else vm.importParse(bytes)
+            }.onFailure { vm.importReject(it.message ?: "could not read the selected file") }
+        }
+    }
 
     val filtered = ui.items.filter {
         val q = query.trim().lowercase()
@@ -260,6 +279,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
             TopAppBar(
                 title = { Text("andvari", style = MaterialTheme.typography.titleLarge) },
                 actions = {
+                    IconButton(onClick = { importPicker.launch(arrayOf("*/*")) }) { Icon(Icons.Default.FileUpload, "import CSV") }
                     IconButton(onClick = { vm.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
                     IconButton(onClick = { vm.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
                     IconButton(onClick = { vm.lock() }) { Icon(Icons.Default.Lock, "lock") }
@@ -288,8 +308,87 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                     }
                 }
             }
+            ImportDialogs(vm, ui)
         }
     }
+}
+
+/** The three CSV-import dialogs (parse error → preview/confirm+progress+retry → done). */
+@Composable
+private fun ImportDialogs(vm: AndvariViewModel, ui: UiState) {
+    if (ui.importError != null && ui.importPlan == null && !ui.importDone) {
+        AlertDialog(
+            onDismissRequest = vm::importDismiss,
+            confirmButton = { TextButton(onClick = vm::importDismiss) { Text("OK") } },
+            title = { Text("Couldn’t import") },
+            text = { Text(ui.importError) },
+        )
+    }
+    ui.importPlan?.let { plan ->
+        if (!ui.importDone) {
+            val report = plan.report
+            AlertDialog(
+                onDismissRequest = { if (!ui.importBusy) vm.importDismiss() },
+                confirmButton = {
+                    if (ui.importError != null) {
+                        TextButton(onClick = vm::importConfirm, enabled = !ui.importBusy) { Text("Retry") }
+                    } else {
+                        TextButton(onClick = vm::importConfirm, enabled = !ui.importBusy && report.imported > 0) { Text("Import ${report.imported}") }
+                    }
+                },
+                dismissButton = { TextButton(onClick = vm::importDismiss, enabled = !ui.importBusy) { Text("Cancel") } },
+                title = { Text("Import passwords?") },
+                text = {
+                    Column {
+                        Text(
+                            "⚠ This file holds every password in plaintext. Nothing is uploaded — each login is encrypted on this device. Afterwards, delete the CSV and empty the trash. Re-importing the same file makes duplicates.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text("From ${ui.importFormat?.name?.lowercase() ?: "browser"} export:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("• ${report.imported} to import", style = MaterialTheme.typography.bodySmall)
+                        if (report.collapsed > 0) Text("• ${report.collapsed} exact duplicates merged", style = MaterialTheme.typography.bodySmall)
+                        if (report.flagged.isNotEmpty()) Text("• ${report.flagged.size} renamed (same site, different password)", style = MaterialTheme.typography.bodySmall)
+                        if (report.skippedEmpty > 0) Text("• ${report.skippedEmpty} empty rows skipped", style = MaterialTheme.typography.bodySmall)
+                        if (report.errors.isNotEmpty()) Text("• ${report.errors.size} rows skipped (parse errors)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        ui.importProgress?.let { (done, total) ->
+                            Spacer(Modifier.height(10.dp))
+                            LinearProgressIndicator(progress = { if (total > 0) done.toFloat() / total else 0f }, modifier = Modifier.fillMaxWidth())
+                            Text("Importing $done / $total", style = MaterialTheme.typography.bodySmall)
+                        }
+                        ui.importError?.let { Spacer(Modifier.height(8.dp)); Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                    }
+                },
+            )
+        }
+    }
+    if (ui.importDone) {
+        AlertDialog(
+            onDismissRequest = vm::importDismiss,
+            confirmButton = { TextButton(onClick = vm::importDismiss) { Text("Done") } },
+            title = { Text("Imported") },
+            text = { Text("Added ${ui.importReport?.imported ?: 0} logins to your vault. Now delete the CSV file and empty your trash.") },
+        )
+    }
+}
+
+/**
+ * Read at most [limit] bytes from [input]; return null if the source is larger (so a
+ * multi-GB pick is rejected without ever being buffered in memory). Mirrors CsvImport's
+ * own size cap so a file that fits here also passes parse().
+ */
+private fun readBounded(input: java.io.InputStream, limit: Int): ByteArray? {
+    val out = java.io.ByteArrayOutputStream()
+    val buf = ByteArray(64 * 1024)
+    var total = 0L
+    while (true) {
+        val r = input.read(buf)
+        if (r < 0) break
+        total += r
+        if (total > limit) return null
+        out.write(buf, 0, r)
+    }
+    return out.toByteArray()
 }
 
 @Composable

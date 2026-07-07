@@ -1,0 +1,433 @@
+{
+    "files": [
+        {
+            "name": "chrome-basic",
+            "contentB64": "bmFtZSx1cmwsdXNlcm5hbWUscGFzc3dvcmQsbm90ZQpHaXRIdWIsaHR0cHM6Ly9naXRodWIuY29tL2xvZ2luLGphY29iLHMzY3JldCxteSBub3RlCg",
+            "expect": {
+                "format": "chrome",
+                "rows": [
+                    {
+                        "name": "GitHub",
+                        "url": "https://github.com/login",
+                        "username": "jacob",
+                        "password": "s3cret",
+                        "notes": "my note"
+                    }
+                ],
+                "errors": [],
+                "docs": [
+                    {
+                        "name": "GitHub",
+                        "username": "jacob",
+                        "password": "s3cret",
+                        "uri": "https://github.com/login",
+                        "notes": "my note"
+                    }
+                ],
+                "report": {
+                    "imported": 1,
+                    "skippedEmpty": 0,
+                    "collapsed": 0,
+                    "flagged": []
+                }
+            }
+        },
+        {
+            "name": "chrome-old-4col",
+            "contentB64": "bmFtZSx1cmwsdXNlcm5hbWUscGFzc3dvcmQKQmFuayxodHRwczovL2JhbmsuZXhhbXBsZSxqbyxwdwo",
+            "expect": {
+                "format": "chrome",
+                "rows": [
+                    {
+                        "name": "Bank",
+                        "url": "https://bank.example",
+                        "username": "jo",
+                        "password": "pw",
+                        "notes": ""
+                    }
+                ],
+                "errors": [],
+                "docs": [
+                    {
+                        "name": "Bank",
+                        "username": "jo",
+                        "password": "pw",
+                        "uri": "https://bank.example",
+                        "notes": ""
+                    }
+                ],
+                "report": {
+                    "imported": 1,
+                    "skippedEmpty": 0,
+                    "collapsed": 0,
+                    "flagged": []
+                }
+            }
+        },
+        {
+            "name": "chrome-quoting",
+            "contentB64": "bmFtZSx1cmwsdXNlcm5hbWUscGFzc3dvcmQsbm90ZQ0KIkFjbWUsIEluYyIsaHR0cHM6Ly9hY21lLnRlc3QsInVzZXIsbmFtZSIsInAiInciLCJsaW5lMQpsaW5lMiINCg",
+            "expect": {
+                "format": "chrome",
+                "rows": [
+                    {
+                        "name": "Acme, Inc",
+                        "url": "https://acme.test",
+                        "username": "user,name",
+                        "password": "p\"w",
+                        "notes": "line1\nline2"
+                    }
+                ],
+                "errors": [],
+                "docs": [
+                    {
+                        "name": "Acme, Inc",
+                        "username": "user,name",
+                        "password": "p\"w",
+                        "uri": "https://acme.test",
+                        "notes": "line1\nline2"
+                    }
+                ],
+                "report": {
+                    "imported": 1,
+                    "skippedEmpty": 0,
+                    "collapsed": 0,
+                    "flagged": []
+                }
+            }
+        },
+        {
+            "name": "chrome-bom",
+            "contentB64": "77u_bmFtZSx1cmwsdXNlcm5hbWUscGFzc3dvcmQsbm90ZQ0KU2l0ZSxodHRwczovL3NpdGUudGVzdCx1LHAsbg0K",
+            "expect": {
+                "format": "chrome",
+                "rows": [
+                    {
+                        "name": "Site",
+                        "url": "https://site.test",
+                        "username": "u",
+                        "password": "p",
+                        "notes": "n"
+                    }
+                ],
+                "errors": [],
+                "docs": [
+                    {
+                        "name": "Site",
+                        "username": "u",
+                        "password": "p",
+                        "uri": "https://site.test",
+                        "notes": "n"
+                    }
+                ],
+                "report": {
+                    "imported": 1,
+                    "skippedEmpty": 0,
+                    "collapsed": 0,
+                    "flagged": []
+                }
+            }
+        },
+        {
+            "name": "chrome-skip-empty",
+            "contentB64": "bmFtZSx1cmwsdXNlcm5hbWUscGFzc3dvcmQsbm90ZQprZWVwLGh0dHBzOi8vYS50ZXN0LHUscCwKanVuayxodHRwczovL2IudGVzdCwsLAo",
+            "expect": {
+                "format": "chrome",
+                "rows": [
+                    {
+                        "name": "keep",
+                        "url": "https://a.test",
+                        "username": "u",
+                        "password": "p",
+                        "notes": ""
+                    },
+                    {
+                        "name": "junk",
+                        "url": "https://b.test",
+                        "username": "",
+                        "password": "",
+                        "notes": ""
+                    }
+                ],
+                "errors": [],
+                "docs": [
+                    {
+                        "name": "keep",
+                        "username": "u",
+                        "password": "p",
+                        "uri": "https://a.test",
+                        "notes": ""
+                    }
+                ],
+                "report": {
+                    "imported": 1,
+                    "skippedEmpty": 1,
+                    "collapsed": 0,
+                    "flagged": []
+                }
+            }
+        },
+        {
+            "name": "chrome-name-fallback",
+            "contentB64": "bmFtZSx1cmwsdXNlcm5hbWUscGFzc3dvcmQsbm90ZQosaHR0cHM6Ly91c2VyOnB3QEhvc3QuRXhhbXBsZTo4NDQzL3BhdGg_cSxhbGljZSxhLAosaHR0cHM6Ly9bMjAwMTpkYjg6OjFdOjQ0My8sYm9iLGIsCixmdHA6Ly9iYXJlLmhvc3QsY2Fyb2wsYywK",
+            "expect": {
+                "format": "chrome",
+                "rows": [
+                    {
+                        "name": "host.example",
+                        "url": "https://user:pw@Host.Example:8443/path?q",
+                        "username": "alice",
+                        "password": "a",
+                        "notes": ""
+                    },
+                    {
+                        "name": "2001:db8::1",
+                        "url": "https://[2001:db8::1]:443/",
+                        "username": "bob",
+                        "password": "b",
+                        "notes": ""
+                    },
+                    {
+                        "name": "bare.host",
+                        "url": "ftp://bare.host",
+                        "username": "carol",
+                        "password": "c",
+                        "notes": ""
+                    }
+                ],
+                "errors": [],
+                "docs": [
+                    {
+                        "name": "host.example",
+                        "username": "alice",
+                        "password": "a",
+                        "uri": "https://user:pw@Host.Example:8443/path?q",
+                        "notes": ""
+                    },
+                    {
+                        "name": "2001:db8::1",
+                        "username": "bob",
+                        "password": "b",
+                        "uri": "https://[2001:db8::1]:443/",
+                        "notes": ""
+                    },
+                    {
+                        "name": "bare.host",
+                        "username": "carol",
+                        "password": "c",
+                        "uri": "ftp://bare.host",
+                        "notes": ""
+                    }
+                ],
+                "report": {
+                    "imported": 3,
+                    "skippedEmpty": 0,
+                    "collapsed": 0,
+                    "flagged": []
+                }
+            }
+        },
+        {
+            "name": "chrome-dupes",
+            "contentB64": "bmFtZSx1cmwsdXNlcm5hbWUscGFzc3dvcmQsbm90ZQpNYWlsLGh0dHBzOi8vbWFpbC50ZXN0LG1lLHB3MSwKTWFpbCxodHRwczovL21haWwudGVzdCxtZSxwdzEsCk1haWwsaHR0cHM6Ly9tYWlsLnRlc3QsbWUscHcyLApNYWlsLGh0dHBzOi8vbWFpbC50ZXN0LG1lLHB3MywK",
+            "expect": {
+                "format": "chrome",
+                "rows": [
+                    {
+                        "name": "Mail",
+                        "url": "https://mail.test",
+                        "username": "me",
+                        "password": "pw1",
+                        "notes": ""
+                    },
+                    {
+                        "name": "Mail",
+                        "url": "https://mail.test",
+                        "username": "me",
+                        "password": "pw1",
+                        "notes": ""
+                    },
+                    {
+                        "name": "Mail",
+                        "url": "https://mail.test",
+                        "username": "me",
+                        "password": "pw2",
+                        "notes": ""
+                    },
+                    {
+                        "name": "Mail",
+                        "url": "https://mail.test",
+                        "username": "me",
+                        "password": "pw3",
+                        "notes": ""
+                    }
+                ],
+                "errors": [],
+                "docs": [
+                    {
+                        "name": "Mail",
+                        "username": "me",
+                        "password": "pw1",
+                        "uri": "https://mail.test",
+                        "notes": ""
+                    },
+                    {
+                        "name": "Mail (2)",
+                        "username": "me",
+                        "password": "pw2",
+                        "uri": "https://mail.test",
+                        "notes": ""
+                    },
+                    {
+                        "name": "Mail (3)",
+                        "username": "me",
+                        "password": "pw3",
+                        "uri": "https://mail.test",
+                        "notes": ""
+                    }
+                ],
+                "report": {
+                    "imported": 3,
+                    "skippedEmpty": 0,
+                    "collapsed": 1,
+                    "flagged": [
+                        "Mail (2)",
+                        "Mail (3)"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "firefox-basic",
+            "contentB64": "dXJsLHVzZXJuYW1lLHBhc3N3b3JkLGh0dHBSZWFsbSxmb3JtQWN0aW9uT3JpZ2luLGd1aWQsdGltZUNyZWF0ZWQsdGltZUxhc3RVc2VkLHRpbWVQYXNzd29yZENoYW5nZWQKaHR0cHM6Ly9mZi50ZXN0L2xvZ2luLGZveCxwdywsaHR0cHM6Ly9mZi50ZXN0LHthYmN9LDE3MDAwMDAwMDAwMDAsMTcwMDAwMDAwMTAwMCwxNzAwMDAwMDAyMDAwCg",
+            "expect": {
+                "format": "firefox",
+                "rows": [
+                    {
+                        "name": "ff.test",
+                        "url": "https://ff.test/login",
+                        "username": "fox",
+                        "password": "pw",
+                        "notes": "",
+                        "timePasswordChangedMs": 1700000002000
+                    }
+                ],
+                "errors": [],
+                "docs": [
+                    {
+                        "name": "ff.test",
+                        "username": "fox",
+                        "password": "pw",
+                        "uri": "https://ff.test/login",
+                        "notes": ""
+                    }
+                ],
+                "report": {
+                    "imported": 1,
+                    "skippedEmpty": 0,
+                    "collapsed": 0,
+                    "flagged": []
+                }
+            }
+        },
+        {
+            "name": "firefox-httprealm",
+            "contentB64": "dXJsLHVzZXJuYW1lLHBhc3N3b3JkLGh0dHBSZWFsbSxmb3JtQWN0aW9uT3JpZ2luLGd1aWQsdGltZUNyZWF0ZWQsdGltZUxhc3RVc2VkLHRpbWVQYXNzd29yZENoYW5nZWQKaHR0cHM6Ly9yb3V0ZXIudGVzdC8sYWRtaW4scHcsIlJvdXRlciBMb2dpbiIsLHt4fSwwLDAsMAo",
+            "expect": {
+                "format": "firefox",
+                "rows": [
+                    {
+                        "name": "router.test",
+                        "url": "https://router.test/",
+                        "username": "admin",
+                        "password": "pw",
+                        "notes": "HTTP realm: Router Login",
+                        "timePasswordChangedMs": 0
+                    }
+                ],
+                "errors": [],
+                "docs": [
+                    {
+                        "name": "router.test",
+                        "username": "admin",
+                        "password": "pw",
+                        "uri": "https://router.test/",
+                        "notes": "HTTP realm: Router Login"
+                    }
+                ],
+                "report": {
+                    "imported": 1,
+                    "skippedEmpty": 0,
+                    "collapsed": 0,
+                    "flagged": []
+                }
+            }
+        },
+        {
+            "name": "errors-bad-rows",
+            "contentB64": "bmFtZSx1cmwsdXNlcm5hbWUscGFzc3dvcmQsbm90ZQpvayxodHRwczovL29rLnRlc3QsdSxwLG4KdG9vZmV3LGh0dHBzOi8vZmV3LnRlc3QsdQpiYWQsImh0dHBzOi8vcS50ZXN0LHUscCxuCm9rMixodHRwczovL29rMi50ZXN0LHUyLHAyLG4yCg",
+            "expect": {
+                "format": "chrome",
+                "rows": [
+                    {
+                        "name": "ok",
+                        "url": "https://ok.test",
+                        "username": "u",
+                        "password": "p",
+                        "notes": "n"
+                    }
+                ],
+                "errors": [
+                    {
+                        "line": 3,
+                        "code": "wrong_field_count"
+                    },
+                    {
+                        "line": 4,
+                        "code": "bad_quote"
+                    }
+                ],
+                "docs": [
+                    {
+                        "name": "ok",
+                        "username": "u",
+                        "password": "p",
+                        "uri": "https://ok.test",
+                        "notes": "n"
+                    }
+                ],
+                "report": {
+                    "imported": 1,
+                    "skippedEmpty": 0,
+                    "collapsed": 0,
+                    "flagged": []
+                }
+            }
+        }
+    ],
+    "reject": [
+        {
+            "name": "unrecognized-header",
+            "reason": "unrecognized_header",
+            "contentB64": "Zm9vLGJhcixiYXoKMSwyLDMK"
+        },
+        {
+            "name": "too-many-rows",
+            "reason": "too_many_rows",
+            "construct": {
+                "header": "name,url,username,password,note",
+                "row": "n,https://x.test,u,p,c",
+                "count": 10001
+            }
+        },
+        {
+            "name": "too-large",
+            "reason": "too_large",
+            "construct": {
+                "header": "name,url,username,password,note",
+                "row": "n,https://x.test,u,p,c",
+                "count": 455904
+            }
+        }
+    ]
+}

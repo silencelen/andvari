@@ -172,11 +172,18 @@ private fun Vault(state: DesktopState) {
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("andvari", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            IconButton(onClick = {
+                val dialog = FileDialog(null as Frame?, "Import passwords CSV", FileDialog.LOAD)
+                dialog.isVisible = true
+                val dir = dialog.directory; val picked = dialog.file
+                if (dir != null && picked != null) state.importFromFile(File(dir, picked))
+            }) { Icon(Icons.Default.FileUpload, "import CSV") }
             IconButton(onClick = { state.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
             IconButton(onClick = { state.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
             IconButton(onClick = { state.lock() }) { Icon(Icons.Default.Lock, "lock") }
         }
         Divider()
+        ImportDialogs(state)
         val current = detailId?.let { state.item(it) }
         when {
             editing != null -> Editor(
@@ -203,6 +210,65 @@ private fun Vault(state: DesktopState) {
                 }
             }
         }
+    }
+}
+
+/** The three CSV-import dialogs (parse error → preview/confirm+progress+retry → done). */
+@Composable
+private fun ImportDialogs(state: DesktopState) {
+    if (state.importError != null && state.importPlan == null && !state.importDone) {
+        AlertDialog(
+            onDismissRequest = { state.importDismiss() },
+            confirmButton = { TextButton(onClick = { state.importDismiss() }) { Text("OK") } },
+            title = { Text("Couldn’t import") },
+            text = { Text(state.importError!!) },
+        )
+    }
+    state.importPlan?.let { plan ->
+        if (!state.importDone) {
+            val report = plan.report
+            AlertDialog(
+                onDismissRequest = { if (!state.importBusy) state.importDismiss() },
+                confirmButton = {
+                    if (state.importError != null) {
+                        TextButton(onClick = { state.importConfirm() }, enabled = !state.importBusy) { Text("Retry") }
+                    } else {
+                        TextButton(onClick = { state.importConfirm() }, enabled = !state.importBusy && report.imported > 0) { Text("Import ${report.imported}") }
+                    }
+                },
+                dismissButton = { TextButton(onClick = { state.importDismiss() }, enabled = !state.importBusy) { Text("Cancel") } },
+                title = { Text("Import passwords?") },
+                text = {
+                    Column {
+                        Text(
+                            "⚠ This file holds every password in plaintext. Nothing is uploaded — each login is encrypted on this device. Afterwards, delete the CSV and empty the trash. Re-importing the same file makes duplicates.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text("From ${state.importFormat?.name?.lowercase() ?: "browser"} export:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("• ${report.imported} to import", style = MaterialTheme.typography.bodySmall)
+                        if (report.collapsed > 0) Text("• ${report.collapsed} exact duplicates merged", style = MaterialTheme.typography.bodySmall)
+                        if (report.flagged.isNotEmpty()) Text("• ${report.flagged.size} renamed (same site, different password)", style = MaterialTheme.typography.bodySmall)
+                        if (report.skippedEmpty > 0) Text("• ${report.skippedEmpty} empty rows skipped", style = MaterialTheme.typography.bodySmall)
+                        if (report.errors.isNotEmpty()) Text("• ${report.errors.size} rows skipped (parse errors)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        state.importProgress?.let { (done, total) ->
+                            Spacer(Modifier.height(10.dp))
+                            LinearProgressIndicator(progress = { if (total > 0) done.toFloat() / total else 0f }, modifier = Modifier.fillMaxWidth())
+                            Text("Importing $done / $total", style = MaterialTheme.typography.bodySmall)
+                        }
+                        state.importError?.let { Spacer(Modifier.height(8.dp)); Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                    }
+                },
+            )
+        }
+    }
+    if (state.importDone) {
+        AlertDialog(
+            onDismissRequest = { state.importDismiss() },
+            confirmButton = { TextButton(onClick = { state.importDismiss() }) { Text("Done") } },
+            title = { Text("Imported") },
+            text = { Text("Added ${state.importReport?.imported ?: 0} logins to your vault. Now delete the CSV file and empty your trash.") },
+        )
     }
 }
 
