@@ -2,7 +2,12 @@ package io.silencelen.andvari.server
 
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ClientPolicy
+import io.silencelen.andvari.core.model.CreateVaultRequest
+import io.silencelen.andvari.core.model.CreateVaultResponse
 import io.silencelen.andvari.core.model.InviteResponse
+import io.silencelen.andvari.core.model.UserLookupResponse
+import io.silencelen.andvari.core.model.VaultMemberAdd
+import io.silencelen.andvari.core.model.VaultMemberSummary
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.MutationResult
@@ -328,12 +333,19 @@ class Service(
         }?.let { return json.decodeFromString(MutationResult.serializer(), it) }
 
         val role = repo.grantRole(c, principal.userId, m.vaultId)
+        val existing = if (role == null || role == "reader") null else repo.itemById(c, m.itemId)
         val result = if (role == null || role == "reader") {
             // spec 03 §5: a denied write is an intrusion event and MUST be audited.
             repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, "${m.vaultId}:${m.itemId}")
             MutationResult(m.mutationId, "denied")
+        } else if (existing != null && existing.vaultId != m.vaultId) {
+            // An item cannot move vaults (its blob AD binds to (vaultId,itemId), spec 02 §2).
+            // Return a per-mutation `denied` — NOT a thrown BadRequest — so a buggy/old client
+            // (which re-encrypts a shared item under its personal vault) drops the mutation and
+            // keeps syncing instead of wedging its queue forever; other members stay protected.
+            repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, "vault_mismatch:${m.vaultId}:${m.itemId}")
+            MutationResult(m.mutationId, "denied")
         } else {
-            val existing = repo.itemById(c, m.itemId)
             when (m.op) {
                 "put" -> applyPut(c, m, existing, affected)
                 "delete" -> applyDelete(c, m, existing, affected, filesToUnlink)
@@ -406,6 +418,118 @@ class Service(
 
     private fun vaultMemberIds(c: Connection, vaultId: String): Set<String> =
         c.queryAll("SELECT userId FROM grants WHERE vaultId=? AND revokedAt IS NULL", vaultId) { it.getString(1) }.toSet()
+
+    // ---- shared vaults (spec 03 §10) ----
+
+    /** base64url ciphertext bound by a byte cap (opaque to the server). ASCII alphabet only. */
+    private fun requireB64(value: String, maxBytes: Int, field: String): String {
+        val ok = value.isNotEmpty() && value.length <= maxBytes * 4 / 3 + 4 &&
+            value.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }
+        if (!ok) throw BadRequest("bad_$field")
+        return value
+    }
+
+    suspend fun createSharedVault(p: Principal, req: CreateVaultRequest, ip: String): CreateVaultResponse {
+        if (!UUID_RE.matches(req.vaultId)) throw BadRequest("bad_vault_id")
+        requireB64(req.metaBlob, 4096, "meta_blob")
+        requireB64(req.wrappedVk, 1024, "wrapped_vk")
+        val rev = repo.db.tx { c ->
+            if (repo.vaultType(c, req.vaultId) != null) throw BadRequest("vault_id_taken")
+            val t = now()
+            val vaultRev = repo.nextRev(c, "vault", req.vaultId, req.vaultId)
+            c.exec("INSERT INTO vaults(vaultId,type,rev,metaBlob,createdAt) VALUES(?, 'shared', ?, ?, ?)", req.vaultId, vaultRev, req.metaBlob, t)
+            val grantRev = repo.nextRev(c, "grant", req.vaultId, req.vaultId)
+            c.exec("INSERT INTO grants(vaultId,userId,role,wrappedVk,sealedVk,rev,addedAt) VALUES(?,?, 'owner', ?, NULL, ?, ?)", req.vaultId, p.userId, req.wrappedVk, grantRev, t)
+            repo.auditOn(c, "vault_create", p.userId, p.deviceId, ip, req.vaultId)
+            repo.currentRev(c)
+        }
+        onChange(setOf(p.userId), rev)
+        return CreateVaultResponse(rev)
+    }
+
+    fun lookupUser(p: Principal, email: String, ip: String): UserLookupResponse {
+        val u = repo.userByEmail(email)?.takeIf { it.status == "active" } ?: run {
+            repo.audit("user_lookup", p.userId, p.deviceId, ip, email)
+            throw NotFound("no_such_user")
+        }
+        repo.audit("user_lookup", p.userId, p.deviceId, ip, email)
+        return UserLookupResponse(u.userId, u.displayName, u.identityPub)
+    }
+
+    fun listVaultMembers(p: Principal, vaultId: String): List<VaultMemberSummary> = repo.db.read { c ->
+        if (repo.grantRole(c, p.userId, vaultId) == null) throw Forbidden("no_grant") // hidden-as-403
+        c.queryAll(
+            """SELECT g.userId, g.role, COALESCE(g.addedAt, 0) AS addedAt, u.email, u.displayName, u.identityPub
+               FROM grants g JOIN users u ON u.userId=g.userId
+               WHERE g.vaultId=? AND g.revokedAt IS NULL ORDER BY g.rev""",
+            vaultId,
+        ) { rs ->
+            VaultMemberSummary(
+                userId = rs.getString("userId"), email = rs.getString("email"),
+                displayName = rs.getString("displayName"), role = rs.getString("role"),
+                identityPub = rs.getString("identityPub"), addedAt = rs.getLong("addedAt"),
+            )
+        }
+    }
+
+    private fun requireOwnerOfShared(c: Connection, p: Principal, vaultId: String) {
+        if (repo.grantRole(c, p.userId, vaultId) != "owner") throw Forbidden("not_vault_owner")
+        if (repo.vaultType(c, vaultId) != "shared") throw BadRequest("not_shared_vault")
+    }
+
+    suspend fun addVaultMember(p: Principal, vaultId: String, req: VaultMemberAdd, ip: String): CreateVaultResponse {
+        if (req.role !in setOf("writer", "reader")) throw BadRequest("bad_role")
+        if (req.userId == p.userId) throw BadRequest("cannot_target_self")
+        requireB64(req.sealedVk, 1024, "sealed_vk")
+        val (rev, notify) = repo.db.tx { c ->
+            requireOwnerOfShared(c, p, vaultId)
+            val target = c.queryOne("SELECT status FROM users WHERE userId=?", req.userId) { it.getString(1) }
+                ?: throw NotFound("no_such_user")
+            if (target != "active") throw BadRequest("user_inactive")
+            if (repo.grantRole(c, req.userId, vaultId) != null) throw BadRequest("already_member")
+            val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
+            // Insert, or resurrect a previously-revoked row (PRIMARY KEY(vaultId,userId)).
+            c.exec(
+                """INSERT INTO grants(vaultId,userId,role,wrappedVk,sealedVk,rev,revokedAt,addedAt) VALUES(?,?,?,'',?,?,NULL,?)
+                   ON CONFLICT(vaultId,userId) DO UPDATE SET role=excluded.role, wrappedVk='', sealedVk=excluded.sealedVk, rev=excluded.rev, revokedAt=NULL, addedAt=excluded.addedAt""",
+                vaultId, req.userId, req.role, req.sealedVk, grantRev, now(),
+            )
+            repo.auditOn(c, "vault_member_add", p.userId, p.deviceId, ip, "$vaultId:${req.userId}:${req.role}")
+            repo.currentRev(c) to vaultMemberIds(c, vaultId)
+        }
+        onChange(notify, rev)
+        return CreateVaultResponse(rev)
+    }
+
+    suspend fun setVaultMemberRole(p: Principal, vaultId: String, targetUserId: String, role: String, ip: String): CreateVaultResponse {
+        if (role !in setOf("writer", "reader")) throw BadRequest("bad_role")
+        if (targetUserId == p.userId) throw BadRequest("cannot_target_self")
+        val (rev, notify) = repo.db.tx { c ->
+            requireOwnerOfShared(c, p, vaultId)
+            if (repo.grantRole(c, targetUserId, vaultId) == null) throw NotFound("not_a_member")
+            val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
+            c.exec("UPDATE grants SET role=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL", role, grantRev, vaultId, targetUserId)
+            repo.auditOn(c, "vault_member_role", p.userId, p.deviceId, ip, "$vaultId:$targetUserId:$role")
+            repo.currentRev(c) to vaultMemberIds(c, vaultId)
+        }
+        onChange(notify, rev)
+        return CreateVaultResponse(rev)
+    }
+
+    suspend fun removeVaultMember(p: Principal, vaultId: String, targetUserId: String, ip: String): CreateVaultResponse {
+        if (targetUserId == p.userId) throw BadRequest("cannot_target_self")
+        val (rev, notify) = repo.db.tx { c ->
+            requireOwnerOfShared(c, p, vaultId)
+            if (repo.grantRole(c, targetUserId, vaultId) == null) throw NotFound("not_a_member")
+            val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
+            c.exec("UPDATE grants SET revokedAt=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL", now(), grantRev, vaultId, targetUserId)
+            repo.auditOn(c, "vault_member_remove", p.userId, p.deviceId, ip, "$vaultId:$targetUserId")
+            // Notify the remaining members AND the victim (so the victim's pull delivers removedGrants).
+            repo.currentRev(c) to (vaultMemberIds(c, vaultId) + targetUserId)
+        }
+        onChange(notify, rev)
+        return CreateVaultResponse(rev)
+    }
 
     // ---- helpers ----
     private class IssuedSession(val deviceId: String, val access: String, val refresh: String)

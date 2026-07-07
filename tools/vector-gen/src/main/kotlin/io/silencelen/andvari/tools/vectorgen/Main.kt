@@ -8,6 +8,7 @@ import io.silencelen.andvari.core.crypto.Hibp
 import io.silencelen.andvari.core.crypto.Hkdf
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
+import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.TotpAlgorithm
 import io.silencelen.andvari.core.crypto.TotpConfig
@@ -55,7 +56,8 @@ fun main(args: Array<String>) {
     write(outDir, "secretstream.json", secretstream())
     write(outDir, "totp.json", totp())
     write(outDir, "hibp.json", hibp())
-    println("vector-gen: wrote 7 files to ${outDir.absolutePath}")
+    write(outDir, "sharedgrant.json", sharedGrant())
+    println("vector-gen: wrote 8 files to ${outDir.absolutePath}")
 }
 
 /** Argon2id timing on this host (spec 01 §9 benchmark table). */
@@ -244,6 +246,32 @@ private fun seal(): JsonObject = buildJsonObject {
     putJsonObject("rejectWrongKey") {
         put("wrongSeedB64", b64(pat(32, 23)))
         put("sealedB64", b64(crypto.sealTo(recovery.publicKey, "nope".encodeToByteArray())))
+    }
+}
+
+/** spec 01 §6 — shared-vault sealed grants. Seals are nondeterministic, so pin open +
+ *  payload canonicalization + fingerprint; each impl round-trips its own seal. */
+private fun sharedGrant(): JsonObject = buildJsonObject {
+    val memberSeed = pat(32, 40)
+    val member = crypto.boxKeypairFromSeed(memberSeed)
+    val vaultId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    val vk = pat(32, 41)
+    put("memberSeedB64", b64(memberSeed))
+    put("memberIdentityPubB64", b64(member.publicKey))
+    put("memberIdentityPrivB64", b64(member.privateKey))
+    put("fingerprint", SharedGrant.fingerprint(crypto, member.publicKey))
+    put("shortFingerprint", SharedGrant.shortFingerprint(crypto, member.publicKey))
+    put("vaultId", vaultId)
+    put("vkB64", b64(vk))
+    // Exact canonical payload bytes both impls must reproduce before sealing.
+    put("payloadUtf8", SharedGrant.canonicalPayload(vaultId, vk).decodeToString())
+    // A seal that opens to the VK (open is deterministic; the seal itself is not).
+    put("sealedB64", b64(SharedGrant.seal(crypto, member.publicKey, vaultId, vk)))
+    // A seal whose payload names a DIFFERENT vaultId — open MUST reject under the real vaultId.
+    putJsonObject("rejectVaultMismatch") {
+        val wrongVaultId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        put("expectedVaultId", vaultId)
+        put("sealedB64", b64(SharedGrant.seal(crypto, member.publicKey, wrongVaultId, vk)))
     }
 }
 

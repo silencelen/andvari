@@ -5,6 +5,13 @@ import { adIdkey, adItem, adUvk, adVaultMeta, adVk } from "./ad";
 import { fromB64, fromUtf8, toB64, utf8 } from "./bytes";
 import { open, sealWithNonce } from "./envelope";
 import { CANARY_USER_ID, KEY_TYPE_UVK, fingerprint, openEscrow, shortFingerprint } from "./escrow";
+import {
+  canonicalGrantPayload,
+  identityFingerprint,
+  openSharedGrant,
+  sealSharedGrant,
+  shortIdentityFingerprint,
+} from "./sharedgrant";
 import { generatePassword } from "./generator";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex, hibpSuffix } from "./hibp";
 import { hkdfSha256 } from "./hkdf";
@@ -124,6 +131,28 @@ describe("seal.json", () => {
 
     const wrong = boxKeypairFromSeed(fromB64(v.rejectWrongKey.wrongSeedB64));
     expect(() => sealOpen(wrong.publicKey, wrong.privateKey, fromB64(v.rejectWrongKey.sealedB64))).toThrow();
+  });
+});
+
+describe("sharedgrant.json", () => {
+  const v = load("sharedgrant.json");
+  it("seal-grant open + canonical payload + vaultId-mismatch reject + fingerprint", async () => {
+    const kp = boxKeypairFromSeed(fromB64(v.memberSeedB64));
+    expect(toB64(kp.publicKey)).toBe(v.memberIdentityPubB64);
+    // Canonical payload bytes must match the Kotlin reference byte-for-byte.
+    expect(toB64(canonicalGrantPayload(v.vaultId, fromB64(v.vkB64)))).toBe(toB64(utf8(v.payloadUtf8)));
+    // Open pins the VK.
+    expect(toB64(openSharedGrant(kp.publicKey, kp.privateKey, v.vaultId, fromB64(v.sealedB64)))).toBe(v.vkB64);
+    // A seal naming a different vaultId must be rejected under the real vaultId.
+    expect(() =>
+      openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVaultMismatch.expectedVaultId, fromB64(v.rejectVaultMismatch.sealedB64)),
+    ).toThrow();
+    // Round-trip this impl's own (nondeterministic) seal.
+    const own = sealSharedGrant(kp.publicKey, v.vaultId, fromB64(v.vkB64));
+    expect(toB64(openSharedGrant(kp.publicKey, kp.privateKey, v.vaultId, own))).toBe(v.vkB64);
+    // Seed-derived fingerprint matches the reference.
+    expect(await identityFingerprint(kp.publicKey)).toBe(v.fingerprint);
+    expect(await shortIdentityFingerprint(kp.publicKey)).toBe(v.shortFingerprint);
   });
 });
 

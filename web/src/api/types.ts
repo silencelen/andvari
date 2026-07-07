@@ -52,6 +52,8 @@ export interface WireGrant {
   role: string;
   wrappedVk: string;
   rev: number;
+  /** Member grants (spec 01 §6): crypto_box_seal to the member identityPub; owner/personal use wrappedVk. */
+  sealedVk?: string | null;
 }
 
 export interface WireItem {
@@ -74,6 +76,39 @@ export interface SyncResponse {
   grants: WireGrant[];
   items: WireItem[];
   removedGrants: string[];
+}
+
+// ---- shared vaults (spec 03 §10) ----
+
+export interface CreateVaultRequest {
+  vaultId: string;
+  metaBlob: string;
+  wrappedVk: string;
+}
+
+export interface CreateVaultResponse {
+  rev: number;
+}
+
+export interface UserLookupResponse {
+  userId: string;
+  displayName: string;
+  identityPub: string;
+}
+
+export interface VaultMemberAdd {
+  userId: string;
+  role: string;
+  sealedVk: string;
+}
+
+export interface VaultMemberSummary {
+  userId: string;
+  email: string;
+  displayName: string;
+  role: string;
+  identityPub: string;
+  addedAt: number;
 }
 
 export interface ItemUpload {

@@ -12,6 +12,7 @@ class UpgradeRequired(val platform: String, val minVersion: String) : Exception(
 class Unauthorized(val reason: String = "invalid_credentials") : Exception()
 class Forbidden(val reason: String = "forbidden") : Exception()
 class BadRequest(val reason: String) : Exception()
+class NotFound(val reason: String) : Exception()
 class RateLimited : Exception()
 class ResyncRequired : Exception()
 

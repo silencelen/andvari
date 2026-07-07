@@ -65,12 +65,6 @@ class AuditHardeningTest : P4TestSupport() {
         minKdfMemBytes = 67_108_864L, minKdfOps = 3L,
     )
 
-    private suspend fun HttpClient.auditRows(admin: VirtualClient, type: String): List<AuditEvent> {
-        val resp = get("/api/v1/admin/audit?type=$type") { authed(admin) }
-        assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
-        return json.decodeFromString(ListSerializer(AuditEvent.serializer()), resp.bodyAsText())
-    }
-
     // ---- LOW-1: KDF floor is enforced at enrollment ----
 
     /**

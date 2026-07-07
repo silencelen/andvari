@@ -15,6 +15,7 @@ import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.put
+import io.ktor.server.routing.delete
 import io.ktor.server.routing.routing
 import io.ktor.server.routing.RoutingContext
 import io.ktor.server.websocket.WebSockets
@@ -59,7 +60,7 @@ import kotlin.time.Duration.Companion.minutes
 /** Bootstrap invite email sentinel: matches whatever email the first admin registers with. */
 const val BOOTSTRAP_ANY_EMAIL = "*"
 
-const val SERVER_VERSION = "0.2.0"
+const val SERVER_VERSION = "0.3.0"
 
 private val UUID_PATH_RE = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -133,6 +134,7 @@ fun Application.andvariModule(services: Services) {
                 is Unauthorized -> call.respond(HttpStatusCode.Unauthorized, ApiError(cause.reason, "authentication failed"))
                 is Forbidden -> call.respond(HttpStatusCode.Forbidden, ApiError(cause.reason, "forbidden"))
                 is BadRequest -> call.respond(HttpStatusCode.BadRequest, ApiError(cause.reason, "bad request"))
+                is NotFound -> call.respond(HttpStatusCode.NotFound, ApiError(cause.reason, "not found"))
                 is ResyncRequired -> call.respond(HttpStatusCode.Gone, ApiError("resync_required", "cursor predates retained history"))
                 is RateLimited -> call.respond(HttpStatusCode.TooManyRequests, ApiError("rate_limited", "slow down"))
                 is PayloadTooLarge -> call.respond(HttpStatusCode.PayloadTooLarge, ApiError(cause.reason, "quota exceeded"))
@@ -329,6 +331,51 @@ fun Application.andvariModule(services: Services) {
             enforceVersion(call, service)
             val req = call.receive<PushRequest>()
             call.respond(service.push(p, req.mutations, call.clientIp(config)))
+        }
+
+        // ---- shared vaults (spec 03 §10) — authed, version-checked, owner-managed,
+        // refused on the public break-glass origin (sharing admin is a sit-at-home op). ----
+        post("/api/v1/vaults") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+            if (!limiter.allow("vault_create:${p.userId}", 5, 3_600_000)) throw RateLimited()
+            call.respond(HttpStatusCode.Created, service.createSharedVault(p, call.receive(), call.clientIp(config)))
+        }
+        post("/api/v1/users/lookup") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+            if (!limiter.allow("lookup:${p.userId}", 20, 60_000)) throw RateLimited()
+            call.respond(service.lookupUser(p, call.receive<io.silencelen.andvari.core.model.UserLookupRequest>().email, call.clientIp(config)))
+        }
+        get("/api/v1/vaults/{vaultId}/members") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            call.respond(service.listVaultMembers(p, requireUuid(call.parameters["vaultId"], "vault_id")))
+        }
+        post("/api/v1/vaults/{vaultId}/members") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            call.respond(HttpStatusCode.Created, service.addVaultMember(p, vaultId, call.receive(), call.clientIp(config)))
+        }
+        put("/api/v1/vaults/{vaultId}/members/{userId}") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            val userId = requireUuid(call.parameters["userId"], "user_id")
+            call.respond(service.setVaultMemberRole(p, vaultId, userId, call.receive<io.silencelen.andvari.core.model.VaultMemberRole>().role, call.clientIp(config)))
+        }
+        delete("/api/v1/vaults/{vaultId}/members/{userId}") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            val userId = requireUuid(call.parameters["userId"], "user_id")
+            call.respond(service.removeVaultMember(p, vaultId, userId, call.clientIp(config)))
         }
 
         // ---- escrow ----

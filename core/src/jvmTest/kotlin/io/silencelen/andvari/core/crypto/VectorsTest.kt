@@ -143,6 +143,29 @@ class VectorsTest {
     }
 
     @Test
+    fun sharedGrant() {
+        val v = load("sharedgrant.json")
+        val kp = crypto.boxKeypairFromSeed(v.b("memberSeedB64"))
+        assertContentEquals(v.b("memberIdentityPubB64"), kp.publicKey)
+        assertEquals(v.s("fingerprint"), SharedGrant.fingerprint(crypto, kp.publicKey))
+        assertEquals(v.s("shortFingerprint"), SharedGrant.shortFingerprint(crypto, kp.publicKey))
+
+        val vaultId = v.s("vaultId")
+        // Canonical payload bytes must match the reference byte-for-byte.
+        assertContentEquals(v.s("payloadUtf8").encodeToByteArray(), SharedGrant.canonicalPayload(vaultId, v.b("vkB64")))
+        // Open pins the VK.
+        assertContentEquals(v.b("vkB64"), SharedGrant.open(crypto, kp.publicKey, kp.privateKey, vaultId, v.b("sealedB64")))
+        // A seal whose payload names a different vaultId must be rejected under the real vaultId.
+        val reject = v.getValue("rejectVaultMismatch").jsonObject
+        assertFailsWith<CryptoException> {
+            SharedGrant.open(crypto, kp.publicKey, kp.privateKey, reject.s("expectedVaultId"), reject.b("sealedB64"))
+        }
+        // Round-trip this impl's own (nondeterministic) seal.
+        val ownSeal = SharedGrant.seal(crypto, kp.publicKey, vaultId, v.b("vkB64"))
+        assertContentEquals(v.b("vkB64"), SharedGrant.open(crypto, kp.publicKey, kp.privateKey, vaultId, ownSeal))
+    }
+
+    @Test
     fun secretstream() {
         val v = load("secretstream.json")
         val key = v.b("keyB64")
