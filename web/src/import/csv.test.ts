@@ -39,6 +39,9 @@ describe("import.json — files", () => {
         expect(r.password).toBe(er.password);
         expect(r.notes).toBe(er.notes);
         if ("timePasswordChangedMs" in er) expect(r.timePasswordChangedMs).toBe(er.timePasswordChangedMs);
+        // Twin of ImportVectorsTest: assertEquals(if ("totp" in er) er.s("totp") else null, r.totp)
+        if ("totp" in er) expect(r.totp).toBe(er.totp);
+        else expect(r.totp).toBeNull();
       }
 
       expect(parsed.errors.length).toBe(exp.errors.length);
@@ -60,6 +63,9 @@ describe("import.json — files", () => {
         expect(doc.login?.password ?? "").toBe(ed.password);
         expect(doc.login?.uris?.[0] ?? "").toBe(ed.uri);
         expect(doc.notes ?? "").toBe(ed.notes);
+        // Twin of ImportVectorsTest: assertEquals(if ("totp" in ed) ed.s("totp") else null, doc.login?.totp)
+        if ("totp" in ed) expect(doc.login?.totp).toBe(ed.totp);
+        else expect(doc.login?.totp).toBeUndefined();
       }
       expect(plan.report.imported).toBe(exp.report.imported);
       expect(plan.report.skippedEmpty).toBe(exp.report.skippedEmpty);
@@ -87,6 +93,37 @@ describe("import.json — reject", () => {
       expect((caught as ImportError).code).toBe(r.reason);
     });
   }
+});
+
+describe("totp differentiates exact dupes (review finding)", () => {
+  it("keeps two rows that differ only by totp; collapses a true exact repeat", () => {
+    const two = planImport(
+      parseCsvImport(utf8("name,url,username,password,note,totp\nA,https://a.test,u,p,,otpauth://x\nA,https://a.test,u,p,,\n")),
+      (() => { let n = 0; return () => `id-${n++}`; })(),
+    );
+    expect(two.items.length).toBe(2);
+    expect(new Set(two.items.map((i) => i.doc.login?.totp))).toEqual(new Set(["otpauth://x", undefined]));
+    const one = planImport(
+      parseCsvImport(utf8("name,url,username,password,note,totp\nA,https://a.test,u,p,,t\nA,https://a.test,u,p,,t\n")),
+      () => "x",
+    );
+    expect(one.items.length).toBe(1);
+  });
+});
+
+describe("totp column (andvari CSV round-trip, spec 06 §1 / 07 §1)", () => {
+  it("still detects as chrome and maps totp; empty cell and absent column yield no totp", () => {
+    const parsed = parseCsvImport(
+      utf8("name,url,username,password,note,totp\nGH,https://gh.test,jacob,pw,,otpauth://totp/x?secret=AAAA\nNT,https://n.test,ana,pw2,,\n"),
+    );
+    expect(parsed.format).toBe("chrome");
+    let seq = 0;
+    const plan = planImport(parsed, () => `id-${seq++}`);
+    expect(plan.items[0]!.doc.login?.totp).toBe("otpauth://totp/x?secret=AAAA");
+    expect(plan.items[1]!.doc.login?.totp).toBeUndefined();
+    const noCol = planImport(parseCsvImport(utf8("name,url,username,password,note\nGH,https://gh.test,jacob,pw,hi\n")), () => "x");
+    expect(noCol.items[0]!.doc.login?.totp).toBeUndefined();
+  });
 });
 
 describe("planImport idempotency contract", () => {

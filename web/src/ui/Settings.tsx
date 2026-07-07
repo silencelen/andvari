@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { ClientPolicy, TotpSetupResponse, TotpStatus } from "../api/types";
+import { backupNudge, readLastExportAt } from "../export/plan";
 import { Account } from "../vault/account";
+import { fmtDate } from "./format";
 
 interface Props {
   client: ApiClient;
@@ -15,8 +17,30 @@ export function Settings({ client, account, policy, onPasswordChanged }: Props) 
     <div>
       <h2 className="view-title" style={{ margin: "22px 0 4px" }}>Settings</h2>
       <IdentityCard account={account} />
+      <BackupCard account={account} />
       <TotpCard client={client} />
       <PasswordCard client={client} account={account} policy={policy} onPasswordChanged={onPasswordChanged} />
+    </div>
+  );
+}
+
+// ---- backups (spec 07 §2.6 — lastExportAt is recorded LOCALLY, never server-side) ----
+
+function BackupCard({ account }: { account: Account }) {
+  const last = readLastExportAt(account.userId);
+  const nudge = backupNudge(last);
+  return (
+    <div className="sheet">
+      <h2>Backups</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Encrypted backups are made from the Vault view — “Back up vault…”. This device only
+        remembers when it last made one; the server is never told.
+      </p>
+      <div className="field">
+        <label>Last backup</label>
+        <div>{last !== null ? fmtDate(last) : "never (on this device)"}</div>
+      </div>
+      {nudge && <p className="muted">{nudge}</p>}
     </div>
   );
 }

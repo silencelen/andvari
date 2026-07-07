@@ -27,6 +27,8 @@ import java.io.File
  *   fingerprint <pubkeyB64>             show the fingerprint of a public key
  *   canary make <pubkeyB64>             seal the fixed canary blob (store server-side)
  *   canary verify <sealedB64>           open the canary with the printed seed (proves the sheet works)
+ *   verify <seedFile> <dumpJson>        fleet canary: unseal EVERY escrow blob from a sqlite dump,
+ *                                       PASS/FAIL per user, exit 1 on any FAIL (docs/drills/escrow-canary-drill.md)
  *   recover <sealedBlobB64>             unseal a user's UVK and emit an admin recovery upload bundle
  */
 
@@ -43,6 +45,7 @@ fun main(args: Array<String>) {
                 "verify" -> canaryVerify(argOrDie(args, 2, "sealedB64"))
                 else -> die("usage: canary make <pubkeyB64> | canary verify <sealedB64>")
             }
+            "verify" -> verifyDump(argOrDie(args, 1, "seedFile"), argOrDie(args, 2, "escrowDumpJson"))
             "recover" -> recover(argOrDie(args, 1, "sealedBlobB64"))
             else -> die(
                 """
@@ -51,6 +54,7 @@ fun main(args: Array<String>) {
                   fingerprint <pubkeyB64>
                   canary make <pubkeyB64>
                   canary verify <sealedB64>
+                  verify <seedFile> <escrowDumpJson>
                   recover <sealedBlobB64>
                 """.trimIndent(),
             )
@@ -120,6 +124,31 @@ private fun canaryVerify(sealedB64: String) {
     require(Bytes.fromB64(payload.key).contentEquals(Escrow.CANARY_KEY)) { "canary key mismatch" }
     println("CANARY VERIFIED ✓  print → restore → unseal works end-to-end.")
     println("Fingerprint of the sheet's key: ${Escrow.fingerprint(crypto, kp.publicKey)}")
+}
+
+/**
+ * Fleet escrow canary (spec 04; docs/drills/escrow-canary-drill.md): open every escrowed
+ * blob with the printed seed and prove the accounts are recoverable. The seed comes from
+ * a FILE (typed/scanned from the sheet onto the air-gapped box, or the USB copy) so the
+ * drill is scriptable; the dump is `sqlite3 -json` output of the server's escrow table.
+ */
+private fun verifyDump(seedFile: String, dumpFile: String) {
+    val seed = Bytes.fromB64(File(seedFile).readText().trim())
+    require(seed.size == 32) { "seed file must contain a base64url 32-byte seed" }
+    val rows = EscrowVerify.parseDump(File(dumpFile).readText())
+    if (rows.isEmpty()) die("no escrow rows in $dumpFile — export with: sqlite3 -json <db> \"SELECT userId, sealed, fingerprint, updatedAt FROM escrow\"")
+
+    val kp = crypto.boxKeypairFromSeed(seed)
+    println("Escrow fleet verify — recovery key ${Escrow.shortFingerprint(crypto, kp.publicKey)} (${rows.size} blob(s))")
+    println()
+    val results = EscrowVerify.verify(crypto, seed, rows)
+    println("%-38s %-6s %s".format("userId", "result", "detail"))
+    for (r in results) println("%-38s %-6s %s".format(r.userId, if (r.pass) "PASS" else "FAIL", r.detail))
+    val fails = results.count { !it.pass }
+    println()
+    println("${results.size - fails}/${results.size} PASS")
+    if (fails > 0) die("$fails escrow blob(s) FAILED — those accounts are NOT recoverable with this key (spec 04 §4: P1 incident, re-ceremony + re-escrow)")
+    println("All escrowed accounts are recoverable with this sheet.")
 }
 
 private fun recover(sealedBlobB64: String) {

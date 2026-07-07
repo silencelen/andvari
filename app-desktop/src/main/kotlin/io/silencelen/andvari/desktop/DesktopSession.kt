@@ -38,6 +38,9 @@ class DesktopSessionStore {
         val baseUrl: String = DEFAULT_BASE_URL,
         val cacheAllowed: Boolean = true,
         val baseUrlMigratedTailnet: Boolean = false,
+        val autoLockSeconds: Int = 0,
+        val lastExportAt: Long = 0,
+        val lastSyncAt: Long = 0,
     )
 
     private fun prefs(): Prefs = runCatching { json.decodeFromString(Prefs.serializer(), prefsFile.readText()) }.getOrDefault(Prefs())
@@ -62,6 +65,29 @@ class DesktopSessionStore {
     var cacheAllowed: Boolean
         get() = prefs().cacheAllowed
         set(v) { writePrefs(prefs().copy(cacheAllowed = v)) }
+
+    /**
+     * Last-known org autoLockSeconds (spec 01 §8; 0 = disabled) — enforced on offline cold
+     * starts, before the first live policy fetch lands. Mirrors Android's SessionStore.
+     */
+    var autoLockSeconds: Int
+        get() = prefs().autoLockSeconds
+        set(v) { writePrefs(prefs().copy(autoLockSeconds = v)) }
+
+    /**
+     * When the last spec 07 backup was produced (unix ms; 0 = never). Recorded LOCALLY
+     * only — the server is never told an export happened (spec 07 §2.6). Drives the
+     * "Last backup: N days ago" line + the >90-day nudge in Settings.
+     */
+    var lastExportAt: Long
+        get() = prefs().lastExportAt
+        set(v) { writePrefs(prefs().copy(lastExportAt = v)) }
+
+    /** When the last SUCCESSFUL sync finished (unix ms; 0 = unknown) — the timestamp the
+     *  spec 07 offline-export note shows ("vault as of last sync <time>"). */
+    var lastSyncAt: Long
+        get() = prefs().lastSyncAt
+        set(v) { writePrefs(prefs().copy(lastSyncAt = v)) }
 
     fun load(): DesktopSession? =
         runCatching { json.decodeFromString(DesktopSession.serializer(), file.readText()) }.getOrNull()

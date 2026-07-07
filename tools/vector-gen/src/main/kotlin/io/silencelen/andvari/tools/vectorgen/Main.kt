@@ -8,7 +8,15 @@ import io.silencelen.andvari.core.crypto.Hibp
 import io.silencelen.andvari.core.crypto.Hkdf
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
+import io.silencelen.andvari.core.client.Backup
+import io.silencelen.andvari.core.client.BackupItem
+import io.silencelen.andvari.core.client.BackupPayload
+import io.silencelen.andvari.core.client.BackupSkipped
+import io.silencelen.andvari.core.client.BackupSkippedItem
+import io.silencelen.andvari.core.client.BackupVault
 import io.silencelen.andvari.core.client.CsvImport
+import io.silencelen.andvari.core.client.ExportCsv
+import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.TotpAlgorithm
@@ -20,6 +28,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -61,7 +70,9 @@ fun main(args: Array<String>) {
     write(outDir, "sharedgrant.json", sharedGrant())
     write(outDir, "import.json", importVectors())
     write(outDir, "urimatch.json", uriMatch())
-    println("vector-gen: wrote 10 files to ${outDir.absolutePath}")
+    write(outDir, "itemdoc.json", itemDoc())
+    write(outDir, "export.json", exportVectors())
+    println("vector-gen: wrote 12 files to ${outDir.absolutePath}")
 }
 
 /** Argon2id timing on this host (spec 01 §9 benchmark table). */
@@ -300,6 +311,7 @@ private fun importVectors(): JsonObject {
                     put("name", r.name); put("url", r.url); put("username", r.username)
                     put("password", r.password); put("notes", r.notes)
                     r.timePasswordChangedMs?.let { put("timePasswordChangedMs", it) }
+                    r.totp?.let { put("totp", it) }
                 }
             }
             putJsonArray("errors") { for (e in parsed.errors) addJsonObject { put("line", e.line); put("code", e.code) } }
@@ -310,6 +322,7 @@ private fun importVectors(): JsonObject {
                     put("password", it.doc.login?.password ?: "")
                     put("uri", it.doc.login?.uris?.firstOrNull() ?: "")
                     put("notes", it.doc.notes ?: "")
+                    it.doc.login?.totp?.let { t -> put("totp", t) }
                 }
             }
             putJsonObject("report") {
@@ -344,6 +357,15 @@ private fun importVectors(): JsonObject {
                 "Mail,https://mail.test,me,pw1,\n" + // exact dupe → collapsed
                 "Mail,https://mail.test,me,pw2,\n" + // same url+user, diff pw → "(2)"
                 "Mail,https://mail.test,me,pw3,\n",   // → "(3)"
+        ),
+        // andvari's own CSV export (spec 07 §1) is a Chrome superset with a trailing totp
+        // column — this pins the andvari→andvari round-trip mapping (spec 06 §1).
+        caseObj(
+            "andvari-totp-roundtrip",
+            "name,url,username,password,note,totp\n" +
+                "GitHub,https://github.com/login,jacob,s3cret,,otpauth://totp/GitHub:jacob?secret=JBSWY3DPEHPK3PXP&issuer=GitHub\n" +
+                "Bare32,https://b.test,u,p,,JBSWY3DPEHPK3PXP\n" +
+                "NoTotp,https://n.test,u2,p2,note only,\n",
         ),
         caseObj(
             "firefox-basic",
@@ -476,6 +498,328 @@ private fun uriMatch(): JsonObject = buildJsonObject {
         add(c(emptyList(), TEXT, 0, null, "passwd", "password"))
         add(c(emptyList(), TEXT, 0, null, "captcha", "none"))
         add(c(emptyList(), TEXT, 0, null, null, "none"))
+    }
+}
+
+/** spec 02 §3 — unknown-field round-trip (plaintext-level only; envelope bytes are pinned
+ *  in wrap.json/envelope.json). Hand-authored, deterministic: each case is a raw item doc
+ *  with unknown fields, a scripted edit applied through each impl's REAL edit shape
+ *  (Kotlin `copy()`, web spread), and per-path expectations. Consumers MUST assert
+ *  PER-PATH — never whole-object equality: Kotlin re-encodes with encodeDefaults=true and
+ *  explicit nulls, web omits absent keys, and BOTH shapes are spec-legal. Unknown values
+ *  cover every JSON kind; numbers stay within ±2^53 (outside is not preservation-
+ *  guaranteed, spec 02 §3 — future writers use strings). */
+private fun itemDoc(): JsonObject {
+    fun pv(path: String, valueJson: String) = buildJsonObject { put("path", path); put("valueJson", valueJson) }
+    fun edit(op: String, value: kotlinx.serialization.json.JsonElement) = buildJsonObject { put(op, value) }
+    fun editS(op: String, value: String) = edit(op, kotlinx.serialization.json.JsonPrimitive(value))
+    fun editB(op: String, value: Boolean) = edit(op, kotlinx.serialization.json.JsonPrimitive(value))
+    fun case(name: String, docJson: String, edit: JsonObject, unknowns: List<JsonObject>, typed: List<JsonObject>) =
+        buildJsonObject {
+            put("name", name)
+            put("docJson", docJson)
+            put("edit", edit)
+            putJsonArray("expectUnknownPaths") { for (u in unknowns) add(u) }
+            putJsonArray("expectTyped") { for (t in typed) add(t) }
+        }
+
+    return buildJsonObject {
+        putJsonArray("cases") {
+            // Unknowns at the TOP level only (object, array, string kinds).
+            add(case(
+                "top-level-unknowns-rename",
+                """{"type":"login","name":"GitHub","notes":"work account","favorite":false,"login":{"username":"jacob","password":"hunter2","uris":["https://github.com/login"]},"x-future":{"nested":{"deep":true},"arr":[1,"two"]},"x-tags":["a","b"],"x-note":"plain"}""",
+                editS("setName", "GitHub (renamed)"),
+                listOf(
+                    pv("/x-future", """{"nested":{"deep":true},"arr":[1,"two"]}"""),
+                    pv("/x-tags", """["a","b"]"""),
+                    pv("/x-note", "\"plain\""),
+                ),
+                listOf(
+                    pv("/name", "\"GitHub (renamed)\""),
+                    pv("/type", "\"login\""),
+                    pv("/login/username", "\"jacob\""),
+                ),
+            ))
+            // Unknowns inside LOGIN only (boolean, safe integer, null kinds); deep edit.
+            add(case(
+                "login-unknowns-set-password",
+                """{"type":"login","name":"Email","login":{"username":"jo@x.com","password":"old-pass","uris":[],"x-flag":true,"x-order":7,"x-null":null}}""",
+                editS("setPassword", "n3w-p4ss!"),
+                listOf(
+                    pv("/login/x-flag", "true"),
+                    pv("/login/x-order", "7"),
+                    pv("/login/x-null", "null"),
+                ),
+                listOf(
+                    pv("/login/password", "\"n3w-p4ss!\""),
+                    pv("/login/username", "\"jo@x.com\""),
+                    pv("/name", "\"Email\""),
+                ),
+            ))
+            // Unknowns inside EACH passwordHistory entry; top-level flag edit.
+            add(case(
+                "history-entry-unknowns-favorite",
+                """{"type":"login","name":"Bank","favorite":false,"login":{"username":"jo","password":"pw3","passwordHistory":[{"password":"pw1","retiredAt":1700000000000,"x-note":"rotated after breach"},{"password":"pw2","retiredAt":1710000000000,"x-meta":{"source":"import","gen":2}}]}}""",
+                editB("setFavorite", true),
+                listOf(
+                    pv("/login/passwordHistory/0/x-note", "\"rotated after breach\""),
+                    pv("/login/passwordHistory/1/x-meta", """{"source":"import","gen":2}"""),
+                ),
+                listOf(
+                    pv("/favorite", "true"),
+                    pv("/login/passwordHistory/0/password", "\"pw1\""),
+                    pv("/login/passwordHistory/1/retiredAt", "1710000000000"),
+                ),
+            ))
+            // Unknowns inside an ATTACHMENTS entry (incl. the 2^53-1 safe-number boundary).
+            add(case(
+                "attachment-unknowns-rename",
+                """{"type":"login","name":"Passport","login":{"username":"traveler"},"attachments":[{"id":"11111111-1111-4111-8111-111111111111","name":"scan.pdf","size":12345,"fileKey":"c2VjcmV0LWtleS1ieXRlcw","x-tag":"receipts","x-num":9007199254740991}]}""",
+                editS("setName", "Passport 2026"),
+                listOf(
+                    pv("/attachments/0/x-tag", "\"receipts\""),
+                    pv("/attachments/0/x-num", "9007199254740991"),
+                ),
+                listOf(
+                    pv("/attachments/0/id", "\"11111111-1111-4111-8111-111111111111\""),
+                    pv("/attachments/0/size", "12345"),
+                    pv("/name", "\"Passport 2026\""),
+                ),
+            ))
+            // The SAME doc carries unknowns at all 4 levels; deep edit through login.
+            // /login/uris/1 pins the uris-tail survival under a copy/spread edit.
+            add(case(
+                "all-levels-set-password",
+                """{"type":"login","name":"Everything","notes":"n","favorite":true,"x-schema":"v9-preview","login":{"username":"u","password":"old","uris":["https://e.test","https://e2.test"],"x-generator":{"length":24,"symbols":false},"passwordHistory":[{"password":"old0","retiredAt":1690000000000,"x-strength":0.87}]},"attachments":[{"id":"22222222-2222-4222-8222-222222222222","name":"a.bin","size":1,"fileKey":"a2V5","x-hidden":false}]}""",
+                editS("setPassword", "brand-new"),
+                listOf(
+                    pv("/x-schema", "\"v9-preview\""),
+                    pv("/login/x-generator", """{"length":24,"symbols":false}"""),
+                    pv("/login/passwordHistory/0/x-strength", "0.87"),
+                    pv("/attachments/0/x-hidden", "false"),
+                ),
+                listOf(
+                    pv("/login/password", "\"brand-new\""),
+                    pv("/name", "\"Everything\""),
+                    pv("/favorite", "true"),
+                    pv("/login/uris/1", "\"https://e2.test\""),
+                ),
+            ))
+            // No-edit round trip, unknowns at all 4 levels (null + nested-mixed-array kinds).
+            add(case(
+                "all-levels-no-edit",
+                """{"type":"login","name":"Untouched","x-null-top":null,"x-bool":false,"login":{"username":"u6","password":"p6","x-arr":[null,{"k":"v"},[1,2]],"passwordHistory":[{"password":"p0","retiredAt":1650000000000,"x-b":true}]},"attachments":[{"id":"33333333-3333-4333-8333-333333333333","name":"b.txt","size":2,"fileKey":"a2V5Mg","x-s":"tag"}]}""",
+                editB("none", true),
+                listOf(
+                    pv("/x-null-top", "null"),
+                    pv("/x-bool", "false"),
+                    pv("/login/x-arr", """[null,{"k":"v"},[1,2]]"""),
+                    pv("/login/passwordHistory/0/x-b", "true"),
+                    pv("/attachments/0/x-s", "\"tag\""),
+                ),
+                listOf(
+                    pv("/name", "\"Untouched\""),
+                    pv("/login/username", "\"u6\""),
+                ),
+            ))
+            // Optional typed fields ABSENT (notes/favorite/login/attachments) — pins that
+            // absence-vs-default handling never corrupts the unknowns riding alongside.
+            add(case(
+                "absent-optionals-note",
+                """{"type":"note","name":"Just a note","x-only":"bare","x-version":42}""",
+                editS("setName", "Just a note (edited)"),
+                listOf(
+                    pv("/x-only", "\"bare\""),
+                    pv("/x-version", "42"),
+                ),
+                listOf(
+                    pv("/name", "\"Just a note (edited)\""),
+                    pv("/type", "\"note\""),
+                ),
+            ))
+        }
+    }
+}
+
+/** spec 07 — CSV export writer + `.andvari` backup container. CSV cases and the container
+ *  bytes are fully deterministic (FAST-class kdfParams, fixed kdfSalt + envelope nonce via
+ *  sealWithNonce, fixed fileId, pinned payloadUtf8) so both impls must PRODUCE and OPEN the
+ *  exact bytes. Attachment sections are covered by per-impl round-trip + truncation tests
+ *  (secretstream is nondeterministic — same posture as secretstream.json). Reject headers
+ *  are RAW-JSON built (the typed KdfParams cannot even construct foreign alg/v). */
+private fun exportVectors(): JsonObject {
+    val itemJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    // ---- (a) CSV-writer cases: docs in → exact output string ----
+    fun csvCase(name: String, docsJson: List<String>): JsonObject = buildJsonObject {
+        put("name", name)
+        putJsonArray("docs") { for (d in docsJson) add(Json.parseToJsonElement(d)) }
+        put("csvUtf8", ExportCsv.write(docsJson.map { itemJson.decodeFromString(ItemDoc.serializer(), it) }))
+    }
+    val csvCases = listOf(
+        csvCase("empty", emptyList()),
+        csvCase(
+            "basic-and-empty-url",
+            listOf(
+                """{"type":"login","name":"GitHub","notes":"work account","login":{"username":"jacob","password":"hunter2","uris":["https://github.com/login"],"totp":"otpauth://totp/GitHub:jacob?secret=JBSWY3DPEHPK3PXP"}}""",
+                """{"type":"login","name":"EmptyUrl","login":{"username":"u","password":"p","uris":[]}}""",
+                """{"type":"login","name":"NoLoginBlock"}""",
+            ),
+        ),
+        csvCase(
+            "quoting-and-formula-verbatim",
+            listOf(
+                """{"type":"login","name":"Acme, Inc","login":{"username":"user\"name","password":"p,w\"1","uris":["https://acme.test"]}}""",
+                """{"type":"login","name":"=cmd()","notes":" spaced, not trimmed ","login":{"username":"=SUM(A1)","password":"+plus-@at","uris":["https://f.test"]}}""",
+            ),
+        ),
+        csvCase(
+            "crlf-normalization",
+            listOf(
+                """{"type":"login","name":"Multiline","notes":"line1\r\nline2\rline3\nline4","login":{"username":"u","password":"p\rq","uris":["https://m.test"]}}""",
+            ),
+        ),
+        csvCase(
+            "totp-bare-skips-and-empty-row",
+            listOf(
+                """{"type":"note","name":"Skipped note","notes":"never exported"}""",
+                """{"type":"login","name":"Bare32","login":{"username":"u","password":"p","uris":["https://b.test"],"totp":"JBSWY3DPEHPK3PXP"}}""",
+                """{"type":"login","name":"ExtraUris","login":{"username":"e","password":"pw","uris":["https://first.test","https://dropped.test"]}}""",
+                """{"type":"login","name":"EmptyBoth","notes":"written; reimport skips it","login":{"username":"","password":"","uris":["https://w.test"]}}""",
+            ),
+        ),
+    )
+
+    // ---- (b) container cases ----
+    fun buildContainer(passphrase: String, fileId: String, salt: ByteArray, nonce: ByteArray, payloadUtf8: String): ByteArray {
+        val parts = ArrayList<ByteArray>()
+        Backup.buildWithPayloadBytes(crypto, passphrase, fileId, salt, FAST, payloadUtf8.encodeToByteArray(), emptyList(), nonce) { parts.add(it) }
+        val out = ByteArray(parts.sumOf { it.size })
+        var o = 0
+        for (p in parts) { p.copyInto(out, o); o += p.size }
+        return out
+    }
+    fun kdfParamsObj() = buildJsonObject {
+        put("v", 1); put("alg", "argon2id13"); put("opsLimit", FAST.ops); put("memBytes", FAST.memBytes)
+    }
+    fun containerCase(name: String, passphrase: String, fileId: String, saltSeed: Int, nonceSeed: Int, payloadUtf8: String): Pair<JsonObject, ByteArray> {
+        val salt = pat(16, saltSeed)
+        val nonce = pat(24, nonceSeed)
+        val container = buildContainer(passphrase, fileId, salt, nonce, payloadUtf8)
+        val obj = buildJsonObject {
+            put("name", name)
+            put("passphraseUtf8", passphrase)
+            put("fileId", fileId)
+            put("kdfSaltB64", b64(salt))
+            put("kdfParams", kdfParamsObj())
+            put("envelopeNonceB64", b64(nonce))
+            put("payloadUtf8", payloadUtf8)
+            put("containerB64", b64(container))
+        }
+        return obj to container
+    }
+
+    val passphrase = "export vectors passphrase"
+    val fileId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    val vaultId = "11111111-1111-4111-8111-111111111111"
+    val itemsOnlyPayload = BackupPayload(
+        exportedAt = 1751850000000,
+        origin = "https://andvari.taila2dff2.ts.net",
+        userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        identityFingerprint = "0123456789abcdef",
+        vaults = listOf(BackupVault(vaultId, "personal", "Personal", "owner")),
+        items = listOf(
+            BackupItem(
+                itemId = "22222222-2222-4222-8222-222222222222", vaultId = vaultId, formatVersion = 1, updatedAt = 1751840000000,
+                doc = itemJson.decodeFromString(
+                    ItemDoc.serializer(),
+                    """{"type":"login","name":"GitHub","login":{"username":"jacob","password":"hunter2","uris":["https://github.com/login"],"totp":"otpauth://totp/GitHub:jacob?secret=JBSWY3DPEHPK3PXP"}}""",
+                ),
+            ),
+            BackupItem(
+                itemId = "33333333-3333-4333-8333-333333333333", vaultId = vaultId, formatVersion = 1, updatedAt = 1751841000000,
+                doc = itemJson.decodeFromString(ItemDoc.serializer(), """{"type":"note","name":"Wifi","notes":"router in the closet"}"""),
+            ),
+        ),
+        skipped = BackupSkipped(
+            undecryptable = listOf(BackupSkippedItem("44444444-4444-4444-8444-444444444444", vaultId, 2)),
+            attachmentsOverCap = listOf("tax-archive.zip"),
+            attachmentFetchFailed = listOf("scan.pdf"),
+        ),
+    )
+    val (itemsOnlyObj, goodContainer) = containerCase(
+        "items-only", passphrase, fileId, saltSeed = 50, nonceSeed = 51,
+        payloadUtf8 = itemJson.encodeToString(BackupPayload.serializer(), itemsOnlyPayload),
+    )
+
+    // Unknown keys at the payload level AND inside the doc at all 4 levels — open() must
+    // tolerate the former (ignoreUnknownKeys) and PRESERVE the latter (spec 02 §3 overlay).
+    val unknownDoc =
+        """{"type":"login","name":"Everything","x-top":"keep","login":{"username":"u","password":"p","x-l":{"deep":true},"passwordHistory":[{"password":"old","retiredAt":1690000000000,"x-h":7}]},"attachments":[{"id":"55555555-5555-4555-8555-555555555555","name":"a.bin","size":1,"fileKey":"a2V5","x-a":false}]}"""
+    val unknownPayloadTyped = BackupPayload(
+        exportedAt = 1751850000001,
+        userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        vaults = listOf(BackupVault(vaultId, "personal", "Personal", "owner")),
+        items = listOf(
+            BackupItem(
+                itemId = "66666666-6666-4666-8666-666666666666", vaultId = vaultId, formatVersion = 1, updatedAt = 1751842000000,
+                doc = itemJson.decodeFromString(ItemDoc.serializer(), unknownDoc),
+            ),
+        ),
+    )
+    val unknownPayloadUtf8 = run {
+        val base = Json.parseToJsonElement(itemJson.encodeToString(BackupPayload.serializer(), unknownPayloadTyped)).jsonObject
+        JsonObject(base + ("x-future" to buildJsonObject { put("hint", "ignore-me") })).toString()
+    }
+    val (unknownObj, _) = containerCase(
+        "unknown-fields-tolerated", passphrase, "ffffffff-ffff-4fff-8fff-ffffffffffff", saltSeed = 52, nonceSeed = 53,
+        payloadUtf8 = unknownPayloadUtf8,
+    )
+
+    // ---- (c) reject cases ----
+    fun u32le(v: Int) = byteArrayOf(v.toByte(), (v ushr 8).toByte(), (v ushr 16).toByte(), (v ushr 24).toByte())
+    fun u64le(v: Long) = ByteArray(8) { i -> ((v ushr (8 * i)) and 0xFF).toByte() }
+    fun rawContainer(headerJson: String, sections: List<ByteArray>): ByteArray {
+        var out = "ANDVBK01".encodeToByteArray() + u32le(headerJson.encodeToByteArray().size) + headerJson.encodeToByteArray()
+        for (s in sections) out = out + u64le(s.size.toLong()) + s
+        return out
+    }
+    val saltB64 = b64(pat(16, 50))
+    fun headerJson(format: String = "andvari-backup", v: Int = 1, kdfV: Int = 1, alg: String = "argon2id13", opsLimit: Long = FAST.ops, memBytes: Long = FAST.memBytes): String =
+        """{"format":"$format","v":$v,"fileId":"$fileId","kdfSalt":"$saltB64","kdfParams":{"v":$kdfV,"alg":"$alg","opsLimit":$opsLimit,"memBytes":$memBytes}}"""
+    val dummySection = pat(42, 60)
+    fun reject(name: String, reason: String, container: ByteArray, pass: String = passphrase) = buildJsonObject {
+        put("name", name)
+        put("reason", reason)
+        put("passphraseUtf8", pass)
+        put("containerB64", b64(container))
+    }
+    // AD/fileId mismatch: same header length, one hex digit of the fileId swapped in place.
+    val fileIdSwapped = run {
+        val headerLen = goodContainer.copyOfRange(8, 12).let { (it[0].toInt() and 0xFF) or ((it[1].toInt() and 0xFF) shl 8) or ((it[2].toInt() and 0xFF) shl 16) or ((it[3].toInt() and 0xFF) shl 24) }
+        val headerStr = goodContainer.copyOfRange(12, 12 + headerLen).decodeToString()
+        val swapped = headerStr.replace(fileId, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeef").encodeToByteArray()
+        check(swapped.size == headerLen) { "fileId swap must preserve headerLen" }
+        goodContainer.copyOf().also { swapped.copyInto(it, 12) }
+    }
+    val rejects = listOf(
+        reject("bad-magic", "unknown_format", goodContainer.copyOf().also { "XNDVBK99".encodeToByteArray().copyInto(it, 0) }),
+        reject("unknown-format", "unknown_format", rawContainer(headerJson(format = "andvari-backup-vault"), listOf(dummySection))),
+        reject("unknown-version", "unknown_version", rawContainer(headerJson(v = 2), listOf(dummySection))),
+        reject("foreign-kdf-alg", "unsupported_kdf", rawContainer(headerJson(alg = "scrypt"), listOf(dummySection))),
+        reject("foreign-kdf-v", "unsupported_kdf", rawContainer(headerJson(kdfV = 2), listOf(dummySection))),
+        reject("membytes-over-ceiling", "unsupported_kdf", rawContainer(headerJson(memBytes = 256L * 1024 * 1024 + 1), listOf(dummySection))),
+        reject("opslimit-over-ceiling", "unsupported_kdf", rawContainer(headerJson(opsLimit = 17), listOf(dummySection))),
+        reject("truncated-section", "truncated", goodContainer.copyOfRange(0, goodContainer.size - 20)),
+        reject("fileid-mismatch", "wrong_passphrase_or_corrupt", fileIdSwapped),
+        reject("wrong-passphrase", "wrong_passphrase_or_corrupt", goodContainer, pass = "not the export passphrase"),
+    )
+
+    return buildJsonObject {
+        putJsonArray("csv") { for (c in csvCases) add(c) }
+        putJsonArray("container") { add(itemsOnlyObj); add(unknownObj) }
+        putJsonArray("reject") { for (r in rejects) add(r) }
     }
 }
 

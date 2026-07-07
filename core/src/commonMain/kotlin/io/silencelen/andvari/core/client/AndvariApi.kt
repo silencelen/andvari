@@ -42,11 +42,19 @@ import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import kotlinx.serialization.json.Json
 
-class ApiException(val status: Int, val code: String, message: String) : Exception(message)
+open class ApiException(val status: Int, val code: String, message: String) : Exception(message)
+
+/**
+ * Typed 426 surface (spec 03 §1): the server's policy pins minVersion above this build.
+ * A subclass of [ApiException] so every existing `catch (e: ApiException)` keeps working;
+ * UI layers can catch this specifically to show a blocking "update required" screen
+ * instead of a generic error toast. UI wiring is a follow-up — this is the detection.
+ */
+class UpgradeRequiredException(code: String, message: String) : ApiException(426, code, message)
 
 data class Tokens(val accessToken: String, val refreshToken: String)
 
-const val ANDVARI_CLIENT_VERSION = "0.3.0"
+const val ANDVARI_CLIENT_VERSION = "0.4.0"
 
 /**
  * Kotlin API client (sibling of web/src/api/client.ts). Auto-refreshes the access
@@ -125,6 +133,11 @@ class AndvariApi(
             json.decodeFromString(ApiError.serializer(), resp.bodyAsText())
         } catch (e: Exception) {
             ApiError("http_${resp.status.value}", resp.status.description)
+        }
+        // 426 upgrade_required is the min-version pin firing (spec 03 §1) — surface it
+        // typed so callers can distinguish "this build is banned" from transient errors.
+        if (resp.status.value == 426 || err.error == "upgrade_required") {
+            return UpgradeRequiredException(err.error, err.message)
         }
         return ApiException(resp.status.value, err.error, err.message)
     }

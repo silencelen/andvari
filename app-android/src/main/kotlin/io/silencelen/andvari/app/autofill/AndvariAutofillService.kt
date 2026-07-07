@@ -45,8 +45,13 @@ class AndvariAutofillService : AutofillService() {
 
         // No auth row for a signed-out device (e.g. after revocation) — the unlock activity
         // would have no email/tokens to work with (a dead end inside another app's fill flow).
-        val session = SessionStore(applicationContext).load()
+        val store = SessionStore(applicationContext)
+        val session = store.load()
         if (session == null || session.accessToken.isEmpty()) return null
+
+        // Belt-and-suspenders: make sure the process-wide auto-lock gate carries the
+        // last-known policy window even if no other component set it in this process.
+        VaultSession.setAutoLockSeconds(store.autoLockSeconds)
 
         val form = StructureParser.parse(structure)
         if (form.fields.isEmpty()) return null // no username/password field classified
@@ -55,8 +60,10 @@ class AndvariAutofillService : AutofillService() {
             if (Build.VERSION.SDK_INT >= 30) request.inlineSuggestionsRequest else null
 
         // Snapshot the session ONCE; a concurrent lock() cannot NPE this reference, at worst
-        // it makes the in-memory read slightly stale.
-        val unlocked = VaultSession.get()
+        // it makes the in-memory read slightly stale. getIfFresh enforces the inactivity
+        // auto-lock (spec 01 §8): an idle-expired vault is locked here and the user gets
+        // the unlock row instead of a silent credential fill.
+        val unlocked = VaultSession.getIfFresh()
         return if (unlocked == null) {
             lockedResponse(form, inlineRequest)
         } else {

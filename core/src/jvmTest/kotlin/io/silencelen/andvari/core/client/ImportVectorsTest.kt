@@ -44,6 +44,7 @@ class ImportVectorsTest {
                 assertEquals(er.s("password"), r.password, "$label row$idx pass")
                 assertEquals(er.s("notes"), r.notes, "$label row$idx notes")
                 if ("timePasswordChangedMs" in er) assertEquals(er.getValue("timePasswordChangedMs").jsonPrimitive.long, r.timePasswordChangedMs)
+                assertEquals(if ("totp" in er) er.s("totp") else null, r.totp, "$label row$idx totp")
             }
 
             val expErrors = expect.arr("errors")
@@ -64,6 +65,7 @@ class ImportVectorsTest {
                 assertEquals(ed.s("password"), doc.login?.password ?: "", "$label doc$idx pass")
                 assertEquals(ed.s("uri"), doc.login?.uris?.firstOrNull() ?: "", "$label doc$idx uri")
                 assertEquals(ed.s("notes"), doc.notes ?: "", "$label doc$idx notes")
+                assertEquals(if ("totp" in ed) ed.s("totp") else null, doc.login?.totp, "$label doc$idx totp")
             }
             val expReport = expect.getValue("report").jsonObject
             assertEquals(expReport.i("imported"), plan.report.imported, "$label imported")

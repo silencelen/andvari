@@ -71,6 +71,30 @@ fun requireUuid(value: String?, field: String): String {
     return v
 }
 
+/**
+ * Structural escrow-blob gate (spec 04 §3). The blob is crypto_box_seal'd to the OFFLINE
+ * recovery key, so the server CANNOT verify it cryptographically — by design (ZK: the
+ * recovery secret never exists server-side). What it can do is refuse obvious garbage
+ * before it becomes an account's only recovery path: base64url validity + sealed-length
+ * bounds. crypto_box_SEALBYTES = 48 (32B ephemeral pk + 16B MAC); the v1 canonical
+ * payload (Escrow.canonicalPayload: uuid userId, keyType "uvk", 32B key + its sha256,
+ * both base64url) is exactly 178 bytes → 226 sealed. Bounds leave headroom for future
+ * additive payload versions while still rejecting truncated/random junk. Real
+ * verification happens offline: `recovery-cli verify` (docs/drills/escrow-canary-drill.md).
+ */
+const val ESCROW_SEAL_OVERHEAD = 48
+const val ESCROW_SEALED_MIN = ESCROW_SEAL_OVERHEAD + 150
+const val ESCROW_SEALED_MAX = ESCROW_SEAL_OVERHEAD + 1024
+
+fun requireEscrowBlob(sealedB64: String) {
+    val bytes = try {
+        Bytes.fromB64(sealedB64)
+    } catch (e: Exception) {
+        throw BadRequest("bad_escrow_blob")
+    }
+    if (bytes.size < ESCROW_SEALED_MIN || bytes.size > ESCROW_SEALED_MAX) throw BadRequest("bad_escrow_blob")
+}
+
 class Services(
     val repo: Repo,
     val service: Service,
@@ -383,6 +407,7 @@ fun Application.andvariModule(services: Services) {
             val p = requirePrincipal(call, service)
             val body = call.receive<io.silencelen.andvari.core.model.EscrowUpload>()
             if (body.fingerprint != config.recoveryFingerprint) throw BadRequest("escrow_fingerprint_mismatch")
+            requireEscrowBlob(body.sealed)
             services.repo.db.tx { c ->
                 c.exec(
                     "INSERT INTO escrow(userId,sealed,fingerprint,updatedAt) VALUES(?,?,?,?) ON CONFLICT(userId) DO UPDATE SET sealed=excluded.sealed, fingerprint=excluded.fingerprint, updatedAt=excluded.updatedAt",

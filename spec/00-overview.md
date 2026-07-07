@@ -16,6 +16,7 @@ implementations, and `scripts/verify.sh` must green both suites off the same vec
 | 04-escrow-recovery | Org recovery key ceremony, sealed-blob format, canary, recovery + drills |
 | 05-threat-model | Assets, adversaries, guarantees, accepted risks, non-goals |
 | 06-import-formats | Browser CSV import column maps |
+| 07-export | CSV export dialect + encrypted `.andvari` backup container, restore rules |
 
 ## System shape (informative)
 

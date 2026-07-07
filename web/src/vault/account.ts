@@ -226,7 +226,14 @@ export class Account {
 
   decryptItem(item: WireItem): ItemDoc {
     if (!item.blob) throw new CryptoError("item has no blob (tombstone?)");
+    // Fail closed on documents from a NEWER format: unknown-field preservation (spec 02 §3)
+    // is scoped WITHIN a formatVersion, and editing a v2 doc here would re-seal it silently
+    // downgraded to v1. CryptoError rides the existing catch paths ("undecryptable").
+    if (item.formatVersion > ITEM_FORMAT_VERSION) throw new CryptoError(`item formatVersion ${item.formatVersion} is newer than this client supports`);
     const plain = open(this.vk(item.vaultId), fromB64(item.blob), adItem(item.vaultId, item.itemId, item.formatVersion));
+    // CONTRACT (spec 02 §3): the parsed doc may carry fields this client version does not
+    // know — they MUST survive a rewrite. Never rebuild a decrypted doc field-by-field;
+    // edit via spread/structuredClone only, so unknown keys round-trip through encryptItem.
     return JSON.parse(fromUtf8(plain)) as ItemDoc;
   }
 

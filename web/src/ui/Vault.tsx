@@ -9,7 +9,9 @@ import { base32Decode, parseOtpauthUri, totpCode, totpSecondsRemaining } from ".
 import type { Account } from "../vault/account";
 import type { PendingUpload, VaultInfo, VaultItem, VaultStore } from "../vault/store";
 import { ImportError, type ImportFormat, type ImportPlan, parseCsvImport, planImport } from "../import/csv";
+import { isExportOriginAllowed } from "../export/plan";
 import { Admin } from "./Admin";
+import { ExportPanel, type ExportMode } from "./ExportPanel";
 import { humanSize } from "./format";
 import { Health } from "./Health";
 import { Settings } from "./Settings";
@@ -35,13 +37,26 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<ItemDoc | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [exportMode, setExportMode] = useState<ExportMode | null>(null);
   const [mustChange, setMustChange] = useState(mustChangePassword);
   const [online, setOnline] = useState(true);
 
+  // spec 07 (SHOULD): sessions arriving via the break-glass PUBLIC origin hide both
+  // export entry points (T6/T11 posture — don't advertise bulk extraction on the
+  // least-trusted surface). The client is served same-origin by the server, so the
+  // page origin IS the server origin; see isExportOriginAllowed for the honest-cheap
+  // tailnet/LAN/localhost check.
+  const exportAllowed = useMemo(
+    () => typeof window !== "undefined" && isExportOriginAllowed(window.location.origin),
+    [],
+  );
+
   const refresh = () => setItems(store.list());
 
-  // WS dirty-bell → pull. The ticket mint adds a round-trip before the socket exists, so
-  // sync once on open to catch any rev pushed during that window (the notifier has no replay).
+  // WS dirty-bell → pull. The bell auto-reconnects (client.ts: backoff + fresh ticket per
+  // attempt) and onOpen fires on EVERY (re)open, so the sync there catches both the mint
+  // round-trip window and any bells missed while the socket was down (no replay server-side).
+  // The returned close fn is the effect cleanup — no socket leaks across lock/unlock cycles.
   useEffect(() => {
     const close = client.events(
       async () => {
@@ -77,12 +92,14 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   const startNew = (type: "login" | "note") => {
     setSelected(null);
     setImportOpen(false);
+    setExportMode(null);
     setEditing(type === "login" ? { type, name: "", login: { username: "", password: "", uris: [""] } } : { type, name: "", notes: "" });
   };
 
   const openItem = (it: VaultItem) => {
     setSelected(it.itemId);
     setImportOpen(false);
+    setExportMode(null);
     setEditing(null);
   };
 
@@ -103,11 +120,12 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
     setView("vault");
     setEditing(null);
     setImportOpen(false);
+    setExportMode(null);
     setSelected(itemId);
   };
 
   const navBtn = (v: View, label: string) => (
-    <button className={`navbtn ${view === v ? "active" : ""}`} onClick={() => { setView(v); setEditing(null); setImportOpen(false); setSelected(null); }}>{label}</button>
+    <button className={`navbtn ${view === v ? "active" : ""}`} onClick={() => { setView(v); setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); }}>{label}</button>
   );
 
   const current = selected ? store.get(selected) : null;
@@ -147,6 +165,14 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
           <Settings client={client} account={account} policy={policy} onPasswordChanged={() => setMustChange(false)} />
         ) : view === "admin" && isAdmin ? (
           <Admin client={client} />
+        ) : exportMode ? (
+          <ExportPanel
+            mode={exportMode}
+            account={account}
+            store={store}
+            policy={policy}
+            onClose={() => { setExportMode(null); refresh(); }}
+          />
         ) : importOpen ? (
           <ImportPanel
             store={store}
@@ -179,7 +205,14 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
               <input placeholder="Search vault…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus />
               <button className="ghost" onClick={() => startNew("login")}>+ Login</button>
               <button className="ghost" onClick={() => startNew("note")}>+ Note</button>
-              <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setImportOpen(true); }}>Import CSV</button>
+              <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setExportMode(null); setImportOpen(true); }}>Import CSV</button>
+              {/* Hidden on the public break-glass origin (spec 07 — see exportAllowed). */}
+              {exportAllowed && (
+                <>
+                  <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("backup"); }}>Back up vault…</button>
+                  <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("csv"); }}>Export for another password manager…</button>
+                </>
+              )}
             </div>
             {filtered.length === 0 ? (
               <div className="empty">
@@ -227,6 +260,7 @@ function useCopy(clearSeconds: number) {
 
 function Detail({ item, client, store, policy, readOnly, vaultName, onEdit, onDelete, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; onEdit: () => void; onDelete: () => void; onBack: () => void }) {
   const { flash, copy } = useCopy(policy?.clipboardClearSeconds ?? 30);
+  const [deleting, setDeleting] = useState(false);
   const doc = item.doc;
   return (
     <div className="sheet">
@@ -281,9 +315,20 @@ function Detail({ item, client, store, policy, readOnly, vaultName, onEdit, onDe
       {/* A reader-role member cannot edit/delete/attach — the push would be denied. */}
       {!readOnly && (
         <div className="actions">
-          <button className="primary" onClick={onEdit}>Edit</button>
-          <div className="spacer" />
-          <button className="ghost" onClick={onDelete} style={{ color: "var(--danger)" }}>Delete</button>
+          {deleting ? (
+            <>
+              <span className="muted">Delete “{doc.name}” from every device?</span>
+              <div className="spacer" />
+              <button className="ghost" onClick={() => { setDeleting(false); onDelete(); }} style={{ color: "var(--danger)" }}>Confirm delete</button>
+              <button className="ghost" onClick={() => setDeleting(false)}>Keep</button>
+            </>
+          ) : (
+            <>
+              <button className="primary" onClick={onEdit}>Edit</button>
+              <div className="spacer" />
+              <button className="ghost" onClick={() => setDeleting(true)} style={{ color: "var(--danger)" }}>Delete</button>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -505,7 +550,8 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
           </div>
           <div className="field">
             <label>Website</label>
-            <input value={login.uris?.[0] ?? ""} onChange={(e) => setLogin({ uris: [e.target.value] })} placeholder="https://" />
+            {/* Edits uris[0] only; the tail (extra URIs written by other clients) is preserved. */}
+            <input value={login.uris?.[0] ?? ""} onChange={(e) => setLogin({ uris: e.target.value ? [e.target.value, ...(login.uris ?? []).slice(1)] : (login.uris ?? []).slice(1) })} placeholder="https://" />
           </div>
           <div className="field">
             <label>TOTP secret (otpauth:// URI or base32)</label>

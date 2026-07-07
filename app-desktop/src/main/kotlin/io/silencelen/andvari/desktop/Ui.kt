@@ -18,6 +18,7 @@ import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
+import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.crypto.Base32
 import io.silencelen.andvari.core.crypto.GeneratorOptions
@@ -289,6 +290,10 @@ private fun Row(item: VaultItem, onClick: () -> Unit) {
 @Composable
 private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onDelete: () -> Unit, onBack: () -> Unit) {
     val doc = item.doc
+    // Vault-secret copies clear after the org policy window, clamped to >=1 s exactly like
+    // web's useCopy (Math.max(1, n)): a policy of 0 still clears — never "keep forever" for
+    // secrets. 30 s fallback while the policy hasn't loaded (matches web).
+    val clipClear = maxOf(1, state.policy?.clipboardClearSeconds ?: 30)
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
         Text(doc.name, style = MaterialTheme.typography.headlineMedium)
@@ -297,9 +302,9 @@ private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onD
         NoticeBar(state.notice, state::clearNotice)
         Spacer(Modifier.height(16.dp))
         doc.login?.let { login ->
-            login.username?.takeIf { it.isNotBlank() }?.let { CopyRow("Username", it, secret = false) }
-            login.password?.takeIf { it.isNotBlank() }?.let { CopyRow("Password", it, secret = true) }
-            login.totp?.takeIf { it.isNotBlank() }?.let { TotpRow(it) }
+            login.username?.takeIf { it.isNotBlank() }?.let { CopyRow("Username", it, secret = false, clearSeconds = clipClear) }
+            login.password?.takeIf { it.isNotBlank() }?.let { CopyRow("Password", it, secret = true, clearSeconds = clipClear) }
+            login.totp?.takeIf { it.isNotBlank() }?.let { TotpRow(it, clearSeconds = clipClear) }
             login.uris.firstOrNull()?.takeIf { it.isNotBlank() }?.let { ReadOnly("Website", it) }
         }
         doc.notes?.takeIf { it.isNotBlank() }?.let { ReadOnly("Notes", it) }
@@ -319,10 +324,20 @@ private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onD
             }
         }
         Spacer(Modifier.height(24.dp))
+        var confirmDelete by remember { mutableStateOf(false) }
         androidx.compose.foundation.layout.Row {
             Button(onClick = onEdit, modifier = Modifier.weight(1f)) { Text("Edit") }
             Spacer(Modifier.width(12.dp))
-            OutlinedButton(onClick = onDelete, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
+            OutlinedButton(onClick = { confirmDelete = true }, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
+        }
+        if (confirmDelete) {
+            AlertDialog(
+                onDismissRequest = { confirmDelete = false },
+                title = { Text("Delete \"${doc.name}\"?") },
+                text = { Text("This removes the item from every device and every family member who can see it.") },
+                confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") } },
+                dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
+            )
         }
     }
 }
@@ -390,8 +405,14 @@ private fun Editor(
             }
         }) { Icon(Icons.Default.AttachFile, null); Text(" Attach file") }
         Spacer(Modifier.height(16.dp))
-        val doc = ItemDoc(type = initial.type, name = name.trim(), notes = notes.ifBlank { null }, favorite = initial.favorite,
-            login = if (isLogin) LoginData(username = username, password = password, uris = listOf(website), totp = totp.ifBlank { null }) else null,
+        // copy()-based edit, never a field-by-field rebuild: carries favorite, passwordHistory,
+        // extra URIs beyond the first, and unknown-field extras (spec 02 §3) through the save.
+        val doc = initial.copy(name = name.trim(), notes = notes.ifBlank { null },
+            login = if (isLogin) (initial.login ?: LoginData()).copy(
+                username = username, password = password,
+                uris = buildList { if (website.isNotBlank()) add(website); addAll(initial.login?.uris.orEmpty().drop(1)) },
+                totp = totp.ifBlank { null },
+            ) else null,
             attachments = attachments)
         Primary("Save", name.isNotBlank() && !busy, busy) { onSave(doc, pending) }
     }
@@ -412,7 +433,7 @@ private fun AttachmentLine(ref: AttachmentRef, action: @Composable () -> Unit) {
 }
 
 @Composable
-private fun TotpRow(uri: String) {
+private fun TotpRow(uri: String, clearSeconds: Int) {
     val crypto = remember { createCryptoProvider() }
     var code by remember { mutableStateOf("······") }
     var remaining by remember { mutableStateOf(30) }
@@ -428,7 +449,7 @@ private fun TotpRow(uri: String) {
     Column(Modifier.padding(vertical = 8.dp)) {
         Text("One-time code", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { copyWithAutoClear(code) }) { Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary) }
+            TextButton(onClick = { copyWithAutoClear(code, clearSeconds) }) { Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary) }
             Text("${remaining}s", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -460,6 +481,31 @@ private fun SettingsScreen(state: DesktopState) {
         }
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
+                Text("Vault backup", style = MaterialTheme.typography.titleLarge)
+                Text(lastBackupLine(state.lastExportAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (backupNudge(state.lastExportAt)) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (state.lastExportAt <= 0) {
+                            "You've never backed up this vault — an offline backup is the only copy that survives losing the server and its backups."
+                        } else {
+                            "It's been over 90 days — consider taking a fresh backup."
+                        },
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = state::backupBegin, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Back up vault…") }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = state::csvBegin, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Export for another password manager…") }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        ErrorBar(state.error, state::clearError)
+        NoticeBar(state.notice, state::clearNotice)
+        ExportDialogs(state)
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
                 Text("Server TOTP", style = MaterialTheme.typography.titleLarge)
                 Text("A second factor the server checks at sign-in — protects break-glass/public logins.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -488,6 +534,204 @@ private fun SettingsScreen(state: DesktopState) {
         }
     }
 }
+
+// ---- export & backup (spec 07) ----
+
+/** The spec 07 export dialogs. Destinations come from java.awt.FileDialog(SAVE) — the
+ *  same pattern as the attachment "Save" button — invoked from the confirm buttons. */
+@Composable
+private fun ExportDialogs(state: DesktopState) {
+    state.backupPreflight?.let { pre ->
+        BackupPreflightDialog(state, pre) { selected, includeAttachments, passphrase ->
+            val dialog = FileDialog(null as Frame?, "Save vault backup", FileDialog.SAVE)
+            dialog.file = "andvari-backup-${exportDateSuffix()}.andvari"
+            dialog.isVisible = true
+            val dir = dialog.directory; val file = dialog.file
+            // Cancelled picker → the preflight dialog stays open for another go.
+            if (dir != null && file != null) state.backupRun(selected, includeAttachments, passphrase, File(dir, file))
+        }
+    }
+    state.backupResult?.let { BackupResultDialog(it, state::backupResultDismiss) }
+    state.csvPreflight?.let { pre ->
+        CsvPreflightDialog(state, pre) {
+            val dialog = FileDialog(null as Frame?, "Save CSV export", FileDialog.SAVE)
+            dialog.file = "andvari-export-${exportDateSuffix()}.csv"
+            dialog.isVisible = true
+            val dir = dialog.directory; val file = dialog.file
+            if (dir != null && file != null) state.csvRun(File(dir, file))
+        }
+    }
+}
+
+@Composable
+private fun BackupPreflightDialog(
+    state: DesktopState,
+    pre: BackupPreflight,
+    onChooseDestination: (Set<String>, Boolean, String) -> Unit,
+) {
+    var selected by remember(pre) { mutableStateOf(pre.vaults.map { it.vaultId }.toSet()) }
+    var includeAttachments by remember(pre) { mutableStateOf(false) }
+    var passphrase by remember(pre) { mutableStateOf("") }
+    var confirm by remember(pre) { mutableStateOf("") }
+    val plan = remember(pre, selected) { state.attachmentPlan(selected) }
+    val score = Strength.estimateStrength(passphrase)
+    val ready = selected.isNotEmpty() && passphrase.isNotEmpty() && passphrase == confirm &&
+        score >= Strength.BACKUP_FLOOR && !state.busy
+    AlertDialog(
+        onDismissRequest = { if (!state.busy) state.backupDismiss() },
+        confirmButton = {
+            TextButton(onClick = { onChooseDestination(selected, includeAttachments, passphrase) }, enabled = ready) { Text("Choose where to save") }
+        },
+        dismissButton = { TextButton(onClick = state::backupDismiss, enabled = !state.busy) { Text("Cancel") } },
+        title = { Text("Back up vault") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                pre.offlineNote?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(8.dp))
+                }
+                Text(
+                    "Exporting is private — other members and the server are not notified.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                pre.vaults.forEach { v ->
+                    if (v.type == "personal") {
+                        Text("• ${v.name} — ${v.itemCount} item(s), personal", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(v.vaultId in selected, { on -> selected = if (on) selected + v.vaultId else selected - v.vaultId })
+                            Text("${v.name} — ${v.itemCount} item(s), shared (${v.role})", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(includeAttachments, { includeAttachments = it })
+                    Text("Include attachments (${humanSize(plan.totalBytes)})", style = MaterialTheme.typography.bodySmall)
+                }
+                if (includeAttachments && plan.overCap.isNotEmpty()) {
+                    Text("Skipped — over the 64 MiB total cap:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    plan.overCap.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                }
+                Spacer(Modifier.height(8.dp))
+                Secret("Backup passphrase", passphrase) { passphrase = it }
+                Secret("Confirm passphrase", confirm) { confirm = it }
+                if (passphrase.isNotEmpty()) {
+                    val ok = score >= Strength.BACKUP_FLOOR
+                    Text(
+                        "Strength: ${Strength.label(score)}" + if (ok) "" else " — needs at least “good”",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (ok) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (confirm.isNotEmpty() && confirm != passphrase) {
+                    Text("Passphrases don't match.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                if (passphrase.any { it.code > 127 }) {
+                    Text(
+                        "Heads-up: non-ASCII characters are used exactly as typed — you must type them identically to restore.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Tip: your master password is a fine choice — the backup is then exactly as protected as your vault. A different passphrase belongs on your printed recovery sheet.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun BackupResultDialog(r: BackupResult, onDone: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDone,
+        confirmButton = { TextButton(onClick = onDone) { Text("Done") } },
+        title = { Text("Backup saved") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "Backed up ${r.items} item(s) across ${r.vaults} vault(s)" +
+                        (if (r.attachments > 0) " with ${r.attachments} attachment(s)." else "."),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                NamedSkips("Skipped (over the 64 MiB attachment cap):", r.attachmentsOverCap)
+                NamedSkips("Skipped (download failed twice):", r.attachmentFetchFailed)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "If you change your master password later, this file still opens with the passphrase you just set.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Restore is for total server loss only — via the offline backup-cli today, in-app in a future release.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun CsvPreflightDialog(state: DesktopState, pre: CsvPreflight, onChooseDestination: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = { if (!state.busy) state.csvDismiss() },
+        confirmButton = {
+            TextButton(onClick = onChooseDestination, enabled = !state.busy && pre.loginCount > 0) { Text("Choose where to save") }
+        },
+        dismissButton = { TextButton(onClick = state::csvDismiss, enabled = !state.busy) { Text("Cancel") } },
+        title = { Text("Export for another password manager?") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                pre.offlineNote?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(8.dp))
+                }
+                Text(
+                    "⚠ The CSV holds every password in PLAINTEXT. Anyone who reads the file reads your vault. Delete it (and empty the trash) as soon as the other manager has imported it.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text("${pre.loginCount} login(s) will be written.", style = MaterialTheme.typography.bodySmall)
+                NamedSkips("Not exported (secure notes):", pre.warnings.noteItems)
+                NamedSkips("Attachments can't be represented in CSV:", pre.warnings.withAttachments)
+                NamedSkips("Only the first website is kept:", pre.warnings.extraUris)
+                NamedSkips("Written, but a reimport would skip them (no username or password):", pre.warnings.emptyUsernameAndPassword)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Reimporting a CSV collapses exact duplicates.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+/** Named enumeration (spec 07 §1: by item name, never by count). Empty → renders nothing. */
+@Composable
+private fun NamedSkips(title: String, names: List<String>) {
+    if (names.isEmpty()) return
+    Spacer(Modifier.height(6.dp))
+    Text(title, style = MaterialTheme.typography.bodySmall)
+    names.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+}
+
+private fun exportDateSuffix(): String =
+    java.text.SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(java.util.Date())
+
+private fun lastBackupLine(lastExportAt: Long): String {
+    if (lastExportAt <= 0) return "Last backup: never"
+    return when (val days = ((System.currentTimeMillis() - lastExportAt) / 86_400_000L).toInt()) {
+        0 -> "Last backup: today"
+        1 -> "Last backup: yesterday"
+        else -> "Last backup: $days days ago"
+    }
+}
+
+private fun backupNudge(lastExportAt: Long): Boolean =
+    lastExportAt <= 0 || System.currentTimeMillis() - lastExportAt > 90L * 86_400_000L
 
 @Composable
 private fun TotpSetupBlock(state: DesktopState, setup: TotpSetupResponse) {
@@ -550,14 +794,14 @@ private fun Secret(label: String, value: String, onChange: (String) -> Unit) {
 }
 
 @Composable
-private fun CopyRow(label: String, value: String, secret: Boolean) {
+private fun CopyRow(label: String, value: String, secret: Boolean, clearSeconds: Int) {
     var show by remember { mutableStateOf(!secret) }
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (show) value else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
             if (secret) IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) }
-            TextButton(onClick = { copyWithAutoClear(value) }) { Text("Copy") }
+            TextButton(onClick = { copyWithAutoClear(value, clearSeconds) }) { Text("Copy") }
         }
     }
 }

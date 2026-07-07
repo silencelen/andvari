@@ -23,6 +23,7 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
 import io.silencelen.andvari.core.crypto.Attachments
 import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.model.AuditEvent
 import io.silencelen.andvari.core.model.ClientPolicy
@@ -252,10 +253,12 @@ class AuditHardeningTest : P4TestSupport() {
         val admin = VirtualClient("escrow@x.com", "escrow self upload password", fast = true)
         client.register(admin, bootstrapToken)
 
-        // fingerprint must match the server's pinned recovery fingerprint (P4TestSupport's keypair).
+        // fingerprint must match the server's pinned recovery fingerprint (P4TestSupport's
+        // keypair), and the blob must be structurally valid (requireEscrowBlob) — a real
+        // sealed UVK, exactly what a conforming client re-uploads.
         val put = client.put("/api/v1/escrow/self") {
             contentType(ContentType.Application.Json); authed(admin)
-            setBody(EscrowUpload(Bytes.toB64(crypto.randomBytes(48)), fingerprint))
+            setBody(EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, admin.userId, crypto.randomBytes(32))), fingerprint))
         }
         assertEquals(HttpStatusCode.OK, put.status, put.bodyAsText())
 
@@ -280,7 +283,7 @@ class AuditHardeningTest : P4TestSupport() {
             val resp = client.put("/api/v1/escrow/self") {
                 contentType(ContentType.Application.Json); authed(admin)
                 headers.forEach { (k, v) -> header(k, v) }
-                setBody(EscrowUpload(Bytes.toB64(crypto.randomBytes(48)), fingerprint))
+                setBody(EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, admin.userId, crypto.randomBytes(32))), fingerprint))
             }
             assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
             return client.auditRows(admin, "escrow_self_upload").first().ip // DESC → latest

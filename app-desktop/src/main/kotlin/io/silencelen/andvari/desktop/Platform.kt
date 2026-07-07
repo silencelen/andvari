@@ -52,7 +52,11 @@ fun copyPlain(value: String) {
     Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(value), null)
 }
 
-/** Copy to the system clipboard and auto-clear after [clearSeconds] (best-effort). */
+/**
+ * Copy to the system clipboard and auto-clear after [clearSeconds] (best-effort). Vault-secret
+ * call sites pass `max(1, policy.clipboardClearSeconds)` — clamped exactly like web's useCopy,
+ * so a policy of 0 still clears after 1 s (never "keep forever" for secrets).
+ */
 fun copyWithAutoClear(value: String, clearSeconds: Int = 30) {
     val clipboard = Toolkit.getDefaultToolkit().systemClipboard
     clipboard.setContents(StringSelection(value), null)

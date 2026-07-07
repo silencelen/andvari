@@ -1,5 +1,37 @@
 # andvari — changelog
 
+## 0.4.0 — backups & export, auto-lock, forward-compat, sync liveness
+
+- **Back up vault** (all clients). One file, encrypted with a passphrase you choose
+  (your master password is a fine choice — the backup is then exactly as protected as
+  your vault). Full fidelity: every vault you can read, TOTP, password history,
+  attachments (opt-in, capped), restorable years from now with nothing but the file,
+  the passphrase, and the documented format (spec 07). `tools/backup-cli` verifies,
+  dumps, and extracts backups offline. Restore flows in clients come next release —
+  the file format is frozen and forward-safe now.
+- **Export for another password manager** (all clients). Chrome-compatible CSV with a
+  `totp` column (andvari's own importer round-trips it; other managers import the
+  Chrome columns). The export screen names exactly what a CSV cannot carry.
+- **Auto-lock enforced.** The org policy's `autoLockSeconds` now actually locks all
+  three clients after inactivity (including the Android autofill path), and native
+  clients honor the clipboard-clear policy instead of a hardcoded 30 s.
+- **Forward compatibility fixed.** Editing an item written by a NEWER client version
+  no longer silently strips fields it doesn't know (spec 02 §3 is now enforced and
+  vector-tested in both implementations). This also fixes three live bugs: Android
+  resetting `favorite` on every edit, both native editors wiping password history,
+  and native edits truncating multi-URI logins to one URI.
+- **Sync liveness.** Web reconnects its live-sync socket after drops (server deploys,
+  laptop sleep) with fresh one-shot tickets; native clients sync on foreground and
+  every 5 min while open, so revocations and policy changes actually arrive.
+- **Safety rails.** Delete now asks for confirmation everywhere; deleting is still
+  fleet-wide. New-client-version documents fail closed instead of being downgraded.
+- **Ops.** `user_lookup` no longer writes the looked-up email into audit logs;
+  escrow uploads are structurally validated; a typed 426 upgrade-path surfaced in the
+  client API + an admin drill doc; recovery-cli gained an offline escrow-canary
+  `verify` and a portable fat jar; Uptime-Kuma now watches `/healthz` via a
+  heimdall-relayed push monitor (dead-mans if heimdall dies too).
+- Fielded 0.3.0 clients keep working; no wire or schema changes require upgrade.
+
 ## 0.3.0 — family sharing, offline cache, CSV import, autofill
 
 - **Family sharing.** Create shared vaults and add household members. Each member grant

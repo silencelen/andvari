@@ -12,11 +12,16 @@ import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.LoginRequest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.io.File
 import java.nio.file.Files
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -143,5 +148,59 @@ class ClientEngineTest {
         engine2.sync()
         assertEquals(250, engine2.items().size, "fresh device pulled + decrypted all imported items")
         assertTrue(engine2.items().any { it.doc.login?.password == "pw123" })
+    }
+
+    /**
+     * spec 02 §3 + spec 03 §5: conflict materialization must not strip unknown fields.
+     * A doc written by a "future" client (unknown keys at top, login, and history-entry
+     * level) goes through the REAL conflict path — stale edit → server flags → engine
+     * materializes copy + flag-clear rewrite — and BOTH pushed mutations must still
+     * carry the unknowns when decrypted.
+     */
+    @Test
+    fun conflictMaterialization_preservesUnknownFields() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val api = AndvariApi("", createClient { })
+        val policy = api.clientPolicy()
+        val recoveryPub = Bytes.fromB64(api.recoveryPubkey())
+        val (req, account) = Account.enroll(
+            "client-bootstrap", "cf@x.com", "CF", "conflict unknown password",
+            policy.kdfParams, recoveryPub, policy.recoveryFingerprint, "cf-device", crypto,
+        )
+        api.register(req)
+        val engineA = SyncEngine(api, account, InMemoryVaultCache())
+        engineA.sync()
+
+        // As decoded from a future client's plaintext (Account's json config shape).
+        val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        val futureDoc = json.decodeFromString(
+            ItemDoc.serializer(),
+            """{"type":"login","name":"Future","x-top":{"a":1},
+                "login":{"username":"u","password":"p1","x-flag":true,
+                         "passwordHistory":[{"password":"p0","retiredAt":1690000000000,"x-hist":"h"}]}}""",
+        )
+        engineA.save(null, futureDoc)
+        val itemId = engineA.items().single().itemId
+
+        // "Device B": second engine over an independent cache, synced to the same rev.
+        val engineB = SyncEngine(api, account, InMemoryVaultCache())
+        engineB.sync()
+
+        // A advances the item; B then edits from its now-STALE base rev → server flags
+        // the item, and B's post-push pull materializes the conflict (copy + flag-clear).
+        engineA.save(itemId, engineA.item(itemId)!!.doc.copy(name = "Future v2"))
+        engineB.save(itemId, engineB.item(itemId)!!.doc.copy(name = "Future stale"))
+
+        // Decrypt both pushed mutations through a plain pull on engine A.
+        engineA.sync()
+        val rewrite = engineA.item(itemId)
+        val copy = engineA.items().singleOrNull { it.doc.name.contains("(conflict ") }
+        assertNotNull(rewrite, "flag-clear rewrite still present")
+        assertNotNull(copy, "conflict copy materialized")
+        for ((label, doc) in listOf("copy" to copy.doc, "rewrite" to rewrite.doc)) {
+            assertEquals(buildJsonObject { put("a", 1) }, doc.extras["x-top"], "$label lost top-level unknown")
+            assertEquals(JsonPrimitive(true), doc.login?.extras?.get("x-flag"), "$label lost login-level unknown")
+            assertEquals(JsonPrimitive("h"), doc.login?.passwordHistory?.single()?.extras?.get("x-hist"), "$label lost history-entry unknown")
+        }
     }
 }

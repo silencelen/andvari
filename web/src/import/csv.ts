@@ -29,6 +29,7 @@ export interface ParsedRow {
   password: string;
   notes: string;
   timePasswordChangedMs: number | null;
+  totp: string | null;
 }
 
 /** wrong_field_count | bad_quote, at the 1-based physical line of the row's first char. */
@@ -89,6 +90,7 @@ export function parseCsvImport(bytes: Uint8Array): Parsed {
   const iNote = col("note") >= 0 ? col("note") : col("notes");
   const iRealm = col("httprealm");
   const iPwChanged = col("timepasswordchanged");
+  const iTotp = col("totp"); // andvari CSV round-trip column (spec 06 §1 / 07 §1); browsers lack it
 
   const rows: ParsedRow[] = [];
   const errors: RowError[] = [];
@@ -113,7 +115,8 @@ export function parseCsvImport(bytes: Uint8Array): Parsed {
     const rawName = format === "chrome" && iName >= 0 ? getOr(f, iName) : "";
     const name = rawName.length > 0 ? rawName : nameFallback(url);
     const pwChanged = iPwChanged >= 0 ? toLongOrNull(getOr(f, iPwChanged).trim()) : null;
-    rows.push({ name, url, username, password, notes, timePasswordChangedMs: pwChanged });
+    const totp = iTotp >= 0 ? getOr(f, iTotp).trim() || null : null;
+    rows.push({ name, url, username, password, notes, timePasswordChangedMs: pwChanged, totp });
   }
   return { format, rows, errors };
 }
@@ -136,7 +139,8 @@ export function planImport(parsed: Parsed, newId: () => string): ImportPlan {
   let skippedEmpty = 0;
   let collapsed = 0;
   const flagged: string[] = [];
-  const exactSeen = new Set<string>(); // url user pass
+  const exactSeen = new Set<string>(); // url user pass totp — totp included so a row that differs
+  //                                       ONLY by its TOTP seed is not dropped as an exact dup
   const groupCount = new Map<string, number>(); // url user → count so far (distinct passwords)
   const items: PlannedItem[] = [];
   for (const row of parsed.rows) {
@@ -144,7 +148,7 @@ export function planImport(parsed: Parsed, newId: () => string): ImportPlan {
       skippedEmpty++;
       continue;
     }
-    const exact = `${row.url} ${row.username} ${row.password}`;
+    const exact = `${row.url} ${row.username} ${row.password} ${row.totp ?? ""}`;
     if (exactSeen.has(exact)) {
       collapsed++;
       continue;
@@ -163,6 +167,7 @@ export function planImport(parsed: Parsed, newId: () => string): ImportPlan {
         username: row.username,
         password: row.password,
         uris: row.url.length > 0 ? [row.url] : [],
+        ...(row.totp ? { totp: row.totp } : {}),
       },
     };
     items.push({ itemId: newId(), doc });
