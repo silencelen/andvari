@@ -157,6 +157,7 @@ fun AndvariApp(vm: AndvariViewModel) {
             is Screen.Unlock -> UnlockScreen(vm, ui, screen.email)
             is Screen.Vault -> VaultScreen(vm, ui)
             is Screen.Settings -> SettingsScreen(vm, ui)
+            is Screen.AutofillStatus -> AutofillStatusScreen(vm, ui)
         }
     }
 }
@@ -701,6 +702,18 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                     Button(onClick = vm::backupBegin, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) { Text("Back up vault…") }
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(onClick = vm::csvBegin, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) { Text("Export for another password manager…") }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Autofill", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "Is autofill working? See what the last fill request looked like and why it did (or didn't) offer anything — screenshot-friendly.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(onClick = vm::openAutofillStatus, modifier = Modifier.fillMaxWidth()) { Text("Autofill status") }
                 }
             }
             Spacer(Modifier.height(16.dp))

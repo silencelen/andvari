@@ -27,37 +27,65 @@ import java.util.concurrent.atomic.AtomicInteger
  * - Self-guard: never fill our own screens (no recursion, no master-password capture).
  * - Signed-out device (no session / empty token): return null, not a dead-end unlock row.
  * - Never logs field values, item names, or URIs.
+ *
+ * Diagnostics: every formerly-silent exit records a terminal-reason event via
+ * [AutofillDebugLog] (last-request summary always; the 50-event ring buffer only while
+ * the Settings → Autofill status "Debug autofill (24h)" toggle is armed). All recording
+ * is throw-proof and value-free — it can never break a fill or leak vault material.
  */
 class AndvariAutofillService : AutofillService() {
 
     override fun onFillRequest(request: FillRequest, cancellationSignal: CancellationSignal, callback: FillCallback) {
-        val response = runCatching { handleFill(request) }.getOrNull()
+        val trace = AutofillDebugLog.FillTrace(origin = "service")
+        val response = runCatching { handleFill(request, trace) }
+            .onFailure { t ->
+                // CLASS name only — exception messages routinely echo their input
+                // (URIs, JSON, view content) and must never reach the log (never-log rule).
+                trace.finish(applicationContext, AutofillDebugLog.FillReason.EXCEPTION, AutofillDebugLog.exceptionDetail(t))
+            }
+            .getOrNull()
         // onSuccess(null) is the correct "no suggestions" reply; a failure degrades to it too.
         callback.onSuccess(response)
     }
 
-    private fun handleFill(request: FillRequest): FillResponse? {
-        val structure = request.fillContexts.lastOrNull()?.structure ?: return null
-        val appPackage = structure.activityComponent?.packageName ?: return null
+    private fun handleFill(request: FillRequest, trace: AutofillDebugLog.FillTrace): FillResponse? {
+        val ctx = applicationContext
+        val structure = request.fillContexts.lastOrNull()?.structure
+            ?: return null.also { trace.finish(ctx, AutofillDebugLog.FillReason.NO_STRUCTURE) }
+        val appPackage = structure.activityComponent?.packageName
+            ?: return null.also { trace.finish(ctx, AutofillDebugLog.FillReason.NO_STRUCTURE) }
+        trace.pkg = appPackage
 
         // Self-guard: never offer suggestions inside andvari itself (our unlock/sign-in UI).
-        if (appPackage == packageName) return null
+        if (appPackage == packageName) {
+            trace.finish(ctx, AutofillDebugLog.FillReason.SELF_FILL)
+            return null
+        }
 
         // No auth row for a signed-out device (e.g. after revocation) — the unlock activity
         // would have no email/tokens to work with (a dead end inside another app's fill flow).
         val store = SessionStore(applicationContext)
         val session = store.load()
-        if (session == null || session.accessToken.isEmpty()) return null
+        if (session == null || session.accessToken.isEmpty()) {
+            trace.finish(ctx, AutofillDebugLog.FillReason.SIGNED_OUT)
+            return null
+        }
 
         // Belt-and-suspenders: make sure the process-wide auto-lock gate carries the
         // last-known policy window even if no other component set it in this process.
         VaultSession.setAutoLockSeconds(store.autoLockSeconds)
 
         val form = StructureParser.parse(structure)
-        if (form.fields.isEmpty()) return null // no username/password field classified
+        trace.setForm(form)
+        trace.setTrust(ctx, form)
+        if (form.fields.isEmpty()) {
+            trace.finish(ctx, AutofillDebugLog.FillReason.NO_FIELDS)
+            return null // no username/password field classified
+        }
 
         val inlineRequest: InlineSuggestionsRequest? =
             if (Build.VERSION.SDK_INT >= 30) request.inlineSuggestionsRequest else null
+        trace.inline = inlineRequest != null
 
         // Snapshot the session ONCE; a concurrent lock() cannot NPE this reference, at worst
         // it makes the in-memory read slightly stale. getIfFresh enforces the inactivity
@@ -65,11 +93,11 @@ class AndvariAutofillService : AutofillService() {
         // the unlock row instead of a silent credential fill.
         val unlocked = VaultSession.getIfFresh()
         return if (unlocked == null) {
-            lockedResponse(form, inlineRequest)
+            lockedResponse(form, inlineRequest).also { trace.finish(ctx, AutofillDebugLog.FillReason.LOCKED_ROW_SHOWN) }
         } else {
             DatasetBuilder.buildUnlockedResponse(
-                this, unlocked.engine.items(), form, TrustedBrowsers.isTrusted(this, appPackage), inlineRequest,
-            )
+                this, unlocked.engine.items(), form, TrustedBrowsers.isTrusted(this, appPackage), inlineRequest, trace,
+            ).also { trace.finishFromBuild(ctx) }
         }
     }
 

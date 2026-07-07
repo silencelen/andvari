@@ -12,9 +12,11 @@ import io.silencelen.andvari.core.client.autofill.FieldSignal
  * One classified fillable field. [webDomain] is the nearest ancestor frame's
  * `getWebDomain()` — carried PER FIELD so a cross-origin iframe cannot borrow another
  * frame's domain (binding requirement). Null when no frame domain applies (native app,
- * or a frame that declared none).
+ * or a frame that declared none). [signal] is the diagnostic-only "winning signal" label
+ * (e.g. "hint:password", "html:type=password", "inputType:0xE1") for the Autofill-status
+ * screen — it names WHICH signal classified the field, never a field value.
  */
-data class ParsedField(val id: AutofillId, val kind: FieldKind, val webDomain: String?)
+data class ParsedField(val id: AutofillId, val kind: FieldKind, val webDomain: String?, val signal: String = "")
 
 /**
  * The classified form. [fields] holds only USERNAME/PASSWORD fields (NONE is dropped).
@@ -56,12 +58,37 @@ object StructureParser {
 
         val id = node.autofillId
         if (id != null && important != View.IMPORTANT_FOR_AUTOFILL_NO) {
-            val kind = FieldClassifier.classify(signalOf(node))
+            val sig = signalOf(node)
+            val kind = FieldClassifier.classify(sig)
             if (kind == FieldKind.USERNAME || kind == FieldKind.PASSWORD) {
-                out.add(ParsedField(id, kind, domain))
+                out.add(ParsedField(id, kind, domain, winningSignal(sig, kind)))
             }
         }
         for (i in 0 until node.childCount) walk(node.getChildAt(i), domain, depth + 1, out)
+    }
+
+    /**
+     * Diagnostic label for WHICH signal group won the classification, derived by ablation
+     * against the real [FieldClassifier] (never a re-implementation of its rules): replay
+     * the classifier with only one signal group at a time, in the classifier's own
+     * priority order, and name the first group that alone reproduces [kind]. Values only
+     * name signal METADATA (hints, html type/name attr, InputType bits) — never field text.
+     */
+    private fun winningSignal(s: FieldSignal, kind: FieldKind): String {
+        if (s.hints.isNotEmpty() && FieldClassifier.classify(FieldSignal(hints = s.hints)) == kind) {
+            return "hint:" + s.hints.joinToString(",") { it.take(32) }
+        }
+        if (FieldClassifier.classify(FieldSignal(htmlTag = s.htmlTag, htmlType = s.htmlType, htmlNameOrId = s.htmlNameOrId)) == kind) {
+            return buildString {
+                append("html:")
+                s.htmlType?.let { append("type=").append(it.take(32)) }
+                s.htmlNameOrId?.let { if (length > 5) append(","); append("name=").append(it.take(32)) }
+            }
+        }
+        if (FieldClassifier.classify(FieldSignal(inputTypeClass = s.inputTypeClass, inputTypeVariation = s.inputTypeVariation)) == kind) {
+            return "inputType:0x" + (s.inputTypeClass or s.inputTypeVariation).toString(16).uppercase()
+        }
+        return "combined" // only the full signal set reproduces the verdict
     }
 
     private fun signalOf(node: AssistStructure.ViewNode): FieldSignal {

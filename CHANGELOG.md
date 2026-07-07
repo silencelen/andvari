@@ -1,5 +1,29 @@
 # andvari — changelog
 
+## Unreleased — v5 refinement (version pinned by batch B4)
+
+Polish, fixes, and half-wired features across the shipped stack. Landing in reviewed
+batches; entries added as each ships.
+
+- **Vault screen chrome (web).** The toolbar no longer overflows — the two export actions
+  fold into an "Export ▾" menu (viewport-clamped, keyboard-navigable) so the search box
+  keeps its width; the header survives phone widths with Lock always reachable; light-theme
+  buttons and the item monogram are legible in both themes; the connectivity dot is honest
+  (green only after a successful sync, grey on a sustained disconnect).
+- **Android autofill resurrected.** Fixed the four reasons it produced zero suggestions on
+  every browser: missing package-visibility (`<queries>`), a Chrome signing-cert pin
+  truncated by one base64 character (now guarded by a core 32-byte-decode test),
+  `supportsInlineSuggestions` never declared, and every failure collapsing into silence. New
+  in-app **Autofill status** screen (service/vault state, last request with the "why nothing
+  filled" reason and the caller's observed cert digest, and a self-expiring debug log that
+  records only field types/counts/host names — never values), a **"Open andvari"** fallback
+  row so a fill request is never dead-silent, and a post-unlock no-match message. Firefox and
+  Samsung pins are captured on-device via the new screen (`docs/autofill-fold-debugging.md`).
+- **Backups (ops).** The nightly clean-snapshot job no longer silently failed every night
+  after the first (VACUUM INTO refused to overwrite — PBS/B2 had been carrying a frozen
+  first-night copy); the snapshot is now `600` from creation and failures escalate to
+  journald instead of unwatched cron mail.
+
 ## 0.4.0 — backups & export, auto-lock, forward-compat, sync liveness
 
 - **Back up vault** (all clients). One file, encrypted with a passphrase you choose

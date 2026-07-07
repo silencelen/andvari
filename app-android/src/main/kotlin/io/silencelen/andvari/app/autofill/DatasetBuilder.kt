@@ -42,10 +42,15 @@ object DatasetBuilder {
         structure: AssistStructure,
         items: List<VaultItem>,
         inlineRequest: InlineSuggestionsRequest?,
+        trace: AutofillDebugLog.FillTrace? = null,
     ): FillResponse? {
         val form = StructureParser.parse(structure)
+        trace?.pkg = form.appPackage.ifEmpty { null }
+        trace?.setForm(form)
+        trace?.setTrust(context, form)
+        trace?.inline = inlineRequest != null
         if (form.fields.isEmpty()) return null
-        return buildUnlockedResponse(context, items, form, TrustedBrowsers.isTrusted(context, form.appPackage), inlineRequest)
+        return buildUnlockedResponse(context, items, form, TrustedBrowsers.isTrusted(context, form.appPackage), inlineRequest, trace)
     }
 
     fun buildUnlockedResponse(
@@ -54,12 +59,64 @@ object DatasetBuilder {
         form: ParsedForm,
         trusted: Boolean,
         inlineRequest: InlineSuggestionsRequest?,
+        trace: AutofillDebugLog.FillTrace? = null,
     ): FillResponse? {
         val datasets = buildDatasets(context, items, form, trusted, inlineRequest)
-        if (datasets.isEmpty()) return null
+        trace?.let { annotate(it, items, form, trusted, datasets.size) }
+        if (datasets.isEmpty()) {
+            // Honest failure (never absolute silence): the form HAS fillable login fields
+            // (form.fields is USERNAME/PASSWORD only — the gate that keeps this row off
+            // every plain text box), so offer a single "Open andvari" row instead of
+            // vanishing. Bitwarden/1Password convention; tapping launches the app.
+            val fallback = openAppDataset(context, form, inlineRequest) ?: return null
+            val response = runCatching { FillResponse.Builder().addDataset(fallback).build() }.getOrNull()
+            // Only a DELIVERED row justifies the confident NO_URI_MATCH label downstream
+            // (finishFromBuild); a failed build must read as UNKNOWN, not "no match".
+            trace?.fallbackRowShown = response != null
+            return response
+        }
         val b = FillResponse.Builder()
         datasets.forEach { b.addDataset(it) }
         return b.build()
+    }
+
+    /**
+     * Diagnostic counts for the Autofill-status screen (counts only — never names/values;
+     * see AutofillDebugLog). Per-field counting mirrors [buildDatasets]' REAL fillability
+     * rule — the item must carry a credential of the field's KIND (username for USERNAME
+     * fields, password for PASSWORD) AND match that field's own target — so the screen
+     * can't contradict what actually filled. The only deliberate difference: these are
+     * RAW candidate counts, not capped at [MAX_DATASETS] (FieldSummary documents that).
+     */
+    private fun annotate(
+        trace: AutofillDebugLog.FillTrace,
+        items: List<VaultItem>,
+        form: ParsedForm,
+        trusted: Boolean,
+        datasetCount: Int,
+    ) {
+        runCatching {
+            trace.datasetCount = datasetCount
+            val logins = items.mapNotNull { item ->
+                if (item.doc.type != "login") return@mapNotNull null
+                val login = item.doc.login ?: return@mapNotNull null
+                if (login.username.isNullOrEmpty() && login.password.isNullOrEmpty()) return@mapNotNull null
+                login
+            }
+            trace.loginItemCount = logins.size
+            trace.setMatchCounts(
+                form.fields.map { f ->
+                    logins.count { login ->
+                        val hasCred = when (f.kind) {
+                            FieldKind.USERNAME -> !login.username.isNullOrEmpty()
+                            FieldKind.PASSWORD -> !login.password.isNullOrEmpty()
+                            else -> false
+                        }
+                        hasCred && UriMatch.matchLogins(login.uris, targetFor(f, form, trusted))
+                    }
+                },
+            )
+        }
     }
 
     private fun buildDatasets(
@@ -162,6 +219,58 @@ object DatasetBuilder {
         }
         return runCatching { b.build() }.getOrNull()
     }
+
+    // ---- no-match fallback row ----
+
+    /**
+     * The always-present "Open andvari" row for a login form with ZERO matching items.
+     * A dataset with `setAuthentication` and null values fills nothing — tapping launches
+     * MainActivity so the user can add/inspect the login instead of concluding autofill
+     * is broken. Built under runCatching: a failure degrades to the old null response.
+     */
+    @Suppress("DEPRECATION") // legacy setValue overloads pre-33, as in buildDatasetLegacy
+    private fun openAppDataset(context: Context, form: ParsedForm, inlineRequest: InlineSuggestionsRequest?): Dataset? =
+        runCatching {
+            val title = "Open andvari"
+            val subtitle = "No match for this app or site"
+            val menu = presentationRow(context, title, subtitle)
+            val spec = inlineSpecs(inlineRequest).firstOrNull()
+            val inline = if (Build.VERSION.SDK_INT >= 30 && spec != null) buildInline(context, title, subtitle, spec) else null
+            // FLAG_MUTABLE for the same reason as the locked auth row: the platform injects
+            // fill extras into an authentication IntentSender's launch intent.
+            val flags = if (Build.VERSION.SDK_INT >= 31) {
+                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            // NEW_TASK is required: dataset-auth IntentSenders fire from the BROWSER's
+            // activity (startIntentSenderForResult), so without it MainActivity would be
+            // pushed onto the browser's task stack. NEW_TASK routes it to andvari's own
+            // task (bringing an existing one forward — deliberately no CLEAR_TASK, which
+            // would destroy whatever the user had open in the app).
+            val launch = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val pi = PendingIntent.getActivity(context, OPEN_APP_REQUEST_CODE, launch, flags)
+            val b = if (Build.VERSION.SDK_INT >= 33) {
+                val pres = Presentations.Builder().setMenuPresentation(menu)
+                if (inline != null) pres.setInlinePresentation(inline)
+                Dataset.Builder(pres.build())
+            } else {
+                Dataset.Builder(menu)
+            }
+            // Null values: the dataset must reference at least one field id to be shown,
+            // but fills nothing — the tap only fires the authentication intent.
+            for (f in form.fields) {
+                when {
+                    Build.VERSION.SDK_INT >= 33 -> b.setValue(f.id, null)
+                    Build.VERSION.SDK_INT >= 30 && inline != null -> b.setValue(f.id, null, menu, inline)
+                    else -> b.setValue(f.id, null)
+                }
+            }
+            b.setAuthentication(pi.intentSender)
+            b.build()
+        }.getOrNull()
+
+    private const val OPEN_APP_REQUEST_CODE = 0x0AFD // stable id; intent is always identical
 
     // ---- locked-path presentations ----
 

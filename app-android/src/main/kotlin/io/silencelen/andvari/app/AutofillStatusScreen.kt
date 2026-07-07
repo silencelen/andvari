@@ -1,0 +1,308 @@
+package io.silencelen.andvari.app
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import android.view.autofill.AutofillManager
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import io.silencelen.andvari.app.autofill.AutofillDebugLog
+import io.silencelen.andvari.core.client.autofill.SavedUri
+import io.silencelen.andvari.core.client.autofill.UriMatch
+
+/**
+ * "Autofill status" — the screenshot-me diagnostic surface (recon F08). Three sections:
+ * platform/service state (with a "Set as autofill service" shortcut), the LAST fill
+ * request as recorded by AutofillDebugLog (trust verdict, parsed fields, terminal
+ * reason), and the debug ring buffer (24h toggle + copy-to-clipboard). Read-only over
+ * the vault: shows only counts/enums/hosts — never item names or values.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AutofillStatusScreen(vm: AndvariViewModel, ui: UiState) {
+    val ctx = LocalContext.current
+    var tick by remember { mutableIntStateOf(0) } // bump to re-read everything below
+
+    val afm = remember { runCatching { ctx.getSystemService(AutofillManager::class.java) }.getOrNull() }
+    val supported = remember(tick) { runCatching { afm?.isAutofillSupported == true }.getOrDefault(false) }
+    val enabled = remember(tick) { runCatching { afm?.hasEnabledAutofillServices() == true }.getOrDefault(false) }
+
+    val store = remember { SessionStore(ctx.applicationContext) }
+    val signedIn = remember(tick) { store.load()?.accessToken?.isNotEmpty() == true }
+    val unlocked = remember(tick) { VaultSession.get() != null }
+    val idleSeconds = remember(tick) { VaultSession.idleSeconds() }
+    val autoLock = remember(tick) { store.autoLockSeconds }
+    val last = remember(tick) { AutofillDebugLog.lastEvent(ctx) }
+    var debugUntil by remember { mutableStateOf(store.autofillDebugUntil) }
+
+    // Item URI census (counts only). ui.items is the unlocked working set (empty when locked).
+    val census = remember(tick, ui.items) { uriCensus(ui.items.map { it.doc }) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Autofill status", style = MaterialTheme.typography.titleLarge) },
+                navigationIcon = { IconButton(onClick = vm::closeAutofillStatus) { Icon(Icons.Default.ArrowBack, "back") } },
+                actions = { IconButton(onClick = { tick++ }) { Icon(Icons.Default.Refresh, "refresh") } },
+            )
+        },
+    ) { pad ->
+        Column(Modifier.padding(pad).fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+            // ---- section 1: service + vault state ----
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Service", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.height(8.dp))
+                    StatusRow("Autofill supported on this device", supported)
+                    StatusRow("andvari is the selected autofill service", enabled)
+                    if (!enabled) {
+                        Spacer(Modifier.height(8.dp))
+                        var noPicker by remember { mutableStateOf(false) }
+                        Button(
+                            onClick = {
+                                // Deliberately NOT gated on resolveActivity(): package
+                                // visibility (API 30+) filters it and the manifest
+                                // <queries> lists only browser <package> entries, so it
+                                // can return null even though the Settings picker exists.
+                                // Just fire it; if the device truly has no handler the
+                                // ActivityNotFoundException lands in runCatching and the
+                                // manual-path hint below is shown.
+                                val ok = runCatching {
+                                    ctx.startActivity(
+                                        Intent(Settings.ACTION_REQUEST_SET_AUTOFILL_SERVICE)
+                                            .setData(Uri.parse("package:${ctx.packageName}")),
+                                    )
+                                }.isSuccess
+                                noPicker = !ok
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Set as autofill service") }
+                        if (noPicker) {
+                            Text(
+                                "This device offers no picker — enable it under System settings → Passwords & accounts → Autofill service.",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    StatusRow("Signed in", signedIn)
+                    StatusRow("Vault unlocked", unlocked)
+                    Spacer(Modifier.height(8.dp))
+                    if (unlocked) {
+                        KeyValue("Items", "${census.total} (${census.logins} logins)")
+                        KeyValue("Logins with a web address", "${census.web}")
+                        KeyValue("Logins with an androidapp:// link", "${census.androidApp}")
+                        KeyValue("Logins with NO address (can never match)", "${census.noUri}")
+                    } else {
+                        Text("Unlock the vault to see item counts.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    KeyValue("Auto-lock window", if (autoLock > 0) "${autoLock}s" else "disabled")
+                    if (unlocked) KeyValue("Idle for", "${idleSeconds}s")
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+
+            // ---- section 2: last fill request ----
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Last fill request", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.height(8.dp))
+                    if (last == null) {
+                        Text(
+                            "No autofill request seen yet — open a login form in your browser (or an app's sign-in screen) and come back.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        KeyValue("When", formatTs(last.ts))
+                        KeyValue("From", "${last.pkg ?: "(unknown)"} · via ${last.origin}")
+                        last.trust?.let { KeyValue("Browser trust", it) }
+                        KeyValue("Keyboard inline UI requested", if (last.inline) "yes" else "no")
+                        KeyValue("Outcome", last.reason + (last.detail?.let { " ($it)" } ?: ""))
+                        outcomeHint(last)?.let {
+                            Spacer(Modifier.height(4.dp))
+                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (last.observedDigest != null) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Observed signing-cert digest of ${last.pkg ?: "the caller"} — pin exactly this value in BrowserCertPins to trust it:",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                            )
+                            SelectionContainer {
+                                Text(last.observedDigest, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        if (last.fields.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text("Fields seen (${last.fields.size})", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            last.fields.forEach { f ->
+                                Text(
+                                    buildString {
+                                        append("• ").append(f.kind)
+                                        f.host?.let { append(" · ").append(it) }
+                                        if (f.signal.isNotEmpty()) append(" · ").append(f.signal)
+                                        if (f.matches >= 0) append(" · ").append(f.matches).append(" match(es)")
+                                    },
+                                    style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+
+            // ---- section 3: debug ring buffer ----
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Debug log", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "Keeps the last ${AutofillDebugLog.RING_MAX} fill events on this device (reasons, counts and hosts only — never passwords or item names). Turns itself off after 24 hours.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    val now = System.currentTimeMillis()
+                    val armed = debugUntil > now
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Debug autofill (24h)", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                        Switch(checked = armed, onCheckedChange = { on ->
+                            val v = if (on) System.currentTimeMillis() + AutofillDebugLog.DEBUG_WINDOW_MS else 0L
+                            // Through the log module, not raw prefs: it refreshes the
+                            // fill path's cached armed-check AND purges the ring file
+                            // the moment the toggle is disarmed (off = deleted, not kept).
+                            AutofillDebugLog.setDebugUntil(ctx, v)
+                            debugUntil = v
+                        })
+                    }
+                    if (armed) {
+                        Text(
+                            "Recording — expires in ${remainingLabel(debugUntil - now)}.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary,
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    var copied by remember { mutableStateOf<String?>(null) }
+                    OutlinedButton(
+                        onClick = {
+                            copied = runCatching {
+                                val text = AutofillDebugLog.ringText(ctx)
+                                if (text.isBlank()) {
+                                    "Log is empty — turn the toggle on, reproduce the fill, then copy."
+                                } else {
+                                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    cm.setPrimaryClip(ClipData.newPlainText("andvari autofill log", text))
+                                    "Copied ${text.lineSequence().count { it.isNotBlank() }} event(s) to the clipboard."
+                                }
+                            }.getOrElse { "Couldn't read the log." }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Copy log") }
+                    copied?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- helpers ----
+
+private data class UriCensus(val total: Int, val logins: Int, val web: Int, val androidApp: Int, val noUri: Int)
+
+private fun uriCensus(docs: List<io.silencelen.andvari.core.client.ItemDoc>): UriCensus {
+    var logins = 0; var web = 0; var androidApp = 0; var noUri = 0
+    for (doc in docs) {
+        if (doc.type != "login") continue
+        val login = doc.login ?: continue
+        logins++
+        val parsed = login.uris.mapNotNull { UriMatch.parseSavedUri(it) }
+        if (parsed.any { it is SavedUri.Web }) web++
+        if (parsed.any { it is SavedUri.AndroidApp }) androidApp++
+        if (parsed.isEmpty()) noUri++
+    }
+    return UriCensus(docs.size, logins, web, androidApp, noUri)
+}
+
+/** One-line plain-English translation of the terminal reason, for the screenshot. */
+private fun outcomeHint(e: AutofillDebugLog.FillEvent): String? = when (e.reason) {
+    "NO_STRUCTURE" -> "The system sent no form data — usually a transient platform issue."
+    "SELF_FILL" -> "andvari never fills its own screens."
+    "SIGNED_OUT" -> "Not signed in on this device, so no suggestions are possible."
+    "NO_FIELDS" -> "The screen had no field andvari recognizes as a username or password."
+    "LOCKED_ROW_SHOWN" -> "Vault was locked — an “Unlock andvari” row was offered."
+    "NO_ITEMS" -> "The vault has no usable logins (username or password required)."
+    "NO_URI_MATCH" -> "Logins exist, but none list this site/app — an “Open andvari” row was offered. Add the site's address (or androidapp://package) to the login."
+    "DATASETS" -> "Suggestions were offered (${e.detail ?: "?"} match(es))."
+    "EXCEPTION" -> "The fill failed with an internal error (class above); enable the debug log and reproduce."
+    "UNKNOWN" -> "The fill ended before andvari could tell why — enable the debug log and reproduce."
+    else -> null
+}
+
+private fun formatTs(ts: Long): String =
+    java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.ROOT).format(java.util.Date(ts))
+
+private fun remainingLabel(ms: Long): String {
+    val totalMin = ms / 60_000
+    return if (totalMin >= 60) "${totalMin / 60}h ${totalMin % 60}m" else "${totalMin}m"
+}
+
+@Composable
+private fun StatusRow(label: String, ok: Boolean) {
+    Row(Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "●",
+            color = if (ok) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+        Text(if (ok) "yes" else "no", style = MaterialTheme.typography.bodyMedium, color = if (ok) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error)
+    }
+}
+
+@Composable
+private fun KeyValue(label: String, value: String) {
+    Row(Modifier.padding(vertical = 2.dp)) {
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+    }
+}
