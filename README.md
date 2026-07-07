@@ -13,14 +13,14 @@ and recovery goes through an offline escrow key, never the server.
 
 | Path | What |
 |---|---|
-| `spec/` | **Normative** protocol + crypto spec (00–06) and `test-vectors/` — code follows spec, never the reverse |
+| `spec/` | **Normative** protocol + crypto spec (00–07) and `test-vectors/` — code follows spec, never the reverse |
 | `core/` | Kotlin Multiplatform (android + jvm): crypto, models, sync engine, client cache |
 | `server/` | ktor JVM sync server (depends on `:core`) |
 | `app-android/` | Android client |
 | `app-desktop/` | Compose for Desktop Windows client |
 | `web/` | Independent TypeScript implementation of the spec (Vite + React) |
 | `tools/vector-gen` | Emits `spec/test-vectors/*.json` from the Kotlin reference implementation |
-| `tools/recovery-cli` | Offline escrow ceremony + recovery tool (never runs on the server) |
+| `tools/recovery-cli` / `tools/backup-cli` | Offline escrow ceremony/recovery + offline `.andvari` backup reader (verify/dump/extract) |
 | `ops/` | LXC bring-up runbook, systemd units, deploy + backup scripts |
 | `scripts/` | `verify.sh` (both test suites), `build.sh`, `ship.sh` (devstore) |
 

@@ -14,7 +14,9 @@ import io.silencelen.andvari.core.client.BackupPayload
 import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupSkippedItem
 import io.silencelen.andvari.core.client.BackupVault
+import io.silencelen.andvari.core.client.ConflictCopy
 import io.silencelen.andvari.core.client.CsvImport
+import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.crypto.SharedGrant
@@ -72,7 +74,9 @@ fun main(args: Array<String>) {
     write(outDir, "urimatch.json", uriMatch())
     write(outDir, "itemdoc.json", itemDoc())
     write(outDir, "export.json", exportVectors())
-    println("vector-gen: wrote 12 files to ${outDir.absolutePath}")
+    write(outDir, "strength.json", strength())
+    write(outDir, "conflictcopy.json", conflictCopy())
+    println("vector-gen: wrote 14 files to ${outDir.absolutePath}")
 }
 
 /** Argon2id timing on this host (spec 01 §9 benchmark table). */
@@ -940,6 +944,58 @@ private fun hibp(): JsonObject = buildJsonObject {
                 put("suffix", Hibp.suffix(hash))
                 put("rangeResponse", response)
                 put("expectedCount", count)
+            }
+        }
+    }
+}
+
+
+/**
+ * Strength-estimator vectors (spec 07 §2.3): the score gates the backup-passphrase
+ * floor, so a drift between impls means one client accepts a passphrase another
+ * rejects. Cases straddle every class-weight and bit-threshold boundary, incl.
+ * UTF-16-length semantics (Kotlin String.length == JS String.length).
+ */
+private fun strength(): JsonObject = buildJsonObject {
+    val cases = listOf(
+        "", "a", "password", "aaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaa",
+        "passwordpasswordpassword", "Password1", "Password12", "Passw0rd!",
+        "correct horse battery staple", "Tr0ub4dour&3", "aA1!aA1!aA1!aA1!aA1!",
+        "0123456789012345678", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm",
+        "pässwörd pässwörd", "😀😀😀😀😀😀😀😀", "  spaces  count  too  ",
+        "xX9# ", "the quick brown fox jumps over the lazy dog 42 TIMES!",
+    )
+    putJsonArray("cases") {
+        for (pw in cases) {
+            addJsonObject {
+                put("password", pw)
+                put("utf16Length", pw.length)
+                put("score", Strength.estimateStrength(pw))
+            }
+        }
+    }
+}
+
+/**
+ * Conflict-copy-id vectors (spec 03 §5): the deterministic (itemId, rev) → UUID map that
+ * makes concurrent materializers converge on ONE copy. Divergence silently doubles
+ * conflict copies across the fleet.
+ */
+private fun conflictCopy(): JsonObject = buildJsonObject {
+    val ids = listOf(
+        "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10" to 1L,
+        "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10" to 2L,
+        "ffffffff-ffff-4fff-bfff-ffffffffffff" to 0L,
+        "00000000-0000-4000-8000-000000000000" to 9007199254740991L,
+        "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60" to 42L,
+        "e3c0418f-1118-4a5a-8888-b26efdd3eafc" to 123456789L,
+    )
+    putJsonArray("cases") {
+        for ((itemId, rev) in ids) {
+            addJsonObject {
+                put("itemId", itemId)
+                put("rev", rev)
+                put("copyId", ConflictCopy.id(crypto, itemId, rev))
             }
         }
     }

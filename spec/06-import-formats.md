@@ -32,7 +32,8 @@ only). `guid` is NOT preserved as itemId (always mint fresh UUIDs).
 
 - Encoding: UTF-8 (accept BOM). Reject files > 10 MiB or > 10 000 rows with a clear
   error.
-- **Dedup rule:** exact duplicate rows (same url+username+password) collapse to one.
+- **Dedup rule:** exact duplicate rows (same url+username+password+totp) collapse to
+  one (totp joined the key in 0.4.0 alongside the `totp` CSV column).
   Same url+username with DIFFERENT passwords imports both, second and later named
   "<name> (2)", "<name> (3)"…, and the import report flags them for manual cleanup.
 - Import report (shown, not stored): imported / skipped-empty / collapsed /

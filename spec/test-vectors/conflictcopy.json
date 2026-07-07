@@ -1,0 +1,34 @@
+{
+    "cases": [
+        {
+            "itemId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
+            "rev": 1,
+            "copyId": "a388c6f1-d2be-413e-9828-ca172f8af982"
+        },
+        {
+            "itemId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
+            "rev": 2,
+            "copyId": "05d6a458-a973-4107-9de1-23e40523e7c1"
+        },
+        {
+            "itemId": "ffffffff-ffff-4fff-bfff-ffffffffffff",
+            "rev": 0,
+            "copyId": "d89f1a9d-fabf-4037-9893-10f70263da33"
+        },
+        {
+            "itemId": "00000000-0000-4000-8000-000000000000",
+            "rev": 9007199254740991,
+            "copyId": "75e4a71f-67d2-478a-9d6e-7b23ef0301e3"
+        },
+        {
+            "itemId": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+            "rev": 42,
+            "copyId": "bd4c0c47-9b54-42d9-9737-be9e636bbbaf"
+        },
+        {
+            "itemId": "e3c0418f-1118-4a5a-8888-b26efdd3eafc",
+            "rev": 123456789,
+            "copyId": "d7296687-d9e9-412e-885f-f552abcddb49"
+        }
+    ]
+}

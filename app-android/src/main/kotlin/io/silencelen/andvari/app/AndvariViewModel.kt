@@ -150,7 +150,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     private val engine: SyncEngine? get() = VaultSession.get()?.engine
 
     private fun newApi(tokens: Tokens? = null): AndvariApi =
-        AndvariApi(store.baseUrl, HttpClient(OkHttp), tokens) { store.updateTokens(it) }
+        AndvariApi(store.baseUrl, HttpClient(OkHttp), tokens, { store.updateTokens(it) }) // platform defaults to "android"
 
     fun start() {
         viewModelScope.launch {

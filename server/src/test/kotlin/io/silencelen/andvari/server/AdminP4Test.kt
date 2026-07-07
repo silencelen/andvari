@@ -95,4 +95,40 @@ class AdminP4Test : P4TestSupport() {
         ).single()
         assertNotNull(after.revokedAt)
     }
+
+    @Test
+    fun lastActiveAdminCannotBeDisabled() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+
+        val admin = VirtualClient("root@x.com", "admin password value")
+        client.register(admin, bootstrapToken)
+
+        // Sole admin disabling themselves = instance-wide lockout → refused.
+        val selfDisable = client.post("/api/v1/admin/users/${admin.userId}/disable") { authed(admin) }
+        assertEquals(HttpStatusCode.BadRequest, selfDisable.status, selfDisable.bodyAsText())
+        assertEquals("last_admin", errorOf(selfDisable))
+
+        // Add a second ADMIN — now the first can be disabled (an active admin remains)...
+        val invResp = client.post("/api/v1/admin/users") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(InviteRequest("admin2@x.com", isAdmin = true))
+        }
+        val invite = json.decodeFromString(InviteResponse.serializer(), invResp.bodyAsText())
+        val admin2 = VirtualClient("admin2@x.com", "second admin password")
+        assertTrue(client.register(admin2, invite.inviteToken).isAdmin)
+
+        val disableFirst = client.post("/api/v1/admin/users/${admin.userId}/disable") { authed(admin2) }
+        assertEquals(HttpStatusCode.OK, disableFirst.status, disableFirst.bodyAsText())
+
+        // ...but the remaining admin is now the last one and is protected again.
+        val disableLast = client.post("/api/v1/admin/users/${admin2.userId}/disable") { authed(admin2) }
+        assertEquals(HttpStatusCode.BadRequest, disableLast.status, disableLast.bodyAsText())
+        assertEquals("last_admin", errorOf(disableLast))
+
+        // Unknown target is a clean 400, not a silent no-op audit row.
+        val ghost = client.post("/api/v1/admin/users/00000000-0000-4000-8000-000000000000/disable") { authed(admin2) }
+        assertEquals(HttpStatusCode.BadRequest, ghost.status)
+        assertEquals("no_such_user", errorOf(ghost))
+    }
 }
