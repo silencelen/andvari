@@ -97,10 +97,25 @@ Prioritized; each is additive and back-compatible.
 - **Quick-unlock** (spec 01 §8) — Android Keystore-wrapped UVK + biometric; Windows Hello /
   DPAPI + PIN on desktop. The single integration point on Android is `AutofillUnlockActivity`
   (hook already noted). `androidx-biometric` is already catalogued.
-- **Autofill save-flow** — SaveInfo/onSaveRequest (v1 is fill-only). Capture new logins the
-  user types into an unrecognized form.
-- **Browser extension** — reuses the `:core`/web `UriMatch` + `FieldClassifier` (already
-  built + vector-tested for exactly this) and the same-origin API. Chromium + Firefox.
+- **Autofill save-flow ("Save to andvari?")** — *owner-requested 2026-07-07.* v1 is
+  fill-only; add `SaveInfo` on the FillResponse + `onSaveRequest` so that when the user
+  types credentials (or a card, below) andvari has no record for, it offers **"Save to
+  andvari?"** and creates the item. Android first (SaveInfo/SaveCallback + a confirm
+  activity that unlocks if needed); web save happens through the browser extension. Pairs
+  naturally with the Autofill Status diagnostics already shipped (B2) and with cards.
+- **Cards / wallet items + card autofill** — *owner-requested 2026-07-07.* A new additive
+  ItemDoc `type:"card"` (cardholder / number / expiry / brand / CVV — all ciphertext under
+  the item envelope; the 0.4.0 ExtrasOverlay + fail-closed-on-unknown machinery makes the
+  fields safe to add). Editor + detail UI on all three clients; Android autofill grows a
+  card-field classifier (`AUTOFILL_HINT_CREDIT_CARD_*`) and card datasets, and the save-flow
+  captures new cards too. **Design gate:** a new top-level `type` must degrade gracefully on
+  fielded clients that only know login/note (decide: render as a read-only "needs an app
+  update" item, reusing the F32 surface, vs. a generic secure note) — settle that before the
+  first `type:"card"` item can be written into a mixed fleet.
+- **Browser extension** — *owner-requested 2026-07-07 (reaffirmed).* Reuses the `:core`/web
+  `UriMatch` + `FieldClassifier` (already built + vector-tested for exactly this) and the
+  same-origin API; carries the web save-flow. Chromium + Firefox. Go/no-go spike:
+  libsodium-WASM under an MV3 service-worker CSP + host_permissions vs. CORS.
 - **Owner-signed grants** (Ed25519 signing identity) — closes F16 fully: grants and lifecycle
   ops carry a sender signature under a per-account signing key, so a malicious server can no
   longer inject vaults/credentials or forge a transfer even to a client that holds no VK. The
@@ -120,6 +135,23 @@ Prioritized; each is additive and back-compatible.
   case (v1 uses `androidapp://` exact + a browser allowlist).
 - **iOS client** (KMP `:core` already targets it in principle; not wired) — assess.
 - **Passkeys / WebAuthn** — evaluate as a credential type; large.
+
+## Onboarding & reach (owner-requested 2026-07-07 — near-term product polish, mostly UI)
+
+- **"Get andvari on your other devices" hub** — a Settings/menu section that surfaces every
+  client with a real link: the Android APK (devstore, tailnet), the Windows MSI
+  (`/downloads` — already served, once the owner publishes the build), and the browser
+  extension (when it ships). Rides the `/downloads/manifest.json` surface B4 already made
+  honest; small, mostly web (+ native parity later). Caveat: devstore is tailnet-only and
+  the MSI isn't published yet, so the links are tailnet URLs today.
+- **Guided per-source importers** — replace the single generic "CSV upload" with named,
+  instructioned flows: "Import from Chrome / Edge / Brave / Opera" (all export the *same*
+  Chromium CSV the current importer already parses — so this slice is mostly a friendlier
+  picker + per-source "how to export" steps, small), then "Import from Firefox / Bitwarden /
+  1Password / LastPass" (each needs a new format adapter — medium each; the importer already
+  has an `ImportFormat` seam). Cross-platform (web + natives). Eases the switch away from a
+  previous manager — the natural companion to the vault-lifecycle work (people arrive, people
+  leave). Do the Chromium-family UI first as a quick win; add adapters incrementally.
 
 ## Accepted risks (signed off; not P6 work unless revisited)
 
