@@ -4,6 +4,24 @@ Where andvari is, what gates real-secret migration, and where it goes next. Livi
 the SSOT for *state* is the memory file `andvari-password-manager-2026-07-05.md` + the
 git history. This is the SSOT for *direction*.
 
+## v5 refinement cycle — in progress (2026-07-07)
+
+A 14-lens recon (84 findings) drives a set of reviewed batches. **Shipped so far** (each:
+gates → high-effort review → fix → deploy): web vault-chrome + honest connectivity dot
+(owner gripe 4, live); the nightly-backup hotfix (was silently dead since night 2, F38,
+verified on CT122); **Android autofill resurrected** — four kill switches + an in-app
+Autofill Status diagnostic screen, **APK vc 16214522 on devstore** (owner gripe 2; debug
+protocol `docs/autofill-fold-debugging.md`); web error-truthfulness (network vs password vs
+permission, live); release/update-version truth so the owner's MSI rebuild is safe (B4);
+dangerous-doc de-fang (F39/F41) + the escrow-drill reminder that never existed (F43). The
+**shared-vault lifecycle** (owner gripe 1) has a won tournament design —
+`docs/design/2026-07-07-shared-vault-lifecycle-skipti.md` — implementation is its own batch
+(schema v4; snapshot CT122 first). Remaining: admin-lockout guard + spec-table truth (B5),
+session/sync integrity incl. refresh single-flight (B7), native data-safety (B8), the Skipti
+build, and a ~39-finding tail. **Owner-actionable now:** test autofill on the Fold with the
+new APK + protocol; rebuild the MSI (now safe — fixes the 0.2.x edit-corruption); enroll
+server-TOTP (still pending, gates break-glass).
+
 ## Where we are (2026-07-06, v0.4.0)
 
 v1 is feature-complete and deployed (CT 122). **0.4.0 (same day, v4 cycle)** adds: spec 07
