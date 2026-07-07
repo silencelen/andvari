@@ -4,10 +4,17 @@ Where andvari is, what gates real-secret migration, and where it goes next. Livi
 the SSOT for *state* is the memory file `andvari-password-manager-2026-07-05.md` + the
 git history. This is the SSOT for *direction*.
 
-## Where we are (2026-07-06, v0.3.0)
+## Where we are (2026-07-06, v0.4.0)
 
-v1 is feature-complete and deployed (CT 122). The 0.3.0 line adds, on top of the shipped
-P0–P4 core (ZK crypto, sync, attachments, server-TOTP, admin, break-glass):
+v1 is feature-complete and deployed (CT 122). **0.4.0 (same day, v4 cycle)** adds: spec 07
+export/backup (`.andvari` container + CSV w/ totp round-trip + `backup-cli`), enforced
+auto-lock + policy clipboard-clear, the spec 02 §3 unknown-field round-trip fix
+(ExtrasOverlaySerializer + itemdoc.json vector; also fixed live favorite/passwordHistory/
+multi-URI edit-loss bugs), web WS auto-reconnect + native foreground/5-min polls, delete
+confirmations, user_lookup audit-PII fix, escrow upload validation + offline canary
+`verify`, typed 426 surface + drill docs, and the Kuma healthz push monitor. The 0.3.0
+line added, on top of the shipped P0–P4 core (ZK crypto, sync, attachments, server-TOTP,
+admin, break-glass):
 
 - **Hardening batch** — the 2026-07-06 self-audit's remaining LOW/INFO items: trusted-proxy
   client IP, per-user upload caps, WebSocket single-use ticket auth (no token-in-URL),
@@ -40,10 +47,17 @@ importing any real password:
 4. **On-device smoke tests** — attachments + TOTP on the Fold + desktop; the autofill Fold-7
    checklist (design §6.4); a CSV dry-run with a synthetic export; a shared-vault invite
    round-trip web↔Fold with the printed-sheet fingerprint check.
-5. **Uptime-Kuma monitor** on `/healthz` (gjallarhorn CT 260, needs the Kuma API).
+5. ~~**Uptime-Kuma monitor** on `/healthz`~~ **DONE 2026-07-06** — gjallarhorn can't reach
+   VLAN 2 (UDM default-deny), so it's a Kuma **push** monitor (`andvari-healthz`, id 13):
+   heimdall checks `http://192.168.2.122:8080/healthz` every 2 min and pushes up/down
+   (`andvari-kuma-push.{sh,service,timer}` on heimdall, mirrored in netplan
+   `scripts/active/monitoring/`; token in `/etc/andvari-kuma-token`). Also dead-mans if
+   heimdall itself dies (pushes stop → missed-heartbeat alert → Telegram).
 6. **Drills:** PBS restore of CT122's DB + blobDir; **escrow-recovery drill** with the
    air-gapped key (recover a throwaway account end-to-end); **min-version-pin exercise**
-   (bump `minVersion`, confirm all three clients block writes and show the upgrade path).
+   (bump `minVersion`, confirm all three clients block writes and show the upgrade path);
+   **backup-verify drill** (export a `.andvari` → `backup-cli` verify/dump/extract —
+   `docs/drills/backup-restore-drill.md`, then quarterly).
 7. **30-day soak** with synthetic secrets across 3 devices (web + Fold + desktop).
 8. **Migrate**, then keep the old manager **read-only for 60 days** before deleting it.
 
@@ -68,7 +82,6 @@ Prioritized; each is additive and back-compatible.
 - **eTLD+1 / PSL matching** for autofill (v1's label-boundary rule is strictly safer but
   misses sibling-subdomain matches); **Digital Asset Links** for the native-app-with-web-creds
   case (v1 uses `androidapp://` exact + a browser allowlist).
-- **Auto-lock timer** — the app has no inactivity lock today (lock is manual / process-death).
 - **iOS client** (KMP `:core` already targets it in principle; not wired) — assess.
 - **Passkeys / WebAuthn** — evaluate as a credential type; large.
 

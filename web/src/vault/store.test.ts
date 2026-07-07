@@ -1,10 +1,12 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import type { ApiClient } from "../api/client";
+import { ApiError, type ApiClient } from "../api/client";
 import type { ItemDoc, Mutation, PushResponse, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
+import { concat } from "../crypto/bytes";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
+import { type BackupPayload, buildBackup, openBackup } from "../export/export";
 import { Account } from "./account";
 import { VaultStore, conflictCopyId } from "./store";
 
@@ -161,6 +163,69 @@ describe("VaultStore family sharing (P5)", () => {
     expect(api.pushes.length).toBe(1); // unchanged
   });
 
+  it("conflict materialization preserves unknown fields in BOTH pushed mutations", async () => {
+    const s = await scenario("writer");
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    // The flagged winner's plaintext carries unknown fields at top, login, and
+    // history-entry level (a future client wrote it) — spec 02 §3.
+    const futureDoc = JSON.parse(
+      '{"type":"login","name":"Future","x-top":{"a":1},"login":{"username":"u","password":"p1","x-flag":true,"passwordHistory":[{"password":"p0","retiredAt":1690000000000,"x-hist":"h"}]}}',
+    ) as ItemDoc;
+    const item: WireItem = { ...s.item, rev: 8, conflict: true, blob: s.owner.encryptItem(s.vaultId, s.itemId, futureDoc) };
+    api.queue.push({ rev: 9, full: true, vaults: [s.vault], grants: [s.grant], items: [item], removedGrants: [] });
+    await store.sync();
+
+    expect(api.pushes.length).toBe(1);
+    const [copy, rewrite] = api.pushes[0]!;
+    // Decrypt both pushed mutations and walk the unknown paths per-field.
+    for (const [label, m] of [["copy", copy!], ["rewrite", rewrite!]] as const) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const doc = s.member.decryptItem({
+        ...item,
+        itemId: m.itemId,
+        conflict: false,
+        formatVersion: m.item!.formatVersion,
+        blob: m.item!.blob,
+      }) as any;
+      expect(doc["x-top"], `${label} lost top-level unknown`).toEqual({ a: 1 });
+      expect(doc.login["x-flag"], `${label} lost login-level unknown`).toBe(true);
+      expect(doc.login.passwordHistory[0]["x-hist"], `${label} lost history-entry unknown`).toBe("h");
+    }
+  });
+
+  it("fails closed on a newer formatVersion: decryptItem throws, sync skips the item", async () => {
+    const s = await scenario("writer");
+    // Direct: the gate fires before the envelope is opened (same blob, claimed v2).
+    expect(() => s.member.decryptItem({ ...s.item, formatVersion: 2 })).toThrow(/newer/);
+
+    // Through the store: the v2 item is skipped (envelope-only, retried after upgrade),
+    // never materialized (a rewrite would silently downgrade it), and the rest of the
+    // pull still lands.
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    const goodId = s.owner.newItemId();
+    const good: WireItem = {
+      ...s.item,
+      itemId: goodId,
+      rev: 6,
+      blob: s.owner.encryptItem(s.vaultId, goodId, { type: "note", name: "still fine" }),
+    };
+    api.queue.push({
+      rev: 9,
+      full: true,
+      vaults: [s.vault],
+      grants: [s.grant],
+      items: [{ ...s.item, rev: 8, conflict: true, formatVersion: 2 }, good],
+      removedGrants: [],
+    });
+    await store.sync(); // must not throw
+    expect(store.get(s.itemId)).toBeUndefined(); // v2 item skipped, not surfaced
+    expect(store.get(goodId)?.doc.name).toBe("still fine"); // pull continued past it
+    expect(store.list().some((i) => i.itemId === s.itemId)).toBe(false);
+    expect(api.pushes.length).toBe(0); // no conflict materialization of an undecryptable item
+  });
+
   it("purges the vault's items and forgets key + role on removedGrants", async () => {
     const s = await scenario();
     const api = new FakeApi();
@@ -199,5 +264,154 @@ describe("VaultStore family sharing (P5)", () => {
     // …and defaults to the personal vault without one.
     await store.save(null, { type: "note", name: "personal note" });
     expect(api.pushes.at(-1)![0]!.vaultId).toBe(s.owner.personalVaultId);
+  });
+
+  it("records lastSyncAt only after a successful sync (export offline banner)", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    expect(store.lastSyncAt).toBeNull();
+
+    // A failing pull leaves it untouched…
+    const failing = { sync: async () => { throw new Error("offline"); } } as unknown as ApiClient;
+    const offlineStore = new VaultStore(failing, s.member);
+    await expect(offlineStore.sync()).rejects.toThrow();
+    expect(offlineStore.lastSyncAt).toBeNull();
+
+    // …a successful one stamps the wall clock.
+    const before = Date.now();
+    await store.sync();
+    expect(store.lastSyncAt).not.toBeNull();
+    expect(store.lastSyncAt!).toBeGreaterThanOrEqual(before);
+  });
+});
+
+/**
+ * spec 07 §2.4: items the client holds the vault key for but cannot decrypt must be
+ * RETAINED (itemId/vaultId/formatVersion) so a backup enumerates them in
+ * `skipped.undecryptable` instead of silently omitting credentials — while staying
+ * out of the visible list()/get() surface.
+ */
+describe("VaultStore undecryptable retention (spec 07 §2.4)", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  it("retains a held-key formatVersion=2 item — and it lands in a backup's skipped set", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    const goodId = s.owner.newItemId();
+    const good: WireItem = {
+      ...s.item,
+      itemId: goodId,
+      rev: 6,
+      blob: s.owner.encryptItem(s.vaultId, goodId, { type: "note", name: "still fine" }),
+    };
+    api.queue.push({
+      rev: 9,
+      full: true,
+      vaults: [s.vault],
+      grants: [s.grant],
+      items: [{ ...s.item, formatVersion: 2 }, good],
+      removedGrants: [],
+    });
+    await store.sync();
+
+    // Side-channel list only: the visible surface still silently skips it.
+    expect(store.get(s.itemId)).toBeUndefined();
+    expect(store.list().some((i) => i.itemId === s.itemId)).toBe(false);
+    expect(store.undecryptable()).toEqual([{ itemId: s.itemId, vaultId: s.vaultId, formatVersion: 2 }]);
+    // A normally decrypted item is NOT enumerated.
+    expect(store.undecryptable().some((u) => u.itemId === goodId)).toBe(false);
+
+    // The list flows into a built container's authenticated skipped set (§2.4).
+    const payload: BackupPayload = {
+      v: 1,
+      exportedAt: Date.now(),
+      origin: "",
+      userId: s.member.userId,
+      identityFingerprint: "",
+      vaults: [],
+      items: [],
+      attachments: [],
+      skipped: { undecryptable: store.undecryptable(), attachmentsOverCap: [], attachmentFetchFailed: [] },
+    };
+    const parts = await buildBackup("pw pw pw", crypto.randomUUID(), randomBytes(16), KDF, payload, []);
+    const opened = await openBackup("pw pw pw", concat(...parts));
+    expect(opened.payload.skipped.undecryptable).toEqual([
+      { itemId: s.itemId, vaultId: s.vaultId, formatVersion: 2 },
+    ]);
+  });
+
+  it("retains a corrupt blob under a held key; items of no-key vaults are NOT ours to enumerate", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    // AD mismatch: a blob sealed for a DIFFERENT itemId fails decrypt under the held VK.
+    const corrupt: WireItem = { ...s.item, blob: s.owner.encryptItem(s.vaultId, s.owner.newItemId(), DOC) };
+    // A vault we hold no key for is skipped WITHOUT being enumerated (not "undecryptable" — not ours).
+    const foreign: WireItem = { ...s.item, itemId: s.owner.newItemId(), vaultId: "vault-with-no-key", formatVersion: 2 };
+    api.queue.push({ rev: 9, full: true, vaults: [s.vault], grants: [s.grant], items: [corrupt, foreign], removedGrants: [] });
+    await store.sync();
+
+    expect(store.undecryptable()).toEqual([{ itemId: s.itemId, vaultId: s.vaultId, formatVersion: 1 }]);
+  });
+
+  it("clears the entry when the item becomes decryptable, is tombstoned, or its grant is revoked", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [{ ...s.item, formatVersion: 2 }], removedGrants: [] });
+    await store.sync();
+    expect(store.undecryptable()).toHaveLength(1);
+
+    // Re-delivered decryptable (an upgraded writer re-encrypted at v1) → cleared, visible again.
+    api.queue.push({ rev: 6, full: false, vaults: [], grants: [], items: [{ ...s.item, rev: 6 }], removedGrants: [] });
+    await store.sync();
+    expect(store.undecryptable()).toEqual([]);
+    expect(store.get(s.itemId)?.doc).toEqual(DOC);
+
+    // A newer undecryptable rev supersedes the held plaintext (never BOTH surfaces)…
+    api.queue.push({ rev: 7, full: false, vaults: [], grants: [], items: [{ ...s.item, rev: 7, formatVersion: 2 }], removedGrants: [] });
+    await store.sync();
+    expect(store.get(s.itemId)).toBeUndefined();
+    expect(store.undecryptable()).toHaveLength(1);
+
+    // …a tombstone ends the enumeration…
+    api.queue.push({ rev: 8, full: false, vaults: [], grants: [], items: [{ ...s.item, rev: 8, deleted: true }], removedGrants: [] });
+    await store.sync();
+    expect(store.undecryptable()).toEqual([]);
+
+    // …and a revoked membership purges the vault's entries with it.
+    api.queue.push({ rev: 9, full: false, vaults: [], grants: [], items: [{ ...s.item, rev: 9, formatVersion: 2 }], removedGrants: [] });
+    await store.sync();
+    expect(store.undecryptable()).toHaveLength(1);
+    api.queue.push({ rev: 10, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId] });
+    await store.sync();
+    expect(store.undecryptable()).toEqual([]);
+  });
+
+  it("does not double-count across a 410 resync-from-0", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [{ ...s.item, formatVersion: 2 }], removedGrants: [] });
+    await store.sync();
+    expect(store.undecryptable()).toHaveLength(1);
+
+    // Cursor expired: the next pull 410s and the retry-from-0 re-delivers the SAME item.
+    let failedOnce = false;
+    const realSync = api.sync.bind(api);
+    api.sync = async (since: number) => {
+      if (!failedOnce) {
+        failedOnce = true;
+        throw new ApiError(410, "cursor_gone", "resync required");
+      }
+      return realSync(since);
+    };
+    api.queue.push({ rev: 6, full: true, vaults: [s.vault], grants: [s.grant], items: [{ ...s.item, formatVersion: 2 }], removedGrants: [] });
+    await store.sync();
+    expect(store.undecryptable()).toEqual([{ itemId: s.itemId, vaultId: s.vaultId, formatVersion: 2 }]);
   });
 });

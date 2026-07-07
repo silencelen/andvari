@@ -131,6 +131,35 @@ Quick unlock wraps the **UVK** (not the password, not MK) in platform hardware:
   password.
 Quick unlock never weakens the server story: the server still only ever sees authKey.
 
+### Auto-lock (policy `autoLockSeconds`)
+
+All three clients enforce an **inactivity auto-lock** driven by the org policy's
+`autoLockSeconds` (spec 03 §7; `0` or absent = disabled). Clients use the most
+recently fetched policy — refreshed at start, at unlock (web), and on the spec 03 §6
+sync cadence (natives) — and the natives persist the last-known value so an offline
+cold start still enforces it.
+
+- **Activity** = direct user interaction with the client (pointer, key, or touch),
+  coarsened to ≥1 s granularity. Background syncs, WS bell frames, and Android
+  autofill fills do **not** extend the window — a device left untouched locks even
+  while the app keeps syncing or filling.
+- **Expiry** drops the in-memory keys via exactly the manual lock path of that
+  platform (web `onLock`/session clear, Android `VaultSession.lock()`, desktop
+  `DesktopState.lock()`) and shows the normal unlock screen. The native durable
+  offline queue (spec 02 §8) survives a lock that lands mid-push; the mutation
+  replays after the next unlock. Clients may **defer** (never skip) the lock while a
+  user-initiated operation is in flight rather than yank the engine mid-write — the
+  1 s check re-fires.
+- The window is **wall-clock**: time suspended/backgrounded counts, so a client
+  returning from sleep or background past the window locks on return, before content
+  is readable. Android additionally gates the autofill entry points on the same
+  expiry check (an idle-expired vault re-prompts for the master password before any
+  fill).
+- The timer **resets on unlock**.
+- Clipboard: vault-secret copies auto-clear after `clipboardClearSeconds`, clamped
+  to a minimum of 1 s on every client (a policy of 0 still clears — never "keep
+  forever" for secrets; non-secret setup material is exempt).
+
 ## 9. Benchmarks (P0 gate)
 
 Measured 2026-07-05 on huginn (LXC 117 on E5-2640v4 @ 2.4 GHz — deliberately

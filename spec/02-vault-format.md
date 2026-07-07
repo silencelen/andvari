@@ -76,7 +76,22 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
 ```
 
 Unknown fields MUST be preserved on rewrite (forward compatibility within a
-formatVersion). TOTP presentation: RFC 6238, SHA-1, 6 digits, 30 s step unless the
+formatVersion), at every level of the document: the top-level object, `login`, each
+`login.passwordHistory[]` entry, and each `attachments[]` entry. Preservation rules:
+
+- **Typed fields win.** If a field is known to this client version, its typed value is
+  authoritative on encode; a stale unknown-field copy of the same name MUST NOT shadow it.
+- **Scoped within a formatVersion.** A client MUST fail closed on any `formatVersion`
+  greater than it implements — treat the item as undecryptable (keep the envelope, retry
+  after upgrade), never edit it, since a rewrite would silently downgrade the version.
+- **Numbers.** JavaScript clients parse JSON numbers as IEEE-754 doubles, so unknown
+  numeric values outside the exactly-representable range (|n| > 2^53) are NOT
+  preservation-guaranteed. Writers of future fields MUST encode 64-bit integers as
+  JSON strings.
+- **Partial editors.** A client that exposes only the first `login.uris` entry MUST
+  preserve the tail on edit; clearing the field removes only the first entry.
+
+TOTP presentation: RFC 6238, SHA-1, 6 digits, 30 s step unless the
 otpauth URI overrides.
 
 ### 3.1 login.uris — semantics & client match rules (autofill / browser fill)

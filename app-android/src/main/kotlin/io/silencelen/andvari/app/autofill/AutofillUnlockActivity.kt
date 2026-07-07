@@ -82,9 +82,15 @@ class AutofillUnlockActivity : ComponentActivity() {
         if (structure == null) { finish(); return }
         val inlineRequest = intent.inlineRequest()
 
+        // Cold-process safety: arm the auto-lock gate with the persisted policy window
+        // before consulting it (this activity never fetches policy itself).
+        VaultSession.setAutoLockSeconds(SessionStore(applicationContext).autoLockSeconds)
+
         // Fast path: already unlocked in this process (e.g. the main app unlocked first) —
         // reuse it, build datasets immediately, no password prompt, no second token-holder.
-        VaultSession.get()?.let { unlocked ->
+        // getIfFresh enforces the inactivity window (spec 01 §8): an idle-expired vault is
+        // locked and falls through to the master-password prompt below.
+        VaultSession.getIfFresh()?.let { unlocked ->
             // Any throwable building the response must degrade to CANCELED, never crash the
             // host app's fill flow (an uncaught throw in this callback path kills the process).
             finishWithResponse(runCatching {
@@ -151,8 +157,11 @@ class AutofillUnlockActivity : ComponentActivity() {
         VaultSession.unlockMutex.withLock {
             // Inside the lock: reuse the winner's session if the main app (or a prior fill)
             // unlocked while we waited — never mint a second token-holder that reuses the
-            // now-consumed refresh token (→ device revocation).
-            VaultSession.get()?.let { return@withLock it }
+            // now-consumed refresh token (→ device revocation). getIfFresh: an idle-expired
+            // winner is dropped (its api/token-holder CLOSED by lock()) instead of adopted,
+            // and we mint the replacement holder below while still holding the mutex — the
+            // single-token-holder invariant is preserved.
+            VaultSession.getIfFresh()?.let { return@withLock it }
             unlockLocked(store, session, password)
         }
 
@@ -183,9 +192,9 @@ class AutofillUnlockActivity : ComponentActivity() {
             InMemoryVaultCache()
         }
         val engine = SyncEngine(api, acct, cache).also { it.hydrate() }
-        VaultSession.bind(api, acct, engine) // now THE token-holder; the main app reuses it
+        VaultSession.bind(api, acct, engine, cache) // now THE token-holder; the main app reuses it
         runCatching { engine.sync() } // best-effort; hydrate already gave cached items
-        return VaultSession.get() ?: VaultSession.Unlocked(api, acct, engine)
+        return VaultSession.get() ?: VaultSession.Unlocked(api, acct, engine, cache)
     }
 
     private fun finishWithResponse(response: android.service.autofill.FillResponse?) {

@@ -25,6 +25,25 @@ class CsvImportTest {
         assertEquals("hi", d.notes)
     }
 
+    // andvari CSV round-trip column (spec 06 §1 / 07 §1): still detects as Chrome, maps totp;
+    // an empty cell and a browser file without the column both yield totp = null.
+    @Test fun totpColumn_mapsWhenPresent() {
+        val p = plan("name,url,username,password,note,totp\nGH,https://gh.test,jacob,pw,,otpauth://totp/x?secret=AAAA\nNT,https://n.test,ana,pw2,,\n")
+        assertEquals("otpauth://totp/x?secret=AAAA", p.items[0].doc.login?.totp)
+        assertEquals(null, p.items[1].doc.login?.totp)
+        assertEquals(null, plan("name,url,username,password,note\nGH,https://gh.test,jacob,pw,hi\n").items[0].doc.login?.totp)
+    }
+
+    // Two rows identical but for the TOTP seed must both survive dedup — else an
+    // andvari→andvari round trip silently loses a 2FA seed (review finding).
+    @Test fun totpDifferentiatesExactDupes() {
+        val p = plan("name,url,username,password,note,totp\nA,https://a.test,u,p,,otpauth://x\nA,https://a.test,u,p,,\n")
+        assertEquals(2, p.items.size)
+        assertEquals(setOf("otpauth://x", null), p.items.map { it.doc.login?.totp }.toSet())
+        // A truly exact repeat (same totp) still collapses to one.
+        assertEquals(1, plan("name,url,username,password,note,totp\nA,https://a.test,u,p,,t\nA,https://a.test,u,p,,t\n").items.size)
+    }
+
     @Test fun quoting_commaNewlineEscapedQuote() {
         val parsed = CsvImport.parse("name,url,username,password,note\n\"a,b\",https://x.test,\"u\"\"v\",p,\"l1\nl2\"\n".encodeToByteArray())
         val r = parsed.rows.single()

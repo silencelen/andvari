@@ -298,6 +298,70 @@
             }
         },
         {
+            "name": "andvari-totp-roundtrip",
+            "contentB64": "bmFtZSx1cmwsdXNlcm5hbWUscGFzc3dvcmQsbm90ZSx0b3RwCkdpdEh1YixodHRwczovL2dpdGh1Yi5jb20vbG9naW4samFjb2IsczNjcmV0LCxvdHBhdXRoOi8vdG90cC9HaXRIdWI6amFjb2I_c2VjcmV0PUpCU1dZM0RQRUhQSzNQWFAmaXNzdWVyPUdpdEh1YgpCYXJlMzIsaHR0cHM6Ly9iLnRlc3QsdSxwLCxKQlNXWTNEUEVIUEszUFhQCk5vVG90cCxodHRwczovL24udGVzdCx1MixwMixub3RlIG9ubHksCg",
+            "expect": {
+                "format": "chrome",
+                "rows": [
+                    {
+                        "name": "GitHub",
+                        "url": "https://github.com/login",
+                        "username": "jacob",
+                        "password": "s3cret",
+                        "notes": "",
+                        "totp": "otpauth://totp/GitHub:jacob?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+                    },
+                    {
+                        "name": "Bare32",
+                        "url": "https://b.test",
+                        "username": "u",
+                        "password": "p",
+                        "notes": "",
+                        "totp": "JBSWY3DPEHPK3PXP"
+                    },
+                    {
+                        "name": "NoTotp",
+                        "url": "https://n.test",
+                        "username": "u2",
+                        "password": "p2",
+                        "notes": "note only"
+                    }
+                ],
+                "errors": [],
+                "docs": [
+                    {
+                        "name": "GitHub",
+                        "username": "jacob",
+                        "password": "s3cret",
+                        "uri": "https://github.com/login",
+                        "notes": "",
+                        "totp": "otpauth://totp/GitHub:jacob?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+                    },
+                    {
+                        "name": "Bare32",
+                        "username": "u",
+                        "password": "p",
+                        "uri": "https://b.test",
+                        "notes": "",
+                        "totp": "JBSWY3DPEHPK3PXP"
+                    },
+                    {
+                        "name": "NoTotp",
+                        "username": "u2",
+                        "password": "p2",
+                        "uri": "https://n.test",
+                        "notes": "note only"
+                    }
+                ],
+                "report": {
+                    "imported": 3,
+                    "skippedEmpty": 0,
+                    "collapsed": 0,
+                    "flagged": []
+                }
+            }
+        },
+        {
             "name": "firefox-basic",
             "contentB64": "dXJsLHVzZXJuYW1lLHBhc3N3b3JkLGh0dHBSZWFsbSxmb3JtQWN0aW9uT3JpZ2luLGd1aWQsdGltZUNyZWF0ZWQsdGltZUxhc3RVc2VkLHRpbWVQYXNzd29yZENoYW5nZWQKaHR0cHM6Ly9mZi50ZXN0L2xvZ2luLGZveCxwdywsaHR0cHM6Ly9mZi50ZXN0LHthYmN9LDE3MDAwMDAwMDAwMDAsMTcwMDAwMDAwMTAwMCwxNzAwMDAwMDAyMDAwCg",
             "expect": {

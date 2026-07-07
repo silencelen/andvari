@@ -30,7 +30,12 @@ application {
     mainClass.set("io.silencelen.andvari.recovery.MainKt")
 }
 
+// The owner runs this on an air-gapped machine with nothing but a JRE 17+:
+//   flock /tmp/andvari-gradle.lock ./gradlew :tools:recovery-cli:shadowJar
+//   → tools/recovery-cli/build/libs/andvari-recovery-cli.jar   (java -jar, no deps)
+// lazysodium/JNA natives ride inside the jar as plain resources (JNA self-extracts).
 tasks.shadowJar {
     archiveBaseName.set("andvari-recovery-cli")
     archiveClassifier.set("")
+    mergeServiceFiles() // same as :server — keep ServiceLoader metadata intact when deps merge
 }

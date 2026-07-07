@@ -8,12 +8,15 @@ source file and MUST warn it contains plaintext passwords.
 
 Header (Chrome ≥ 2023, Edge identical): `name,url,username,password,note` (older
 exports lack `note`). RFC 4180 quoting (fields may contain commas/newlines/quotes —
-use a real CSV parser, never split-on-comma).
+use a real CSV parser, never split-on-comma). Detection is set-membership, so extra
+columns are tolerated — in particular andvari's own CSV export (spec 07 §1) is a
+Chrome superset with a trailing `totp` column.
 
 Mapping → login item: `name`→name (fallback: URL host), `url`→login.uris[0],
-`username`→login.username, `password`→login.password, `note`→notes. Rows with an
-empty password AND empty username are skipped (Chrome exports junk rows for saved
-forms).
+`username`→login.username, `password`→login.password, `note`→notes,
+`totp`→login.totp when the column is present (andvari round-trip; browser exports
+lack the column). Rows with an empty password AND empty username are skipped
+(Chrome exports junk rows for saved forms).
 
 ## 2. Firefox CSV
 

@@ -5,7 +5,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.view.KeyEvent
+import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -27,13 +30,17 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
+import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.PasswordGenerator
@@ -70,7 +77,41 @@ class MainActivity : ComponentActivity() {
         // One-time: bump an old LAN-default server URL to the tailnet HTTPS default.
         SessionStore(applicationContext).migrateDefaultOnce()
         vm.start()
+        // Foreground sync cadence (spec 03 §6): sync immediately on EVERY ON_RESUME
+        // (onForeground also enforces the idle auto-lock first — a backgrounded app must
+        // lock on return if the window passed while it slept), then every 5 min while
+        // resumed and unlocked. repeatOnLifecycle cancels the loop off-RESUMED; no
+        // WorkManager, no schedule outlives the foreground.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (true) {
+                    vm.onForeground()
+                    delay(FOREGROUND_SYNC_MS)
+                }
+            }
+        }
         setContent { AndvariTheme { AndvariApp(vm) } }
+    }
+
+    // Any user interaction resets the inactivity auto-lock window (spec 01 §8: activity =
+    // pointer/key/touch, nothing else). Dispatch overrides see every event before Compose.
+    override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
+        VaultSession.touch()
+        return super.dispatchTouchEvent(ev)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        VaultSession.touch()
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(ev: MotionEvent?): Boolean {
+        VaultSession.touch() // mouse wheel / rotary / hover-scroll on tablets & ChromeOS
+        return super.dispatchGenericMotionEvent(ev)
+    }
+
+    private companion object {
+        const val FOREGROUND_SYNC_MS = 5L * 60 * 1000 // spec 03 §6 poll interval
     }
 
     /** Deliberately uses only android.widget — no Compose — so a Compose crash still renders. */
@@ -417,10 +458,9 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
         val ref = pendingDownload
         pendingDownload = null
         if (uri != null && ref != null) {
-            vm.saveAttachmentTo(ref) { bytes ->
-                ctx.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
-                    ?: throw IllegalStateException("could not open the chosen destination")
-            }
+            // "wt": same truncate-on-open contract as the export writes — plain "w"
+            // leaves stale trailing bytes when overwriting a longer existing file.
+            vm.saveAttachmentTo(ref) { bytes -> openTruncated(ctx, uri).use { it.write(bytes) } }
         }
     }
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
@@ -430,10 +470,14 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
         Text(doc.name, style = MaterialTheme.typography.headlineMedium)
         Text(if (doc.type == "login") "Login" else "Secure note", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(16.dp))
+        // Vault-secret copies clear after the org policy window, clamped to >=1 s exactly
+        // like web's useCopy (Math.max(1, n)): a policy of 0 still clears — never "keep
+        // forever" for secrets. 30 s fallback while the policy hasn't loaded (matches web).
+        val clipClear = maxOf(1, ui.policy?.clipboardClearSeconds ?: 30)
         doc.login?.let { login ->
-            login.username?.takeIf { it.isNotBlank() }?.let { CopyRow("Username", it, ctx) }
-            login.password?.takeIf { it.isNotBlank() }?.let { SecretCopyRow("Password", it, ctx) }
-            login.totp?.takeIf { it.isNotBlank() }?.let { TotpRow(it, ctx) }
+            login.username?.takeIf { it.isNotBlank() }?.let { CopyRow("Username", it, ctx, clipClear) }
+            login.password?.takeIf { it.isNotBlank() }?.let { SecretCopyRow("Password", it, ctx, clipClear) }
+            login.totp?.takeIf { it.isNotBlank() }?.let { TotpRow(it, ctx, clipClear) }
             login.uris.firstOrNull()?.takeIf { it.isNotBlank() }?.let { ReadOnlyRow("Website", it) }
         }
         doc.notes?.takeIf { it.isNotBlank() }?.let { ReadOnlyRow("Notes", it) }
@@ -447,10 +491,20 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
             }
         }
         Spacer(Modifier.height(24.dp))
+        var confirmDelete by remember { mutableStateOf(false) }
         Row {
             Button(onClick = onEdit, modifier = Modifier.weight(1f)) { Text("Edit") }
             Spacer(Modifier.width(12.dp))
-            OutlinedButton(onClick = onDelete, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
+            OutlinedButton(onClick = { confirmDelete = true }, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
+        }
+        if (confirmDelete) {
+            AlertDialog(
+                onDismissRequest = { confirmDelete = false },
+                title = { Text("Delete \"${doc.name}\"?") },
+                text = { Text("This removes the item from every device and every family member who can see it.") },
+                confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") } },
+                dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
+            )
         }
     }
 }
@@ -551,9 +605,15 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
         attachError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp)) }
         TextButton(onClick = { picker.launch(arrayOf("*/*")) }) { Icon(Icons.Default.AttachFile, null); Text(" Attach file") }
         Spacer(Modifier.height(16.dp))
-        val doc = ItemDoc(
-            type = initial.type, name = name.trim(), notes = notes.ifBlank { null },
-            login = if (isLogin) LoginData(username = username, password = password, uris = listOf(website), totp = totp.ifBlank { null }) else null,
+        // copy()-based edit, never a field-by-field rebuild: carries favorite, passwordHistory,
+        // extra URIs beyond the first, and unknown-field extras (spec 02 §3) through the save.
+        val doc = initial.copy(
+            name = name.trim(), notes = notes.ifBlank { null },
+            login = if (isLogin) (initial.login ?: LoginData()).copy(
+                username = username, password = password,
+                uris = buildList { if (website.isNotBlank()) add(website); addAll(initial.login?.uris.orEmpty().drop(1)) },
+                totp = totp.ifBlank { null },
+            ) else null,
             attachments = attachments,
         )
         PrimaryButton("Save", enabled = name.isNotBlank() && !ui.busy, busy = ui.busy) { onSave(doc, pendingUploads.toList()) }
@@ -562,7 +622,7 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
 
 // ---- TOTP live row ----
 @Composable
-private fun TotpRow(uri: String, ctx: Context) {
+private fun TotpRow(uri: String, ctx: Context, clearSeconds: Int) {
     val crypto = remember { createCryptoProvider() }
     var code by remember { mutableStateOf("······") }
     var remaining by remember { mutableStateOf(30) }
@@ -579,7 +639,7 @@ private fun TotpRow(uri: String, ctx: Context) {
     Column(Modifier.padding(vertical = 8.dp)) {
         Text("One-time code", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { copyToClipboard(ctx, "code", code, 30) }) {
+            TextButton(onClick = { copyToClipboard(ctx, "code", code, clearSeconds) }) {
                 Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary)
             }
             Text("${remaining}s", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -622,6 +682,31 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                 }
                 Spacer(Modifier.height(16.dp))
             }
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Vault backup", style = MaterialTheme.typography.titleLarge)
+                    Text(lastBackupLine(ui.lastExportAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (backupNudge(ui.lastExportAt)) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            if (ui.lastExportAt <= 0) {
+                                "You've never backed up this vault — an offline backup is the only copy that survives losing the server and its backups."
+                            } else {
+                                "It's been over 90 days — consider taking a fresh backup."
+                            },
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = vm::backupBegin, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) { Text("Back up vault…") }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = vm::csvBegin, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) { Text("Export for another password manager…") }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            ErrorBar(ui.error, vm::clearError)
+            NoticeBar(ui.notice, vm::clearNotice)
+            ExportDialogs(vm, ui)
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text("Server TOTP", style = MaterialTheme.typography.titleLarge)
@@ -680,6 +765,287 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
     }
 }
 
+// ---- export & backup (spec 07) ----
+
+/** The spec 07 export dialogs + their SAF launchers (backup preflight → CreateDocument →
+ *  build/verify/write/verify-on-disk; CSV preflight → CreateDocument → write/verify;
+ *  backup success summary). The pending [BackupRequest] is stashed in the ViewModel —
+ *  NOT `remember` — so a Fold unfold / rotation / split-screen resize while the SAF
+ *  picker is foreground doesn't drop it (a `remember` came back null and the result
+ *  no-op'd, leaving a silent empty file). */
+@Composable
+private fun ExportDialogs(vm: AndvariViewModel, ui: UiState) {
+    val ctx = LocalContextCompat()
+
+    // ---- backup (.andvari) ----
+    val backupSaver = rememberLauncherForActivityResult(
+        // MIME octet-stream is deliberate (spec 07 §2.6): a JSON MIME makes SAF mangle the
+        // .andvari extension. Restore sniffs the magic bytes, never the extension.
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        // uri == null → picker cancelled; the request is dropped (take() below) and the
+        // preflight dialog stays open for another go (re-confirming re-stashes it).
+        val req = vm.backupRequestTake()
+        when {
+            uri == null -> {}
+            req == null ->
+                // Process death while the picker was foreground (ViewModel gone; the
+                // passphrase is never persisted, so the flow cannot resume), or a
+                // lock/sign-out cleared the stash: remove the created doc (empty-only)
+                // and explain — never a silent 0-byte file.
+                vm.backupRequestMissing { discardExportDoc(ctx, uri, writeBegan = false) }
+            else -> vm.backupRun(
+                req.vaults, req.includeAttachments, req.passphrase,
+                write = { bytes -> openTruncated(ctx, uri).use { it.write(bytes) } },
+                // On-disk verification read (spec 07 §2.6): bounded by the §2.2 256 MiB
+                // open() cap — larger (a provider that kept a giant stale tail) reads
+                // back null, which the ViewModel treats as verification failure.
+                readBack = { ctx.contentResolver.openInputStream(uri)?.use { readBounded(it, EXPORT_READBACK_LIMIT) } },
+                discard = { writeBegan -> discardExportDoc(ctx, uri, writeBegan) },
+            )
+        }
+    }
+    ui.backupPreflight?.let { pre ->
+        BackupPreflightDialog(vm, ui, pre) { selected, includeAttachments, passphrase ->
+            vm.backupRequestStash(BackupRequest(selected, includeAttachments, passphrase))
+            backupSaver.launch("andvari-backup-${exportDateSuffix()}.andvari")
+        }
+    }
+    ui.backupResult?.let { BackupResultDialog(it, vm::backupResultDismiss) }
+
+    // ---- CSV ----
+    val csvSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+        if (uri != null) {
+            vm.csvRun(
+                write = { bytes -> openTruncated(ctx, uri).use { it.write(bytes) } },
+                readBack = { ctx.contentResolver.openInputStream(uri)?.use { readBounded(it, EXPORT_READBACK_LIMIT) } },
+                discard = { writeBegan -> discardExportDoc(ctx, uri, writeBegan) },
+            )
+        }
+    }
+    ui.csvPreflight?.let { pre ->
+        CsvPreflightDialog(vm, ui, pre) { csvSaver.launch("andvari-export-${exportDateSuffix()}.csv") }
+    }
+}
+
+/** Bound for the post-export verification read-back = the spec 07 §2.2 total-file cap.
+ *  Anything larger on disk is by definition not the file we wrote. */
+private const val EXPORT_READBACK_LIMIT = 256 * 1024 * 1024
+
+/**
+ * Open [uri] for writing with TRUNCATION ("wt"). Plain "w" ([android.content.ContentResolver.openOutputStream]'s
+ * default) does NOT truncate on many DocumentsProviders, so overwriting a longer
+ * pre-existing file would leave stale trailing bytes — a corrupt export. "wt" is the
+ * documented truncate-on-open contract; SAF offers no channel-level truncate to force
+ * the issue on a provider that rejects the mode, so those fall back to "w" and the
+ * export paths rely on their on-disk read-back verification to refuse any
+ * non-truncated result.
+ */
+private fun openTruncated(ctx: Context, uri: Uri): java.io.OutputStream =
+    runCatching { ctx.contentResolver.openOutputStream(uri, "wt") }.getOrNull()
+        ?: ctx.contentResolver.openOutputStream(uri)
+        ?: throw IllegalStateException("could not open the chosen destination")
+
+/**
+ * Best-effort discard of an export destination — deleting ONLY bytes this run may own.
+ * [writeBegan] = the write lambda ran (the destination was opened with truncation): its
+ * content is now partial/corrupt, so deleting satisfies spec 07 §2.6 (never leave a
+ * partial file). When the failure happened BEFORE any write, delete only if the doc is
+ * still EMPTY: CreateDocument usually mints a fresh 0-byte doc (delete = clean abort),
+ * but a user confirming an overwrite gets the PRE-EXISTING document back — deleting
+ * that on a build/verify failure would turn one good backup into zero. Unknown size
+ * (provider won't say) → leave it alone: a stray empty file beats a destroyed backup.
+ */
+private fun discardExportDoc(ctx: Context, uri: Uri, writeBegan: Boolean) {
+    runCatching {
+        if (writeBegan || documentSize(ctx, uri) == 0L) {
+            DocumentsContract.deleteDocument(ctx.contentResolver, uri)
+        }
+    }
+}
+
+/** SIZE column of a document, or -1 when the provider won't report it. */
+private fun documentSize(ctx: Context, uri: Uri): Long {
+    ctx.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+        if (c.moveToFirst()) {
+            val i = c.getColumnIndex(OpenableColumns.SIZE)
+            if (i >= 0 && !c.isNull(i)) return c.getLong(i)
+        }
+    }
+    return -1L
+}
+
+@Composable
+private fun BackupPreflightDialog(
+    vm: AndvariViewModel,
+    ui: UiState,
+    pre: BackupPreflight,
+    onChooseDestination: (Set<String>, Boolean, String) -> Unit,
+) {
+    var selected by remember(pre) { mutableStateOf(pre.vaults.map { it.vaultId }.toSet()) }
+    var includeAttachments by remember(pre) { mutableStateOf(false) }
+    var passphrase by remember(pre) { mutableStateOf("") }
+    var confirm by remember(pre) { mutableStateOf("") }
+    val plan = remember(pre, selected) { vm.attachmentPlan(selected) }
+    val score = Strength.estimateStrength(passphrase)
+    val ready = selected.isNotEmpty() && passphrase.isNotEmpty() && passphrase == confirm &&
+        score >= Strength.BACKUP_FLOOR && !ui.busy
+    AlertDialog(
+        onDismissRequest = { if (!ui.busy) vm.backupDismiss() },
+        confirmButton = {
+            TextButton(onClick = { onChooseDestination(selected, includeAttachments, passphrase) }, enabled = ready) { Text("Choose where to save") }
+        },
+        dismissButton = { TextButton(onClick = vm::backupDismiss, enabled = !ui.busy) { Text("Cancel") } },
+        title = { Text("Back up vault") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                pre.offlineNote?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(8.dp))
+                }
+                Text(
+                    "Exporting is private — other members and the server are not notified.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                pre.vaults.forEach { v ->
+                    if (v.type == "personal") {
+                        Text("• ${v.name} — ${v.itemCount} item(s), personal", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(v.vaultId in selected, { on -> selected = if (on) selected + v.vaultId else selected - v.vaultId })
+                            Text("${v.name} — ${v.itemCount} item(s), shared (${v.role})", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(includeAttachments, { includeAttachments = it })
+                    Text("Include attachments (${humanSize(plan.totalBytes)})", style = MaterialTheme.typography.bodySmall)
+                }
+                if (includeAttachments && plan.overCap.isNotEmpty()) {
+                    Text("Skipped — over the 64 MiB total cap:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    plan.overCap.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                }
+                Spacer(Modifier.height(8.dp))
+                SecretField("Backup passphrase", passphrase) { passphrase = it }
+                SecretField("Confirm passphrase", confirm) { confirm = it }
+                if (passphrase.isNotEmpty()) {
+                    val ok = score >= Strength.BACKUP_FLOOR
+                    Text(
+                        "Strength: ${Strength.label(score)}" + if (ok) "" else " — needs at least “good”",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (ok) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (confirm.isNotEmpty() && confirm != passphrase) {
+                    Text("Passphrases don't match.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                if (passphrase.any { it.code > 127 }) {
+                    Text(
+                        "Heads-up: non-ASCII characters are used exactly as typed — you must type them identically to restore.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Tip: your master password is a fine choice — the backup is then exactly as protected as your vault. A different passphrase belongs on your printed recovery sheet.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun BackupResultDialog(r: BackupResult, onDone: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDone,
+        confirmButton = { TextButton(onClick = onDone) { Text("Done") } },
+        title = { Text("Backup saved") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "Backed up ${r.items} item(s) across ${r.vaults} vault(s)" +
+                        (if (r.attachments > 0) " with ${r.attachments} attachment(s)." else "."),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                NamedSkips("Skipped (over the 64 MiB attachment cap):", r.attachmentsOverCap)
+                NamedSkips("Skipped (download failed twice):", r.attachmentFetchFailed)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "If you change your master password later, this file still opens with the passphrase you just set.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Restore is for total server loss only — via the offline backup-cli today, in-app in a future release.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun CsvPreflightDialog(vm: AndvariViewModel, ui: UiState, pre: CsvPreflight, onChooseDestination: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = { if (!ui.busy) vm.csvDismiss() },
+        confirmButton = {
+            TextButton(onClick = onChooseDestination, enabled = !ui.busy && pre.loginCount > 0) { Text("Choose where to save") }
+        },
+        dismissButton = { TextButton(onClick = vm::csvDismiss, enabled = !ui.busy) { Text("Cancel") } },
+        title = { Text("Export for another password manager?") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                pre.offlineNote?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(8.dp))
+                }
+                Text(
+                    "⚠ The CSV holds every password in PLAINTEXT. Anyone who reads the file reads your vault — and your Downloads folder may auto-sync to cloud storage. Delete it (and empty the trash) as soon as the other manager has imported it.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text("${pre.loginCount} login(s) will be written.", style = MaterialTheme.typography.bodySmall)
+                NamedSkips("Not exported (secure notes):", pre.warnings.noteItems)
+                NamedSkips("Attachments can't be represented in CSV:", pre.warnings.withAttachments)
+                NamedSkips("Only the first website is kept:", pre.warnings.extraUris)
+                NamedSkips("Written, but a reimport would skip them (no username or password):", pre.warnings.emptyUsernameAndPassword)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Reimporting a CSV collapses exact duplicates.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+/** Named enumeration (spec 07 §1: by item name, never by count). Empty → renders nothing. */
+@Composable
+private fun NamedSkips(title: String, names: List<String>) {
+    if (names.isEmpty()) return
+    Spacer(Modifier.height(6.dp))
+    Text(title, style = MaterialTheme.typography.bodySmall)
+    names.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+}
+
+private fun exportDateSuffix(): String =
+    java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(java.util.Date())
+
+private fun lastBackupLine(lastExportAt: Long): String {
+    if (lastExportAt <= 0) return "Last backup: never"
+    return when (val days = ((System.currentTimeMillis() - lastExportAt) / 86_400_000L).toInt()) {
+        0 -> "Last backup: today"
+        1 -> "Last backup: yesterday"
+        else -> "Last backup: $days days ago"
+    }
+}
+
+private fun backupNudge(lastExportAt: Long): Boolean =
+    lastExportAt <= 0 || System.currentTimeMillis() - lastExportAt > 90L * 86_400_000L
+
 @Composable
 private fun InlineError(msg: String?) {
     if (msg != null) Text(msg, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
@@ -720,25 +1086,25 @@ private fun SecretField(label: String, value: String, onChange: (String) -> Unit
 }
 
 @Composable
-private fun CopyRow(label: String, value: String, ctx: Context) {
+private fun CopyRow(label: String, value: String, ctx: Context, clearSeconds: Int) {
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(value, Modifier.weight(1f), fontFamily = FontFamily.Monospace)
-            TextButton(onClick = { copyToClipboard(ctx, label, value, 30) }) { Text("Copy") }
+            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds) }) { Text("Copy") }
         }
     }
 }
 
 @Composable
-private fun SecretCopyRow(label: String, value: String, ctx: Context) {
+private fun SecretCopyRow(label: String, value: String, ctx: Context, clearSeconds: Int) {
     var show by remember { mutableStateOf(false) }
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (show) value else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
             IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) }
-            TextButton(onClick = { copyToClipboard(ctx, label, value, 30) }) { Text("Copy") }
+            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds) }) { Text("Copy") }
         }
     }
 }
@@ -801,7 +1167,9 @@ private fun normalizeTotp(input: String): String {
 private fun copyToClipboard(ctx: Context, label: String, value: String, clearSeconds: Int) {
     val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     cm.setPrimaryClip(ClipData.newPlainText(label, value))
-    if (clearSeconds <= 0) return // non-secret material (e.g. TOTP setup URI) — no auto-clear
+    // <=0 is reserved for NON-secret setup material (e.g. the TOTP setup URI) — no auto-clear.
+    // Vault-secret call sites always pass max(1, policy.clipboardClearSeconds), mirroring web.
+    if (clearSeconds <= 0) return
     // Best-effort auto-clear after the policy window.
     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
         val cur = cm.primaryClip?.getItemAt(0)?.text?.toString()

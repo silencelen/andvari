@@ -37,6 +37,31 @@ class SessionStore(context: Context) {
         get() = prefs.getBoolean("cacheAllowed", true)
         set(v) = prefs.edit().putBoolean("cacheAllowed", v).apply()
 
+    /**
+     * Last-known org `autoLockSeconds` (spec 01 §8; 0 = disabled), persisted so the idle
+     * window is enforced on OFFLINE cold starts and on the autofill unlock path (which
+     * never fetches policy itself). Default 0 until the first policy is seen — nothing can
+     * be unlocked before a first online contact anyway (no cached accountKeys yet).
+     */
+    var autoLockSeconds: Int
+        get() = prefs.getInt("autoLockSeconds", 0)
+        set(v) = prefs.edit().putInt("autoLockSeconds", v).apply()
+
+    /**
+     * When the last spec 07 backup was produced (unix ms; 0 = never). Recorded LOCALLY
+     * only — the server is never told an export happened (spec 07 §2.6). Drives the
+     * "Last backup: N days ago" line + the >90-day nudge in Settings.
+     */
+    var lastExportAt: Long
+        get() = prefs.getLong("lastExportAt", 0L)
+        set(v) = prefs.edit().putLong("lastExportAt", v).apply()
+
+    /** When the last SUCCESSFUL sync finished (unix ms; 0 = unknown) — the timestamp the
+     *  spec 07 offline-export note shows ("vault as of last sync <time>"). */
+    var lastSyncAt: Long
+        get() = prefs.getLong("lastSyncAt", 0L)
+        set(v) = prefs.edit().putLong("lastSyncAt", v).apply()
+
     fun load(): Session? {
         val userId = prefs.getString("userId", null) ?: return null
         return Session(

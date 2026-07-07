@@ -19,30 +19,100 @@ import io.silencelen.andvari.core.model.PersonalVaultUpload
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.KeepGeneratedSerializer
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.elementNames
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
-/** Item plaintext document (spec 02 §3) — shared client model. */
-@kotlinx.serialization.Serializable
+/**
+ * Spec 02 §3 unknown-field contract: JSON keys this client version does not know MUST be
+ * preserved on rewrite (forward compatibility within a formatVersion). Every level of the
+ * item document carries a decode-computed [extras] overlay; this wrapper splits the JSON
+ * object into typed fields (delegated to the plugin-generated serializer) plus the
+ * remainder, and re-merges on encode. Typed fields always win over a same-named extras
+ * entry, judged against the generated DESCRIPTOR's element names — never the emitted
+ * object — so encodeDefaults can never let a stale extras copy shadow a defaulted field.
+ * JSON-only by design: item documents are (de)serialized solely by [Account] (the durable
+ * cache and offline queue store ciphertext envelopes, never decoded docs).
+ */
+@OptIn(ExperimentalSerializationApi::class)
+internal abstract class ExtrasOverlaySerializer<T>(
+    private val delegate: KSerializer<T>,
+    private val extrasOf: (T) -> Map<String, JsonElement>,
+    private val withExtras: (T, Map<String, JsonElement>) -> T,
+) : KSerializer<T> {
+    override val descriptor: SerialDescriptor get() = delegate.descriptor
+    private val known = delegate.descriptor.elementNames.toSet()
+
+    override fun deserialize(decoder: Decoder): T {
+        val jd = decoder as? JsonDecoder ?: throw SerializationException("item documents are JSON-only")
+        val obj = jd.decodeJsonElement().jsonObject
+        // Delegate only the known keys (a strict Json instance would throw on unknowns).
+        val typed = jd.json.decodeFromJsonElement(delegate, JsonObject(obj.filterKeys { it in known }))
+        val rest = obj.filterKeys { it !in known }
+        return if (rest.isEmpty()) typed else withExtras(typed, rest)
+    }
+
+    override fun serialize(encoder: Encoder, value: T) {
+        val je = encoder as? JsonEncoder ?: throw SerializationException("item documents are JSON-only")
+        val emitted = je.json.encodeToJsonElement(delegate, value).jsonObject
+        val rest = extrasOf(value).filterKeys { it !in known }
+        je.encodeJsonElement(JsonObject(emitted + rest))
+    }
+}
+
+/** Item plaintext document (spec 02 §3) — shared client model. The [extras] overlays are
+ *  @Transient so the mechanism never leaks a literal "extras" key into the wire format;
+ *  `copy()` carries them, which is what keeps edits and conflict materialization lossless. */
+@OptIn(ExperimentalSerializationApi::class)
+@kotlinx.serialization.Serializable(with = LoginDataSerializer::class)
+@KeepGeneratedSerializer
 data class LoginData(
     val username: String? = null,
     val password: String? = null,
     val uris: List<String> = emptyList(),
     val totp: String? = null,
     val passwordHistory: List<PasswordHistoryEntry> = emptyList(),
+    @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
 )
 
-@kotlinx.serialization.Serializable
-data class PasswordHistoryEntry(val password: String, val retiredAt: Long)
+@OptIn(ExperimentalSerializationApi::class)
+@kotlinx.serialization.Serializable(with = PasswordHistoryEntrySerializer::class)
+@KeepGeneratedSerializer
+data class PasswordHistoryEntry(
+    val password: String,
+    val retiredAt: Long,
+    @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
+)
 
 /** Mirrors the plaintext attachment entry (spec 02 §3) — the SECRET half of attachmentIds. */
-@kotlinx.serialization.Serializable
-data class AttachmentRef(val id: String, val name: String, val size: Long, val fileKey: String)
+@OptIn(ExperimentalSerializationApi::class)
+@kotlinx.serialization.Serializable(with = AttachmentRefSerializer::class)
+@KeepGeneratedSerializer
+data class AttachmentRef(
+    val id: String,
+    val name: String,
+    val size: Long,
+    val fileKey: String,
+    @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
+)
 
-@kotlinx.serialization.Serializable
+@OptIn(ExperimentalSerializationApi::class)
+@kotlinx.serialization.Serializable(with = ItemDocSerializer::class)
+@KeepGeneratedSerializer
 data class ItemDoc(
     val type: String, // "login" | "note"
     val name: String,
@@ -50,7 +120,20 @@ data class ItemDoc(
     val favorite: Boolean = false,
     val login: LoginData? = null,
     val attachments: List<AttachmentRef> = emptyList(),
+    @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
 )
+
+@OptIn(ExperimentalSerializationApi::class)
+internal object LoginDataSerializer : ExtrasOverlaySerializer<LoginData>(LoginData.generatedSerializer(), LoginData::extras, { v, e -> v.copy(extras = e) })
+
+@OptIn(ExperimentalSerializationApi::class)
+internal object PasswordHistoryEntrySerializer : ExtrasOverlaySerializer<PasswordHistoryEntry>(PasswordHistoryEntry.generatedSerializer(), PasswordHistoryEntry::extras, { v, e -> v.copy(extras = e) })
+
+@OptIn(ExperimentalSerializationApi::class)
+internal object AttachmentRefSerializer : ExtrasOverlaySerializer<AttachmentRef>(AttachmentRef.generatedSerializer(), AttachmentRef::extras, { v, e -> v.copy(extras = e) })
+
+@OptIn(ExperimentalSerializationApi::class)
+internal object ItemDocSerializer : ExtrasOverlaySerializer<ItemDoc>(ItemDoc.generatedSerializer(), ItemDoc::extras, { v, e -> v.copy(extras = e) })
 
 /**
  * An unlocked account — the Kotlin sibling of web/src/vault/account.ts. Holds the
@@ -252,6 +335,11 @@ class Account private constructor(
 
     fun decryptItem(item: WireItem): ItemDoc {
         val blob = item.blob ?: throw CryptoException("item has no blob (tombstone?)")
+        // Fail closed on documents from a NEWER format: unknown-field preservation (spec 02
+        // §3) is scoped WITHIN a formatVersion, and editing a v2 doc here would re-seal it
+        // silently downgraded to v1. CryptoException rides the existing runCatching sync
+        // paths ("undecryptable, retried on hydrate") — never a crash, envelope persists.
+        if (item.formatVersion > ITEM_FORMAT_VERSION) throw CryptoException("item formatVersion ${item.formatVersion} is newer than this client supports")
         val plain = Envelope.openB64(crypto, vk(item.vaultId), blob, Ad.item(item.vaultId, item.itemId, item.formatVersion))
         return json.decodeFromString(ItemDoc.serializer(), plain.decodeToString())
     }

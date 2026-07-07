@@ -22,6 +22,15 @@ export interface VaultInfo {
   role: string | null;
 }
 
+/** Minimal identity of an item we hold the vault key for but could not decrypt —
+ *  spec 07 §2.4's `skipped.undecryptable` shape (structurally export.ts's
+ *  BackupSkippedItem; declared here so vault/ doesn't import from export/). */
+export interface UndecryptableItem {
+  itemId: string;
+  vaultId: string;
+  formatVersion: number;
+}
+
 /**
  * UUIDv4-shaped id from sha256("conflict|itemId|rev") (spec 03 §5): concurrent
  * materializers across members/devices converge on ONE copy id, absorbed by the
@@ -52,6 +61,16 @@ export class VaultStore {
   private cursor = 0;
   private itemsById = new Map<string, VaultItem>();
   private vaultsById = new Map<string, WireVault>();
+  /** spec 07 §2.4: HELD-key decrypt failures retained at sync time (see [undecryptable]).
+   *  Mutually exclusive with itemsById — an itemId lives in exactly one of the two. */
+  private undecryptableById = new Map<string, UndecryptableItem>();
+  private _lastSyncAt: number | null = null;
+
+  /** Wall-clock time of the last SUCCESSFUL sync, or null before the first one —
+   *  the export flow's "vault as of last sync <time>" banner reads this (spec 07). */
+  get lastSyncAt(): number | null {
+    return this._lastSyncAt;
+  }
 
   constructor(
     private api: ApiClient,
@@ -64,6 +83,21 @@ export class VaultStore {
 
   get(itemId: string): VaultItem | undefined {
     return this.itemsById.get(itemId);
+  }
+
+  /**
+   * Items whose vault key IS held but whose blob failed decryptItem at sync time — a
+   * newer formatVersion (spec 02 §3 fail-closed) or a corrupt/mismatched blob. The
+   * export flow enumerates these into `skipped.undecryptable` (spec 07 §2.4) instead
+   * of silently omitting credentials from a backup; they stay OUT of the visible
+   * list()/get() surface. Items of vaults with no key are deliberately absent — those
+   * aren't ours to enumerate (the Kotlin clients derive the same held-key set from
+   * their retained envelopes). Sorted for deterministic backup bytes.
+   */
+  undecryptable(): UndecryptableItem[] {
+    return [...this.undecryptableById.values()].sort(
+      (a, b) => a.vaultId.localeCompare(b.vaultId) || a.itemId.localeCompare(b.itemId),
+    );
   }
 
   /** Vaults whose key we hold, personal first then shared by name. */
@@ -94,6 +128,7 @@ export class VaultStore {
         this.cursor = 0;
         this.itemsById.clear();
         this.vaultsById.clear();
+        this.undecryptableById.clear(); // resync-from-0 re-delivers — never double-count
         resp = await this.api.sync(0);
       } else {
         throw e;
@@ -123,6 +158,7 @@ export class VaultStore {
       if (!this.account.hasVault(item.vaultId)) continue;
       if (item.deleted) {
         this.itemsById.delete(item.itemId);
+        this.undecryptableById.delete(item.itemId); // a tombstone ends the enumeration too
         continue;
       }
       try {
@@ -134,9 +170,21 @@ export class VaultStore {
           updatedAt: item.updatedAt,
           doc,
         });
+        this.undecryptableById.delete(item.itemId); // became decryptable (e.g. rewritten at v1)
         if (item.conflict) conflictsToMaterialize.push(item);
       } catch {
-        /* undecryptable (missing key) — skip */
+        // Undecryptable under a HELD key (formatVersion > supported — decryptItem
+        // fails closed BEFORE opening the envelope, so capture the wire field here —
+        // or a corrupt/mismatched blob). Stays out of the visible list, but its
+        // identity is RETAINED so a backup can enumerate it (spec 07 §2.4) instead of
+        // silently omitting a credential. The newer rev supersedes any older
+        // plaintext we held (Kotlin's upsertItem(wire, null) drops the decrypted twin).
+        this.itemsById.delete(item.itemId);
+        this.undecryptableById.set(item.itemId, {
+          itemId: item.itemId,
+          vaultId: item.vaultId,
+          formatVersion: item.formatVersion,
+        });
       }
     }
 
@@ -146,6 +194,9 @@ export class VaultStore {
     for (const vaultId of resp.removedGrants) {
       for (const it of [...this.itemsById.values()]) {
         if (it.vaultId === vaultId) this.itemsById.delete(it.itemId);
+      }
+      for (const it of [...this.undecryptableById.values()]) {
+        if (it.vaultId === vaultId) this.undecryptableById.delete(it.itemId);
       }
       this.vaultsById.delete(vaultId);
       this.account.removeVault(vaultId);
@@ -158,6 +209,8 @@ export class VaultStore {
       if (this.account.roleFor(item.vaultId) === "reader") continue;
       await this.materializeConflict(item);
     }
+
+    this._lastSyncAt = Date.now();
   }
 
   private async materializeConflict(item: WireItem): Promise<void> {
@@ -185,6 +238,8 @@ export class VaultStore {
       vaultId,
       baseItemRev,
       item: {
+        // Stays 1 until a coordinated format bump: the AD binding (account.encryptItem) and
+        // this wire field must move together, and decrypt fails closed on newer versions.
         formatVersion: 1,
         attachmentIds: doc.attachments?.map((a) => a.id) ?? [],
         blob: this.account.encryptItem(vaultId, itemId, doc),

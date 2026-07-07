@@ -155,8 +155,15 @@ ticket's ≤30 s TTL, the already-minted ticket may still open the bell for that
 the session's access token is rejected on its next `/sync`).
 Server → client frames: `{"type":"rev","rev":N}` (something changed — pull if N >
 local), `{"type":"policy"}`, `{"type":"revoked"}` (session killed — drop to lock
-screen). Nothing else rides the socket; it is a dirty-bell, not a data plane. Clients
-without WS poll `/sync` on foreground + every 5 min. Server pings every 30 s; both
+screen). Nothing else rides the socket; it is a dirty-bell, not a data plane.
+**Liveness:** browser clients reconnect a dropped bell with exponential backoff (1 s
+doubling to a 60 s cap, jittered), minting a fresh single-use ticket per attempt, and
+pull `/sync` on every (re)open to recover bells missed while down (the notifier has no
+replay); a tab becoming visible with a dead socket reconnects immediately, and a
+401/403 at ticket mint (dead session) stops reconnection and drops to the lock screen.
+Clients without WS poll `/sync` + refresh `/client-policy`: Android on every
+foreground transition and every 5 min while foregrounded and unlocked; desktop on
+window focus regained and every 5 min while unlocked. Server pings every 30 s; both
 proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — verified in P1.
 
 ## 7. Admin (isAdmin only; every call audited)

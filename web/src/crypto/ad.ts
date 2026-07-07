@@ -17,3 +17,5 @@ export const adUvk = (userId: string) => join("uvk", userId);
 export const adIdkey = (userId: string) => join("idkey", userId);
 export const adVk = (vaultId: string, userId: string) => join("vk", vaultId, userId);
 export const adVaultMeta = (vaultId: string) => join("vaultmeta", vaultId);
+/** spec 07 §2.4 — backup items envelope AD; `v` is the container header version. */
+export const adExport = (v: number, fileId: string) => join("export", String(v), fileId);

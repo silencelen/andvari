@@ -238,9 +238,12 @@ class SharedVaultTest : P4TestSupport() {
         // Valid add, then duplicate → already_member.
         assertEquals(HttpStatusCode.Created, client.addMember(owner, handle.vaultId, VaultMemberAdd(frank.userId, "reader", sealedF)).status)
         assertEquals(HttpStatusCode.BadRequest, client.addMember(owner, handle.vaultId, VaultMemberAdd(frank.userId, "reader", sealedF)).status)
-        // Lookup of an unknown email → 404 + audit row.
+        // Lookup of an unknown email → 404 + audit row. Raw target emails must never land
+        // in audit meta (INFO-1 data minimization — audit rows ship to the central log store).
         assertEquals(HttpStatusCode.NotFound, client.lookup(owner, "ghost@x.com").status)
-        assertTrue(client.auditRows(owner, "user_lookup").isNotEmpty())
+        val lookups = client.auditRows(owner, "user_lookup")
+        assertTrue(lookups.isNotEmpty())
+        assertTrue(lookups.none { it.meta?.contains("@") == true })
     }
 
     // ---- 7: vault_mismatch — a put targeting an existing item under the WRONG vaultId is a

@@ -1,0 +1,245 @@
+{
+    "cases": [
+        {
+            "name": "top-level-unknowns-rename",
+            "docJson": "{\"type\":\"login\",\"name\":\"GitHub\",\"notes\":\"work account\",\"favorite\":false,\"login\":{\"username\":\"jacob\",\"password\":\"hunter2\",\"uris\":[\"https://github.com/login\"]},\"x-future\":{\"nested\":{\"deep\":true},\"arr\":[1,\"two\"]},\"x-tags\":[\"a\",\"b\"],\"x-note\":\"plain\"}",
+            "edit": {
+                "setName": "GitHub (renamed)"
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/x-future",
+                    "valueJson": "{\"nested\":{\"deep\":true},\"arr\":[1,\"two\"]}"
+                },
+                {
+                    "path": "/x-tags",
+                    "valueJson": "[\"a\",\"b\"]"
+                },
+                {
+                    "path": "/x-note",
+                    "valueJson": "\"plain\""
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/name",
+                    "valueJson": "\"GitHub (renamed)\""
+                },
+                {
+                    "path": "/type",
+                    "valueJson": "\"login\""
+                },
+                {
+                    "path": "/login/username",
+                    "valueJson": "\"jacob\""
+                }
+            ]
+        },
+        {
+            "name": "login-unknowns-set-password",
+            "docJson": "{\"type\":\"login\",\"name\":\"Email\",\"login\":{\"username\":\"jo@x.com\",\"password\":\"old-pass\",\"uris\":[],\"x-flag\":true,\"x-order\":7,\"x-null\":null}}",
+            "edit": {
+                "setPassword": "n3w-p4ss!"
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/login/x-flag",
+                    "valueJson": "true"
+                },
+                {
+                    "path": "/login/x-order",
+                    "valueJson": "7"
+                },
+                {
+                    "path": "/login/x-null",
+                    "valueJson": "null"
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/login/password",
+                    "valueJson": "\"n3w-p4ss!\""
+                },
+                {
+                    "path": "/login/username",
+                    "valueJson": "\"jo@x.com\""
+                },
+                {
+                    "path": "/name",
+                    "valueJson": "\"Email\""
+                }
+            ]
+        },
+        {
+            "name": "history-entry-unknowns-favorite",
+            "docJson": "{\"type\":\"login\",\"name\":\"Bank\",\"favorite\":false,\"login\":{\"username\":\"jo\",\"password\":\"pw3\",\"passwordHistory\":[{\"password\":\"pw1\",\"retiredAt\":1700000000000,\"x-note\":\"rotated after breach\"},{\"password\":\"pw2\",\"retiredAt\":1710000000000,\"x-meta\":{\"source\":\"import\",\"gen\":2}}]}}",
+            "edit": {
+                "setFavorite": true
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/login/passwordHistory/0/x-note",
+                    "valueJson": "\"rotated after breach\""
+                },
+                {
+                    "path": "/login/passwordHistory/1/x-meta",
+                    "valueJson": "{\"source\":\"import\",\"gen\":2}"
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/favorite",
+                    "valueJson": "true"
+                },
+                {
+                    "path": "/login/passwordHistory/0/password",
+                    "valueJson": "\"pw1\""
+                },
+                {
+                    "path": "/login/passwordHistory/1/retiredAt",
+                    "valueJson": "1710000000000"
+                }
+            ]
+        },
+        {
+            "name": "attachment-unknowns-rename",
+            "docJson": "{\"type\":\"login\",\"name\":\"Passport\",\"login\":{\"username\":\"traveler\"},\"attachments\":[{\"id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"scan.pdf\",\"size\":12345,\"fileKey\":\"c2VjcmV0LWtleS1ieXRlcw\",\"x-tag\":\"receipts\",\"x-num\":9007199254740991}]}",
+            "edit": {
+                "setName": "Passport 2026"
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/attachments/0/x-tag",
+                    "valueJson": "\"receipts\""
+                },
+                {
+                    "path": "/attachments/0/x-num",
+                    "valueJson": "9007199254740991"
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/attachments/0/id",
+                    "valueJson": "\"11111111-1111-4111-8111-111111111111\""
+                },
+                {
+                    "path": "/attachments/0/size",
+                    "valueJson": "12345"
+                },
+                {
+                    "path": "/name",
+                    "valueJson": "\"Passport 2026\""
+                }
+            ]
+        },
+        {
+            "name": "all-levels-set-password",
+            "docJson": "{\"type\":\"login\",\"name\":\"Everything\",\"notes\":\"n\",\"favorite\":true,\"x-schema\":\"v9-preview\",\"login\":{\"username\":\"u\",\"password\":\"old\",\"uris\":[\"https://e.test\",\"https://e2.test\"],\"x-generator\":{\"length\":24,\"symbols\":false},\"passwordHistory\":[{\"password\":\"old0\",\"retiredAt\":1690000000000,\"x-strength\":0.87}]},\"attachments\":[{\"id\":\"22222222-2222-4222-8222-222222222222\",\"name\":\"a.bin\",\"size\":1,\"fileKey\":\"a2V5\",\"x-hidden\":false}]}",
+            "edit": {
+                "setPassword": "brand-new"
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/x-schema",
+                    "valueJson": "\"v9-preview\""
+                },
+                {
+                    "path": "/login/x-generator",
+                    "valueJson": "{\"length\":24,\"symbols\":false}"
+                },
+                {
+                    "path": "/login/passwordHistory/0/x-strength",
+                    "valueJson": "0.87"
+                },
+                {
+                    "path": "/attachments/0/x-hidden",
+                    "valueJson": "false"
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/login/password",
+                    "valueJson": "\"brand-new\""
+                },
+                {
+                    "path": "/name",
+                    "valueJson": "\"Everything\""
+                },
+                {
+                    "path": "/favorite",
+                    "valueJson": "true"
+                },
+                {
+                    "path": "/login/uris/1",
+                    "valueJson": "\"https://e2.test\""
+                }
+            ]
+        },
+        {
+            "name": "all-levels-no-edit",
+            "docJson": "{\"type\":\"login\",\"name\":\"Untouched\",\"x-null-top\":null,\"x-bool\":false,\"login\":{\"username\":\"u6\",\"password\":\"p6\",\"x-arr\":[null,{\"k\":\"v\"},[1,2]],\"passwordHistory\":[{\"password\":\"p0\",\"retiredAt\":1650000000000,\"x-b\":true}]},\"attachments\":[{\"id\":\"33333333-3333-4333-8333-333333333333\",\"name\":\"b.txt\",\"size\":2,\"fileKey\":\"a2V5Mg\",\"x-s\":\"tag\"}]}",
+            "edit": {
+                "none": true
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/x-null-top",
+                    "valueJson": "null"
+                },
+                {
+                    "path": "/x-bool",
+                    "valueJson": "false"
+                },
+                {
+                    "path": "/login/x-arr",
+                    "valueJson": "[null,{\"k\":\"v\"},[1,2]]"
+                },
+                {
+                    "path": "/login/passwordHistory/0/x-b",
+                    "valueJson": "true"
+                },
+                {
+                    "path": "/attachments/0/x-s",
+                    "valueJson": "\"tag\""
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/name",
+                    "valueJson": "\"Untouched\""
+                },
+                {
+                    "path": "/login/username",
+                    "valueJson": "\"u6\""
+                }
+            ]
+        },
+        {
+            "name": "absent-optionals-note",
+            "docJson": "{\"type\":\"note\",\"name\":\"Just a note\",\"x-only\":\"bare\",\"x-version\":42}",
+            "edit": {
+                "setName": "Just a note (edited)"
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/x-only",
+                    "valueJson": "\"bare\""
+                },
+                {
+                    "path": "/x-version",
+                    "valueJson": "42"
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/name",
+                    "valueJson": "\"Just a note (edited)\""
+                },
+                {
+                    "path": "/type",
+                    "valueJson": "\"note\""
+                }
+            ]
+        }
+    ]
+}

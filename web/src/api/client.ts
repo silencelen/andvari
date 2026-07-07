@@ -24,7 +24,7 @@ import type {
   WsTicketResponse,
 } from "./types";
 
-export const CLIENT_VERSION = "0.3.0";
+export const CLIENT_VERSION = "0.4.0";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
 
 export class ApiError extends Error {
@@ -287,37 +287,115 @@ export class ApiClient {
   }
 
   /**
-   * WebSocket dirty-bell. Auth = a single-use ~30 s ticket minted over the
-   * authenticated REST channel (spec 03 §6) — the long-lived access token never
-   * appears in a URL. Returns a close fn; `onOpen` fires once the socket is up
-   * (the mint adds a round-trip, so callers racing a push should await it).
+   * WebSocket dirty-bell with automatic reconnection (spec 03 §6). Auth = a
+   * single-use ~30 s ticket minted over the authenticated REST channel — tickets are
+   * strictly one-shot, so every (re)connect attempt mints a fresh one; the long-lived
+   * access token never appears in a URL.
+   *
+   * Liveness: any drop (server deploy, laptop sleep, proxy hiccup) reconnects with
+   * exponential backoff (1 s → 60 s cap, jittered). `onOpen` fires on EVERY (re)open —
+   * consumers use it to `/sync` and catch bells missed while the socket was down (the
+   * notifier has no replay). A 401/403 at ticket mint means the session itself is dead
+   * (the client already tried a token refresh): reconnection stops and `onRevoked`
+   * fires so the consumer drops to the lock screen. On tab-visible, a dead socket
+   * reconnects immediately instead of waiting out the backoff.
+   *
+   * Returns a close fn — tears down the socket, any pending retry timer, and the
+   * visibility listener (callers MUST invoke it on lock/unmount or sockets leak).
    */
   events(onRev: (rev: number) => void, onRevoked: () => void, onOpen?: () => void): () => void {
     let ws: WebSocket | null = null;
     let closed = false;
-    void (async () => {
+    let connecting = false;
+    let attempts = 0; // consecutive failed cycles since the last successful open
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleReconnect = () => {
+      if (closed || timer !== null) return;
+      // Backoff base 1s·2^n capped at 60s, jittered into [base/2, base] so a fleet of
+      // tabs dropped by one server restart doesn't reconnect in lockstep.
+      const base = Math.min(60_000, 1_000 * 2 ** Math.min(attempts, 6));
+      const delay = base / 2 + Math.random() * (base / 2);
+      attempts++;
+      timer = setTimeout(() => {
+        timer = null;
+        void connect();
+      }, delay);
+    };
+
+    const connect = async () => {
+      if (closed || connecting || ws) return;
+      connecting = true;
       try {
+        // Tickets are single-use (spec 03 §6) — re-mint on every attempt.
         const t = await this.json<WsTicketResponse>("POST", "/api/v1/events/ticket");
         if (closed) return;
         const sock = new WebSocket(this.baseUrl.replace(/^http/, "ws") + `/api/v1/events?ticket=${encodeURIComponent(t.ticket)}`);
         ws = sock;
-        sock.onopen = () => onOpen?.();
+        sock.onopen = () => {
+          attempts = 0; // healthy again — future drops restart the backoff from 1 s
+          onOpen?.();
+        };
         sock.onmessage = (ev) => {
           try {
             const msg = JSON.parse(ev.data);
             if (msg.type === "rev") onRev(msg.rev);
-            else if (msg.type === "revoked") onRevoked();
+            else if (msg.type === "revoked") {
+              closed = true; // don't race a reconnect against the consumer's teardown
+              onRevoked();
+            }
           } catch {
             /* ignore */
           }
         };
-      } catch {
-        /* bell unavailable (offline / expired session) — sync still works on demand */
+        sock.onclose = () => {
+          if (ws === sock) ws = null;
+          scheduleReconnect();
+        };
+        sock.onerror = () => {
+          /* the paired onclose handles recovery */
+        };
+      } catch (e) {
+        if (closed) return;
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+          // Session died (refresh already attempted inside json()) — surface it via the
+          // consumer's existing session-expiry path and stop retrying.
+          closed = true;
+          onRevoked();
+          return;
+        }
+        scheduleReconnect(); // offline / server down — keep trying quietly
+      } finally {
+        connecting = false;
       }
-    })();
+    };
+
+    // Tab became visible with a dead socket (e.g. laptop woke up): reconnect NOW —
+    // don't leave the user staring at stale data for up to a full backoff window.
+    const onVisible = () => {
+      if (closed || typeof document === "undefined" || document.visibilityState !== "visible") return;
+      if (!ws && !connecting) {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        attempts = 0;
+        void connect();
+      }
+    };
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
+
+    void connect();
+
     return () => {
       closed = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible);
       ws?.close();
+      ws = null;
     };
   }
 }

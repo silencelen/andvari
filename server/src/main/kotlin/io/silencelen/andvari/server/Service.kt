@@ -76,6 +76,7 @@ class Service(
     fun register(req: RegisterRequest, ip: String): SessionResponse = repo.db.tx { c ->
         if (!config.escrowConfigured) throw BadRequest("escrow_not_configured")
         if (req.escrow.fingerprint != config.recoveryFingerprint) throw BadRequest("escrow_fingerprint_mismatch")
+        requireEscrowBlob(req.escrow.sealed)
         requireKdfFloor(req.kdfParams)
 
         val tokenHash = ServerCrypto.hashToken(req.inviteToken)
@@ -448,11 +449,13 @@ class Service(
     }
 
     fun lookupUser(p: Principal, email: String, ip: String): UserLookupResponse {
+        // Never write the raw target email into audit meta (INFO-1: audit rows ship to the
+        // central log store, a different trust boundary). Found → target userId; miss → no meta.
         val u = repo.userByEmail(email)?.takeIf { it.status == "active" } ?: run {
-            repo.audit("user_lookup", p.userId, p.deviceId, ip, email)
+            repo.audit("user_lookup", p.userId, p.deviceId, ip)
             throw NotFound("no_such_user")
         }
-        repo.audit("user_lookup", p.userId, p.deviceId, ip, email)
+        repo.audit("user_lookup", p.userId, p.deviceId, ip, u.userId)
         return UserLookupResponse(u.userId, u.displayName, u.identityPub)
     }
 
