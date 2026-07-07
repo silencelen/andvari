@@ -39,16 +39,25 @@ export interface Tokens {
   refreshToken: string;
 }
 
+/** A request retries after at most this many refresh/adopt rounds (see raw()). */
+const MAX_AUTH_ATTEMPTS = 2;
+
 /**
  * REST client for the andvari server. Holds the token pair, refreshes the access
- * token once on 401 and retries, and surfaces 426 (upgrade) / 410 (resync) as typed
+ * token on 401 and retries, and surfaces 426 (upgrade) / 410 (resync) as typed
  * errors the store handles.
+ *
+ * `readPersistedTokens` (optional) reads the pair another TAB may have persisted
+ * (ui/session.ts wires it to localStorage) — see tryRefresh: the refresh token is
+ * single-use and rotating, and the server treats reuse as theft (it revokes the whole
+ * device), so a rotation another tab already performed must be ADOPTED, never replayed.
  */
 export class ApiClient {
   constructor(
     public baseUrl: string,
     private tokens: Tokens | null = null,
     private onTokens: (t: Tokens | null) => void = () => {},
+    private readPersistedTokens: (() => Tokens | null) | null = null,
   ) {}
 
   setTokens(t: Tokens | null) {
@@ -60,27 +69,73 @@ export class ApiClient {
     return this.tokens;
   }
 
-  private async raw(method: string, path: string, body?: unknown, auth = true, retry = true): Promise<Response> {
+  private async raw(method: string, path: string, body?: unknown, auth = true, attempt = 0): Promise<Response> {
     const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    if (auth && this.tokens) headers["Authorization"] = `Bearer ${this.tokens.accessToken}`;
+    const used = auth && this.tokens ? this.tokens.accessToken : null;
+    if (used) headers["Authorization"] = `Bearer ${used}`;
     const resp = await fetch(this.baseUrl + path, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    if (resp.status === 401 && auth && retry && this.tokens) {
-      if (await this.tryRefresh()) return this.raw(method, path, body, auth, false);
+    if (resp.status === 401 && auth && attempt < MAX_AUTH_ATTEMPTS && this.tokens) {
+      // A refresh that completed while this request was in flight (another caller's
+      // single-flight refresh, or a pair adopted from another tab) already replaced
+      // the tokens — retry with the fresh access token instead of rotating again.
+      if (this.tokens.accessToken !== used) return this.raw(method, path, body, auth, attempt + 1);
+      if (await this.tryRefresh()) return this.raw(method, path, body, auth, attempt + 1);
     }
     return resp;
   }
 
-  private async tryRefresh(): Promise<boolean> {
-    if (!this.tokens) return false;
+  private refreshInFlight: Promise<boolean> | null = null;
+
+  /**
+   * F25 — the refresh token is SINGLE-USE and rotating; the server's reuse heuristic
+   * revokes the whole device (`refresh_reuse`). Two concurrent 401s (a WS-bell sync
+   * racing a user save at access expiry, or two tabs) must never both spend the same
+   * refresh token:
+   *  - in-tab: every concurrent caller awaits the ONE in-flight refresh promise;
+   *  - cross-tab: the rotation runs inside the `andvari-refresh` Web Lock (where
+   *    available), and INSIDE the lock the persisted session is re-read first — if
+   *    another tab already rotated, its pair is adopted and no POST happens.
+   * A transport failure rejects every waiter without clearing tokens (transient);
+   * only a server "no" (!resp.ok) kills the pair.
+   */
+  private tryRefresh(): Promise<boolean> {
+    this.refreshInFlight ??= this.refreshExclusive().finally(() => {
+      this.refreshInFlight = null;
+    });
+    return this.refreshInFlight;
+  }
+
+  private async refreshExclusive(): Promise<boolean> {
+    // Web Locks API (Chrome 69+/FF 96+/Safari 15.4+) serializes tabs. Where missing
+    // (older browsers, non-window contexts) proceed unlocked — the persisted-pair
+    // re-read in refreshNow still catches most cross-tab races, and in-tab callers
+    // are already deduped by the shared promise.
+    if (typeof navigator !== "undefined" && navigator.locks?.request) {
+      return await navigator.locks.request("andvari-refresh", () => this.refreshNow());
+    }
+    return this.refreshNow();
+  }
+
+  private async refreshNow(): Promise<boolean> {
+    const spending = this.tokens;
+    if (!spending) return false;
+    // Re-read INSIDE the lock: if another tab already rotated (the persisted refresh
+    // token differs from the one we were about to spend), adopt its pair — POSTing
+    // ours now would replay a consumed token and revoke the device.
+    const persisted = this.readPersistedTokens?.() ?? null;
+    if (persisted && persisted.refreshToken !== spending.refreshToken) {
+      this.setTokens(persisted);
+      return true;
+    }
     const resp = await fetch(this.baseUrl + "/api/v1/auth/refresh", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Andvari-Client": CLIENT_HEADER },
-      body: JSON.stringify({ refreshToken: this.tokens.refreshToken }),
+      body: JSON.stringify({ refreshToken: spending.refreshToken }),
     });
     if (!resp.ok) {
       this.setTokens(null);
@@ -92,13 +147,15 @@ export class ApiClient {
   }
 
   /** Like raw() but with a binary request body (attachments). */
-  private async rawBytes(method: string, path: string, body: Uint8Array | undefined, retry = true): Promise<Response> {
+  private async rawBytes(method: string, path: string, body: Uint8Array | undefined, attempt = 0): Promise<Response> {
     const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
     if (body !== undefined) headers["Content-Type"] = "application/octet-stream";
-    if (this.tokens) headers["Authorization"] = `Bearer ${this.tokens.accessToken}`;
+    const used = this.tokens ? this.tokens.accessToken : null;
+    if (used) headers["Authorization"] = `Bearer ${used}`;
     const resp = await fetch(this.baseUrl + path, { method, headers, body: body as BodyInit | undefined });
-    if (resp.status === 401 && retry && this.tokens) {
-      if (await this.tryRefresh()) return this.rawBytes(method, path, body, false);
+    if (resp.status === 401 && attempt < MAX_AUTH_ATTEMPTS && this.tokens) {
+      if (this.tokens.accessToken !== used) return this.rawBytes(method, path, body, attempt + 1);
+      if (await this.tryRefresh()) return this.rawBytes(method, path, body, attempt + 1);
     }
     return resp;
   }
@@ -138,11 +195,29 @@ export class ApiClient {
     return this.json<SessionResponse>("POST", "/api/v1/auth/register", req, false);
   }
 
-  async login(email: string, authKey: string, deviceName: string, totp?: string): Promise<SessionResponse> {
+  /**
+   * F28 — `opts.installId` is a stable per-browser-install UUID (ui/session.ts) sent so
+   * repeat sign-ins CAN be collapsed onto one device row. Today the fielded server
+   * ignores it (Wire.kt DeviceInfo has only platform+name, Service.issueSession INSERTs
+   * a fresh row per login, and its Json is ignoreUnknownKeys=true, so the extra field is
+   * additive and safely dropped); once the server upserts devices on it, clients already
+   * in the field start deduplicating with no further change here.
+   */
+  async login(
+    email: string,
+    authKey: string,
+    deviceName: string,
+    opts: { totp?: string; installId?: string } = {},
+  ): Promise<SessionResponse> {
     const s = await this.json<SessionResponse>(
       "POST",
       "/api/v1/auth/login",
-      { email, authKey, device: { platform: "web", name: deviceName }, ...(totp ? { totp } : {}) },
+      {
+        email,
+        authKey,
+        device: { platform: "web", name: deviceName, installId: opts.installId },
+        ...(opts.totp ? { totp: opts.totp } : {}),
+      },
       false,
     );
     this.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });

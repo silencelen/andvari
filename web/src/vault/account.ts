@@ -1,5 +1,5 @@
 import { adIdkey, adItem, adUvk, adVaultMeta, adVk } from "../crypto/ad";
-import { fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
+import { ctEquals, fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
 import { open, seal } from "../crypto/envelope";
 import { fingerprint as recoveryFingerprint, sealUvk } from "../crypto/escrow";
 import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
@@ -9,6 +9,19 @@ import { CryptoError } from "../crypto/sodium";
 import type { AccountKeys, CreateVaultRequest, ItemDoc, RegisterRequest, WireGrant, WireItem } from "../api/types";
 
 const ITEM_FORMAT_VERSION = 1;
+
+/**
+ * spec 01 §5 MUST (F31, core Account.unlock parity): the server-sent `identityPub` did
+ * not match the public key derived from the account's sealed identity seed — a
+ * pubkey-substitution attempt (or corrupted account row). Deliberately a DISTINCT type
+ * from CryptoError so the auth surfaces can never present it as "wrong master password".
+ */
+export class IdentityMismatchError extends Error {
+  constructor() {
+    super("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.");
+    this.name = "IdentityMismatchError";
+  }
+}
 
 function uuidv4(): string {
   return crypto.randomUUID();
@@ -45,6 +58,8 @@ export class Account {
     kdfParams: KdfParams;
     recoveryPublicKey: Uint8Array;
     recoveryFingerprint: string;
+    /** F28: stable per-browser-install id (see ui/session.ts installId) — additive; the fielded server ignores it. */
+    installId?: string;
   }): Promise<{ request: RegisterRequest; account: Account }> {
     const userId = uuidv4();
     const personalVaultId = uuidv4();
@@ -84,7 +99,7 @@ export class Account {
       encryptedIdentitySeed: toB64(encryptedIdentitySeed),
       escrow: { sealed: toB64(sealed), fingerprint: params.recoveryFingerprint },
       personalVault: { vaultId: personalVaultId, wrappedVk: toB64(wrappedVk), metaBlob: toB64(metaBlob) },
-      device: { platform: "web", name: deviceName() },
+      device: { platform: "web", name: deviceName(), installId: params.installId },
     };
 
     const vaultKeys = new Map([[personalVaultId, vk]]);
@@ -114,6 +129,13 @@ export class Account {
     }
     const identitySeed = open(uvk, fromB64(keys.encryptedIdentitySeed), adIdkey(userId));
     const identity = boxKeypairFromSeed(identitySeed);
+    // spec 01 §5 (core parity): fingerprints and sealed-grant opening use the
+    // SEED-derived keypair, which the server cannot forge — so a server-sent
+    // identityPub that does not equal the derived key is a substitution attempt.
+    // Hard-fail with a distinct error; this must NEVER read as "wrong password".
+    if (!ctEquals(identity.publicKey, fromB64(keys.identityPub))) {
+      throw new IdentityMismatchError();
+    }
     return new Account(userId, uvk, identity.privateKey, identity.publicKey, "", new Map());
   }
 

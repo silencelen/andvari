@@ -51,6 +51,21 @@ export interface PendingUpload {
 }
 
 /**
+ * F31 (spec 05 T1 / core `rev_regression` parity): the server's sync response failed a
+ * rollback guard — nothing was applied and the cursor did not move. Typed so callers'
+ * existing catch paths (Vault's syncNow flips the offline dot) absorb it without
+ * mistaking it for a transport error, and distinct from ApiError because the server
+ * DID answer — we refused the answer.
+ */
+export class SyncIntegrityError extends Error {
+  readonly code = "rev_regression";
+  constructor(message: string) {
+    super(message);
+    this.name = "SyncIntegrityError";
+  }
+}
+
+/**
  * Client sync store: pulls deltas since a cursor, decrypts, materializes conflict
  * copies (spec 03 §5 — the CLIENT does this, the server can't re-encrypt), and pushes
  * mutations with stable mutationIds. Web MVP keeps decrypted items in memory only.
@@ -120,19 +135,43 @@ export class VaultStore {
 
   /** Pull everything new since the cursor. Handles 410 (resync from 0). */
   async sync(): Promise<void> {
+    const since = this.cursor;
+    let resyncing = false;
     let resp;
     try {
-      resp = await this.api.sync(this.cursor);
+      resp = await this.api.sync(since);
     } catch (e) {
       if (e instanceof ApiError && e.status === 410) {
-        this.cursor = 0;
-        this.itemsById.clear();
-        this.vaultsById.clear();
-        this.undecryptableById.clear(); // resync-from-0 re-delivers — never double-count
+        // Fetch the replacement snapshot FIRST (core SyncEngine parity): the working
+        // set is wiped only once the full response is in hand, so a failed or
+        // rejected refetch never leaves an emptied store behind.
+        resyncing = true;
         resp = await this.api.sync(0);
       } else {
         throw e;
       }
+    }
+
+    // Rollback guards BEFORE anything is applied (F31, mirrors core SyncEngine.pull /
+    // spec 05 T1: warn, never overwrite local newer state; spec 03 §4). A non-full
+    // response below our cursor, or a full snapshot we did not ask for via the 410
+    // path, signals a server rollback/replay — reject it, keep the cursor and local
+    // state, and let the caller's failure path (Vault's offline dot) surface it.
+    if (!resp.full && resp.rev < since) {
+      console.warn(`sync rejected: server rev ${resp.rev} went backwards from cursor ${since} — possible rollback; local state kept`);
+      throw new SyncIntegrityError("server rev went backwards — possible rollback; local state kept");
+    }
+    if (resp.full && since > 0 && !resyncing) {
+      console.warn(`sync rejected: unsolicited full snapshot at cursor ${since} — possible rollback; local state kept`);
+      throw new SyncIntegrityError("unsolicited full snapshot — possible rollback; local state kept");
+    }
+
+    if (resyncing) {
+      // resync-from-0 re-delivers everything — reset so nothing double-counts.
+      this.cursor = 0;
+      this.itemsById.clear();
+      this.vaultsById.clear();
+      this.undecryptableById.clear();
     }
 
     // EVERY grant goes through addGrant: the role update always applies (a role change
