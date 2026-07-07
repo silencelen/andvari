@@ -40,6 +40,8 @@ import io.silencelen.andvari.core.model.TokenPair
 import io.silencelen.andvari.core.model.TotpCodeRequest
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 
 open class ApiException(val status: Int, val code: String, message: String) : Exception(message)
@@ -119,20 +121,32 @@ class AndvariApi(
         if (auth) tokens?.let { header("Authorization", "Bearer ${it.accessToken}") }
     }
 
+    // Serializes refresh: two concurrent 401s must not both POST the same rotating
+    // refresh token — the server's reuse detection would revoke the whole device.
+    private val refreshMutex = Mutex()
+
     private suspend fun tryRefresh(): Boolean {
-        val t = tokens ?: return false
-        val resp = http.post(baseUrl + "/api/v1/auth/refresh") {
-            header("X-Andvari-Client", clientHeader)
-            contentType(ContentType.Application.Json)
-            setBody(RefreshRequest(t.refreshToken))
+        val observed = tokens ?: return false
+        return refreshMutex.withLock {
+            val current = tokens ?: return@withLock false // concurrently signed out
+            // Another coroutine already rotated while we waited on the lock — the caller
+            // just retries with the fresh pair; a second POST would double-spend.
+            if (current !== observed) return@withLock true
+            val resp = http.post(baseUrl + "/api/v1/auth/refresh") {
+                header("X-Andvari-Client", clientHeader)
+                contentType(ContentType.Application.Json)
+                setBody(RefreshRequest(current.refreshToken))
+            }
+            if (!resp.status.isSuccess()) {
+                // Only a definitive auth verdict kills the pair; a transient 502/503/429
+                // from a proxy must not sign the device out — keep the tokens, fail this try.
+                if (resp.status.value == 401 || resp.status.value == 403) setTokens(null)
+                return@withLock false
+            }
+            val pair = resp.body<TokenPair>()
+            setTokens(Tokens(pair.accessToken, pair.refreshToken))
+            true
         }
-        if (!resp.status.isSuccess()) {
-            setTokens(null)
-            return false
-        }
-        val pair = resp.body<TokenPair>()
-        setTokens(Tokens(pair.accessToken, pair.refreshToken))
-        return true
     }
 
     private suspend inline fun <reified T> call(method: String, path: String, body: Any? = null, auth: Boolean = true): T {

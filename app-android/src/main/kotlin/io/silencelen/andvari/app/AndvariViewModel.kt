@@ -1,5 +1,8 @@
 package io.silencelen.andvari.app
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.ktor.client.HttpClient
@@ -38,6 +41,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 sealed interface Screen {
     data object Loading : Screen
@@ -51,6 +55,9 @@ sealed interface Screen {
 data class UiState(
     val screen: Screen = Screen.Loading,
     val items: List<VaultItem> = emptyList(),
+    // Held envelopes newer than this build can decrypt (fail-closed) — the vault list
+    // shows them as a one-line "N items need an app update" banner instead of nothing.
+    val needsUpdateCount: Int = 0,
     val policy: ClientPolicy? = null,
     val busy: Boolean = false,
     val error: String? = null,
@@ -149,6 +156,47 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     private val account: Account? get() = VaultSession.get()?.account
     private val engine: SyncEngine? get() = VaultSession.get()?.engine
 
+    // Pending attachment picks (ref + plaintext bytes) for the OPEN editor session. Held
+    // here, not in Compose state: the ViewModel survives rotation/fold-posture recreation
+    // and the bytes can never go into SavedState. The editor UI adds/removes;
+    // [closeEditor] clears it (plaintext must not outlive the editor session).
+    val editorPendingUploads = mutableListOf<PendingUpload>()
+
+    // The OPEN editor session (open flag + target itemId) also lives HERE, not in the
+    // composition: a save completing across an Activity recreation must close the editor
+    // the user is actually looking at — a composition-captured close callback died with
+    // the old Activity and left the restored editor stuck open. On process death the
+    // vault relocks to the Unlock screen, so editor session state is moot there.
+    var editorOpen by mutableStateOf(false)
+        private set
+    var editorItemId by mutableStateOf<String?>(null)
+        private set
+
+    fun openEditor(itemId: String?) {
+        editorPendingUploads.clear() // a fresh editor session never inherits stale picks
+        editorItemId = itemId
+        editorOpen = true
+    }
+
+    fun closeEditor() {
+        editorOpen = false
+        editorItemId = null
+        editorPendingUploads.clear()
+    }
+
+    /** The item under edit vanished (deleted on another device, tombstone synced): close
+     *  instead of rebasing a blank doc onto the existing id — a Save would resurrect it
+     *  empty in the personal vault, destroying history/extras/attachments. */
+    fun editorTargetVanished() {
+        closeEditor()
+        _ui.value = _ui.value.copy(notice = "This item was removed on another device.")
+    }
+
+    /** Server-declared role for a vault (mirrors web's account.roleFor) — null when unknown. */
+    fun roleFor(vaultId: String): String? = account?.roleFor(vaultId)
+
+    private fun needsUpdate(): Int = engine?.needsUpdateCount() ?: 0
+
     private fun newApi(tokens: Tokens? = null): AndvariApi =
         AndvariApi(store.baseUrl, HttpClient(OkHttp), tokens, { store.updateTokens(it) }) // platform defaults to "android"
 
@@ -160,7 +208,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             // the unlock screen, never flash vault content (spec 01 §8).
             val bound = VaultSession.getIfFresh() != null
             if (bound) {
-                _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), baseUrl = store.baseUrl)
+                _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), baseUrl = store.baseUrl)
             }
             val session = store.load()
             val probe = newApi()
@@ -210,7 +258,8 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     fun signIn(email: String, password: String, totp: String? = null) = op {
         val a = newApi()
         val pre = a.prelogin(email)
-        val authKey = Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams)
+        // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on Main (ANrs/jank).
+        val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams) }
         val s = try {
             a.login(LoginRequest(email, authKey, Account.deviceInfo(android.os.Build.MODEL ?: "android"), totp = totp))
         } catch (e: ApiException) {
@@ -229,7 +278,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
                 else -> throw e
             }
         }
-        val acct = Account.unlock(s.userId, password, s.accountKeys)
+        val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys) }
         store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
         persistAccountKeys(s.accountKeys)
         bind(a, acct)
@@ -258,7 +307,8 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
                 throw e
             }
             val acct = try {
-                Account.unlock(session.userId, password, keys)
+                // KDF off the Main thread (argon2id 64 MiB — the unlock spinner must animate).
+                withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys) }
             } catch (t: Throwable) { a.close(); throw t }
             bind(a, acct)
         }
@@ -274,12 +324,15 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         val policy = _ui.value.policy ?: newApi().also { it.close() }.let { newApi().clientPolicy() }
         val a = newApi()
         val recoveryPub = Bytes.fromB64(a.recoveryPubkey())
-        val (req, acct) = Account.enroll(
-            inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
-            password = password, params = policy.kdfParams,
-            recoveryPublicKey = recoveryPub, recoveryFingerprint = policy.recoveryFingerprint,
-            deviceName = android.os.Build.MODEL ?: "android",
-        )
+        // Key generation + KDF are CPU-bound (argon2id) — off the Main thread.
+        val (req, acct) = withContext(Dispatchers.Default) {
+            Account.enroll(
+                inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
+                password = password, params = policy.kdfParams,
+                recoveryPublicKey = recoveryPub, recoveryFingerprint = policy.recoveryFingerprint,
+                deviceName = android.os.Build.MODEL ?: "android",
+            )
+        }
         val s = a.register(req)
         store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
         persistAccountKeys(s.accountKeys)
@@ -339,7 +392,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             runCatching { current.api.clientPolicy() }.onSuccess { applyPolicy(it) }
             try {
                 syncNow(current.engine)
-                _ui.value = _ui.value.copy(items = current.engine.items(), busy = false)
+                _ui.value = _ui.value.copy(items = current.engine.items(), needsUpdateCount = current.engine.needsUpdateCount(), busy = false)
             } catch (t: Throwable) {
                 _ui.value = _ui.value.copy(busy = false, error = if (t is IOException) _ui.value.error else t.message)
             }
@@ -766,26 +819,47 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         // cache is retained on lock (spec 05 T3); a relaunch hydrates it.
         VaultSession.lock()
         pendingBackupRequest = null // a stashed export must not survive a lock (see stash docs)
+        closeEditor() // the editor session (and its picked plaintext bytes) dies with the lock
         _ui.value = _ui.value.copy(
-            screen = Screen.Unlock(store.load()?.email ?: ""), items = emptyList(),
+            screen = Screen.Unlock(store.load()?.email ?: ""), items = emptyList(), needsUpdateCount = 0,
             notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
             backupPreflight = null, backupResult = null, csvPreflight = null,
         )
     }
 
     fun signOut() {
-        val userId = store.load()?.userId
+        if (_ui.value.busy) return
+        val session = store.load()
         val current = VaultSession.get()
-        viewModelScope.launch { runCatching { current?.api?.logout() } }
-        // VaultSession.lock() closes the engine BEFORE we delete the DB (holders), then the api.
-        VaultSession.lock()
-        pendingBackupRequest = null // never carry a stashed export into a different account
-        userId?.let { deleteCache(it) }
-        store.clear()
-        _ui.value = _ui.value.copy(
-            screen = Screen.Welcome, items = emptyList(),
-            notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
-        )
+        _ui.value = _ui.value.copy(busy = true, error = null)
+        viewModelScope.launch {
+            // AWAIT the server-side revocation (bounded) BEFORE tearing the session down.
+            // The old fire-and-forget launch raced VaultSession.lock() → api.close(), which
+            // cancelled the in-flight logout and left the refresh token valid for ~30 days.
+            if (current != null) {
+                runCatching { withTimeoutOrNull(5_000) { current.api.logout() } }
+            } else if (session != null && session.accessToken.isNotEmpty()) {
+                // LOCKED sign-out (the Unlock screen's "Sign out / use a different
+                // account"): no live token-holder exists, but the persisted refresh token
+                // is still valid server-side — store.clear() alone would leave it live for
+                // ~30 days. Build a short-lived holder from the persisted session (same
+                // shape as newApi(): updateTokens wired so any rotation persists) purely
+                // to revoke it.
+                val a = newApi(session.tokens())
+                runCatching { withTimeoutOrNull(5_000) { a.logout() } }
+                a.close()
+            }
+            // VaultSession.lock() closes the engine BEFORE we delete the DB (holders), then the api.
+            VaultSession.lock()
+            pendingBackupRequest = null // never carry a stashed export into a different account
+            closeEditor()
+            session?.userId?.let { deleteCache(it) }
+            store.clear()
+            _ui.value = _ui.value.copy(
+                screen = Screen.Welcome, items = emptyList(), needsUpdateCount = 0, busy = false,
+                notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
+            )
+        }
     }
 
     // ---- settings / server TOTP ----
@@ -867,11 +941,11 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     }
 
     private fun refreshItems() {
-        _ui.value = _ui.value.copy(items = engine?.items() ?: emptyList(), busy = false, error = null)
+        _ui.value = _ui.value.copy(items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null)
     }
 
     private fun toVault() {
-        _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), busy = false, error = null, loginTotpRequired = false)
+        _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null, loginTotpRequired = false)
     }
 
     private fun op(block: suspend () -> Unit) {

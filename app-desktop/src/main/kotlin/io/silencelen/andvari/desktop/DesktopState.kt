@@ -37,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -81,6 +82,10 @@ class DesktopState(private val scope: CoroutineScope) {
     var screen by mutableStateOf<DesktopScreen>(DesktopScreen.Loading)
         private set
     var items by mutableStateOf<List<VaultItem>>(emptyList())
+        private set
+    // Held envelopes newer than this build can decrypt (fail-closed) — the vault list
+    // shows them as a one-line "N items need an app update" banner instead of nothing.
+    var needsUpdateCount by mutableStateOf(0)
         private set
     var policy by mutableStateOf<ClientPolicy?>(null)
         private set
@@ -170,7 +175,8 @@ class DesktopState(private val scope: CoroutineScope) {
     fun signIn(email: String, password: String, totp: String? = null) = op {
         val a = newApi()
         val pre = a.prelogin(email)
-        val authKey = Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams)
+        // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on the UI thread.
+        val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams) }
         val s = try {
             a.login(LoginRequest(email, authKey, Account.deviceInfo(deviceName(), desktopPlatform()), totp = totp))
         } catch (e: ApiException) {
@@ -183,7 +189,7 @@ class DesktopState(private val scope: CoroutineScope) {
                 else -> throw e
             }
         }
-        val acct = Account.unlock(s.userId, password, s.accountKeys)
+        val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys) }
         store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
         persistAccountKeys(s.accountKeys)
         bind(a, acct); syncNow(engine!!)
@@ -204,7 +210,8 @@ class DesktopState(private val scope: CoroutineScope) {
             if (e.status == 401) { purgeOfflineData(session.userId); store.clear() }
             throw e
         }
-        val acct = Account.unlock(session.userId, password, keys)
+        // KDF off the UI thread (argon2id 64 MiB — the unlock spinner must animate).
+        val acct = withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys) }
         bind(a, acct)
         runCatching { syncNow(engine!!) }.onFailure {
             if (it is java.io.IOException) notice = "Offline — showing cached data" else throw it
@@ -216,11 +223,14 @@ class DesktopState(private val scope: CoroutineScope) {
         val pol = policy ?: newApi().clientPolicy().also { policy = it }
         val a = newApi()
         val recoveryPub = Bytes.fromB64(a.recoveryPubkey())
-        val (req, acct) = Account.enroll(
-            inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
-            password = password, params = pol.kdfParams,
-            recoveryPublicKey = recoveryPub, recoveryFingerprint = pol.recoveryFingerprint, deviceName = deviceName(),
-        )
+        // Key generation + KDF are CPU-bound (argon2id) — off the UI thread.
+        val (req, acct) = withContext(Dispatchers.Default) {
+            Account.enroll(
+                inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
+                password = password, params = pol.kdfParams,
+                recoveryPublicKey = recoveryPub, recoveryFingerprint = pol.recoveryFingerprint, deviceName = deviceName(),
+            )
+        }
         val s = a.register(req)
         store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
         persistAccountKeys(s.accountKeys)
@@ -233,6 +243,9 @@ class DesktopState(private val scope: CoroutineScope) {
     fun deleteItem(itemId: String) = op { engine!!.remove(itemId); refreshItems() }
     fun refresh() = op { syncNow(engine!!); refreshItems() }
     fun item(itemId: String): VaultItem? = engine?.item(itemId)
+
+    /** Server-declared role for a vault (mirrors web's account.roleFor) — null when unknown. */
+    fun roleFor(vaultId: String): String? = account?.roleFor(vaultId)
 
     // ---- inactivity auto-lock + poll cadence (spec 01 §8 / spec 03 §6) ----
 
@@ -280,6 +293,7 @@ class DesktopState(private val scope: CoroutineScope) {
             try {
                 syncNow(e)
                 items = e.items()
+                needsUpdateCount = e.needsUpdateCount()
                 busy = false
             } catch (t: Throwable) {
                 busy = false
@@ -686,19 +700,40 @@ class DesktopState(private val scope: CoroutineScope) {
     fun lock() {
         // Retain the ciphertext cache on lock (spec 05 T3); close its handle.
         engine?.close(); api?.close(); api = null; account = null; engine = null; cache = null
+        clearVaultClipboard() // a copied secret must not outlive the unlocked session
         clearSecondary()
-        screen = DesktopScreen.Unlock(store.load()?.email ?: ""); items = emptyList()
+        screen = DesktopScreen.Unlock(store.load()?.email ?: ""); items = emptyList(); needsUpdateCount = 0
     }
 
     fun signOut() {
-        val userId = store.load()?.userId
-        scope.launch { runCatching { api?.logout() } }
-        // Close the engine (releases the DB handle — Windows won't delete an open file) first.
-        engine?.close(); api?.close(); api = null; account = null; engine = null; cache = null
-        userId?.let { deleteCache(it) }
-        store.clear()
-        clearSecondary(); signInTotpRequired = false
-        screen = DesktopScreen.Welcome; items = emptyList()
+        if (busy) return
+        val session = store.load()
+        val a = api
+        busy = true; error = null
+        scope.launch {
+            // AWAIT the server-side revocation (bounded) BEFORE close(): the old
+            // fire-and-forget launch raced the teardown below, which cancelled the
+            // in-flight logout and left the refresh token valid for ~30 days.
+            if (a != null) {
+                runCatching { withTimeoutOrNull(5_000) { a.logout() } }
+            } else if (session != null && session.accessToken.isNotEmpty()) {
+                // LOCKED sign-out (the Unlock screen's "Sign out / use a different
+                // account"): no live token-holder exists, but the persisted refresh token
+                // is still valid server-side — store.clear() alone would leave it live
+                // for ~30 days. Build a short-lived holder purely to revoke it.
+                val temp = newApi(session.tokens())
+                runCatching { withTimeoutOrNull(5_000) { temp.logout() } }
+                temp.close()
+            }
+            // Close the engine (releases the DB handle — Windows won't delete an open file) first.
+            engine?.close(); a?.close(); api = null; account = null; engine = null; cache = null
+            clearVaultClipboard()
+            session?.userId?.let { deleteCache(it) }
+            store.clear()
+            clearSecondary(); signInTotpRequired = false
+            busy = false
+            screen = DesktopScreen.Welcome; items = emptyList(); needsUpdateCount = 0
+        }
     }
 
     private fun clearSecondary() {
@@ -763,8 +798,18 @@ class DesktopState(private val scope: CoroutineScope) {
         runCatching { f.setReadable(false, false); f.setReadable(true, true); f.setWritable(false, false); f.setWritable(true, true) }
     }
 
-    private fun refreshItems() { items = engine?.items() ?: emptyList(); busy = false; error = null }
-    private fun toVault() { screen = DesktopScreen.Vault; items = engine?.items() ?: emptyList(); busy = false; error = null }
+    private fun refreshItems() {
+        items = engine?.items() ?: emptyList()
+        needsUpdateCount = engine?.needsUpdateCount() ?: 0
+        busy = false; error = null
+    }
+
+    private fun toVault() {
+        screen = DesktopScreen.Vault
+        items = engine?.items() ?: emptyList()
+        needsUpdateCount = engine?.needsUpdateCount() ?: 0
+        busy = false; error = null
+    }
 
     private fun op(block: suspend () -> Unit) {
         busy = true; error = null; notice = null

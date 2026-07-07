@@ -28,6 +28,17 @@ class SyncEngine(
     fun items(): List<VaultItem> = cache.allItems().sortedBy { it.doc.name.lowercase() }
     fun item(itemId: String): VaultItem? = cache.getItem(itemId)
 
+    /**
+     * Held envelopes this build cannot decrypt because their formatVersion is newer than
+     * [Account.ITEM_FORMAT_VERSION] (fail-closed, spec 02 §3) — items that exist but
+     * silently vanish from [items]. Excludes tombstones and vaults whose VK is missing
+     * (those aren't an app-version problem). Drives the "N items need an app update"
+     * banner on the native clients.
+     */
+    fun needsUpdateCount(): Int = cache.envelopes().count {
+        !it.deleted && account.hasVault(it.vaultId) && it.formatVersion > Account.ITEM_FORMAT_VERSION
+    }
+
     /** Push any queued mutations first (crash recovery), then pull deltas. */
     suspend fun sync() {
         flushQueue()

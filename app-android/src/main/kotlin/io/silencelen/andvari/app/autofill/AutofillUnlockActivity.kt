@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.view.View
+import android.view.WindowManager
 import android.view.autofill.AutofillManager
 import android.view.inputmethod.InlineSuggestionsRequest
 import androidx.activity.ComponentActivity
@@ -78,6 +79,9 @@ class AutofillUnlockActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // This overlay takes the master password — keep it out of screen recordings/casts
+        // (it is already excludeFromRecents, so no thumbnail concern).
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         // Default result is CANCELED (back / dismiss returns cleanly with no fill).
         setResult(RESULT_CANCELED)
 

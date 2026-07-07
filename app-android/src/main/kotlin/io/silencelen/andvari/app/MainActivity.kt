@@ -1,15 +1,19 @@
 package io.silencelen.andvari.app
 
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.os.PersistableBundle
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -23,6 +27,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -48,8 +54,11 @@ import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
 
 class MainActivity : ComponentActivity() {
     private val vm: AndvariViewModel by viewModels {
@@ -73,6 +82,17 @@ class MainActivity : ComponentActivity() {
             val trace = runCatching { crashFile.readText() }.getOrDefault("(crash file unreadable)")
             showCrash(trace) { crashFile.delete(); recreate() }
             return
+        }
+        // Block Recents thumbnails / screen recording / casting from capturing revealed
+        // secrets (set AFTER the crash-screen early-return above — crash traces must stay
+        // screenshot-able). The Autofill Status screen is exempted below: the owner's Fold
+        // debugging protocol depends on screenshotting it, and it renders no vault values.
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        lifecycleScope.launch {
+            vm.ui.map { it.screen is Screen.AutofillStatus }.distinctUntilChanged().collect { exempt ->
+                if (exempt) window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                else window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+            }
         }
         // One-time: bump an old LAN-default server URL to the tailnet HTTPS default.
         SessionStore(applicationContext).migrateDefaultOnce()
@@ -202,7 +222,7 @@ private fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
 
 @Composable
 fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
-    var tab by remember { mutableStateOf(0) }
+    var tab by rememberSaveable { mutableStateOf(0) }
     Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(40.dp))
         Sigil()
@@ -221,9 +241,10 @@ fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
 
 @Composable
 private fun SignInForm(vm: AndvariViewModel, ui: UiState) {
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var totp by remember { mutableStateOf("") }
+    // rememberSaveable: rotation / fold-posture change must not wipe a half-typed form.
+    var email by rememberSaveable { mutableStateOf("") }
+    var password by rememberSaveable { mutableStateOf("") }
+    var totp by rememberSaveable { mutableStateOf("") }
     Column(Modifier.fillMaxWidth()) {
         Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
         SecretField("Master password", password) { password = it }
@@ -238,12 +259,14 @@ private fun SignInForm(vm: AndvariViewModel, ui: UiState) {
 
 @Composable
 private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
-    var invite by remember { mutableStateOf("") }
-    var email by remember { mutableStateOf("") }
-    var name by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var confirm by remember { mutableStateOf("") }
-    var fpOk by remember { mutableStateOf(false) }
+    // rememberSaveable: enrollment is the longest form in the app — losing it to a fold
+    // unfold (Activity recreation) was silent data loss.
+    var invite by rememberSaveable { mutableStateOf("") }
+    var email by rememberSaveable { mutableStateOf("") }
+    var name by rememberSaveable { mutableStateOf("") }
+    var password by rememberSaveable { mutableStateOf("") }
+    var confirm by rememberSaveable { mutableStateOf("") }
+    var fpOk by rememberSaveable { mutableStateOf(false) }
     val fp = ui.policy?.recoveryFingerprint ?: ""
     val ready = invite.isNotBlank() && email.isNotBlank() && password.length >= 8 && password == confirm && fpOk && fp.isNotEmpty()
     Column(Modifier.fillMaxWidth()) {
@@ -289,11 +312,33 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
-    var query by remember { mutableStateOf("") }
-    var editing by remember { mutableStateOf<Pair<String?, ItemDoc>?>(null) }
-    var detailId by remember { mutableStateOf<String?>(null) }
+    // rememberSaveable: rotation / fold-posture change recreates the Activity, and plain
+    // `remember` state (search, open detail) silently reset — typed work lost. (With the
+    // manifest configChanges those events no longer even recreate; this is defense-in-depth.)
+    var query by rememberSaveable { mutableStateOf("") }
+    var detailId by rememberSaveable { mutableStateOf<String?>(null) }
     val ctx = LocalContextCompat()
     val scope = rememberCoroutineScope()
+
+    // The editor session (open flag + target itemId) lives in the ViewModel — see
+    // AndvariViewModel.openEditor/closeEditor. Local snapshot for smart-casts.
+    val editorItemId = vm.editorItemId
+    // Snapshot the initial doc per editor session (remember, not derived live): edits build
+    // on initial.copy(), and the base must not shift under the user mid-session. null with
+    // a non-null id = the target item no longer exists.
+    val editorInitial = if (!vm.editorOpen) null else remember(editorItemId) {
+        if (editorItemId == null) ItemDoc(type = "login", name = "", login = LoginData(uris = listOf("")))
+        else vm.item(editorItemId)?.doc
+    }
+    if (vm.editorOpen && editorItemId != null && editorInitial == null) {
+        // Deleted on another device (tombstone synced) — never rebase a blank doc onto the
+        // existing id; the ViewModel closes the session and explains.
+        LaunchedEffect(editorItemId) { vm.editorTargetVanished() }
+    }
+    // System back walks the in-app hierarchy instead of backgrounding the app: detail →
+    // list here; editor → discard-confirm (handled inside ItemEditor, which registers its
+    // own BackHandler while composed and therefore wins while the editor is open).
+    BackHandler(enabled = editorInitial == null && detailId != null) { detailId = null }
 
     // CSV import: OpenDocument → BOUNDED read (never buffer a multi-GB file) → parse on-device.
     val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -329,19 +374,25 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
             )
         },
         floatingActionButton = {
-            if (editing == null && detailId == null) {
-                ExtendedFloatingActionButton(onClick = { editing = null to ItemDoc(type = "login", name = "", login = LoginData(uris = listOf(""))) }, text = { Text("Add") }, icon = { Icon(Icons.Default.Add, null) })
+            if (editorInitial == null && detailId == null) {
+                ExtendedFloatingActionButton(onClick = { vm.openEditor(null) }, text = { Text("Add") }, icon = { Icon(Icons.Default.Add, null) })
             }
         },
     ) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
             val current = detailId?.let { vm.item(it) }
             when {
-                editing != null -> ItemEditor(vm, ui, editing!!.first, editing!!.second, onSave = { doc, uploads -> vm.saveItem(editing!!.first, doc, uploads) { editing = null } }, onCancel = { editing = null })
-                current != null -> ItemDetail(vm, ui, current, onEdit = { editing = current.itemId to current.doc }, onDelete = { vm.deleteItem(current.itemId); detailId = null }, onBack = { detailId = null })
+                // Completion callbacks capture the STABLE vm, never composition state: a
+                // save finishing across an Activity recreation still closes the editor.
+                editorInitial != null -> ItemEditor(vm, ui, editorItemId, editorInitial, onSave = { doc, uploads -> vm.saveItem(editorItemId, doc, uploads) { vm.closeEditor() } }, onCancel = { vm.closeEditor() })
+                current != null -> ItemDetail(vm, ui, current, onEdit = { vm.openEditor(current.itemId) }, onDelete = { vm.deleteItem(current.itemId); detailId = null }, onBack = { detailId = null })
                 else -> Column(Modifier.padding(16.dp)) {
                     OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
                     ErrorBar(ui.error, vm::clearError)
+                    NoticeBar(ui.notice, vm::clearNotice)
+                    if (ui.needsUpdateCount > 0) {
+                        Text(needsUpdateLine(ui.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 4.dp))
+                    }
                     Spacer(Modifier.height(8.dp))
                     if (filtered.isEmpty()) {
                         Centered { Spacer(Modifier.height(60.dp)); Text("ᛝ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary); Text(if (ui.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -454,6 +505,9 @@ private fun VaultRow(item: VaultItem, onClick: () -> Unit) {
 private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdit: () -> Unit, onDelete: () -> Unit, onBack: () -> Unit) {
     val ctx = LocalContextCompat()
     val doc = item.doc
+    // Reader-role members get no Edit/Delete affordances (mirrors web): the push would be
+    // denied server-side and the denied mutation's typed work destroyed.
+    val readOnly = vm.roleFor(item.vaultId) == "reader"
     var pendingDownload by remember { mutableStateOf<AttachmentRef?>(null) }
     val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         val ref = pendingDownload
@@ -469,7 +523,7 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
         ErrorBar(ui.error, vm::clearError)
         NoticeBar(ui.notice, vm::clearNotice)
         Text(doc.name, style = MaterialTheme.typography.headlineMedium)
-        Text(if (doc.type == "login") "Login" else "Secure note", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text((if (doc.type == "login") "Login" else "Secure note") + (if (readOnly) " · view only" else ""), color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(16.dp))
         // Vault-secret copies clear after the org policy window, clamped to >=1 s exactly
         // like web's useCopy (Math.max(1, n)): a policy of 0 still clears — never "keep
@@ -492,20 +546,22 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
             }
         }
         Spacer(Modifier.height(24.dp))
-        var confirmDelete by remember { mutableStateOf(false) }
-        Row {
-            Button(onClick = onEdit, modifier = Modifier.weight(1f)) { Text("Edit") }
-            Spacer(Modifier.width(12.dp))
-            OutlinedButton(onClick = { confirmDelete = true }, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
-        }
-        if (confirmDelete) {
-            AlertDialog(
-                onDismissRequest = { confirmDelete = false },
-                title = { Text("Delete \"${doc.name}\"?") },
-                text = { Text("This removes the item from every device and every family member who can see it.") },
-                confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") } },
-                dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
-            )
+        if (!readOnly) {
+            var confirmDelete by remember { mutableStateOf(false) }
+            Row {
+                Button(onClick = onEdit, modifier = Modifier.weight(1f)) { Text("Edit") }
+                Spacer(Modifier.width(12.dp))
+                OutlinedButton(onClick = { confirmDelete = true }, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
+            }
+            if (confirmDelete) {
+                AlertDialog(
+                    onDismissRequest = { confirmDelete = false },
+                    title = { Text("Delete \"${doc.name}\"?") },
+                    text = { Text("This removes the item from every device and every family member who can see it.") },
+                    confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") } },
+                    dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
+                )
+            }
         }
     }
 }
@@ -529,17 +585,44 @@ private fun AttachmentRow(ref: AttachmentRef, enabled: Boolean, onClick: () -> U
 private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initial: ItemDoc, onSave: (ItemDoc, List<PendingUpload>) -> Unit, onCancel: () -> Unit) {
     val ctx = LocalContextCompat()
     val isLogin = initial.type == "login"
-    var name by remember { mutableStateOf(initial.name) }
-    var username by remember { mutableStateOf(initial.login?.username ?: "") }
-    var password by remember { mutableStateOf(initial.login?.password ?: "") }
-    var website by remember { mutableStateOf(initial.login?.uris?.firstOrNull() ?: "") }
-    var totp by remember { mutableStateOf(initial.login?.totp ?: "") }
-    var notes by remember { mutableStateOf(initial.notes ?: "") }
-    var attachments by remember { mutableStateOf(initial.attachments) }
-    val pendingUploads = remember { mutableStateListOf<PendingUpload>() }
+    // rememberSaveable: every typed field survives Activity recreation (rotation / fold
+    // posture change) — plain `remember` silently wiped them all.
+    var name by rememberSaveable { mutableStateOf(initial.name) }
+    var username by rememberSaveable { mutableStateOf(initial.login?.username ?: "") }
+    var password by rememberSaveable { mutableStateOf(initial.login?.password ?: "") }
+    var website by rememberSaveable { mutableStateOf(initial.login?.uris?.firstOrNull() ?: "") }
+    var totp by rememberSaveable { mutableStateOf(initial.login?.totp ?: "") }
+    var notes by rememberSaveable { mutableStateOf(initial.notes ?: "") }
+    var attachments by rememberSaveable(stateSaver = attachmentListSaver) { mutableStateOf(initial.attachments) }
+    // Pending pick BYTES live in the ViewModel (they can't go in SavedState) — see
+    // AndvariViewModel.editorPendingUploads.
+    val pendingUploads = vm.editorPendingUploads
     var attachError by remember { mutableStateOf<String?>(null) }
+    var totpError by remember { mutableStateOf<String?>(null) }
+    var confirmDiscard by remember { mutableStateOf(false) }
     val crypto = remember { createCryptoProvider() }
     val scope = rememberCoroutineScope()
+
+    // Process death (not rotation) loses the ViewModel's pending bytes while the saved
+    // attachment refs restore: drop any NEW ref whose bytes we no longer hold — saving it
+    // would write a dangling attachment pointer.
+    LaunchedEffect(Unit) {
+        val held = pendingUploads.mapTo(HashSet()) { it.ref.id }
+        val preExisting = initial.attachments.mapTo(HashSet()) { it.id }
+        attachments = attachments.filter { it.id in preExisting || it.id in held }
+    }
+
+    // System back asks before throwing typed work away (it used to background the app).
+    BackHandler { confirmDiscard = true }
+    if (confirmDiscard) {
+        AlertDialog(
+            onDismissRequest = { confirmDiscard = false },
+            title = { Text("Discard changes?") },
+            text = { Text("Anything typed in this editor will be lost.") },
+            confirmButton = { TextButton(onClick = { confirmDiscard = false; onCancel() }) { Text("Discard") } },
+            dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text("Keep editing") } },
+        )
+    }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
@@ -548,14 +631,21 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
             runCatching {
                 withContext(Dispatchers.IO) {
                     val fileName = displayName(ctx, uri)
-                    val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    val stream = ctx.contentResolver.openInputStream(uri)
                         ?: throw IllegalStateException("could not read the selected file")
-                    fileName to bytes
+                    // BOUNDED read, mirroring the CSV import path: the cap must be enforced
+                    // DURING the read — buffering first (readBytes) OOMed on a mispicked
+                    // multi-GB file before the size check ever ran. null = over the cap.
+                    val bytes = stream.use { readBounded(it, cap.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()) }
+                    val overCapSize = if (bytes == null) documentSize(ctx, uri) else -1L
+                    Triple(fileName, bytes, overCapSize)
                 }
-            }.onSuccess { (fileName, bytes) ->
+            }.onSuccess { (fileName, bytes, overCapSize) ->
                 when {
+                    bytes == null -> attachError =
+                        if (overCapSize > 0) "“$fileName” is ${humanSize(overCapSize)} — over the ${humanSize(cap)} limit."
+                        else "“$fileName” is over the ${humanSize(cap)} limit."
                     bytes.isEmpty() -> attachError = "“$fileName” is empty — nothing to attach."
-                    bytes.size > cap -> attachError = "“$fileName” is ${humanSize(bytes.size.toLong())} — over the ${humanSize(cap)} limit."
                     else -> when (val ref = vm.newAttachmentRef(fileName, bytes.size.toLong())) {
                         null -> attachError = "vault is locked"
                         else -> {
@@ -581,7 +671,11 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
                 TextButton(onClick = { password = PasswordGenerator.generate(crypto, GeneratorOptions(length = 20)) }) { Icon(Icons.Default.Refresh, null); Text(" Generate") }
             }
             Field("Website", website, { website = it })
-            Field("TOTP (otpauth:// or base32)", totp, { totp = normalizeTotp(it) }, mono = true)
+            // RAW text while typing — normalizeTotp per keystroke rewrote the field to an
+            // otpauth:// URI on the first character, making hand-typing a secret impossible.
+            // Normalization + validation happen once, on Save.
+            Field("TOTP (otpauth:// or base32)", totp, { totp = it; totpError = null }, mono = true)
+            InlineError(totpError)
         }
         Field("Notes", notes, { notes = it }, singleLine = false)
         Spacer(Modifier.height(12.dp))
@@ -608,16 +702,23 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
         Spacer(Modifier.height(16.dp))
         // copy()-based edit, never a field-by-field rebuild: carries favorite, passwordHistory,
         // extra URIs beyond the first, and unknown-field extras (spec 02 §3) through the save.
-        val doc = initial.copy(
+        fun builtDoc(totpValue: String) = initial.copy(
             name = name.trim(), notes = notes.ifBlank { null },
             login = if (isLogin) (initial.login ?: LoginData()).copy(
                 username = username, password = password,
                 uris = buildList { if (website.isNotBlank()) add(website); addAll(initial.login?.uris.orEmpty().drop(1)) },
-                totp = totp.ifBlank { null },
+                totp = totpValue.ifBlank { null },
             ) else null,
             attachments = attachments,
         )
-        PrimaryButton("Save", enabled = name.isNotBlank() && !ui.busy, busy = ui.busy) { onSave(doc, pendingUploads.toList()) }
+        PrimaryButton("Save", enabled = name.isNotBlank() && !ui.busy, busy = ui.busy) {
+            val normalizedTotp = if (isLogin) normalizeTotp(totp) else ""
+            if (isLogin && totp.isNotBlank() && runCatching { Totp.parseUri(normalizedTotp) }.isFailure) {
+                totpError = "TOTP secret isn't valid base32 or an otpauth:// link"
+            } else {
+                onSave(builtDoc(normalizedTotp), pendingUploads.toList())
+            }
+        }
     }
 }
 
@@ -655,6 +756,7 @@ private fun TotpRow(uri: String, ctx: Context, clearSeconds: Int) {
 fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
     val ctx = LocalContextCompat()
     var code by remember { mutableStateOf("") }
+    BackHandler(onBack = vm::closeSettings) // back = the top-bar arrow, not "background the app"
     Scaffold(
         topBar = {
             TopAppBar(
@@ -1151,6 +1253,19 @@ private fun PrimaryButton(text: String, enabled: Boolean, busy: Boolean, onClick
 
 private const val DEFAULT_ATTACHMENT_MAX_BYTES = 25L * 1024 * 1024
 
+private val attachmentJson = Json { ignoreUnknownKeys = true }
+
+/** SavedState Saver for the editor's attachment list — JSON via the spec serializer so
+ *  unknown-field extras survive the recreation round-trip too. Restore failures fall
+ *  back to re-initialization (null) rather than crashing the restore. */
+private val attachmentListSaver = listSaver<List<AttachmentRef>, String>(
+    save = { list -> list.map { attachmentJson.encodeToString(AttachmentRef.serializer(), it) } },
+    restore = { list -> runCatching { list.map { attachmentJson.decodeFromString(AttachmentRef.serializer(), it) } }.getOrNull() },
+)
+
+private fun needsUpdateLine(n: Int): String =
+    if (n == 1) "1 item needs an app update to display." else "$n items need an app update to display."
+
 private fun groupHex(hex: String): String = hex.chunked(4).joinToString(" ")
 
 private fun humanSize(bytes: Long): String = when {
@@ -1179,13 +1294,27 @@ private fun normalizeTotp(input: String): String {
 
 private fun copyToClipboard(ctx: Context, label: String, value: String, clearSeconds: Int) {
     val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    cm.setPrimaryClip(ClipData.newPlainText(label, value))
     // <=0 is reserved for NON-secret setup material (e.g. the TOTP setup URI) — no auto-clear.
     // Vault-secret call sites always pass max(1, policy.clipboardClearSeconds), mirroring web.
-    if (clearSeconds <= 0) return
-    // Best-effort auto-clear after the policy window.
+    if (clearSeconds <= 0) {
+        cm.setPrimaryClip(ClipData.newPlainText(label, value))
+        return
+    }
+    // Secret copy: EXTRA_IS_SENSITIVE keeps the value out of the Android 13+ clipboard
+    // preview overlay (and tells sync'd clipboards to leave it alone).
+    val clip = ClipData.newPlainText(label, value)
+    clip.description.extras = PersistableBundle().apply { putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true) }
+    cm.setPrimaryClip(clip)
+    // Auto-clear after the policy window — ONLY when we can confirm the clipboard still
+    // holds OUR secret. On API 29+ a backgrounded read returns null (and a non-text clip
+    // reads null even in foreground), so a null read means "can't verify ownership" — NOT
+    // "still ours". Clearing on null would silently wipe whatever the user copied from
+    // another app after pasting (a URL, a 2FA code, an image). For the background case the
+    // real mitigation is EXTRA_IS_SENSITIVE (set above), which lets the OS auto-expire and
+    // hide the value on Android 13+; on older versions the secret may linger until
+    // overwritten — a platform limitation we cannot fix without clobbering user data.
     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-        val cur = cm.primaryClip?.getItemAt(0)?.text?.toString()
-        if (cur == value) cm.setPrimaryClip(ClipData.newPlainText("", ""))
+        val cur = runCatching { cm.primaryClip?.getItemAt(0)?.text?.toString() }.getOrNull()
+        if (cur == value) runCatching { cm.clearPrimaryClip() }
     }, clearSeconds * 1000L)
 }

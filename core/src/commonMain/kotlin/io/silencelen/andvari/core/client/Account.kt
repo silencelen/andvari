@@ -152,7 +152,8 @@ class Account private constructor(
     private val vaultRoles: MutableMap<String, String> = mutableMapOf(),
 ) {
     companion object {
-        private const val ITEM_FORMAT_VERSION = 1
+        /** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed). */
+        const val ITEM_FORMAT_VERSION = 1
         private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
         // platform must match the AndvariApi wire tag ("android" | "windows" | "linux") so
