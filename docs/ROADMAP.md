@@ -36,10 +36,12 @@ spec 02 §5 table); each was adversarially reviewed before deploy.
 The code is ready. These operational steps are not, and must complete **in order** before
 importing any real password:
 
-1. **Air-gapped escrow-genesis ceremony** — `recovery-cli keygen` on an offline box → print
-   the sheet ×2 + USB → pin `ANDVARI_RECOVERY_PUBKEY`/`_FINGERPRINT` in CT122 andvari.env →
-   restart → **canary make + verify from the printed sheet**. This REPLACES the current TEST
-   key (its seed touched a networked host; it is fine for the test round only).
+1. ~~**Air-gapped escrow-genesis ceremony**~~ **DONE 2026-07-07.** keygen ran air-gapped on
+   prestige; canary make+verify PASSED from the printed sheet; CT122 pinned + restarted and
+   now serves fingerprint `b26efdd3eafc9dad…` (TEST key `e3c0418f…` retired, backed up).
+   Seed on 2 sheets + USB, offline only. Owner-verified canary at
+   `/etc/andvari/escrow-canary.b64`. **TODO before soak:** purge the 1 pre-swap TEST account
+   (0 items; its escrow is orphaned to the old key) so `recovery-cli verify` reads all-PASS.
 2. **Enroll the first admin** (bootstrap token in andvari.env) + **enroll server-TOTP**
    immediately after (break-glass public login is impossible without it).
 3. **Windows MSI rebuild** on the owner box (desktop 0.3.0 — the tailnet-default URL + version
