@@ -22,6 +22,18 @@ data class DecryptedItemVersion(
 )
 
 /**
+ * Item undelete (feature): a tombstoned item paired with its last archived version decrypted for
+ * display (doc=null when nothing readable remains — still restorable by identity, just unnamed).
+ * Plaintext lives only in memory.
+ */
+data class DeletedItemView(
+    val itemId: String,
+    val vaultId: String,
+    val deletedAt: Long,
+    val doc: ItemDoc?,
+)
+
+/**
  * One soft-hidden removed vault in the holding area (spec 03 §11 / design §6): the vault
  * row, the retained grant blob (normative — held ciphertext is dead bytes without it),
  * the ciphertext item snapshot, and the PARKED mutations replayed on restore/re-add (F21).

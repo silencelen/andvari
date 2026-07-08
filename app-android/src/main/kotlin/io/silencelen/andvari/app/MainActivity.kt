@@ -179,6 +179,7 @@ fun AndvariApp(vm: AndvariViewModel) {
             is Screen.Vault -> VaultScreen(vm, ui)
             is Screen.Sharing -> SharingScreen(vm, ui)
             is Screen.Settings -> SettingsScreen(vm, ui)
+            is Screen.Trash -> TrashScreen(vm, ui)
             is Screen.AutofillStatus -> AutofillStatusScreen(vm, ui)
         }
     }
@@ -412,6 +413,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                     IconButton(onClick = { importPicker.launch(arrayOf("*/*")) }) { Icon(Icons.Default.FileUpload, "import CSV") }
                     IconButton(onClick = { vm.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
                     IconButton(onClick = { vm.openSharing() }) { Icon(Icons.Default.Group, "sharing") }
+                    IconButton(onClick = { vm.openTrash() }) { Icon(Icons.Default.Delete, "trash") }
                     IconButton(onClick = { vm.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
                     IconButton(onClick = { vm.lock() }) { Icon(Icons.Default.Lock, "lock") }
                 },
@@ -852,6 +854,62 @@ private fun TotpRow(uri: String, ctx: Context, clearSeconds: Int) {
 }
 
 // ---- settings / server TOTP ----
+
+/**
+ * Item undelete (feature): "Recently deleted" — the tombstoned items the user can recover. Each is
+ * named from its last archived version (a tombstone's own blob is null); Restore re-creates it live
+ * via the dedicated route (clean un-tombstone). Attachments are not restored (blobs gone at delete).
+ * Mirrors the web Trash view.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TrashScreen(vm: AndvariViewModel, ui: UiState) {
+    BackHandler(onBack = vm::closeTrash)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Recently deleted", style = MaterialTheme.typography.titleLarge) },
+                navigationIcon = { IconButton(onClick = vm::closeTrash) { Icon(Icons.Default.ArrowBack, "back") } },
+            )
+        },
+    ) { pad ->
+        Column(Modifier.padding(pad).fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+            ErrorBar(ui.error, vm::clearError)
+            NoticeBar(ui.notice, vm::clearNotice)
+            Text(
+                "Deleted items you can still restore. Restoring brings an item back to its vault on every device.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            val deleted = ui.deletedItems
+            when {
+                deleted == null -> Text(if (ui.busy) "Loading…" else "", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                deleted.isEmpty() -> Text("Nothing here — deleted items you can recover will show up in this list.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                else -> deleted.forEach { d ->
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                d.doc?.name ?: "(unrecoverable — no readable version)",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = if (d.doc != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                "deleted ${java.time.Instant.ofEpochMilli(d.deletedAt).toString().take(10)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        val docToRestore = d.doc
+                        if (docToRestore != null) {
+                            TextButton(enabled = !ui.busy, onClick = { vm.restoreDeleted(d.itemId, d.vaultId, docToRestore) }) { Text("Restore") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

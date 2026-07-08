@@ -14,6 +14,10 @@ import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AttachmentMeta
 import io.silencelen.andvari.core.model.DeletedVaultSummary
+import io.silencelen.andvari.core.model.DeletedItem
+import io.silencelen.andvari.core.model.DeletedItemsResponse
+import io.silencelen.andvari.core.model.ItemRestoreResponse
+import io.silencelen.andvari.core.model.ItemUpload
 import io.silencelen.andvari.core.model.ItemVersion
 import io.silencelen.andvari.core.model.ItemVersionsResponse
 import io.silencelen.andvari.core.model.Mutation
@@ -95,6 +99,8 @@ class SyncEngineLifecycleTest {
 
         val attachments = HashMap<String, ByteArray>()
         val itemVersionsById = HashMap<String, List<ItemVersion>>() // item history: archived versions the server holds
+        val deletedItemsList = mutableListOf<DeletedItem>() // undelete: tombstoned items the server would list
+        val restoreCalls = mutableListOf<Pair<String, ItemUpload>>() // undelete: captured restore POSTs
         var deletedList: List<DeletedVaultSummary> = emptyList()
         val calls = mutableListOf<String>()
 
@@ -162,6 +168,16 @@ class SyncEngineLifecycleTest {
                         } else {
                             respond(b, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/octet-stream"))
                         }
+                    }
+                    path == "/api/v1/items/deleted" -> {
+                        ok(json.encodeToString(DeletedItemsResponse.serializer(), DeletedItemsResponse(deletedItemsList.toList())))
+                    }
+                    path.startsWith("/api/v1/items/") && path.endsWith("/restore") -> {
+                        val id = path.removePrefix("/api/v1/items/").removeSuffix("/restore")
+                        val upload = json.decodeFromString(ItemUpload.serializer(), req.body.toByteArray().decodeToString())
+                        restoreCalls.add(id to upload)
+                        deletedItemsList.removeAll { it.itemId == id } // un-tombstoned
+                        ok(json.encodeToString(ItemRestoreResponse.serializer(), ItemRestoreResponse(++rev)))
                     }
                     path.startsWith("/api/v1/items/") && path.endsWith("/versions") -> {
                         val id = path.removePrefix("/api/v1/items/").removeSuffix("/versions")
@@ -484,6 +500,27 @@ class SyncEngineLifecycleTest {
         assertEquals(listOf(8L, 7L), versions.map { it.rev }, "decrypted, newest first; the undecryptable version dropped")
         assertEquals("old-2", versions[0].doc.login?.password)
         assertEquals("old-1", versions[1].doc.login?.password)
+    }
+
+    @Test
+    fun deletedItems_namesFromLastVersion_andRestoreDropsAttachments() = runBlocking<Unit> {
+        // Undelete end-to-end through the engine: list a tombstone, name it from its last archived
+        // version, then restore (re-encrypt under the held VK, attachment refs stripped).
+        val s = seededMember("writer")
+        val lastDoc = doc.copy(attachments = listOf(AttachmentRef("att-1", "recovery.txt", 10L, "k")))
+        s.server.deletedItemsList.add(DeletedItem(s.itemId, s.vaultId, 1_690_000_000_000L))
+        s.server.itemVersionsById[s.itemId] = listOf(
+            ItemVersion(rev = 9L, blob = s.owner.encryptItem(s.vaultId, s.itemId, lastDoc).blob, formatVersion = 1, archivedAt = 1_690_000_000_000L),
+        )
+
+        val trash = s.engine.deletedItems()
+        assertEquals(1, trash.size)
+        assertEquals("Shared login", trash[0].doc?.name, "named from its last archived version")
+
+        s.engine.restoreDeleted(s.itemId, s.vaultId, trash[0].doc!!)
+        assertEquals(listOf(s.itemId), s.server.restoreCalls.map { it.first })
+        assertTrue(s.server.restoreCalls[0].second.attachmentIds.isEmpty(), "attachment refs dropped on restore (blobs gone at tombstone)")
+        assertTrue(s.engine.deletedItems().isEmpty(), "restored item leaves the trash")
     }
 
     // ==== consumed-deleteId recognition ====

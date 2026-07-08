@@ -20,6 +20,7 @@ import io.silencelen.andvari.core.client.BackupVault
 import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.DecryptedItemVersion
+import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.DeletedVaultInfo
 import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.client.HeldVaultInfo
@@ -62,6 +63,7 @@ sealed interface Screen {
     data object Vault : Screen
     data object Sharing : Screen
     data object Settings : Screen
+    data object Trash : Screen
     data object AutofillStatus : Screen
 }
 
@@ -117,6 +119,8 @@ data class UiState(
     // Item history (feature): decrypted archived versions of the currently-viewed item, loaded on
     // demand (null = not loaded / loading). Restore a chosen version with saveItem.
     val itemVersions: List<DecryptedItemVersion>? = null,
+    // Item undelete (feature): the Trash screen's deleted items (null = not loaded / loading).
+    val deletedItems: List<DeletedItemView>? = null,
 )
 
 class AndvariViewModel(private val store: SessionStore, private val cacheDir: File) : ViewModel() {
@@ -341,6 +345,24 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     }
 
     fun clearItemVersions() { _ui.value = _ui.value.copy(itemVersions = null) }
+
+    /** Item undelete (feature): open the Trash screen and load the deleted items. */
+    fun openTrash() {
+        _ui.value = _ui.value.copy(screen = Screen.Trash, deletedItems = null)
+        loadDeletedItems()
+    }
+
+    fun loadDeletedItems() = op {
+        _ui.value = _ui.value.copy(deletedItems = engine!!.deletedItems(), busy = false)
+    }
+
+    /** Item undelete (feature): restore a deleted item, then refresh the trash list + the vault. */
+    fun restoreDeleted(itemId: String, vaultId: String, doc: ItemDoc) = op {
+        engine!!.restoreDeleted(itemId, vaultId, doc)
+        _ui.value = _ui.value.copy(deletedItems = engine!!.deletedItems(), items = engine!!.items(), busy = false, notice = "Item restored.")
+    }
+
+    fun closeTrash() { _ui.value = _ui.value.copy(screen = Screen.Vault, deletedItems = null) }
 
     fun signIn(email: String, password: String, totp: String? = null) = op {
         val a = newApi()
