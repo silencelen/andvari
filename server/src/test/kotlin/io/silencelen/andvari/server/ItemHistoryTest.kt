@@ -1,12 +1,19 @@
 package io.silencelen.andvari.server
 
 import io.ktor.client.request.get
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
+import io.silencelen.andvari.core.model.DeletedItemsResponse
 import io.silencelen.andvari.core.model.ItemVersionsResponse
+import io.silencelen.andvari.core.model.Mutation
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -60,5 +67,46 @@ class ItemHistoryTest : LifecycleTestSupport() {
         assertEquals(HttpStatusCode.Forbidden, client.get("/api/v1/items/$itemId/versions") { authed(stranger) }.status)
         // An unknown item → also 403-hidden (not 404 — no cross-tenant existence oracle).
         assertEquals(HttpStatusCode.Forbidden, client.get("/api/v1/items/${uuid()}/versions") { authed(owner) }.status)
+    }
+
+    @Test
+    fun deletedItems_grantScoped_andRestoreCleanlyUntombstones() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val owner = VirtualClient("undel-owner@x.com", "undelete owner password one")
+        client.register(owner, bootstrapToken)
+        val stranger = client.enrollSecond(owner, "undel-stranger@x.com", "undelete stranger password two")
+
+        // Create then delete an item → it tombstones (row persists; its last value is in the archive).
+        val itemId = owner.newItemId()
+        val r1 = client.push(owner, putMutation(owner, itemId, "secret-v1", 0))
+        client.push(owner, Mutation(uuid(), "delete", itemId, owner.personalVaultId, r1.results[0].newItemRev!!, null))
+
+        // The owner sees it in the trash; a non-member never does (grant-scoped in SQL).
+        suspend fun trashOf(vc: VirtualClient) =
+            json.decodeFromString(DeletedItemsResponse.serializer(), client.get("/api/v1/items/deleted") { authed(vc) }.bodyAsText()).items
+        assertEquals(listOf(itemId), trashOf(owner).map { it.itemId })
+        assertTrue(trashOf(stranger).none { it.itemId == itemId }, "cross-tenant tombstones are never listed")
+
+        // Restore: re-encrypt content and POST it. The stranger (no grant) is 403-hidden.
+        assertEquals(
+            HttpStatusCode.Forbidden,
+            client.post("/api/v1/items/$itemId/restore") { authed(stranger); contentType(ContentType.Application.Json); setBody(owner.encItem(itemId, "x")) }.status,
+        )
+        val restore = client.post("/api/v1/items/$itemId/restore") { authed(owner); contentType(ContentType.Application.Json); setBody(owner.encItem(itemId, "secret-restored")) }
+        assertEquals(HttpStatusCode.OK, restore.status, restore.bodyAsText())
+
+        // It leaves the trash and syncs back LIVE with conflict=false (dedicated un-tombstone, not a put).
+        assertTrue(trashOf(owner).none { it.itemId == itemId }, "restored item leaves the trash")
+        val live = client.sync(owner).items.find { it.itemId == itemId }
+        assertNotNull(live)
+        assertEquals(false, live.deleted, "restored item is live")
+        assertEquals(false, live.conflict, "restore does NOT flag a conflict (avoids the spurious-copy trap)")
+
+        // Restoring a LIVE (non-deleted) item is rejected.
+        assertEquals(
+            HttpStatusCode.BadRequest,
+            client.post("/api/v1/items/$itemId/restore") { authed(owner); contentType(ContentType.Application.Json); setBody(owner.encItem(itemId, "again")) }.status,
+        )
     }
 }

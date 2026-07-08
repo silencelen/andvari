@@ -3,6 +3,7 @@ package io.silencelen.andvari.server
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.model.AuditEvent
+import io.silencelen.andvari.core.model.DeletedItem
 import io.silencelen.andvari.core.model.ItemVersion
 import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.RemovedGrantInfo
@@ -424,6 +425,16 @@ class Repo(val db: Db) {
             "SELECT rev, blob, formatVersion, archivedAt FROM item_versions WHERE itemId=? ORDER BY rev DESC LIMIT 10",
             itemId,
         ) { rs -> ItemVersion(rs.getLong("rev"), rs.getString("blob"), rs.getInt("formatVersion"), rs.getLong("archivedAt")) }
+
+    /** Item undelete: the user's tombstoned items across every vault they still hold a grant to,
+     *  newest-deleted first. Grant-scoped in SQL so it can never surface another tenant's items. */
+    fun deletedItemsFor(c: Connection, userId: String): List<DeletedItem> =
+        c.queryAll(
+            """SELECT itemId, vaultId, updatedAt FROM items
+               WHERE deleted=1 AND vaultId IN (SELECT vaultId FROM grants WHERE userId=? AND revokedAt IS NULL)
+               ORDER BY updatedAt DESC""",
+            userId,
+        ) { rs -> DeletedItem(rs.getString("itemId"), rs.getString("vaultId"), rs.getLong("updatedAt")) }
 
     fun archiveVersion(c: Connection, item: WireItem) {
         if (item.blob == null) return

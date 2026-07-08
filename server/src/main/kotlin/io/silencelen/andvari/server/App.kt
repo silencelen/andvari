@@ -28,7 +28,10 @@ import io.ktor.websocket.readText
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.model.ApiError
 import io.silencelen.andvari.core.model.ClientPolicy
+import io.silencelen.andvari.core.model.DeletedItemsResponse
 import io.silencelen.andvari.core.model.InviteRequest
+import io.silencelen.andvari.core.model.ItemRestoreResponse
+import io.silencelen.andvari.core.model.ItemUpload
 import io.silencelen.andvari.core.model.ItemVersionsResponse
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.PreloginRequest
@@ -406,6 +409,22 @@ fun Application.andvariModule(services: Services) {
             services.repo.db.read { c -> services.repo.grantRole(c, p.userId, item.vaultId) } ?: throw Forbidden("no_grant")
             val versions = services.repo.db.read { c -> services.repo.itemVersions(c, id) }
             call.respond(ItemVersionsResponse(id, versions))
+        }
+
+        // Item undelete (feature): the caller's tombstoned items, grant-scoped (a tombstone's blob
+        // is null, so the client fetches each item's last version for the name/preview).
+        get("/api/v1/items/deleted") {
+            val p = requirePrincipal(call, service)
+            call.respond(DeletedItemsResponse(service.deletedItems(p.userId)))
+        }
+        // Restore a tombstoned item: the client re-encrypts a chosen version and POSTs it here; the
+        // server un-tombstones cleanly (dedicated path, not a put — avoids the edit-over-tombstone
+        // conflict that would spawn a spurious copy). Writer/owner only; only a deleted item.
+        post("/api/v1/items/{id}/restore") {
+            val p = requirePrincipal(call, service)
+            val id = requireUuid(call.parameters["id"], "item_id")
+            val rev = service.restoreItem(p, id, call.receive<ItemUpload>(), call.clientIp(config))
+            call.respond(ItemRestoreResponse(rev))
         }
 
         // ---- sync ----

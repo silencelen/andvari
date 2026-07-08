@@ -330,6 +330,20 @@ data class ItemVersion(
 @Serializable
 data class ItemVersionsResponse(val itemId: String, val versions: List<ItemVersion>)
 
+/**
+ * Item undelete (feature): a tombstoned item the user can restore. A tombstone's blob is null, so
+ * the name/preview lives in the item's last archived version (GET /items/{id}/versions). Restore
+ * re-encrypts a chosen version and POSTs it to /items/{id}/restore (an ItemUpload body).
+ */
+@Serializable
+data class DeletedItem(val itemId: String, val vaultId: String, val deletedAt: Long)
+
+@Serializable
+data class DeletedItemsResponse(val items: List<DeletedItem>)
+
+@Serializable
+data class ItemRestoreResponse(val rev: Long)
+
 // ---- attachments (spec 02 §6) ----
 
 /** Server bookkeeping for one encrypted attachment blob; filename + fileKey live inside item ciphertext. */

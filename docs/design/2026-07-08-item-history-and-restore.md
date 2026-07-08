@@ -75,3 +75,35 @@ design explicitly handles it. This design commits to the honest, cheap contract:
   doc. M, additive, no schema/crypto/version change.
 - **Batch 2:** web History panel (per-version reveal + restore-on-live-items). Reviewed separately.
 - Android/desktop History panels + undelete/trash are subsequent slices.
+
+## Undelete / Trash (subsequent slice — server + core landed, UIs to follow)
+
+The item-history batches ship history + restore-on-LIVE-items. Undelete extends that to DELETED
+items. The two hard parts the tournament flagged, and how this design resolves them:
+
+1. **Clients hard-drop tombstones on ingest**, so a deleted item isn't in the live set to ask about.
+   → A grant-scoped **enumeration route** `GET /api/v1/items/deleted` → `{items:[{itemId, vaultId,
+   deletedAt}]}` (grant-scoped in SQL — `deleted=1 AND vaultId IN (the caller's non-revoked grants)`,
+   so it can never surface another tenant's items). A tombstone's `blob` is null, so it carries no
+   name; the client fetches each item's last version (`GET /items/{id}/versions`, which already
+   serves tombstoned items) and decrypts it to show the name/preview. N+1 requests — fine for a
+   Trash view (few items).
+
+2. **Restore-marker server semantics.** A plain put over a tombstone is *edit-over-tombstone*
+   (`conflict = stale || existing.deleted` in `applyPut`), which sets `conflict=1` and would make the
+   pull-side materialize a spurious "(conflict …)" copy of the just-restored item. So restore is a
+   **dedicated** route `POST /api/v1/items/{id}/restore` with an `ItemUpload` body (the client
+   re-encrypts a chosen version under the current VK): the server un-tombstones **cleanly**
+   (`deleted=0, conflict=0`, new rev), writer/owner-only, only on a currently-deleted item (else
+   400), notifies members like push, audits `item_restore`. Verified: the restored item syncs back
+   live with `conflict=false`.
+
+**Retention (open, F49).** Tombstoned item rows and their (≤10) archived versions persist today
+(tombstone GC is dormant, spec 02 §7), so Trash currently holds *everything* ever deleted in the
+vault. That's the honest v1 behavior; a retention window is an F49 decision, not this slice.
+
+- **Landed (server + core batch):** the two routes + `DeletedItem`/`DeletedItemsResponse`/
+  `ItemRestoreResponse` DTOs + `AndvariApi.deletedItems`/`restoreItem` + server tests (grant-scope +
+  clean un-tombstone). No schema/crypto/version change.
+- **Next (undelete batch 2):** web Trash view (list deleted → per-item name via its last version →
+  Restore). Then Android/desktop Trash. Diff summarizer stays cut.

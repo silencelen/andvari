@@ -22,7 +22,11 @@ import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.CreateVaultResponse
 import io.silencelen.andvari.core.model.DeletedVaultSummary
+import io.silencelen.andvari.core.model.DeletedItem
+import io.silencelen.andvari.core.model.DeletedItemsResponse
 import io.silencelen.andvari.core.model.EscrowUpload
+import io.silencelen.andvari.core.model.ItemRestoreResponse
+import io.silencelen.andvari.core.model.ItemUpload
 import io.silencelen.andvari.core.model.ItemVersion
 import io.silencelen.andvari.core.model.ItemVersionsResponse
 import io.silencelen.andvari.core.model.LoginRequest
@@ -203,6 +207,14 @@ class AndvariApi(
      *  (server keeps the last 10). Grant-checked; the caller decrypts each blob under the held VK. */
     suspend fun itemVersions(itemId: String): List<ItemVersion> =
         call<ItemVersionsResponse>("GET", "/api/v1/items/$itemId/versions").versions
+
+    /** Item undelete (feature): the caller's tombstoned items (grant-scoped server-side). */
+    suspend fun deletedItems(): List<DeletedItem> =
+        call<DeletedItemsResponse>("GET", "/api/v1/items/deleted").items
+
+    /** Item undelete (feature): restore a tombstoned item from a re-encrypted version; returns the new rev. */
+    suspend fun restoreItem(itemId: String, upload: ItemUpload): Long =
+        call<ItemRestoreResponse>("POST", "/api/v1/items/$itemId/restore", body = upload).rev
 
     suspend fun prelogin(email: String): PreloginResponse = call("POST", "/api/v1/auth/prelogin", PreloginRequest(email), auth = false)
 
