@@ -32,4 +32,21 @@ object Bytes {
         for (i in a.indices) acc = acc or (a[i].toInt() xor b[i].toInt())
         return acc == 0
     }
+
+    /**
+     * Shape (the first) 16 bytes into an RFC 4122 v4-format UUID string (version nibble
+     * forced to 4, variant to 10) — the ONE shared implementation behind random ids
+     * (Account.uuid), deterministic conflict-copy ids (ConflictCopy, vector-pinned), and
+     * F19 gesture mutationIds (SyncEngine), byte-identical to web's uuidFromLabel shaping.
+     * A drift between copies silently breaks server-dedup convergence, so everything
+     * derives from this.
+     */
+    fun uuidV4FromBytes(bytes: ByteArray): String {
+        require(bytes.size >= 16) { "need at least 16 bytes for a UUID" }
+        val h = bytes.copyOf(16)
+        h[6] = ((h[6].toInt() and 0x0F) or 0x40).toByte() // version nibble 4
+        h[8] = ((h[8].toInt() and 0x3F) or 0x80).toByte() // variant 10
+        val hex = toHexLower(h)
+        return "${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}"
+    }
 }

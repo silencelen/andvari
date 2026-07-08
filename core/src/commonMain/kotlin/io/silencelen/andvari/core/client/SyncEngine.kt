@@ -3,18 +3,123 @@ package io.silencelen.andvari.core.client
 import io.silencelen.andvari.core.crypto.Attachments
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.CryptoException
+import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.PushRequest
+import io.silencelen.andvari.core.model.PendingTransfer
+import io.silencelen.andvari.core.model.RemovedGrantInfo
+import io.silencelen.andvari.core.model.TransferAcceptRequest
+import io.silencelen.andvari.core.model.TransferOfferRequest
+import io.silencelen.andvari.core.model.VaultDeleteRequest
+import io.silencelen.andvari.core.model.VaultMetaUpdateRequest
+import io.silencelen.andvari.core.model.VaultRestoreRequest
 import io.silencelen.andvari.core.model.WireItem
+import io.silencelen.andvari.core.model.WireVault
+import io.silencelen.andvari.core.model.WireGrant
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** A newly attached file awaiting upload: the doc's AttachmentRef + plaintext bytes. */
 class PendingUpload(val ref: AttachmentRef, val data: ByteArray)
+
+/** A vault we hold the key for — for pickers, badges, and the sharing screens. */
+data class VaultInfo(
+    val vaultId: String,
+    val type: String,
+    val name: String,
+    val role: String?,
+)
+
+/**
+ * A lifecycle notice the UI renders (spec 03 §11 / design §11). Fired ONLY for vaults held
+ * locally before the pull — never on since=0 / fresh-device pulls. Attribution ("by its
+ * owner") is EARNED by a verified proof; unverified events get calm/anomaly wording.
+ */
+data class LifecycleNotice(
+    val id: String,
+    val vaultId: String,
+    val vaultName: String,
+    val kind: String, // deleted | removed | left | anomaly | restored | transfer-complete | transfer-anomaly
+    /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
+    val purgeAt: Long? = null,
+    /** verified delete: N of the member's edits parked for replay on restore (F21). */
+    val parkedCount: Int? = null,
+    /** transfer-complete/-anomaly: who now owns the vault, and whether that is us. */
+    val newOwnerUserId: String? = null,
+    val becameMine: Boolean = false,
+)
+
+/** A restorable in-grace deleted vault (GET /vaults/deleted), name decrypted locally. */
+data class DeletedVaultInfo(
+    val vaultId: String,
+    val name: String,
+    val deletedAt: Long,
+    val purgeAt: Long,
+    val deleteId: String,
+)
+
+/** A verified incoming ownership offer TO this user — the accept consent screen renders
+ *  only after the offer proof verifies under the held VK (spec 03 §11). */
+data class IncomingTransfer(
+    val vaultId: String,
+    val vaultName: String,
+    val offerId: String,
+    val seq: Long,
+    val expiresAt: Long,
+)
+
+/** One holding-area entry for the "Recently removed" surface (name re-derived, never stored). */
+data class HeldVaultInfo(
+    val vaultId: String,
+    val name: String,
+    val reason: String,
+    val verified: Boolean,
+    val purgeAt: Long?,
+    val expungeAt: Long,
+)
+
+/** One attachment of a move/copy gesture: fresh id + fresh fileKey minted at gesture time. */
+data class GestureAttachment(
+    val oldId: String,
+    val newId: String,
+    val newFileKey: String,
+    val name: String,
+    val size: Long,
+)
+
+/** A move/copy gesture (F19, design §8). Minted ONCE (fresh newItemId + per-attachment fresh
+ *  fileKeys); a RETRY of the SAME gesture converges via server mutation-dedup — never a fresh
+ *  gesture, which would collide-or-duplicate. [sourceRev] is the rev of the content copied,
+ *  so the delete leg's baseItemRev catches a source that changed mid-move. */
+data class MoveGesture(
+    val gestureId: String,
+    val sourceItemId: String,
+    val sourceVaultId: String,
+    val sourceRev: Long,
+    val targetVaultId: String,
+    val newItemId: String,
+    val del: Boolean, // true = move (copy then delete source); false = copy only
+    val attachments: List<GestureAttachment>,
+)
+
+/** F19: the target vault denied the copy — source untouched, gesture aborted (design §8). */
+class CopyDeniedException :
+    ApiException(403, "copy_denied", "The copy to the target vault was denied — you may not have write access there.")
+
+/** F19: the source changed since we read it — the move is aborted, nothing deleted (design §8). */
+class ItemChangedException :
+    ApiException(409, "item_changed", "This item changed while moving — review and retry.")
 
 /**
  * Client sync engine (sibling of web/src/vault/store.ts). Pulls deltas since the
  * cursor, decrypts into the cache, materializes conflict copies client-side (the
  * server can't re-encrypt — spec 03 §5), and pushes mutations with stable ids. The
  * offline queue in [VaultCache] makes pushes crash-durable and retry-idempotent.
+ *
+ * 0.5.0 adds the shared-vault lifecycle (spec 03 §11): proof-verified tri-state
+ * handling of removedGrants with a holding area (durable where the cache is), parked
+ * denied mutations replayed on restore (F21), verified transfer offers/completions,
+ * delete/restore/leave/transfer/rename actions, and the F19 move/copy gesture engine.
  */
 class SyncEngine(
     private val api: AndvariApi,
@@ -23,10 +128,70 @@ class SyncEngine(
 ) {
     private companion object {
         const val SERVER_BATCH_MAX = 200 // server rejects a push batch larger than this (Service.push)
+        const val DAY_MS = 86_400_000L
     }
+
+    // ---- vault lifecycle state (spec 03 §11); session-scoped — the durable halves
+    // (holding area, consumed deleteIds, verified transfer seqs, STAGED-DENIED queue rows)
+    // live in [VaultCache].
+    /** Notices awaiting the UI banner. */
+    private val noticeList = mutableListOf<LifecycleNotice>()
+    /** Vaults this device just deleted/left — drop them cleanly on the reconcile pull (no
+     *  banner). One-shot AND scoped to the action's own reconcile (removed in a finally
+     *  there), so a failed reconcile can never leave a stale entry that would misread a
+     *  LATER genuine removal as self-initiated and bypass the holding area. */
+    private val suppressDrop = mutableSetOf<String>()
+
+    /** One denied mutation awaiting its park-vs-genuine verdict. [stagedBefore] is the
+     *  pull-start counter at staging time: only a pull that STARTED later may classify it. */
+    private class StagedDenial(val mutation: Mutation, val stagedBefore: Long)
+
+    /** Denied mutations staged between flush and the fresh pull that reveals their vault's
+     *  fate (F21). In-memory INDEX only — the durable truth is the queue's staged-denied
+     *  state ([VaultCache.markStagedDenied]), reloaded here by [hydrate] after a restart. */
+    private val preParkedByVault = mutableMapOf<String, MutableList<StagedDenial>>()
+
+    /**
+     * Serializes every flush→pull→classify cycle. Without it, a concurrent caller's pull —
+     * whose snapshot may PREDATE a vault's deletion — could classify another cycle's staged
+     * denial as "genuine" off stale state and drop a parkable edit. The epoch guard below
+     * ([pullStartCounter]/[freshestCompletedPullStart]) is the belt for the same hazard.
+     */
+    private val syncMutex = Mutex()
+    /** Monotonic id handed to each pull as it STARTS. */
+    private var pullStartCounter = 0L
+    /** The largest start-id among COMPLETED pulls — "a pull started at X has finished". */
+    private var freshestCompletedPullStart = 0L
+
+    /** mutationIds re-enqueued by a reinstate replay: a denial of one of these on a LIVE
+     *  vault is a calm one-time notice ("recovered edits couldn't be applied"), never a
+     *  thrown sync failure — the member's role may simply have changed across the grace. */
+    private val replayedMutationIds = mutableSetOf<String>()
+    /** vaultId → count of replayed mutations denied this cycle (drained into a notice). */
+    private val replayDeniedByVault = mutableMapOf<String, Int>()
+
+    /** Verified incoming ownership offers TO us, recomputed every pull from vault rows. */
+    private val incomingByVault = mutableMapOf<String, IncomingTransfer>()
+    /** Bulk-copy gestures memoized per (source vault | item | target) so a RETRY after a
+     *  mid-run failure reuses the SAME gestureId/newItemId/fileKeys (design §8). */
+    private val bulkGestures = mutableMapOf<String, MoveGesture>()
 
     fun items(): List<VaultItem> = cache.allItems().sortedBy { it.doc.name.lowercase() }
     fun item(itemId: String): VaultItem? = cache.getItem(itemId)
+
+    /** Vaults whose key we hold, personal first then shared by name (mirrors web vaults()). */
+    fun vaultInfos(): List<VaultInfo> = cache.vaults()
+        .filter { account.hasVault(it.vaultId) }
+        .map { v ->
+            val name = account.decryptVaultName(v.vaultId, v.metaBlob)
+            VaultInfo(
+                vaultId = v.vaultId,
+                type = v.type,
+                name = if (!name.isNullOrEmpty() && name != "(vault)") name else if (v.type == "personal") "Personal" else "Shared",
+                role = account.roleFor(v.vaultId),
+            )
+        }
+        .sortedWith(compareBy({ it.type != "personal" }, { it.name.lowercase() }))
 
     /**
      * Held envelopes this build cannot decrypt because their formatVersion is newer than
@@ -39,10 +204,22 @@ class SyncEngine(
         !it.deleted && account.hasVault(it.vaultId) && it.formatVersion > Account.ITEM_FORMAT_VERSION
     }
 
-    /** Push any queued mutations first (crash recovery), then pull deltas. */
-    suspend fun sync() {
+    /**
+     * Push any queued mutations first (crash recovery), then pull deltas, THEN surface
+     * denied writes — a denied flush must never abort the pull that delivers
+     * `removedGrants` (F21, spec 03 §4): the purge/notice and the denied verdict land in
+     * ONE cycle, and denials whose vault the pull revealed as in-grace are PARKED
+     * (replayable on restore), not surfaced as failures.
+     *
+     * The whole cycle is [syncMutex]-serialized: concurrent callers (the 5-min poll, a
+     * user refresh, a save's reconcile) must never interleave, or one cycle's stale pull
+     * could classify another cycle's staged denial (see [surfaceStagedDenials]).
+     */
+    suspend fun sync() = syncMutex.withLock {
+        pruneHolding()
         flushQueue()
         pull()
+        surfaceStagedDenials()
     }
 
     /**
@@ -65,13 +242,30 @@ class SyncEngine(
                 cache.upsertItem(w, VaultItem(w.itemId, w.vaultId, w.rev, w.updatedAt, account.decryptItem(w)))
             }
         }
+        // Reload durably staged denials (F21): a process death between a denial and the
+        // pull that classifies it must not destroy the edit. stagedBefore=0 → the first
+        // completed pull after this restart is fresh enough to classify them.
+        for (m in cache.stagedDenied()) {
+            preParkedByVault.getOrPut(m.vaultId) { mutableListOf() }.add(StagedDenial(m, 0))
+        }
     }
 
     /** Close the underlying cache (must precede deleting its DB file — Windows file locks). */
     fun close() = cache.close()
 
     private suspend fun pull() {
+        // Epoch guard (#0 belt): stamp the START of this pull before anything is fetched.
+        // surfaceStagedDenials only classifies denials staged BEFORE a completed pull's
+        // start — i.e. verdicts always come from a snapshot fetched after the denial.
+        val myStart = ++pullStartCounter
         val since = cache.cursor()
+        // Capture the vaults we HOLD THE KEY FOR before applying this pull, with their
+        // decrypted names (spec 03 §11: notices fire ONLY for locally-held vaults, and the
+        // pre-purge name drives the copy). Empty on a since=0 / fresh-device pull.
+        val prePullNames = HashMap<String, String>()
+        for (v in cache.vaults()) {
+            if (account.hasVault(v.vaultId)) prePullNames[v.vaultId] = account.decryptVaultName(v.vaultId, v.metaBlob) ?: "(vault)"
+        }
         var resyncing = false
         val resp = try {
             api.sync(since)
@@ -95,8 +289,9 @@ class SyncEngine(
             throw ApiException(409, "rev_regression", "unsolicited full snapshot — possible rollback; local state kept")
         }
 
+        val reinstated: List<ReinstatedVault>
         try {
-            applyPull(resp, resyncing)
+            reinstated = applyPull(resp, resyncing, since, prePullNames)
         } catch (t: Throwable) {
             // The DB tx rolled back to a consistent state, but the in-memory working set +
             // Account key map were mutated eagerly. Rebuild them from the (rolled-back)
@@ -106,28 +301,83 @@ class SyncEngine(
             throw t
         }
 
+        if (myStart > freshestCompletedPullStart) freshestCompletedPullStart = myStart
+
+        // Reinstate replay (spec 03 §11 / #3): the parked mutations were durably
+        // RE-ENQUEUED inside the pull tx (crash-safe — death here replays them on the next
+        // launch); flush them now through the ordinary queue path with their ORIGINAL
+        // mutationIds (server dedup + the never-cache-denied rule make this converge).
+        for (r in reinstated) {
+            pushNotice(LifecycleNotice(account.newItemId(), r.vaultId, r.cachedName, "restored"))
+        }
+        if (reinstated.isNotEmpty()) {
+            runCatching { flushQueue() } // offline replay failure ≠ pull failure; rows stay queued
+        }
+        drainReplayDenied()
+
         materializeOutstandingConflicts()
     }
 
-    private fun applyPull(resp: io.silencelen.andvari.core.model.SyncResponse, resyncing: Boolean) {
+    private class ReinstatedVault(val vaultId: String, val cachedName: String)
+
+    /** Replayed-then-denied edits (#6): the vault is live again but our role no longer
+     *  allows the write (e.g. re-added as reader) — a calm one-time notice, never a thrown
+     *  sync failure, and the rows were already durably dropped in [flushQueue]. */
+    private fun drainReplayDenied() {
+        if (replayDeniedByVault.isEmpty()) return
+        for ((vid, n) in replayDeniedByVault) {
+            val name = cache.vaults().find { it.vaultId == vid }
+                ?.let { account.decryptVaultName(vid, it.metaBlob) } ?: "(vault)"
+            pushNotice(LifecycleNotice(account.newItemId(), vid, name, "replay-denied", parkedCount = n))
+        }
+        replayDeniedByVault.clear()
+    }
+
+    private fun applyPull(
+        resp: io.silencelen.andvari.core.model.SyncResponse,
+        resyncing: Boolean,
+        since: Long,
+        prePullNames: Map<String, String>,
+    ): List<ReinstatedVault> {
+        val reinstated = mutableListOf<ReinstatedVault>()
         cache.atomically {
-            if (resyncing) cache.clear() // resets cursor + rows; PRESERVES the queue (spec 03 §4)
+            if (resyncing) cache.clear() // resets cursor + rows; PRESERVES the queue + holding area (spec 03 §4/§11)
+            // A LIVE grant re-arriving for a vault in the holding area is a reinstate
+            // signal (restore / owner re-add) — collected here, acted on after items apply.
+            val reinstatedIds = mutableSetOf<String>()
             for (grant in resp.grants) {
                 // Persist UNCONDITIONALLY (ciphertext rows; deltas never re-send) — the
                 // in-memory key-open below may fail/skip, hydrate() retries from disk.
                 cache.upsertGrant(grant)
                 // addGrant applies role changes even when the VK is already held (a role
                 // change re-delivers the grant precisely for this).
-                runCatching { account.addGrant(grant) }
+                runCatching {
+                    account.addGrant(grant)
+                    if (cache.getHeld(grant.vaultId) != null) reinstatedIds.add(grant.vaultId)
+                }
             }
             for (vault in resp.vaults) {
                 cache.upsertVault(vault)
                 if (vault.type == "personal" && account.hasVault(vault.vaultId)) account.setPersonalVault(vault.vaultId)
-            }
-            for (vaultId in resp.removedGrants) {
-                cache.dropVault(vaultId)
-                cache.dropPending(vaultId) // a revoked member's unsynced edits are discarded (spec 03 §4)
-                account.removeVault(vaultId)
+                // Consumed-deleteId marker (spec 03 §11): a live vault that WAS restored
+                // carries restoreProof over the deleteId it undid. Verifying it durably
+                // marks the deleteId consumed, so a later replayed old tombstone bearing it
+                // is recognized as stale — even on a device offline across the whole
+                // delete→restore cycle.
+                val rp = vault.restoreProof
+                val did = vault.deleteId
+                if (rp != null && did != null && account.hasVault(vault.vaultId)) {
+                    runCatching {
+                        val key = account.lifecycleKeyFor(vault.vaultId)
+                        val expected = LifecycleProof.restore(account.cryptoProvider(), key, vault.vaultId, did)
+                        if (LifecycleProof.verify(expected, rp)) cache.addConsumedDeleteId(did)
+                    }
+                }
+                // Transfer state: recompute the verified incoming offer + surface a
+                // completion notice for a newly-seen accepted transfer.
+                runCatching {
+                    applyTransferState(vault, noticeable = prePullNames.containsKey(vault.vaultId) && since > 0 && !resyncing)
+                }
             }
             for (item in resp.items) {
                 if (item.deleted) {
@@ -143,9 +393,555 @@ class SyncEngine(
                 } else null
                 cache.upsertItem(item, decrypted)
             }
+            // Reinstate (spec 03 §11): runs AFTER items apply so the backfill row wins and
+            // the held-ciphertext rehydration below only fills gaps.
+            for (vaultId in reinstatedIds) {
+                val held = cache.getHeld(vaultId) ?: continue
+                // Durable-first (#3): the parked mutations re-enter the crash-durable queue
+                // BEFORE the holding record is dropped — all inside this tx, so a process
+                // death anywhere after commit still replays them (ordinary flushQueue path,
+                // ORIGINAL mutationIds preserved).
+                for (m in held.parked) {
+                    cache.enqueue(m)
+                    replayedMutationIds.add(m.mutationId) // a denial of these is a calm notice (#6)
+                }
+                cache.removeHeld(vaultId)
+                held.deleteId?.let { cache.addConsumedDeleteId(it) }
+                // Belt: rehydrate any held ciphertext item the backfill did not re-deliver.
+                for (wi in held.items) {
+                    if (cache.getItem(wi.itemId) != null) continue
+                    runCatching {
+                        cache.upsertItem(wi, VaultItem(wi.itemId, vaultId, wi.rev, wi.updatedAt, account.decryptItem(wi)))
+                    }
+                }
+                val name = prePullNames[vaultId]
+                    ?: held.grant?.let { account.peekVaultName(it, held.vault.metaBlob) }
+                    ?: "(vault)"
+                reinstated.add(ReinstatedVault(vaultId, name))
+            }
+            // Revoked memberships (spec 03 §11 tri-state). F21: this MUST NOT throw — a bad
+            // proof or holding failure can never abort the pull that delivered removedGrants.
+            val infoByVault = HashMap<String, RemovedGrantInfo>()
+            for (info in resp.removedGrantsInfo) infoByVault[info.vaultId] = info
+            for (vaultId in resp.removedGrants) {
+                runCatching {
+                    handleRemovedGrant(vaultId, infoByVault[vaultId], prePullNames[vaultId], since, resyncing)
+                }.onFailure {
+                    hardDropLocal(vaultId) // still ensure the vault leaves the live view
+                }
+            }
             cache.setCursor(resp.rev)
         }
+        return reinstated
     }
+
+    // ==== vault lifecycle: sync-time handling (spec 03 §11) ====
+
+    /**
+     * One removedGrants entry, tri-state (spec 03 §4/§11):
+     *  - vault NOT held before the pull → unverifiable / unknown → silent no-op (no banner);
+     *  - a replayed tombstone whose deleteId is already consumed → recognized, kept live, no warn;
+     *  - this device initiated the delete/leave → drop cleanly, no banner;
+     *  - held VK → verify the relayed proof: VALID → soft-hide + attributed notice; INVALID or a
+     *    bare revocation → soft-hide + anomaly warning; 'left' → soft-hide + calm "you left".
+     * Never hard-purges before purgeAt even on a valid proof (bounds tombstone-replay to a
+     * self-healing ≤7d soft-hide). The vault always leaves the LIVE view; holding retains it.
+     */
+    private fun handleRemovedGrant(
+        vaultId: String,
+        info: RemovedGrantInfo?,
+        cachedName: String?,
+        since: Long,
+        resyncing: Boolean,
+    ) {
+        // One-shot self-initiation marker (#4): consumed on the FIRST removedGrant processed
+        // for this vault, no matter which branch runs below — a stale entry must never
+        // linger to misread a LATER genuine removal as self-initiated and bypass holding.
+        val selfInitiated = suppressDrop.remove(vaultId)
+
+        // A stale/replayed tombstone of an already-restored vault: keep it live, do not re-warn.
+        val deleteId = info?.deleteId
+        if (info?.reason == "deleted" && deleteId != null && cache.isConsumedDeleteId(deleteId)) return
+
+        // Unverifiable: the VK was not held before this pull (fresh device, hidden grant, or a
+        // since=0 / resync pull) → silent no-op. Drop any stray unusable row.
+        if (cachedName == null || since == 0L || resyncing) {
+            hardDropLocal(vaultId)
+            return
+        }
+
+        // This device initiated the delete/leave — drop cleanly, no banner (design §4/§13).
+        if (selfInitiated) {
+            hardDropLocal(vaultId)
+            return
+        }
+
+        val reason = info?.reason ?: "removed"
+        val verdict = when {
+            reason == "left" -> "left"
+            verifyRemoval(vaultId, reason, info) -> "valid"
+            else -> "anomaly"
+        }
+
+        // Snapshot ciphertext + move to holding BEFORE forgetting the VK.
+        val parkedCount = moveToHolding(vaultId, reason, info, verdict == "valid", cachedName)
+
+        when {
+            verdict == "left" -> pushNotice(LifecycleNotice(account.newItemId(), vaultId, cachedName, "left"))
+            verdict == "anomaly" -> pushNotice(LifecycleNotice(account.newItemId(), vaultId, cachedName, "anomaly"))
+            reason == "deleted" -> pushNotice(
+                LifecycleNotice(
+                    account.newItemId(), vaultId, cachedName, "deleted",
+                    purgeAt = info?.purgeAt, parkedCount = parkedCount.takeIf { it > 0 },
+                ),
+            )
+            else -> pushNotice(LifecycleNotice(account.newItemId(), vaultId, cachedName, "removed"))
+        }
+    }
+
+    /** Verify the relayed removal/delete proof under the still-held VK (spec 03 §11). */
+    private fun verifyRemoval(vaultId: String, reason: String, info: RemovedGrantInfo?): Boolean {
+        if (info == null) return false // a bare revocation of a held vault is never "valid"
+        return runCatching {
+            val key = account.lifecycleKeyFor(vaultId)
+            val crypto = account.cryptoProvider()
+            if (reason == "deleted") {
+                val proof = info.deleteProof ?: return false
+                val id = info.deleteId ?: return false
+                LifecycleProof.verify(LifecycleProof.delete(crypto, key, vaultId, id), proof)
+            } else {
+                // 'removed' / 'transferred': verify the optional removal proof over (vaultId, me, nonce).
+                val proof = info.removeProof ?: return false
+                val nonce = info.removeNonce ?: return false
+                LifecycleProof.verify(LifecycleProof.remove(crypto, key, vaultId, account.userId, nonce), proof)
+            }
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Move a removed vault's rows into the ciphertext-only holding area (design §6), then
+     * drop it from the live view. Parked = this cycle's staged denials (F21) + any not-yet-
+     * flushed queued mutations for the vault (they would only be denied) + anything already
+     * held. Returns the parked count for the notice. The item snapshot reuses the cache's
+     * ciphertext envelopes verbatim — nothing is re-encrypted, nothing plaintext at rest.
+     */
+    private fun moveToHolding(
+        vaultId: String,
+        reason: String,
+        info: RemovedGrantInfo?,
+        verifiedDelete: Boolean,
+        @Suppress("UNUSED_PARAMETER") cachedName: String,
+    ): Int {
+        val items = cache.envelopes().filter { it.vaultId == vaultId && !it.deleted }
+        val staged = preParkedByVault.remove(vaultId)?.map { it.mutation } ?: emptyList()
+        val queued = cache.pending().filter { it.vaultId == vaultId }
+        val parked = ((cache.getHeld(vaultId)?.parked ?: emptyList()) + staged + queued).distinctBy { it.mutationId }
+        // Verified deletes expunge at purgeAt (the server erases then); everything else at +30d.
+        val expungeAt = if (verifiedDelete && reason == "deleted" && info?.purgeAt != null) info.purgeAt else nowMs() + 30 * DAY_MS
+        cache.putHeld(
+            HeldVaultRecord(
+                vault = cache.vaults().find { it.vaultId == vaultId } ?: WireVault(vaultId, "shared", 0, "", 0),
+                grant = cache.grants().find { it.vaultId == vaultId }, // retained (normative, design §6)
+                items = items,
+                reason = reason,
+                verified = verifiedDelete,
+                purgeAt = info?.purgeAt,
+                deleteId = info?.deleteId,
+                parked = parked,
+                expungeAt = expungeAt,
+            ),
+        )
+        hardDropLocal(vaultId)
+        return parked.size
+    }
+
+    /** Drop a vault from the LIVE view: rows, queued mutations, key/role, incoming offer. */
+    private fun hardDropLocal(vaultId: String) {
+        cache.dropVault(vaultId)
+        cache.dropPending(vaultId)
+        account.removeVault(vaultId)
+        incomingByVault.remove(vaultId)
+    }
+
+    /** Expunge holding-area entries past their deadline (purgeAt / +30d, design §6). */
+    private fun pruneHolding() {
+        val now = nowMs()
+        for (h in cache.heldVaults()) if (h.expungeAt <= now) cache.removeHeld(h.vault.vaultId)
+    }
+
+    /**
+     * Recompute transfer state for one vault row (spec 03 §11). A pending offer TO us
+     * surfaces ONLY after its proof verifies under the held VK, is unexpired, and its seq
+     * beats the last VERIFIED one (replay floor). A completed transfer is verified via the
+     * relayed wrapHash; only a VERIFIED completion advances the seen-seq chain — an
+     * unverifiable row must not suppress the notice when the genuine wrapHash arrives on a
+     * later pull, nor (via a fabricated huge seq) mute future offers. A verified completion
+     * also retracts any earlier transfer-anomaly warning for the vault.
+     */
+    private fun applyTransferState(vault: WireVault, noticeable: Boolean) {
+        val vaultId = vault.vaultId
+        if (!account.hasVault(vaultId)) return
+        // Incoming offer: recomputed each pull, so a cancel/expiry/re-designate (all
+        // re-deliver the row) clears a stale banner.
+        incomingByVault.remove(vaultId)
+        val crypto = account.cryptoProvider()
+        val seenSeq = cache.lastVerifiedTransferSeq(vaultId)
+        val pt = vault.pendingTransfer
+        if (pt != null && pt.toUserId == account.userId && pt.expiresAt > nowMs() && pt.seq > seenSeq) {
+            runCatching {
+                val key = account.lifecycleKeyFor(vaultId)
+                val expected = LifecycleProof.offer(crypto, key, vaultId, pt.offerId, pt.toUserId, pt.expiresAt, pt.seq)
+                if (LifecycleProof.verify(expected, pt.proof)) {
+                    incomingByVault[vaultId] = IncomingTransfer(
+                        vaultId = vaultId,
+                        vaultName = account.decryptVaultName(vaultId, vault.metaBlob) ?: "(vault)",
+                        offerId = pt.offerId,
+                        seq = pt.seq,
+                        expiresAt = pt.expiresAt,
+                    )
+                }
+            } // no key / bad proof — no consent screen (spec 03 §11)
+        }
+        val lt = vault.lastTransfer
+        if (lt != null && lt.seq > seenSeq) {
+            val wrapHash = lt.wrapHash
+            val verified = wrapHash != null && runCatching {
+                val key = account.lifecycleKeyFor(vaultId)
+                val expected = LifecycleProof.acceptFromHash(crypto, key, vaultId, lt.offerId, lt.newOwnerUserId, lt.seq, wrapHash)
+                LifecycleProof.verify(expected, lt.acceptProof)
+            }.getOrDefault(false)
+            val name = account.decryptVaultName(vaultId, vault.metaBlob) ?: "(vault)"
+            if (verified) {
+                cache.setLastVerifiedTransferSeq(vaultId, lt.seq)
+                // A verified completion supersedes any earlier unverified-sighting warning.
+                noticeList.removeAll { it.vaultId == vaultId && it.kind == "transfer-anomaly" }
+                if (noticeable) {
+                    pushNotice(
+                        LifecycleNotice(
+                            account.newItemId(), vaultId, name, "transfer-complete",
+                            newOwnerUserId = lt.newOwnerUserId, becameMine = lt.newOwnerUserId == account.userId,
+                        ),
+                    )
+                }
+            } else if (noticeable) {
+                // Invalid proof / missing wrapHash on a locally-held vault: retain-and-warn
+                // (design §4 TRANSFER 5) — the ownership change couldn't be verified.
+                pushNotice(LifecycleNotice(account.newItemId(), vaultId, name, "transfer-anomaly", newOwnerUserId = lt.newOwnerUserId))
+            }
+        }
+    }
+
+    private fun pushNotice(n: LifecycleNotice) {
+        // Collapse a repeat notice for the same vault+kind (idempotent re-pulls).
+        noticeList.removeAll { it.vaultId == n.vaultId && it.kind == n.kind }
+        noticeList.add(n)
+    }
+
+    // ==== vault lifecycle: read surfaces ====
+
+    /** The pending lifecycle notices for the UI banner (spec 03 §11). */
+    fun notices(): List<LifecycleNotice> = noticeList.toList()
+
+    fun dismissNotice(id: String) {
+        noticeList.removeAll { it.id == id }
+    }
+
+    fun clearNotices() = noticeList.clear()
+
+    /** Vaults soft-hidden in the holding area (the "Recently removed" surface). The name is
+     *  re-derived from the retained grant + metaBlob on each read — never persisted. */
+    fun heldVaultInfos(): List<HeldVaultInfo> {
+        pruneHolding()
+        return cache.heldVaults().map { h ->
+            HeldVaultInfo(
+                vaultId = h.vault.vaultId,
+                name = h.grant?.let { account.peekVaultName(it, h.vault.metaBlob) } ?: "(vault)",
+                reason = h.reason,
+                verified = h.verified,
+                purgeAt = h.purgeAt,
+                expungeAt = h.expungeAt,
+            )
+        }
+    }
+
+    /** Verified incoming ownership offers TO us — the accept consent screen renders per entry. */
+    fun incomingTransfers(): List<IncomingTransfer> = incomingByVault.values.toList()
+
+    /** The pending offer on a vault (for the owner's "Ownership offer to …" chip), or null. */
+    fun pendingTransferFor(vaultId: String): PendingTransfer? =
+        cache.vaults().find { it.vaultId == vaultId }?.pendingTransfer
+
+    // ==== vault lifecycle: actions (spec 03 §11) ====
+
+    /**
+     * Reconcile sync after a lifecycle op COMMITTED server-side (#1). Transport/offline
+     * failures are swallowed — the op itself succeeded, a later sync trues up ([onFailure]
+     * lets the caller clean its local view first). But a genuine-denial ApiException from
+     * the same cycle is real user-facing information about a DIFFERENT edit being dropped
+     * (e.g. a queued reader edit on an unrelated vault) — it must propagate, never be
+     * silently swallowed with the edit.
+     */
+    private suspend fun reconcileSync(onFailure: (() -> Unit)? = null) {
+        try {
+            sync()
+        } catch (e: Throwable) {
+            onFailure?.invoke()
+            if (e is ApiException && e.code == "denied") throw e
+        }
+    }
+
+    /** DELETE (soft, 7d grace). Mints a fresh deleteId + delete proof under the held VK.
+     *  This device initiated it, so the reconcile pull drops the vault cleanly (no banner);
+     *  the owner restores it from Recently deleted. Returns the server-erase deadline. */
+    suspend fun deleteSharedVault(vaultId: String): Long {
+        val deleteId = account.newItemId()
+        val key = account.lifecycleKeyFor(vaultId)
+        val proof = LifecycleProof.delete(account.cryptoProvider(), key, vaultId, deleteId)
+        val resp = api.deleteVault(vaultId, VaultDeleteRequest(deleteId, proof))
+        suppressDrop.add(vaultId)
+        try {
+            reconcileSync(onFailure = { hardDropLocal(vaultId) })
+        } finally {
+            suppressDrop.remove(vaultId) // #4: never outlives the action's own reconcile
+        }
+        return resp.purgeAt
+    }
+
+    /** The caller's own in-grace deleted vaults — re-opens each VK from the wrappedVk it
+     *  already owned so the name shows AND restore can mint its proof (ZK-clean). */
+    suspend fun listDeleted(): List<DeletedVaultInfo> = api.deletedVaults().map { d ->
+        var name = "(vault)"
+        runCatching {
+            account.addGrant(WireGrant(d.vaultId, account.userId, "owner", d.wrappedVk, 0, null))
+            name = account.decryptVaultName(d.vaultId, d.metaBlob) ?: "(vault)"
+        } // can't open — placeholder; restore will fail loudly if truly lost
+        DeletedVaultInfo(d.vaultId, name, d.deletedAt, d.purgeAt, d.deleteId)
+    }
+
+    /** RESTORE (within grace). Requires the VK held (listDeleted re-opened it). */
+    suspend fun restoreSharedVault(vaultId: String, deleteId: String) {
+        val key = account.lifecycleKeyFor(vaultId)
+        val proof = LifecycleProof.restore(account.cryptoProvider(), key, vaultId, deleteId)
+        api.restoreVault(vaultId, VaultRestoreRequest(deleteId, proof))
+        cache.addConsumedDeleteId(deleteId)
+        reconcileSync() // restore committed; a failed reconcile trues up later
+    }
+
+    /** LEAVE (self-removal). This device initiated it → drop cleanly (no "you left" banner here). */
+    suspend fun leaveSharedVault(vaultId: String) {
+        api.leaveVault(vaultId)
+        suppressDrop.add(vaultId)
+        try {
+            reconcileSync(onFailure = { hardDropLocal(vaultId) })
+        } finally {
+            suppressDrop.remove(vaultId) // #4: never outlives the action's own reconcile
+        }
+    }
+
+    /** TRANSFER offer. seq = the vault's last completed transfer seq + 1 (= transferSeq+1). */
+    suspend fun offerTransfer(vaultId: String, toUserId: String) {
+        val seq = (cache.vaults().find { it.vaultId == vaultId }?.lastTransfer?.seq ?: 0L) + 1
+        val offerId = account.newItemId()
+        val expiresAt = nowMs() + 14 * DAY_MS
+        val key = account.lifecycleKeyFor(vaultId)
+        val proof = LifecycleProof.offer(account.cryptoProvider(), key, vaultId, offerId, toUserId, expiresAt, seq)
+        api.offerTransfer(vaultId, TransferOfferRequest(toUserId, offerId, expiresAt, proof))
+        reconcileSync()
+    }
+
+    /** TRANSFER cancel (owner) or decline (target). */
+    suspend fun cancelTransfer(vaultId: String) {
+        api.cancelTransfer(vaultId)
+        incomingByVault.remove(vaultId)
+        reconcileSync()
+    }
+
+    /**
+     * TRANSFER accept (design §4 TRANSFER 3). Re-verifies the offer proof under the held VK
+     * BEFORE acting, mints + round-trip-verifies the owner wrap (same construction as vault
+     * creation), and posts acceptProof over sha256(wrappedVk). Fails loudly rather than
+     * post an unopenable wrap.
+     */
+    suspend fun acceptTransfer(vaultId: String) {
+        val pt = cache.vaults().find { it.vaultId == vaultId }?.pendingTransfer
+        if (pt == null || pt.toUserId != account.userId) {
+            throw ApiException(409, "transfer_not_pending", "no ownership offer pending for you")
+        }
+        if (pt.expiresAt <= nowMs()) throw ApiException(409, "transfer_not_pending", "this ownership offer has expired")
+        val key = account.lifecycleKeyFor(vaultId)
+        val crypto = account.cryptoProvider()
+        val expected = LifecycleProof.offer(crypto, key, vaultId, pt.offerId, pt.toUserId, pt.expiresAt, pt.seq)
+        if (!LifecycleProof.verify(expected, pt.proof)) {
+            throw ApiException(400, "not_transfer_target", "the offer could not be verified with the vault's key")
+        }
+        val wrappedVk = account.buildOwnerWrap(vaultId) // throws if it fails round-trip
+        val proof = LifecycleProof.accept(crypto, key, vaultId, pt.offerId, account.userId, pt.seq, wrappedVk)
+        api.acceptTransfer(vaultId, TransferAcceptRequest(pt.offerId, wrappedVk, proof))
+        incomingByVault.remove(vaultId)
+        reconcileSync()
+    }
+
+    /** RENAME. Read-modify-write metaBlob (name only, unknown fields preserved, metaV bumped),
+     *  with the current vault rev as the stale-write guard. A 409 stale_meta (a concurrent
+     *  change) auto-resyncs and retries ONCE on top of the fresh row (never a silent
+     *  last-write-wins). */
+    suspend fun renameVault(vaultId: String, newName: String, retry: Boolean = true) {
+        val vault = cache.vaults().find { it.vaultId == vaultId } ?: throw CryptoException("vault not found")
+        val metaBlob = account.buildRenameMeta(vaultId, vault.metaBlob, newName)
+        try {
+            api.updateVaultMeta(vaultId, VaultMetaUpdateRequest(metaBlob, vault.rev))
+        } catch (e: ApiException) {
+            if (retry && e.code == "stale_meta") {
+                sync() // pull the newer row, then rebuild the rename on top of it
+                return renameVault(vaultId, newName, retry = false)
+            }
+            throw e
+        }
+        reconcileSync()
+    }
+
+    // ==== F19: move / copy an item into another vault (design §8) ====
+
+    /** Mint a move/copy gesture: fresh newItemId + per-attachment fresh fileKeys, captured
+     *  ONCE. A retry MUST reuse the SAME gesture (server dedup converges); a new deliberate
+     *  copy gets a fresh one. [del]=true = move (copy then delete source); false = copy. */
+    fun newMoveGesture(itemId: String, targetVaultId: String, del: Boolean): MoveGesture {
+        val src = cache.getItem(itemId) ?: throw CryptoException("the item to move is no longer here")
+        return MoveGesture(
+            gestureId = account.newItemId(),
+            sourceItemId = itemId,
+            sourceVaultId = src.vaultId,
+            sourceRev = src.rev, // the rev of the content copied — the delete leg's stale-write guard
+            targetVaultId = targetVaultId,
+            newItemId = account.newItemId(),
+            del = del,
+            attachments = src.doc.attachments.map {
+                GestureAttachment(
+                    oldId = it.id,
+                    newId = account.newItemId(),
+                    newFileKey = Bytes.toB64(account.newFileKey()), // FRESH — breaks the sha256(ciphertext) linkage
+                    name = it.name,
+                    size = it.size,
+                )
+            },
+        )
+    }
+
+    /** UUIDv4-shaped id from sha256("gesture|gestureId|leg") — a retry of the same gesture
+     *  replays the same mutationIds (server dedup key = deviceId+mutationId). Shaping is the
+     *  ONE shared [Bytes.uuidV4FromBytes] (also behind ConflictCopy + Account ids). */
+    private fun gestureMutationId(gestureId: String, leg: String): String =
+        Bytes.uuidV4FromBytes(account.cryptoProvider().sha256("gesture|$gestureId|$leg".encodeToByteArray()))
+
+    /**
+     * Run a move/copy gesture (design §8 safe shape): COPY LEG FIRST (fresh ids, attachments
+     * re-encrypted under fresh fileKeys), wait for a POSITIVE `applied`/`conflict`, THEN —
+     * for a move — delete the SOURCE with the baseRev of the content actually copied. Copy
+     * denied → [CopyDeniedException], source untouched. A missing/unknown copy status is NOT
+     * a durable copy — abort with the source untouched. Delete conflict (source changed) →
+     * resync + [ItemChangedException], never a blind retry. Idempotent per gesture
+     * (mutationIds derive from gestureId; the server replays stored results verbatim).
+     * Pushed DIRECTLY (never queued): the gate must inspect this leg's own result.
+     */
+    suspend fun runGesture(g: MoveGesture, onProgress: ((done: Int, total: Int) -> Unit)? = null, finalSync: Boolean = true) {
+        val src = cache.getItem(g.sourceItemId)
+            ?: throw CryptoException("The item to move is no longer here — it may have changed or been removed.")
+
+        // --- COPY LEG ---
+        var newDoc = src.doc
+        if (g.attachments.isNotEmpty()) {
+            val newRefs = ArrayList<AttachmentRef>(g.attachments.size)
+            var done = 0
+            onProgress?.invoke(0, g.attachments.size)
+            for (a in g.attachments) {
+                val srcRef = src.doc.attachments.find { it.id == a.oldId }
+                    ?: throw CryptoException("an attachment vanished from the source item")
+                val plain = downloadAttachment(srcRef)
+                val enc = Attachments.encrypt(account.cryptoProvider(), Bytes.fromB64(a.newFileKey), plain)
+                api.uploadAttachment(a.newId, g.newItemId, g.targetVaultId, enc.header + enc.ciphertext)
+                newRefs.add(AttachmentRef(id = a.newId, name = a.name, size = a.size, fileKey = a.newFileKey))
+                onProgress?.invoke(++done, g.attachments.size)
+            }
+            newDoc = newDoc.copy(attachments = newRefs)
+        }
+        val upload = account.encryptItem(g.targetVaultId, g.newItemId, newDoc)
+        val copyResp = api.push(
+            PushRequest(listOf(Mutation(gestureMutationId(g.gestureId, "copy"), "put", g.newItemId, g.targetVaultId, 0, upload))),
+        )
+        val copyResult = copyResp.results.firstOrNull()
+        if (copyResult?.status == "denied") throw CopyDeniedException() // ABORT — source untouched
+        // POSITIVE confirmation required (design §8): only `applied`, or `conflict` (put-over-
+        // existing on a crash-window retry: our copy won, content is present), may proceed to
+        // the delete leg. A missing result or an unknown/future status is NOT a durable copy.
+        if (copyResult?.status != "applied" && copyResult?.status != "conflict") {
+            throw ApiException(0, "copy_unconfirmed", "The copy could not be confirmed — nothing was moved. Try again.")
+        }
+        if (account.hasVault(g.targetVaultId)) {
+            val now = nowMs()
+            val wire = WireItem(
+                itemId = g.newItemId, vaultId = g.targetVaultId, rev = copyResult.newItemRev ?: 1,
+                createdAt = now, updatedAt = now, deleted = false, conflict = false,
+                formatVersion = upload.formatVersion, attachmentIds = upload.attachmentIds, blob = upload.blob,
+            )
+            cache.upsertItem(wire, VaultItem(g.newItemId, g.targetVaultId, wire.rev, now, newDoc))
+        }
+
+        // --- DELETE LEG (move only) ---
+        if (g.del) {
+            val delResp = api.push(
+                PushRequest(listOf(Mutation(gestureMutationId(g.gestureId, "delete"), "delete", g.sourceItemId, g.sourceVaultId, g.sourceRev, null))),
+            )
+            when (delResp.results.firstOrNull()?.status) {
+                "conflict" -> {
+                    // Resync so the user sees the newer source; a genuine-denial the resync
+                    // surfaces (an UNRELATED dropped edit, #1) rides along as suppressed —
+                    // the item-changed verdict stays the primary error.
+                    val changed = ItemChangedException()
+                    try {
+                        sync()
+                    } catch (e: Throwable) {
+                        if (e is ApiException && e.code == "denied") changed.addSuppressed(e)
+                    }
+                    throw changed
+                }
+                "denied" -> throw ApiException(403, "denied", "The source item could not be deleted — your access may have changed. The copy was made.")
+                else -> cache.deleteItem(g.sourceItemId)
+            }
+        }
+
+        if (finalSync) {
+            reconcileSync() // move/copy committed; offline reconcile trues up later; genuine denials surface (#1)
+        }
+    }
+
+    /**
+     * Bulk "copy all to Personal" (design §8) — the delete dialog's rescue step. COPY LEGS
+     * ONLY: originals are NEVER deleted (abort mid-bulk is non-destructive; the vault delete
+     * itself ends access, and grace-retains the originals so a restore genuinely returns
+     * everything). Gestures are memoized per source item, so a RETRY after a mid-run failure
+     * reuses the same ids and converges on server dedup instead of double-writing.
+     */
+    suspend fun copyAllToPersonal(vaultId: String, onProgress: ((done: Int, total: Int) -> Unit)? = null): Int {
+        val items = cache.allItems().filter { it.vaultId == vaultId }
+        var copied = 0
+        for (it in items) {
+            val gKey = "$vaultId|${it.itemId}|${account.personalVaultId}"
+            var g = bulkGestures[gKey]
+            if (g == null || g.sourceRev != it.rev) {
+                // New gesture only for a first attempt or when the source content changed
+                // since the memoized attempt (a different rev IS different content).
+                g = newMoveGesture(it.itemId, account.personalVaultId, del = false)
+                bulkGestures[gKey] = g
+            }
+            runGesture(g, onProgress = null, finalSync = false)
+            copied++
+            onProgress?.invoke(copied, items.size)
+        }
+        reconcileSync()
+        return copied
+    }
+
+    // ==== conflict materialization (spec 03 §5) ====
 
     /**
      * Conflict copies derive from PERSISTED state, not a transient in-loop list: a crash
@@ -202,17 +998,33 @@ class SyncEngine(
      * (possibly fresh) itemId, THEN push the item that references them. An EXISTING item
      * never changes vaults (its blob AD binds to the vault; the server enforces
      * vault_mismatch) — edits always target the item's own vault, wherever it lives.
+     *
+     * F21: a save denied because its vault just went in-grace (an owner's accidental
+     * delete) is PARKED for replay on restore — [surfaceStagedDenials] runs after the
+     * reconcile pull, whose verdict is guaranteed fresh: the whole flush→pull→classify
+     * cycle is [syncMutex]-serialized against every other caller, and the epoch guard
+     * additionally refuses to classify off any pull that started before the denial
+     * (the native equivalent of the web store's second-sync review fix).
      */
     suspend fun saveWithUploads(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload>, vaultId: String? = null) {
         val existing = itemId?.let { cache.getItem(it) }
+        // Save guard (design §6): an edit to an itemId we no longer hold must NOT silently
+        // teleport into the personal vault — the item's vault may have been deleted or its
+        // grant revoked mid-edit. Fail loudly; the server-side skeletal fence is the belt.
+        if (itemId != null && existing == null) {
+            throw ApiException(409, "vault_state_changed", "This item is no longer here — it may have been removed or its vault deleted.")
+        }
         val effectiveVault = existing?.vaultId ?: vaultId ?: account.personalVaultId
         val id = itemId ?: account.newItemId()
         for (u in uploads) {
             val enc = Attachments.encrypt(account.cryptoProvider(), Bytes.fromB64(u.ref.fileKey), u.data)
             api.uploadAttachment(u.ref.id, id, effectiveVault, enc.header + enc.ciphertext)
         }
-        push(listOf(putMutation(id, effectiveVault, doc, existing?.rev ?: 0)))
-        pull()
+        syncMutex.withLock {
+            push(listOf(putMutation(id, effectiveVault, doc, existing?.rev ?: 0)))
+            pull()
+            surfaceStagedDenials()
+        }
     }
 
     /**
@@ -225,7 +1037,7 @@ class SyncEngine(
     suspend fun importAll(
         items: List<CsvImport.PlannedItem>,
         onProgress: ((done: Int, total: Int) -> Unit)? = null,
-    ) {
+    ) = syncMutex.withLock {
         val vaultId = account.personalVaultId
         var done = 0
         for (chunk in items.chunked(SERVER_BATCH_MAX)) {
@@ -240,6 +1052,7 @@ class SyncEngine(
             onProgress?.invoke(done, items.size)
         }
         pull()
+        surfaceStagedDenials()
     }
 
     /** Download + decrypt one attachment (hard failure on any corruption, spec 02 §6). */
@@ -256,8 +1069,11 @@ class SyncEngine(
 
     suspend fun remove(itemId: String) {
         val existing = cache.getItem(itemId) ?: return
-        push(listOf(deleteMutation(itemId, existing.vaultId, existing.rev)))
-        pull()
+        syncMutex.withLock {
+            push(listOf(deleteMutation(itemId, existing.vaultId, existing.rev)))
+            pull()
+            surfaceStagedDenials()
+        }
     }
 
     /** Enqueue durably, attempt to send; a failure leaves it queued for flushQueue(). */
@@ -266,12 +1082,18 @@ class SyncEngine(
         flushQueue()
     }
 
-    private suspend fun flushQueue() {
+    /**
+     * Drain the queue in server-cap-sized batches. A `denied` mutation is durably marked
+     * STAGED-DENIED (#2 — it survives process death; [VaultCache.pending] stops returning
+     * it so it is never blindly re-pushed) and indexed in [preParkedByVault]: the following
+     * fresh pull either folds it into the holding area (its vault went in-grace → PARKED
+     * for restore replay, F21) or [surfaceStagedDenials] concludes a genuine permission
+     * denial and durably drops it. A denial of a reinstate-REPLAYED mutation on a live
+     * vault is a calm notice instead (#6). NEVER throws for denied — a denied flush must
+     * not abort the pull that delivers removedGrants.
+     */
+    private suspend fun flushQueue(): Int {
         var deniedCount = 0
-        // Drain the queue in server-cap-sized batches. The server rejects a >200 batch
-        // outright (batch_too_large), so a queue that grew past 200 (e.g. a partially-failed
-        // bulk import) must be chunked here — otherwise every flush wedges. Fixes the queue
-        // for ALL callers, not just import.
         while (true) {
             val chunk = cache.pending().take(SERVER_BATCH_MAX)
             if (chunk.isEmpty()) break
@@ -280,16 +1102,69 @@ class SyncEngine(
             var progressed = false
             for (m in chunk) {
                 val r = byId[m.mutationId] ?: continue
-                if (r.status == "denied") deniedCount++
-                // Any definitive server outcome removes it from the queue (idempotent replay
-                // returns the original result; denied is un-retryable) — both drop it.
-                cache.dequeue(m.mutationId)
+                val wasReplay = replayedMutationIds.remove(m.mutationId)
+                if (r.status == "denied") {
+                    deniedCount++
+                    if (wasReplay) {
+                        // Recovered-edit replay denied on the now-live vault (role changed
+                        // across the grace): drained into a calm notice, durably dropped.
+                        replayDeniedByVault[m.vaultId] = (replayDeniedByVault[m.vaultId] ?: 0) + 1
+                        cache.dequeue(m.mutationId)
+                    } else {
+                        cache.markStagedDenied(m.mutationId)
+                        preParkedByVault.getOrPut(m.vaultId) { mutableListOf() }.add(StagedDenial(m, pullStartCounter))
+                    }
+                } else {
+                    // Any other definitive outcome removes it (idempotent replay returns
+                    // the original result).
+                    cache.dequeue(m.mutationId)
+                }
                 progressed = true
             }
             if (!progressed) break // defensive: no results matched (server returns one per mutation)
         }
-        if (deniedCount > 0) throw ApiException(403, "denied", "write denied for $deniedCount mutation(s)")
+        return deniedCount
     }
+
+    /**
+     * After the pull: staged denials whose vault landed in the holding area were parked
+     * (folded in by [moveToHolding]; late arrivals for an already-held vault append here) —
+     * those are NOT failures, the deletion notice explains them. Anything else is a genuine
+     * permission denial and surfaces exactly like the pre-0.5.0 behavior, just AFTER the
+     * pull (F21). Epoch guard (#0): an entry may be classified ONLY once a pull that
+     * STARTED after it was staged has completed — a verdict must never come from a stale
+     * snapshot that predates the denial (a too-fresh entry stays durably staged for the
+     * next cycle).
+     */
+    private fun surfaceStagedDenials() {
+        if (preParkedByVault.isEmpty()) return
+        var genuine = 0
+        val iter = preParkedByVault.entries.iterator()
+        while (iter.hasNext()) {
+            val (vaultId, entries) = iter.next()
+            val (ripe, tooFresh) = entries.partition { freshestCompletedPullStart > it.stagedBefore }
+            if (ripe.isEmpty()) continue
+            val held = cache.getHeld(vaultId)
+            if (held != null) {
+                cache.atomically {
+                    cache.putHeld(held.copy(parked = (held.parked + ripe.map { it.mutation }).distinctBy { it.mutationId }))
+                    ripe.forEach { cache.dequeue(it.mutation.mutationId) } // queue → held.parked, atomically
+                }
+            } else {
+                genuine += ripe.size
+                ripe.forEach { cache.dequeue(it.mutation.mutationId) } // definitive durable drop
+            }
+            if (tooFresh.isEmpty()) {
+                iter.remove()
+            } else {
+                entries.clear()
+                entries.addAll(tooFresh)
+            }
+        }
+        if (genuine > 0) throw ApiException(403, "denied", "write denied for $genuine mutation(s)")
+    }
+
+    private fun nowMs(): Long = kotlinx.datetime.Clock.System.now().toEpochMilliseconds()
 
     private fun isoDate(epochMillis: Long): String {
         val instant = kotlinx.datetime.Instant.fromEpochMilliseconds(epochMillis)

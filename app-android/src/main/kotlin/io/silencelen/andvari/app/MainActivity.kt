@@ -176,6 +176,7 @@ fun AndvariApp(vm: AndvariViewModel) {
             is Screen.Welcome -> WelcomeScreen(vm, ui)
             is Screen.Unlock -> UnlockScreen(vm, ui, screen.email)
             is Screen.Vault -> VaultScreen(vm, ui)
+            is Screen.Sharing -> SharingScreen(vm, ui)
             is Screen.Settings -> SettingsScreen(vm, ui)
             is Screen.AutofillStatus -> AutofillStatusScreen(vm, ui)
         }
@@ -195,7 +196,7 @@ private fun Sigil() {
 }
 
 @Composable
-private fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
+internal fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
     if (msg != null) {
         Card(Modifier.fillMaxWidth().padding(vertical = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -207,7 +208,7 @@ private fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
+internal fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
     if (msg != null) {
         Card(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -368,6 +369,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                 actions = {
                     IconButton(onClick = { importPicker.launch(arrayOf("*/*")) }) { Icon(Icons.Default.FileUpload, "import CSV") }
                     IconButton(onClick = { vm.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
+                    IconButton(onClick = { vm.openSharing() }) { Icon(Icons.Default.Group, "sharing") }
                     IconButton(onClick = { vm.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
                     IconButton(onClick = { vm.lock() }) { Icon(Icons.Default.Lock, "lock") }
                 },
@@ -386,10 +388,14 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                 // save finishing across an Activity recreation still closes the editor.
                 editorInitial != null -> ItemEditor(vm, ui, editorItemId, editorInitial, onSave = { doc, uploads -> vm.saveItem(editorItemId, doc, uploads) { vm.closeEditor() } }, onCancel = { vm.closeEditor() })
                 current != null -> ItemDetail(vm, ui, current, onEdit = { vm.openEditor(current.itemId) }, onDelete = { vm.deleteItem(current.itemId); detailId = null }, onBack = { detailId = null })
-                else -> Column(Modifier.padding(16.dp)) {
+                else -> Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
                     OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
                     ErrorBar(ui.error, vm::clearError)
                     NoticeBar(ui.notice, vm::clearNotice)
+                    // Lifecycle notices + verified ownership offers (spec 03 §11) land where the
+                    // user actually looks — the main list — not only on the Sharing screen.
+                    LifecycleNoticesBanner(ui.lifecycleNotices, vm::dismissNotice)
+                    IncomingTransferCards(vm, ui)
                     if (ui.needsUpdateCount > 0) {
                         Text(needsUpdateLine(ui.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 4.dp))
                     }
@@ -561,6 +567,15 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
                     confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") } },
                     dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
                 )
+            }
+            // F19 (design §8): move/copy into another writable vault. Mirrors web — only for
+            // writers/owners of the SOURCE (a reader's delete leg would be denied anyway).
+            val moveTargets = vm.vaultInfos().filter {
+                (it.type == "personal" || it.role == "owner" || it.role == "writer") && it.vaultId != item.vaultId
+            }
+            if (moveTargets.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                MoveCopyControl(vm, ui, item, moveTargets)
             }
         }
     }
@@ -889,7 +904,7 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
  *  picker is foreground doesn't drop it (a `remember` came back null and the result
  *  no-op'd, leaving a silent empty file). */
 @Composable
-private fun ExportDialogs(vm: AndvariViewModel, ui: UiState) {
+internal fun ExportDialogs(vm: AndvariViewModel, ui: UiState) {
     val ctx = LocalContextCompat()
 
     // ---- backup (.andvari) ----

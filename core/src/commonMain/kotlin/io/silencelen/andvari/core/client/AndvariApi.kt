@@ -21,12 +21,21 @@ import io.silencelen.andvari.core.model.AttachmentMeta
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.CreateVaultResponse
+import io.silencelen.andvari.core.model.DeletedVaultSummary
 import io.silencelen.andvari.core.model.LoginRequest
+import io.silencelen.andvari.core.model.TransferAcceptRequest
+import io.silencelen.andvari.core.model.TransferOfferRequest
+import io.silencelen.andvari.core.model.TransferOfferResponse
 import io.silencelen.andvari.core.model.UserLookupRequest
 import io.silencelen.andvari.core.model.UserLookupResponse
+import io.silencelen.andvari.core.model.VaultDeleteRequest
+import io.silencelen.andvari.core.model.VaultDeleteResponse
 import io.silencelen.andvari.core.model.VaultMemberAdd
+import io.silencelen.andvari.core.model.VaultMemberRemoveRequest
 import io.silencelen.andvari.core.model.VaultMemberRole
 import io.silencelen.andvari.core.model.VaultMemberSummary
+import io.silencelen.andvari.core.model.VaultMetaUpdateRequest
+import io.silencelen.andvari.core.model.VaultRestoreRequest
 import io.silencelen.andvari.core.model.PasswordChangeRequest
 import io.silencelen.andvari.core.model.PreloginRequest
 import io.silencelen.andvari.core.model.PreloginResponse
@@ -62,7 +71,7 @@ data class Tokens(val accessToken: String, val refreshToken: String)
  * (android versionName, desktop packageVersion) stay equal to it, so a release bump can't
  * skew across artifacts again (0.4.0 shipped with two modules still claiming 0.3.0).
  */
-const val ANDVARI_CLIENT_VERSION = "0.4.0"
+const val ANDVARI_CLIENT_VERSION = "0.5.0"
 
 /**
  * Kotlin API client (sibling of web/src/api/client.ts). Auto-refreshes the access
@@ -107,7 +116,7 @@ class AndvariApi(
             "GET" -> http.get(baseUrl + path) { common(auth) }
             "POST" -> http.post(baseUrl + path) { common(auth); if (body != null) { contentType(ContentType.Application.Json); setBody(body) } }
             "PUT" -> http.put(baseUrl + path) { common(auth); if (body != null) { contentType(ContentType.Application.Json); setBody(body) } }
-            "DELETE" -> http.delete(baseUrl + path) { common(auth) }
+            "DELETE" -> http.delete(baseUrl + path) { common(auth); if (body != null) { contentType(ContentType.Application.Json); setBody(body) } }
             else -> error("unsupported method $method")
         }
         if (resp.status == HttpStatusCode.Unauthorized && auth && retry && tokens != null) {
@@ -211,8 +220,39 @@ class AndvariApi(
     suspend fun setVaultMemberRole(vaultId: String, userId: String, role: String): CreateVaultResponse =
         call("PUT", "/api/v1/vaults/$vaultId/members/$userId", VaultMemberRole(role))
 
-    suspend fun removeVaultMember(vaultId: String, userId: String): CreateVaultResponse =
-        call("DELETE", "/api/v1/vaults/$vaultId/members/$userId")
+    /** [removal] is the optional removal proof (spec 03 §10/§11): minted by the removing
+     *  owner's unlocked client and relayed to the victim via removedGrantsInfo so a 0.5.0
+     *  client can verify the removal as a real owner action. Omitted → bare removal (the
+     *  victim retains-and-warns). */
+    suspend fun removeVaultMember(vaultId: String, userId: String, removal: VaultMemberRemoveRequest? = null): CreateVaultResponse =
+        call("DELETE", "/api/v1/vaults/$vaultId/members/$userId", removal?.takeIf { it.proof != null || it.nonce != null })
+
+    // ---- vault lifecycle (spec 03 §11) — refused on the public break-glass origin.
+    // Foreground REST only: lifecycle ops are NEVER queued durably offline (design §2).
+
+    suspend fun deleteVault(vaultId: String, req: VaultDeleteRequest): VaultDeleteResponse =
+        call("POST", "/api/v1/vaults/$vaultId/delete", req)
+
+    suspend fun restoreVault(vaultId: String, req: VaultRestoreRequest): CreateVaultResponse =
+        call("POST", "/api/v1/vaults/$vaultId/restore", req)
+
+    suspend fun deletedVaults(): List<DeletedVaultSummary> = call("GET", "/api/v1/vaults/deleted")
+
+    suspend fun leaveVault(vaultId: String): CreateVaultResponse =
+        call("POST", "/api/v1/vaults/$vaultId/leave")
+
+    suspend fun offerTransfer(vaultId: String, req: TransferOfferRequest): TransferOfferResponse =
+        call("POST", "/api/v1/vaults/$vaultId/transfer", req)
+
+    /** Owner cancel or target decline. */
+    suspend fun cancelTransfer(vaultId: String): CreateVaultResponse =
+        call("DELETE", "/api/v1/vaults/$vaultId/transfer")
+
+    suspend fun acceptTransfer(vaultId: String, req: TransferAcceptRequest): CreateVaultResponse =
+        call("POST", "/api/v1/vaults/$vaultId/transfer/accept", req)
+
+    suspend fun updateVaultMeta(vaultId: String, req: VaultMetaUpdateRequest): CreateVaultResponse =
+        call("PUT", "/api/v1/vaults/$vaultId/meta", req)
 
     // ---- attachments (spec 02 §6: body = header || ciphertext chunks) ----
 
