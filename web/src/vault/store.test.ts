@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ApiError, type ApiClient } from "../api/client";
-import type { ItemDoc, Mutation, PushResponse, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
+import type { ItemDoc, ItemVersion, ItemVersionsResponse, Mutation, PushResponse, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
 import { concat } from "../crypto/bytes";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
@@ -28,6 +28,12 @@ class FakeApi {
   rev = 1;
   /** PDD-1: arm a one-shot conflict result (carrying the losing serverItem) for an itemId. */
   conflictOnce = new Map<string, { serverItem: WireItem; newItemRev: number }>();
+  /** Item history: archived versions the server would hold, keyed by itemId. */
+  itemVersionsById = new Map<string, ItemVersion[]>();
+
+  async itemVersions(itemId: string): Promise<ItemVersionsResponse> {
+    return { itemId, versions: this.itemVersionsById.get(itemId) ?? [] };
+  }
 
   async sync(since: number): Promise<SyncResponse> {
     this.sinceLog.push(since);
@@ -312,6 +318,33 @@ describe("VaultStore family sharing (P5)", () => {
     const copyId = await conflictCopyId(s.itemId, 7);
     const spurious = api.pushes.slice(pushesBefore).flat().find((m) => m.itemId === copyId);
     expect(spurious, "a losing delete must not spawn a conflict-copy duplicate").toBeFalsy();
+  });
+
+  it("itemVersions fetches + decrypts archived versions under the held VK; restore is a put (item history)", async () => {
+    const s = await scenario("writer");
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+    await store.sync();
+
+    // Two archived ciphertext versions (encrypted by the owner under the shared VK — as the server holds).
+    const v1: ItemDoc = { type: "login", name: "Netflix", login: { username: "fam", password: "old-1" } };
+    const v2: ItemDoc = { type: "login", name: "Netflix", login: { username: "fam", password: "old-2" } };
+    api.itemVersionsById.set(s.itemId, [
+      { rev: 8, blob: s.owner.encryptItem(s.vaultId, s.itemId, v2), formatVersion: 1, archivedAt: 1_690_000_100_000 },
+      { rev: 7, blob: s.owner.encryptItem(s.vaultId, s.itemId, v1), formatVersion: 1, archivedAt: 1_690_000_000_000 },
+    ]);
+
+    const versions = await store.itemVersions(s.itemId, s.vaultId);
+    expect(versions.map((v) => v.rev)).toEqual([8, 7]); // newest first
+    expect(versions[0]!.doc.login?.password).toBe("old-2");
+    expect(versions[1]!.doc.login?.password).toBe("old-1");
+
+    // Restore the older version — an ordinary put over the live item.
+    const pushesBefore = api.pushes.length;
+    await store.save(s.itemId, versions[1]!.doc);
+    expect(api.pushes.length).toBeGreaterThan(pushesBefore);
+    expect(store.get(s.itemId)?.doc.login?.password).toBe("old-1");
   });
 
   it("purges the vault's items and forgets key + role on removedGrants", async () => {

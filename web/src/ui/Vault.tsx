@@ -669,6 +669,8 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
 
       {(doc.attachments?.length ?? 0) > 0 && <AttachmentList item={item} store={store} />}
 
+      <ItemHistory item={item} store={store} readOnly={readOnly} onRestored={onBack} />
+
       {/* A reader-role member cannot edit/delete/attach — the push would be denied. */}
       {!readOnly && (
         <>
@@ -692,6 +694,74 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           {!deleting && moveTargets.length > 0 && <MoveCopyControl item={item} store={store} targets={moveTargets} onMoved={onMoved} />}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Item history & restore (feature: "the fat-finger seatbelt"). Fetches the archived versions the
+ * server already keeps (up to the last 10), decrypts each under the held VK, and offers per-version
+ * password reveal + "Restore" (a plain put over the live item). Readers can view but not restore.
+ * Honest bound: "up to the last 10 saves" — never "nothing is ever lost" (spec 02 §7).
+ */
+function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; store: VaultStore; readOnly: boolean; onRestored: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [versions, setVersions] = useState<{ rev: number; archivedAt: number; doc: ItemDoc }[] | null>(null);
+  const [err, setErr] = useState("");
+  const [restoringRev, setRestoringRev] = useState<number | null>(null);
+
+  const load = async () => {
+    setOpen(true);
+    if (versions !== null || loading) return;
+    setLoading(true);
+    setErr("");
+    try {
+      setVersions(await store.itemVersions(item.itemId, item.vaultId));
+    } catch (e) {
+      setErr(e instanceof ApiError ? "Couldn't load history from the server." : "Couldn't reach the server for history.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const restore = async (v: { rev: number; doc: ItemDoc }) => {
+    setRestoringRev(v.rev);
+    setErr("");
+    try {
+      await store.save(item.itemId, v.doc); // an ordinary put over the live item
+      onRestored(); // back to the vault; the live item now holds the restored version
+    } catch {
+      setErr("Restore failed — nothing changed. Try again.");
+      setRestoringRev(null);
+    }
+  };
+
+  if (!open) {
+    return <button className="link" style={{ marginTop: 12 }} onClick={load}>Version history</button>;
+  }
+  return (
+    <div className="field" style={{ marginTop: 18 }}>
+      <label>Version history <span className="muted">· up to the last 10 saves</span></label>
+      {loading && <div className="muted">Loading…</div>}
+      {err && <div className="msg err">{err}</div>}
+      {versions?.length === 0 && <div className="muted">No earlier versions yet — history starts from the next change.</div>}
+      {versions?.map((v) => (
+        <div key={v.rev} className="secret-row" style={{ alignItems: "center", marginTop: 6 }}>
+          <span className="muted mono" style={{ minWidth: 92 }}>{new Date(v.archivedAt).toISOString().slice(0, 10)}</span>
+          {v.doc.type === "login" && v.doc.login?.password ? (
+            <PasswordField value={v.doc.login.password} />
+          ) : (
+            <span className="muted" style={{ flex: 1 }}>{v.doc.type === "login" ? "(no password in this version)" : "note"}</span>
+          )}
+          {!readOnly && (
+            <button className="ghost" disabled={restoringRev !== null} onClick={() => restore(v)}>
+              {restoringRev === v.rev ? "Restoring…" : "Restore"}
+            </button>
+          )}
+        </div>
+      ))}
+      <button className="link" style={{ marginTop: 8 }} onClick={() => setOpen(false)}>Hide history</button>
     </div>
   );
 }

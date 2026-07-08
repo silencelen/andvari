@@ -9,6 +9,7 @@ import type {
   CreateVaultResponse,
   DeletedVaultSummary,
   InviteResponse,
+  ItemVersionsResponse,
   PasswordChangeRequest,
   PreloginResponse,
   PushResponse,
@@ -304,6 +305,12 @@ export class ApiClient {
 
   push(mutations: Mutation[]) {
     return this.json<PushResponse>("POST", "/api/v1/sync/push", { mutations });
+  }
+
+  /** Item history: the archived ciphertext versions of an item (server keeps the last 10),
+   *  grant-checked. The caller decrypts each blob under the held VK (Account.decryptItemVersion). */
+  itemVersions(itemId: string) {
+    return this.json<ItemVersionsResponse>("GET", `/api/v1/items/${itemId}/versions`);
   }
 
   // ---- shared vaults (spec 03 §10) — refused on the public break-glass origin ----

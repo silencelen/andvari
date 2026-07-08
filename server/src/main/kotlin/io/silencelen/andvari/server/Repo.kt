@@ -419,7 +419,9 @@ class Repo(val db: Db) {
      *  (the server keeps the last 10; see [archiveVersion]). Grant-checked at the route. */
     fun itemVersions(c: Connection, itemId: String): List<ItemVersion> =
         c.queryAll(
-            "SELECT rev, blob, formatVersion, archivedAt FROM item_versions WHERE itemId=? ORDER BY rev DESC",
+            // LIMIT 10 is belt-and-suspenders: archiveVersion already prunes to the newest 10, but
+            // capping the READ too means a prune regression can never balloon a history response.
+            "SELECT rev, blob, formatVersion, archivedAt FROM item_versions WHERE itemId=? ORDER BY rev DESC LIMIT 10",
             itemId,
         ) { rs -> ItemVersion(rs.getLong("rev"), rs.getString("blob"), rs.getInt("formatVersion"), rs.getLong("archivedAt")) }
 

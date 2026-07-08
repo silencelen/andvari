@@ -118,6 +118,19 @@ export interface WireItem {
   blob: string | null;
 }
 
+/** One archived ciphertext version of an item (item history feature; server keeps the last 10). */
+export interface ItemVersion {
+  rev: number;
+  blob: string;
+  formatVersion: number;
+  archivedAt: number;
+}
+
+export interface ItemVersionsResponse {
+  itemId: string;
+  versions: ItemVersion[];
+}
+
 export interface SyncResponse {
   rev: number;
   full: boolean;
