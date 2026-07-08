@@ -312,6 +312,24 @@ data class MutationResult(
 @Serializable
 data class PushResponse(val rev: Long, val results: List<MutationResult>)
 
+/**
+ * One archived ciphertext version of an item (spec 02 §7 / feature: item history & restore). The
+ * server keeps the last 10 per item and returns them newest-first from GET /items/{id}/versions.
+ * `blob` is sealed under the vault VK with AD bound to (vaultId, itemId, formatVersion) — NOT rev —
+ * so the client decrypts old versions with the key it already holds. No vault-identifying field:
+ * the client supplies the vaultId (known from the live item) to decrypt.
+ */
+@Serializable
+data class ItemVersion(
+    val rev: Long,
+    val blob: String,
+    val formatVersion: Int,
+    val archivedAt: Long,
+)
+
+@Serializable
+data class ItemVersionsResponse(val itemId: String, val versions: List<ItemVersion>)
+
 // ---- attachments (spec 02 §6) ----
 
 /** Server bookkeeping for one encrypted attachment blob; filename + fileKey live inside item ciphertext. */

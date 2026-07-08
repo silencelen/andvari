@@ -227,10 +227,18 @@ generations converge without 409/410 loops).
   are GC'd after **90 days**; a client whose cursor predates the oldest retained
   change receives `410 Gone` on sync and MUST full-resync (prevents deletion
   resurrection by stale caches).
-- **item_versions**: on every overwrite the server archives the previous `{rev,
-  blob}` for the item, keeping the most recent **10** versions. AD stays valid
-  (same itemId). This is the no-silent-loss backstop and powers client-side
-  "password history repair" after conflicts.
+- **item_versions**: on every overwrite (and before every delete) the server archives
+  the previous `{rev, blob, formatVersion}` for the item, keeping the most recent **10**
+  versions. AD stays valid (bound to itemId+formatVersion, **not** rev), so an old version
+  decrypts under the item's current VK with no crypto change. This is the no-silent-loss
+  backstop and powers client-side "password history repair" after conflicts. **Exposed
+  (item history & restore feature):** `GET /items/{id}/versions` (spec 03) serves them
+  grant-checked; the client decrypts each blob under the VK it holds and can restore one as
+  an ordinary put. Two bounds the UI MUST state honestly: (1) at most the last **10**
+  versions ("up to the last 10", never "nothing is ever lost"); (2) **history resets at VK
+  rotation** — the archive is ciphertext under the *current* VK, so the queued lazy VK
+  rotation (ROADMAP:126) either prunes item_versions for the rotated vault or re-seals it
+  (design decision handed to the rotation work; see docs/design/2026-07-08-item-history-and-restore.md).
 - **Conflict flow** (authoritative rules in spec 03 §5): the server never merges and
   never re-encrypts; it applies the newest write, archives the loser, and sets
   `conflict=true`. The next syncing client that can decrypt materializes a visible

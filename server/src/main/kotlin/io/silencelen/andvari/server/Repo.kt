@@ -3,6 +3,7 @@ package io.silencelen.andvari.server
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.model.AuditEvent
+import io.silencelen.andvari.core.model.ItemVersion
 import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.RemovedGrantInfo
 import io.silencelen.andvari.core.model.TransferRecord
@@ -413,6 +414,14 @@ class Repo(val db: Db) {
 
     fun itemById(c: Connection, itemId: String): WireItem? =
         c.queryOne("SELECT * FROM items WHERE itemId=?", itemId) { itemRow(it) }
+
+    /** Feature: item history — the archived ciphertext versions of an item, newest rev first
+     *  (the server keeps the last 10; see [archiveVersion]). Grant-checked at the route. */
+    fun itemVersions(c: Connection, itemId: String): List<ItemVersion> =
+        c.queryAll(
+            "SELECT rev, blob, formatVersion, archivedAt FROM item_versions WHERE itemId=? ORDER BY rev DESC",
+            itemId,
+        ) { rs -> ItemVersion(rs.getLong("rev"), rs.getString("blob"), rs.getInt("formatVersion"), rs.getLong("archivedAt")) }
 
     fun archiveVersion(c: Connection, item: WireItem) {
         if (item.blob == null) return
