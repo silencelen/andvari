@@ -138,6 +138,14 @@ Prioritized; each is additive and back-compatible.
 
 ## Onboarding & reach (owner-requested 2026-07-07 — near-term product polish, mostly UI)
 
+- **TOTP enrollment QR code** — *owner-requested 2026-07-07.* Settings → "Two-factor (server
+  TOTP)" already receives the `otpauth://` URI (`TotpSetupResponse.otpauthUri`) but renders it
+  only as copyable text (`Settings.tsx:165`) — show a scannable QR of that URI so a 3rd-party
+  authenticator (Aegis/Google Auth/etc.) enrolls by camera. Client-side render only (the URI
+  never leaves the page; no wire change). Needs a QR encoder: a tiny audited dep or a
+  hand-rolled byte-mode encoder — decide against the web bundle's dependency posture. Native
+  parity later (Android enrollment happens on web today).
+
 - **"Get andvari on your other devices" hub** — a Settings/menu section that surfaces every
   client with a real link: the Android APK (devstore, tailnet), the Windows MSI
   (`/downloads` — already served, once the owner publishes the build), and the browser
