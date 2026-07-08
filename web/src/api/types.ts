@@ -44,6 +44,51 @@ export interface WireVault {
   rev: number;
   metaBlob: string;
   createdAt: number;
+  // ---- vault lifecycle (spec 03 §11) — all additive; old clients ignore unknown keys ----
+  /** A pending ownership-transfer offer riding the vault row (re-delivered to every member). */
+  pendingTransfer?: PendingTransfer | null;
+  /** The last completed transfer — every member verifies its seq-chained acceptProof. */
+  lastTransfer?: TransferRecord | null;
+  /** On a live vault that WAS restored: the restoreProof over the consumed deleteId. A
+   *  client re-receiving the restored vault verifies restore(VK, vaultId, deleteId) and
+   *  durably marks the deleteId consumed, so a replayed old tombstone bearing it is stale. */
+  restoreProof?: string | null;
+  deleteId?: string | null;
+}
+
+/** A pending ownership-transfer offer (spec 03 §11). `proof` is the VK-derived offer MAC —
+ *  the target's 0.5.0 client verifies it BEFORE rendering consent; the server only relays it. */
+export interface PendingTransfer {
+  toUserId: string;
+  offerId: string;
+  proof: string;
+  expiresAt: number;
+  seq: number;
+}
+
+/** The last completed transfer (spec 03 §11). Members verify `acceptProof` under their held
+ *  VK using `wrapHash` (= hexLower(sha256(utf8(new owner's wrappedVk))), which they never
+ *  receive) — a server-side role rewrite or wrap swap is then detectable. */
+export interface TransferRecord {
+  offerId: string;
+  newOwnerUserId: string;
+  acceptProof: string;
+  seq: number;
+  wrapHash?: string | null;
+}
+
+/** Why the caller lost a grant (spec 03 §11). `reason` derives from the caller's OWN grant's
+ *  revokedReason. Tombstone fields ride only 'deleted'; removeProof/removeNonce only
+ *  'removed'/'left' when the removing owner supplied a removal proof. */
+export interface RemovedGrantInfo {
+  vaultId: string;
+  reason: "removed" | "left" | "deleted" | "transferred";
+  deletedAt?: number | null;
+  purgeAt?: number | null;
+  deleteId?: string | null;
+  deleteProof?: string | null;
+  removeProof?: string | null;
+  removeNonce?: string | null;
 }
 
 export interface WireGrant {
@@ -76,6 +121,9 @@ export interface SyncResponse {
   grants: WireGrant[];
   items: WireItem[];
   removedGrants: string[];
+  /** Additive companion detail for removedGrants (spec 03 §4/§11) — never the purge trigger
+   *  itself; drives the 0.5.0 proof-verified notice / holding-area flow. */
+  removedGrantsInfo?: RemovedGrantInfo[];
 }
 
 // ---- shared vaults (spec 03 §10) ----
@@ -109,6 +157,65 @@ export interface VaultMemberSummary {
   role: string;
   identityPub: string;
   addedAt: number;
+  /** F22 rider (spec 03 §10): account status ('active'|'disabled') — additive; feeds the
+   *  transfer target picker and the disabled-member badge. */
+  status?: string | null;
+}
+
+// ---- vault lifecycle (spec 03 §11) ----
+
+export interface VaultDeleteRequest {
+  deleteId: string;
+  proof: string;
+}
+
+export interface VaultDeleteResponse {
+  rev: number;
+  purgeAt: number;
+}
+
+export interface VaultRestoreRequest {
+  deleteId: string;
+  proof: string;
+}
+
+/** One in-grace deleted vault of the caller's (owner-only; ciphertext they already owned). */
+export interface DeletedVaultSummary {
+  vaultId: string;
+  metaBlob: string;
+  wrappedVk: string;
+  deletedAt: number;
+  purgeAt: number;
+  deleteId: string;
+}
+
+export interface TransferOfferRequest {
+  toUserId: string;
+  offerId: string;
+  expiresAt: number;
+  proof: string;
+}
+
+export interface TransferOfferResponse {
+  rev: number;
+  expiresAt: number;
+}
+
+export interface TransferAcceptRequest {
+  offerId: string;
+  wrappedVk: string;
+  proof: string;
+}
+
+export interface VaultMetaUpdateRequest {
+  metaBlob: string;
+  baseVaultRev?: number;
+}
+
+/** Optional removal-proof body for the existing member-remove route (spec 03 §10/§11). */
+export interface VaultMemberRemoveRequest {
+  proof?: string;
+  nonce?: string;
 }
 
 export interface ItemUpload {

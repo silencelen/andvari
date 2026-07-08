@@ -3,6 +3,7 @@ import { ctEquals, fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
 import { open, seal } from "../crypto/envelope";
 import { fingerprint as recoveryFingerprint, sealUvk } from "../crypto/escrow";
 import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
+import { lifecycleKey } from "../crypto/lifecycleproof";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
 import { CryptoError } from "../crypto/sodium";
@@ -270,11 +271,57 @@ export class Account {
 
   decryptVaultName(vaultId: string, metaBlob: string): string {
     try {
-      const plain = open(this.vk(vaultId), fromB64(metaBlob), adVaultMeta(vaultId));
-      return (JSON.parse(fromUtf8(plain)) as { name: string }).name;
+      return (this.decryptVaultMeta(vaultId, metaBlob).name as string) ?? "(vault)";
     } catch {
       return "(vault)";
     }
+  }
+
+  /** The full vault-meta plaintext object (spec 02 §4) — `name`, the monotonic `metaV`
+   *  counter, and any unknown fields a future client wrote. Throws if the VK is missing or
+   *  the blob doesn't open. Callers that only need the name use decryptVaultName. */
+  decryptVaultMeta(vaultId: string, metaBlob: string): Record<string, unknown> {
+    const plain = open(this.vk(vaultId), fromB64(metaBlob), adVaultMeta(vaultId));
+    return JSON.parse(fromUtf8(plain)) as Record<string, unknown>;
+  }
+
+  // ---- vault lifecycle (spec 03 §11) ----
+
+  /**
+   * The lifecycle key for a vault: `HKDF-SHA-256(VK, "andvari/v1|lifecycle")` — domain-
+   * separated from the AEAD key. Callers mint/verify destructive-op proofs under it; the VK
+   * itself never leaves this class (ZK: proofs are MACs the server can neither mint nor open).
+   */
+  lifecycleKeyFor(vaultId: string): Promise<Uint8Array> {
+    return lifecycleKey(this.vk(vaultId));
+  }
+
+  /**
+   * Transfer accept (spec 03 §11): the new owner re-wraps the VK it ALREADY holds (via its
+   * sealed member grant) under its OWN UVK — identical construction to vault creation
+   * (`seal(UVK, VK, adVk(vaultId, me))`). Round-trip-verified before returning, so a garbage
+   * wrap that would lock the new owner out never gets posted (the "garbage-wrap" break).
+   */
+  buildOwnerWrap(vaultId: string): string {
+    const vk = this.vk(vaultId);
+    const wrapped = seal(this.uvk, vk, adVk(vaultId, this.userId));
+    if (!ctEquals(open(this.uvk, wrapped, adVk(vaultId, this.userId)), vk)) {
+      throw new CryptoError("owner wrap failed round-trip verification");
+    }
+    return toB64(wrapped);
+  }
+
+  /**
+   * Rename (spec 03 §11 / Q6): read-modify-write the metaBlob under the SAME VK/AD — change
+   * ONLY `name`, PRESERVE every unknown field (spec 02 §4), and increment the monotonic
+   * plaintext `metaV` counter (anti-replay). Returns the new metaBlob (base64url). The name
+   * stays E2E ciphertext; the server only ever sees an opaque blob.
+   */
+  buildRenameMeta(vaultId: string, metaBlob: string, newName: string): string {
+    const meta = this.decryptVaultMeta(vaultId, metaBlob);
+    const metaV = typeof meta.metaV === "number" ? meta.metaV : 0;
+    const next = { ...meta, name: newName, metaV: metaV + 1 };
+    return toB64(seal(this.vk(vaultId), utf8(JSON.stringify(next)), adVaultMeta(vaultId)));
   }
 
   newItemId(): string {

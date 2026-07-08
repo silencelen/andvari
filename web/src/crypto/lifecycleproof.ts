@@ -46,9 +46,24 @@ export async function acceptProof(
   seq: number,
   wrappedVk: string,
 ): Promise<string> {
-  const wrapHash = toHexLower(await sha256(utf8(wrappedVk)));
-  return mac(key, `andvari/v1|lifecycle|transfer-accept|${vaultId}|${offerId}|${newOwnerUserId}|${seq}|${wrapHash}`);
+  return acceptProofFromHash(key, vaultId, offerId, newOwnerUserId, seq, toHexLower(await sha256(utf8(wrappedVk))));
 }
+
+/**
+ * Accept proof from the wrap HASH directly (spec 03 §11): other members receive only
+ * `lastTransfer.wrapHash` (= hexLower(sha256(utf8(wrappedVk)))), never the new owner's
+ * wrappedVk blob, yet must re-verify the seq-chained acceptProof to trust the ownership
+ * flip. Byte-identical domain to acceptProof — the accepter passes its own wrappedVk.
+ */
+export const acceptProofFromHash = (
+  key: Uint8Array,
+  vaultId: string,
+  offerId: string,
+  newOwnerUserId: string,
+  seq: number,
+  wrapHash: string,
+): Promise<string> =>
+  mac(key, `andvari/v1|lifecycle|transfer-accept|${vaultId}|${offerId}|${newOwnerUserId}|${seq}|${wrapHash}`);
 
 export const removeProof = (key: Uint8Array, vaultId: string, targetUserId: string, nonce: string): Promise<string> =>
   mac(key, `andvari/v1|lifecycle|remove|${vaultId}|${targetUserId}|${nonce}`);

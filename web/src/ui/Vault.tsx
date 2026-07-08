@@ -7,7 +7,16 @@ import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import { randomBytes } from "../crypto/provider";
 import { base32Decode, parseOtpauthUri, totpCode, totpSecondsRemaining } from "../crypto/totp";
 import type { Account } from "../vault/account";
-import type { PendingUpload, VaultInfo, VaultItem, VaultStore } from "../vault/store";
+import {
+  CopyDeniedError,
+  ItemChangedError,
+  type LifecycleNotice,
+  type MoveGesture,
+  type PendingUpload,
+  type VaultInfo,
+  type VaultItem,
+  type VaultStore,
+} from "../vault/store";
 import { ImportError, type ImportFormat, type ImportPlan, parseCsvImport, planImport } from "../import/csv";
 import { isExportOriginAllowed } from "../export/plan";
 import { Admin } from "./Admin";
@@ -37,6 +46,8 @@ interface Props {
 export function Vault({ account, store, client, policy, isAdmin, mustChangePassword, onLock, onRevoked }: Props) {
   const [view, setView] = useState<View>("vault");
   const [items, setItems] = useState<VaultItem[]>(store.list());
+  // Lifecycle notices (spec 03 §11) — the banner reflects the store's list after every sync.
+  const [notices, setNotices] = useState<LifecycleNotice[]>(store.notices());
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<ItemDoc | null>(null);
@@ -72,7 +83,15 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
     [],
   );
 
-  const refresh = () => setItems(store.list());
+  const refresh = () => {
+    setItems(store.list());
+    setNotices(store.notices());
+  };
+
+  const dismissNotice = (id: string) => {
+    store.dismissNotice(id);
+    setNotices(store.notices());
+  };
 
   // One sync path for the dirty-bell, every (re)open, the F29 offline poll, and the
   // manual "Sync now" button. It never throws (the WS callbacks run un-awaited inside
@@ -83,6 +102,7 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
     try {
       await store.sync();
       setItems(store.list());
+      setNotices(store.notices());
       setSyncOk(true);
     } catch {
       setSyncOk(false);
@@ -246,11 +266,19 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
         </div>
       )}
 
+      <NoticesBanner notices={notices} onDismiss={dismissNotice} />
+
       <div className="wrap">
         {view === "health" ? (
           <Health store={store} client={client} onOpenItem={goToItem} />
         ) : view === "sharing" ? (
-          <Sharing account={account} store={store} client={client} onSynced={refresh} />
+          <Sharing
+            account={account}
+            store={store}
+            client={client}
+            onSynced={refresh}
+            onBackup={() => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setExportMode("backup"); }}
+          />
         ) : view === "settings" ? (
           <Settings client={client} account={account} policy={policy} onPasswordChanged={() => setMustChange(false)} />
         ) : view === "admin" && isAdmin ? (
@@ -285,8 +313,10 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
             policy={policy}
             readOnly={account.roleFor(current.vaultId) === "reader"}
             vaultName={current.vaultId !== account.personalVaultId ? vaultNameById.get(current.vaultId) : undefined}
+            moveTargets={newItemVaultChoices.filter((v) => v.vaultId !== current.vaultId)}
             onEdit={() => setEditing(current.doc)}
             onDelete={() => remove(current.itemId)}
+            onMoved={() => { refresh(); setSelected(null); }}
             onBack={() => setSelected(null)}
           />
         ) : (
@@ -330,6 +360,68 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/** "July 14"-style day (spec 03 §11 copy). Falls back gracefully for a missing time. */
+export function fmtDay(ms?: number): string {
+  if (!ms) return "soon";
+  return new Date(ms).toLocaleDateString(undefined, { month: "long", day: "numeric" });
+}
+
+function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
+  const name = n.vaultName || "a vault";
+  switch (n.kind) {
+    case "deleted":
+      return {
+        warn: false,
+        body:
+          `“${name}” was deleted by its owner. Its items were moved off this device` +
+          (n.purgeAt ? ` (kept sealed until ${fmtDay(n.purgeAt)}, then removed).` : ".") +
+          (n.parkedCount ? ` ${n.parkedCount} of your edits hadn’t synced — they’ll be recovered if the vault is restored this week.` : ""),
+      };
+    case "removed":
+      return { warn: false, body: `Your access to “${name}” was removed.` };
+    case "left":
+      return { warn: false, body: `You left “${name}”.` };
+    case "restored":
+      return { warn: false, body: `“${name}” was restored.` };
+    case "transfer-complete":
+      return { warn: false, body: n.becameMine ? `You are now the owner of “${name}”.` : `“${name}” now has a new owner.` };
+    case "transfer-anomaly":
+      return {
+        warn: true,
+        body:
+          `The server says “${name}” changed owners, but this couldn’t be verified with the vault’s own key. ` +
+          `If nobody in your household did this, tell your admin — the server may be misbehaving.`,
+      };
+    case "anomaly":
+      return {
+        warn: true,
+        body:
+          `The server says you lost access to “${name}”, but this couldn’t be verified as a real owner action. ` +
+          `A sealed copy of its data is kept on this device for 30 days (Settings → Recently removed). ` +
+          `If nobody in your household did this, tell your admin — the server may be misbehaving.`,
+      };
+  }
+}
+
+/** The lifecycle notices banner (spec 03 §11): attributed only when the proof verified; the
+ *  anomaly warning renders in the danger tone. Each notice is individually dismissable. */
+function NoticesBanner({ notices, onDismiss }: { notices: LifecycleNotice[]; onDismiss: (id: string) => void }) {
+  if (notices.length === 0) return null;
+  return (
+    <div className="wrap" style={{ paddingBottom: 0 }}>
+      {notices.map((n) => {
+        const { body, warn } = noticeBody(n);
+        return (
+          <div key={n.id} className={`msg ${warn ? "err" : "info"}`} style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+            <span style={{ flex: 1 }}>{body}</span>
+            <button type="button" className="link" onClick={() => onDismiss(n.id)}>Dismiss</button>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -419,7 +511,7 @@ function useCopy(clearSeconds: number) {
   return { flash, copy };
 }
 
-function Detail({ item, client, store, policy, readOnly, vaultName, onEdit, onDelete, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; onEdit: () => void; onDelete: () => Promise<void>; onBack: () => void }) {
+function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets, onEdit, onDelete, onMoved, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; moveTargets: VaultInfo[]; onEdit: () => void; onDelete: () => Promise<void>; onMoved: () => void; onBack: () => void }) {
   const { flash, copy } = useCopy(policy?.clipboardClearSeconds ?? 30);
   const [deleting, setDeleting] = useState(false);
   const [delBusy, setDelBusy] = useState(false);
@@ -517,8 +609,88 @@ function Detail({ item, client, store, policy, readOnly, vaultName, onEdit, onDe
               </>
             )}
           </div>
+          {!deleting && moveTargets.length > 0 && <MoveCopyControl item={item} store={store} targets={moveTargets} onMoved={onMoved} />}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * F19 (design §8): move or copy this item into another vault. Runs the store's copy-leg-first
+ * gesture; a transient failure keeps the SAME gesture so Retry converges (never duplicates); a
+ * denied copy or a changed source aborts with an honest message (source untouched).
+ */
+function MoveCopyControl({ item, store, targets, onMoved }: { item: VaultItem; store: VaultStore; targets: VaultInfo[]; onMoved: () => void }) {
+  const [mode, setMode] = useState<"move" | "copy" | null>(null);
+  const [target, setTarget] = useState(targets[0]?.vaultId ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const gestureRef = useRef<MoveGesture | null>(null);
+
+  const resetGesture = () => { gestureRef.current = null; };
+
+  const run = async () => {
+    if (!mode || !target) return;
+    setBusy(true);
+    setErr("");
+    setProgress(null);
+    try {
+      const g = gestureRef.current ?? store.newMoveGesture(item.itemId, target, mode === "move");
+      gestureRef.current = g; // reused verbatim on retry (server dedup converges)
+      await store.runGesture(g, (done, total) => setProgress({ done, total }));
+      resetGesture();
+      onMoved();
+    } catch (e) {
+      if (e instanceof CopyDeniedError) {
+        resetGesture();
+        setErr("You don’t have permission to add items to that vault — nothing was moved.");
+      } else if (e instanceof ItemChangedError) {
+        resetGesture();
+        setErr("This item changed while moving — go back, review it, and try again.");
+      } else if (e instanceof ApiError && e.status === 403) {
+        resetGesture();
+        setErr(e.message);
+      } else {
+        // Transient — keep the gesture so Retry replays the same ids (no duplicate).
+        setErr("That didn’t finish. Press Retry — it won’t create a duplicate.");
+      }
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  };
+
+  if (!mode) {
+    return (
+      <div className="actions" style={{ marginTop: 6 }}>
+        <button type="button" className="ghost" onClick={() => { setMode("move"); resetGesture(); }}>Move to vault…</button>
+        <button type="button" className="ghost" onClick={() => { setMode("copy"); resetGesture(); }}>Copy to vault…</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="field" style={{ marginTop: 12 }}>
+      <label>{mode === "move" ? "Move to another vault" : "Copy to another vault"}</label>
+      {err && <div className="msg err">{err}</div>}
+      {mode === "move" && (
+        <p className="muted" style={{ marginTop: 0 }}>
+          Members of “{store.vaults().find((v) => v.vaultId === item.vaultId)?.name ?? "this vault"}” may still have copies from before the move.
+        </p>
+      )}
+      <div className="secret-row">
+        <select value={target} onChange={(e) => { setTarget(e.target.value); resetGesture(); }} disabled={busy} style={{ width: "auto" }}>
+          {targets.map((v) => (
+            <option key={v.vaultId} value={v.vaultId}>{v.name}{v.type === "personal" ? "" : " (shared)"}</option>
+          ))}
+        </select>
+        <button type="button" className="primary" disabled={busy || !target} onClick={run}>
+          {busy ? (progress && progress.total > 0 ? `Copying… ${progress.done}/${progress.total}` : "Working…") : err ? "Retry" : mode === "move" ? "Move" : "Copy"}
+        </button>
+        <button type="button" className="ghost" disabled={busy} onClick={() => { setMode(null); setErr(""); resetGesture(); }}>Cancel</button>
+      </div>
     </div>
   );
 }
