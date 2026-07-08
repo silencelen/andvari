@@ -7,7 +7,7 @@ import { lifecycleKey } from "../crypto/lifecycleproof";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
 import { CryptoError } from "../crypto/sodium";
-import type { AccountKeys, CreateVaultRequest, ItemDoc, RegisterRequest, WireGrant, WireItem } from "../api/types";
+import type { AccountKeys, CreateVaultRequest, ItemDoc, ItemVersion, RegisterRequest, WireGrant, WireItem } from "../api/types";
 
 const ITEM_FORMAT_VERSION = 1;
 
@@ -267,6 +267,27 @@ export class Account {
     // know — they MUST survive a rewrite. Never rebuild a decrypted doc field-by-field;
     // edit via spread/structuredClone only, so unknown keys round-trip through encryptItem.
     return JSON.parse(fromUtf8(plain)) as ItemDoc;
+  }
+
+  /**
+   * Item history: decrypt one archived {@link ItemVersion} under the vault VK. Reuses
+   * {@link decryptItem} — the item AD binds (vaultId, itemId, formatVersion), NOT rev, so an old
+   * version opens under the CURRENT key (until a VK rotation, which resets history; see the
+   * design doc). The caller supplies vaultId (the version DTO carries none) from the live item.
+   */
+  decryptItemVersion(vaultId: string, itemId: string, version: ItemVersion): ItemDoc {
+    return this.decryptItem({
+      itemId,
+      vaultId,
+      rev: version.rev,
+      createdAt: 0,
+      updatedAt: version.archivedAt,
+      deleted: false,
+      conflict: false,
+      formatVersion: version.formatVersion,
+      attachmentIds: [],
+      blob: version.blob,
+    });
   }
 
   decryptVaultName(vaultId: string, metaBlob: string): string {

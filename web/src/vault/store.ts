@@ -852,6 +852,25 @@ export class VaultStore {
   }
 
   /**
+   * Item history (feature): fetch this item's archived versions (server keeps the last 10) and
+   * decrypt each under the held VK, newest first. Versions that don't decrypt — e.g. sealed under a
+   * superseded VK after a rotation — are dropped (history is bounded and resets at VK rotation; see
+   * the design doc). Restore a chosen version with `save(itemId, doc)` — an ordinary put.
+   */
+  async itemVersions(itemId: string, vaultId: string): Promise<{ rev: number; archivedAt: number; doc: ItemDoc }[]> {
+    const resp = await this.api.itemVersions(itemId);
+    const out: { rev: number; archivedAt: number; doc: ItemDoc }[] = [];
+    for (const v of resp.versions) {
+      try {
+        out.push({ rev: v.rev, archivedAt: v.archivedAt, doc: this.account.decryptItemVersion(vaultId, itemId, v) });
+      } catch {
+        /* undecryptable (post-rotation / held key) — bounded history, skip */
+      }
+    }
+    return out;
+  }
+
+  /**
    * Bulk CSV import (spec 06): push planned items into the personal vault in chunks of
    * SERVER_BATCH_MAX, then one sync at the end. Each mutation's mutationId IS its itemId
    * (minted once at plan time) so re-running the SAME plan after a mid-import failure
