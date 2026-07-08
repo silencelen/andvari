@@ -18,7 +18,13 @@ import { QrSvg } from "./QrSvg";
  */
 
 // The household app store. Tailnet-only (no MagicDNS `devstore` host); the bare
-// devserv name is the canonical URL. Matches scripts/ship.sh's DEVSERV target.
+// devserv name is the canonical URL. Matches scripts/ship.sh's DEVSTORE target.
+// KNOWN + ACCEPTED (review web-correctness-1): this literal ships in the ONE static
+// bundle, so it is view-source-visible even on the public break-glass origin — the
+// isPrivateOrigin gate suppresses the DOM/fetch, not the bytes. Accepted because
+// tailnet HTTPS hostnames are already public knowledge (ts.net certs land in CT
+// logs), and isPrivateOrigin is documented posture, not a security boundary. If
+// that posture ever tightens, split this half of the card behind a dynamic import.
 const DEVSTORE_URL = "https://devserv.taila2dff2.ts.net";
 
 // Computed once — DEVSTORE_URL is constant, and the vendored encoder is pure.
@@ -38,6 +44,19 @@ export type WindowsRow =
   | { kind: "loading" }
   | { kind: "unpublished" }
   | { kind: "available"; version: string; url: string };
+
+/**
+ * Coerce whatever the manifest fetch parsed into a usable value. `r.json()` can
+ * legitimately produce `null` or a non-object (a file literally containing `null`
+ * would otherwise be indistinguishable from the "still fetching" state and wedge
+ * the row on "Checking…" forever) — anything that isn't a plain object is treated
+ * exactly like a 404: unpublished, never an error.
+ */
+export function coerceManifest(parsed: unknown): DownloadsManifest | "error" {
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? (parsed as DownloadsManifest)
+    : "error";
+}
 
 /**
  * Pure decision for the Windows row — the whole point of the manifest fetch, kept
@@ -76,7 +95,7 @@ export function DevicesCard({ origin }: { origin?: string }) {
     let live = true;
     fetch("/downloads/manifest.json", { headers: { accept: "application/json" } })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((m) => live && setManifest(m as DownloadsManifest))
+      .then((m) => live && setManifest(coerceManifest(m)))
       .catch(() => live && setManifest("error"));
     return () => {
       live = false;
@@ -103,8 +122,8 @@ export function DevicesCard({ origin }: { origin?: string }) {
           <div className="field">
             <label>Android</label>
             <p className="muted">
-              Install from <span className="mono">{DEVSTORE_URL}</span> — the household app store (reachable on
-              the home network). Updates arrive there too.
+              Install from <span className="mono">{DEVSTORE_URL}</span> — the household app store (the phone
+              needs Tailscale). Updates arrive there too.
             </p>
             <QrSvg modules={DEVSTORE_MODULES} ariaLabel={`Install QR code for ${DEVSTORE_URL}`} />
           </div>

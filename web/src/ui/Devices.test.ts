@@ -2,14 +2,31 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { isExportOriginAllowed } from "../export/plan";
-import { DevicesCard, windowsRowState } from "./Devices";
+import { coerceManifest, DevicesCard, windowsRowState } from "./Devices";
 import { isPrivateOrigin } from "./origin";
 
+describe("coerceManifest (fetch-parse → state, review finding web-correctness-2)", () => {
+  it("a JSON body of literal null (or any non-object) is 'error', NEVER the loading state", () => {
+    expect(coerceManifest(null)).toBe("error"); // would otherwise wedge on "Checking…" forever
+    expect(coerceManifest("null")).toBe("error");
+    expect(coerceManifest(42)).toBe("error");
+    expect(coerceManifest([])).toBe("error");
+    expect(coerceManifest(undefined)).toBe("error");
+  });
+
+  it("a plain object passes through", () => {
+    const m = { windows: { version: "0.5.0", url: "/downloads/x.msi" } };
+    expect(coerceManifest(m)).toBe(m);
+    expect(coerceManifest({})).toEqual({});
+  });
+});
+
 /**
- * The manifest→Windows-row decision is pure and tested exhaustively here; the fetch
- * itself is not mount-tested (the web suite runs in node, no jsdom), but every OUTCOME
- * of that fetch (null / "error" / parsed) is covered below, so the branching is fully
- * exercised without a DOM.
+ * The manifest→state decision path is pure (coerceManifest + windowsRowState) and
+ * tested exhaustively here. The useEffect fetch itself and its private-origin guard
+ * are NOT executed in this suite (node environment, no jsdom, static markup runs no
+ * effects) — accepted per review test-adequacy-4: the effect is a one-line guard over
+ * the same isPrivateOrigin predicate pinned below and in export/plan tests.
  */
 describe("windowsRowState (downloads manifest → Windows row)", () => {
   it("null = still fetching", () => {

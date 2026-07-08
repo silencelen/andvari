@@ -51,12 +51,21 @@ class PurgeGaugesTest : LifecycleTestSupport() {
         assertEquals(1.0, gaugeValue(s, "andvari_vaults_deleted_pending"))
         assertEquals(0.0, gaugeValue(s, "andvari_vaults_purge_overdue"))
 
-        // Wind purgeAt a day past the 2-day overdue window (epoch ms — the janitor's unit).
+        // Due (purgeAt passed) but NOT yet 2 days late: this is the normal
+        // janitor-runs-this-morning state — pending, NOT overdue. The threshold
+        // itself is what the stalled-purge alert keys on, so pin both sides of it.
         services.repo.db.tx { c ->
-            c.exec(
-                "UPDATE vaults SET purgeAt=? WHERE vaultId=?",
-                now() - PURGE_OVERDUE_MS - Service.DAY_MS, handle.vaultId,
-            )
+            c.exec("UPDATE vaults SET purgeAt=? WHERE vaultId=?", now() - 3_600_000L, handle.vaultId)
+        }
+        s = scrape()
+        assertEquals(1.0, gaugeValue(s, "andvari_vaults_deleted_pending"))
+        assertEquals(0.0, gaugeValue(s, "andvari_vaults_purge_overdue"))
+
+        // Wind purgeAt a day past the 2-day overdue window. Deliberately a LITERAL
+        // (3 days in ms), not PURGE_OVERDUE_MS arithmetic — testing the threshold
+        // with the constant under test would let a regression of the constant pass.
+        services.repo.db.tx { c ->
+            c.exec("UPDATE vaults SET purgeAt=? WHERE vaultId=?", now() - 3L * 86_400_000L, handle.vaultId)
         }
         s = scrape()
         assertEquals(1.0, gaugeValue(s, "andvari_vaults_deleted_pending"))
