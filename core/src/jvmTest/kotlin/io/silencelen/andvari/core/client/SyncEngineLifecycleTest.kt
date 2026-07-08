@@ -15,6 +15,7 @@ import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AttachmentMeta
 import io.silencelen.andvari.core.model.DeletedVaultSummary
 import io.silencelen.andvari.core.model.ItemVersion
+import io.silencelen.andvari.core.model.ItemVersionsResponse
 import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.MutationResult
 import io.silencelen.andvari.core.model.PendingTransfer
@@ -93,6 +94,7 @@ class SyncEngineLifecycleTest {
         var syncRelease: CompletableDeferred<Unit>? = null
 
         val attachments = HashMap<String, ByteArray>()
+        val itemVersionsById = HashMap<String, List<ItemVersion>>() // item history: archived versions the server holds
         var deletedList: List<DeletedVaultSummary> = emptyList()
         val calls = mutableListOf<String>()
 
@@ -160,6 +162,10 @@ class SyncEngineLifecycleTest {
                         } else {
                             respond(b, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/octet-stream"))
                         }
+                    }
+                    path.startsWith("/api/v1/items/") && path.endsWith("/versions") -> {
+                        val id = path.removePrefix("/api/v1/items/").removeSuffix("/versions")
+                        ok(json.encodeToString(ItemVersionsResponse.serializer(), ItemVersionsResponse(id, itemVersionsById[id] ?: emptyList())))
                     }
                     path == "/api/v1/vaults/deleted" -> {
                         calls.add("deletedVaults")
@@ -459,6 +465,25 @@ class SyncEngineLifecycleTest {
         val decoded = member.decryptItemVersion(vaultId, itemId, version)
         assertEquals("Netflix", decoded.name)
         assertEquals("last-week-pw", decoded.login?.password, "the old version decrypts to its historical secret")
+    }
+
+    @Test
+    fun itemVersions_fetchesDecryptsNewestFirst_dropsUndecryptable() = runBlocking<Unit> {
+        // Item history end-to-end through the engine: fetch the server's archive + decrypt each.
+        val s = seededMember("writer")
+        val v1 = doc.copy(login = LoginData(username = "fam", password = "old-1"))
+        val v2 = doc.copy(login = LoginData(username = "fam", password = "old-2"))
+        s.server.itemVersionsById[s.itemId] = listOf(
+            ItemVersion(rev = 8L, blob = s.owner.encryptItem(s.vaultId, s.itemId, v2).blob, formatVersion = 1, archivedAt = 1_690_000_100_000L),
+            ItemVersion(rev = 7L, blob = s.owner.encryptItem(s.vaultId, s.itemId, v1).blob, formatVersion = 1, archivedAt = 1_690_000_000_000L),
+            // A blob this key can't open (e.g. sealed under a superseded VK) is silently dropped.
+            ItemVersion(rev = 6L, blob = Bytes.toB64(ByteArray(8)), formatVersion = 1, archivedAt = 1_680_000_000_000L),
+        )
+
+        val versions = s.engine.itemVersions(s.itemId, s.vaultId)
+        assertEquals(listOf(8L, 7L), versions.map { it.rev }, "decrypted, newest first; the undecryptable version dropped")
+        assertEquals("old-2", versions[0].doc.login?.password)
+        assertEquals("old-1", versions[1].doc.login?.password)
     }
 
     // ==== consumed-deleteId recognition ====

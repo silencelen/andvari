@@ -362,6 +362,48 @@ private fun Row(item: VaultItem, onClick: () -> Unit) {
     }
 }
 
+/**
+ * Item history & restore (feature: "the fat-finger seatbelt"). Loads the archived versions the
+ * server keeps (up to the last 10), decrypts each under the held VK, and offers per-version reveal
+ * + Restore (a plain put over the live item). Readers view but can't restore. "up to the last 10
+ * saves" — never "nothing is ever lost" (spec 02 §7). Mirrors the deployed web panel.
+ */
+@Composable
+private fun ItemHistorySection(state: DesktopState, item: VaultItem, readOnly: Boolean, onRestored: () -> Unit) {
+    var open by remember(item.itemId) { mutableStateOf(false) }
+    if (!open) {
+        TextButton(onClick = { open = true; state.loadItemVersions(item.itemId, item.vaultId) }) { Text("Version history") }
+        return
+    }
+    Text("Version history · up to the last 10 saves", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    val versions = state.itemVersions
+    when {
+        versions == null -> Text(if (state.busy) "Loading…" else "", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        versions.isEmpty() -> Text("No earlier versions yet — history starts from the next change.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        else -> versions.forEach { v ->
+            var revealed by remember(v.rev) { mutableStateOf(false) }
+            androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
+                Text(java.time.Instant.ofEpochMilli(v.archivedAt).toString().take(10), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(96.dp))
+                val pw = v.doc.login?.password
+                Text(
+                    when {
+                        pw == null && v.doc.type == "login" -> "(no password)"
+                        pw == null -> "note"
+                        revealed -> pw
+                        else -> "••••••••"
+                    },
+                    modifier = Modifier.weight(1f),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (pw != null) TextButton(onClick = { revealed = !revealed }) { Text(if (revealed) "Hide" else "Show") }
+                if (!readOnly) TextButton(onClick = { state.saveItem(item.itemId, v.doc) { onRestored() } }) { Text("Restore") }
+            }
+        }
+    }
+    TextButton(onClick = { open = false; state.clearItemVersions() }) { Text("Hide history") }
+}
+
 @Composable
 private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onDelete: () -> Unit, onBack: () -> Unit) {
     val doc = item.doc
@@ -401,6 +443,8 @@ private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onD
                 }
             }
         }
+        Spacer(Modifier.height(16.dp))
+        ItemHistorySection(state, item, readOnly, onRestored = onBack)
         Spacer(Modifier.height(24.dp))
         if (!readOnly) {
             var confirmDelete by remember { mutableStateOf(false) }

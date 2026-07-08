@@ -179,6 +179,17 @@ class SyncEngine(
     fun items(): List<VaultItem> = cache.allItems().sortedBy { it.doc.name.lowercase() }
     fun item(itemId: String): VaultItem? = cache.getItem(itemId)
 
+    /**
+     * Item history (feature): fetch this item's archived versions (server keeps the last 10) and
+     * decrypt each under the held VK, newest rev first. Versions that don't decrypt — e.g. sealed
+     * under a superseded VK after a rotation — are dropped (bounded history, resets at VK rotation;
+     * see the design doc). Restore a chosen version with [save] — an ordinary put over the live item.
+     */
+    suspend fun itemVersions(itemId: String, vaultId: String): List<DecryptedItemVersion> =
+        api.itemVersions(itemId).mapNotNull { v ->
+            runCatching { DecryptedItemVersion(v.rev, v.archivedAt, account.decryptItemVersion(vaultId, itemId, v)) }.getOrNull()
+        }
+
     /** Vaults whose key we hold, personal first then shared by name (mirrors web vaults()). */
     fun vaultInfos(): List<VaultInfo> = cache.vaults()
         .filter { account.hasVault(it.vaultId) }

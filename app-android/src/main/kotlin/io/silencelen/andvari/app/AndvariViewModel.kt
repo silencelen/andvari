@@ -19,6 +19,7 @@ import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupVault
 import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.CsvImport
+import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedVaultInfo
 import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.client.HeldVaultInfo
@@ -113,6 +114,9 @@ data class UiState(
     // target + the value the user verifies against the new printed sheet).
     val escrowStale: Boolean = false,
     val escrowFingerprint: String = "",
+    // Item history (feature): decrypted archived versions of the currently-viewed item, loaded on
+    // demand (null = not loaded / loading). Restore a chosen version with saveItem.
+    val itemVersions: List<DecryptedItemVersion>? = null,
 )
 
 class AndvariViewModel(private val store: SessionStore, private val cacheDir: File) : ViewModel() {
@@ -328,6 +332,15 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         a.escrowSelf(upload)
         _ui.value = _ui.value.copy(busy = false, escrowStale = false, notice = "Account re-protected — your recovery is up to date.")
     }
+
+    /** Item history (feature): load + decrypt the currently-viewed item's archived versions. */
+    fun loadItemVersions(itemId: String, vaultId: String) = op {
+        _ui.value = _ui.value.copy(itemVersions = null)
+        val versions = engine!!.itemVersions(itemId, vaultId)
+        _ui.value = _ui.value.copy(itemVersions = versions, busy = false)
+    }
+
+    fun clearItemVersions() { _ui.value = _ui.value.copy(itemVersions = null) }
 
     fun signIn(email: String, password: String, totp: String? = null) = op {
         val a = newApi()
