@@ -327,6 +327,23 @@ export class Account {
   newItemId(): string {
     return uuidv4();
   }
+
+  /**
+   * F57: build a fresh escrow blob re-sealing this account's UVK to the current org recovery key
+   * after a re-ceremony (spec 04 §4). SECURITY: `verifiedFingerprint` MUST be the value the user
+   * confirmed against the NEW printed recovery sheet (short-form). We bind the server-fetched
+   * `recoveryPubB64` to that fingerprint and refuse to seal on mismatch, so a hostile server
+   * cannot redirect the UVK escrow to an attacker-held recovery key. The UVK only ever leaves
+   * the client sealed to the verified recovery public key (zero-knowledge).
+   */
+  async resealEscrowFor(recoveryPubB64: string, verifiedFingerprint: string): Promise<{ sealed: string; fingerprint: string }> {
+    const pub = fromB64(recoveryPubB64);
+    if ((await recoveryFingerprint(pub)) !== verifiedFingerprint) {
+      throw new CryptoError("recovery public key does not match the verified fingerprint — refusing to re-seal escrow");
+    }
+    const sealed = await sealUvk(pub, this.userId, this.uvk);
+    return { sealed: toB64(sealed), fingerprint: verifiedFingerprint };
+  }
 }
 
 export function deviceName(): string {

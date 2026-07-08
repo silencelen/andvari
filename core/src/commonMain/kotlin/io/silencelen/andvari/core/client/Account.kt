@@ -410,4 +410,20 @@ class Account private constructor(
     }
 
     fun newItemId(): String = uuid(crypto)
+
+    /**
+     * F57: build a fresh escrow blob re-sealing THIS account's UVK to the current org recovery
+     * key after a re-ceremony (spec 04 §4). SECURITY: [verifiedFingerprint] MUST be the value the
+     * user just confirmed against the NEW printed recovery sheet (short-form). We bind the
+     * server-fetched [recoveryPubB64] to that fingerprint here and refuse to seal if they differ,
+     * so a hostile server cannot redirect the UVK escrow to an attacker-held recovery key. The UVK
+     * never leaves the client except sealed to the verified recovery public key (zero-knowledge).
+     */
+    fun resealEscrowFor(recoveryPubB64: String, verifiedFingerprint: String): EscrowUpload {
+        val pub = Bytes.fromB64(recoveryPubB64)
+        require(Escrow.fingerprint(crypto, pub) == verifiedFingerprint) {
+            "recovery public key does not match the verified fingerprint — refusing to re-seal escrow"
+        }
+        return EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, pub, userId, uvk)), verifiedFingerprint)
+    }
 }

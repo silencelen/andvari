@@ -62,6 +62,11 @@ data class AccountKeys(
     val encryptedIdentitySeed: String,
     val identityPub: String,
     val escrowFingerprint: String,
+    // F57: true when this account's escrow blob is sealed to a PRIOR org recovery key (a
+    // re-ceremony happened) and must be re-sealed to the current key. `escrowFingerprint` is
+    // the CURRENT org fingerprint (the re-seal target + pubkey-verification anchor). Additive,
+    // defaulted false so older clients ignore it and a rollback server that omits it is safe.
+    val escrowStale: Boolean = false,
 )
 
 @Serializable

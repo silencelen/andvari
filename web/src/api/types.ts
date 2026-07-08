@@ -25,6 +25,10 @@ export interface AccountKeys {
   encryptedIdentitySeed: string;
   identityPub: string;
   escrowFingerprint: string;
+  // F57: true when this account's escrow is sealed to a PRIOR org recovery key (re-ceremony)
+  // and must be re-sealed to the current one. `escrowFingerprint` is the CURRENT org fingerprint
+  // (the re-seal target + pubkey-verification anchor). Optional for back-compat with old servers.
+  escrowStale?: boolean;
 }
 
 export interface SessionResponse {

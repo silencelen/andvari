@@ -22,6 +22,7 @@ import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.CreateVaultResponse
 import io.silencelen.andvari.core.model.DeletedVaultSummary
+import io.silencelen.andvari.core.model.EscrowUpload
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.TransferAcceptRequest
 import io.silencelen.andvari.core.model.TransferOfferRequest
@@ -184,6 +185,16 @@ class AndvariApi(
         val resp = request("GET", "/api/v1/recovery-pubkey", auth = false)
         if (!resp.status.isSuccess()) throw errorFrom(resp)
         return resp.bodyAsText().trim()
+    }
+
+    /**
+     * F57: re-upload this account's escrow blob, re-sealed to the current org recovery key
+     * (`PUT /escrow/self`). The blob is built by [Account.resealEscrowFor], which binds the
+     * fetched [recoveryPubkey] to a fingerprint the USER verified against the printed sheet.
+     */
+    suspend fun escrowSelf(upload: EscrowUpload) {
+        val resp = request("PUT", "/api/v1/escrow/self", body = upload)
+        if (!resp.status.isSuccess()) throw errorFrom(resp)
     }
 
     suspend fun prelogin(email: String): PreloginResponse = call("POST", "/api/v1/auth/prelogin", PreloginRequest(email), auth = false)

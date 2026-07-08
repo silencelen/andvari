@@ -135,6 +135,7 @@ function UsersTab({ client }: { client: ApiClient }) {
                   onToggleDevices={() => toggleDevices(u.userId)}
                   onDisable={() => disableUser(u.userId)}
                   onRevoke={(deviceId) => revokeDevice(u.userId, deviceId)}
+                  onDownloadEscrow={() => client.adminUserEscrow(u.userId)}
                 />
               ))}
             </tbody>
@@ -145,7 +146,7 @@ function UsersTab({ client }: { client: ApiClient }) {
   );
 }
 
-function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable, onRevoke }: {
+function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable, onRevoke, onDownloadEscrow }: {
   user: AdminUserSummary;
   expanded: boolean;
   devices: AdminDeviceSummary[];
@@ -153,11 +154,38 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
   onToggleDevices: () => void;
   onDisable: () => void;
   onRevoke: (deviceId: string) => void;
+  onDownloadEscrow: () => Promise<string>;
 }) {
   // Disabling is drastic (revokes every session; sign-in then fails like a wrong
   // password) — never fire it off a single click. The server additionally refuses to
   // disable the last active admin (last_admin).
   const [confirming, setConfirming] = useState(false);
+  // F59 recovery step 1 — hand the admin the sealed escrow blob as a file to carry to the
+  // offline recovery-cli (docs/drills/account-recovery-drill.md). The blob is crypto_box_seal'd
+  // to the org recovery PUBLIC key — useless without the printed sheet — so this is safe to
+  // download. `no_escrow` (a race: the escrow was removed since the list loaded) surfaces
+  // inline; the button itself only shows for users who have an escrow blob on file.
+  const [escrowBusy, setEscrowBusy] = useState(false);
+  const [escrowMsg, setEscrowMsg] = useState("");
+  const downloadEscrow = async () => {
+    setEscrowMsg("");
+    setEscrowBusy(true);
+    try {
+      const sealed = await onDownloadEscrow();
+      const url = URL.createObjectURL(new Blob([sealed], { type: "text/plain" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `andvari-escrow-${u.userId}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      setEscrowMsg(e instanceof ApiError && e.code === "no_escrow" ? "no escrow on file" : "download failed");
+    } finally {
+      setEscrowBusy(false);
+    }
+  };
   return (
     <>
       <tr>
@@ -170,6 +198,12 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
         <td><button type="button" className="link" onClick={onToggleDevices}>{u.deviceCount} device{u.deviceCount === 1 ? "" : "s"} {expanded ? "▴" : "▾"}</button></td>
         <td className="mono muted" title={u.escrowFingerprint ?? undefined}>{u.escrowFingerprint ? u.escrowFingerprint.slice(0, 12) + "…" : "—"}</td>
         <td>
+          {u.escrowFingerprint && (
+            <div style={{ marginBottom: u.status === "active" ? 6 : 0 }}>
+              <button type="button" className="ghost" disabled={escrowBusy} onClick={downloadEscrow}>{escrowBusy ? "Fetching…" : "Download escrow"}</button>
+              {escrowMsg && <span className="muted" style={{ marginLeft: 8 }}>{escrowMsg}</span>}
+            </div>
+          )}
           {u.status === "active" && (confirming ? (
             <span style={{ whiteSpace: "nowrap" }}>
               <span className="muted">Disable {u.email}?&nbsp;</span>
