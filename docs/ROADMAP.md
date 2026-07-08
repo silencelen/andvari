@@ -19,15 +19,16 @@ data-safety** (fold-proof editing, argon2 off the UI thread, FLAG_SECURE, clipbo
 hygiene, locked-screen sign-out revocation, hand-typeable TOTP, reader-role gating, the
 "N items need an app update" banner). Full narrative: CHANGELOG "Unreleased" section.
 
-**Remaining from the cycle:** the **Skipti** shared-vault lifecycle implementation (owner
-gripe 1; design won a 4-way tournament —
-`docs/design/2026-07-07-shared-vault-lifecycle-skipti.md`; its own batch: spec pass →
-schema v4 with a CT122 vzdump snapshot first → server → core → clients, 16-step plan in
-the doc); the ~39-finding tail (server hardening/perf, escrow re-seal wiring, recovery
-tooling, web/desktop polish packs — triage list in the session task record); a round-2
-recon on a WS-capable host. **Owner-actionable now:** update the Android app and run the
-Fold autofill protocol; rebuild the MSI (now safe — fixes the 0.2.x edit-corruption);
-enroll server-TOTP (still pending, gates break-glass).
+**Cycle wrap (2026-07-08):** the **Skipti** shared-vault lifecycle **SHIPPED in 0.5.0**
+(design `docs/design/2026-07-07-shared-vault-lifecycle-skipti.md`; schema v4 live on CT122
+with a pre-migration snapshot). The finding tail is **triaged into `docs/v6-backlog.md`**
+(9 already-fixed / 19 quick-wins / 8 fold-ins / 8 standalone / 1 won't-fix — the honest v6
+work queue). Round-2 recon (live-WS, MSI wire-compat, attachments E2E, prod parity,
+autofill, lifecycle cross-slice + persona walks, all findings adversarially verified) ran
+2026-07-08 — report in `docs/recon/`. **Owner-actionable now:** update the Android app
+(devstore vc 16260489) and run the Fold autofill protocol; rebuild the MSI (now safe —
+fixes the 0.2.x edit-corruption); enroll server-TOTP (the v6-QW1 QR makes it a
+camera-scan — do it right after the QW1 deploy).
 
 ## Where we are (2026-07-06, v0.4.0)
 
@@ -138,20 +139,18 @@ Prioritized; each is additive and back-compatible.
 
 ## Onboarding & reach (owner-requested 2026-07-07 — near-term product polish, mostly UI)
 
-- **TOTP enrollment QR code** — *owner-requested 2026-07-07.* Settings → "Two-factor (server
-  TOTP)" already receives the `otpauth://` URI (`TotpSetupResponse.otpauthUri`) but renders it
-  only as copyable text (`Settings.tsx:165`) — show a scannable QR of that URI so a 3rd-party
-  authenticator (Aegis/Google Auth/etc.) enrolls by camera. Client-side render only (the URI
-  never leaves the page; no wire change). Needs a QR encoder: a tiny audited dep or a
-  hand-rolled byte-mode encoder — decide against the web bundle's dependency posture. Native
-  parity later (Android enrollment happens on web today).
+- ~~**TOTP enrollment QR code**~~ **SHIPPED 2026-07-08 (batch v6-QW1)** — Settings enrollment
+  renders the otpauth URI as a scannable QR (vendored zero-dep `qrcode-generator@1.4.4` under
+  `web/src/vendor/`, hashes pinned, decode-proven with a scratch jsqr round-trip; copy fields
+  kept as fallback). Native parity still later (enrollment happens on web today).
 
-- **"Get andvari on your other devices" hub** — a Settings/menu section that surfaces every
-  client with a real link: the Android APK (devstore, tailnet), the Windows MSI
-  (`/downloads` — already served, once the owner publishes the build), and the browser
-  extension (when it ships). Rides the `/downloads/manifest.json` surface B4 already made
-  honest; small, mostly web (+ native parity later). Caveat: devstore is tailnet-only and
-  the MSI isn't published yet, so the links are tailnet URLs today.
+- ~~**"Get andvari on your other devices" hub**~~ **SHIPPED 2026-07-08 (batch v6-QW1)** —
+  Settings section: this browser, devstore Android (with install QR, tailnet-only labelled),
+  Windows MSI via `/downloads/manifest.json` (honest "not published yet" until the owner
+  publishes; no extension row until one exists). Hidden on the public break-glass origin
+  (shared `isPrivateOrigin`). The batch also shipped the Skipti purge-visibility gauges
+  (`andvari_vaults_deleted_pending` / `_purge_overdue`) — apply the ops alert per
+  `ops/grafana-purge-stall-alert.md` after deploy.
 - **Guided per-source importers** — replace the single generic "CSV upload" with named,
   instructioned flows: "Import from Chrome / Edge / Brave / Opera" (all export the *same*
   Chromium CSV the current importer already parses — so this slice is mostly a friendlier
