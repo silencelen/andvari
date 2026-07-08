@@ -7,6 +7,7 @@ import type {
   ClientPolicy,
   CreateVaultRequest,
   CreateVaultResponse,
+  DeletedVaultSummary,
   InviteResponse,
   PasswordChangeRequest,
   PreloginResponse,
@@ -16,11 +17,19 @@ import type {
   SyncResponse,
   TotpSetupResponse,
   TotpStatus,
+  TransferAcceptRequest,
+  TransferOfferRequest,
+  TransferOfferResponse,
   Mutation,
   AccountKeys,
   UserLookupResponse,
+  VaultDeleteRequest,
+  VaultDeleteResponse,
   VaultMemberAdd,
+  VaultMemberRemoveRequest,
   VaultMemberSummary,
+  VaultMetaUpdateRequest,
+  VaultRestoreRequest,
   WsTicketResponse,
 } from "./types";
 
@@ -319,8 +328,49 @@ export class ApiClient {
     return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${vaultId}/members/${userId}`, { role });
   }
 
-  removeVaultMember(vaultId: string, userId: string) {
-    return this.json<CreateVaultResponse>("DELETE", `/api/v1/vaults/${vaultId}/members/${userId}`);
+  /** DELETE member. `proof`/`nonce` (spec 03 §11 removal proof) are optional and additive:
+   *  when supplied they ride the body so a 0.5.0 victim can verify the removal was a real
+   *  owner action; omitted → the proofless 0.4.0 shape (no body). */
+  removeVaultMember(vaultId: string, userId: string, body?: VaultMemberRemoveRequest) {
+    return this.json<CreateVaultResponse>(
+      "DELETE",
+      `/api/v1/vaults/${vaultId}/members/${userId}`,
+      body && (body.proof || body.nonce) ? body : undefined,
+    );
+  }
+
+  // ---- vault lifecycle (spec 03 §11) — refused on the public break-glass origin ----
+
+  deleteVault(vaultId: string, body: VaultDeleteRequest) {
+    return this.json<VaultDeleteResponse>("POST", `/api/v1/vaults/${vaultId}/delete`, body);
+  }
+
+  restoreVault(vaultId: string, body: VaultRestoreRequest) {
+    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${vaultId}/restore`, body);
+  }
+
+  deletedVaults() {
+    return this.json<DeletedVaultSummary[]>("GET", "/api/v1/vaults/deleted");
+  }
+
+  leaveVault(vaultId: string) {
+    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${vaultId}/leave`, {});
+  }
+
+  offerTransfer(vaultId: string, body: TransferOfferRequest) {
+    return this.json<TransferOfferResponse>("POST", `/api/v1/vaults/${vaultId}/transfer`, body);
+  }
+
+  cancelTransfer(vaultId: string) {
+    return this.json<CreateVaultResponse>("DELETE", `/api/v1/vaults/${vaultId}/transfer`);
+  }
+
+  acceptTransfer(vaultId: string, body: TransferAcceptRequest) {
+    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${vaultId}/transfer/accept`, body);
+  }
+
+  updateVaultMeta(vaultId: string, body: VaultMetaUpdateRequest) {
+    return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${vaultId}/meta`, body);
   }
 
   putEscrow(sealed: string, fingerprint: string) {
