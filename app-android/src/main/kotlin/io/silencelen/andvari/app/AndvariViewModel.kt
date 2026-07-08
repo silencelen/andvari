@@ -39,6 +39,7 @@ import io.silencelen.andvari.core.model.VaultMemberSummary
 import java.io.File
 import java.io.IOException
 import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
@@ -107,6 +108,11 @@ data class UiState(
     val copiedNote: String? = null,
     /** F19 move/copy attachment re-encryption progress (Detail screen). */
     val moveProgress: Pair<Int, Int>? = null,
+    // F57: the account's escrow is sealed to a superseded org recovery key (re-ceremony) — the
+    // vault screen offers a re-seal. escrowFingerprint is the CURRENT org fingerprint (the re-seal
+    // target + the value the user verifies against the new printed sheet).
+    val escrowStale: Boolean = false,
+    val escrowFingerprint: String = "",
 )
 
 class AndvariViewModel(private val store: SessionStore, private val cacheDir: File) : ViewModel() {
@@ -302,6 +308,27 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
 
     fun clearNotice() { _ui.value = _ui.value.copy(notice = null) }
 
+    /**
+     * F57: re-seal this account's UVK to the CURRENT org recovery key after a re-ceremony. The user
+     * must have TYPED the new recovery fingerprint's short form from their PRINTED sheet (spec 04
+     * §2(3)); we re-check that, then [Account.resealEscrowFor] binds the server-fetched recovery
+     * pubkey to that verified fingerprint (refusing on mismatch) so a hostile server can't redirect
+     * the escrow. Non-blocking: on success the banner clears; a failure surfaces as an error.
+     */
+    fun resealEscrow(shortFormEntry: String) = op {
+        val fp = _ui.value.escrowFingerprint
+        val a = api ?: throw IllegalStateException("not connected")
+        val acct = account ?: throw IllegalStateException("locked")
+        if (!Escrow.shortFormMatches(shortFormEntry, fp)) {
+            _ui.value = _ui.value.copy(busy = false, error = "That doesn't match this server's recovery key — check your printed recovery sheet.")
+            return@op
+        }
+        val pub = withContext(Dispatchers.Default) { a.recoveryPubkey() }
+        val upload = withContext(Dispatchers.Default) { acct.resealEscrowFor(pub, fp) }
+        a.escrowSelf(upload)
+        _ui.value = _ui.value.copy(busy = false, escrowStale = false, notice = "Account re-protected — your recovery is up to date.")
+    }
+
     fun signIn(email: String, password: String, totp: String? = null) = op {
         val a = newApi()
         val pre = a.prelogin(email)
@@ -329,6 +356,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
         persistAccountKeys(s.accountKeys)
         bind(a, acct)
+        _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint)
         syncNow(engine!!)
         toVault()
     }
@@ -358,6 +386,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
                 withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys) }
             } catch (t: Throwable) { a.close(); throw t }
             bind(a, acct)
+            _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowFingerprint = keys.escrowFingerprint)
         }
         // Tolerate an offline sync — hydrate() already populated the cached vault.
         runCatching { syncNow(engine!!) }.onFailure {
@@ -384,6 +413,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
         persistAccountKeys(s.accountKeys)
         bind(a, acct)
+        _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint)
         syncNow(engine!!)
         toVault()
     }
