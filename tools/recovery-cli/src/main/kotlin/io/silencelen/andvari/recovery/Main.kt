@@ -10,9 +10,8 @@ import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.PasswordGenerator
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import io.silencelen.andvari.core.model.RecoveryUpload
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import java.io.File
 
 /**
@@ -169,13 +168,8 @@ private fun recover(sealedBlobB64: String) {
     val tempWrapKey = Keys.wrapKey(crypto, mk)
     val tempWrappedUvk = Envelope.seal(crypto, tempWrapKey, uvk, Ad.uvk(userId))
 
-    val bundle = buildJsonObject {
-        put("userId", userId)
-        put("tempAuthKey", Bytes.toB64(tempAuthKey))
-        put("tempWrappedUvk", Bytes.toB64(tempWrappedUvk))
-        put("tempKdfSalt", Bytes.toB64(tempSalt))
-        put("tempKdfParams", json.encodeToString(KdfParams.serializer(), params))
-    }
+    val bundle = recoveryBundle(userId, tempAuthKey, tempWrappedUvk, tempSalt, params)
+    val bundleJson = json.encodeToString(RecoveryUpload.serializer(), bundle)
 
     println()
     println("RECOVERY BUNDLE for userId=$userId")
@@ -187,14 +181,34 @@ private fun recover(sealedBlobB64: String) {
     println("2. Upload this bundle to the server: POST /api/v1/admin/recovery")
     println("   (as admin; the server sets mustChangePassword and revokes their sessions)")
     println()
-    println(json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), bundle))
+    println(bundleJson)
     println()
     println("3. User logs in with the temp password on any client → forced password change.")
-    File("andvari-recovery-$userId.json").writeText(
-        json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), bundle) + "\n",
-    )
+    File("andvari-recovery-$userId.json").writeText(bundleJson + "\n")
     println("(also written to andvari-recovery-$userId.json)")
 }
+
+/**
+ * Build the admin recovery-upload bundle as the server's EXACT [RecoveryUpload] type so the
+ * emitted JSON is round-trip-guaranteed to decode. PRC-1: hand-building a JsonObject let
+ * `tempKdfParams` serialize as a JSON STRING (`"{}"`) instead of the object the server's
+ * non-lenient decoder expects, so `POST /admin/recovery` 400'd — the household's only path
+ * back from a forgotten master password broke at the final admin-upload step. Serializing the
+ * typed value cannot drift from the wire contract; [RecoveryCeremonyTest] round-trips it.
+ */
+internal fun recoveryBundle(
+    userId: String,
+    tempAuthKey: ByteArray,
+    tempWrappedUvk: ByteArray,
+    tempKdfSalt: ByteArray,
+    params: KdfParams,
+): RecoveryUpload = RecoveryUpload(
+    userId = userId,
+    tempAuthKey = Bytes.toB64(tempAuthKey),
+    tempWrappedUvk = Bytes.toB64(tempWrappedUvk),
+    tempKdfSalt = Bytes.toB64(tempKdfSalt),
+    tempKdfParams = params,
+)
 
 // A readable temp password: 4 short words + digits (owner types it once).
 private fun humanTempPassword(): String =

@@ -83,20 +83,33 @@ class AttachmentStore(
         val fl = inFlight.computeIfAbsent(userId) { InFlight(maxConcurrentUploadsPerUser) }
         // Acquire BEFORE the try — a failed acquire must never reach the release in finally.
         if (!fl.sem.tryAcquire()) throw RateLimited()
-        // An idempotent re-upload of an already-committed id is EXEMPT from the user quota
-        // (the authoritative commit path returns the stored meta before its quota check),
-        // so the mid-stream bound must exempt it too — else a retry near quota double-counts
-        // the existing bytes against itself and false-413s a request the commit path allows.
-        val (preexisting, committedBytes) = repo.db.read { c ->
-            (rowById(c, attachmentId) != null) to userBytes(c, userId)
-        }
-        val tmp = File(dir, "$attachmentId.part")
         val digest = MessageDigest.getInstance("SHA-256")
         var header: ByteArray? = null
         var cipherBytes = 0L
         var inFlightAdded = 0L
+        var tmp: File? = null
         try {
-            tmp.outputStream().use { out ->
+            // The quota read and the temp-file creation live INSIDE the try so any throw (a DB
+            // error, or an IOException from createTempFile doing disk I/O) still reaches the
+            // finally that releases the semaphore permit — a leaked permit would permanently
+            // shrink this user's concurrent-upload cap for the process lifetime.
+            //
+            // An idempotent re-upload of an already-committed id is EXEMPT from the user quota
+            // (the authoritative commit path returns the stored meta before its quota check),
+            // so the mid-stream bound must exempt it too — else a retry near quota double-counts
+            // the existing bytes against itself and false-413s a request the commit path allows.
+            val (preexisting, committedBytes) = repo.db.read { c ->
+                (rowById(c, attachmentId) != null) to userBytes(c, userId)
+            }
+            // ATT-1: a UNIQUE temp file per in-flight upload. A deterministic "$attachmentId.part"
+            // let two concurrent PUTs for the SAME attachmentId (a client retry / double-tap Save /
+            // refresh that re-encrypts while the first body is still draining) interleave their bytes
+            // into one inode; the winner's committed row.sha256 then matched NEITHER the winner's nor
+            // the loser's on-disk bytes → permanent, silent, undecryptable ciphertext loss. Each
+            // upload now streams to its own inode; the commit-time row guard below still serializes
+            // the single winner's rename, and the finally-block deletes whichever temp did not commit.
+            val part = File.createTempFile("$attachmentId.", ".part", dir).also { tmp = it }
+            part.outputStream().use { out ->
                 val buf = ByteArray(64 * 1024)
                 val headerBuf = ByteArray(Attachments.HEADER_BYTES)
                 var headerFill = 0
@@ -145,17 +158,17 @@ class AttachmentStore(
                 // land ciphertext into a vault they just lost.
                 val txRole = repo.grantRole(c, userId, vaultId)
                 if (txRole == null || txRole == "reader") {
-                    tmp.delete()
+                    part.delete()
                     throw Forbidden("no_grant")
                 }
                 val existing = rowById(c, attachmentId)
                 if (existing != null) {
-                    tmp.delete()
+                    part.delete()
                     if (existing.sha256 != sha || existing.itemId != itemId || existing.vaultId != vaultId) throw BadRequest("attachment_id_taken")
                     return@tx AttachmentMeta(existing.attachmentId, existing.itemId, existing.vaultId, existing.size, existing.sha256, existing.createdAt)
                 }
                 if (userBytes(c, userId) + cipherBytes > maxCipherBytes(policy.userAttachmentsMaxBytes)) {
-                    tmp.delete()
+                    part.delete()
                     throw PayloadTooLarge("user_attachment_quota")
                 }
                 val t = now()
@@ -163,9 +176,9 @@ class AttachmentStore(
                     "INSERT INTO attachments(attachmentId,itemId,vaultId,size,sha256,header,createdAt) VALUES(?,?,?,?,?,?,?)",
                     attachmentId, itemId, vaultId, cipherBytes, sha, Bytes.toB64(hdr), t,
                 )
-                if (!tmp.renameTo(file(attachmentId))) {
-                    tmp.copyTo(file(attachmentId), overwrite = true)
-                    tmp.delete()
+                if (!part.renameTo(file(attachmentId))) {
+                    part.copyTo(file(attachmentId), overwrite = true)
+                    part.delete()
                 }
                 repo.auditOn(c, "attachment_upload", userId, null, null, "$attachmentId:$cipherBytes")
                 AttachmentMeta(attachmentId, itemId, vaultId, cipherBytes, sha, t)
@@ -173,7 +186,7 @@ class AttachmentStore(
         } finally {
             if (inFlightAdded > 0) fl.bytes.addAndGet(-inFlightAdded)
             fl.sem.release()
-            tmp.delete()
+            tmp?.delete()
         }
     }
 

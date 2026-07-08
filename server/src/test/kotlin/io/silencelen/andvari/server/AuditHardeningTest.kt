@@ -42,9 +42,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.builtins.ListSerializer
 import java.io.File
+import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -378,6 +380,99 @@ class AuditHardeningTest : P4TestSupport() {
             ch3.flushAndClose()
             assertTrue(third.await().isSuccess, "cap must release after completion: ${third.await()}")
         }
+    }
+
+    @Test
+    fun concurrentSameAttachmentId_committedBlobMatchesItsRow_noInterleave() {
+        // ATT-1: two concurrent PUTs for the SAME attachmentId must each stream into their OWN
+        // temp file. Exactly one commits; its on-disk bytes MUST equal its clean stream (sha
+        // matches the committed row), never a byte-interleave of both — which would decrypt
+        // under neither key: permanent, silent, undetectable ciphertext loss.
+        val (store, repo, _) = bareStore(maxConcurrent = 4)
+        val policy = ClientPolicy(attachmentMaxBytes = 4L * 1024 * 1024, userAttachmentsMaxBytes = 16L * 1024 * 1024)
+        runBlocking {
+            val userId = "user-att1"; val vaultId = uuid(); val itemId = uuid(); val attId = uuid()
+            seedWriteGrant(repo, userId, vaultId)
+            // Two DISTINCT ciphertext bodies under one attachmentId (different filler so any
+            // blend is detectable and the loser fails the sha-equality id-taken check).
+            val headerA = ByteArray(Attachments.HEADER_BYTES) { 0xA1.toByte() }
+            val headerB = ByteArray(Attachments.HEADER_BYTES) { 0xB2.toByte() }
+            val bodyA = ByteArray(192 * 1024) { 0x11 }
+            val bodyB = ByteArray(192 * 1024) { 0x22 }
+            val chA = ByteChannel(autoFlush = true)
+            val chB = ByteChannel(autoFlush = true)
+            val a = async(Dispatchers.IO) { runCatching { store.store(userId, attId, itemId, vaultId, chA, policy) } }
+            val b = async(Dispatchers.IO) { runCatching { store.store(userId, attId, itemId, vaultId, chB, policy) } }
+            chA.writeFully(headerA); chB.writeFully(headerB)
+            // Interleave the two bodies in 32 KiB steps so the OLD shared-".part" path blends them.
+            // NB: ktor writeFully takes (startIndex, endIndex), not (offset, length).
+            var off = 0; val step = 32 * 1024
+            while (off < bodyA.size) {
+                val end = minOf(off + step, bodyA.size)
+                chA.writeFully(bodyA, off, end); chB.writeFully(bodyB, off, end)
+                off += step
+            }
+            chA.flushAndClose(); chB.flushAndClose()
+            val results = listOf(a.await(), b.await())
+
+            val committed = results.mapNotNull { it.getOrNull() }
+            assertEquals(1, committed.size, "exactly one upload commits: $results")
+            val row = repo.db.read { c -> store.rowById(c, attId) }
+            assertNotNull(row, "committed attachment row must exist")
+            // The file holds the ciphertext body only (the header rides in the row); its actual
+            // sha256 must equal the row's stored sha256 — proving no interleave landed on disk.
+            val fileBytes = store.file(attId).readBytes()
+            val actualSha = Bytes.toHexLower(MessageDigest.getInstance("SHA-256").digest(fileBytes))
+            assertEquals(row.sha256, actualSha, "on-disk blob must match its row sha256 (ATT-1: no interleave)")
+            assertTrue(
+                fileBytes.contentEquals(bodyA) || fileBytes.contentEquals(bodyB),
+                "committed body must be exactly one clean stream, not a blend of both",
+            )
+        }
+    }
+
+    @Test
+    fun failedTempFileCreation_releasesUploadPermit_noLeak() {
+        // ATT-1 follow-up: createTempFile does real disk I/O and can throw (e.g. a full/unmounted
+        // blob volume). That throw site now lives INSIDE the try, so the finally still releases the
+        // semaphore permit — if it leaked, one failure at maxConcurrent=1 would lock the user out
+        // of ALL future uploads for the process lifetime (InFlight is never evicted).
+        val (store, repo, dir) = bareStore(maxConcurrent = 1)
+        val policy = ClientPolicy()
+        runBlocking {
+            val userId = "user-leak"; val vaultId = uuid()
+            seedWriteGrant(repo, userId, vaultId)
+            dir.deleteRecursively() // now File.createTempFile(..., dir) throws IOException
+            repeat(3) {
+                val ch = ByteChannel(autoFlush = true)
+                ch.writeFully(ByteArray(Attachments.HEADER_BYTES + 64) { 1 }); ch.flushAndClose()
+                val r = runCatching { store.store(userId, uuid(), uuid(), vaultId, ch, policy) }
+                assertTrue(r.isFailure, "upload into a missing blob dir must fail")
+                assertTrue(
+                    r.exceptionOrNull() !is RateLimited,
+                    "each failure must surface the IO error, NOT a leaked-permit RateLimited: ${r.exceptionOrNull()}",
+                )
+            }
+            // Restore the dir → a real upload succeeds: the permit was released every time.
+            dir.mkdirs()
+            val ch = ByteChannel(autoFlush = true)
+            ch.writeFully(ByteArray(Attachments.HEADER_BYTES + 64) { 2 }); ch.flushAndClose()
+            assertTrue(
+                runCatching { store.store(userId, uuid(), uuid(), vaultId, ch, policy) }.isSuccess,
+                "the upload cap must be intact after transient temp-file IO failures",
+            )
+        }
+    }
+
+    @Test
+    fun auditLoggerRoutesToAttachedAppender() {
+        // PROD-1: the AUDIT appender MUST be declared at configuration level and REFERENCED by
+        // the andvari.audit logger. Nesting <appender> inside <logger> left the logger with NO
+        // appender (additivity=false) so audit JSON reached neither journald nor Loki — the
+        // off-box tamper-evident copy the Alloy pipeline exists to carry silently did not exist.
+        val logger = org.slf4j.LoggerFactory.getLogger("andvari.audit") as ch.qos.logback.classic.Logger
+        assertNotNull(logger.getAppender("AUDIT"), "andvari.audit must reference the AUDIT appender (PROD-1)")
+        assertTrue(!logger.isAdditive, "andvari.audit must stay non-additive (raw JSON, not double-logged)")
     }
 
     @Test

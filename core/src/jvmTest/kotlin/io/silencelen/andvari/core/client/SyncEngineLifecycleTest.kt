@@ -70,6 +70,9 @@ class SyncEngineLifecycleTest {
         /** Return `conflict` for a push (put or delete) of one of these itemIds. */
         val conflictItems = mutableSetOf<String>()
 
+        /** PDD-1: one-shot `conflict` carrying the DISPLACED (losing) serverItem + winner rev, keyed by itemId. */
+        val conflictWithLosing = mutableMapOf<String, Pair<WireItem, Long>>()
+
         /** Return an unknown/future per-mutation status for pushes targeting these vaults. */
         val unknownStatusVaults = mutableSetOf<String>()
 
@@ -103,13 +106,18 @@ class SyncEngineLifecycleTest {
             pushes.add(req.mutations)
             if (req.mutations.any { it.vaultId in emptyResultsVaults }) return PushResponse(++rev, emptyList())
             val results = req.mutations.map { m ->
-                val status = when {
-                    m.vaultId in denyVaults -> "denied"
-                    m.itemId in conflictItems -> "conflict"
-                    m.vaultId in unknownStatusVaults -> "rate_limited" // a future status this client doesn't know
-                    else -> "applied"
+                val losing = conflictWithLosing.remove(m.itemId) // PDD-1: one-shot displaced-value conflict
+                if (losing != null) {
+                    MutationResult(m.mutationId, "conflict", losing.second, serverItem = losing.first)
+                } else {
+                    val status = when {
+                        m.vaultId in denyVaults -> "denied"
+                        m.itemId in conflictItems -> "conflict"
+                        m.vaultId in unknownStatusVaults -> "rate_limited" // a future status this client doesn't know
+                        else -> "applied"
+                    }
+                    MutationResult(m.mutationId, status, if (status == "conflict") null else 1L)
                 }
-                MutationResult(m.mutationId, status, if (status == "conflict") null else 1L)
             }
             return PushResponse(++rev, results)
         }
@@ -362,6 +370,53 @@ class SyncEngineLifecycleTest {
         val e = assertFailsWith<ApiException> { s.engine.save(s.itemId, doc.copy(name = "reader edit")) }
         assertEquals("denied", e.code)
         assertTrue(s.engine.heldVaultInfos().isEmpty())
+    }
+
+    @Test
+    fun pushSideMaterializesConflictCopyFromLosingServerItem() = runBlocking<Unit> {
+        val s = seededMember("writer")
+        // The DISPLACED (losing) value the server returns on our conflicting push — a concurrent
+        // edit by another device, encrypted under the shared VK.
+        val losingDoc = doc.copy(login = LoginData(username = "fam", password = "THEIRS-lost"))
+        val losing = WireItem(
+            s.itemId, s.vaultId, 6, 0, 1_690_000_000_000, false, false, 1, emptyList(),
+            s.owner.encryptItem(s.vaultId, s.itemId, losingDoc).blob,
+        )
+        s.server.conflictWithLosing[s.itemId] = losing to 9L
+        val pushesBefore = s.server.pushes.size
+
+        // Our edit — the winner. save() pushes it; the server keeps ours live (LWW) and returns
+        // the losing value, so the push side must materialize the copy FROM THE LOSING value.
+        s.engine.save(s.itemId, doc.copy(login = LoginData(username = "fam", password = "OURS-wins")))
+
+        // A copy was pushed, keyed by the deterministic id over the WINNER rev (9) — the SAME id
+        // the pull-side fallback uses, so the two converge (spec 03 §5, PDD-1).
+        val copyId = ConflictCopy.id(crypto, s.itemId, 9L)
+        val copyMut = s.server.pushes.drop(pushesBefore).flatten().find { it.itemId == copyId }
+        assertNotNull(copyMut, "a conflict copy must be materialized from the losing serverItem")
+        assertEquals(0L, copyMut.baseItemRev, "the copy is a fresh item, not a rewrite of the winner")
+        // Its content is the LOSING value, dated — NOT ours.
+        val copyDoc = s.member.decryptItem(
+            WireItem(copyId, s.vaultId, 1, 0, 0, false, false, copyMut.item!!.formatVersion, copyMut.item!!.attachmentIds, copyMut.item!!.blob),
+        )
+        assertEquals("THEIRS-lost", copyDoc.login?.password, "the copy must carry the LOSING value, not the winner")
+        assertTrue(copyDoc.name.contains("(conflict ") && copyDoc.name.endsWith(")"), "copy name should be dated: ${copyDoc.name}")
+    }
+
+    @Test
+    fun deleteThatLosesToNewerEdit_materializesNoSpuriousCopy() = runBlocking<Unit> {
+        val s = seededMember("writer")
+        // A delete that loses to a newer concurrent edit returns conflict + serverItem, but there
+        // serverItem is the SURVIVING winner, not a displaced value — the push side must NOT copy it.
+        val survivor = WireItem(s.itemId, s.vaultId, 7, 0, 0, false, false, 1, emptyList(), s.owner.encryptItem(s.vaultId, s.itemId, doc).blob)
+        s.server.conflictWithLosing[s.itemId] = survivor to 7L
+        val pushesBefore = s.server.pushes.size
+
+        s.engine.remove(s.itemId)
+
+        val copyId = ConflictCopy.id(crypto, s.itemId, 7L)
+        val spurious = s.server.pushes.drop(pushesBefore).flatten().find { it.itemId == copyId }
+        assertNull(spurious, "a losing delete must not spawn a conflict-copy duplicate")
     }
 
     // ==== consumed-deleteId recognition ====

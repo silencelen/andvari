@@ -7,6 +7,10 @@ import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import io.silencelen.andvari.core.model.RecoveryUpload
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -66,6 +70,35 @@ class RecoveryCeremonyTest {
         val sealed = Escrow.sealUvk(crypto, recovery.publicKey, "u", crypto.randomBytes(32))
         val wrong = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
         assertFailsWith<Exception> { Escrow.open(crypto, wrong.publicKey, wrong.privateKey, sealed) }
+    }
+
+    @Test
+    fun recoveryBundleRoundTripsThroughServerType() {
+        // PRC-1 regression guard. The bundle `recover()` emits must decode into the server's
+        // exact RecoveryUpload; the old hand-built JsonObject wrote tempKdfParams as a JSON
+        // STRING and 400'd the admin upload. Cover BOTH default params (serialize to `{}`) and
+        // non-default params (must carry their values), each round-tripping losslessly.
+        val cliJson = Json { prettyPrint = true } // MUST match Main.kt's `json` instance
+        // The server's decoder is non-lenient beyond ignoreUnknownKeys (Repo.kt) — no
+        // string→object coercion, so this decode is exactly what App.kt's receive() does.
+        val serverJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        for (params in listOf(KdfParams.DEFAULT, KdfParams(ops = 5, memBytes = 128L * 1024 * 1024))) {
+            val bundle = recoveryBundle(
+                userId = "abcdef01-2345-4678-8abc-def012345678",
+                tempAuthKey = crypto.randomBytes(32),
+                tempWrappedUvk = crypto.randomBytes(80),
+                tempKdfSalt = crypto.randomBytes(KdfParams.SALT_BYTES),
+                params = params,
+            )
+            val text = cliJson.encodeToString(RecoveryUpload.serializer(), bundle)
+            // tempKdfParams MUST be a nested object, never a JSON string — the PRC-1 bug.
+            val field = Json.parseToJsonElement(text).jsonObject["tempKdfParams"]
+            assertTrue(field is JsonObject, "tempKdfParams must serialize as an object, got: $field")
+            // And the server's decoder accepts the emitted bundle and reconstructs it exactly.
+            val decoded = serverJson.decodeFromString(RecoveryUpload.serializer(), text)
+            assertEquals(bundle, decoded, "recovery bundle must round-trip through RecoveryUpload")
+            assertEquals(params, decoded.tempKdfParams, "KDF params must survive the round-trip")
+        }
     }
 
     @Test
