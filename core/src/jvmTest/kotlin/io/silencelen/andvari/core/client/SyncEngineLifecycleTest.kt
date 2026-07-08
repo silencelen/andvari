@@ -14,6 +14,7 @@ import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AttachmentMeta
 import io.silencelen.andvari.core.model.DeletedVaultSummary
+import io.silencelen.andvari.core.model.ItemVersion
 import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.MutationResult
 import io.silencelen.andvari.core.model.PendingTransfer
@@ -442,6 +443,22 @@ class SyncEngineLifecycleTest {
         // SECURITY: refuse to seal if the fetched pubkey doesn't match the sheet-verified
         // fingerprint — a hostile server cannot redirect the UVK escrow to an attacker key.
         assertFailsWith<IllegalArgumentException> { account.resealEscrowFor(Bytes.toB64(rec2.publicKey), fp1) }
+    }
+
+    @Test
+    fun decryptItemVersion_opensArchivedVersionUnderCurrentVk() {
+        // Feature: item history — an archived version's ciphertext (AD bound to vaultId+itemId+
+        // formatVersion, not rev) decrypts under the VK the member already holds.
+        val member = enroll("hist@example.com")
+        val vaultId = member.personalVaultId
+        val itemId = member.newItemId()
+        val old = doc.copy(name = "Netflix", login = LoginData(username = "fam", password = "last-week-pw"))
+        val enc = member.encryptItem(vaultId, itemId, old) // the "archived" ciphertext blob
+        val version = ItemVersion(rev = 7, blob = enc.blob, formatVersion = enc.formatVersion, archivedAt = 1_690_000_000_000L)
+
+        val decoded = member.decryptItemVersion(vaultId, itemId, version)
+        assertEquals("Netflix", decoded.name)
+        assertEquals("last-week-pw", decoded.login?.password, "the old version decrypts to its historical secret")
     }
 
     // ==== consumed-deleteId recognition ====

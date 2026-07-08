@@ -23,6 +23,8 @@ import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.CreateVaultResponse
 import io.silencelen.andvari.core.model.DeletedVaultSummary
 import io.silencelen.andvari.core.model.EscrowUpload
+import io.silencelen.andvari.core.model.ItemVersion
+import io.silencelen.andvari.core.model.ItemVersionsResponse
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.TransferAcceptRequest
 import io.silencelen.andvari.core.model.TransferOfferRequest
@@ -196,6 +198,11 @@ class AndvariApi(
         val resp = request("PUT", "/api/v1/escrow/self", body = upload)
         if (!resp.status.isSuccess()) throw errorFrom(resp)
     }
+
+    /** Feature: item history — the archived ciphertext versions of an item, newest rev first
+     *  (server keeps the last 10). Grant-checked; the caller decrypts each blob under the held VK. */
+    suspend fun itemVersions(itemId: String): List<ItemVersion> =
+        call<ItemVersionsResponse>("GET", "/api/v1/items/$itemId/versions").versions
 
     suspend fun prelogin(email: String): PreloginResponse = call("POST", "/api/v1/auth/prelogin", PreloginRequest(email), auth = false)
 

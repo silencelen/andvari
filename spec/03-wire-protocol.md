@@ -90,6 +90,14 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
   A denied-mutation failure MUST NOT abort the pull that delivers `removedGrants` (F21);
   denied mutations for in-grace vaults SHOULD be parked and replayed on restore. Clients
   MUST ignore unknown response fields (pins the additivity contract).
+- **Item history (feature: item history & restore):** `GET /items/{id}/versions` →
+  `{ itemId, versions: [{ rev, blob, formatVersion, archivedAt }] }`, newest rev first — the
+  archived ciphertext versions the server already keeps (spec 02 §7, last 10). Grant-checked
+  against the item's own vault (unknown item and non-member both `403`-hidden, §8 — no
+  existence oracle); serves a tombstoned item's versions too (the item row persists). The
+  client decrypts each `blob` under the VK it holds (AD binds itemId+formatVersion, not rev)
+  and restores a chosen version as an ordinary put over the live item. Additive: no schema
+  bump, no formatVersion bump, no new server knowledge.
 - **Durable cursor rule (spec 02 §8):** vaults/grants/items/removedGrants are all deltas
   over the same global rev, so a client that persists its cursor MUST also persist the
   grant rows, vault rows, and item envelopes it has applied (grant/vault rows never

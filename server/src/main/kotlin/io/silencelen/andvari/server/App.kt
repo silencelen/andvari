@@ -29,6 +29,7 @@ import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.model.ApiError
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.InviteRequest
+import io.silencelen.andvari.core.model.ItemVersionsResponse
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.PreloginRequest
 import io.silencelen.andvari.core.model.PushRequest
@@ -391,6 +392,20 @@ fun Application.andvariModule(services: Services) {
                 write(header)
                 blob.inputStream().use { it.copyTo(this) }
             }
+        }
+
+        // Item history (feature: item history & restore): the archived ciphertext versions of an
+        // item (server keeps the last 10; spec 02 §7). Grant-checked against the item's OWN vault.
+        // The item row persists even when tombstoned, so this also serves a deleted item's versions
+        // (a future undelete slice builds on it). Client decrypts each blob under the VK it holds.
+        get("/api/v1/items/{id}/versions") {
+            val p = requirePrincipal(call, service)
+            val id = requireUuid(call.parameters["id"], "item_id")
+            // Hidden as 403 for cross-tenant probes (spec 03 §8): unknown item AND no grant both 403.
+            val item = services.repo.db.read { c -> services.repo.itemById(c, id) } ?: throw Forbidden("no_grant")
+            services.repo.db.read { c -> services.repo.grantRole(c, p.userId, item.vaultId) } ?: throw Forbidden("no_grant")
+            val versions = services.repo.db.read { c -> services.repo.itemVersions(c, id) }
+            call.respond(ItemVersionsResponse(id, versions))
         }
 
         // ---- sync ----

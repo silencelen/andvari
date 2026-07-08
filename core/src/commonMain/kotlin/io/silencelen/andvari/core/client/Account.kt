@@ -15,6 +15,7 @@ import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.DeviceInfo
 import io.silencelen.andvari.core.model.EscrowUpload
 import io.silencelen.andvari.core.model.ItemUpload
+import io.silencelen.andvari.core.model.ItemVersion
 import io.silencelen.andvari.core.model.PersonalVaultUpload
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.WireGrant
@@ -410,6 +411,16 @@ class Account private constructor(
     }
 
     fun newItemId(): String = uuid(crypto)
+
+    /**
+     * Feature: item history — decrypt one archived [ItemVersion] under the vault VK. The item AD
+     * binds (vaultId, itemId, formatVersion), NOT rev, so an old version opens with the CURRENT key
+     * — no crypto change (until a VK rotation, which resets history; see the design doc). Reuses
+     * [decryptItem] (same fail-closed-on-newer-formatVersion behavior). The caller supplies the
+     * vaultId (the version DTO carries none) — the live item the history belongs to.
+     */
+    fun decryptItemVersion(vaultId: String, itemId: String, version: ItemVersion): ItemDoc =
+        decryptItem(WireItem(itemId, vaultId, version.rev, 0, version.archivedAt, false, false, version.formatVersion, emptyList(), version.blob))
 
     /**
      * F57: build a fresh escrow blob re-sealing THIS account's UVK to the current org recovery
