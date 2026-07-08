@@ -4,6 +4,8 @@
 
 **Summary of verdicts:** 9 findings turned out to be **already consumed** by v5/Skipti (several fixed by name — the code cites F22/F26/F27/F29/F31 in comments). 19 survive as **quick wins** (all effort-S), grouped here into three concrete reviewable batches by surface. 8 **fold into planned v6 queue items** (skipti-loose-ends ×3, quick-unlock ×2, and one each for totp-qr-hub, importers, extension-spike). 8 need **standalone batches** (grouped into four proposals). 1 is a defensible **won't-fix**. Several "yes" verdicts came back *partial* — the sections below say exactly which half died.
 
+> **Update 2026-07-08:** QW-1 shipped (fleet unified at 0.5.0) and **round-2 recon ran** (`docs/recon/2026-07-08-round2-recon.md`). Recon verified the v5/Skipti set is sound and added **6 findings the static F-id triage couldn't reach** — see the new **§6**. Three are P1 silent-data-loss / broken-recovery paths (**ATT-1, PDD-1, PRC-1**) now grouped as a **pre-migration integrity batch**.
+
 ---
 
 ## 1. Consumed by v5/Skipti after all (9)
@@ -130,12 +132,35 @@ Internally sequenced: F71 first (data-loss-adjacent), F82 second (drift trap), F
 
 ---
 
-## 6. Recommended order of play
+## 6. Round-2 recon additions (2026-07-08)
+
+Round-2 recon (**`docs/recon/2026-07-08-round2-recon.md`** — 7 adversarial lenses + 4 persona walks against post-Skipti HEAD `1f0fcdb`, prod-parity lens vs deployed `190c627`) confirmed the v5/Skipti fix set is **sound: 0 regressions, byte-clean prod parity, every Skipti seam verified.** It also reached defects the static F-id triage above structurally *could not* — live concurrency races, break-glass *tooling*, boot-time config — surfacing **six new findings** (own id space) plus live corroboration of several F-ids.
+
+### New — not reducible to any F-id above
+
+| id | sev | one-line | disposition |
+|----|----|----|----|
+| **ATT-1** | **P1** | Concurrent same-`attachmentId` PUTs interleave into one deterministic `.part` inode → committed `row.sha256` matches neither on-disk blob; permanent, silent, undetectable ciphertext loss. **Reproduced live.** | **pre-migration integrity batch.** Fix = unique temp file per upload (`File.createTempFile`); the commit-time row guard already serializes the winner. |
+| **PDD-1** | **P1** | Concurrent same-item edit is last-write-wins; client builds the "conflict copy" from the *winner* instead of the returned `serverItem`, so the displaced edit is lost — on web **and** native (parity confirmed). Violates spec 03 §5. **Reproduced two-tab.** | **pre-migration integrity batch.** Fix = materialize copy from `result.serverItem`; mirror in core `SyncEngine`. |
+| **PRC-1** | **P1**/P2 | `recovery-cli recover` writes `tempKdfParams` as a JSON **string** `"{}"`; server field is a `KdfParams` object under a non-lenient `Json` → admin upload 400s. The household's only forgot-master path breaks at the last step; a non-technical admin is stranded holding a valid temp password. | **pre-migration integrity batch** (recovery must work before real secrets). Fix = emit nested object + round-trip test + concrete admin-authed curl in the runbook. Trivial. |
+| **PROD-1** | P2 | `logback.xml` nests the `AUDIT` appender *inside* its logger instead of referencing it → "Appender named [AUDIT] not referenced" at boot; **zero** audit lines reach journald/Loki (SQLite `audit` table still written — no data loss, but the tamper-evident off-box copy the Alloy pipeline exists to produce doesn't exist). | QW-1-adjacent server fix (config one-liner + a boot-assert test). |
+| **LC-1** | P2 | Re-delete during restore-replay: the `replayedMutationIds` fast-path skips a member's parked offline edit → **F21's** offline-edit protection defeated. The one place new lifecycle code introduced a loss path. | **skipti-loose-ends** (§3) — Skipti-seam gap, fresh-context follow-through. |
+| **MSI-1** | P2 | Desktop MSI sends `X-Andvari-Client: android/0.2.0`; a future `minVersion[android]` pin would 426-wedge the owner's daily desktop. Latent (no pin set today; compile-time default `emptyMap`). | Guard-rail for **quick-unlock / MSI-refresh** — desktop must send its own client id *before* any android pin ships. |
+
+### Corroborated (already tracked as F-ids — recon adds live evidence, no new work)
+WS-1/WS-2 ↔ **F54** (dead `notifyRevoked` / `policy` frame). PDD-2 ↔ **F79** (search ignores notes + 2nd URI). PDD-4 ↔ **F10** (single-URI editor). PRC-3 ↔ **F57** (dead `PUT /escrow/self`). PRC-2 ↔ **F58** (post-recovery temp password stays live). ATT-2 ↔ the attachment-integrity family. Autofill P3s (AF-2…6) ↔ **F09 / F11 / F12**. The full recon→F-id map is in the report §1 ("Did the v5 fixes hold?").
+
+### → pre-migration integrity batch (NEW, recommended before real-secrets migration)
+**ATT-1 + PDD-1 + PRC-1** are three independent *silent data-loss / recovery-broken* paths — all pre-existing (not QW1 regressions), all small, well-scoped fixes. Ship them as **one reviewed server+core batch before real secrets migrate**, on the same gate as the already-identified recovery items (**F57** escrow re-seal, **F59** drill). PROD-1 (audit truth) rides along naturally. This is the concrete "harden before migration" content ROADMAP step 6 was holding a place for.
+
+---
+
+## 7. Recommended order of play
 
 Tied into the ratified v6 queue (**triage → round-2 recon → totp-qr-hub → cards+save-flow → importers → extension-spike**, with skipti-loose-ends and quick-unlock as adjacent lanes):
 
-1. **Now, before/alongside round-2 recon:** **QW-1 (server hardening)** — F50/F55 are live exposure on the public origin and shipping them first means round-2 recon verifies them instead of re-finding them. Also the two pre-migration recovery items: **F59 drill + Admin button** (ROADMAP step 6) and **SB-2 escrow re-seal (F57)** — the recovery path must be real before secrets migrate; at minimum ship the spec-truth reword.
-2. **Round-2 recon** — verifies B1–B8 + Skipti + QW-1; the F53 residual race and F27 multi-tab edges belong here *only if* they manifest.
+1. **Now, before real-secrets migration:** **QW-1 (server hardening)** — ✅ **shipped 2026-07-08** (F50/F55 live on the public origin; round-2 recon verified them rather than re-finding them). Remaining pre-migration gate: the **§6 integrity batch (ATT-1 + PDD-1 + PRC-1 + PROD-1)** and the two recovery items **F59 drill + Admin button** (ROADMAP step 6) and **SB-2 escrow re-seal (F57)** — the recovery path must be *real and tested* before secrets migrate; at minimum ship the spec-truth reword.
+2. **Round-2 recon** — ✅ **done 2026-07-08** (`docs/recon/2026-07-08-round2-recon.md`): B1–B8 + Skipti + QW-1 all verified sound. Surfaced the **§6 pre-migration integrity batch (ATT-1 + PDD-1 + PRC-1)** — three silent-data-loss / broken-recovery paths that should ship **before real secrets migrate**, folded into step 1's pre-migration gate above. The F53 residual race did **not** manifest; F27 multi-tab held.
 3. **QW-2 (web UX)** and **QW-3 (native robustness)** — independent of the feature queue; slot either between recon and totp-qr-hub or as filler between features. F60 (password floor) should not slip past migration.
 4. **skipti-loose-ends** (F18, F20, F49) — fresh-context follow-through while the Skipti machinery is warm; naturally pairs with the CT122 snapshot + v4 migration step already tracked.
 5. **totp-qr-hub** — inherits **F77** (build the QR encoder once, reuse for enrollment).
