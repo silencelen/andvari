@@ -76,6 +76,20 @@ class EscrowValidationTest : P4TestSupport() {
     }
 
     @Test
+    fun freshEnrollIsNotEscrowStale_andReportsCurrentFingerprint() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val vc = VirtualClient("stale@x.com", "escrow stale password 1")
+        val session = client.register(vc, bootstrapToken)
+        // F57: a fresh account's escrow is sealed to the CURRENT org recovery key → NOT stale;
+        // the client is handed the current fingerprint (escrowFingerprint) so it can detect a
+        // future re-ceremony (escrowStale flips true only once the org key rotates) and drive
+        // the re-seal-on-unlock prompt.
+        assertEquals(false, session.accountKeys.escrowStale, "fresh enroll must not be escrow-stale")
+        assertEquals(fingerprint, session.accountKeys.escrowFingerprint)
+    }
+
+    @Test
     fun register_rejectsGarbageEscrow_withoutConsumingInvite() = testApplication {
         application { andvariModule(buildServices(config(), Notifier())) }
         val client = jsonClient(this)

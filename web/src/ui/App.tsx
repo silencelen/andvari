@@ -209,6 +209,8 @@ export function App() {
         policy={policy}
         isAdmin={phase.meta.isAdmin}
         mustChangePassword={phase.meta.mustChangePassword}
+        escrowStale={phase.meta.escrowStale}
+        escrowFingerprint={phase.meta.escrowFingerprint}
         onLock={onManualLock}
         onRevoked={onRevoked}
       />

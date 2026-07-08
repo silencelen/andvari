@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { ApiClient, ApiError, type SessionEndKind } from "../api/client";
 import type { AttachmentRef, ClientPolicy, ItemDoc } from "../api/types";
 import { toB64 } from "../crypto/bytes";
+import { shortFormMatches } from "../crypto/escrow";
 import { generatePassword } from "../crypto/generator";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import { randomBytes } from "../crypto/provider";
@@ -36,6 +37,10 @@ interface Props {
   policy: ClientPolicy | null;
   isAdmin: boolean;
   mustChangePassword: boolean;
+  /** F57: this account's escrow is sealed to a superseded recovery key — offer a re-seal. */
+  escrowStale: boolean;
+  /** F57: the CURRENT org recovery fingerprint (re-seal target + short-form verify anchor). */
+  escrowFingerprint: string;
   /** F26: locks — keeps the persisted session; the user gets the Unlock card. */
   onLock: () => void;
   /** F26: the session died server-side — full sign-out, not a lock. `kind` says
@@ -43,7 +48,7 @@ interface Props {
   onRevoked: (kind: SessionEndKind) => void;
 }
 
-export function Vault({ account, store, client, policy, isAdmin, mustChangePassword, onLock, onRevoked }: Props) {
+export function Vault({ account, store, client, policy, isAdmin, mustChangePassword, escrowStale, escrowFingerprint, onLock, onRevoked }: Props) {
   const [view, setView] = useState<View>("vault");
   const [items, setItems] = useState<VaultItem[]>(store.list());
   // Lifecycle notices (spec 03 §11) — the banner reflects the store's list after every sync.
@@ -266,6 +271,8 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
         </div>
       )}
 
+      {escrowStale && escrowFingerprint && <ReSealBanner account={account} client={client} escrowFingerprint={escrowFingerprint} />}
+
       <NoticesBanner notices={notices} onDismiss={dismissNotice} />
 
       <div className="wrap">
@@ -405,6 +412,79 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
           `If nobody in your household did this, tell your admin — the server may be misbehaving.`,
       };
   }
+}
+
+/**
+ * F57: after a recovery-key re-ceremony an account's escrow is sealed to the DEAD key (spec 04
+ * §4). This prompt re-seals the UVK to the CURRENT recovery key — but ONLY after the user
+ * confirms the new fingerprint against their PRINTED recovery sheet (short-form). resealEscrowFor
+ * then binds the server-fetched pubkey to that verified fingerprint and refuses on mismatch, so a
+ * hostile server cannot redirect the escrow to an attacker key. Non-blocking: "Later" just leaves
+ * it for the next unlock (escrowStale persists server-side until the re-seal lands).
+ */
+function ReSealBanner({ account, client, escrowFingerprint }: { account: Account; client: ApiClient; escrowFingerprint: string }) {
+  const [open, setOpen] = useState(false);
+  const [entry, setEntry] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [err, setErr] = useState("");
+  const shortOk = shortFormMatches(entry, escrowFingerprint);
+
+  const reseal = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      const pub = await client.recoveryPubkey();
+      const { sealed, fingerprint } = await account.resealEscrowFor(pub, escrowFingerprint);
+      await client.putEscrow(sealed, fingerprint);
+      setDone(true);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "re-seal failed — try again, or contact your admin");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (done) {
+    return <div className="banner"><span>Account re-protected — your recovery is up to date. ✓</span></div>;
+  }
+  if (!open) {
+    return (
+      <div className="banner">
+        <span>Your household's recovery key changed — re-protect this account so it stays recoverable.</span>
+        <button className="link" onClick={() => setOpen(true)}>Re-protect →</button>
+      </div>
+    );
+  }
+  return (
+    <div className="banner">
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", width: "100%" }}>
+        <span className="muted">
+          Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect. Your master
+          key never leaves this device except sealed to the recovery key you verify below.
+        </span>
+        <label>Type the FIRST 16 characters of the fingerprint on your printed recovery sheet</label>
+        <input
+          value={entry}
+          onChange={(e) => setEntry(e.target.value)}
+          placeholder="from the sheet, not this screen"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        {!shortOk && entry && (
+          <span style={{ color: "var(--danger)" }}>
+            doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin
+          </span>
+        )}
+        {shortOk && <span className="muted">matches — {escrowFingerprint.replace(/(.{4})/g, "$1 ").trim()}</span>}
+        {err && <span style={{ color: "var(--danger)" }}>{err}</span>}
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <button className="primary" disabled={!shortOk || busy} onClick={reseal}>{busy ? "Re-protecting…" : "Re-protect account"}</button>
+          <button className="ghost" disabled={busy} onClick={() => setOpen(false)}>Later</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** The lifecycle notices banner (spec 03 §11): attributed only when the proof verified; the
