@@ -4,11 +4,17 @@
             <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level %logger{20} - %msg%n</pattern>
         </encoder>
     </appender>
-    <!-- Audit trail as raw single-line JSON on stdout for Alloy/Loki. -->
+    <!-- Audit trail as raw single-line JSON on stdout for Alloy/Loki. PROD-1: the AUDIT
+         appender MUST be declared at configuration level and REFERENCED by the logger.
+         Nesting <appender> inside <logger> made logback log "Appender named [AUDIT] not
+         referenced" at boot and — with additivity=false — route every audit event to NO
+         appender, so journald/Loki received zero audit lines (the SQLite audit table was
+         still written, so no data loss, but the tamper-evident off-box copy did not exist). -->
+    <appender name="AUDIT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder><pattern>%msg%n</pattern></encoder>
+    </appender>
     <logger name="andvari.audit" level="INFO" additivity="false">
-        <appender name="AUDIT" class="ch.qos.logback.core.ConsoleAppender">
-            <encoder><pattern>%msg%n</pattern></encoder>
-        </appender>
+        <appender-ref ref="AUDIT"/>
     </logger>
     <logger name="io.ktor" level="INFO"/>
     <logger name="io.netty" level="WARN"/>

@@ -961,15 +961,37 @@ class SyncEngine(
             if (account.roleFor(item.vaultId) == "reader") continue
             val winner = cache.getItem(item.itemId) ?: continue // undecryptable → wait
             val copyId = deterministicCopyId(item.itemId, item.rev)
-            if (copyId in known || cache.getItem(copyId) != null) continue
-            val copyDoc = winner.doc.copy(name = "${winner.doc.name} (conflict ${isoDate(item.updatedAt)})")
-            push(
-                listOf(
-                    putMutation(copyId, item.vaultId, copyDoc, 0),
-                    putMutation(item.itemId, item.vaultId, winner.doc, winner.rev), // clears the flag
-                ),
-            )
+            // PDD-1: the CORRECT copy is built from the DISPLACED (losing) value by the pushing
+            // client (materializeConflictFromServerItem); this path is the FALLBACK + flag
+            // clearer. If the copy is already present (push side, a peer, or a prior pass), skip
+            // re-creating it and just clear the flag with the live winner. If it is absent (the
+            // conflict was caused by a client that didn't materialize) preserve at least the
+            // winner so clearing the flag doesn't erase the only trace.
+            val mutations = mutableListOf<Mutation>()
+            if (copyId !in known && cache.getItem(copyId) == null) {
+                val copyDoc = winner.doc.copy(name = "${winner.doc.name} (conflict ${isoDate(item.updatedAt)})")
+                mutations += putMutation(copyId, item.vaultId, copyDoc, 0)
+            }
+            mutations += putMutation(item.itemId, item.vaultId, winner.doc, winner.rev) // clears the flag
+            push(mutations)
         }
+    }
+
+    /**
+     * Materialize the conflict copy from the server-returned LOSING version (spec 03 §5, PDD-1).
+     * The pushing client is the ONLY party that receives the displaced value (MutationResult
+     * .serverItem); the pull side sees only the winner. Creates just the copy — the conflict
+     * flag is cleared by [materializeOutstandingConflicts] on the reconcile pull, which holds
+     * the live winner. The copy id is deterministic over (itemId, winnerRev), the same
+     * derivation the pull side uses, so an already-present copy is a no-op.
+     */
+    private suspend fun materializeConflictFromServerItem(losing: WireItem, winnerRev: Long) {
+        if (account.roleFor(losing.vaultId) == "reader") return // a reader's push would be denied
+        val losingDoc = runCatching { account.decryptItem(losing) }.getOrNull() ?: return // held key → skip
+        val copyId = deterministicCopyId(losing.itemId, winnerRev)
+        if (cache.getItem(copyId) != null) return // already materialized
+        val copyDoc = losingDoc.copy(name = "${losingDoc.name} (conflict ${isoDate(losing.updatedAt)})")
+        push(listOf(putMutation(copyId, losing.vaultId, copyDoc, 0)))
     }
 
     /** UUIDv4-shaped id derived from sha256("conflict|itemId|rev") — stable across retries.
@@ -1094,6 +1116,7 @@ class SyncEngine(
      */
     private suspend fun flushQueue(): Int {
         var deniedCount = 0
+        val displaced = mutableListOf<Pair<WireItem, Long>>() // PDD-1: (losing serverItem, winner newRev)
         while (true) {
             val chunk = cache.pending().take(SERVER_BATCH_MAX)
             if (chunk.isEmpty()) break
@@ -1115,6 +1138,16 @@ class SyncEngine(
                         preParkedByVault.getOrPut(m.vaultId) { mutableListOf() }.add(StagedDenial(m, pullStartCounter))
                     }
                 } else {
+                    // PDD-1: on a conflicting PUT the server keeps OUR value live (LWW) and
+                    // returns the DISPLACED (losing) version as serverItem. Capture it and
+                    // materialize the conflict copy from THAT after the drain (spec 03 §5) — the
+                    // pull side sees only the winner and would copy the wrong (surviving) value.
+                    // Guard on op=="put": a DELETE that loses to a newer edit (edit-beats-delete)
+                    // ALSO returns conflict+serverItem, but there serverItem is the SURVIVING
+                    // winner, not a losing value — materializing it would spawn a spurious copy.
+                    val si = r.serverItem
+                    val nr = r.newItemRev
+                    if (r.status == "conflict" && m.op == "put" && si != null && nr != null) displaced += si to nr
                     // Any other definitive outcome removes it (idempotent replay returns
                     // the original result).
                     cache.dequeue(m.mutationId)
@@ -1123,6 +1156,9 @@ class SyncEngine(
             }
             if (!progressed) break // defensive: no results matched (server returns one per mutation)
         }
+        // Materialize AFTER draining — a re-entrant push here recurses into flushQueue; each
+        // copy is a fresh item (baseRev 0) that applies cleanly, so the recursion is bounded.
+        for ((losing, winnerRev) in displaced) materializeConflictFromServerItem(losing, winnerRev)
         return deniedCount
     }
 

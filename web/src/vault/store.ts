@@ -471,18 +471,47 @@ export class VaultStore {
   private async materializeConflict(item: WireItem): Promise<void> {
     const winner = this.itemsById.get(item.itemId);
     if (!winner) return;
-    // The server returned the losing version on the conflicting push; but on a plain
-    // pull we only see the winner flagged. Create a dated copy of the winner's current
-    // content so nothing is lost, then clear the flag with a normal rewrite. The copy
-    // id is deterministic (spec 03 §5) so concurrent materializers converge on one copy.
+    // PDD-1: the CORRECT conflict copy is built from the DISPLACED (losing) version, which
+    // only the pushing client receives (materializeConflictFromServerItem, below). On a plain
+    // pull we hold only the winner, so this path is a FALLBACK plus the flag-clearer: if the
+    // push side already materialized the copy (deterministic id over (itemId, rev), spec 03
+    // §5), skip re-creating it and just clear the flag with the live winner; otherwise (the
+    // conflict was caused by a client that didn't materialize) preserve at least the winner so
+    // clearing the flag doesn't erase the only trace.
     const copyId = await conflictCopyId(item.itemId, item.rev);
-    if (this.itemsById.has(copyId)) return; // already materialized (by us or a peer)
-    const stamp = new Date(item.updatedAt).toISOString().slice(0, 10);
-    const copyDoc: ItemDoc = { ...winner.doc, name: `${winner.doc.name} (conflict ${stamp})` };
-    await this.push([
-      this.putMutation(copyId, item.vaultId, copyDoc, 0),
-      this.putMutation(item.itemId, item.vaultId, winner.doc, winner.rev), // clears conflict flag
-    ]);
+    const mutations: Mutation[] = [];
+    if (!this.itemsById.has(copyId)) {
+      const stamp = new Date(item.updatedAt).toISOString().slice(0, 10);
+      const copyDoc: ItemDoc = { ...winner.doc, name: `${winner.doc.name} (conflict ${stamp})` };
+      mutations.push(this.putMutation(copyId, item.vaultId, copyDoc, 0));
+    }
+    mutations.push(this.putMutation(item.itemId, item.vaultId, winner.doc, winner.rev)); // clears conflict flag
+    await this.push(mutations);
+  }
+
+  /**
+   * Materialize the conflict copy from the server-returned LOSING version (spec 03 §5, PDD-1).
+   * The pushing client is the ONLY party that receives the displaced value (as
+   * MutationResult.serverItem); the pull side sees only the winner. Creates just the copy —
+   * the conflict flag is cleared by the pull-side materializeConflict on the reconcile pull,
+   * which holds the live winner (at push time our own itemsById still holds the pre-edit
+   * value). The copy id is deterministic over (itemId, winnerRev) — the same derivation the
+   * pull side uses — so a copy already present (our retry, a peer, or the pull fallback) is a
+   * no-op.
+   */
+  private async materializeConflictFromServerItem(losing: WireItem, winnerRev: number): Promise<void> {
+    if (this.account.roleFor(losing.vaultId) === "reader") return; // a reader's push would be denied
+    let losingDoc: ItemDoc;
+    try {
+      losingDoc = this.account.decryptItem(losing);
+    } catch {
+      return; // losing version under a held key (formatVersion too new) — nothing safe to copy
+    }
+    const copyId = await conflictCopyId(losing.itemId, winnerRev);
+    if (this.itemsById.has(copyId)) return; // already materialized
+    const stamp = new Date(losing.updatedAt).toISOString().slice(0, 10);
+    const copyDoc: ItemDoc = { ...losingDoc, name: `${losingDoc.name} (conflict ${stamp})` };
+    await this.push([this.putMutation(copyId, losing.vaultId, copyDoc, 0)]);
   }
 
   // ==== vault lifecycle: sync-time handling (spec 03 §11) ====
@@ -1212,10 +1241,23 @@ export class VaultStore {
 
   private async push(mutations: Mutation[]): Promise<PushResponse> {
     const resp = await this.api.push(mutations);
-    // Apply confirmed revs locally where we can (best-effort; sync() reconciles fully).
+    // PDD-1: on a conflicting PUT the server keeps OUR value live (LWW) and returns the
+    // DISPLACED (losing) version as serverItem. Materialize the conflict copy from THAT here,
+    // synchronously — the pull side only ever sees the winner and would otherwise copy the
+    // wrong (surviving) value (spec 03 §5). Collect first, then materialize, so the loop over
+    // resp.results isn't re-entered by the nested copy push. Guard on op==="put": a DELETE that
+    // loses to a newer edit (edit-beats-delete) ALSO returns conflict+serverItem, but there
+    // serverItem is the SURVIVING winner, not a losing value — copying it would spawn a
+    // spurious duplicate of the still-live item.
+    const opById = new Map(mutations.map((m) => [m.mutationId, m.op]));
+    const displaced: { item: WireItem; winnerRev: number }[] = [];
     for (const r of resp.results) {
       if (r.status === "denied") throw new ApiError(403, "denied", "write denied");
+      if (r.status === "conflict" && opById.get(r.mutationId) === "put" && r.serverItem && r.newItemRev != null) {
+        displaced.push({ item: r.serverItem, winnerRev: r.newItemRev });
+      }
     }
+    for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
     return resp;
   }
 }

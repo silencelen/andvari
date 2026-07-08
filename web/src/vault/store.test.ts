@@ -26,6 +26,8 @@ class FakeApi {
   /** `since` of every sync call — lets tests assert the store's cursor did not move. */
   sinceLog: number[] = [];
   rev = 1;
+  /** PDD-1: arm a one-shot conflict result (carrying the losing serverItem) for an itemId. */
+  conflictOnce = new Map<string, { serverItem: WireItem; newItemRev: number }>();
 
   async sync(since: number): Promise<SyncResponse> {
     this.sinceLog.push(since);
@@ -39,7 +41,17 @@ class FakeApi {
 
   async push(mutations: Mutation[]): Promise<PushResponse> {
     this.pushes.push(mutations);
-    return { rev: ++this.rev, results: mutations.map((m) => ({ mutationId: m.mutationId, status: "applied" as const, newItemRev: 1 })) };
+    return {
+      rev: ++this.rev,
+      results: mutations.map((m) => {
+        const c = this.conflictOnce.get(m.itemId);
+        if (c) {
+          this.conflictOnce.delete(m.itemId);
+          return { mutationId: m.mutationId, status: "conflict" as const, newItemRev: c.newItemRev, serverItem: c.serverItem };
+        }
+        return { mutationId: m.mutationId, status: "applied" as const, newItemRev: 1 };
+      }),
+    };
   }
 
   asClient(): ApiClient {
@@ -232,6 +244,74 @@ describe("VaultStore family sharing (P5)", () => {
     expect(store.get(goodId)?.doc.name).toBe("still fine"); // pull continued past it
     expect(store.list().some((i) => i.itemId === s.itemId)).toBe(false);
     expect(api.pushes.length).toBe(0); // no conflict materialization of an undecryptable item
+  });
+
+  it("push side materializes the conflict copy from the LOSING serverItem, keeping our value live (PDD-1)", async () => {
+    const s = await scenario("writer");
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    // Member holds the shared vault + item (our local base = the future winner).
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+    await store.sync();
+    expect(store.get(s.itemId)?.doc).toEqual(DOC);
+
+    // The DISPLACED (losing) value the server returns on our conflicting push: a different
+    // concurrent edit by another device, encrypted under the shared VK.
+    const losingDoc: ItemDoc = { type: "login", name: "Shared login", login: { username: "fam", password: "THEIRS-lost" } };
+    const losing: WireItem = {
+      ...s.item,
+      rev: 6,
+      updatedAt: 1_690_000_000_000,
+      conflict: false,
+      blob: s.owner.encryptItem(s.vaultId, s.itemId, losingDoc),
+    };
+    api.conflictOnce.set(s.itemId, { serverItem: losing, newItemRev: 9 });
+    const pushesBefore = api.pushes.length;
+
+    // Our edit — the winner. save() pushes it; the server keeps ours live (LWW) and returns
+    // the losing value, so the push side must materialize the copy FROM THE LOSING value.
+    const ourDoc: ItemDoc = { type: "login", name: "Shared login", login: { username: "fam", password: "OURS-wins" } };
+    await store.save(s.itemId, ourDoc);
+
+    // A copy was pushed, keyed by the deterministic id over the WINNER rev (9) — the SAME id
+    // the pull-side fallback uses, so the two converge (spec 03 §5).
+    const copyId = await conflictCopyId(s.itemId, 9);
+    const copyMut = api.pushes.slice(pushesBefore).flat().find((m) => m.itemId === copyId);
+    expect(copyMut, "a conflict copy must be materialized from the losing serverItem").toBeTruthy();
+    expect(copyMut!.baseItemRev).toBe(0); // a fresh item, not a rewrite of the winner
+    // Its content is the LOSING value (their password), dated — NOT ours.
+    const copyDoc = s.member.decryptItem({
+      ...losing,
+      itemId: copyId,
+      conflict: false,
+      formatVersion: copyMut!.item!.formatVersion,
+      blob: copyMut!.item!.blob,
+    }) as ItemDoc & { login: { password: string } };
+    expect(copyDoc.login.password).toBe("THEIRS-lost");
+    expect(copyDoc.name).toMatch(/\(conflict \d{4}-\d\d-\d\d\)$/);
+    // Our value stays live locally (the winner), never overwritten by the copy.
+    expect(store.get(s.itemId)?.doc).toEqual(ourDoc);
+  });
+
+  it("a losing delete (edit-beats-delete) does NOT materialize a spurious copy (PDD-1)", async () => {
+    const s = await scenario("writer");
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+    await store.sync();
+
+    // On a delete that loses to a newer concurrent edit the server returns conflict + serverItem,
+    // but serverItem is the SURVIVING winner, not a displaced value — nothing to preserve.
+    const survivor: WireItem = { ...s.item, rev: 7, conflict: false };
+    api.conflictOnce.set(s.itemId, { serverItem: survivor, newItemRev: 7 });
+    const pushesBefore = api.pushes.length;
+
+    await store.remove(s.itemId);
+
+    // No conflict copy must be pushed (the op was a delete).
+    const copyId = await conflictCopyId(s.itemId, 7);
+    const spurious = api.pushes.slice(pushesBefore).flat().find((m) => m.itemId === copyId);
+    expect(spurious, "a losing delete must not spawn a conflict-copy duplicate").toBeFalsy();
   });
 
   it("purges the vault's items and forgets key + role on removedGrants", async () => {
