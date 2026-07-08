@@ -6,6 +6,7 @@ import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
+import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
@@ -161,4 +162,56 @@ class VirtualClient(val email: String, val password: String, fast: Boolean = tru
 
     fun decItemIn(vaultId: String, vaultKey: ByteArray, itemId: String, blobB64: String): String =
         Envelope.openB64(crypto, vaultKey, blobB64, Ad.item(vaultId, itemId, 1)).decodeToString()
+
+    // ---- vault lifecycle (spec 03 §11): the REAL client-side proof mints + re-wrap ----
+
+    private fun lifecycleKey(vaultKey: ByteArray): ByteArray = LifecycleProof.lifecycleKey(crypto, vaultKey)
+
+    fun mintDeleteProof(vaultId: String, vaultKey: ByteArray, deleteId: String): String =
+        LifecycleProof.delete(crypto, lifecycleKey(vaultKey), vaultId, deleteId)
+
+    fun mintRestoreProof(vaultId: String, vaultKey: ByteArray, deleteId: String): String =
+        LifecycleProof.restore(crypto, lifecycleKey(vaultKey), vaultId, deleteId)
+
+    fun mintOfferProof(vaultId: String, vaultKey: ByteArray, offerId: String, toUserId: String, expiresAt: Long, seq: Long): String =
+        LifecycleProof.offer(crypto, lifecycleKey(vaultKey), vaultId, offerId, toUserId, expiresAt, seq)
+
+    fun mintAcceptProof(vaultId: String, vaultKey: ByteArray, offerId: String, newOwnerUserId: String, seq: Long, wrappedVk: String): String =
+        LifecycleProof.accept(crypto, lifecycleKey(vaultKey), vaultId, offerId, newOwnerUserId, seq, wrappedVk)
+
+    /**
+     * What an OTHER 0.5.0 member does with a delivered lastTransfer (spec 03 §11 / #3): it
+     * only ever receives `wrapHash` (never the new owner's wrappedVk), so it recomputes the
+     * accept-proof domain from wrapHash + its held VK and compares — detecting a server-side
+     * role rewrite or wrap swap. Mirrors LifecycleProof.accept's domain, fed the hash directly.
+     */
+    fun verifyAcceptProofFromWrapHash(
+        vaultId: String, vaultKey: ByteArray, offerId: String, newOwnerUserId: String, seq: Long, wrapHash: String, presented: String,
+    ): Boolean {
+        val domain = "andvari/v1|lifecycle|transfer-accept|$vaultId|$offerId|$newOwnerUserId|$seq|$wrapHash"
+        val expected = Bytes.toB64(crypto.hmacSha256(lifecycleKey(vaultKey), domain.encodeToByteArray()))
+        return LifecycleProof.verify(expected, presented)
+    }
+
+    fun mintRemoveProof(vaultId: String, vaultKey: ByteArray, targetUserId: String, nonce: String): String =
+        LifecycleProof.remove(crypto, lifecycleKey(vaultKey), vaultId, targetUserId, nonce)
+
+    /** What a 0.5.0 member does with a delivered proof: recompute under the held VK and compare. */
+    fun verifyDeleteProof(vaultId: String, vaultKey: ByteArray, deleteId: String, presented: String): Boolean =
+        LifecycleProof.verify(mintDeleteProof(vaultId, vaultKey, deleteId), presented)
+
+    fun verifyRemoveProof(vaultId: String, vaultKey: ByteArray, targetUserId: String, nonce: String, presented: String): Boolean =
+        LifecycleProof.verify(mintRemoveProof(vaultId, vaultKey, targetUserId, nonce), presented)
+
+    /** Transfer-accept re-wrap: the transferee seals the VK under its OWN UVK — the exact
+     *  construction vault creation uses (Ad.vk binds vaultId + this user). */
+    fun wrapVkUnderOwnUvk(vaultId: String, vaultKey: ByteArray): String =
+        Envelope.sealB64(crypto, uvk, vaultKey, Ad.vk(vaultId, userId))
+
+    /** A renamed metaBlob under the same VK/AD (rename, spec 03 §11). */
+    fun sealVaultMeta(vaultId: String, vaultKey: ByteArray, plaintextJson: String): String =
+        Envelope.sealB64(crypto, vaultKey, plaintextJson.encodeToByteArray(), Ad.vaultMeta(vaultId))
+
+    fun openVaultMeta(vaultId: String, vaultKey: ByteArray, metaBlobB64: String): String =
+        Envelope.openB64(crypto, vaultKey, metaBlobB64, Ad.vaultMeta(vaultId)).decodeToString()
 }

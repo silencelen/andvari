@@ -321,19 +321,34 @@ class AuditHardeningTest : P4TestSupport() {
     // ---- LOW-6: per-user in-flight upload cap + quota accounting (drives store() directly:
     // testApplication cannot hold a request body open) ----
 
-    private fun bareStore(maxConcurrent: Int): Pair<AttachmentStore, File> {
+    private fun bareStore(maxConcurrent: Int): Triple<AttachmentStore, Repo, File> {
         val repo = Repo(Db(File(tmpDir, "inflight-${System.nanoTime()}.db").absolutePath))
         val dir = File(tmpDir, "inflight-blobs-${System.nanoTime()}")
-        return AttachmentStore(repo, dir.absolutePath, maxConcurrent) to dir
+        return Triple(AttachmentStore(repo, dir.absolutePath, maxConcurrent), repo, dir)
+    }
+
+    /** store() now re-checks the grant inside its commit tx (spec 03 §11 lifecycle race),
+     *  so bare-store uploads that COMMIT need a minimal user+vault+writer grant seeded. */
+    private fun seedWriteGrant(repo: Repo, userId: String, vaultId: String) {
+        repo.db.tx { c ->
+            c.exec(
+                """INSERT OR IGNORE INTO users(userId,email,displayName,kdfSalt,kdfParams,verifier,wrappedUvk,identityPub,encryptedIdentitySeed,createdAt)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                userId, "$userId@seed.local", "seed", "s", """{"ops":1,"memBytes":8388608}""", "v", "w", "i", "e", now(),
+            )
+            c.exec("INSERT OR IGNORE INTO vaults(vaultId,type,rev,metaBlob,createdAt) VALUES(?, 'shared', 1, 'm', ?)", vaultId, now())
+            c.exec("INSERT OR REPLACE INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES(?,?, 'writer', 'wv', 1)", vaultId, userId)
+        }
     }
 
     @Test
     fun uploadCap_secondConcurrentUploadRejected_capReleasesOnCompletion() {
-        val (store, _) = bareStore(maxConcurrent = 1)
+        val (store, repo, _) = bareStore(maxConcurrent = 1)
         val policy = ClientPolicy()
         runBlocking {
+            val v1 = uuid(); seedWriteGrant(repo, "user-1", v1)
             val ch1 = ByteChannel(autoFlush = true)
-            val first = async(Dispatchers.IO) { runCatching { store.store("user-1", uuid(), uuid(), uuid(), ch1, policy) } }
+            val first = async(Dispatchers.IO) { runCatching { store.store("user-1", uuid(), uuid(), v1, ch1, policy) } }
             ch1.writeFully(ByteArray(Attachments.HEADER_BYTES + 100) { 1 }) // header + some ciphertext, then HOLD open
             delay(250) // let the first store acquire its permit and enter the read loop
 
@@ -346,8 +361,9 @@ class AuditHardeningTest : P4TestSupport() {
             assertTrue(secondAgain.exceptionOrNull() is RateLimited)
 
             // A DIFFERENT user is unaffected (the cap is per-user).
+            val vOther = uuid(); seedWriteGrant(repo, "user-2", vOther)
             val chOther = ByteChannel(autoFlush = true)
-            val other = async(Dispatchers.IO) { runCatching { store.store("user-2", uuid(), uuid(), uuid(), chOther, policy) } }
+            val other = async(Dispatchers.IO) { runCatching { store.store("user-2", uuid(), uuid(), vOther, chOther, policy) } }
             chOther.writeFully(ByteArray(Attachments.HEADER_BYTES + 64) { 2 })
             chOther.flushAndClose()
             assertTrue(other.await().isSuccess, "other user's upload: ${other.await()}")
@@ -355,8 +371,9 @@ class AuditHardeningTest : P4TestSupport() {
             // Completing the first upload releases the permit → a third same-user upload works.
             ch1.flushAndClose()
             assertTrue(first.await().isSuccess, "first upload: ${first.await()}")
+            val v3 = uuid(); seedWriteGrant(repo, "user-1", v3)
             val ch3 = ByteChannel(autoFlush = true)
-            val third = async(Dispatchers.IO) { runCatching { store.store("user-1", uuid(), uuid(), uuid(), ch3, policy) } }
+            val third = async(Dispatchers.IO) { runCatching { store.store("user-1", uuid(), uuid(), v3, ch3, policy) } }
             ch3.writeFully(ByteArray(Attachments.HEADER_BYTES + 64) { 3 })
             ch3.flushAndClose()
             assertTrue(third.await().isSuccess, "cap must release after completion: ${third.await()}")
@@ -365,10 +382,11 @@ class AuditHardeningTest : P4TestSupport() {
 
     @Test
     fun uploadQuota_idempotentReUpload_atQuota_isExempt_not413() {
-        val (store, _) = bareStore(maxConcurrent = 4)
+        val (store, repo, _) = bareStore(maxConcurrent = 4)
         val policy = ClientPolicy(userAttachmentsMaxBytes = 4096)
         runBlocking {
             val userId = "user-r"; val itemId = uuid(); val vaultId = uuid(); val attId = uuid()
+            seedWriteGrant(repo, userId, vaultId)
             // First upload fills most of the tiny quota and commits.
             val body = ByteArray(Attachments.HEADER_BYTES + 3000) { 9 }
             val ch = ByteChannel(autoFlush = true); ch.writeFully(body); ch.flushAndClose()
@@ -386,12 +404,13 @@ class AuditHardeningTest : P4TestSupport() {
 
     @Test
     fun uploadQuota_countsInFlightBytes_beforeCommit() {
-        val (store, dir) = bareStore(maxConcurrent = 4)
+        val (store, repo, dir) = bareStore(maxConcurrent = 4)
         val policy = ClientPolicy(userAttachmentsMaxBytes = 4096) // tiny per-user budget
         runBlocking {
             // First upload streams ~3 KiB and stays OPEN — nothing committed yet.
+            val v1 = uuid(); seedWriteGrant(repo, "user-q", v1)
             val ch1 = ByteChannel(autoFlush = true)
-            val first = async(Dispatchers.IO) { runCatching { store.store("user-q", uuid(), uuid(), uuid(), ch1, policy) } }
+            val first = async(Dispatchers.IO) { runCatching { store.store("user-q", uuid(), uuid(), v1, ch1, policy) } }
             ch1.writeFully(ByteArray(Attachments.HEADER_BYTES + 3072) { 1 })
             delay(250)
 
@@ -408,8 +427,9 @@ class AuditHardeningTest : P4TestSupport() {
             // Draining: finish the first (fits alone); accounting returns; a small upload succeeds.
             ch1.flushAndClose()
             assertTrue(first.await().isSuccess, "first upload: ${first.await()}")
+            val v3 = uuid(); seedWriteGrant(repo, "user-q", v3)
             val ch3 = ByteChannel(autoFlush = true)
-            val third = async(Dispatchers.IO) { runCatching { store.store("user-q", uuid(), uuid(), uuid(), ch3, policy) } }
+            val third = async(Dispatchers.IO) { runCatching { store.store("user-q", uuid(), uuid(), v3, ch3, policy) } }
             ch3.writeFully(ByteArray(Attachments.HEADER_BYTES + 128) { 3 })
             ch3.flushAndClose()
             assertTrue(third.await().isSuccess, "in-flight accounting must drain: ${third.await()}")

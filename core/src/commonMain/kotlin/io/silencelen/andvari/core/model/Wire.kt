@@ -100,6 +100,48 @@ data class WireVault(
     val rev: Long,
     val metaBlob: String,
     val createdAt: Long,
+    // Vault lifecycle (spec 03 §11) — additive; 0.2.x/0.4.0 clients ignore unknown keys.
+    // Present while an ownership-transfer offer is pending / after the last completed one.
+    val pendingTransfer: PendingTransfer? = null,
+    val lastTransfer: TransferRecord? = null,
+    // Restore consumption marker (spec 03 §11 / #4): on a live vault that WAS restored,
+    // the deleteId that was consumed + the restoreProof over it. A client re-receiving the
+    // restored vault verifies restore(VK, vaultId, deleteId) == restoreProof and durably
+    // marks the deleteId consumed, so a later replayed old tombstone bearing it is rejected
+    // as stale even by a device offline across the whole delete→restore cycle.
+    val restoreProof: String? = null,
+    val deleteId: String? = null,
+)
+
+/**
+ * A pending ownership-transfer offer riding the vault row (spec 03 §11). Placing it on
+ * the vault means any cancel/expiry/re-designate clears every stale banner via ordinary
+ * row re-delivery. `proof` is the VK-derived offer MAC — the target's 0.5.0 client
+ * verifies it BEFORE rendering consent; the server only stores and relays it.
+ */
+@Serializable
+data class PendingTransfer(
+    val toUserId: String,
+    val offerId: String,
+    val proof: String,
+    val expiresAt: Long,
+    val seq: Long,
+)
+
+/**
+ * The last completed transfer (spec 03 §11): every member verifies the seq-chained
+ * acceptProof under its held VK. The accept-proof domain binds hexLower(sha256(utf8(the
+ * new owner's wrappedVk))), which other members never receive — so the server relays that
+ * hash here (`wrapHash`) as hashing an opaque ciphertext blob is ZK-safe. It stays
+ * consistent with acceptProof because the self-heal re-mints both together.
+ */
+@Serializable
+data class TransferRecord(
+    val offerId: String,
+    val newOwnerUserId: String,
+    val acceptProof: String,
+    val seq: Long,
+    val wrapHash: String? = null,
 )
 
 @Serializable
@@ -137,6 +179,30 @@ data class SyncResponse(
     val grants: List<WireGrant>,
     val items: List<WireItem>,
     val removedGrants: List<String>,
+    // Additive companion detail for removedGrants (spec 03 §4/§11). removedGrants stays
+    // the sole purge trigger for fielded clients; 0.5.0 clients use this for the
+    // proof-verified notice/holding-area flow. Never the trigger itself.
+    val removedGrantsInfo: List<RemovedGrantInfo> = emptyList(),
+)
+
+/**
+ * Why the caller lost a grant (spec 03 §11). `reason` derives from the caller's OWN
+ * grant's revokedReason: 'removed' | 'left' | 'deleted'. Tombstone fields ride along only
+ * for reason='deleted'; removeProof/removeNonce only for reason='removed' when the removing
+ * owner supplied a removal proof. (restoreProof is NOT delivered here — a revoked grant is
+ * never live at the same instant a restore populates restoreProof; the consumed-deleteId
+ * marker rides WireVault.restoreProof/deleteId on the live restored vault instead — #4.)
+ */
+@Serializable
+data class RemovedGrantInfo(
+    val vaultId: String,
+    val reason: String,
+    val deletedAt: Long? = null,
+    val purgeAt: Long? = null,
+    val deleteId: String? = null,
+    val deleteProof: String? = null,
+    val removeProof: String? = null,
+    val removeNonce: String? = null,
 )
 
 // ---- shared vaults (spec 03 §10) ----
@@ -167,7 +233,48 @@ data class VaultMemberSummary(
     val role: String,
     val identityPub: String,
     val addedAt: Long,
+    // F22 rider (spec 03 §10): account status ('active'|'disabled') — additive; feeds the
+    // transfer target picker and the disabled-member badge.
+    val status: String? = null,
 )
+
+// ---- vault lifecycle (spec 03 §11) ----
+
+@Serializable
+data class VaultDeleteRequest(val deleteId: String, val proof: String)
+
+@Serializable
+data class VaultDeleteResponse(val rev: Long, val purgeAt: Long)
+
+@Serializable
+data class VaultRestoreRequest(val deleteId: String, val proof: String)
+
+/** One in-grace deleted vault of the caller's (owner-only; ciphertext they already owned). */
+@Serializable
+data class DeletedVaultSummary(
+    val vaultId: String,
+    val metaBlob: String,
+    val wrappedVk: String,
+    val deletedAt: Long,
+    val purgeAt: Long,
+    val deleteId: String,
+)
+
+@Serializable
+data class TransferOfferRequest(val toUserId: String, val offerId: String, val expiresAt: Long, val proof: String)
+
+@Serializable
+data class TransferOfferResponse(val rev: Long, val expiresAt: Long)
+
+@Serializable
+data class TransferAcceptRequest(val offerId: String, val wrappedVk: String, val proof: String)
+
+@Serializable
+data class VaultMetaUpdateRequest(val metaBlob: String, val baseVaultRev: Long? = null)
+
+/** Optional removal-proof body for the existing member-remove route (spec 03 §10). */
+@Serializable
+data class VaultMemberRemoveRequest(val proof: String? = null, val nonce: String? = null)
 
 @Serializable
 data class ItemUpload(

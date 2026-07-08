@@ -8,6 +8,7 @@ import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.origin
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.request.contentLength
 import io.ktor.server.request.header
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
@@ -105,6 +106,7 @@ class Services(
     val notifier: Notifier,
     val config: Config,
     val metrics: PrometheusMeterRegistry,
+    val janitor: Janitor,
     val wsTickets: WsTicketStore = WsTicketStore(),
 ) {
     fun metricsScrape(): String = metrics.scrape()
@@ -117,7 +119,8 @@ fun buildServices(config: Config, notifier: Notifier): Services {
     val http = HttpClient(Java)
     val service = Service(repo, config) { userIds, rev -> notifier.notifyRev(userIds, rev) }
     val metrics = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
-    return Services(repo, service, AdminService(repo), HibpRelay(repo, http), notifier, config, metrics)
+    val janitor = Janitor(repo, service.attachments, config) { userIds, rev -> notifier.notifyRev(userIds, rev) }
+    return Services(repo, service, AdminService(repo), HibpRelay(repo, http), notifier, config, metrics, janitor)
 }
 
 private suspend fun ApplicationCall.respondFileContent(file: File) {
@@ -161,6 +164,8 @@ fun Application.andvariModule(services: Services) {
                 is Forbidden -> call.respond(HttpStatusCode.Forbidden, ApiError(cause.reason, "forbidden"))
                 is BadRequest -> call.respond(HttpStatusCode.BadRequest, ApiError(cause.reason, "bad request"))
                 is NotFound -> call.respond(HttpStatusCode.NotFound, ApiError(cause.reason, "not found"))
+                is Conflict -> call.respond(HttpStatusCode.Conflict, ApiError(cause.reason, "conflict"))
+                is Gone -> call.respond(HttpStatusCode.Gone, ApiError(cause.reason, "gone"))
                 is ResyncRequired -> call.respond(HttpStatusCode.Gone, ApiError("resync_required", "cursor predates retained history"))
                 is RateLimited -> call.respond(HttpStatusCode.TooManyRequests, ApiError("rate_limited", "slow down"))
                 is PayloadTooLarge -> call.respond(HttpStatusCode.PayloadTooLarge, ApiError(cause.reason, "quota exceeded"))
@@ -196,6 +201,18 @@ fun Application.andvariModule(services: Services) {
             runCatching { service.attachments.sweepOrphans() }
                 .onFailure { environment.log.warn("attachment GC failed", it) }
             delay(1.hours)
+        }
+    }
+
+    // Lifecycle janitor (spec 03 §11): vault purge + transfer-offer expiry ONLY.
+    // Daily at 04:30 local, plus one delayed on-boot pass (a server down over 04:30
+    // must not defer a due purge a whole day). ANDVARI_JANITOR_DRYRUN → log-only.
+    launch(Dispatchers.IO) {
+        delay(5.minutes)
+        while (true) {
+            runCatching { services.janitor.sweep() }
+                .onFailure { environment.log.warn("lifecycle janitor sweep failed", it) }
+            delay(msUntilNextDaily(4, 30))
         }
     }
 
@@ -360,48 +377,101 @@ fun Application.andvariModule(services: Services) {
         }
 
         // ---- shared vaults (spec 03 §10) — authed, version-checked, owner-managed,
-        // refused on the public break-glass origin (sharing admin is a sit-at-home op). ----
+        // refused on the public break-glass origin (sharing admin is a sit-at-home op).
+        // Every route below shares ONE preamble (sharingPrincipal) so the public-origin
+        // guard can never be silently dropped again (F23). ----
         post("/api/v1/vaults") {
-            val p = requirePrincipal(call, service)
-            enforceVersion(call, service)
-            if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+            val p = sharingPrincipal(config, service)
             if (!limiter.allow("vault_create:${p.userId}", 5, 3_600_000)) throw RateLimited()
             call.respond(HttpStatusCode.Created, service.createSharedVault(p, call.receive(), call.clientIp(config)))
         }
         post("/api/v1/users/lookup") {
-            val p = requirePrincipal(call, service)
-            enforceVersion(call, service)
-            if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+            val p = sharingPrincipal(config, service)
             if (!limiter.allow("lookup:${p.userId}", 20, 60_000)) throw RateLimited()
             call.respond(service.lookupUser(p, call.receive<io.silencelen.andvari.core.model.UserLookupRequest>().email, call.clientIp(config)))
         }
         get("/api/v1/vaults/{vaultId}/members") {
-            val p = requirePrincipal(call, service)
-            enforceVersion(call, service)
+            // F23: this GET had drifted past the public-origin refusal — now it rides the
+            // shared preamble like every other sharing route.
+            val p = sharingPrincipal(config, service)
             call.respond(service.listVaultMembers(p, requireUuid(call.parameters["vaultId"], "vault_id")))
         }
         post("/api/v1/vaults/{vaultId}/members") {
-            val p = requirePrincipal(call, service)
-            enforceVersion(call, service)
-            if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+            val p = sharingPrincipal(config, service)
             val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
             call.respond(HttpStatusCode.Created, service.addVaultMember(p, vaultId, call.receive(), call.clientIp(config)))
         }
         put("/api/v1/vaults/{vaultId}/members/{userId}") {
-            val p = requirePrincipal(call, service)
-            enforceVersion(call, service)
-            if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+            val p = sharingPrincipal(config, service)
             val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
             val userId = requireUuid(call.parameters["userId"], "user_id")
             call.respond(service.setVaultMemberRole(p, vaultId, userId, call.receive<io.silencelen.andvari.core.model.VaultMemberRole>().role, call.clientIp(config)))
         }
         delete("/api/v1/vaults/{vaultId}/members/{userId}") {
-            val p = requirePrincipal(call, service)
-            enforceVersion(call, service)
-            if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+            val p = sharingPrincipal(config, service)
             val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
             val userId = requireUuid(call.parameters["userId"], "user_id")
-            call.respond(service.removeVaultMember(p, vaultId, userId, call.clientIp(config)))
+            // Additive optional removal-proof body (spec 03 §10/§11). Distinguish ABSENT
+            // (no body → proofless removal, the 0.4.0 shape) from PRESENT-but-unparseable
+            // (→ 400 bad_request so the client knows the proof did NOT land and can retry) —
+            // never silently swallow a sent-but-malformed proof (#5).
+            val body = if ((call.request.contentLength() ?: 0L) > 0L) {
+                runCatching { call.receive<io.silencelen.andvari.core.model.VaultMemberRemoveRequest>() }
+                    .getOrElse { throw BadRequest("bad_request") }
+            } else null
+            call.respond(service.removeVaultMember(p, vaultId, userId, call.clientIp(config), body?.proof, body?.nonce))
+        }
+
+        // ---- vault lifecycle (spec 03 §11) — authed, version-checked, refused on the
+        // public break-glass origin, rate-bucketed: vault_destructive (delete, transfer
+        // offer, rename) 10/h vs vault_recovery (restore, cancel, accept, leave) 30/h —
+        // a restore is never blocked by the delete spree it undoes. Idempotency is by
+        // operation identity (deleteId/offerId), enforced in Service. ----
+        post("/api/v1/vaults/{vaultId}/delete") {
+            val p = sharingPrincipal(config, service)
+            if (!limiter.allow("vault_destructive:${p.userId}", 10, 3_600_000)) throw RateLimited()
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            call.respond(service.deleteVault(p, vaultId, call.receive(), call.clientIp(config)))
+        }
+        post("/api/v1/vaults/{vaultId}/restore") {
+            val p = sharingPrincipal(config, service)
+            if (!limiter.allow("vault_recovery:${p.userId}", 30, 3_600_000)) throw RateLimited()
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            call.respond(service.restoreVault(p, vaultId, call.receive(), call.clientIp(config)))
+        }
+        get("/api/v1/vaults/deleted") {
+            val p = sharingPrincipal(config, service)
+            call.respond(service.listDeletedVaults(p))
+        }
+        post("/api/v1/vaults/{vaultId}/leave") {
+            val p = sharingPrincipal(config, service)
+            if (!limiter.allow("vault_recovery:${p.userId}", 30, 3_600_000)) throw RateLimited()
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            call.respond(service.leaveVault(p, vaultId, call.clientIp(config)))
+        }
+        post("/api/v1/vaults/{vaultId}/transfer") {
+            val p = sharingPrincipal(config, service)
+            if (!limiter.allow("vault_destructive:${p.userId}", 10, 3_600_000)) throw RateLimited()
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            call.respond(HttpStatusCode.Created, service.offerTransfer(p, vaultId, call.receive(), call.clientIp(config)))
+        }
+        delete("/api/v1/vaults/{vaultId}/transfer") {
+            val p = sharingPrincipal(config, service)
+            if (!limiter.allow("vault_recovery:${p.userId}", 30, 3_600_000)) throw RateLimited()
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            call.respond(service.cancelTransfer(p, vaultId, call.clientIp(config)))
+        }
+        post("/api/v1/vaults/{vaultId}/transfer/accept") {
+            val p = sharingPrincipal(config, service)
+            if (!limiter.allow("vault_recovery:${p.userId}", 30, 3_600_000)) throw RateLimited()
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            call.respond(service.acceptTransfer(p, vaultId, call.receive(), call.clientIp(config)))
+        }
+        put("/api/v1/vaults/{vaultId}/meta") {
+            val p = sharingPrincipal(config, service)
+            if (!limiter.allow("vault_destructive:${p.userId}", 10, 3_600_000)) throw RateLimited()
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            call.respond(service.updateVaultMeta(p, vaultId, call.receive(), call.clientIp(config)))
         }
 
         // ---- escrow ----
@@ -540,8 +610,31 @@ fun Application.andvariModule(services: Services) {
     }
 }
 
+/** Milliseconds until the next local-time HH:MM (janitor schedule: daily 04:30). */
+internal fun msUntilNextDaily(hour: Int, minute: Int, nowMs: Long = now()): Long {
+    val zone = java.time.ZoneId.systemDefault()
+    val nowZ = java.time.Instant.ofEpochMilli(nowMs).atZone(zone)
+    var next = nowZ.withHour(hour).withMinute(minute).withSecond(0).withNano(0)
+    if (!next.isAfter(nowZ)) next = next.plusDays(1)
+    return java.time.Duration.between(nowZ, next).toMillis()
+}
+
 private suspend fun enforceVersion(call: io.ktor.server.application.ApplicationCall, service: Service) {
     enforceMinVersion(service.policy(), call.clientId())
+}
+
+/**
+ * The single shared preamble for EVERY §10 sharing + §11 lifecycle route (#7): authenticate,
+ * enforce the min-version pin, and refuse the public break-glass origin. Consolidating it into
+ * one call means a future sharing/lifecycle route cannot silently omit the public-origin guard
+ * (the exact copy-paste omission that caused the F23 members-GET drift) — it either calls this
+ * and is guarded, or has no principal at all.
+ */
+private suspend fun RoutingContext.sharingPrincipal(config: Config, service: Service): Principal {
+    val p = requirePrincipal(call, service)
+    enforceVersion(call, service)
+    if (call.isPublicOrigin(config)) throw Forbidden("sharing_public_disabled")
+    return p
 }
 
 private fun requirePrincipal(call: io.ktor.server.application.ApplicationCall, service: Service): Principal {

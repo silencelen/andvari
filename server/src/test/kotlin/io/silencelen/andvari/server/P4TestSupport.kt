@@ -43,12 +43,13 @@ abstract class P4TestSupport {
     protected val bootstrapToken = "p4-bootstrap-token"
     protected val tmpDir: File = Files.createTempDirectory("andvari-p4").toFile()
 
-    protected fun config(publicHostname: String? = null) = Config(
+    protected fun config(publicHostname: String? = null, janitorDryRun: Boolean = false) = Config(
         host = "127.0.0.1", port = 0,
         dbPath = File(tmpDir, "p4-${System.nanoTime()}.db").absolutePath,
         blobDir = File(tmpDir, "blobs-${System.nanoTime()}").absolutePath, webDir = null,
         recoveryPublicKey = recovery.publicKey, recoveryFingerprint = fingerprint,
         enumSecret = ByteArray(32) { 7 }, publicHostname = publicHostname, bootstrapToken = bootstrapToken,
+        janitorDryRun = janitorDryRun,
     )
 
     @AfterTest fun cleanupTmp() { tmpDir.deleteRecursively() }

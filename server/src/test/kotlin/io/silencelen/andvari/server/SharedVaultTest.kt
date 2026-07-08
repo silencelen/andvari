@@ -294,10 +294,12 @@ class SharedVaultTest : P4TestSupport() {
     @Test
     fun migration_v2ToV3_addsNullableSealedVk() {
         val dbFile = File(tmpDir, "v2fixture-${System.nanoTime()}.db")
-        // Hand-build a v2-shaped DB: meta(schemaVersion=2) + the v1 grants table (no sealedVk).
+        // Hand-build a v2-shaped DB: meta(schemaVersion=2) + the v1 grants/vaults tables
+        // (no sealedVk; vaults included because the v4 lifecycle migration ALTERs it too).
         DriverManager.getConnection("jdbc:sqlite:${dbFile.absolutePath}").use { c ->
             c.createStatement().use { st ->
                 st.executeUpdate("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                st.executeUpdate("CREATE TABLE vaults(vaultId TEXT PRIMARY KEY, type TEXT NOT NULL, rev INTEGER NOT NULL, metaBlob TEXT NOT NULL, createdAt INTEGER NOT NULL)")
                 st.executeUpdate(
                     """CREATE TABLE grants(vaultId TEXT NOT NULL, userId TEXT NOT NULL, role TEXT NOT NULL,
                        wrappedVk TEXT NOT NULL, rev INTEGER NOT NULL, revokedAt INTEGER, PRIMARY KEY(vaultId,userId))""",
@@ -307,19 +309,19 @@ class SharedVaultTest : P4TestSupport() {
             }
         }
 
-        // Opening through Db() runs the v3 migration on the live-shaped DB.
+        // Opening through Db() runs the v3 (and then v4 lifecycle) migration chain.
         Db(dbFile.absolutePath).use { db ->
             val (version, sealed) = db.read { c ->
                 val v = c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) }
                 val s = c.queryOne("SELECT sealedVk FROM grants WHERE userId='u'") { rs -> rs.getString(1) }
                 v to s
             }
-            assertEquals("3", version)
+            assertEquals("4", version)
             assertNull(sealed, "the pre-existing v2 grant reads back sealedVk=NULL")
         }
-        // Re-opening is idempotent (already v3 — the ALTER does not re-run).
+        // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("3", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("4", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }
