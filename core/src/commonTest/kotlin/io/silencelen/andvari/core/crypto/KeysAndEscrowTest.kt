@@ -83,6 +83,20 @@ class KeysAndEscrowTest {
     }
 
     @Test
+    fun shortFormMatchesTolueratesSeparatorsAndRejectsWrong() {
+        val full = "a4960ab45c42dea4" + "f".repeat(48) // 64 hex; short form = first 16
+        // Exact, spaced, grouped, and uppercase transcriptions of the FIRST 16 all match.
+        assertTrue(Escrow.shortFormMatches("a4960ab45c42dea4", full))
+        assertTrue(Escrow.shortFormMatches("a496 0ab4 5c42 dea4", full))
+        assertTrue(Escrow.shortFormMatches("A4:96:0A:B4:5C:42:DE:A4", full))
+        // Wrong, too short, too long, and empty all reject (16 hex chars, exact prefix).
+        assertFalse(Escrow.shortFormMatches("a4960ab45c42dea5", full)) // last char off
+        assertFalse(Escrow.shortFormMatches("a4960ab45c42dea", full)) // 15 chars
+        assertFalse(Escrow.shortFormMatches("a4960ab45c42dea4f", full)) // 17 chars
+        assertFalse(Escrow.shortFormMatches("", full))
+    }
+
+    @Test
     fun seededKeypairIsDeterministic() {
         val a = crypto.boxKeypairFromSeed(ByteArray(32) { 9 })
         val b = crypto.boxKeypairFromSeed(ByteArray(32) { 9 })

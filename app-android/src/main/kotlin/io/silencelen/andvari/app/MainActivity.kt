@@ -43,6 +43,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.CsvImport
+import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
@@ -292,6 +293,47 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
     }
 }
 
+/**
+ * F57: after a recovery-key re-ceremony this account's escrow is sealed to the DEAD key. Offer to
+ * re-seal to the current key — but only after the user TYPES the new recovery fingerprint from
+ * their PRINTED sheet (spec 04 §2(3): we deliberately do NOT display it, so a compromised server
+ * can't win a lazy eyeball-match). The ViewModel binds the fetched pubkey to that verified
+ * fingerprint and refuses on mismatch. Non-blocking: "Later" leaves it for the next unlock.
+ */
+@Composable
+private fun ReSealCard(vm: AndvariViewModel, ui: UiState) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    var entry by rememberSaveable { mutableStateOf("") }
+    val ok = Escrow.shortFormMatches(entry, ui.escrowFingerprint)
+    Card(
+        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            if (!open) {
+                Text(
+                    "Your household's recovery key changed — re-protect this account so it stays recoverable.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { open = true }) { Text("Re-protect →") }
+            } else {
+                Text("Re-protect account", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect. " +
+                        "Your master key never leaves this device except sealed to the recovery key you verify.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(vertical = 6.dp),
+                )
+                Field("First 16 characters from your printed recovery sheet", entry, { entry = it }, mono = true)
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    PrimaryButton("Re-protect account", enabled = ok && !ui.busy, busy = ui.busy) { vm.resealEscrow(entry) }
+                    TextButton(onClick = { open = false }) { Text("Later") }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
     var password by remember { mutableStateOf("") }
@@ -396,6 +438,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                     // user actually looks — the main list — not only on the Sharing screen.
                     LifecycleNoticesBanner(ui.lifecycleNotices, vm::dismissNotice)
                     IncomingTransferCards(vm, ui)
+                    if (ui.escrowStale && ui.escrowFingerprint.isNotEmpty()) ReSealCard(vm, ui)
                     if (ui.needsUpdateCount > 0) {
                         Text(needsUpdateLine(ui.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 4.dp))
                     }

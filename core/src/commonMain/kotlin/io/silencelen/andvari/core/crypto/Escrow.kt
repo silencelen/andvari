@@ -58,4 +58,15 @@ object Escrow {
 
     fun shortFingerprint(crypto: CryptoProvider, publicKey: ByteArray): String =
         fingerprint(crypto, publicKey).take(16)
+
+    /**
+     * spec 04 §2(3): the user TYPES the first 16 hex chars of the org recovery fingerprint from
+     * the PRINTED sheet (the UI must NOT display them first, so a compromised server can't get a
+     * lazy eyeball-match). Separators / whitespace are tolerated; exactly 16 hex chars required.
+     * Mirrors the web `shortFormMatches` for cross-client parity (enrollment + F57 re-seal).
+     */
+    fun shortFormMatches(entry: String, fullFingerprintHex: String): Boolean {
+        val norm = entry.lowercase().filter { it in "0123456789abcdef" }
+        return norm.length == 16 && fullFingerprintHex.lowercase().take(16) == norm
+    }
 }
