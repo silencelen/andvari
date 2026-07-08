@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { ClientPolicy, TotpSetupResponse, TotpStatus } from "../api/types";
 import { backupNudge, readLastExportAt } from "../export/plan";
+import { qrModules } from "../vendor/qrcode-generator";
 import { Account } from "../vault/account";
+import { DevicesCard } from "./Devices";
 import { fmtDate } from "./format";
+import { QrSvg } from "./QrSvg";
 
 interface Props {
   client: ApiClient;
@@ -20,6 +23,7 @@ export function Settings({ client, account, policy, onPasswordChanged }: Props) 
       <BackupCard account={account} />
       <TotpCard client={client} />
       <PasswordCard client={client} account={account} policy={policy} onPasswordChanged={onPasswordChanged} />
+      <DevicesCard />
     </div>
   );
 }
@@ -91,6 +95,9 @@ function TotpCard({ client }: { client: ApiClient }) {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
 
+  // Encode the otpauth URI once per fresh setup — NOT on every confirm-code keystroke.
+  const otpModules = useMemo(() => (setup ? qrModules(setup.otpauthUri, "M") : null), [setup]);
+
   useEffect(() => {
     client.totpStatus().then(setStatus).catch(() => setErr("Could not load TOTP status."));
   }, [client]);
@@ -161,6 +168,14 @@ function TotpCard({ client }: { client: ApiClient }) {
             break-glass/public logins — without it enrolled, this account cannot sign in
             from the public address at all.
           </p>
+          {otpModules && (
+            <div className="field">
+              <QrSvg modules={otpModules} ariaLabel="Two-factor enrollment QR code" />
+              <p className="muted" style={{ marginTop: 6 }}>
+                Scan with an authenticator app (Aegis, Google Authenticator…) — or copy the URI or secret below.
+              </p>
+            </div>
+          )}
           <div className="field">
             <label>otpauth URI</label>
             <div className="secret-row">
