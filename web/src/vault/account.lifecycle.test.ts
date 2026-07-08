@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { toB64 } from "../crypto/bytes";
-import { fingerprint } from "../crypto/escrow";
+import { fromB64, toB64 } from "../crypto/bytes";
+import { fingerprint, openEscrow } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
@@ -31,6 +31,32 @@ async function enroll(email = "a@example.com"): Promise<Account> {
 describe("Account vault-lifecycle crypto (spec 03 §11)", () => {
   beforeAll(async () => {
     await initSodium();
+  });
+
+  it("resealEscrowFor re-seals the SAME UVK to a rotated recovery key, verified against the sheet (F57)", async () => {
+    // Enroll against recovery key #1.
+    const rec1 = boxKeypairFromSeed(randomBytes(32));
+    const fp1 = await fingerprint(rec1.publicKey);
+    const { request, account } = await Account.enroll({
+      inviteToken: "t", email: "u@e.com", displayName: "u", password: "pw",
+      kdfParams: KDF, recoveryPublicKey: rec1.publicKey, recoveryFingerprint: fp1,
+    });
+    // Oracle: the UVK recovered from the ORIGINAL escrow (sealed to key #1).
+    const uvk1 = await openEscrow(rec1.publicKey, rec1.privateKey, fromB64(request.escrow.sealed));
+
+    // Re-ceremony rotates to recovery key #2; the user confirmed fp2 against the new sheet.
+    const rec2 = boxKeypairFromSeed(randomBytes(32));
+    const fp2 = await fingerprint(rec2.publicKey);
+    const upload = await account.resealEscrowFor(toB64(rec2.publicKey), fp2);
+    expect(upload.fingerprint).toBe(fp2);
+    // The re-sealed blob opens with key #2 and yields the SAME UVK (data stays recoverable).
+    const uvk2 = await openEscrow(rec2.publicKey, rec2.privateKey, fromB64(upload.sealed));
+    expect(uvk2.key).toBe(uvk1.key);
+    expect(uvk2.userId).toBe(account.userId);
+
+    // SECURITY: refuse to seal if the fetched pubkey doesn't match the sheet-verified fingerprint —
+    // a hostile server cannot redirect the UVK escrow to an attacker key.
+    await expect(account.resealEscrowFor(toB64(rec2.publicKey), fp1)).rejects.toThrow(/fingerprint/);
   });
 
   it("lifecycleKeyFor derives HKDF(VK, 'andvari/v1|lifecycle') identically for every VK holder", async () => {

@@ -300,7 +300,19 @@ class Service(
 
     fun accountKeys(userId: String): AccountKeys {
         val u = repo.userById(userId) ?: throw Unauthorized()
-        return AccountKeys(u.kdfSalt, u.kdfParams, u.wrappedUvk, u.encryptedIdentitySeed, u.identityPub, config.recoveryFingerprint)
+        return AccountKeys(u.kdfSalt, u.kdfParams, u.wrappedUvk, u.encryptedIdentitySeed, u.identityPub, config.recoveryFingerprint, escrowStale(u.userId))
+    }
+
+    /**
+     * F57: true when the account has an escrow blob sealed to a SUPERSEDED org recovery key (a
+     * re-ceremony rotated the key). Drives the client's re-seal-on-unlock prompt (spec 04 §4).
+     * A missing escrow row is NOT stale (nothing to re-seal), and it's never stale when escrow
+     * is unconfigured.
+     */
+    private fun escrowStale(userId: String): Boolean {
+        if (!config.escrowConfigured) return false
+        val fp = repo.db.read { c -> c.queryOne("SELECT fingerprint FROM escrow WHERE userId=?", userId) { it.getString(1) } }
+        return fp != null && fp != config.recoveryFingerprint
     }
 
     /** Resolve a Bearer access token → Principal (or null). */
@@ -947,7 +959,7 @@ class Service(
 
     private fun IssuedSession.toResponse(u: UserRow, isAdmin: Boolean, mustChange: Boolean) = SessionResponse(
         userId = u.userId, deviceId = deviceId, accessToken = access, refreshToken = refresh,
-        accountKeys = AccountKeys(u.kdfSalt, u.kdfParams, u.wrappedUvk, u.encryptedIdentitySeed, u.identityPub, config.recoveryFingerprint),
+        accountKeys = AccountKeys(u.kdfSalt, u.kdfParams, u.wrappedUvk, u.encryptedIdentitySeed, u.identityPub, config.recoveryFingerprint, escrowStale(u.userId)),
         isAdmin = isAdmin, mustChangePassword = mustChange, totpEnrolled = u.totpSecret != null,
     )
 

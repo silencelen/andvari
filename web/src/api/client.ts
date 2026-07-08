@@ -377,6 +377,12 @@ export class ApiClient {
     return this.raw("PUT", "/api/v1/escrow/self", { sealed, fingerprint });
   }
 
+  // F57: current org recovery PUBLIC key (base64url); the client verifies its fingerprint
+  // against the user-confirmed sheet value before re-sealing escrow to it.
+  recoveryPubkey() {
+    return this.text("GET", "/api/v1/recovery-pubkey");
+  }
+
   // ---- attachments (spec 02 §6: body = 24-byte header ‖ ciphertext chunks) ----
 
   async uploadAttachment(id: string, itemId: string, vaultId: string, body: Uint8Array): Promise<AttachmentMeta> {
@@ -430,6 +436,13 @@ export class ApiClient {
 
   adminDevices(userId: string) {
     return this.json<AdminDeviceSummary[]>("GET", `/api/v1/admin/users/${userId}/devices`);
+  }
+
+  /** F59 recovery step 1 — the user's sealed escrow blob (base64url, text/plain) to carry to
+   *  offline `recovery-cli recover`. Sealed to the org recovery PUBLIC key, so safe to hand
+   *  out. Throws ApiError `no_escrow` (400) if the user never enrolled one. */
+  adminUserEscrow(userId: string) {
+    return this.text("GET", `/api/v1/admin/users/${userId}/escrow`);
   }
 
   adminRevokeDevice(deviceId: string) {

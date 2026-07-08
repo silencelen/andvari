@@ -75,7 +75,7 @@ on the recovered account's next sync like any offline device.
 
 **Account recovery (forgot master password):**
 1. Admin fetches the user's sealed blob (`/admin/users/{id}` → escrow).
-2. Offline: `recovery-cli recover --sealed <blob>` — prompts for sheet seed, opens
+2. Offline: `recovery-cli recover <sealedBlobB64>` (positional arg — matches the CLI) — prompts for sheet seed, opens
    blob, validates internal sha256 + userId, then generates a one-time temp
    password, derives temp salt/params/authKey/wrapKey, re-wraps UVK, and prints an
    upload bundle `{tempAuthKey, tempWrappedUvk, tempKdfSalt, tempKdfParams}`.

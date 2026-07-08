@@ -7,6 +7,7 @@ import io.ktor.client.engine.mock.toByteArray
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.LifecycleProof
@@ -417,6 +418,30 @@ class SyncEngineLifecycleTest {
         val copyId = ConflictCopy.id(crypto, s.itemId, 7L)
         val spurious = s.server.pushes.drop(pushesBefore).flatten().find { it.itemId == copyId }
         assertNull(spurious, "a losing delete must not spawn a conflict-copy duplicate")
+    }
+
+    @Test
+    fun resealEscrowFor_bindsPubkeyToVerifiedFingerprint_andRoundTrips() {
+        // F57: after a recovery-key re-ceremony the client re-seals its UVK to the NEW key.
+        // Enroll against recovery key #1.
+        val rec1 = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
+        val fp1 = Escrow.fingerprint(crypto, rec1.publicKey)
+        val (reg, account) = Account.enroll("inv", "u@e.com", "u", "pw", kdf, rec1.publicKey, fp1, "dev", crypto)
+        // Oracle: the UVK recovered from the ORIGINAL escrow (sealed to key #1).
+        val uvkFrom1 = Escrow.open(crypto, rec1.publicKey, rec1.privateKey, Bytes.fromB64(reg.escrow.sealed))
+
+        // Re-ceremony rotates to recovery key #2. The user confirmed fp2 against the new sheet.
+        val rec2 = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
+        val fp2 = Escrow.fingerprint(crypto, rec2.publicKey)
+        val upload = account.resealEscrowFor(Bytes.toB64(rec2.publicKey), fp2)
+        assertEquals(fp2, upload.fingerprint)
+        // The re-sealed blob opens with key #2 and yields the SAME UVK (data stays recoverable).
+        val uvkFrom2 = Escrow.open(crypto, rec2.publicKey, rec2.privateKey, Bytes.fromB64(upload.sealed))
+        assertEquals(uvkFrom1.key, uvkFrom2.key, "re-sealed escrow must recover the identical UVK")
+
+        // SECURITY: refuse to seal if the fetched pubkey doesn't match the sheet-verified
+        // fingerprint — a hostile server cannot redirect the UVK escrow to an attacker key.
+        assertFailsWith<IllegalArgumentException> { account.resealEscrowFor(Bytes.toB64(rec2.publicKey), fp1) }
     }
 
     // ==== consumed-deleteId recognition ====
