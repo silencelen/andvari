@@ -1,5 +1,6 @@
 import type { AttachmentRef } from "../api/types";
 import type { VaultInfo, VaultItem } from "../vault/store";
+import { isPrivateOrigin } from "../ui/origin";
 import { MAX_TOTAL_ATTACHMENT_PLAINTEXT } from "./export";
 
 /**
@@ -22,33 +23,14 @@ export function exportFilename(kind: "backup" | "csv", date: Date = new Date()):
 // ---- break-glass origin suppression (spec 07 intro — SHOULD, T6/T11 posture) ----
 
 /**
- * Cheapest honest check for "are we on a private origin?". The web client is served
- * same-origin by the andvari server (session.defaultBaseUrl() is ""), so the page
- * origin IS the server origin; the deployment story (spec 05 T6/T11) is: tailnet
- * origin = `*.ts.net` (or a raw Tailscale 100.64/10 address), LAN = RFC1918 /
- * localhost / mDNS-style suffixes — anything else is the public break-glass origin
- * (Cloudflare-fronted), where both export entry points are hidden. This is a UI
- * posture knob, not a security boundary: the break-glass page already holds the
- * decrypted vault; hiding the buttons just avoids advertising bulk-extraction on the
- * least-trusted surface.
+ * Where both export entry points are shown: private origins only — the break-glass
+ * page already holds the decrypted vault; hiding the buttons just avoids advertising
+ * bulk-extraction on the least-trusted surface. Delegates to the shared predicate in
+ * ui/origin.ts (also used by the Settings devices hub); kept under its export-flavored
+ * name so call sites and tests keep reading in export vocabulary.
  */
 export function isExportOriginAllowed(origin: string): boolean {
-  let host: string;
-  try {
-    host = new URL(origin).hostname.toLowerCase();
-  } catch {
-    return false; // unparseable origin — fail toward hiding (SHOULD-level feature)
-  }
-  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1); // IPv6 literal
-  if (host === "localhost" || host === "::1") return true;
-  if (host.endsWith(".ts.net")) return true; // Tailscale MagicDNS (tailnet origin)
-  if (host.endsWith(".local") || host.endsWith(".lan") || host.endsWith(".home.arpa") || host.endsWith(".internal")) return true;
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true; // loopback
-  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true; // RFC1918
-  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true; // RFC1918
-  if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(host)) return true; // RFC1918
-  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(host)) return true; // Tailscale CGNAT 100.64/10
-  return false;
+  return isPrivateOrigin(origin);
 }
 
 // ---- ordering + preflight ----

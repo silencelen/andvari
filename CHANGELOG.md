@@ -40,6 +40,17 @@ fielded 0.4.0/0.2.x clients unaffected, no minVersion pin armed.
 Polish, fixes, and half-wired features across the shipped stack. Landing in reviewed
 batches; entries added as each ships.
 
+- **Two-factor QR + a "get andvari on your devices" hub (v6-QW1, web + server).** Server-TOTP
+  enrollment now renders the `otpauth://` URI as a scannable QR so a family member enrolls by
+  camera instead of hand-copying a 32-character secret (a dependency-free vendored encoder,
+  rendered entirely client-side — nothing new leaves the browser; the copy-URI / copy-secret
+  fallbacks stay). A new Settings section points at every real client — this browser, the
+  devstore Android install (with its own QR), and the Windows installer once the owner
+  publishes it (it reads the `/downloads/manifest.json` the server already serves, showing an
+  honest "not published yet" until then) — and hides those pointers on the public break-glass
+  origin. Server-side, two additive `/metrics` gauges (`andvari_vaults_deleted_pending`,
+  `andvari_vaults_purge_overdue`) expose the Skipti janitor's purge backlog so the
+  design-mandated stalled-purge alert has a series to fire on.
 - **Vault screen chrome (web).** The toolbar no longer overflows — the two export actions
   fold into an "Export ▾" menu (viewport-clamped, keyboard-navigable) so the search box
   keeps its width; the header survives phone widths with Lock always reachable; light-theme

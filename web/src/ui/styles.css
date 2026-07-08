@@ -299,6 +299,20 @@ input.token { font-size: 15px; color: var(--gold-bright); }
 .kv dt { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); align-self: center; }
 .kv dd { margin: 0; word-break: break-word; }
 
+/* ---- QR (scannable surfaces: TOTP enrollment, devices hub) ---- */
+.qr-card {
+  /* Hard-coded white on purpose: scanners need dark modules on a LIGHT quiet zone,
+     so this card ignores the theme in BOTH modes. */
+  background: #fff;
+  border-radius: var(--radius);
+  padding: 12px;
+  width: 100%;
+  max-width: 240px;
+  box-sizing: border-box;
+  margin: 0 0 14px;
+}
+.qr-card svg { display: block; width: 100%; height: auto; }
+
 /* ---- phone widths: keep the appbar on one line with Lock always reachable ---- */
 @media (max-width: 560px) {
   .appbar { padding: 12px 14px; }

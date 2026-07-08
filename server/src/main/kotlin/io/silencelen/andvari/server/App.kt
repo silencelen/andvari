@@ -119,8 +119,39 @@ fun buildServices(config: Config, notifier: Notifier): Services {
     val http = HttpClient(Java)
     val service = Service(repo, config) { userIds, rev -> notifier.notifyRev(userIds, rev) }
     val metrics = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
+    registerPurgeGauges(metrics, db)
     val janitor = Janitor(repo, service.attachments, config) { userIds, rev -> notifier.notifyRev(userIds, rev) }
     return Services(repo, service, AdminService(repo), HibpRelay(repo, http), notifier, config, metrics, janitor)
+}
+
+/** A purge stalled this long past its due time means the janitor is dead — alert-worthy. */
+internal const val PURGE_OVERDUE_MS = 2 * Service.DAY_MS
+
+/**
+ * Purge-visibility gauges (design 2026-07-07 skipti §4 step 6 ops mandate): the ops
+ * alert on stalled purges keys off these two /metrics series (the Grafana rule itself
+ * lives ops-side).
+ *   andvari_vaults_deleted_pending — tombstones awaiting purge (normal during grace)
+ *   andvari_vaults_purge_overdue  — due >2 days ago and still unpurged (janitor stalled)
+ * Scrape-time COUNTs under the Db lock: cheap (vaults is small + idx_vaults_purge) and
+ * safe (the single ReentrantLock serializes with route txs). Micrometer holds gauge
+ * state WEAKLY — `db` is strongly held for the app's lifetime via Services.repo.db, so
+ * these can never silently GC to NaN.
+ */
+private fun registerPurgeGauges(metrics: PrometheusMeterRegistry, db: Db) {
+    metrics.gauge("andvari.vaults.deleted.pending", db) { d ->
+        d.read { c ->
+            c.queryOne("SELECT COUNT(*) FROM vaults WHERE deletedAt IS NOT NULL AND purgedAt IS NULL") { it.getLong(1) } ?: 0L
+        }.toDouble()
+    }
+    metrics.gauge("andvari.vaults.purge.overdue", db) { d ->
+        d.read { c ->
+            c.queryOne(
+                "SELECT COUNT(*) FROM vaults WHERE deletedAt IS NOT NULL AND purgedAt IS NULL AND purgeAt IS NOT NULL AND purgeAt < ?",
+                now() - PURGE_OVERDUE_MS,
+            ) { it.getLong(1) } ?: 0L
+        }.toDouble()
+    }
 }
 
 private suspend fun ApplicationCall.respondFileContent(file: File) {
