@@ -160,6 +160,45 @@ Prioritized; each is additive and back-compatible.
   previous manager — the natural companion to the vault-lifecycle work (people arrive, people
   leave). Do the Chromium-family UI first as a quick win; add adapters incrementally.
 
+## Horizons & cycle doctrine (2026-07-08 brainstorm — the spine behind the queues)
+
+**The organizing gate is the real-secrets migration.** Features are cheap before it and
+risky after it, so the order of everything above is: (1) *before migration* — the recovery
+path must be real and drilled (escrow re-seal F57, the F59 admin button + 2am drill doc,
+native mustChangePassword F58), the public origin hardened (QW-1: F50/F52/F55), the
+password floor raised (F60); (2) *during the 30-day soak* — features that convert mistakes
+into trust: **item history & undelete on the existing `item_versions` data** (the v6
+exploration tournament's 4-of-5-lens convergence; the server already archives every
+overwrite and delete that no client can reach), plus the daily-delight queue
+(cards+save-flow, importers — which are the migration tooling itself, quick-unlock);
+(3) *after* — the compounding security milestones.
+
+**Far horizons, in rough order of when they become real:**
+- **Owner-signed grants** (already under P6) is the "security story complete" milestone —
+  treat it as its own cycle with a Skipti-grade design tournament.
+- **Emergency access / dead-man escrow** ("Arfi" tournament pitch): the 10-year household
+  story. Honest blocker its breaker found: andvari has no out-of-band channel to deliver a
+  veto-window notice — design that channel (likely via household ops, not the ZK server)
+  before the feature.
+- **Passkeys:** store-as-item + extension bridge is the realistic first slice; full
+  WebAuthn custody stays "evaluate". Jumps the queue the moment household sites push
+  passkeys hard.
+- **Post-quantum, narrowly:** the escrow sheets are the decades-lived secret — a PQ-hybrid
+  seal (X25519+ML-KEM) for escrow blobs is the one early PQ investment worth making;
+  everything else waits for libsodium.
+- **Steward panel / self-judging health** (tournament pitch): backup freshness, drill
+  staleness, canary age as green/amber/red in Admin — the F38 lesson generalized.
+  Companion: a generated, printed "household recovery booklet" (paper is the last-resort DR).
+- **Explicit non-goals** (scope discipline): multi-household federation, cloud hosting, HA.
+  One household, one home server, belt-and-suspenders backups — that constraint is why the
+  ZK design stays auditable.
+
+**Cycle doctrine (constitutional):** every cycle ships one *trust* feature, one
+*daily-delight* feature, and one hardening/debt batch from `docs/v6-backlog.md`; wide
+solution spaces get a design tournament; every diff gets the high-effort adversarial
+review before deploy (5-for-5 catching data-loss past green gates); recon re-runs after
+each cycle. Small reviewed batches, additive wire, docs true as you go.
+
 ## Accepted risks (signed off; not P6 work unless revisited)
 
 - **R7** removed shared-vault member keeps decryption capability for ciphertext they held
