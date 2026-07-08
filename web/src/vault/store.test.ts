@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ApiError, type ApiClient } from "../api/client";
-import type { ItemDoc, ItemVersion, ItemVersionsResponse, Mutation, PushResponse, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
+import type { DeletedItem, DeletedItemsResponse, ItemDoc, ItemRestoreResponse, ItemUpload, ItemVersion, ItemVersionsResponse, Mutation, PushResponse, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
 import { concat } from "../crypto/bytes";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
@@ -33,6 +33,18 @@ class FakeApi {
 
   async itemVersions(itemId: string): Promise<ItemVersionsResponse> {
     return { itemId, versions: this.itemVersionsById.get(itemId) ?? [] };
+  }
+
+  /** Item undelete: tombstoned items the server would list + a capture of restore POSTs. */
+  deletedList: DeletedItem[] = [];
+  restored: { itemId: string; upload: ItemUpload }[] = [];
+  async deletedItems(): Promise<DeletedItemsResponse> {
+    return { items: this.deletedList };
+  }
+  async restoreItem(itemId: string, upload: ItemUpload): Promise<ItemRestoreResponse> {
+    this.restored.push({ itemId, upload });
+    this.deletedList = this.deletedList.filter((d) => d.itemId !== itemId); // un-tombstoned
+    return { rev: 999 };
   }
 
   async sync(since: number): Promise<SyncResponse> {
@@ -345,6 +357,38 @@ describe("VaultStore family sharing (P5)", () => {
     await store.save(s.itemId, versions[1]!.doc);
     expect(api.pushes.length).toBeGreaterThan(pushesBefore);
     expect(store.get(s.itemId)?.doc.login?.password).toBe("old-1");
+  });
+
+  it("deletedItems names each tombstone from its last version; restoreDeleted re-encrypts + restores (undelete)", async () => {
+    const s = await scenario("writer");
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    // The item is DELETED — not in the live set; the vault + grant are, so the member holds the VK.
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [], removedGrants: [] });
+    await store.sync();
+
+    // A tombstone whose last value is in the archive (encrypted by the owner under the shared VK).
+    // It HAD an attachment — whose blob was hard-unlinked at delete — so restore must drop the ref.
+    const lastDoc: ItemDoc = {
+      type: "login",
+      name: "Deleted Netflix",
+      login: { username: "fam", password: "p" },
+      attachments: [{ id: "att-1", name: "recovery.txt", size: 10, fileKey: "k" }],
+    };
+    api.deletedList = [{ itemId: s.itemId, vaultId: s.vaultId, deletedAt: 1_690_000_000_000 }];
+    api.itemVersionsById.set(s.itemId, [
+      { rev: 9, blob: s.owner.encryptItem(s.vaultId, s.itemId, lastDoc), formatVersion: 1, archivedAt: 1_690_000_000_000 },
+    ]);
+
+    const trash = await store.deletedItems();
+    expect(trash).toHaveLength(1);
+    expect(trash[0]!.doc?.name).toBe("Deleted Netflix"); // named from its last archived version
+
+    await store.restoreDeleted(s.itemId, s.vaultId, trash[0]!.doc!);
+    expect(api.restored.map((r) => r.itemId)).toEqual([s.itemId]);
+    expect(api.restored[0]!.upload.blob.length).toBeGreaterThan(0); // re-encrypted content POSTed
+    expect(api.restored[0]!.upload.attachmentIds).toEqual([]); // attachment ref dropped — its blob is gone
+    expect(await store.deletedItems()).toHaveLength(0); // restored item leaves the trash
   });
 
   it("purges the vault's items and forgets key + role on removedGrants", async () => {

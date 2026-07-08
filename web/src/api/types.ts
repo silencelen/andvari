@@ -131,6 +131,21 @@ export interface ItemVersionsResponse {
   versions: ItemVersion[];
 }
 
+/** Item undelete: a tombstoned item the user can restore (its name lives in the last version). */
+export interface DeletedItem {
+  itemId: string;
+  vaultId: string;
+  deletedAt: number;
+}
+
+export interface DeletedItemsResponse {
+  items: DeletedItem[];
+}
+
+export interface ItemRestoreResponse {
+  rev: number;
+}
+
 export interface SyncResponse {
   rev: number;
   full: boolean;
