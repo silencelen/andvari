@@ -4,7 +4,9 @@ import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.CreateVaultResponse
+import io.silencelen.andvari.core.model.DeletedItem
 import io.silencelen.andvari.core.model.InviteResponse
+import io.silencelen.andvari.core.model.ItemUpload
 import io.silencelen.andvari.core.model.UserLookupResponse
 import io.silencelen.andvari.core.model.VaultMemberAdd
 import io.silencelen.andvari.core.model.VaultMemberSummary
@@ -347,6 +349,36 @@ class Service(
         val rev = repo.db.read { repo.currentRev(it) }
         if (affectedUsers.isNotEmpty()) onChange(affectedUsers, rev)
         return PushResponse(rev, results)
+    }
+
+    /** Item undelete (feature): the caller's tombstoned items, grant-scoped in SQL. */
+    fun deletedItems(userId: String): List<DeletedItem> = repo.db.read { c -> repo.deletedItemsFor(c, userId) }
+
+    /**
+     * Item undelete (feature): un-tombstone [itemId] with the client's re-encrypted content. A
+     * DEDICATED restore (deleted=0, conflict=0) rather than a plain put: a put over a tombstone is
+     * edit-over-tombstone (conflict=1) and would spawn a spurious conflict copy. Only a writer/owner
+     * of the item's vault, and only a currently-deleted item; notifies members like push does.
+     * Returns the new global rev.
+     */
+    suspend fun restoreItem(principal: Principal, itemId: String, upload: ItemUpload, ip: String?): Long {
+        var affected: Set<String> = emptySet()
+        repo.db.tx { c ->
+            val existing = repo.itemById(c, itemId) ?: throw Forbidden("no_grant") // hidden (spec 03 §8)
+            val role = repo.grantRole(c, principal.userId, existing.vaultId)
+            if (role == null || role == "reader") throw Forbidden("no_grant")
+            if (!existing.deleted) throw BadRequest("item_not_deleted")
+            affected = vaultMemberIds(c, existing.vaultId)
+            val newRev = repo.nextRev(c, "item", itemId, existing.vaultId)
+            c.exec(
+                "UPDATE items SET rev=?, updatedAt=?, deleted=0, conflict=0, formatVersion=?, attachmentIds=?, blob=?, blobSize=? WHERE itemId=?",
+                newRev, now(), upload.formatVersion, encodeIds(upload.attachmentIds), upload.blob, upload.blob.length.toLong(), itemId,
+            )
+            repo.auditOn(c, "item_restore", principal.userId, principal.deviceId, ip, "${existing.vaultId}:$itemId")
+        }
+        val rev = repo.db.read { repo.currentRev(it) }
+        if (affected.isNotEmpty()) onChange(affected, rev)
+        return rev
     }
 
     private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>, filesToUnlink: MutableList<String>, ip: String): MutationResult {
