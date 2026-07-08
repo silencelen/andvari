@@ -1,5 +1,40 @@
 # andvari — changelog
 
+## 0.5.0 — shared-vault lifecycle "Skipti" (2026-07-08)
+
+Owner gripe 1 closed fleet-wide: shared vaults are no longer immortal. Server schema v4
+(live on CT122, migrated with a pre-v4 snapshot), web UI deployed, Android APK
+vc 16260489 on devstore; the desktop app inherits the client protections through the
+shared engine (UI parity rides the future MSI rebuild). All wire changes additive —
+fielded 0.4.0/0.2.x clients unaffected, no minVersion pin armed.
+
+- **Delete a shared vault** (owner): type-the-exact-name confirm with an honest
+  "what this does and doesn't erase" block, optional "Copy items to my Personal vault
+  first…", 7-day grace, then a daily janitor purge that reduces items to permanent
+  ciphertext-free tombstones and wipes every grant's key material.
+- **Restore within grace** — Sharing → Recently deleted; brings the vault back for every
+  member with everything in it, including members' parked offline edits (replayed with
+  their original ids).
+- **Leave a shared vault** (non-owner); owners are told to transfer or delete instead.
+- **Transfer ownership** — two-phase: the owner offers (14-day expiry, one pending max),
+  the recipient sees a consent screen that renders only after the offer proof verifies
+  against the vault's own key, accepts by re-wrapping the vault key under their own
+  account key. The old owner stays on as a writer.
+- **Rename a shared vault** (owner) — name stays ciphertext to the server.
+- **Move / Copy an item between vaults** — copy-leg-first with a positive server
+  confirmation before the source is touched; attachments are re-encrypted under fresh
+  file keys so ciphertext can't be linked across vaults.
+- **Lifecycle proofs (ZK preserved):** every destructive action carries an HMAC minted
+  under a key derived from the vault key, which the server never holds — clients verify
+  removals/deletes/transfers as genuine owner actions; anything unverifiable lands in a
+  local holding area with a warning instead of being silently dropped. The holding area
+  is durable on phones (ciphertext-only at rest).
+- Server hardening that rode along: uniform-403 guard order (no vault-existence oracle),
+  idempotency by operation identity (a stale delete retry can never undo a restore),
+  denied results never cached (parked edits re-apply after restore), removal proofs
+  stored durably, the members list refused on the public break-glass origin, split
+  destructive/recovery rate buckets so a delete spree can't block its own undo.
+
 ## Unreleased — v5 refinement (version pinned by batch B4)
 
 Polish, fixes, and half-wired features across the shipped stack. Landing in reviewed
