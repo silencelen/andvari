@@ -14,6 +14,13 @@ data class VaultItem(
     val doc: ItemDoc,
 )
 
+/** Item history (feature): a decrypted archived version of an item. Plaintext lives only in memory. */
+data class DecryptedItemVersion(
+    val rev: Long,
+    val archivedAt: Long,
+    val doc: ItemDoc,
+)
+
 /**
  * One soft-hidden removed vault in the holding area (spec 03 §11 / design §6): the vault
  * row, the retained grant blob (normative — held ciphertext is dead bytes without it),

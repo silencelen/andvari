@@ -11,6 +11,7 @@ import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.UpgradeRequiredException
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.CsvImport
+import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.Backup
 import io.silencelen.andvari.core.client.BackupAttachmentEntry
 import io.silencelen.andvari.core.client.BackupItem
@@ -112,6 +113,10 @@ class DesktopState(private val scope: CoroutineScope) {
     var escrowStale by mutableStateOf(false)
         private set
     var escrowFingerprint by mutableStateOf("")
+        private set
+    // Item history (feature): decrypted archived versions of the currently-viewed item, loaded on
+    // demand (null = not loaded / loading). Restore a chosen version with saveItem.
+    var itemVersions by mutableStateOf<List<DecryptedItemVersion>?>(null)
         private set
     var totpStatus by mutableStateOf<TotpStatus?>(null)
         private set
@@ -271,8 +276,17 @@ class DesktopState(private val scope: CoroutineScope) {
         busy = false; escrowStale = false; notice = "Account re-protected — your recovery is up to date."
     }
 
-    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList()) =
-        op { engine!!.saveWithUploads(itemId, doc, uploads); refreshItems() }
+    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), onSaved: () -> Unit = {}) =
+        op { engine!!.saveWithUploads(itemId, doc, uploads); refreshItems(); onSaved() }
+
+    /** Item history (feature): load + decrypt the currently-viewed item's archived versions. */
+    fun loadItemVersions(itemId: String, vaultId: String) = op {
+        itemVersions = null
+        itemVersions = engine!!.itemVersions(itemId, vaultId)
+        busy = false
+    }
+
+    fun clearItemVersions() { itemVersions = null }
     fun deleteItem(itemId: String) = op { engine!!.remove(itemId); refreshItems() }
     fun refresh() = op { syncNow(engine!!); refreshItems() }
     fun item(itemId: String): VaultItem? = engine?.item(itemId)
