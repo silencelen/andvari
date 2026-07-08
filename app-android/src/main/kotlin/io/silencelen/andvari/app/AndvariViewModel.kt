@@ -17,15 +17,25 @@ import io.silencelen.andvari.core.client.BackupItem
 import io.silencelen.andvari.core.client.BackupPayload
 import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupVault
+import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.CsvImport
+import io.silencelen.andvari.core.client.DeletedVaultInfo
 import io.silencelen.andvari.core.client.ExportCsv
+import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.InMemoryVaultCache
+import io.silencelen.andvari.core.client.IncomingTransfer
+import io.silencelen.andvari.core.client.ItemChangedException
 import io.silencelen.andvari.core.client.ItemDoc
+import io.silencelen.andvari.core.client.LifecycleNotice
+import io.silencelen.andvari.core.client.MoveGesture
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
+import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.client.sqliteVaultCache
+import io.silencelen.andvari.core.model.PendingTransfer
+import io.silencelen.andvari.core.model.VaultMemberSummary
 import java.io.File
 import java.io.IOException
 import io.silencelen.andvari.core.crypto.Bytes
@@ -48,6 +58,7 @@ sealed interface Screen {
     data object Welcome : Screen
     data class Unlock(val email: String) : Screen
     data object Vault : Screen
+    data object Sharing : Screen
     data object Settings : Screen
     data object AutofillStatus : Screen
 }
@@ -81,6 +92,21 @@ data class UiState(
     val backupResult: BackupResult? = null,
     val csvPreflight: CsvPreflight? = null,
     val lastExportAt: Long = 0,
+    // Vault lifecycle (spec 03 §11) — notices banner, verified incoming ownership offers,
+    // the Sharing screen's members/deleted/held lists, and bulk-copy / move progress.
+    val lifecycleNotices: List<LifecycleNotice> = emptyList(),
+    val incomingTransfers: List<IncomingTransfer> = emptyList(),
+    /** vaultId → current owner displayName (for the consent card), fetched lazily. */
+    val transferOwnerNames: Map<String, String> = emptyMap(),
+    /** Owned shared vaultId → members (drives the transfer target picker). */
+    val sharingMembers: Map<String, List<VaultMemberSummary>> = emptyMap(),
+    val deletedVaults: List<DeletedVaultInfo> = emptyList(),
+    val heldVaults: List<HeldVaultInfo> = emptyList(),
+    /** Bulk "copy items to Personal first" progress + its post-copy note (delete dialog). */
+    val copyProgress: Pair<Int, Int>? = null,
+    val copiedNote: String? = null,
+    /** F19 move/copy attachment re-encryption progress (Detail screen). */
+    val moveProgress: Pair<Int, Int>? = null,
 )
 
 class AndvariViewModel(private val store: SessionStore, private val cacheDir: File) : ViewModel() {
@@ -248,7 +274,28 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     }
 
     private fun fail(t: Throwable) {
-        _ui.value = _ui.value.copy(busy = false, error = t.message ?: "something went wrong")
+        _ui.value = _ui.value.copy(busy = false, error = friendlyError(t))
+    }
+
+    /** §11 friendlyError mappings (mirrors web Sharing.tsx) — lifecycle codes get honest,
+     *  human copy; everything else keeps the raw message the app always showed. */
+    private fun friendlyError(t: Throwable): String {
+        if (t is ApiException) {
+            when (t.code) {
+                "owner_must_transfer_or_delete" -> return "You own this vault, so you can't just leave it — make someone else the owner first, or delete it."
+                "vault_deleted" -> return "This vault was deleted. The owner can restore it for a few more days."
+                "vault_gone" -> return "The restore window has passed — this vault's data has been erased."
+                "vault_state_changed" -> return "This vault changed since you tried that — reload and try again."
+                "transfer_not_pending" -> return "This ownership offer is no longer active."
+                "not_transfer_target" -> return "This ownership offer isn't for you, or it couldn't be verified."
+                "stale_meta" -> return "This vault changed somewhere else — reload and try the rename again."
+                "not_a_member" -> return "They have to be a member of this vault first."
+                "user_inactive" -> return "That account has been disabled — ask your admin to re-enable it first."
+                "not_vault_owner" -> return "Only the vault's owner can do that."
+            }
+            if (t.status == 429) return "Too many requests — please wait a bit and try again."
+        }
+        return t.message ?: "something went wrong"
     }
 
     fun clearError() { _ui.value = _ui.value.copy(error = null) }
@@ -356,6 +403,207 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
 
     fun item(itemId: String): VaultItem? = engine?.item(itemId)
 
+    // ---- vault lifecycle (spec 03 §11): sharing screen + notices + F19 move/copy ----
+
+    /** Vaults whose key we hold (personal first) — pickers, badges, the Sharing screen. */
+    fun vaultInfos(): List<VaultInfo> = engine?.vaultInfos() ?: emptyList()
+
+    /** The pending offer on a vault (owner's "Ownership offer to …" chip), or null. */
+    fun pendingTransferFor(vaultId: String): PendingTransfer? = engine?.pendingTransferFor(vaultId)
+
+    fun dismissNotice(id: String) {
+        engine?.dismissNotice(id)
+        refreshLifecycle()
+    }
+
+    /** Mirror the engine's lifecycle read-surfaces into UI state (cheap in-memory reads),
+     *  and lazily resolve the owner display name behind any verified incoming offer. */
+    private fun refreshLifecycle() {
+        val e = engine ?: return
+        val incoming = e.incomingTransfers()
+        _ui.value = _ui.value.copy(
+            lifecycleNotices = e.notices(),
+            incomingTransfers = incoming,
+            heldVaults = e.heldVaultInfos(),
+        )
+        val missing = incoming.filter { it.vaultId !in _ui.value.transferOwnerNames }
+        if (missing.isNotEmpty()) {
+            val a = api ?: return
+            viewModelScope.launch {
+                val names = _ui.value.transferOwnerNames.toMutableMap()
+                for (t in missing) {
+                    runCatching { a.vaultMembers(t.vaultId).find { it.role == "owner" } }.getOrNull()
+                        ?.let { names[t.vaultId] = it.displayName }
+                }
+                _ui.value = _ui.value.copy(transferOwnerNames = names)
+            }
+        }
+    }
+
+    fun openSharing() {
+        _ui.value = _ui.value.copy(screen = Screen.Sharing, copiedNote = null, copyProgress = null)
+        reloadSharing()
+    }
+
+    fun closeSharing() {
+        _ui.value = _ui.value.copy(screen = Screen.Vault, copiedNote = null, copyProgress = null)
+    }
+
+    /** Fetch the Sharing screen's server-side lists: members per owned shared vault (the
+     *  transfer target picker) and the caller's restorable Recently-deleted vaults. */
+    fun reloadSharing() {
+        val e = engine ?: return
+        refreshLifecycle()
+        val a = api ?: return
+        viewModelScope.launch {
+            val members = mutableMapOf<String, List<VaultMemberSummary>>()
+            for (v in e.vaultInfos().filter { it.type == "shared" && it.role == "owner" }) {
+                runCatching { members[v.vaultId] = a.vaultMembers(v.vaultId) }
+            }
+            val deleted = runCatching { e.listDeleted() }.getOrDefault(emptyList())
+            _ui.value = _ui.value.copy(sharingMembers = members, deletedVaults = deleted)
+        }
+    }
+
+    /** RENAME (owner). stale_meta auto-retries once inside the engine. */
+    fun renameVault(vaultId: String, newName: String) = op {
+        engine!!.renameVault(vaultId, newName)
+        refreshItems(); reloadSharing()
+    }
+
+    /** DELETE (soft, 7d grace). The §11 owner toast lands in [UiState.notice]. */
+    fun deleteVault(vaultId: String, vaultName: String) = op {
+        val purgeAt = engine!!.deleteSharedVault(vaultId)
+        refreshItems(); reloadSharing()
+        _ui.value = _ui.value.copy(
+            notice = "“$vaultName” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Sharing → Recently deleted).",
+        )
+    }
+
+    /** Bulk "Copy items to my Personal vault first…" (F19 rider — copy legs ONLY). */
+    fun copyItemsToPersonal(vaultId: String) {
+        val e = engine ?: return
+        _ui.value = _ui.value.copy(busy = true, error = null, copiedNote = null, copyProgress = 0 to 0)
+        viewModelScope.launch {
+            try {
+                val copied = e.copyAllToPersonal(vaultId) { done, total ->
+                    _ui.value = _ui.value.copy(copyProgress = done to total)
+                }
+                _ui.value = _ui.value.copy(
+                    busy = false, copyProgress = null, items = e.items(),
+                    copiedNote = "Copied $copied ${if (copied == 1) "item" else "items"} to your Personal vault. You can still change your mind — deleting won't remove those copies.",
+                )
+            } catch (t: Throwable) {
+                _ui.value = _ui.value.copy(copyProgress = null)
+                fail(t)
+            }
+        }
+    }
+
+    fun offerTransfer(vaultId: String, toUserId: String) = op {
+        engine!!.offerTransfer(vaultId, toUserId)
+        refreshItems(); reloadSharing()
+    }
+
+    /** Owner cancel or target decline. */
+    fun cancelTransfer(vaultId: String) = op {
+        engine!!.cancelTransfer(vaultId)
+        refreshItems(); reloadSharing()
+    }
+
+    /** Accept an ownership offer — the engine re-verifies the proof before acting. */
+    fun acceptTransfer(vaultId: String) = op {
+        engine!!.acceptTransfer(vaultId)
+        refreshItems(); reloadSharing()
+    }
+
+    fun leaveVault(vaultId: String) = op {
+        engine!!.leaveSharedVault(vaultId)
+        refreshItems(); reloadSharing()
+    }
+
+    fun restoreVault(vaultId: String, deleteId: String) = op {
+        engine!!.restoreSharedVault(vaultId, deleteId)
+        refreshItems(); reloadSharing()
+    }
+
+    fun clearCopiedNote() { _ui.value = _ui.value.copy(copiedNote = null) }
+
+    // F19 gestures memoized per (item|target|mode): a RETRY of a transiently-failed
+    // move/copy reuses the SAME gesture (fresh ids were minted ONCE) so the server's
+    // mutation dedup converges instead of duplicating. Kept ONLY across a failed attempt
+    // of the same UNCHANGED item (#5): a rev change remints (a stale gesture would rebuild
+    // attachments from a stale snapshot), and Cancel/dismiss discards.
+    private val moveGestures = mutableMapOf<String, MoveGesture>()
+
+    // The move/copy picker session lives HERE, not in the composition (#7, same convention
+    // as editorOpen): completion across an Activity recreation must close the picker the
+    // user is actually looking at, never a dead composition-captured callback.
+    var movePickerMode by mutableStateOf<String?>(null) // "move" | "copy"
+        private set
+    var movePickerItemId by mutableStateOf<String?>(null)
+        private set
+
+    fun openMovePicker(itemId: String, mode: String) {
+        movePickerItemId = itemId
+        movePickerMode = mode
+    }
+
+    /** Picker cancel/dismiss: close it and discard the item's memoized gestures (#5). */
+    fun closeMovePicker() {
+        movePickerItemId?.let { id -> moveGestures.keys.filter { it.startsWith("$id|") }.forEach { moveGestures.remove(it) } }
+        movePickerMode = null
+        movePickerItemId = null
+    }
+
+    /** Move (copy + delete source) or copy [itemId] into [targetVaultId] (design §8). */
+    fun moveOrCopyItem(itemId: String, targetVaultId: String, move: Boolean) {
+        val e = engine ?: return
+        val gKey = "$itemId|$targetVaultId|$move"
+        _ui.value = _ui.value.copy(busy = true, error = null, moveProgress = null)
+        viewModelScope.launch {
+            try {
+                val current = e.item(itemId)
+                    ?: throw ApiException(409, "vault_state_changed", "This item is no longer here — it may have been removed or its vault deleted.")
+                // #5: reuse the memo ONLY while the source content is unchanged — a
+                // different rev IS different content (mirror of copyAllToPersonal's memo).
+                val memo = moveGestures[gKey]
+                val g = if (memo != null && memo.sourceRev == current.rev) memo
+                        else e.newMoveGesture(itemId, targetVaultId, move).also { moveGestures[gKey] = it }
+                e.runGesture(g, { done, total -> _ui.value = _ui.value.copy(moveProgress = done to total) })
+                moveGestures.remove(gKey)
+                val target = e.vaultInfos().find { it.vaultId == targetVaultId }?.name ?: "the other vault"
+                // Completion is VM state (#7): close the picker + notice, whatever
+                // composition is alive. A MOVE also empties the detail view via the item
+                // list refresh (the source item is gone).
+                movePickerMode = null
+                movePickerItemId = null
+                refreshItems()
+                _ui.value = _ui.value.copy(moveProgress = null, notice = if (move) "Moved to “$target”." else "Copied to “$target”.")
+            } catch (t: Throwable) {
+                _ui.value = _ui.value.copy(moveProgress = null)
+                when {
+                    t is CopyDeniedException -> {
+                        moveGestures.remove(gKey)
+                        _ui.value = _ui.value.copy(busy = false, error = "You don't have permission to add items to that vault — nothing was moved.")
+                    }
+                    t is ItemChangedException -> {
+                        moveGestures.remove(gKey)
+                        _ui.value = _ui.value.copy(busy = false, error = "This item changed while moving — go back, review it, and try again.")
+                    }
+                    t is ApiException && t.status == 403 -> {
+                        moveGestures.remove(gKey)
+                        fail(t)
+                    }
+                    else -> {
+                        // Transient — KEEP the gesture so Retry replays the same ids.
+                        _ui.value = _ui.value.copy(busy = false, error = "That didn't finish. Press Retry — it won't create a duplicate.")
+                    }
+                }
+            }
+        }
+    }
+
     // ---- inactivity auto-lock + foreground sync cadence (spec 01 §8 / spec 03 §6) ----
 
     /**
@@ -369,7 +617,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         val s = _ui.value
         if (VaultSession.get() == null) {
             // Locked underneath us (autofill gate) — reflect it in the UI.
-            if (s.screen is Screen.Vault || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus) lock()
+            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus) lock()
             return
         }
         if (s.busy || s.importBusy) return
@@ -393,8 +641,10 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             try {
                 syncNow(current.engine)
                 _ui.value = _ui.value.copy(items = current.engine.items(), needsUpdateCount = current.engine.needsUpdateCount(), busy = false)
+                refreshLifecycle() // a background pull may have delivered notices/offers
             } catch (t: Throwable) {
                 _ui.value = _ui.value.copy(busy = false, error = if (t is IOException) _ui.value.error else t.message)
+                refreshLifecycle() // even a denied/park cycle leaves notices to show
             }
         }
     }
@@ -820,10 +1070,16 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         VaultSession.lock()
         pendingBackupRequest = null // a stashed export must not survive a lock (see stash docs)
         closeEditor() // the editor session (and its picked plaintext bytes) dies with the lock
+        moveGestures.clear() // gestures reference the dead engine's item state
+        movePickerMode = null
+        movePickerItemId = null
         _ui.value = _ui.value.copy(
             screen = Screen.Unlock(store.load()?.email ?: ""), items = emptyList(), needsUpdateCount = 0,
             notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
             backupPreflight = null, backupResult = null, csvPreflight = null,
+            lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
+            sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
+            copyProgress = null, copiedNote = null, moveProgress = null,
         )
     }
 
@@ -853,11 +1109,17 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             VaultSession.lock()
             pendingBackupRequest = null // never carry a stashed export into a different account
             closeEditor()
+            moveGestures.clear()
+            movePickerMode = null
+            movePickerItemId = null
             session?.userId?.let { deleteCache(it) }
             store.clear()
             _ui.value = _ui.value.copy(
                 screen = Screen.Welcome, items = emptyList(), needsUpdateCount = 0, busy = false,
                 notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
+                lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
+                sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
+                copyProgress = null, copiedNote = null, moveProgress = null,
             )
         }
     }
@@ -942,10 +1204,12 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
 
     private fun refreshItems() {
         _ui.value = _ui.value.copy(items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null)
+        refreshLifecycle()
     }
 
     private fun toVault() {
         _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null, loginTotpRequired = false)
+        refreshLifecycle()
     }
 
     private fun op(block: suspend () -> Unit) {

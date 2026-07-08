@@ -13,11 +13,6 @@ import io.silencelen.andvari.core.crypto.CryptoProvider
  * byte-for-byte.
  */
 object ConflictCopy {
-    fun id(crypto: CryptoProvider, itemId: String, rev: Long): String {
-        val h = crypto.sha256("conflict|$itemId|$rev".encodeToByteArray()).copyOf(16)
-        h[6] = ((h[6].toInt() and 0x0F) or 0x40).toByte() // version nibble 4
-        h[8] = ((h[8].toInt() and 0x3F) or 0x80).toByte() // variant 10
-        val hex = Bytes.toHexLower(h)
-        return "${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}"
-    }
+    fun id(crypto: CryptoProvider, itemId: String, rev: Long): String =
+        Bytes.uuidV4FromBytes(crypto.sha256("conflict|$itemId|$rev".encodeToByteArray()))
 }

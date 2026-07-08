@@ -43,8 +43,20 @@ object LifecycleProof {
         vaultId: String, offerId: String, newOwnerUserId: String, seq: Long, wrappedVk: String,
     ): String {
         val wrapHash = Bytes.toHexLower(crypto.sha256(wrappedVk.encodeToByteArray()))
-        return mac(crypto, key, "andvari/v1|lifecycle|transfer-accept|$vaultId|$offerId|$newOwnerUserId|$seq|$wrapHash")
+        return acceptFromHash(crypto, key, vaultId, offerId, newOwnerUserId, seq, wrapHash)
     }
+
+    /**
+     * Accept proof from the wrap HASH directly (mirror of web `acceptProofFromHash`): other
+     * members receive only `lastTransfer.wrapHash` (= hexLower(sha256(utf8(wrappedVk)))),
+     * never the new owner's wrappedVk blob, yet must re-verify the seq-chained acceptProof
+     * to trust the ownership flip. Byte-identical domain to [accept] — the accepter passes
+     * its own wrappedVk there.
+     */
+    fun acceptFromHash(
+        crypto: CryptoProvider, key: ByteArray,
+        vaultId: String, offerId: String, newOwnerUserId: String, seq: Long, wrapHash: String,
+    ): String = mac(crypto, key, "andvari/v1|lifecycle|transfer-accept|$vaultId|$offerId|$newOwnerUserId|$seq|$wrapHash")
 
     fun remove(crypto: CryptoProvider, key: ByteArray, vaultId: String, targetUserId: String, nonce: String): String =
         mac(crypto, key, "andvari/v1|lifecycle|remove|$vaultId|$targetUserId|$nonce")

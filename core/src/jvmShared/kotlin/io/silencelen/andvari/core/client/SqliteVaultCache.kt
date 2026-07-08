@@ -39,6 +39,7 @@ class SqliteVaultCache(private val db: SqlBox, private val accountUserId: String
             db.tx {
                 db.exec("DELETE FROM items"); db.exec("DELETE FROM grants"); db.exec("DELETE FROM vaults")
                 db.exec("DELETE FROM queue"); db.exec("DELETE FROM kv")
+                db.exec("DELETE FROM held"); db.exec("DELETE FROM consumed_delete_ids"); db.exec("DELETE FROM transfer_seq")
                 db.exec("INSERT INTO kv(key,value) VALUES('userId',?)", accountUserId)
             }
         }
@@ -69,6 +70,21 @@ class SqliteVaultCache(private val db: SqlBox, private val accountUserId: String
                 )
             }
             db.userVersion = 1
+        }
+        if (db.userVersion == 1) {
+            // v2 (client 0.5.0, spec 03 §11): the durable holding area + replay-protection
+            // state, plus the queue's staged-denied flag (a denied mutation awaiting its
+            // park-vs-genuine verdict from a fresh pull — must survive process death, F21).
+            // `held.json` is a serialized HeldVaultRecord — ciphertext/wire material only
+            // (the decrypted name is deliberately not part of the record), so the spec 02
+            // §8 at-rest surface is unchanged.
+            db.tx {
+                db.exec("CREATE TABLE IF NOT EXISTS held(vaultId TEXT PRIMARY KEY, json TEXT NOT NULL, expungeAt INTEGER NOT NULL)")
+                db.exec("CREATE TABLE IF NOT EXISTS consumed_delete_ids(deleteId TEXT PRIMARY KEY)")
+                db.exec("CREATE TABLE IF NOT EXISTS transfer_seq(vaultId TEXT PRIMARY KEY, seq INTEGER NOT NULL)")
+                db.exec("ALTER TABLE queue ADD COLUMN staged INTEGER NOT NULL DEFAULT 0")
+            }
+            db.userVersion = 2
         }
     }
 
@@ -157,14 +173,16 @@ class SqliteVaultCache(private val db: SqlBox, private val accountUserId: String
     override fun close(): Unit = lock.withLock { db.close() }
 
     override fun enqueue(mutation: Mutation): Unit = lock.withLock {
+        // INSERT OR REPLACE also resets staged=0: a re-enqueue (reinstate replay) returns
+        // the row to the pushable state.
         db.exec(
-            "INSERT OR REPLACE INTO queue(mutationId,vaultId,json) VALUES(?,?,?)",
+            "INSERT OR REPLACE INTO queue(mutationId,vaultId,json,staged) VALUES(?,?,?,0)",
             mutation.mutationId, mutation.vaultId, json.encodeToString(Mutation.serializer(), mutation),
         )
     }
 
     override fun pending(): List<Mutation> = lock.withLock {
-        db.query("SELECT json FROM queue ORDER BY seq") { r ->
+        db.query("SELECT json FROM queue WHERE staged=0 ORDER BY seq") { r ->
             json.decodeFromString(Mutation.serializer(), r.string(0)!!)
         }
     }
@@ -175,6 +193,59 @@ class SqliteVaultCache(private val db: SqlBox, private val accountUserId: String
 
     override fun dropPending(vaultId: String): Unit = lock.withLock {
         db.exec("DELETE FROM queue WHERE vaultId=?", vaultId)
+    }
+
+    override fun markStagedDenied(mutationId: String): Unit = lock.withLock {
+        db.exec("UPDATE queue SET staged=1 WHERE mutationId=?", mutationId)
+    }
+
+    override fun stagedDenied(): List<Mutation> = lock.withLock {
+        db.query("SELECT json FROM queue WHERE staged=1 ORDER BY seq") { r ->
+            json.decodeFromString(Mutation.serializer(), r.string(0)!!)
+        }
+    }
+
+    // ---- vault lifecycle (spec 03 §11) — durable: the holding area's retention promise
+    // and the replay floors must survive process restarts. NOT wiped by [clear] (like the
+    // queue: safety state a 410 resync must not erase).
+
+    override fun putHeld(held: HeldVaultRecord): Unit = lock.withLock {
+        db.exec(
+            "INSERT OR REPLACE INTO held(vaultId,json,expungeAt) VALUES(?,?,?)",
+            held.vault.vaultId, json.encodeToString(HeldVaultRecord.serializer(), held), held.expungeAt,
+        )
+    }
+
+    override fun getHeld(vaultId: String): HeldVaultRecord? = lock.withLock {
+        db.query("SELECT json FROM held WHERE vaultId=?", vaultId) { r ->
+            json.decodeFromString(HeldVaultRecord.serializer(), r.string(0)!!)
+        }.firstOrNull()
+    }
+
+    override fun heldVaults(): List<HeldVaultRecord> = lock.withLock {
+        db.query("SELECT json FROM held") { r ->
+            json.decodeFromString(HeldVaultRecord.serializer(), r.string(0)!!)
+        }
+    }
+
+    override fun removeHeld(vaultId: String): Unit = lock.withLock {
+        db.exec("DELETE FROM held WHERE vaultId=?", vaultId)
+    }
+
+    override fun addConsumedDeleteId(deleteId: String): Unit = lock.withLock {
+        db.exec("INSERT OR REPLACE INTO consumed_delete_ids(deleteId) VALUES(?)", deleteId)
+    }
+
+    override fun isConsumedDeleteId(deleteId: String): Boolean = lock.withLock {
+        db.query("SELECT deleteId FROM consumed_delete_ids WHERE deleteId=?", deleteId) { it.string(0) }.isNotEmpty()
+    }
+
+    override fun lastVerifiedTransferSeq(vaultId: String): Long = lock.withLock {
+        db.query("SELECT seq FROM transfer_seq WHERE vaultId=?", vaultId) { it.long(0) }.firstOrNull() ?: 0L
+    }
+
+    override fun setLastVerifiedTransferSeq(vaultId: String, seq: Long): Unit = lock.withLock {
+        db.exec("INSERT OR REPLACE INTO transfer_seq(vaultId,seq) VALUES(?,?)", vaultId, seq)
     }
 }
 

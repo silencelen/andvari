@@ -243,14 +243,8 @@ class Account private constructor(
             return Account(crypto, userId, uvk, identity.publicKey, identity.privateKey, "", mutableMapOf())
         }
 
-        private fun uuid(crypto: CryptoProvider): String {
-            // RFC 4122 v4 from 16 random bytes.
-            val b = crypto.randomBytes(16)
-            b[6] = ((b[6].toInt() and 0x0F) or 0x40).toByte()
-            b[8] = ((b[8].toInt() and 0x3F) or 0x80).toByte()
-            val h = Bytes.toHexLower(b)
-            return "${h.substring(0, 8)}-${h.substring(8, 12)}-${h.substring(12, 16)}-${h.substring(16, 20)}-${h.substring(20)}"
-        }
+        private fun uuid(crypto: CryptoProvider): String =
+            Bytes.uuidV4FromBytes(crypto.randomBytes(16)) // RFC 4122 v4 from 16 random bytes
     }
 
     /**
@@ -320,6 +314,74 @@ class Account private constructor(
     /** Decrypt a vault's display name from its metaBlob (null when the VK is missing). */
     fun decryptVaultName(vaultId: String, metaBlob: String): String? = runCatching {
         val plain = Envelope.openB64(crypto, vk(vaultId), metaBlob, Ad.vaultMeta(vaultId)).decodeToString()
+        Json.parseToJsonElement(plain).jsonObject["name"]?.jsonPrimitive?.content
+    }.getOrNull()
+
+    // ---- vault lifecycle (spec 03 §11) — narrow accessors, mirrors of web account.ts ----
+
+    /**
+     * The lifecycle key for a vault: `HKDF-SHA-256(VK, "andvari/v1|lifecycle")` — domain-
+     * separated from the AEAD key. Callers mint/verify destructive-op proofs under it; the
+     * VK itself never leaves this class (ZK: proofs are MACs the server can neither mint
+     * nor open).
+     */
+    fun lifecycleKeyFor(vaultId: String): ByteArray =
+        io.silencelen.andvari.core.crypto.LifecycleProof.lifecycleKey(crypto, vk(vaultId))
+
+    /**
+     * Transfer accept (spec 03 §11): the new owner re-wraps the VK it ALREADY holds (via its
+     * sealed member grant) under its OWN UVK — identical construction to vault creation
+     * (`seal(UVK, VK, Ad.vk(vaultId, me))`). Round-trip-verified before returning, so a
+     * garbage wrap that would lock the new owner out never gets posted.
+     */
+    fun buildOwnerWrap(vaultId: String): String {
+        val vk = vk(vaultId)
+        val wrapped = Envelope.sealB64(crypto, uvk, vk, Ad.vk(vaultId, userId))
+        if (!Envelope.openB64(crypto, uvk, wrapped, Ad.vk(vaultId, userId)).contentEquals(vk)) {
+            throw CryptoException("owner wrap failed round-trip verification")
+        }
+        return wrapped
+    }
+
+    /** The full vault-meta plaintext object (spec 02 §4) — `name`, the monotonic `metaV`
+     *  counter, and any unknown fields a future client wrote. Throws if the VK is missing
+     *  or the blob doesn't open. Callers that only need the name use [decryptVaultName]. */
+    fun decryptVaultMeta(vaultId: String, metaBlob: String): JsonObject {
+        val plain = Envelope.openB64(crypto, vk(vaultId), metaBlob, Ad.vaultMeta(vaultId)).decodeToString()
+        return Json.parseToJsonElement(plain).jsonObject
+    }
+
+    /**
+     * Rename (spec 03 §11 / Q6): read-modify-write the metaBlob under the SAME VK/AD —
+     * change ONLY `name`, PRESERVE every unknown field (spec 02 §4), and increment the
+     * monotonic plaintext `metaV` counter (anti-replay). Returns the new metaBlob
+     * (base64url). The name stays E2E ciphertext; the server only ever sees an opaque blob.
+     */
+    fun buildRenameMeta(vaultId: String, metaBlob: String, newName: String): String {
+        val meta = decryptVaultMeta(vaultId, metaBlob)
+        val metaV = (meta["metaV"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+        val next = buildJsonObject {
+            for ((k, v) in meta) if (k != "name" && k != "metaV") put(k, v)
+            put("name", newName)
+            put("metaV", metaV + 1)
+        }
+        return Envelope.sealB64(crypto, vk(vaultId), next.toString().encodeToByteArray(), Ad.vaultMeta(vaultId))
+    }
+
+    /**
+     * Decrypt a HELD (revoked) vault's name from its retained grant blob + metaBlob WITHOUT
+     * re-admitting the key to the live key map — the holding area (spec 03 §11) lists
+     * soft-hidden vaults after a restart, but a removed vault must never become writable
+     * again through the display path. Null when the grant/blob doesn't open.
+     */
+    fun peekVaultName(grant: WireGrant, metaBlob: String): String? = runCatching {
+        val sealed = grant.sealedVk
+        val heldVk = if (!sealed.isNullOrEmpty()) {
+            SharedGrant.open(crypto, identityPub, identityPriv, grant.vaultId, Bytes.fromB64(sealed))
+        } else {
+            Envelope.openB64(crypto, uvk, grant.wrappedVk, Ad.vk(grant.vaultId, userId))
+        }
+        val plain = Envelope.openB64(crypto, heldVk, metaBlob, Ad.vaultMeta(grant.vaultId)).decodeToString()
         Json.parseToJsonElement(plain).jsonObject["name"]?.jsonPrimitive?.content
     }.getOrNull()
 
