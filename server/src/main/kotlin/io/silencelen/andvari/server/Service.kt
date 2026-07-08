@@ -19,6 +19,14 @@ import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.TokenPair
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
+import io.silencelen.andvari.core.model.DeletedVaultSummary
+import io.silencelen.andvari.core.model.TransferAcceptRequest
+import io.silencelen.andvari.core.model.TransferOfferRequest
+import io.silencelen.andvari.core.model.TransferOfferResponse
+import io.silencelen.andvari.core.model.VaultDeleteRequest
+import io.silencelen.andvari.core.model.VaultDeleteResponse
+import io.silencelen.andvari.core.model.VaultMetaUpdateRequest
+import io.silencelen.andvari.core.model.VaultRestoreRequest
 import io.silencelen.andvari.core.crypto.Base32
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.KdfParams
@@ -306,10 +314,12 @@ class Service(
     }
 
     // ---- sync ----
-    fun pull(userId: String, since: Long): io.silencelen.andvari.core.model.SyncResponse = repo.db.read { c ->
-        if (since > 0 && since < repo.oldestRetainedRev(c)) throw ResyncRequired()
-        repo.pull(userId, since)
-    }
+    fun pull(userId: String, since: Long): io.silencelen.andvari.core.model.SyncResponse =
+        repo.db.read { c ->
+            if (since > 0 && since < repo.oldestRetainedRev(c)) throw ResyncRequired()
+            // Removal proofs are read durably from the grant row inside repo.pull (spec 03 §11).
+            repo.pull(userId, since)
+        }
 
     suspend fun push(principal: Principal, mutations: List<Mutation>, ip: String): PushResponse {
         if (mutations.size > 200) throw BadRequest("batch_too_large")
@@ -337,7 +347,10 @@ class Service(
         val existing = if (role == null || role == "reader") null else repo.itemById(c, m.itemId)
         val result = if (role == null || role == "reader") {
             // spec 03 §5: a denied write is an intrusion event and MUST be audited.
-            repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, "${m.vaultId}:${m.itemId}")
+            // A push against a tombstoned vault gets the `deleted:` meta prefix
+            // (spec 03 §11) so intrusion review can exclude routine lifecycle fallout.
+            val deletedPrefix = if (role == null && repo.vaultDeletedAt(c, m.vaultId) != null) "deleted:" else ""
+            repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, "$deletedPrefix${m.vaultId}:${m.itemId}")
             MutationResult(m.mutationId, "denied")
         } else if (existing != null && existing.vaultId != m.vaultId) {
             // An item cannot move vaults (its blob AD binds to (vaultId,itemId), spec 02 §2).
@@ -353,10 +366,17 @@ class Service(
                 else -> throw BadRequest("bad_op")
             }
         }
-        c.exec(
-            "INSERT INTO mutations(deviceId,mutationId,resultJson,createdAt) VALUES(?,?,?,?)",
-            principal.deviceId, m.mutationId, json.encodeToString(MutationResult.serializer(), result), now(),
-        )
+        // Dedup cache: NEVER cache a `denied` result (DATA-LOSS #2 / design §4 RESTORE 3).
+        // A denied mutation changed no state, so re-evaluating a replay is idempotent-safe.
+        // Caching it would freeze a parked edit that was denied during a vault's grace
+        // window — after restore the client replays the SAME mutationId and must be allowed
+        // to apply against the now-active grant, not served a stale cached `denied` forever.
+        if (result.status != "denied") {
+            c.exec(
+                "INSERT INTO mutations(deviceId,mutationId,resultJson,createdAt) VALUES(?,?,?,?)",
+                principal.deviceId, m.mutationId, json.encodeToString(MutationResult.serializer(), result), now(),
+            )
+        }
         return result
     }
 
@@ -462,7 +482,7 @@ class Service(
     fun listVaultMembers(p: Principal, vaultId: String): List<VaultMemberSummary> = repo.db.read { c ->
         if (repo.grantRole(c, p.userId, vaultId) == null) throw Forbidden("no_grant") // hidden-as-403
         c.queryAll(
-            """SELECT g.userId, g.role, COALESCE(g.addedAt, 0) AS addedAt, u.email, u.displayName, u.identityPub
+            """SELECT g.userId, g.role, COALESCE(g.addedAt, 0) AS addedAt, u.email, u.displayName, u.identityPub, u.status
                FROM grants g JOIN users u ON u.userId=g.userId
                WHERE g.vaultId=? AND g.revokedAt IS NULL ORDER BY g.rev""",
             vaultId,
@@ -471,6 +491,8 @@ class Service(
                 userId = rs.getString("userId"), email = rs.getString("email"),
                 displayName = rs.getString("displayName"), role = rs.getString("role"),
                 identityPub = rs.getString("identityPub"), addedAt = rs.getLong("addedAt"),
+                // F22 rider (spec 03 §10): disabled badge + transfer target picker input.
+                status = rs.getString("status"),
             )
         }
     }
@@ -493,8 +515,8 @@ class Service(
             val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
             // Insert, or resurrect a previously-revoked row (PRIMARY KEY(vaultId,userId)).
             c.exec(
-                """INSERT INTO grants(vaultId,userId,role,wrappedVk,sealedVk,rev,revokedAt,addedAt) VALUES(?,?,?,'',?,?,NULL,?)
-                   ON CONFLICT(vaultId,userId) DO UPDATE SET role=excluded.role, wrappedVk='', sealedVk=excluded.sealedVk, rev=excluded.rev, revokedAt=NULL, addedAt=excluded.addedAt""",
+                """INSERT INTO grants(vaultId,userId,role,wrappedVk,sealedVk,rev,revokedAt,revokedReason,removeProof,removeNonce,addedAt) VALUES(?,?,?,'',?,?,NULL,NULL,NULL,NULL,?)
+                   ON CONFLICT(vaultId,userId) DO UPDATE SET role=excluded.role, wrappedVk='', sealedVk=excluded.sealedVk, rev=excluded.rev, revokedAt=NULL, revokedReason=NULL, removeProof=NULL, removeNonce=NULL, addedAt=excluded.addedAt""",
                 vaultId, req.userId, req.role, req.sealedVk, grantRev, now(),
             )
             repo.auditOn(c, "vault_member_add", p.userId, p.deviceId, ip, "$vaultId:${req.userId}:${req.role}")
@@ -510,8 +532,13 @@ class Service(
         val (rev, notify) = repo.db.tx { c ->
             requireOwnerOfShared(c, p, vaultId)
             if (repo.grantRole(c, targetUserId, vaultId) == null) throw NotFound("not_a_member")
+            val v = repo.vaultRowById(c, vaultId) ?: throw NotFound("not_a_member")
             val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
             c.exec("UPDATE grants SET role=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL", role, grantRev, vaultId, targetUserId)
+            // Role-changing the pending transfer target cancels the offer (spec 03 §11).
+            if (v.pendingOfferId != null && v.pendingOwnerId == targetUserId) {
+                clearPendingTransfer(c, vaultId, "target_role_changed", p, ip, bumpVaultRev = true)
+            }
             repo.auditOn(c, "vault_member_role", p.userId, p.deviceId, ip, "$vaultId:$targetUserId:$role")
             repo.currentRev(c) to vaultMemberIds(c, vaultId)
         }
@@ -519,16 +546,377 @@ class Service(
         return CreateVaultResponse(rev)
     }
 
-    suspend fun removeVaultMember(p: Principal, vaultId: String, targetUserId: String, ip: String): CreateVaultResponse {
+    suspend fun removeVaultMember(
+        p: Principal,
+        vaultId: String,
+        targetUserId: String,
+        ip: String,
+        // Optional removal proof (spec 03 §10/§11) minted by the removing owner's client;
+        // relayed to the victim via removedGrantsInfo so a 0.5.0 client can verify the
+        // removal was a real owner action. The server cannot verify it (no VK).
+        proof: String? = null,
+        nonce: String? = null,
+    ): CreateVaultResponse {
         if (targetUserId == p.userId) throw BadRequest("cannot_target_self")
+        if (proof != null) requireB64(proof, 64, "proof")
+        if (nonce != null && !UUID_RE.matches(nonce)) throw BadRequest("bad_nonce")
         val (rev, notify) = repo.db.tx { c ->
             requireOwnerOfShared(c, p, vaultId)
             if (repo.grantRole(c, targetUserId, vaultId) == null) throw NotFound("not_a_member")
+            val v = repo.vaultRowById(c, vaultId) ?: throw NotFound("not_a_member")
             val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
-            c.exec("UPDATE grants SET revokedAt=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL", now(), grantRev, vaultId, targetUserId)
-            repo.auditOn(c, "vault_member_remove", p.userId, p.deviceId, ip, "$vaultId:$targetUserId")
+            // Store the removal proof/nonce ON the revoked grant row (durable relay — spec
+            // 03 §3/§5); NULLs when the owner's client sent none (→ victim retain-and-warn).
+            c.exec(
+                "UPDATE grants SET revokedAt=?, revokedReason='member_remove', removeProof=?, removeNonce=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL",
+                now(), proof, nonce, grantRev, vaultId, targetUserId,
+            )
+            // Removing the pending transfer target cancels the offer (spec 03 §11).
+            if (v.pendingOfferId != null && v.pendingOwnerId == targetUserId) {
+                clearPendingTransfer(c, vaultId, "target_removed", p, ip, bumpVaultRev = true)
+            }
+            repo.auditOn(c, "vault_member_remove", p.userId, p.deviceId, ip, "$vaultId:$targetUserId" + if (proof != null) ":proof" else "")
             // Notify the remaining members AND the victim (so the victim's pull delivers removedGrants).
             repo.currentRev(c) to (vaultMemberIds(c, vaultId) + targetUserId)
+        }
+        onChange(notify, rev)
+        return CreateVaultResponse(rev)
+    }
+
+    // ---- vault lifecycle (spec 03 §11; design 2026-07-07 skipti §4) ----
+    //
+    // Guard order everywhere: resolve the CALLER's grant row FIRST (including revoked) —
+    // an outsider gets a uniform 403 regardless of vault existence (no tombstone
+    // existence oracle). Deleted-vault special-case errors go only to grant-holders.
+    // The server stores + relays lifecycle proofs; it can never mint or verify them (ZK).
+
+
+    /** Clears the pending transfer offer. bumpVaultRev re-delivers the vault row so every
+     *  member's stale offer banner clears via ordinary row re-delivery. */
+    private fun clearPendingTransfer(c: Connection, vaultId: String, tag: String, actor: Principal?, ip: String?, bumpVaultRev: Boolean) {
+        repo.clearPendingOffer(c, vaultId, bumpVaultRev)
+        repo.auditOn(c, "vault_transfer_cancel", actor?.userId, actor?.deviceId, ip, "$vaultId:$tag")
+    }
+
+    /**
+     * Soft delete (design §4 DELETE): revoke every active grant (`vault_delete`, key wraps
+     * KEPT for restore), stamp the tombstone, start the grace clock. Idempotent by
+     * operation identity (deleteId); a mismatched deleteId against an already-deleted
+     * vault is a stale retry racing a restore → 409 vault_state_changed, never a fresh delete.
+     */
+    suspend fun deleteVault(p: Principal, vaultId: String, req: VaultDeleteRequest, ip: String): VaultDeleteResponse {
+        if (!UUID_RE.matches(req.deleteId)) throw BadRequest("bad_delete_id")
+        requireB64(req.proof, 64, "proof")
+        val (rev, purgeAt, notify) = repo.db.tx { c ->
+            val g = repo.grantRowAny(c, p.userId, vaultId) ?: throw Forbidden("not_vault_owner")
+            val v = repo.vaultRowById(c, vaultId) ?: throw Forbidden("not_vault_owner")
+            if (v.deletedAt != null) {
+                if (g.role != "owner") throw Forbidden("not_vault_owner")
+                if (req.deleteId == v.deleteId) {
+                    // Replay of the committed op → idempotent 200, no writes, no bell.
+                    return@tx Triple(repo.currentRev(c), v.purgeAt ?: v.deletedAt, emptySet<String>())
+                }
+                throw Conflict("vault_state_changed")
+            }
+            requireOwnerOfShared(c, p, vaultId)
+            // Consumed-deleteId fence (DATA-LOSS #1 / design Q9): restoreVault RETAINS
+            // vaults.deleteId as a consumed marker (alongside restoreProof). A stale delete
+            // retry whose deleteId was already consumed by a restore must NOT fall through
+            // into a FRESH delete — that would silently undo the restore and re-revoke every
+            // member. It gets 409 vault_state_changed. A genuinely new delete carries a fresh
+            // deleteId (≠ retained) and proceeds, overwriting deleteId + clearing restoreProof.
+            if (req.deleteId == v.deleteId && v.restoreProof != null) throw Conflict("vault_state_changed")
+            // Capture the notify set BEFORE any revocation (vaultMemberIds filters revoked —
+            // computing after would yield an empty WS bell set).
+            val members = vaultMemberIds(c, vaultId)
+            if (v.pendingOfferId != null) clearPendingTransfer(c, vaultId, "superseded", p, ip, bumpVaultRev = false)
+            val t = now()
+            val purgeAt = t + config.vaultGraceDays * DAY_MS
+            // Per-member grant rev bumps are what make every member's pull emit
+            // removedGrants at ANY cursor age. revokedAt == deletedAt exactly — restore
+            // resurrects only vault_delete revocations made at the matching instant.
+            for (uid in members) {
+                val gr = repo.nextRev(c, "grant", vaultId, vaultId)
+                c.exec(
+                    "UPDATE grants SET revokedAt=?, revokedReason='vault_delete', rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL",
+                    t, gr, vaultId, uid,
+                )
+            }
+            val vr = repo.nextRev(c, "vault", vaultId, vaultId)
+            c.exec(
+                "UPDATE vaults SET deletedAt=?, purgeAt=?, deletedBy=?, deleteId=?, deleteProof=?, restoreProof=NULL, rev=? WHERE vaultId=?",
+                t, purgeAt, p.userId, req.deleteId, req.proof, vr, vaultId,
+            )
+            repo.auditOn(c, "vault_delete", p.userId, p.deviceId, ip, "$vaultId:members=${members.size}")
+            Triple(repo.currentRev(c), purgeAt, members)
+        }
+        if (notify.isNotEmpty()) onChange(notify, rev)
+        return VaultDeleteResponse(rev, purgeAt)
+    }
+
+    /**
+     * Restore within grace (design §4 RESTORE): un-revoke ONLY grants revoked by THIS
+     * delete (`revokedReason='vault_delete' AND revokedAt=deletedAt` — members removed
+     * before the delete stay removed), clear the tombstone, store the restoreProof
+     * (consumes the deleteId toward clients). Idempotent by deleteId via the stored proof.
+     */
+    suspend fun restoreVault(p: Principal, vaultId: String, req: VaultRestoreRequest, ip: String): CreateVaultResponse {
+        if (!UUID_RE.matches(req.deleteId)) throw BadRequest("bad_delete_id")
+        requireB64(req.proof, 64, "proof")
+        val (rev, notify) = repo.db.tx { c ->
+            val g = repo.grantRowAny(c, p.userId, vaultId) ?: throw Forbidden("not_vault_owner")
+            if (g.role != "owner") throw Forbidden("not_vault_owner")
+            val v = repo.vaultRowById(c, vaultId) ?: throw Forbidden("not_vault_owner")
+            if (v.deletedAt == null) {
+                // Live vault: a replay of the restore that already won carries the exact
+                // proof we stored (operation identity — the proof binds the deleteId).
+                if (v.restoreProof != null && v.restoreProof == req.proof) {
+                    return@tx repo.currentRev(c) to emptySet<String>()
+                }
+                throw Conflict("vault_state_changed")
+            }
+            if (v.purgedAt != null) throw Gone("vault_gone")
+            if (req.deleteId != v.deleteId) throw Conflict("vault_state_changed")
+            val resurrect = c.queryAll(
+                "SELECT userId FROM grants WHERE vaultId=? AND revokedReason='vault_delete' AND revokedAt=?",
+                vaultId, v.deletedAt,
+            ) { it.getString(1) }
+            for (uid in resurrect) {
+                val gr = repo.nextRev(c, "grant", vaultId, vaultId)
+                c.exec("UPDATE grants SET revokedAt=NULL, revokedReason=NULL, rev=? WHERE vaultId=? AND userId=?", gr, vaultId, uid)
+            }
+            val vr = repo.nextRev(c, "vault", vaultId, vaultId)
+            // RETAIN deleteId (DATA-LOSS #1): it is the consumed-deleteId marker paired with
+            // restoreProof — deleteVault's fence refuses a stale retry bearing it, and the
+            // restored vault row carries deleteId+restoreProof so a client re-receiving it can
+            // verify restore(VK,vaultId,deleteId)==restoreProof and mark the deleteId consumed.
+            // Clear only deletedAt/purgeAt/deleteProof.
+            c.exec(
+                "UPDATE vaults SET deletedAt=NULL, purgeAt=NULL, deleteProof=NULL, restoreProof=?, rev=? WHERE vaultId=?",
+                req.proof, vr, vaultId,
+            )
+            repo.auditOn(c, "vault_restore", p.userId, p.deviceId, ip, "$vaultId:members=${resurrect.size}")
+            repo.currentRev(c) to resurrect.toSet()
+        }
+        if (notify.isNotEmpty()) onChange(notify, rev)
+        return CreateVaultResponse(rev)
+    }
+
+    /** The caller's own in-grace deleted vaults — ciphertext they already owned (ZK-clean). */
+    fun listDeletedVaults(p: Principal): List<DeletedVaultSummary> = repo.db.read { c ->
+        c.queryAll(
+            """SELECT v.vaultId, v.metaBlob, g.wrappedVk, v.deletedAt, v.purgeAt, v.deleteId
+               FROM vaults v JOIN grants g ON g.vaultId=v.vaultId
+               WHERE g.userId=? AND g.role='owner' AND v.deletedAt IS NOT NULL AND v.purgedAt IS NULL
+               ORDER BY v.deletedAt DESC""",
+            p.userId,
+        ) { rs ->
+            DeletedVaultSummary(
+                vaultId = rs.getString(1), metaBlob = rs.getString(2), wrappedVk = rs.getString(3),
+                deletedAt = rs.getLong(4), purgeAt = rs.getLong(5), deleteId = rs.getString(6),
+            )
+        }
+    }
+
+    /**
+     * Self-removal (design §4 LEAVE): byte-identical revocation to owner removal with
+     * `revokedReason='member_leave'`; keys kept so a re-add resurrects. Owner cannot leave.
+     * Idempotent by reason.
+     */
+    suspend fun leaveVault(p: Principal, vaultId: String, ip: String): CreateVaultResponse {
+        val (rev, notify, changed) = repo.db.tx { c ->
+            val g = repo.grantRowAny(c, p.userId, vaultId) ?: throw Forbidden("no_grant")
+            if (g.revokedAt != null) {
+                when (g.revokedReason) {
+                    "member_leave" -> return@tx Triple(repo.currentRev(c), emptySet<String>(), false) // idempotent retry
+                    // Deleted-vault special case only for grant-holders; re-revoking would
+                    // clobber revokedAt/revokedReason and break restore matching.
+                    "vault_delete" -> throw Conflict("vault_deleted")
+                    else -> throw Forbidden("no_grant") // removed member = outsider now
+                }
+            }
+            if (g.role == "owner") throw BadRequest("owner_must_transfer_or_delete")
+            val v = repo.vaultRowById(c, vaultId) ?: throw Forbidden("no_grant")
+            // Pre-capture: remaining members + the leaver (their own pull delivers removedGrants).
+            val members = vaultMemberIds(c, vaultId)
+            val gr = repo.nextRev(c, "grant", vaultId, vaultId)
+            c.exec(
+                "UPDATE grants SET revokedAt=?, revokedReason='member_leave', rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL",
+                now(), gr, vaultId, p.userId,
+            )
+            // Leaving while pending-transfer-target auto-cancels the offer (spec 03 §11).
+            if (v.pendingOfferId != null && v.pendingOwnerId == p.userId) {
+                clearPendingTransfer(c, vaultId, "target_left", p, ip, bumpVaultRev = true)
+            }
+            repo.auditOn(c, "vault_member_leave", p.userId, p.deviceId, ip, "$vaultId:${p.userId}")
+            Triple(repo.currentRev(c), members, true)
+        }
+        if (changed) onChange(notify, rev)
+        return CreateVaultResponse(rev)
+    }
+
+    /**
+     * Transfer offer (design §4 TRANSFER 1): a proof-bound, inert vault-row annotation.
+     * seq = transferSeq+1 (transferSeq advances only at accept). One pending max — an
+     * overwrite audits a cancel first.
+     */
+    suspend fun offerTransfer(p: Principal, vaultId: String, req: TransferOfferRequest, ip: String): TransferOfferResponse {
+        if (!UUID_RE.matches(req.offerId)) throw BadRequest("bad_offer_id")
+        if (!UUID_RE.matches(req.toUserId)) throw BadRequest("bad_user_id")
+        requireB64(req.proof, 64, "proof")
+        if (req.toUserId == p.userId) throw BadRequest("cannot_target_self")
+        val (rev, notify) = repo.db.tx { c ->
+            val g = repo.grantRowAny(c, p.userId, vaultId) ?: throw Forbidden("not_vault_owner")
+            val v = repo.vaultRowById(c, vaultId) ?: throw Forbidden("not_vault_owner")
+            // Guard order (spec 03 §11 / #6): classify the CALLER's grant FIRST — never the
+            // vault's deletedAt — so an ex-member (removed/left before any delete) gets the
+            // SAME uniform 403 whether the vault is live or in grace (no state-transition
+            // oracle). Only the grant-holder-at-delete owner (vault_delete-revoked) gets the
+            // meaningful vault_deleted special case. An active grant implies a live vault
+            // (delete revokes every grant), so the deletedAt belt below is unreachable.
+            if (g.revokedAt != null) {
+                if (g.revokedReason == "vault_delete" && g.role == "owner") throw Conflict("vault_deleted")
+                throw Forbidden("not_vault_owner")
+            }
+            if (g.role != "owner") throw Forbidden("not_vault_owner")
+            if (v.deletedAt != null) throw Conflict("vault_deleted") // belt (unreachable for an active grant)
+            if (v.type != "shared") throw BadRequest("not_shared_vault")
+            val t = now()
+            // The proof binds the exact expiresAt, so the server validates rather than
+            // rewrites: must be in the future and within the configured TTL (+ slack).
+            if (req.expiresAt <= t || req.expiresAt > t + config.transferTtlDays * DAY_MS + 10 * 60_000) throw BadRequest("bad_expiry")
+            val target = repo.grantRowAny(c, req.toUserId, vaultId)
+            if (target == null || target.revokedAt != null) throw NotFound("not_a_member")
+            val status = c.queryOne("SELECT status FROM users WHERE userId=?", req.toUserId) { it.getString(1) }
+            if (status != "active") throw BadRequest("user_inactive")
+            if (v.pendingOfferId != null) clearPendingTransfer(c, vaultId, "superseded", p, ip, bumpVaultRev = false)
+            c.exec(
+                """UPDATE vaults SET pendingOwnerId=?, pendingOfferId=?, pendingOfferProof=?,
+                   pendingOfferExpiresAt=?, pendingOfferSetAt=? WHERE vaultId=?""",
+                req.toUserId, req.offerId, req.proof, req.expiresAt, t, vaultId,
+            )
+            // Vault rev bump → WireVault.pendingTransfer re-delivers to every member.
+            val vr = repo.nextRev(c, "vault", vaultId, vaultId)
+            c.exec("UPDATE vaults SET rev=? WHERE vaultId=?", vr, vaultId)
+            repo.auditOn(c, "vault_transfer_offer", p.userId, p.deviceId, ip, "$vaultId:${req.toUserId}")
+            repo.currentRev(c) to vaultMemberIds(c, vaultId)
+        }
+        onChange(notify, rev)
+        return TransferOfferResponse(rev, req.expiresAt)
+    }
+
+    /** Owner cancel or target decline. Idempotent: no pending → 200 for any active member. */
+    suspend fun cancelTransfer(p: Principal, vaultId: String, ip: String): CreateVaultResponse {
+        val (rev, notify, changed) = repo.db.tx { c ->
+            val g = repo.grantRowAny(c, p.userId, vaultId) ?: throw Forbidden("no_grant")
+            val v = repo.vaultRowById(c, vaultId) ?: throw Forbidden("no_grant")
+            // Guard order (#6): classify the caller's grant FIRST — vault_delete-revoked
+            // grant-holder → vault_deleted; any other revoked caller → uniform 403 no_grant
+            // regardless of vault state. An active grant implies a live vault.
+            if (g.revokedAt != null) {
+                if (g.revokedReason == "vault_delete") throw Conflict("vault_deleted")
+                throw Forbidden("no_grant")
+            }
+            if (v.pendingOfferId == null) return@tx Triple(repo.currentRev(c), emptySet<String>(), false)
+            val isOwner = g.role == "owner"
+            val isTarget = v.pendingOwnerId == p.userId
+            if (!isOwner && !isTarget) throw Forbidden("not_transfer_target")
+            val members = vaultMemberIds(c, vaultId)
+            clearPendingTransfer(c, vaultId, if (isOwner) "owner_cancel" else "target_decline", p, ip, bumpVaultRev = true)
+            Triple(repo.currentRev(c), members, true)
+        }
+        if (changed) onChange(notify, rev)
+        return CreateVaultResponse(rev)
+    }
+
+    /**
+     * Transfer accept (design §4 TRANSFER 3-4): the designated pendingOwnerId flips roles
+     * atomically — old owner → writer (wrappedVk retained, R7-consistent), new owner →
+     * owner with the posted wrappedVk AND their sealedVk RETAINED as fallback key
+     * material (spec 01's exactly-one rule is relaxed here; both are wiped together at
+     * purge). transferSeq advances to the offer's seq. Idempotent retry / owner-of-record
+     * self-heal: the current owner re-posting with offerId == lastTransferOfferId gets its
+     * wrappedVk re-stored (fresh-wrap self-heal, design §4 TRANSFER 5).
+     */
+    suspend fun acceptTransfer(p: Principal, vaultId: String, req: TransferAcceptRequest, ip: String): CreateVaultResponse {
+        if (!UUID_RE.matches(req.offerId)) throw BadRequest("bad_offer_id")
+        requireB64(req.wrappedVk, 1024, "wrapped_vk")
+        requireB64(req.proof, 64, "proof")
+        val (rev, notify) = repo.db.tx { c ->
+            val g = repo.grantRowAny(c, p.userId, vaultId) ?: throw Forbidden("no_grant")
+            val v = repo.vaultRowById(c, vaultId) ?: throw Forbidden("no_grant")
+            // Guard order (#6): classify the caller's grant FIRST — never vault.deletedAt.
+            // A vault_delete-revoked grant-holder → vault_deleted; any other revoked caller →
+            // uniform 403 no_grant regardless of vault state. An active grant implies a live
+            // vault (delete revokes all grants), so the self-heal branch below is delete-safe.
+            if (g.revokedAt != null) {
+                if (g.revokedReason == "vault_delete") throw Conflict("vault_deleted")
+                throw Forbidden("no_grant")
+            }
+            if (g.role == "owner" && v.lastTransferOfferId == req.offerId) {
+                // Owner of record for this offer. A pure lost-response retry (identical
+                // wrappedVk) is truly READ-ONLY — no rev churn (#8). Only a genuine self-heal
+                // (a DIFFERENT wrappedVk, e.g. a cold-start re-wrap that opened via sealedVk)
+                // re-stores the wrap + acceptProof and bumps the revs.
+                if (g.wrappedVk == req.wrappedVk) {
+                    return@tx repo.currentRev(c) to emptySet<String>()
+                }
+                val gr = repo.nextRev(c, "grant", vaultId, vaultId)
+                c.exec("UPDATE grants SET wrappedVk=?, rev=? WHERE vaultId=? AND userId=?", req.wrappedVk, gr, vaultId, p.userId)
+                val vr = repo.nextRev(c, "vault", vaultId, vaultId)
+                c.exec("UPDATE vaults SET lastTransferAcceptProof=?, rev=? WHERE vaultId=?", req.proof, vr, vaultId)
+                repo.auditOn(c, "vault_transfer_accept", p.userId, p.deviceId, ip, "$vaultId:rewrap:${p.userId}")
+                return@tx repo.currentRev(c) to vaultMemberIds(c, vaultId)
+            }
+            // In-tx re-checks (design §4 matrix: accept-vs-cancel/expire/delete).
+            if (v.pendingOfferId == null || v.pendingOfferId != req.offerId) throw Conflict("transfer_not_pending")
+            if (v.pendingOwnerId != p.userId) throw Forbidden("not_transfer_target")
+            if ((v.pendingOfferExpiresAt ?: 0L) <= now()) throw Conflict("transfer_not_pending")
+            // (g.revokedAt is already screened at the top — g is active here.)
+            // Belt (design §4 TRANSFER 2): a grant re-created AFTER the offer was set must
+            // not inherit the offer (remove → re-add → forgotten-banner seizure).
+            if ((g.addedAt ?: 0L) > (v.pendingOfferSetAt ?: Long.MAX_VALUE)) throw Conflict("transfer_not_pending")
+            val oldOwner = c.queryOne(
+                "SELECT userId FROM grants WHERE vaultId=? AND role='owner' AND revokedAt IS NULL", vaultId,
+            ) { it.getString(1) } ?: throw Conflict("transfer_not_pending")
+            val seq = v.transferSeq + 1
+            val gr1 = repo.nextRev(c, "grant", vaultId, vaultId)
+            c.exec("UPDATE grants SET role='writer', rev=? WHERE vaultId=? AND userId=?", gr1, vaultId, oldOwner)
+            val gr2 = repo.nextRev(c, "grant", vaultId, vaultId)
+            // sealedVk deliberately RETAINED on the new owner's grant (keyless-owner fallback).
+            c.exec("UPDATE grants SET role='owner', wrappedVk=?, rev=? WHERE vaultId=? AND userId=?", req.wrappedVk, gr2, vaultId, p.userId)
+            val vr = repo.nextRev(c, "vault", vaultId, vaultId)
+            c.exec(
+                """UPDATE vaults SET transferSeq=?, lastTransferOfferId=?, lastTransferAcceptProof=?,
+                   pendingOwnerId=NULL, pendingOfferId=NULL, pendingOfferProof=NULL,
+                   pendingOfferExpiresAt=NULL, pendingOfferSetAt=NULL, rev=? WHERE vaultId=?""",
+                seq, req.offerId, req.proof, vr, vaultId,
+            )
+            repo.auditOn(c, "vault_transfer_accept", p.userId, p.deviceId, ip, "$vaultId:$oldOwner:${p.userId}")
+            repo.currentRev(c) to vaultMemberIds(c, vaultId)
+        }
+        onChange(notify, rev)
+        return CreateVaultResponse(rev)
+    }
+
+    /**
+     * Rename (design §4 RENAME): the owner's client read-modify-writes the metaBlob
+     * (ciphertext — the server audits ids only). Optional baseVaultRev stale-write guard.
+     * Active-owner-first guard: rename against a deleted vault hits the revoked grant →
+     * 403 (design §4 matrix: rename-vs-delete).
+     */
+    suspend fun updateVaultMeta(p: Principal, vaultId: String, req: VaultMetaUpdateRequest, ip: String): CreateVaultResponse {
+        requireB64(req.metaBlob, 4096, "meta_blob")
+        val (rev, notify) = repo.db.tx { c ->
+            requireOwnerOfShared(c, p, vaultId)
+            val v = repo.vaultRowById(c, vaultId) ?: throw Forbidden("not_vault_owner")
+            if (v.deletedAt != null) throw Conflict("vault_deleted") // belt; delete revokes the owner grant
+            val base = req.baseVaultRev
+            if (base != null && base < v.rev) throw Conflict("stale_meta")
+            val vr = repo.nextRev(c, "vault", vaultId, vaultId)
+            c.exec("UPDATE vaults SET metaBlob=?, rev=? WHERE vaultId=?", req.metaBlob, vr, vaultId)
+            repo.auditOn(c, "vault_rename", p.userId, p.deviceId, ip, vaultId)
+            repo.currentRev(c) to vaultMemberIds(c, vaultId)
         }
         onChange(notify, rev)
         return CreateVaultResponse(rev)
@@ -567,5 +955,6 @@ class Service(
         // A fixed valid argon2id string so unknown-user logins spend the same CPU (timing).
         val DUMMY_VERIFIER: String = ServerCrypto.hashVerifier("andvari-dummy-authkey")
         private val UUID_RE = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        internal const val DAY_MS = 24L * 3600 * 1000
     }
 }

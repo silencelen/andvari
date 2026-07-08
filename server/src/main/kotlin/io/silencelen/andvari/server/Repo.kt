@@ -1,13 +1,18 @@
 package io.silencelen.andvari.server
 
+import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.model.AuditEvent
+import io.silencelen.andvari.core.model.PendingTransfer
+import io.silencelen.andvari.core.model.RemovedGrantInfo
+import io.silencelen.andvari.core.model.TransferRecord
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
 import io.silencelen.andvari.core.model.WireVault
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
+import java.security.MessageDigest
 import java.sql.Connection
 import java.sql.PreparedStatement
 import java.sql.ResultSet
@@ -21,6 +26,11 @@ fun encodeParams(p: KdfParams): String = json.encodeToString(KdfParams.serialize
 fun decodeParams(text: String): KdfParams = json.decodeFromString(KdfParams.serializer(), text)
 
 fun now(): Long = System.currentTimeMillis()
+
+/** hexLower(sha256(utf8(s))) — the accept-proof wrap binding (spec 03 §11); matches
+ *  LifecycleProof.accept's `Bytes.toHexLower(crypto.sha256(wrappedVk.encodeToByteArray()))`. */
+fun sha256HexUtf8(s: String): String =
+    Bytes.toHexLower(MessageDigest.getInstance("SHA-256").digest(s.encodeToByteArray()))
 
 // ---- tiny JDBC helpers ----
 
@@ -118,6 +128,81 @@ private fun sessionRow(rs: ResultSet) = SessionRow(
     revokedAt = rs.getLong("revokedAt").let { if (rs.wasNull()) null else it },
 )
 
+/** Full vault row incl. the v4 lifecycle/transfer columns (spec 02 §4). */
+class VaultRow(
+    val vaultId: String,
+    val type: String,
+    val rev: Long,
+    val metaBlob: String,
+    val createdAt: Long,
+    val deletedAt: Long?,
+    val purgeAt: Long?,
+    val purgedAt: Long?,
+    val deletedBy: String?,
+    val deleteId: String?,
+    val deleteProof: String?,
+    val restoreProof: String?,
+    val transferSeq: Long,
+    val pendingOwnerId: String?,
+    val pendingOfferId: String?,
+    val pendingOfferProof: String?,
+    val pendingOfferExpiresAt: Long?,
+    val pendingOfferSetAt: Long?,
+    val lastTransferOfferId: String?,
+    val lastTransferAcceptProof: String?,
+)
+
+private fun ResultSet.longOrNull(col: String): Long? = getLong(col).let { if (wasNull()) null else it }
+
+fun vaultRow(rs: ResultSet) = VaultRow(
+    vaultId = rs.getString("vaultId"),
+    type = rs.getString("type"),
+    rev = rs.getLong("rev"),
+    metaBlob = rs.getString("metaBlob"),
+    createdAt = rs.getLong("createdAt"),
+    deletedAt = rs.longOrNull("deletedAt"),
+    purgeAt = rs.longOrNull("purgeAt"),
+    purgedAt = rs.longOrNull("purgedAt"),
+    deletedBy = rs.getString("deletedBy"),
+    deleteId = rs.getString("deleteId"),
+    deleteProof = rs.getString("deleteProof"),
+    restoreProof = rs.getString("restoreProof"),
+    transferSeq = rs.getLong("transferSeq"),
+    pendingOwnerId = rs.getString("pendingOwnerId"),
+    pendingOfferId = rs.getString("pendingOfferId"),
+    pendingOfferProof = rs.getString("pendingOfferProof"),
+    pendingOfferExpiresAt = rs.longOrNull("pendingOfferExpiresAt"),
+    pendingOfferSetAt = rs.longOrNull("pendingOfferSetAt"),
+    lastTransferOfferId = rs.getString("lastTransferOfferId"),
+    lastTransferAcceptProof = rs.getString("lastTransferAcceptProof"),
+)
+
+/** A grant row INCLUDING revoked state — the lifecycle guard-order primitive (spec 03 §11):
+ *  resolve the caller's grant FIRST so outsiders get a uniform 403 with no existence oracle. */
+class GrantRowFull(
+    val vaultId: String,
+    val userId: String,
+    val role: String,
+    val wrappedVk: String,
+    val sealedVk: String?,
+    val rev: Long,
+    val revokedAt: Long?,
+    val revokedReason: String?,
+    val addedAt: Long?,
+)
+
+fun grantRowFull(rs: ResultSet) = GrantRowFull(
+    vaultId = rs.getString("vaultId"),
+    userId = rs.getString("userId"),
+    role = rs.getString("role"),
+    wrappedVk = rs.getString("wrappedVk"),
+    sealedVk = rs.getString("sealedVk"),
+    rev = rs.getLong("rev"),
+    revokedAt = rs.longOrNull("revokedAt"),
+    revokedReason = rs.getString("revokedReason"),
+    addedAt = rs.longOrNull("addedAt"),
+)
+
 fun itemRow(rs: ResultSet) = WireItem(
     itemId = rs.getString("itemId"),
     vaultId = rs.getString("vaultId"),
@@ -184,14 +269,52 @@ class Repo(val db: Db) {
         // caller's grant rev on that vault exceeds `since`. A member added at a high rev
         // whose cursor already passed the vault's/items' own revs still gets them; a role
         // change (bumps grant rev) re-delivers the vault's items (idempotent upsert).
+        // currentOwner/currentOwnerWrap feed lastTransfer (spec 03 §11): after an accepted
+        // transfer the active owner grant IS the transferee, so no extra column is needed;
+        // wrapHash lets EVERY member recompute the accept-proof domain (#3).
         val vaults = c.queryAll(
-            """SELECT v.* FROM vaults v JOIN grants g ON g.vaultId=v.vaultId
+            """SELECT v.*,
+                      (SELECT og.userId    FROM grants og WHERE og.vaultId=v.vaultId AND og.role='owner' AND og.revokedAt IS NULL) AS currentOwner,
+                      (SELECT og.wrappedVk FROM grants og WHERE og.vaultId=v.vaultId AND og.role='owner' AND og.revokedAt IS NULL) AS currentOwnerWrap
+               FROM vaults v JOIN grants g ON g.vaultId=v.vaultId
                WHERE g.userId=? AND g.revokedAt IS NULL AND (v.rev>? OR g.rev>?)""",
             userId, since, since,
         ) { rs ->
+            val transferSeq = rs.getLong("transferSeq")
+            val pendingOfferId = rs.getString("pendingOfferId")
+            // seq the offer proof binds = transferSeq+1 at offer time; transferSeq only
+            // advances at accept, which clears pending — so the invariant holds here.
+            val pending = if (pendingOfferId != null) PendingTransfer(
+                toUserId = rs.getString("pendingOwnerId"),
+                offerId = pendingOfferId,
+                proof = rs.getString("pendingOfferProof"),
+                expiresAt = rs.getLong("pendingOfferExpiresAt"),
+                seq = transferSeq + 1,
+            ) else null
+            val lastOfferId = rs.getString("lastTransferOfferId")
+            val currentOwner = rs.getString("currentOwner")
+            val currentOwnerWrap = rs.getString("currentOwnerWrap")
+            val last = if (lastOfferId != null && currentOwner != null) TransferRecord(
+                offerId = lastOfferId,
+                newOwnerUserId = currentOwner,
+                acceptProof = rs.getString("lastTransferAcceptProof"),
+                seq = transferSeq,
+                // hexLower(sha256(utf8(wrappedVk))) — matches LifecycleProof.accept's binding;
+                // hashing an opaque ciphertext string is ZK-safe.
+                wrapHash = currentOwnerWrap?.takeIf { it.isNotEmpty() }?.let { sha256HexUtf8(it) },
+            ) else null
+            // Restore consumption marker (#4): only on a LIVE vault that was restored
+            // (deletedAt cleared, restoreProof + deleteId retained). Delivered vaults are
+            // always live (delete revokes all grants → the vault drops out of this join),
+            // so the deletedAt guard below is a belt.
+            val isDeleted = rs.getLong("deletedAt").let { !rs.wasNull() }
+            val restoreProof = if (!isDeleted) rs.getString("restoreProof") else null
+            val consumedDeleteId = if (restoreProof != null) rs.getString("deleteId") else null
             WireVault(
                 vaultId = rs.getString("vaultId"), type = rs.getString("type"),
                 rev = rs.getLong("rev"), metaBlob = rs.getString("metaBlob"), createdAt = rs.getLong("createdAt"),
+                pendingTransfer = pending, lastTransfer = last,
+                restoreProof = restoreProof, deleteId = consumedDeleteId,
             )
         }
         val grants = c.queryAll(
@@ -209,13 +332,42 @@ class Repo(val db: Db) {
                WHERE g.userId=? AND g.revokedAt IS NULL AND (i.rev>? OR g.rev>?)""",
             userId, since, since,
         ) { rs -> itemRow(rs) }
-        val removed = c.queryAll(
-            "SELECT vaultId FROM grants WHERE userId=? AND revokedAt IS NOT NULL AND rev>?",
+        // ONE scan of the caller's revoked grants (#9B): removedGrantsInfo is the detail,
+        // removedGrants is derived as its vaultId list — the JOIN to vaults never drops a
+        // row (vault rows are never hard-deleted post-v4). Reason derives from the CALLER's
+        // own grant's revokedReason (a member removed before a later delete sees 'removed',
+        // not 'deleted'; NULL pre-v4 → member_remove); tombstone fields ride only 'deleted',
+        // removeProof/nonce only 'removed'/'left'.
+        val removedInfo = c.queryAll(
+            """SELECT g.vaultId, COALESCE(g.revokedReason,'member_remove') AS rr,
+                      g.removeProof, g.removeNonce,
+                      v.deletedAt, v.purgeAt, v.deleteId, v.deleteProof
+               FROM grants g JOIN vaults v ON v.vaultId=g.vaultId
+               WHERE g.userId=? AND g.revokedAt IS NOT NULL AND g.rev>?""",
             userId, since,
-        ) { rs -> rs.getString(1) }
+        ) { rs ->
+            val reason = when (rs.getString("rr")) {
+                "vault_delete" -> "deleted"
+                "member_leave" -> "left"
+                else -> "removed"
+            }
+            if (reason == "deleted") RemovedGrantInfo(
+                vaultId = rs.getString("vaultId"), reason = reason,
+                deletedAt = rs.getLong("deletedAt").let { if (rs.wasNull()) null else it },
+                purgeAt = rs.getLong("purgeAt").let { if (rs.wasNull()) null else it },
+                deleteId = rs.getString("deleteId"), deleteProof = rs.getString("deleteProof"),
+            ) else RemovedGrantInfo(
+                // 'removed'/'left': relay the durable removal proof so a 0.5.0 victim can
+                // attribute the removal even across a server restart (spec 03 §11).
+                vaultId = rs.getString("vaultId"), reason = reason,
+                removeProof = rs.getString("removeProof"), removeNonce = rs.getString("removeNonce"),
+            )
+        }
         io.silencelen.andvari.core.model.SyncResponse(
             rev = rev, full = since == 0L,
-            vaults = vaults, grants = grants, items = items, removedGrants = removed,
+            vaults = vaults, grants = grants, items = items,
+            removedGrants = removedInfo.map { it.vaultId },
+            removedGrantsInfo = removedInfo,
         )
     }
 
@@ -225,8 +377,39 @@ class Repo(val db: Db) {
             userId, vaultId,
         ) { it.getString(1) }
 
+    /** Caller-grant-FIRST guard primitive (spec 03 §11): the grant row INCLUDING revoked. */
+    fun grantRowAny(c: Connection, userId: String, vaultId: String): GrantRowFull? =
+        c.queryOne("SELECT * FROM grants WHERE userId=? AND vaultId=?", userId, vaultId, map = ::grantRowFull)
+
     fun vaultType(c: Connection, vaultId: String): String? =
         c.queryOne("SELECT type FROM vaults WHERE vaultId=?", vaultId) { it.getString(1) }
+
+    fun vaultRowById(c: Connection, vaultId: String): VaultRow? =
+        c.queryOne("SELECT * FROM vaults WHERE vaultId=?", vaultId, map = ::vaultRow)
+
+    /** One indexed lookup for the push_denied `deleted:` meta prefix (spec 03 §11). */
+    fun vaultDeletedAt(c: Connection, vaultId: String): Long? =
+        c.queryOne("SELECT deletedAt FROM vaults WHERE vaultId=?", vaultId) { rs ->
+            rs.getLong(1).let { if (rs.wasNull()) null else it }
+        }
+
+    /**
+     * Clears the pending-transfer fields on a vault; optionally bumps the vault rev so the
+     * row re-delivers and every member's stale offer banner clears (spec 03 §11). Shared by
+     * Service.clearPendingTransfer (cancel/decline/superseded/target-op) and the janitor's
+     * offer-expiry sweep — each caller writes its OWN distinct audit row afterward.
+     */
+    fun clearPendingOffer(c: Connection, vaultId: String, bumpVaultRev: Boolean) {
+        c.exec(
+            """UPDATE vaults SET pendingOwnerId=NULL, pendingOfferId=NULL, pendingOfferProof=NULL,
+               pendingOfferExpiresAt=NULL, pendingOfferSetAt=NULL WHERE vaultId=?""",
+            vaultId,
+        )
+        if (bumpVaultRev) {
+            val vr = nextRev(c, "vault", vaultId, vaultId)
+            c.exec("UPDATE vaults SET rev=? WHERE vaultId=?", vr, vaultId)
+        }
+    }
 
     fun itemById(c: Connection, itemId: String): WireItem? =
         c.queryOne("SELECT * FROM items WHERE itemId=?", itemId) { itemRow(it) }

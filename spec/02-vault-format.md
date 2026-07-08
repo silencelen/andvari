@@ -165,7 +165,7 @@ spec violation.
 | devices | deviceId, userId, platform, **name (user-chosen device label, plaintext)**, clientVersion, createdAt, lastSeenAt, revokedAt |
 | sessions | sessionId, userId, deviceId, hashed access+refresh tokens, access/refresh expiries, refreshConsumedAt, createdAt, revokedAt |
 | vaults | vaultId, type, rev, createdAt (names/icons are ciphertext); **lifecycle** — deletedAt/purgeAt/purgedAt/deletedBy/deleteId, transferSeq, pendingOwnerId/pendingOfferId/pendingOfferExpiresAt/pendingOfferSetAt/lastTransferOfferId (ids + epoch times), and opaque VK-derived MACs deleteProof/restoreProof/pendingOfferProof/lastTransferAcceptProof (PRF outputs — reveal nothing about VK) |
-| grants | vaultId, userId, role, wrapped/sealed VK ciphertext, rev, revokedAt, revokedReason (revoked rows are retained — the server sees WHEN and WHY a member lost access: remove / leave / vault-delete) |
+| grants | vaultId, userId, role, wrapped/sealed VK ciphertext, rev, revokedAt, revokedReason (revoked rows are retained — the server sees WHEN and WHY a member lost access: remove / leave / vault-delete), and removeProof/removeNonce (opaque VK-derived MAC + nonce, stored on a removal for durable relay to the victim — reveal nothing about VK) |
 | items | the Item row of §1 — ids, rev, server timestamps, flags, formatVersion, attachmentIds, ciphertext blob, ciphertext byte size |
 | item_versions | itemId, rev, blob, formatVersion, archivedAt (bounded to the newest 10 per item, §7) |
 | changes | rev, kind, entityId, vaultId, at — the global sync feed (pure metadata; reveals per-vault write timing/volume) |

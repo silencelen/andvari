@@ -16,6 +16,11 @@ class NotFound(val reason: String) : Exception()
 class RateLimited : Exception()
 class ResyncRequired : Exception()
 
+// Vault lifecycle (spec 03 §11): operation-identity conflicts (vault_state_changed,
+// stale_meta, transfer_not_pending, vault_deleted) → 409; past-grace restore → 410.
+class Conflict(val reason: String) : Exception()
+class Gone(val reason: String) : Exception()
+
 /** X-Andvari-Client: <platform>/<semver>; used for version pins + audit. */
 data class ClientId(val platform: String, val version: String)
 

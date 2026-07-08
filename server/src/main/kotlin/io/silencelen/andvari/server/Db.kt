@@ -278,5 +278,43 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 4) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Shared-vault lifecycle "Skipti" (spec 02 §4/§7, spec 03 §11; design
+                    // docs/design/2026-07-07-shared-vault-lifecycle-skipti.md §9). All
+                    // additive O(1) ALTERs; pre-v4 rows read back NULL with unchanged
+                    // semantics (revokedReason NULL renders as member_remove). No NOT NULL
+                    // additions except the constant-default transferSeq. Vault rows are
+                    // NEVER hard-deleted post-v4 (vaultId never recycled) — the
+                    // vault_mismatch fence and mutation dedup depend on it.
+                    // meta.oldestRetainedRev stays '0' — untouched by this feature.
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN deletedAt INTEGER")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN purgeAt INTEGER")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN purgedAt INTEGER")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN deletedBy TEXT")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN deleteId TEXT")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN deleteProof TEXT")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN restoreProof TEXT")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN transferSeq INTEGER NOT NULL DEFAULT 0")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN pendingOwnerId TEXT")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN pendingOfferId TEXT")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN pendingOfferProof TEXT")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN pendingOfferExpiresAt INTEGER")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN pendingOfferSetAt INTEGER")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN lastTransferOfferId TEXT")
+                    st.executeUpdate("ALTER TABLE vaults ADD COLUMN lastTransferAcceptProof TEXT")
+                    st.executeUpdate("ALTER TABLE grants ADD COLUMN revokedReason TEXT")
+                    // Removal proof + nonce (spec 03 §3/§5): minted by the removing owner's
+                    // client, stored on the victim's revoked grant row, relayed durably via
+                    // removedGrantsInfo so a 0.5.0 victim can attribute the removal even
+                    // across a server restart (no in-memory relay).
+                    st.executeUpdate("ALTER TABLE grants ADD COLUMN removeProof TEXT")
+                    st.executeUpdate("ALTER TABLE grants ADD COLUMN removeNonce TEXT")
+                    st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_vaults_purge ON vaults(purgeAt) WHERE purgeAt IS NOT NULL")
+                    st.executeUpdate("UPDATE meta SET value='4' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }

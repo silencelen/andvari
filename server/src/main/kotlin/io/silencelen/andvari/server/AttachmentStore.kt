@@ -138,6 +138,16 @@ class AttachmentStore(
             if (inFlightAdded > 0) { fl.bytes.addAndGet(-inFlightAdded); inFlightAdded = 0 }
 
             return repo.db.tx { c ->
+                // Post-revocation blob-commit race (spec 03 §11 / design §4 matrix,
+                // attachment-upload-vs-delete): the route-level grant check ran before the
+                // body streamed; a vault delete or member removal can land in between.
+                // Re-check the grant inside the commit tx so a revoked writer can never
+                // land ciphertext into a vault they just lost.
+                val txRole = repo.grantRole(c, userId, vaultId)
+                if (txRole == null || txRole == "reader") {
+                    tmp.delete()
+                    throw Forbidden("no_grant")
+                }
                 val existing = rowById(c, attachmentId)
                 if (existing != null) {
                     tmp.delete()
