@@ -14,6 +14,11 @@ type Mode = { unlock: Session } | { fresh: true };
 export interface LoginMeta {
   isAdmin: boolean;
   mustChangePassword: boolean;
+  // F57: the account's escrow is sealed to a superseded recovery key (re-ceremony) and the
+  // client should re-seal on this unlock. escrowFingerprint is the CURRENT org recovery
+  // fingerprint (the re-seal target + the value the user verifies against the new sheet).
+  escrowStale: boolean;
+  escrowFingerprint: string;
 }
 
 interface Props {
@@ -53,7 +58,7 @@ function Unlock({ client, session, notice, onReady, onForget }: { client: ApiCli
       const account = await Account.unlock(session.userId, password, keys);
       const store = new VaultStore(client, account);
       await net(store.sync()); // rediscovers the personal vault id
-      onReady(account, store, { isAdmin: session.isAdmin, mustChangePassword: false });
+      onReady(account, store, { isAdmin: session.isAdmin, mustChangePassword: false, escrowStale: keys.escrowStale ?? false, escrowFingerprint: keys.escrowFingerprint });
     } catch (e) {
       // Only a throw from Account.unlock (the sole un-wrapped, non-ApiError step) may be
       // blamed on the password — EXCEPT its IdentityMismatchError (F31/spec 01 §5),
@@ -157,7 +162,7 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
         isAdmin: s.isAdmin,
         tokens: { accessToken: s.accessToken, refreshToken: s.refreshToken },
       });
-      onReady(account, store, { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword });
+      onReady(account, store, { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint });
     } catch (e) {
       if (e instanceof ApiError && e.code === "totp_required") {
         // Break-glass origin (spec 03 §2): the password checked out; the server
@@ -276,7 +281,7 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady }: { clien
       // "invite already used". A failed first sync just means an empty view until the vault
       // shell's reconnect logic pulls; proceed.
       await store.sync().catch(() => {});
-      onReady(account, store, { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword });
+      onReady(account, store, { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint });
     } catch (e) {
       setErr(e instanceof NetworkError ? UNREACHABLE : e instanceof ApiError ? enrollError(e.code) : "Enrollment failed.");
     } finally {
