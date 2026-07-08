@@ -22,6 +22,7 @@ import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.crypto.Base32
+import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.PasswordGenerator
 import io.silencelen.andvari.core.crypto.Totp
@@ -101,6 +102,48 @@ private fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = onDismiss) { Text("dismiss") }
+        }
+    }
+}
+
+/**
+ * F57: after a recovery-key re-ceremony this account's escrow is sealed to the DEAD key. Offer to
+ * re-seal to the current key — but only after the user TYPES the new recovery fingerprint from their
+ * PRINTED sheet (spec 04 §2(3): the fingerprint is deliberately NOT displayed, so a compromised
+ * server can't win a lazy eyeball-match). DesktopState.resealEscrow binds the fetched pubkey to that
+ * verified fingerprint and refuses on mismatch. Non-blocking: "Later" leaves it for the next unlock.
+ */
+@Composable
+private fun ReSealCard(state: DesktopState) {
+    var open by remember { mutableStateOf(false) }
+    var entry by remember { mutableStateOf("") }
+    val ok = Escrow.shortFormMatches(entry, state.escrowFingerprint)
+    Card(
+        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            if (!open) {
+                Text(
+                    "Your household's recovery key changed — re-protect this account so it stays recoverable.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { open = true }) { Text("Re-protect →") }
+            } else {
+                Text("Re-protect account", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect. " +
+                        "Your master key never leaves this device except sealed to the recovery key you verify.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(vertical = 6.dp),
+                )
+                Field("First 16 characters from your printed recovery sheet", entry, { entry = it }, mono = true)
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Primary("Re-protect account", ok && !state.busy, state.busy) { state.resealEscrow(entry) }
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = { open = false }) { Text("Later") }
+                }
+            }
         }
     }
 }
@@ -231,6 +274,7 @@ private fun Vault(state: DesktopState) {
                 }
                 ErrorBar(state.error, state::clearError)
                 NoticeBar(state.notice, state::clearNotice)
+                if (state.escrowStale && state.escrowFingerprint.isNotEmpty()) ReSealCard(state)
                 if (state.needsUpdateCount > 0) {
                     Text(needsUpdateLine(state.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 4.dp))
                 }

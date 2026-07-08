@@ -27,6 +27,7 @@ import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultCache
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
@@ -104,6 +105,13 @@ class DesktopState(private val scope: CoroutineScope) {
     var upgradeRequired by mutableStateOf<String?>(null)
         private set
     var signInTotpRequired by mutableStateOf(false)
+        private set
+    // F57: this account's escrow is sealed to a superseded org recovery key (re-ceremony) — the
+    // vault screen offers a re-seal. escrowFingerprint is the CURRENT org fingerprint (re-seal
+    // target + the value the user verifies against the new printed sheet).
+    var escrowStale by mutableStateOf(false)
+        private set
+    var escrowFingerprint by mutableStateOf("")
         private set
     var totpStatus by mutableStateOf<TotpStatus?>(null)
         private set
@@ -193,6 +201,7 @@ class DesktopState(private val scope: CoroutineScope) {
         store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
         persistAccountKeys(s.accountKeys)
         bind(a, acct); syncNow(engine!!)
+        escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
         signInTotpRequired = false
         toVault()
     }
@@ -213,6 +222,7 @@ class DesktopState(private val scope: CoroutineScope) {
         // KDF off the UI thread (argon2id 64 MiB — the unlock spinner must animate).
         val acct = withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys) }
         bind(a, acct)
+        escrowStale = keys.escrowStale; escrowFingerprint = keys.escrowFingerprint
         runCatching { syncNow(engine!!) }.onFailure {
             if (it is java.io.IOException) notice = "Offline — showing cached data" else throw it
         }
@@ -235,7 +245,30 @@ class DesktopState(private val scope: CoroutineScope) {
         store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
         persistAccountKeys(s.accountKeys)
         bind(a, acct); syncNow(engine!!)
+        escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
         toVault()
+    }
+
+    /**
+     * F57: re-seal this account's UVK to the CURRENT org recovery key after a re-ceremony. The user
+     * must have TYPED the new recovery fingerprint's short form from their PRINTED sheet (spec 04
+     * §2(3)); we re-check it, then [Account.resealEscrowFor] binds the server-fetched recovery pubkey
+     * to that verified fingerprint (refusing on mismatch) so a hostile server can't redirect the
+     * escrow. Non-blocking: on success the banner clears; a failure surfaces as an error.
+     */
+    fun resealEscrow(shortFormEntry: String) = op {
+        val a = api
+        val acct = account
+        val fp = escrowFingerprint
+        if (a == null || acct == null) { busy = false; return@op }
+        if (!Escrow.shortFormMatches(shortFormEntry, fp)) {
+            busy = false; error = "That doesn't match this server's recovery key — check your printed recovery sheet."
+            return@op
+        }
+        val pub = withContext(Dispatchers.Default) { a.recoveryPubkey() }
+        val upload = withContext(Dispatchers.Default) { acct.resealEscrowFor(pub, fp) }
+        a.escrowSelf(upload)
+        busy = false; escrowStale = false; notice = "Account re-protected — your recovery is up to date."
     }
 
     fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList()) =
