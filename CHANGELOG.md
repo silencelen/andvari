@@ -1,6 +1,10 @@
 # andvari — changelog
 
-## Unreleased (v6-QW1, server+web — pending deploy)
+## v6-QW1 — TOTP-QR + devices hub + purge gauges (2026-07-08, deployed CT122)
+
+Additive to 0.5.0 (no client-version bump — web+server only; Android/desktop unchanged at
+0.5.0). Deployed to CT122 and verified (bundle sha matches repo dist, both new gauges live in
+`/metrics`); adversarial review 7/7 confirmed → fixed/documented before ship.
 
 - **Two-factor QR + a "get andvari on your devices" hub (v6-QW1, web + server).** Server-TOTP
   enrollment now renders the `otpauth://` URI as a scannable QR so a family member enrolls by
