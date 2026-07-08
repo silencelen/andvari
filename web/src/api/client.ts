@@ -7,8 +7,11 @@ import type {
   ClientPolicy,
   CreateVaultRequest,
   CreateVaultResponse,
+  DeletedItemsResponse,
   DeletedVaultSummary,
   InviteResponse,
+  ItemRestoreResponse,
+  ItemUpload,
   ItemVersionsResponse,
   PasswordChangeRequest,
   PreloginResponse,
@@ -311,6 +314,16 @@ export class ApiClient {
    *  grant-checked. The caller decrypts each blob under the held VK (Account.decryptItemVersion). */
   itemVersions(itemId: string) {
     return this.json<ItemVersionsResponse>("GET", `/api/v1/items/${itemId}/versions`);
+  }
+
+  /** Item undelete: the caller's tombstoned items (grant-scoped server-side). */
+  deletedItems() {
+    return this.json<DeletedItemsResponse>("GET", "/api/v1/items/deleted");
+  }
+
+  /** Item undelete: restore a tombstoned item from a re-encrypted version; returns the new rev. */
+  restoreItem(itemId: string, upload: ItemUpload) {
+    return this.json<ItemRestoreResponse>("POST", `/api/v1/items/${itemId}/restore`, upload);
   }
 
   // ---- shared vaults (spec 03 §10) — refused on the public break-glass origin ----

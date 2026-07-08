@@ -871,6 +871,47 @@ export class VaultStore {
   }
 
   /**
+   * Item undelete (feature): the user's tombstoned items, each paired with its last archived version
+   * decrypted for the name/preview (a tombstone's own blob is null, so the name lives in the archive).
+   * An item with no archive or an undecryptable last version surfaces with doc=null — still restorable
+   * by identity, just unnamed. Restore a chosen one with restoreDeleted.
+   */
+  async deletedItems(): Promise<{ itemId: string; vaultId: string; deletedAt: number; doc: ItemDoc | null }[]> {
+    const resp = await this.api.deletedItems();
+    const out: { itemId: string; vaultId: string; deletedAt: number; doc: ItemDoc | null }[] = [];
+    for (const d of resp.items) {
+      let doc: ItemDoc | null = null;
+      try {
+        const newest = (await this.api.itemVersions(d.itemId)).versions[0]; // newest first
+        if (newest) doc = this.account.decryptItemVersion(d.vaultId, d.itemId, newest);
+      } catch {
+        /* no archive / undecryptable — surface as an unnamed deleted item */
+      }
+      out.push({ itemId: d.itemId, vaultId: d.vaultId, deletedAt: d.deletedAt, doc });
+    }
+    return out;
+  }
+
+  /**
+   * Item undelete (feature): restore a tombstoned item by re-encrypting the chosen doc under the
+   * current VK and POSTing to the dedicated restore route (the server un-tombstones cleanly — no
+   * conflict, no spurious copy). Then sync so the item reappears live.
+   */
+  async restoreDeleted(itemId: string, vaultId: string, doc: ItemDoc): Promise<void> {
+    // A deleted item's attachment BLOBS were hard-unlinked at tombstone (applyDelete) — only the
+    // item ciphertext is archived, never attachment blobs. So a restore MUST drop the old
+    // attachment refs; carrying them back would leave dangling/broken download links. The passwords,
+    // notes, and other fields come back; attachments do not (design doc: undelete limitation).
+    const restored: ItemDoc = { ...doc, attachments: undefined };
+    await this.api.restoreItem(itemId, {
+      formatVersion: 1,
+      attachmentIds: [],
+      blob: this.account.encryptItem(vaultId, itemId, restored),
+    });
+    await this.sync();
+  }
+
+  /**
    * Bulk CSV import (spec 06): push planned items into the personal vault in chunks of
    * SERVER_BATCH_MAX, then one sync at the end. Each mutation's mutationId IS its itemId
    * (minted once at plan time) so re-running the SAME plan after a mid-import failure

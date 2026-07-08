@@ -102,6 +102,13 @@ items. The two hard parts the tournament flagged, and how this design resolves t
 (tombstone GC is dormant, spec 02 §7), so Trash currently holds *everything* ever deleted in the
 vault. That's the honest v1 behavior; a retention window is an F49 decision, not this slice.
 
+**Attachments are NOT restored (v1 limitation).** `applyDelete` hard-unlinks an item's attachment
+blobs+rows at tombstone, and `archiveVersion` only archives the item ciphertext — never attachment
+blobs. So a restored item's old attachment refs would be dangling. Restore therefore **drops
+attachment refs** (`restoreDeleted` re-encrypts the doc with `attachments` stripped, `attachmentIds:
+[]`): passwords/notes/username come back, attachments do not. Preserving them would require archiving
+attachment blobs on delete — a strictly larger slice, priced separately if ever wanted.
+
 - **Landed (server + core batch):** the two routes + `DeletedItem`/`DeletedItemsResponse`/
   `ItemRestoreResponse` DTOs + `AndvariApi.deletedItems`/`restoreItem` + server tests (grant-scope +
   clean un-tombstone). No schema/crypto/version change.

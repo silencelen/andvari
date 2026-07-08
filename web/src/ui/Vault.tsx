@@ -28,7 +28,7 @@ import { Settings } from "./Settings";
 import { Sharing } from "./Sharing";
 import { estimateStrength } from "./strength";
 
-type View = "vault" | "sharing" | "health" | "settings" | "admin";
+type View = "vault" | "sharing" | "health" | "settings" | "admin" | "trash";
 
 interface Props {
   account: Account;
@@ -235,6 +235,7 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
             {navBtn("vault", "Vault")}
             {navBtn("sharing", "Sharing")}
             {navBtn("health", "Health")}
+            {navBtn("trash", "Trash")}
             {navBtn("settings", "Settings")}
             {isAdmin && navBtn("admin", "Admin")}
           </nav>
@@ -278,6 +279,8 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
       <div className="wrap">
         {view === "health" ? (
           <Health store={store} client={client} onOpenItem={goToItem} />
+        ) : view === "trash" ? (
+          <TrashView store={store} onRestored={refresh} />
         ) : view === "sharing" ? (
           <Sharing
             account={account}
@@ -693,6 +696,71 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           </div>
           {!deleting && moveTargets.length > 0 && <MoveCopyControl item={item} store={store} targets={moveTargets} onMoved={onMoved} />}
         </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Item undelete (feature): "Recently deleted" — the tombstoned items the user can still recover.
+ * Each is named from its last archived version (a tombstone's own blob is null); Restore re-creates
+ * it live via the dedicated server route (clean un-tombstone, no spurious conflict copy). Honest:
+ * retention is unbounded today (F49), so this holds everything ever deleted within reach.
+ */
+function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () => void }) {
+  const [items, setItems] = useState<{ itemId: string; vaultId: string; deletedAt: number; doc: ItemDoc | null }[] | null>(null);
+  const [err, setErr] = useState("");
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setErr("");
+    try {
+      setItems(await store.deletedItems());
+    } catch (e) {
+      setErr(e instanceof ApiError ? "Couldn't load deleted items from the server." : "Couldn't reach the server for deleted items.");
+    }
+  }, [store]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const restore = async (d: { itemId: string; vaultId: string; doc: ItemDoc | null }) => {
+    if (!d.doc) return; // nothing readable to restore
+    setRestoringId(d.itemId);
+    setErr("");
+    try {
+      await store.restoreDeleted(d.itemId, d.vaultId, d.doc);
+      onRestored(); // re-sync so the item reappears in the vault
+    } catch {
+      setErr("Restore failed — try again.");
+    } finally {
+      setRestoringId(null);
+      await load(); // always re-list: the restored item drops out (and a lost-response success reconciles)
+    }
+  };
+
+  return (
+    <div className="sheet">
+      <h2>Recently deleted</h2>
+      <div className="muted" style={{ marginBottom: 18 }}>
+        Deleted items you can still restore. Restoring brings an item back to its vault on every device.
+      </div>
+      {err && <div className="msg err">{err}</div>}
+      {items === null ? (
+        <div className="muted">Loading…</div>
+      ) : items.length === 0 ? (
+        <div className="muted">Nothing here — deleted items you can recover will show up in this list.</div>
+      ) : (
+        items.map((d) => (
+          <div key={d.itemId} className="secret-row" style={{ alignItems: "center", marginTop: 8 }}>
+            <span style={{ flex: 1 }}>
+              {d.doc ? d.doc.name : <span className="muted">(unrecoverable — no readable version)</span>}
+              <span className="muted mono" style={{ marginLeft: 8 }}>deleted {new Date(d.deletedAt).toISOString().slice(0, 10)}</span>
+            </span>
+            <button className="ghost" disabled={!d.doc || restoringId !== null} onClick={() => restore(d)}>
+              {restoringId === d.itemId ? "Restoring…" : "Restore"}
+            </button>
+          </div>
+        ))
       )}
     </div>
   );
