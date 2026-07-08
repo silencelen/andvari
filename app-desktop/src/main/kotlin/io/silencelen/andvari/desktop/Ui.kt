@@ -70,6 +70,7 @@ fun DesktopApp(state: DesktopState) {
                 is DesktopScreen.Unlock -> Unlock(state, s.email)
                 is DesktopScreen.Vault -> Vault(state)
                 is DesktopScreen.Settings -> SettingsScreen(state)
+                is DesktopScreen.Trash -> TrashScreen(state)
             }
         }
     }
@@ -250,6 +251,7 @@ private fun Vault(state: DesktopState) {
                 val dir = dialog.directory; val picked = dialog.file
                 if (dir != null && picked != null) state.importFromFile(File(dir, picked))
             }) { Icon(Icons.Default.FileUpload, "import CSV") }
+            IconButton(onClick = { state.openTrash() }) { Icon(Icons.Default.Delete, "trash") }
             IconButton(onClick = { state.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
             IconButton(onClick = { state.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
             IconButton(onClick = { state.lock() }) { Icon(Icons.Default.Lock, "lock") }
@@ -358,6 +360,52 @@ private fun Row(item: VaultItem, onClick: () -> Unit) {
                 Text(if (item.doc.type == "login") item.doc.login?.username?.ifBlank { "login" } ?: "login" else "secure note", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
             }
             Text(item.doc.type, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/**
+ * Item undelete (feature): "Recently deleted" — the tombstoned items the user can recover. Each is
+ * named from its last archived version (a tombstone's own blob is null); Restore re-creates it live
+ * via the dedicated route (clean un-tombstone). Attachments are not restored (blobs gone at delete).
+ * Mirrors the web Trash view.
+ */
+@Composable
+private fun TrashScreen(state: DesktopState) {
+    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+        TextButton(onClick = { state.closeTrash() }) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
+        Text("Recently deleted", style = MaterialTheme.typography.headlineMedium)
+        Text(
+            "Deleted items you can still restore. Restoring brings an item back to its vault on every device.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        ErrorBar(state.error, state::clearError)
+        NoticeBar(state.notice, state::clearNotice)
+        Spacer(Modifier.height(12.dp))
+        val deleted = state.deletedItems
+        when {
+            deleted == null -> Text(if (state.busy) "Loading…" else "", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            deleted.isEmpty() -> Text("Nothing here — deleted items you can recover will show up in this list.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else -> deleted.forEach { d ->
+                androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            d.doc?.name ?: "(unrecoverable — no readable version)",
+                            color = if (d.doc != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "deleted ${java.time.Instant.ofEpochMilli(d.deletedAt).toString().take(10)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    val docToRestore = d.doc
+                    if (docToRestore != null) {
+                        TextButton(enabled = !state.busy, onClick = { state.restoreDeleted(d.itemId, d.vaultId, docToRestore) }) { Text("Restore") }
+                    }
+                }
+            }
         }
     }
 }

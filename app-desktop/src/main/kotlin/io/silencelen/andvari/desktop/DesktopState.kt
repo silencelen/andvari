@@ -12,6 +12,7 @@ import io.silencelen.andvari.core.client.UpgradeRequiredException
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.DecryptedItemVersion
+import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.Backup
 import io.silencelen.andvari.core.client.BackupAttachmentEntry
 import io.silencelen.andvari.core.client.BackupItem
@@ -51,6 +52,7 @@ sealed interface DesktopScreen {
     data class Unlock(val email: String) : DesktopScreen
     data object Vault : DesktopScreen
     data object Settings : DesktopScreen
+    data object Trash : DesktopScreen
 }
 
 /**
@@ -117,6 +119,9 @@ class DesktopState(private val scope: CoroutineScope) {
     // Item history (feature): decrypted archived versions of the currently-viewed item, loaded on
     // demand (null = not loaded / loading). Restore a chosen version with saveItem.
     var itemVersions by mutableStateOf<List<DecryptedItemVersion>?>(null)
+        private set
+    // Item undelete (feature): the Trash screen's deleted items (null = not loaded / loading).
+    var deletedItems by mutableStateOf<List<DeletedItemView>?>(null)
         private set
     var totpStatus by mutableStateOf<TotpStatus?>(null)
         private set
@@ -441,6 +446,31 @@ class DesktopState(private val scope: CoroutineScope) {
 
     fun closeSettings() {
         totpSetupInfo = null; totpError = null
+        screen = DesktopScreen.Vault
+    }
+
+    /** Item undelete (feature): open the Trash screen and load the deleted items. */
+    fun openTrash() {
+        deletedItems = null
+        screen = DesktopScreen.Trash
+        loadDeletedItems()
+    }
+
+    fun loadDeletedItems() = op {
+        deletedItems = engine!!.deletedItems()
+        busy = false
+    }
+
+    /** Item undelete (feature): restore a deleted item, then refresh the trash list + the vault. */
+    fun restoreDeleted(itemId: String, vaultId: String, doc: ItemDoc) = op {
+        engine!!.restoreDeleted(itemId, vaultId, doc)
+        deletedItems = engine!!.deletedItems()
+        refreshItems()
+        busy = false
+    }
+
+    fun closeTrash() {
+        deletedItems = null
         screen = DesktopScreen.Vault
     }
 

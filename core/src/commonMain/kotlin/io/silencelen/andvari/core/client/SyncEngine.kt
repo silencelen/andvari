@@ -190,6 +190,29 @@ class SyncEngine(
             runCatching { DecryptedItemVersion(v.rev, v.archivedAt, account.decryptItemVersion(vaultId, itemId, v)) }.getOrNull()
         }
 
+    /**
+     * Item undelete (feature): the user's tombstoned items, each named from its last archived version
+     * (a tombstone's own blob is null). doc=null when there's no readable version → surfaced unnamed
+     * but restorable by identity. Restore a chosen one with [restoreDeleted].
+     */
+    suspend fun deletedItems(): List<DeletedItemView> =
+        api.deletedItems().map { d ->
+            val doc = runCatching {
+                api.itemVersions(d.itemId).firstOrNull()?.let { account.decryptItemVersion(d.vaultId, d.itemId, it) }
+            }.getOrNull()
+            DeletedItemView(d.itemId, d.vaultId, d.deletedAt, doc)
+        }
+
+    /**
+     * Item undelete (feature): restore a tombstoned item by re-encrypting the chosen doc under the
+     * current VK and POSTing to the dedicated restore route, then sync so it reappears live. Attachment
+     * refs are DROPPED — a deleted item's attachment blobs were hard-unlinked at tombstone (design doc).
+     */
+    suspend fun restoreDeleted(itemId: String, vaultId: String, doc: ItemDoc) {
+        api.restoreItem(itemId, account.encryptItem(vaultId, itemId, doc.copy(attachments = emptyList())))
+        sync()
+    }
+
     /** Vaults whose key we hold, personal first then shared by name (mirrors web vaults()). */
     fun vaultInfos(): List<VaultInfo> = cache.vaults()
         .filter { account.hasVault(it.vaultId) }
