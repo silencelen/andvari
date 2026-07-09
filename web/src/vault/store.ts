@@ -911,6 +911,11 @@ export class VaultStore {
     await this.sync();
   }
 
+  /** Item undelete (F49): "Delete forever" — hard-delete a tombstoned item (+ its versions). */
+  async purgeDeleted(itemId: string): Promise<void> {
+    await this.api.purgeItem(itemId);
+  }
+
   /**
    * Bulk CSV import (spec 06): push planned items into the personal vault in chunks of
    * SERVER_BATCH_MAX, then one sync at the end. Each mutation's mutationId IS its itemId

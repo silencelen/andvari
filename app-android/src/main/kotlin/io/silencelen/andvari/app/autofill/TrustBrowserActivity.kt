@@ -1,6 +1,12 @@
 package io.silencelen.andvari.app.autofill
 
+import android.app.assist.AssistStructure
+import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import android.service.autofill.FillResponse
+import android.view.autofill.AutofillManager
+import android.view.inputmethod.InlineSuggestionsRequest
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -21,22 +27,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.app.AndvariTheme
+import io.silencelen.andvari.app.VaultSession
 import io.silencelen.andvari.app.browserLabel
 
 /**
  * Launched from the autofill dropdown's "Trust {browser} to fill here" row ([DatasetBuilder]). Reads
- * the browser's real on-device signing digest and, on the user's explicit confirm (seeing WHICH
- * browser), approves it ([ApprovedBrowsers]) so andvari fills + saves there. The explicit tap is the
- * security gate — a malicious app can't get itself trusted without the user choosing to. Fills
- * nothing; after trusting, the user reopens the form (now a trusted browser → it fills).
+ * the browser's real on-device signing digest and, on the user's explicit confirm, approves it
+ * ([ApprovedBrowsers]). Then — so the dropdown updates without a page reload — it re-runs the fill
+ * for THIS form (now that the browser is trusted) and returns it via EXTRA_AUTHENTICATION_RESULT.
+ * The explicit tap is the security gate; a malicious app can't self-trust.
  */
 class TrustBrowserActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setResult(RESULT_CANCELED) // no fill result; the user reopens the form after trusting
+        setResult(RESULT_CANCELED) // back / dismiss = trusted nothing, no fill
         val pkg = intent.getStringExtra(EXTRA_PKG)
         if (pkg == null) { finish(); return }
-        // The observed digest is what fill/save will re-verify against on every request.
         val digest = TrustedBrowsers.observedCertDigest(applicationContext, pkg)
         if (digest == null) {
             Toast.makeText(applicationContext, "Couldn't read that browser's identity — try again.", Toast.LENGTH_SHORT).show()
@@ -44,16 +50,50 @@ class TrustBrowserActivity : ComponentActivity() {
         }
         setContent {
             AndvariTheme {
-                TrustCard(
-                    browser = browserLabel(pkg),
-                    onTrust = {
-                        ApprovedBrowsers.approve(applicationContext, pkg, digest)
-                        Toast.makeText(applicationContext, "${browserLabel(pkg)} trusted — reopen the login form.", Toast.LENGTH_SHORT).show()
-                        finish()
-                    },
-                    onCancel = { finish() },
-                )
+                TrustCard(browser = browserLabel(pkg), onTrust = { approveAndRefill(pkg, digest) }, onCancel = { finish() })
             }
+        }
+    }
+
+    private fun approveAndRefill(pkg: String, digest: String) {
+        ApprovedBrowsers.approve(applicationContext, pkg, digest)
+        // Re-run the fill for this form now that the browser is trusted, and hand it back so the
+        // dropdown refreshes in place. Only possible when the vault is unlocked (the trust row only
+        // shows on the unlocked path) and the platform injected the structure; otherwise we just
+        // finish and the toast tells the user to tap the field again.
+        val structure = intent.assistStructure()
+        val unlocked = VaultSession.getIfFresh()
+        val response: FillResponse? = if (structure != null && unlocked != null) {
+            runCatching {
+                DatasetBuilder.responseForUnlocked(this, structure, unlocked.engine.items(), intent.inlineRequest(), null)
+            }.getOrNull()
+        } else {
+            null
+        }
+        if (response != null) {
+            setResult(RESULT_OK, Intent().putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, response))
+            Toast.makeText(applicationContext, "${browserLabel(pkg)} trusted.", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(applicationContext, "${browserLabel(pkg)} trusted — tap the login field again.", Toast.LENGTH_SHORT).show()
+        }
+        finish()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.assistStructure(): AssistStructure? =
+        if (Build.VERSION.SDK_INT >= 33) {
+            getParcelableExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE, AssistStructure::class.java)
+        } else {
+            getParcelableExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE)
+        }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.inlineRequest(): InlineSuggestionsRequest? {
+        if (Build.VERSION.SDK_INT < 30) return null
+        return if (Build.VERSION.SDK_INT >= 33) {
+            getParcelableExtra(AutofillManager.EXTRA_INLINE_SUGGESTIONS_REQUEST, InlineSuggestionsRequest::class.java)
+        } else {
+            getParcelableExtra(AutofillManager.EXTRA_INLINE_SUGGESTIONS_REQUEST)
         }
     }
 

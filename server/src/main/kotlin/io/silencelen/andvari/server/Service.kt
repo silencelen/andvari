@@ -381,6 +381,23 @@ class Service(
         return rev
     }
 
+    /**
+     * Item undelete (feature, F49): "Delete forever" — hard-delete a tombstoned item + its versions.
+     * Writer/owner only, only on an already-deleted item (a live item must be deleted first). No sync
+     * notify needed — Trash is live-queried, and the delete itself already propagated. Audited.
+     */
+    fun purgeItem(principal: Principal, itemId: String, ip: String?): Long {
+        repo.db.tx { c ->
+            val existing = repo.itemById(c, itemId) ?: throw Forbidden("no_grant") // hidden (spec 03 §8)
+            val role = repo.grantRole(c, principal.userId, existing.vaultId)
+            if (role == null || role == "reader") throw Forbidden("no_grant")
+            if (!existing.deleted) throw BadRequest("item_not_deleted")
+            repo.purgeItem(c, itemId)
+            repo.auditOn(c, "item_purge", principal.userId, principal.deviceId, ip, "${existing.vaultId}:$itemId")
+        }
+        return repo.db.read { repo.currentRev(it) }
+    }
+
     private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>, filesToUnlink: MutableList<String>, ip: String): MutationResult {
         // Idempotency: replay the stored result verbatim.
         c.queryOne("SELECT resultJson FROM mutations WHERE deviceId=? AND mutationId=?", principal.deviceId, m.mutationId) { rs ->

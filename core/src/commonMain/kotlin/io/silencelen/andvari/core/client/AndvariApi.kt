@@ -216,6 +216,10 @@ class AndvariApi(
     suspend fun restoreItem(itemId: String, upload: ItemUpload): Long =
         call<ItemRestoreResponse>("POST", "/api/v1/items/$itemId/restore", body = upload).rev
 
+    /** Item undelete (F49): "Delete forever" — hard-delete a tombstoned item + its versions. */
+    suspend fun purgeItem(itemId: String): Long =
+        call<ItemRestoreResponse>("POST", "/api/v1/items/$itemId/purge").rev
+
     suspend fun prelogin(email: String): PreloginResponse = call("POST", "/api/v1/auth/prelogin", PreloginRequest(email), auth = false)
 
     suspend fun register(req: RegisterRequest): SessionResponse {

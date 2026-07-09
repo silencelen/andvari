@@ -315,9 +315,15 @@ object DatasetBuilder {
             val menu = presentationRow(context, title, subtitle)
             val spec = inlineSpecs(inlineRequest).firstOrNull()
             val inline = if (Build.VERSION.SDK_INT >= 30 && spec != null) buildInline(context, title, subtitle, spec) else null
-            // IMMUTABLE: the pkg is baked in and the framework injects nothing (unlike a fill-auth PI).
-            // Per-pkg request code so concurrent browsers don't share one PendingIntent's extras.
-            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            // MUTABLE so the platform injects EXTRA_ASSIST_STRUCTURE into the launch intent (as for
+            // openAppDataset) — after trusting, the activity re-runs the fill and returns it, so the
+            // dropdown updates in place instead of waiting for a page reload. Per-pkg request code so
+            // concurrent browsers don't share one PendingIntent's extras.
+            val flags = if (Build.VERSION.SDK_INT >= 31) {
+                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_CANCEL_CURRENT
+            } else {
+                PendingIntent.FLAG_CANCEL_CURRENT
+            }
             val launch = Intent(context, TrustBrowserActivity::class.java)
                 .putExtra(TrustBrowserActivity.EXTRA_PKG, form.appPackage)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // fires from the browser's task; route to andvari's

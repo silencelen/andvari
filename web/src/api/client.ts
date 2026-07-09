@@ -326,6 +326,11 @@ export class ApiClient {
     return this.json<ItemRestoreResponse>("POST", `/api/v1/items/${itemId}/restore`, upload);
   }
 
+  /** Item undelete (F49): "Delete forever" — hard-delete a tombstoned item + its versions. */
+  purgeItem(itemId: string) {
+    return this.json<ItemRestoreResponse>("POST", `/api/v1/items/${itemId}/purge`);
+  }
+
   // ---- shared vaults (spec 03 §10) — refused on the public break-glass origin ----
 
   createVault(req: CreateVaultRequest) {
