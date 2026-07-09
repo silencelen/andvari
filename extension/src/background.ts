@@ -1,5 +1,5 @@
 import { AndvariApi } from "./api";
-import { adItem, adUvk, adVk, authKey, deriveMasterKey, fromB64, open, seal, toB64, wrapKey } from "./crypto";
+import { adItem, adUvk, adVk, authKey, deriveMasterKey, fromB64, open, seal, toB64, wrapKey, type KdfParams } from "./crypto";
 
 /**
  * MV3 background service worker — the ONLY holder of unlocked vault material, in memory only (never
@@ -77,9 +77,43 @@ async function handle(msg: Msg): Promise<unknown> {
   }
 }
 
+/**
+ * Derive the master key in a dedicated Web Worker so the SW event loop stays free during the ~5.8 s
+ * Argon2id (fill/save messages keep flowing). Falls back to inline (blocks the SW) if the host won't
+ * let the SW spawn a worker (older Chrome / some MV3 runtimes). mk stays inside the extension.
+ */
+function deriveMasterKeyAsync(password: string, params: KdfParams, salt: Uint8Array): Promise<Uint8Array> {
+  return new Promise<Uint8Array>((resolve, reject) => {
+    const inline = () => {
+      try {
+        resolve(deriveMasterKey(password, params, salt));
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    };
+    let worker: Worker;
+    try {
+      worker = new Worker(chrome.runtime.getURL("kdf-worker.js"), { type: "module" });
+    } catch {
+      inline(); // nested workers not supported here → run inline
+      return;
+    }
+    worker.onmessage = (e: MessageEvent<{ ok: boolean; mk?: Uint8Array; error?: string }>) => {
+      worker.terminate();
+      if (e.data.ok && e.data.mk) resolve(e.data.mk);
+      else reject(new Error(e.data.error ?? "kdf worker failed"));
+    };
+    worker.onerror = () => {
+      worker.terminate();
+      inline(); // worker execution failed → don't block unlock, run inline
+    };
+    worker.postMessage({ password, params, salt });
+  });
+}
+
 async function unlock(email: string, password: string): Promise<unknown> {
   const pre = await api.prelogin(email);
-  const mk = deriveMasterKey(password, pre.kdfParams, fromB64(pre.kdfSalt)); // ~5–6 s; TODO: Web Worker
+  const mk = await deriveMasterKeyAsync(password, pre.kdfParams, fromB64(pre.kdfSalt));
   const s = await api.login(email, toB64(authKey(mk)));
   api.setToken(s.accessToken);
 
