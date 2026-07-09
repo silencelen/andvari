@@ -113,13 +113,13 @@ class VirtualClient(val email: String, val password: String, fast: Boolean = tru
         )
     }
 
-    fun encItem(itemId: String, plaintext: String): ItemUpload {
-        val blob = Envelope.sealB64(crypto, vk, plaintext.encodeToByteArray(), Ad.item(personalVaultId, itemId, 1))
-        return ItemUpload(formatVersion = 1, blob = blob)
+    fun encItem(itemId: String, plaintext: String, formatVersion: Int = 1): ItemUpload {
+        val blob = Envelope.sealB64(crypto, vk, plaintext.encodeToByteArray(), Ad.item(personalVaultId, itemId, formatVersion))
+        return ItemUpload(formatVersion = formatVersion, blob = blob)
     }
 
-    fun decItem(itemId: String, blobB64: String): String =
-        Envelope.openB64(crypto, vk, blobB64, Ad.item(personalVaultId, itemId, 1)).decodeToString()
+    fun decItem(itemId: String, blobB64: String, formatVersion: Int = 1): String =
+        Envelope.openB64(crypto, vk, blobB64, Ad.item(personalVaultId, itemId, formatVersion)).decodeToString()
 
     fun newItemId() = uuidV4()
 

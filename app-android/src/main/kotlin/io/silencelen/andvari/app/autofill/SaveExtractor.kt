@@ -52,7 +52,9 @@ object SaveExtractor {
                     when (FieldClassifier.classify(StructureParser.signalOf(node))) {
                         FieldKind.PASSWORD -> if (password == null) { password = value; if (domain == null) domain = nodeDomain }
                         FieldKind.USERNAME -> if (username == null) { username = value; if (domain == null) domain = nodeDomain }
-                        FieldKind.NONE -> {}
+                        // Card kinds are captured by the dedicated card SaveExtractor path (0.7.0 phase 5);
+                        // the login extractor ignores them.
+                        else -> {}
                     }
                 }
             }

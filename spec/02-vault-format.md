@@ -52,7 +52,7 @@ blobs between items, vaults, or purposes (`|`-joined UTF-8, spec 00 conventions)
 boxes (escrow, shared-vault grants) have no AD; their payloads are self-describing
 and receivers MUST validate the internal ids against the row they arrived on.
 
-## 3. Item plaintext document (formatVersion 1)
+## 3. Item plaintext document (formatVersions 1–2)
 
 JSON (not canonical — round-trips freely), `type` inside the ciphertext:
 
@@ -74,6 +74,25 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
   ]
 }
 ```
+
+**formatVersion 2 — cards (0.7.0).** fv2 adds `type` value `"card"` and one optional
+top-level object `card`: `{ cardholderName?, number? (digits-only), expMonth?
+("01".."12"), expYear? (4-digit), securityCode? (3–4 digits; storing it is a per-card
+choice), brand? (derived from the IIN at save, display-only) }` — all strings, all
+inside the ciphertext; the server row gains nothing (`formatVersion` is the existing
+§1 plaintext integer, and `card` gets the same every-level unknown-field preservation
+as `login`). Clients ≥ 0.7.0 MUST seal card-bearing docs (`card != null` OR
+`type == "card"`) at formatVersion ≥ 2; logins/notes keep sealing at 1 (per-doc
+floor), and an existing item re-seals at max(floor, the fv it was decrypted at). The
+server enforces **per-item monotonic formatVersion** — a put/restore declaring a lower
+fv than the stored row's is refused (`denied`, audited `fv_downgrade`) — which turns a
+pre-fv2 client's card-stripping rewrite into a refused write instead of silent
+ciphertext loss. Readers accept a `card` field at ANY fv they can open (e.g. an fv1
+doc whose `card` rode the unknown-field overlay through a legacy backup restore): the
+floor binds writers, not readers, and such an item re-floors to ≥ 2 on its next
+0.7.0 edit. The top-level key space doubles as the doc-level extension registry —
+`card` is CLAIMED (fv2); future top-level fields MUST pick unclaimed keys and stay
+additive within fv2 unless they change the meaning of existing fields.
 
 Unknown fields MUST be preserved on rewrite (forward compatibility within a
 formatVersion), at every level of the document: the top-level object, `login`, each

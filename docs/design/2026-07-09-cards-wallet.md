@@ -25,12 +25,23 @@ with the card intact. The classic cost of a bump (blinding the safe fleet) is di
 **per-doc floor**: no fielded client loses anything on logins/notes, and cards land on the already
 shipped, already tested fail-closed "N items need an app update" surface (B8).
 
-**Guard soundness (no false positives — proven from current code):** no fielded client can
-legitimately emit an fv downgrade. 0.6.0 web/native fail-close before a card reaches an editor
-(`account.ts:264`, `Account.kt:408`); modern conflict materialization waits on undecryptable items
-(`SyncEngine.kt:1001`); the extension skips `fv>1` and only writes logins (`background.ts:441/459`);
-restore/F19/Skipti all require a successful decrypt first. The only downgrade emitter in the whole
-fleet is the 0.2.x MSI writing over a card — exactly the write we want refused. `denied` is an
+**Guard soundness:** no fielded client emits an fv downgrade *on a card it can read as a card*. 0.6.0
+web/native fail-close before an fv2 card reaches an editor (`account.ts:264`, `Account.kt:408`);
+modern conflict materialization waits on undecryptable items (`SyncEngine.kt:1001`); the extension
+skips `fv>1` and only writes logins (`background.ts:441/459`); restore/F19/Skipti all require a
+successful decrypt first. The only downgrade emitter in the fleet is the 0.2.x MSI writing over an
+fv2 card — exactly the write we want refused.
+
+**One accepted false-positive (documented, not a data-loss path):** the legacy-restore edge below
+means a 0.6.0 client CAN hold an fv1 doc that is a card-in-extras. If a 0.7.0 client then re-floors
+that item to fv2, a concurrent stale 0.6.0 edit (e.g. a rename) pushes fv1<2 → `denied`
+(`fv_downgrade`) rather than the pre-guard `conflict` + displaced-copy. The card ciphertext is never
+lost (it rides the 0.6.0 client's extras and the live fv2 row is untouched); only that one concurrent
+0.6.0 edit is refused, and it surfaces as a generic "write denied" until a client phase maps the
+`fv_downgrade` reason to a clearer message. This is the deliberate, correct trade — allowing the write
+would reopen the strip hole — but it IS a false positive against the "no fielded client legitimately
+downgrades" invariant, narrow (needs the legacy-restore edge + a concurrent stale 0.6.0 edit during
+the mixed-fleet window) and pinned by a mixed-fleet test. `denied` is an
 existing per-mutation status every client generation already handles (0.2.x dequeues it + shows its
 error bar, `0c52a2d` flushQueue:148-153 — no wedge, no head-of-line block).
 

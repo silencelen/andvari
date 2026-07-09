@@ -112,9 +112,10 @@ class ItemDocVectorsTest {
         val itemId = account.newItemId()
         val upload = account.encryptItem(account.personalVaultId, itemId, doc)
 
-        // Same blob, declared formatVersion 2 → rejected up front, never edited/resealed.
+        // Same blob, declared one past this build's ceiling → rejected up front, never
+        // edited/resealed (version-relative so the gate stays pinned across fv bumps).
         val e = assertFailsWith<CryptoException> {
-            account.decryptItem(wireItem(account, itemId, upload.blob, formatVersion = 2))
+            account.decryptItem(wireItem(account, itemId, upload.blob, formatVersion = Account.ITEM_FORMAT_VERSION + 1))
         }
         assertTrue("formatVersion" in (e.message ?: ""), "gate must name the version, got: ${e.message}")
         // Sanity: the same envelope at its true version still decrypts.

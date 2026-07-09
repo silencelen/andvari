@@ -363,11 +363,20 @@ class Service(
      */
     suspend fun restoreItem(principal: Principal, itemId: String, upload: ItemUpload, ip: String?): Long {
         var affected: Set<String> = emptySet()
+        var fvDenied = false
         repo.db.tx { c ->
             val existing = repo.itemById(c, itemId) ?: throw Forbidden("no_grant") // hidden (spec 03 §8)
             val role = repo.grantRole(c, principal.userId, existing.vaultId)
             if (role == null || role == "reader") throw Forbidden("no_grant")
             if (!existing.deleted) throw BadRequest("item_not_deleted")
+            // Monotonic-formatVersion guard (same rule as applyPut): delete preserves fv, so a
+            // restore carrying a lower fv is a degraded re-encrypt — refuse, keep the tombstone.
+            // Audit in-tx then throw AFTER commit (a throw here would roll the audit row back).
+            if (upload.formatVersion < existing.formatVersion) {
+                repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, "fv_downgrade:${existing.vaultId}:$itemId")
+                fvDenied = true
+                return@tx
+            }
             affected = vaultMemberIds(c, existing.vaultId)
             val newRev = repo.nextRev(c, "item", itemId, existing.vaultId)
             c.exec(
@@ -376,6 +385,7 @@ class Service(
             )
             repo.auditOn(c, "item_restore", principal.userId, principal.deviceId, ip, "${existing.vaultId}:$itemId")
         }
+        if (fvDenied) throw BadRequest("fv_downgrade")
         val rev = repo.db.read { repo.currentRev(it) }
         if (affected.isNotEmpty()) onChange(affected, rev)
         return rev
@@ -422,7 +432,7 @@ class Service(
             MutationResult(m.mutationId, "denied")
         } else {
             when (m.op) {
-                "put" -> applyPut(c, m, existing, affected)
+                "put" -> applyPut(c, principal, m, existing, affected, ip)
                 "delete" -> applyDelete(c, m, existing, affected, filesToUnlink)
                 else -> throw BadRequest("bad_op")
             }
@@ -441,7 +451,7 @@ class Service(
         return result
     }
 
-    private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>): MutationResult {
+    private fun applyPut(c: Connection, principal: Principal, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, ip: String): MutationResult {
         val item = m.item ?: throw BadRequest("put_without_item")
         validateAttachmentRefs(c, m, item.attachmentIds)
         val vaultUsers = vaultMemberIds(c, m.vaultId).also { affected.addAll(it) }
@@ -454,6 +464,15 @@ class Service(
                 m.itemId, m.vaultId, rev, t, t, item.formatVersion, encodeIds(item.attachmentIds), item.blob, item.blob.length.toLong(),
             )
             return MutationResult(m.mutationId, "applied", rev)
+        }
+        // Monotonic-formatVersion guard (spec 03 §5; design 2026-07-09 cards): no fielded client
+        // legitimately re-seals an item BELOW its stored fv — the only emitter is the 0.2.x
+        // desktop rewriting a doc it silently field-stripped on decode. Must sit ABOVE the
+        // conflict handling: even a "conflict" put overwrites the live blob and burns a history
+        // slot, and this write must touch neither. Never dedup-cached (denied, see applyMutation).
+        if (item.formatVersion < existing.formatVersion) {
+            repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, "fv_downgrade:${m.vaultId}:${m.itemId}")
+            return MutationResult(m.mutationId, "denied")
         }
         // Existing item. Conflict iff the client wrote against a stale rev, OR it's edit-over-tombstone.
         val stale = m.baseItemRev < existing.rev
