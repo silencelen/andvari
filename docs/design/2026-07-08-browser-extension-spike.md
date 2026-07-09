@@ -64,9 +64,27 @@ The extension does NOT need the full crypto set. It needs unlock (Argon2id + key
 AEAD (XChaCha20-Poly1305). **Escrow (sealed box) and attachments (secretstream) are out of v1** —
 they're not part of fill/save — which shrinks the @noble surface to a very tractable core.
 
-**Next concrete step (de-risks B):** a Node/vitest PoC that runs `@noble` Argon2id + XChaCha20-Poly1305
-against the existing web crypto vectors and asserts byte-identical output. If it matches, B is the
-path; if a construction is fiddlier than expected (the item envelope's AAD framing), fall back to A.
+**PoC RESULT (2026-07-08) — path B is DE-RISKED.** `web/src/crypto/noble-extension-poc.test.ts` runs
+`@noble` against libsodium and the shared `spec/test-vectors/kdf.json`, all green:
+- **Argon2id** (ops→t, memBytes→m KiB, p=1, version 0x13) == kdf.json == libsodium `crypto_pwhash`.
+- **HKDF-SHA256** == kdf.json.
+- **XChaCha20-Poly1305** byte-identical to libsodium's `crypto_aead_xchacha20poly1305_ietf`, and
+  interops **both directions** (each opens the other's ciphertext).
+- **Full item envelope** (`version‖alg‖nonce‖ct`) byte-identical to the core `Envelope`.
+
+So @noble is wire-interoperable with web/Android/desktop at zero cost — **path B GO for correctness.**
+
+**The one caveat the PoC surfaced — unlock latency.** Pure-JS Argon2id at the account's production
+params (ops=3, **64 MiB**) is **~5.8 s** for a single unlock (vs libsodium-WASM's sub-second). It's
+per-unlock, not per-fill (the SW caches the VK; the frequent AEAD path is instant), and the params
+are fixed by the account (can't be lowered without breaking key derivation). Resolutions:
+1. **Ship B with a worker + spinner** (simplest): run the KDF in a Web Worker so the popup doesn't
+   freeze, show "Unlocking…". A ~5 s one-time unlock is tolerable but not great.
+2. **Hybrid** (if unlock must be snappy): @noble for everything EXCEPT the unlock KDF, and run only
+   Argon2id in a sandboxed/offscreen page (path A) for that single call — fast unlock, no sandbox on
+   the hot fill path.
+
+Recommendation: **B + worker for v1**; revisit the hybrid only if testers find unlock too slow.
 
 ### 2. host_permissions vs CORS — **solved, not a blocker**
 
