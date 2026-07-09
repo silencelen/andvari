@@ -11,6 +11,7 @@ await esbuild.build({
     background: "src/background.ts",
     content: "src/content.ts",
     popup: "src/popup.ts",
+    "kdf-worker": "src/kdf-worker.ts",
   },
   bundle: true,
   format: "esm",
