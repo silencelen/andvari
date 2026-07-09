@@ -30,7 +30,21 @@ function findLoginFields(): LoginFields {
 
 const fields = findLoginFields();
 if (fields.password) {
-  // Scaffold proof-of-life; TODO: on field focus, ask the SW for matches for location.host and
-  // render an inline chip / dropdown to fill, then a "Save to andvari?" prompt on submit.
-  console.debug("[andvari] login form detected on", location.host, "username field:", Boolean(fields.username));
+  // On focusing a login field, ask the SW (which holds the decrypted vault) for logins matching this
+  // host. Proves the end-to-end pipeline: content → SW → decrypted items → host match. TODO: render an
+  // inline chip/dropdown to CHOOSE + a "reveal" message that returns the chosen password to fill, then
+  // a "Save to andvari?" prompt on submit (mirrors the Android save flow).
+  const onFocus = async (): Promise<void> => {
+    try {
+      const r = (await chrome.runtime.sendMessage({ type: "matches", host: location.host })) as
+        | { matches?: { itemId: string; name: string; username: string | null }[] }
+        | undefined;
+      const matches = r?.matches ?? [];
+      console.debug("[andvari]", matches.length, "login match(es) for", location.host, matches.map((m) => m.name));
+    } catch {
+      /* SW asleep / locked — the popup handles unlock */
+    }
+  };
+  fields.username?.addEventListener("focus", onFocus, { once: true });
+  fields.password.addEventListener("focus", onFocus, { once: true });
 }

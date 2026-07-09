@@ -3,17 +3,30 @@
   <head>
     <meta charset="utf-8" />
     <style>
-      body { font: 13px system-ui, sans-serif; width: 280px; padding: 14px; }
-      h3 { margin: 0 0 8px; }
-      button { margin-top: 10px; }
+      body { font: 13px system-ui, sans-serif; width: 300px; padding: 14px; }
+      h3 { margin: 0 0 10px; }
+      input { display: block; width: 100%; box-sizing: border-box; margin-bottom: 6px; padding: 6px; }
+      button { margin-top: 6px; }
       #msg { margin-top: 8px; color: #555; word-break: break-word; }
+      .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
     </style>
   </head>
   <body>
     <h3>andvari</h3>
-    <div>Status: <span id="status">…</span></div>
-    <button id="ping">Test server connection</button>
+    <div id="locked">
+      <input id="email" type="email" placeholder="email" autocomplete="off" autocapitalize="off" />
+      <input id="password" type="password" placeholder="master password" autocomplete="off" />
+      <button id="unlock">Unlock</button>
+    </div>
+    <div id="unlocked" style="display: none">
+      <div class="row">
+        <span id="count"></span>
+        <button id="lock">Lock</button>
+      </div>
+    </div>
     <div id="msg"></div>
+    <hr />
+    <button id="ping">Test server connection</button>
     <!-- external module only — the MV3 CSP forbids inline scripts -->
     <script type="module" src="popup.js"></script>
   </body>
