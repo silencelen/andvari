@@ -146,8 +146,11 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
   crash-retry therefore observes the identical outcome it would have on first
   success — the client's state converges the same way. (There is no distinct
   `duplicate` status code; the replayed status is whatever the original was.)
-- `denied` — role violation (reader pushing to a shared vault) or no grant; nothing
-  written; audited.
+- `denied` — role violation (reader pushing to a shared vault), no grant, or an fv
+  downgrade (`item.formatVersion` below the stored row's — the monotonic-fv guard; no
+  fielded client legitimately downgrades, an invariant future clients MUST preserve;
+  the same check 400s `fv_downgrade` on `POST /items/{id}/restore`); nothing written;
+  audited.
 
 Batch limit 200 mutations; server applies the batch in order inside ONE transaction:
 a thrown validation failure (e.g. bad attachment refs) rolls back the WHOLE batch,

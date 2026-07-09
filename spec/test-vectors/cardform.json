@@ -1,0 +1,396 @@
+{
+    "refine": [
+        {
+            "name": "card-free login form stays login, kinds untouched",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "username",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "site.example",
+                    "expected": "username"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "password",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "site.example",
+                    "expected": "password"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "checkout card form with named password-typed cvv",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "expiry",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "cc-exp"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "cvv",
+                    "maxLength": 4,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-csc"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "unnamed password csc demoted beside a cc-number sibling",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "cc_number",
+                    "maxLength": null,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "verification",
+                    "maxLength": 3,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-csc"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "maxlength 5 blocks the demotion; leftover password makes it mixed",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "cc_number",
+                    "maxLength": null,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "verification",
+                    "maxLength": 5,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "password"
+                }
+            ],
+            "formKind": "mixed"
+        },
+        {
+            "name": "missing numeric inputmode blocks the demotion",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "cc_number",
+                    "maxLength": null,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "verification",
+                    "maxLength": 4,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "password"
+                }
+            ],
+            "formKind": "mixed"
+        },
+        {
+            "name": "no cc-number sibling: a short numeric pin stays password",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "username",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "bank.example",
+                    "expected": "username"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "pin",
+                    "maxLength": 4,
+                    "inputMode": "numeric",
+                    "frameDomain": "bank.example",
+                    "expected": "password"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "cc-number in ANOTHER frame never demotes this frame's password",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "maxLength": null,
+                    "inputMode": "numeric",
+                    "frameDomain": "psp.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "verification",
+                    "maxLength": 4,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "password"
+                }
+            ],
+            "formKind": "mixed"
+        },
+        {
+            "name": "exp month plus year without a cc-number never qualifies a card form",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "exp_month",
+                    "maxLength": 2,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-exp-month"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "exp_year",
+                    "maxLength": 4,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-exp-year"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "two generic exp fields without a cc-number never qualify a card form",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "expiry",
+                    "maxLength": 7,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-exp"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "exp_date",
+                    "maxLength": 7,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-exp"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "card kinds split across frames do not qualify a card form",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "exp_month",
+                    "maxLength": 2,
+                    "inputMode": "numeric",
+                    "frameDomain": "a.example",
+                    "expected": "cc-exp-month"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "exp_year",
+                    "maxLength": 4,
+                    "inputMode": "numeric",
+                    "frameDomain": "b.example",
+                    "expected": "cc-exp-year"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "a lone csc is not a card form",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "cvv",
+                    "maxLength": 4,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-csc"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "login plus card cluster is mixed; password without maxlength keeps its kind",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "username",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "username"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "password",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "password"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "maxLength": null,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                }
+            ],
+            "formKind": "mixed"
+        },
+        {
+            "name": "native fields cluster on the null frame; platform-mapped numeric password demotes",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": null,
+                    "htmlNameOrId": "cardNo",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": null,
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 2,
+                    "inputTypeVariation": 16,
+                    "htmlType": null,
+                    "htmlNameOrId": null,
+                    "maxLength": 4,
+                    "inputMode": "numeric",
+                    "frameDomain": null,
+                    "expected": "cc-csc"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "a cc-number alone qualifies",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "maxLength": null,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                }
+            ],
+            "formKind": "card"
+        }
+    ]
+}

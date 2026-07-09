@@ -99,6 +99,25 @@ data class PasswordHistoryEntry(
     @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
 )
 
+/** Card fields (spec 02 §3, formatVersion 2) — all ciphertext inside the item envelope;
+ *  the server sees only the plaintext formatVersion integer. Canonical stored forms
+ *  (adapters derive display/fill variants): number digits-only, expMonth "01".."12",
+ *  expYear 4-digit, securityCode 3-4 digits (storing it is an explicit per-card choice),
+ *  brand visa|mastercard|amex|discover derived from the IIN at every save — display-only,
+ *  never authored, so it can't go stale. */
+@OptIn(ExperimentalSerializationApi::class)
+@kotlinx.serialization.Serializable(with = CardDataSerializer::class)
+@KeepGeneratedSerializer
+data class CardData(
+    val cardholderName: String? = null,
+    val number: String? = null,
+    val expMonth: String? = null,
+    val expYear: String? = null,
+    val securityCode: String? = null,
+    val brand: String? = null,
+    @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
+)
+
 /** Mirrors the plaintext attachment entry (spec 02 §3) — the SECRET half of attachmentIds. */
 @OptIn(ExperimentalSerializationApi::class)
 @kotlinx.serialization.Serializable(with = AttachmentRefSerializer::class)
@@ -115,11 +134,12 @@ data class AttachmentRef(
 @kotlinx.serialization.Serializable(with = ItemDocSerializer::class)
 @KeepGeneratedSerializer
 data class ItemDoc(
-    val type: String, // "login" | "note"
+    val type: String, // "login" | "note" | "card" — chosen at creation, never changes
     val name: String,
     val notes: String? = null,
     val favorite: Boolean = false,
     val login: LoginData? = null,
+    val card: CardData? = null,
     val attachments: List<AttachmentRef> = emptyList(),
     @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
 )
@@ -129,6 +149,9 @@ internal object LoginDataSerializer : ExtrasOverlaySerializer<LoginData>(LoginDa
 
 @OptIn(ExperimentalSerializationApi::class)
 internal object PasswordHistoryEntrySerializer : ExtrasOverlaySerializer<PasswordHistoryEntry>(PasswordHistoryEntry.generatedSerializer(), PasswordHistoryEntry::extras, { v, e -> v.copy(extras = e) })
+
+@OptIn(ExperimentalSerializationApi::class)
+internal object CardDataSerializer : ExtrasOverlaySerializer<CardData>(CardData.generatedSerializer(), CardData::extras, { v, e -> v.copy(extras = e) })
 
 @OptIn(ExperimentalSerializationApi::class)
 internal object AttachmentRefSerializer : ExtrasOverlaySerializer<AttachmentRef>(AttachmentRef.generatedSerializer(), AttachmentRef::extras, { v, e -> v.copy(extras = e) })
@@ -154,7 +177,17 @@ class Account private constructor(
 ) {
     companion object {
         /** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed). */
-        const val ITEM_FORMAT_VERSION = 1
+        const val ITEM_FORMAT_VERSION = 2
+
+        /**
+         * Lowest formatVersion a doc may seal at (spec 02 §3): card-bearing docs 2,
+         * logins/notes 1. The floor is the one plaintext signal a zero-knowledge server
+         * gets — it turns a pre-card client's rewrite (a plain decode silently drops the
+         * unknown `card` key) into a server-refused fv downgrade instead of silent loss,
+         * while fv1 docs stay fully readable on every fielded client.
+         */
+        fun docFloor(doc: ItemDoc): Int = if (doc.card != null || doc.type == "card") 2 else 1
+
         private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
         // platform must match the AndvariApi wire tag ("android" | "windows" | "linux") so
@@ -389,9 +422,23 @@ class Account private constructor(
     private fun vk(vaultId: String): ByteArray =
         vaultKeys[vaultId] ?: throw CryptoException("no key for vault $vaultId")
 
+    /** itemId → highest formatVersion this session decrypted or sealed it at. Reseals take
+     *  maxOf(docFloor, this): the server enforces per-item monotonic fv, so an edit must
+     *  never re-seal below the version it arrived at. In-memory only by design — the durable
+     *  cache stores envelopes, and hydrate decrypts every held envelope before any reseal. */
+    private val itemFv = mutableMapOf<String, Int>()
+
+    /**
+     * Seal an item doc under its vault VK. The formatVersion — also bound into the AD —
+     * is maxOf([docFloor], the fv this itemId was last decrypted/sealed at), so callers
+     * never thread fv explicitly: new docs seal at their floor, existing items re-seal
+     * monotonically ([decryptItem]/[decryptItemVersion] feed the per-item memory).
+     */
     fun encryptItem(vaultId: String, itemId: String, doc: ItemDoc): ItemUpload {
-        val blob = Envelope.sealB64(crypto, vk(vaultId), json.encodeToString(ItemDoc.serializer(), doc).encodeToByteArray(), Ad.item(vaultId, itemId, ITEM_FORMAT_VERSION))
-        return ItemUpload(formatVersion = ITEM_FORMAT_VERSION, attachmentIds = doc.attachments.map { it.id }, blob = blob)
+        val fv = maxOf(docFloor(doc), itemFv[itemId] ?: 1)
+        itemFv[itemId] = fv
+        val blob = Envelope.sealB64(crypto, vk(vaultId), json.encodeToString(ItemDoc.serializer(), doc).encodeToByteArray(), Ad.item(vaultId, itemId, fv))
+        return ItemUpload(formatVersion = fv, attachmentIds = doc.attachments.map { it.id }, blob = blob)
     }
 
     /** Random per-file key (spec 02 §6) — lives only inside item ciphertext. */
@@ -407,7 +454,11 @@ class Account private constructor(
         // paths ("undecryptable, retried on hydrate") — never a crash, envelope persists.
         if (item.formatVersion > ITEM_FORMAT_VERSION) throw CryptoException("item formatVersion ${item.formatVersion} is newer than this client supports")
         val plain = Envelope.openB64(crypto, vk(item.vaultId), blob, Ad.item(item.vaultId, item.itemId, item.formatVersion))
-        return json.decodeFromString(ItemDoc.serializer(), plain.decodeToString())
+        val doc = json.decodeFromString(ItemDoc.serializer(), plain.decodeToString())
+        // Remember the fv monotonically (an OLDER archived version arriving via
+        // decryptItemVersion must not lower it) so a later re-seal can't downgrade.
+        itemFv[item.itemId] = maxOf(itemFv[item.itemId] ?: 1, item.formatVersion)
+        return doc
     }
 
     fun newItemId(): String = uuid(crypto)

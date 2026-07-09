@@ -240,6 +240,123 @@
                     "valueJson": "\"note\""
                 }
             ]
+        },
+        {
+            "name": "card-round-trip-rename",
+            "docJson": "{\"type\":\"card\",\"name\":\"Blue Visa\",\"favorite\":false,\"card\":{\"cardholderName\":\"Jacob Cardholder\",\"number\":\"4242424242424242\",\"expMonth\":\"04\",\"expYear\":\"2028\",\"securityCode\":\"123\",\"brand\":\"visa\"},\"x-wallet\":\"personal\"}",
+            "edit": {
+                "setName": "Blue Visa (renamed)"
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/x-wallet",
+                    "valueJson": "\"personal\""
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/type",
+                    "valueJson": "\"card\""
+                },
+                {
+                    "path": "/name",
+                    "valueJson": "\"Blue Visa (renamed)\""
+                },
+                {
+                    "path": "/card/cardholderName",
+                    "valueJson": "\"Jacob Cardholder\""
+                },
+                {
+                    "path": "/card/number",
+                    "valueJson": "\"4242424242424242\""
+                },
+                {
+                    "path": "/card/expMonth",
+                    "valueJson": "\"04\""
+                },
+                {
+                    "path": "/card/expYear",
+                    "valueJson": "\"2028\""
+                },
+                {
+                    "path": "/card/securityCode",
+                    "valueJson": "\"123\""
+                },
+                {
+                    "path": "/card/brand",
+                    "valueJson": "\"visa\""
+                }
+            ]
+        },
+        {
+            "name": "card-inner-unknowns-favorite",
+            "docJson": "{\"type\":\"card\",\"name\":\"Household Amex\",\"card\":{\"cardholderName\":\"Jo Cardholder\",\"number\":\"371449635398431\",\"expMonth\":\"11\",\"expYear\":\"2027\",\"brand\":\"amex\",\"x-issuer\":{\"bank\":\"Fjord Trust\",\"tier\":2},\"x-pin-hint\":\"garage code\"}}",
+            "edit": {
+                "setFavorite": true
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/card/x-issuer",
+                    "valueJson": "{\"bank\":\"Fjord Trust\",\"tier\":2}"
+                },
+                {
+                    "path": "/card/x-pin-hint",
+                    "valueJson": "\"garage code\""
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/favorite",
+                    "valueJson": "true"
+                },
+                {
+                    "path": "/card/number",
+                    "valueJson": "\"371449635398431\""
+                },
+                {
+                    "path": "/card/expMonth",
+                    "valueJson": "\"11\""
+                },
+                {
+                    "path": "/name",
+                    "valueJson": "\"Household Amex\""
+                }
+            ]
+        },
+        {
+            "name": "pre-card-shape-rename-intact",
+            "docJson": "{\"type\":\"login\",\"name\":\"Legacy Login\",\"login\":{\"username\":\"jo\",\"password\":\"pw\",\"uris\":[\"https://legacy.test\"]},\"x-pre-card\":\"kept\"}",
+            "edit": {
+                "setName": "Legacy Login (renamed)"
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/x-pre-card",
+                    "valueJson": "\"kept\""
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/type",
+                    "valueJson": "\"login\""
+                },
+                {
+                    "path": "/name",
+                    "valueJson": "\"Legacy Login (renamed)\""
+                },
+                {
+                    "path": "/login/username",
+                    "valueJson": "\"jo\""
+                },
+                {
+                    "path": "/login/password",
+                    "valueJson": "\"pw\""
+                },
+                {
+                    "path": "/login/uris/0",
+                    "valueJson": "\"https://legacy.test\""
+                }
+            ]
         }
     ]
 }

@@ -1,0 +1,544 @@
+{
+    "digitsOnly": [
+        {
+            "raw": "4111 1111 1111 1111",
+            "expected": "4111111111111111"
+        },
+        {
+            "raw": "4242-4242-4242-4242",
+            "expected": "4242424242424242"
+        },
+        {
+            "raw": "4111.1111",
+            "expected": "41111111"
+        },
+        {
+            "raw": "no digits",
+            "expected": ""
+        },
+        {
+            "raw": "",
+            "expected": ""
+        },
+        {
+            "raw": "４２４２-4242",
+            "expected": "4242"
+        },
+        {
+            "raw": "٤٢٤٢1234",
+            "expected": "1234"
+        },
+        {
+            "raw": "१२३456",
+            "expected": "456"
+        }
+    ],
+    "luhn": [
+        {
+            "raw": "4111111111111111",
+            "valid": true
+        },
+        {
+            "raw": "4242424242424242",
+            "valid": true
+        },
+        {
+            "raw": "4111 1111 1111 1111",
+            "valid": true
+        },
+        {
+            "raw": "4111-1111-1111-1111",
+            "valid": true
+        },
+        {
+            "raw": "4111111111111112",
+            "valid": false
+        },
+        {
+            "raw": "5555555555554444",
+            "valid": true
+        },
+        {
+            "raw": "378282246310005",
+            "valid": true
+        },
+        {
+            "raw": "6011111111111117",
+            "valid": true
+        },
+        {
+            "raw": "2223003122003222",
+            "valid": true
+        },
+        {
+            "raw": "4917610000000000003",
+            "valid": true
+        },
+        {
+            "raw": "411111111117",
+            "valid": true
+        },
+        {
+            "raw": "411111111111",
+            "valid": false
+        },
+        {
+            "raw": "0000000000000000",
+            "valid": true
+        },
+        {
+            "raw": "00000000000",
+            "valid": false
+        },
+        {
+            "raw": "00000000000000000000",
+            "valid": false
+        },
+        {
+            "raw": "4111111111111111x",
+            "valid": false
+        },
+        {
+            "raw": "",
+            "valid": false
+        },
+        {
+            "raw": "４２４２４２４２４２４２４２４２",
+            "valid": false
+        },
+        {
+            "raw": "٤٢٤٢٤٢٤٢٤٢٤٢٤٢٤٢",
+            "valid": false
+        },
+        {
+            "raw": "४२४२४२४२४२४२४२४२",
+            "valid": false
+        },
+        {
+            "raw": "424242424242424２",
+            "valid": false
+        }
+    ],
+    "brand": [
+        {
+            "raw": "4",
+            "expected": "visa"
+        },
+        {
+            "raw": "4242424242424242",
+            "expected": "visa"
+        },
+        {
+            "raw": "4111-1111",
+            "expected": "visa"
+        },
+        {
+            "raw": "34",
+            "expected": "amex"
+        },
+        {
+            "raw": "37",
+            "expected": "amex"
+        },
+        {
+            "raw": "371449635398431",
+            "expected": "amex"
+        },
+        {
+            "raw": "3",
+            "expected": null
+        },
+        {
+            "raw": "51",
+            "expected": "mastercard"
+        },
+        {
+            "raw": "55",
+            "expected": "mastercard"
+        },
+        {
+            "raw": "5555555555554444",
+            "expected": "mastercard"
+        },
+        {
+            "raw": "5",
+            "expected": null
+        },
+        {
+            "raw": "2221",
+            "expected": "mastercard"
+        },
+        {
+            "raw": "2720",
+            "expected": "mastercard"
+        },
+        {
+            "raw": "2223003122003222",
+            "expected": "mastercard"
+        },
+        {
+            "raw": "22",
+            "expected": null
+        },
+        {
+            "raw": "2220",
+            "expected": null
+        },
+        {
+            "raw": "2721",
+            "expected": null
+        },
+        {
+            "raw": "6011",
+            "expected": "discover"
+        },
+        {
+            "raw": "6011111111111117",
+            "expected": "discover"
+        },
+        {
+            "raw": "65",
+            "expected": "discover"
+        },
+        {
+            "raw": "6511111111111112",
+            "expected": "discover"
+        },
+        {
+            "raw": "644",
+            "expected": "discover"
+        },
+        {
+            "raw": "649",
+            "expected": "discover"
+        },
+        {
+            "raw": "643",
+            "expected": null
+        },
+        {
+            "raw": "62",
+            "expected": null
+        },
+        {
+            "raw": "622126",
+            "expected": "discover"
+        },
+        {
+            "raw": "622925",
+            "expected": "discover"
+        },
+        {
+            "raw": "622125",
+            "expected": null
+        },
+        {
+            "raw": "622926",
+            "expected": null
+        },
+        {
+            "raw": "9792111111111111",
+            "expected": null
+        },
+        {
+            "raw": "1",
+            "expected": null
+        },
+        {
+            "raw": "",
+            "expected": null
+        }
+    ],
+    "parseExpiry": [
+        {
+            "raw": "12/27",
+            "expMonth": "12",
+            "expYear": "2027"
+        },
+        {
+            "raw": "01/27",
+            "expMonth": "01",
+            "expYear": "2027"
+        },
+        {
+            "raw": "1/27",
+            "expMonth": "01",
+            "expYear": "2027"
+        },
+        {
+            "raw": "9/27",
+            "expMonth": "09",
+            "expYear": "2027"
+        },
+        {
+            "raw": "12/2027",
+            "expMonth": "12",
+            "expYear": "2027"
+        },
+        {
+            "raw": "1/2027",
+            "expMonth": "01",
+            "expYear": "2027"
+        },
+        {
+            "raw": "12-27",
+            "expMonth": "12",
+            "expYear": "2027"
+        },
+        {
+            "raw": "12-2027",
+            "expMonth": "12",
+            "expYear": "2027"
+        },
+        {
+            "raw": "12.27",
+            "expMonth": "12",
+            "expYear": "2027"
+        },
+        {
+            "raw": "12 / 27",
+            "expMonth": "12",
+            "expYear": "2027"
+        },
+        {
+            "raw": "1227",
+            "expMonth": "12",
+            "expYear": "2027"
+        },
+        {
+            "raw": "0127",
+            "expMonth": "01",
+            "expYear": "2027"
+        },
+        {
+            "raw": "127",
+            "expMonth": "01",
+            "expYear": "2027"
+        },
+        {
+            "raw": "122027",
+            "expMonth": "12",
+            "expYear": "2027"
+        },
+        {
+            "raw": "12027",
+            "expMonth": "01",
+            "expYear": "2027"
+        },
+        {
+            "raw": "12/00",
+            "expMonth": "12",
+            "expYear": "2000"
+        },
+        {
+            "raw": "12/99",
+            "expMonth": "12",
+            "expYear": "2099"
+        },
+        {
+            "raw": "13/27",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "1327",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "0/27",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "00/27",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "12/3",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "12/027",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "2027",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "12",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "12/27/89",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "abc",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "",
+            "expMonth": null,
+            "expYear": null
+        },
+        {
+            "raw": "１２/２７",
+            "expMonth": null,
+            "expYear": null
+        }
+    ],
+    "padMonth": [
+        {
+            "raw": "1",
+            "expected": "01"
+        },
+        {
+            "raw": "01",
+            "expected": "01"
+        },
+        {
+            "raw": "9",
+            "expected": "09"
+        },
+        {
+            "raw": "12",
+            "expected": "12"
+        },
+        {
+            "raw": " 7 ",
+            "expected": "07"
+        },
+        {
+            "raw": "0",
+            "expected": null
+        },
+        {
+            "raw": "13",
+            "expected": null
+        },
+        {
+            "raw": "007",
+            "expected": null
+        },
+        {
+            "raw": "1a",
+            "expected": null
+        },
+        {
+            "raw": "",
+            "expected": null
+        },
+        {
+            "raw": "１２",
+            "expected": null
+        },
+        {
+            "raw": "١",
+            "expected": null
+        }
+    ],
+    "yearTo4": [
+        {
+            "raw": "27",
+            "expected": "2027"
+        },
+        {
+            "raw": "00",
+            "expected": "2000"
+        },
+        {
+            "raw": "99",
+            "expected": "2099"
+        },
+        {
+            "raw": "2027",
+            "expected": "2027"
+        },
+        {
+            "raw": "5",
+            "expected": null
+        },
+        {
+            "raw": "202",
+            "expected": null
+        },
+        {
+            "raw": "20275",
+            "expected": null
+        },
+        {
+            "raw": "2a",
+            "expected": null
+        },
+        {
+            "raw": "",
+            "expected": null
+        },
+        {
+            "raw": "２７",
+            "expected": null
+        }
+    ],
+    "yearTo2": [
+        {
+            "raw": "2027",
+            "expected": "27"
+        },
+        {
+            "raw": "27",
+            "expected": "27"
+        },
+        {
+            "raw": "2000",
+            "expected": "00"
+        },
+        {
+            "raw": "199",
+            "expected": null
+        },
+        {
+            "raw": "",
+            "expected": null
+        },
+        {
+            "raw": "２７",
+            "expected": null
+        }
+    ],
+    "composeShortExpiry": [
+        {
+            "expMonth": "12",
+            "expYear": "2027",
+            "expected": "12/27"
+        },
+        {
+            "expMonth": "1",
+            "expYear": "27",
+            "expected": "01/27"
+        },
+        {
+            "expMonth": "01",
+            "expYear": "2000",
+            "expected": "01/00"
+        },
+        {
+            "expMonth": "13",
+            "expYear": "2027",
+            "expected": null
+        },
+        {
+            "expMonth": "12",
+            "expYear": "202",
+            "expected": null
+        }
+    ]
+}

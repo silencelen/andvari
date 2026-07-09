@@ -193,16 +193,6 @@
             "expected": "none"
         },
         {
-            "hints": [
-                "creditCardNumber"
-            ],
-            "inputTypeClass": 0,
-            "inputTypeVariation": 0,
-            "htmlType": null,
-            "htmlNameOrId": null,
-            "expected": "none"
-        },
-        {
             "hints": [],
             "inputTypeClass": 1,
             "inputTypeVariation": 0,
@@ -321,6 +311,650 @@
             "htmlType": null,
             "htmlNameOrId": null,
             "expected": "none"
+        }
+    ],
+    "classifyCard": [
+        {
+            "hints": [
+                "creditCardNumber"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-number"
+        },
+        {
+            "hints": [
+                "cardNumber"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-number"
+        },
+        {
+            "hints": [
+                "cc-number"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-number"
+        },
+        {
+            "hints": [
+                "creditCardSecurityCode"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [
+                "cc-csc"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [
+                "creditCardExpirationDate"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-exp"
+        },
+        {
+            "hints": [
+                "cc-exp"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-exp"
+        },
+        {
+            "hints": [
+                "creditCardExpirationMonth"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-exp-month"
+        },
+        {
+            "hints": [
+                "cc-exp-month"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-exp-month"
+        },
+        {
+            "hints": [
+                "creditCardExpirationYear"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-exp-year"
+        },
+        {
+            "hints": [
+                "cc-exp-year"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-exp-year"
+        },
+        {
+            "hints": [
+                "cc-name"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "cc-name"
+        },
+        {
+            "hints": [
+                "postalCode"
+            ],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "cardNumber",
+            "expected": "none"
+        },
+        {
+            "hints": [
+                "otpCode"
+            ],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "cvv",
+            "expected": "none"
+        },
+        {
+            "hints": [
+                "creditCardSecurityCode"
+            ],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "password",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [
+                "password"
+            ],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "cvv",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "cvv",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 128,
+            "htmlType": "password",
+            "htmlNameOrId": "cvv",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "card_cvc",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "securityCode",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "cardVerificationValue",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "mycvv",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "cardnumber",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "tel",
+            "htmlNameOrId": "cardNumber",
+            "expected": "cc-number"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "number",
+            "htmlNameOrId": "cc_number",
+            "expected": "cc-number"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "ccnum",
+            "expected": "cc-number"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "",
+            "htmlNameOrId": "cardno",
+            "expected": "cc-number"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": "cardNo",
+            "expected": "cc-number"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 2,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": "cardNumber",
+            "expected": "cc-number"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 2,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "exp_month",
+            "expected": "cc-exp-month"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "expMM",
+            "expected": "cc-exp-month"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "exp_year",
+            "expected": "cc-exp-year"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "expYY",
+            "expected": "cc-exp-year"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "expiry",
+            "expected": "cc-exp"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "exp_date",
+            "expected": "cc-exp"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "cc_exp",
+            "expected": "cc-exp"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "cc_exp_month",
+            "expected": "cc-exp-month"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "cvv",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "number",
+            "htmlNameOrId": "cvc",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "card_security_code",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "cardholder",
+            "expected": "cc-name"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "name_on_card",
+            "expected": "cc-name"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "ccName",
+            "expected": "cc-name"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "email",
+            "htmlNameOrId": "ccnumber",
+            "expected": "username"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "search",
+            "htmlNameOrId": "cardnumber",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "cardnum",
+            "expected": "cc-number"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "card_num",
+            "expected": "cc-number"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "expiration",
+            "expected": "cc-exp"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "expiration_date",
+            "expected": "cc-exp"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "expirationMonth",
+            "expected": "cc-exp-month"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "expirationYear",
+            "expected": "cc-exp-year"
+        }
+    ],
+    "classifyCardFreeRegression": [
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "tel",
+            "htmlNameOrId": "phone",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "tel",
+            "htmlNameOrId": "mobile_number",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "number",
+            "htmlNameOrId": "age",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "password",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "loginPassword",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "pin",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "cardigan_color",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "business_pan",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "experience",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "export_email",
+            "expected": "username"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": "passcode",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 32,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "username"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 2,
+            "inputTypeVariation": 16,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "current_password",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "search",
+            "htmlNameOrId": "q",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "card_note",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "cardNote",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "cardNotes",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "cv_code",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "cs_code",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "passport_expiry",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "passport_expiry_date",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "password_expiry",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 128,
+            "htmlType": null,
+            "htmlNameOrId": "securityCode",
+            "expected": "password"
         }
     ]
 }
