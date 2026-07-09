@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -44,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import io.silencelen.andvari.app.autofill.ApprovedBrowsers
 import io.silencelen.andvari.app.autofill.AutofillDebugLog
 import io.silencelen.andvari.core.client.autofill.SavedUri
 import io.silencelen.andvari.core.client.autofill.UriMatch
@@ -161,14 +163,30 @@ fun AutofillStatusScreen(vm: AndvariViewModel, ui: UiState) {
                             Spacer(Modifier.height(4.dp))
                             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        if (last.observedDigest != null) {
+                        val obsPkg = last.pkg
+                        val obsDigest = last.observedDigest
+                        if (obsDigest != null && obsPkg != null) {
                             Spacer(Modifier.height(8.dp))
-                            Text(
-                                "Observed signing-cert digest of ${last.pkg ?: "the caller"} — pin exactly this value in BrowserCertPins to trust it:",
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
-                            )
+                            val alreadyTrusted = remember(tick) { ApprovedBrowsers.approvedDigest(ctx, obsPkg) == obsDigest }
+                            if (alreadyTrusted) {
+                                Text(
+                                    "✓ You've trusted ${browserLabel(obsPkg)} on this device. Reopen your login form and try autofill again.",
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary,
+                                )
+                            } else {
+                                Text(
+                                    "andvari doesn't recognize ${browserLabel(obsPkg)}'s app signature yet, so it won't fill web logins there. If this is your real browser, trust it on this device:",
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                Button(onClick = { ApprovedBrowsers.approve(ctx, obsPkg, obsDigest); tick++ }) {
+                                    Text("Trust ${browserLabel(obsPkg)} on this device")
+                                }
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            Text("Observed signing-cert digest (safe to share):", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             SelectionContainer {
-                                Text(last.observedDigest, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                Text(obsDigest, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                             }
                         }
                         if (last.fields.isNotEmpty()) {
@@ -190,6 +208,28 @@ fun AutofillStatusScreen(vm: AndvariViewModel, ui: UiState) {
                 }
             }
             Spacer(Modifier.height(16.dp))
+
+            // ---- section 2b: browsers trusted on this device (self-service pins) ----
+            val trusted = remember(tick) { ApprovedBrowsers.all(ctx) }
+            if (trusted.isNotEmpty()) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("Trusted browsers", style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            "Browsers you've trusted for autofill on this device. Revoking one stops andvari filling web logins there until you trust it again.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        trusted.keys.sorted().forEach { pkg ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(browserLabel(pkg), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                                TextButton(onClick = { ApprovedBrowsers.revoke(ctx, pkg); tick++ }) { Text("Revoke") }
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
 
             // ---- section 3: debug ring buffer ----
             Card(Modifier.fillMaxWidth()) {
@@ -265,6 +305,20 @@ private fun uriCensus(docs: List<io.silencelen.andvari.core.client.ItemDoc>): Ur
 }
 
 /** One-line plain-English translation of the terminal reason, for the screenshot. */
+/** Friendly name for a browser package id (the raw id is the fallback). */
+private fun browserLabel(pkg: String): String = when {
+    pkg.startsWith("com.sec.android.app.sbrowser") -> "Samsung Internet"
+    pkg == "com.brave.browser" -> "Brave"
+    pkg == "com.microsoft.emmx" -> "Edge"
+    pkg == "com.opera.browser" || pkg == "com.opera.gx" -> "Opera"
+    pkg == "com.vivaldi.browser" -> "Vivaldi"
+    pkg == "com.duckduckgo.mobile.android" -> "DuckDuckGo"
+    pkg == "com.kiwibrowser.browser" -> "Kiwi"
+    pkg.startsWith("com.android.chrome") || pkg == "com.google.android.apps.chrome" || pkg.startsWith("com.chrome") -> "Chrome"
+    pkg.startsWith("org.mozilla") -> "Firefox"
+    else -> pkg
+}
+
 private fun outcomeHint(e: AutofillDebugLog.FillEvent): String? = when (e.reason) {
     "NO_STRUCTURE" -> "The system sent no form data — usually a transient platform issue."
     "SELF_FILL" -> "andvari never fills its own screens."

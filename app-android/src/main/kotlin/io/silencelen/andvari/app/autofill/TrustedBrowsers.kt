@@ -38,13 +38,18 @@ object TrustedBrowsers {
         return sig.firstOrNull()?.let { Base64.encodeToString(md.digest(it.toByteArray()), Base64.NO_WRAP) }
     }
 
-    /** True iff [pkg] is a pinned browser AND its installed signing cert matches a pinned digest. */
+    /**
+     * True iff [pkg] is a known browser whose installed signing cert is trusted — either by a
+     * shipped verified pin OR by the owner's on-device approval ([ApprovedBrowsers]). The decision
+     * rule lives in :core ([BrowserCertPins.isTrusted]) so it's gate-tested; this only does the
+     * on-device cert lookup + reads the local approval. Re-checks the LIVE cert every call.
+     */
     fun isTrusted(context: Context, pkg: String): Boolean {
-        val pins = PINS[pkg] ?: return false
-        if (pins.isEmpty()) return false // known browser, no verified digest yet → fail closed
+        if (pkg !in PINS) return false // not a known browser → fail closed (cheap early exit)
         val signatures = signingCerts(context, pkg) ?: return false
         val md = MessageDigest.getInstance("SHA-256")
-        return signatures.any { Base64.encodeToString(md.digest(it.toByteArray()), Base64.NO_WRAP) in pins }
+        val digests = signatures.map { Base64.encodeToString(md.digest(it.toByteArray()), Base64.NO_WRAP) }
+        return BrowserCertPins.isTrusted(pkg, digests, ApprovedBrowsers.approvedDigest(context, pkg))
     }
 
     private fun signingCerts(context: Context, pkg: String): Array<android.content.pm.Signature>? {

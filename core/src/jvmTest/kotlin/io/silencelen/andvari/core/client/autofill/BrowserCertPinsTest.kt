@@ -4,6 +4,7 @@ import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -34,5 +35,31 @@ class BrowserCertPinsTest {
             assertTrue(pkg.isNotBlank(), "blank package id in pin table")
             assertTrue(pins.all { it.isNotBlank() }, "blank digest under $pkg")
         }
+    }
+
+    private fun digest(seed: Int): String = Base64.Default.encode(ByteArray(32) { seed.toByte() })
+
+    @Test
+    fun isTrusted_verifiedStaticPin_matchesKnownBrowser() {
+        val chromePin = BrowserCertPins.TABLE["com.android.chrome"]!!.first()
+        assertTrue(BrowserCertPins.isTrusted("com.android.chrome", listOf(chromePin), null), "verified pin → trusted")
+        assertFalse(BrowserCertPins.isTrusted("com.android.chrome", listOf(digest(7)), null), "wrong cert → not trusted")
+    }
+
+    @Test
+    fun isTrusted_emptyPinnedBrowser_selfServiceApprovalPath() {
+        val samsung = "com.sec.android.app.sbrowser" // shipped with an EMPTY pin set (fail closed)
+        val live = digest(1)
+        assertFalse(BrowserCertPins.isTrusted(samsung, listOf(live), null), "no approval → fail closed")
+        assertTrue(BrowserCertPins.isTrusted(samsung, listOf(live), live), "owner approved exactly this digest → trusted")
+        assertFalse(BrowserCertPins.isTrusted(samsung, listOf(live), digest(2)), "approved a DIFFERENT digest (re-signed/spoofed) → not trusted")
+    }
+
+    @Test
+    fun isTrusted_unknownPackage_neverTrustedEvenIfApproved() {
+        // Approval only unlocks KNOWN browser packages (TABLE keys / manifest <queries>); a random
+        // app can't be trusted even if its own digest is somehow "approved".
+        val d = digest(9)
+        assertFalse(BrowserCertPins.isTrusted("com.evil.fake.browser", listOf(d), d))
     }
 }
