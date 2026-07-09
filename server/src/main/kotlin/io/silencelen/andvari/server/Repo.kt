@@ -436,6 +436,22 @@ class Repo(val db: Db) {
             userId,
         ) { rs -> DeletedItem(rs.getString("itemId"), rs.getString("vaultId"), rs.getLong("updatedAt")) }
 
+    /** F49 retention: hard-delete a tombstoned item — the row AND its archived versions. Removes it
+     *  from the Trash query and frees the ciphertext. (Trade-off: the delete leaves future sync
+     *  deltas, so a client offline past retention that never saw the delete could re-add it — rare,
+     *  bounded-Trash is the accepted call. Only ever applied to already-tombstoned items.) */
+    fun purgeItem(c: Connection, itemId: String) {
+        c.exec("DELETE FROM item_versions WHERE itemId=?", itemId)
+        c.exec("DELETE FROM items WHERE itemId=?", itemId)
+    }
+
+    /** F49 retention: hard-delete every item tombstone deleted before [cutoffMs]. Returns the ids. */
+    fun purgeOldTombstones(c: Connection, cutoffMs: Long): List<String> {
+        val ids = c.queryAll("SELECT itemId FROM items WHERE deleted=1 AND updatedAt<?", cutoffMs) { rs -> rs.getString("itemId") }
+        for (id in ids) purgeItem(c, id)
+        return ids
+    }
+
     fun archiveVersion(c: Connection, item: WireItem) {
         if (item.blob == null) return
         c.exec(

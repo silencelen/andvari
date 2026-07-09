@@ -109,4 +109,35 @@ class ItemHistoryTest : LifecycleTestSupport() {
             client.post("/api/v1/items/$itemId/restore") { authed(owner); contentType(ContentType.Application.Json); setBody(owner.encItem(itemId, "again")) }.status,
         )
     }
+
+    @Test
+    fun purgeItem_hardDeletes_grantChecked_onlyDeleted() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val owner = VirtualClient("purge-owner@x.com", "purge owner password one")
+        client.register(owner, bootstrapToken)
+        val stranger = client.enrollSecond(owner, "purge-stranger@x.com", "purge stranger password two")
+
+        val itemId = owner.newItemId()
+        val r1 = client.push(owner, putMutation(owner, itemId, "secret", 0))
+        client.push(owner, Mutation(uuid(), "delete", itemId, owner.personalVaultId, r1.results[0].newItemRev!!, null))
+
+        suspend fun trash() =
+            json.decodeFromString(DeletedItemsResponse.serializer(), client.get("/api/v1/items/deleted") { authed(owner) }.bodyAsText()).items
+        assertEquals(listOf(itemId), trash().map { it.itemId }) // in Trash
+
+        // A live (non-deleted) item can't be "deleted forever" — must be trashed first.
+        val liveId = owner.newItemId()
+        client.push(owner, putMutation(owner, liveId, "live", 0))
+        assertEquals(HttpStatusCode.BadRequest, client.post("/api/v1/items/$liveId/purge") { authed(owner) }.status)
+
+        // Non-member is 403-hidden; the owner purges.
+        assertEquals(HttpStatusCode.Forbidden, client.post("/api/v1/items/$itemId/purge") { authed(stranger) }.status)
+        assertEquals(HttpStatusCode.OK, client.post("/api/v1/items/$itemId/purge") { authed(owner) }.status, "owner purges")
+
+        // Gone: leaves Trash, versions route 403 (row hard-deleted → itemById null), re-purge 403.
+        assertTrue(trash().none { it.itemId == itemId }, "purged item leaves Trash")
+        assertEquals(HttpStatusCode.Forbidden, client.get("/api/v1/items/$itemId/versions") { authed(owner) }.status)
+        assertEquals(HttpStatusCode.Forbidden, client.post("/api/v1/items/$itemId/purge") { authed(owner) }.status)
+    }
 }

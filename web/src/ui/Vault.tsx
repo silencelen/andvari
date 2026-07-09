@@ -711,6 +711,8 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
   const [items, setItems] = useState<{ itemId: string; vaultId: string; deletedAt: number; doc: ItemDoc | null }[] | null>(null);
   const [err, setErr] = useState("");
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [purgingId, setPurgingId] = useState<string | null>(null);
+  const [confirmPurgeId, setConfirmPurgeId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setErr("");
@@ -722,6 +724,20 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
   }, [store]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const purge = async (itemId: string) => {
+    setPurgingId(itemId);
+    setErr("");
+    try {
+      await store.purgeDeleted(itemId);
+    } catch {
+      setErr("Couldn't delete it permanently — try again.");
+    } finally {
+      setPurgingId(null);
+      setConfirmPurgeId(null);
+      await load();
+    }
+  };
 
   const restore = async (d: { itemId: string; vaultId: string; doc: ItemDoc | null }) => {
     if (!d.doc) return; // nothing readable to restore
@@ -742,7 +758,8 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
     <div className="sheet">
       <h2>Recently deleted</h2>
       <div className="muted" style={{ marginBottom: 18 }}>
-        Deleted items you can still restore. Restoring brings an item back to its vault on every device.
+        Deleted items you can still restore — kept for 30 days, then removed automatically. Restoring
+        brings an item back to its vault on every device; “Delete forever” removes it now.
       </div>
       {err && <div className="msg err">{err}</div>}
       {items === null ? (
@@ -756,9 +773,24 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
               {d.doc ? d.doc.name : <span className="muted">(unrecoverable — no readable version)</span>}
               <span className="muted mono" style={{ marginLeft: 8 }}>deleted {new Date(d.deletedAt).toISOString().slice(0, 10)}</span>
             </span>
-            <button className="ghost" disabled={!d.doc || restoringId !== null} onClick={() => restore(d)}>
-              {restoringId === d.itemId ? "Restoring…" : "Restore"}
-            </button>
+            {confirmPurgeId === d.itemId ? (
+              <>
+                <span className="muted">Delete forever?</span>
+                <button className="ghost" style={{ color: "var(--danger)" }} disabled={purgingId !== null} onClick={() => purge(d.itemId)}>
+                  {purgingId === d.itemId ? "Deleting…" : "Confirm"}
+                </button>
+                <button className="ghost" disabled={purgingId !== null} onClick={() => setConfirmPurgeId(null)}>Keep</button>
+              </>
+            ) : (
+              <>
+                <button className="ghost" disabled={!d.doc || restoringId !== null || purgingId !== null} onClick={() => restore(d)}>
+                  {restoringId === d.itemId ? "Restoring…" : "Restore"}
+                </button>
+                <button className="ghost" style={{ color: "var(--danger)" }} disabled={restoringId !== null || purgingId !== null} onClick={() => setConfirmPurgeId(d.itemId)}>
+                  Delete forever
+                </button>
+              </>
+            )}
           </div>
         ))
       )}

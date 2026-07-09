@@ -426,6 +426,12 @@ fun Application.andvariModule(services: Services) {
             val rev = service.restoreItem(p, id, call.receive<ItemUpload>(), call.clientIp(config))
             call.respond(ItemRestoreResponse(rev))
         }
+        // "Delete forever" (F49): hard-delete a tombstoned item + its versions. Writer/owner only.
+        post("/api/v1/items/{id}/purge") {
+            val p = requirePrincipal(call, service)
+            val id = requireUuid(call.parameters["id"], "item_id")
+            call.respond(ItemRestoreResponse(service.purgeItem(p, id, call.clientIp(config))))
+        }
 
         // ---- sync ----
         get("/api/v1/sync") {

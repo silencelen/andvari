@@ -26,10 +26,34 @@ class Janitor(
     private val config: Config,
     private val onChange: suspend (userIds: Collection<String>, rev: Long) -> Unit = { _, _ -> },
 ) {
-    class SweepResult(val purgedVaults: List<String>, val expiredOffers: List<String>, val dryRun: Boolean)
+    class SweepResult(
+        val purgedVaults: List<String>,
+        val expiredOffers: List<String>,
+        val purgedItemTombstones: List<String>,
+        val dryRun: Boolean,
+    )
 
     suspend fun sweep(nowMs: Long = now()): SweepResult =
-        SweepResult(purgeDueVaults(nowMs), expireTransferOffers(nowMs), config.janitorDryRun)
+        SweepResult(purgeDueVaults(nowMs), expireTransferOffers(nowMs), purgeOldItemTombstones(nowMs), config.janitorDryRun)
+
+    // ---- (c) F49: item-tombstone retention (30 days) ----
+
+    /** Hard-delete item tombstones deleted more than 30 days ago (+ their archived versions), so
+     *  Trash is bounded. Dry-run aware; failures are logged, never thrown. Returns the purged ids. */
+    fun purgeOldItemTombstones(nowMs: Long): List<String> {
+        val cutoff = nowMs - 30L * 24 * 3600 * 1000 // 30 days
+        val due = repo.db.read { c ->
+            c.queryAll("SELECT itemId FROM items WHERE deleted=1 AND updatedAt<?", cutoff) { it.getString(1) }
+        }
+        if (due.isEmpty()) return emptyList()
+        if (config.janitorDryRun) {
+            System.err.println("[andvari] janitor DRY-RUN: would purge ${due.size} item tombstone(s) past 30d")
+            return emptyList()
+        }
+        return runCatching { repo.db.tx { c -> repo.purgeOldTombstones(c, cutoff) } }
+            .onFailure { System.err.println("[andvari] janitor: item-tombstone purge failed: $it") }
+            .getOrDefault(emptyList())
+    }
 
     // ---- (a) vault purge ----
 

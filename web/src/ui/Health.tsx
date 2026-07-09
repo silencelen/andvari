@@ -41,8 +41,10 @@ export function Health({ store, client, onOpenItem }: Props) {
     });
   }, [store]);
 
-  // password → breach count, filled by the scan; null until one has run.
-  const [breaches, setBreaches] = useState<Map<string, number> | null>(null);
+  // itemId → breach count, filled by a scan and cached ON-DEVICE (by itemId — never the plaintext
+  // password, which is only the scan's lookup key) so it survives navigating away from Health.
+  // Loaded from the cache on mount → the button reads "Rescan" and the column shows last results.
+  const [breachByItem, setBreachByItem] = useState<Map<string, number> | null>(() => loadBreachCache());
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [scanErr, setScanErr] = useState("");
@@ -69,7 +71,10 @@ export function Health({ store, client, onOpenItem }: Props) {
         for (const pw of passwords) result.set(pw, hibpCountInRange(body, hashes.get(pw)!));
         setProgress({ done: ++done, total: byPrefix.size });
       }
-      setBreaches(result);
+      // Persist + display keyed by itemId — never the plaintext password (the scan's lookup key).
+      const byItem = new Map(rows.map((r) => [r.itemId, result.get(r.password) ?? 0]));
+      setBreachByItem(byItem);
+      saveBreachCache(byItem);
     } catch {
       setScanErr("Breach scan failed — the HIBP relay is unavailable. Partial results were discarded.");
     } finally {
@@ -79,7 +84,12 @@ export function Health({ store, client, onOpenItem }: Props) {
 
   const weak = rows.filter((r) => r.strength <= 1).length;
   const reused = rows.filter((r) => r.reused > 0).length;
-  const breached = breaches ? rows.filter((r) => (breaches.get(r.password) ?? 0) > 0).length : null;
+  const breached = breachByItem ? rows.filter((r) => (breachByItem.get(r.itemId) ?? 0) > 0).length : null;
+  // Highest breach count first (owner ask), then alphabetical; unscanned/no-breach items tie at 0.
+  const sorted = useMemo(() => {
+    const n = (id: string) => breachByItem?.get(id) ?? 0;
+    return [...rows].sort((a, b) => n(b.itemId) - n(a.itemId) || a.name.localeCompare(b.name));
+  }, [rows, breachByItem]);
 
   return (
     <div>
@@ -87,7 +97,7 @@ export function Health({ store, client, onOpenItem }: Props) {
         <h2 className="view-title">Vault health</h2>
         <div className="spacer" />
         <button className="ghost" onClick={scan} disabled={scanning || rows.length === 0}>
-          {scanning ? `Scanning… ${progress.done}/${progress.total}` : breaches ? "Rescan breaches" : "Scan breaches"}
+          {scanning ? `Scanning… ${progress.done}/${progress.total}` : breachByItem ? "Rescan for breaches" : "Scan for breaches"}
         </button>
       </div>
       {scanErr && <div className="msg err">{scanErr}</div>}
@@ -117,8 +127,8 @@ export function Health({ store, client, onOpenItem }: Props) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
-                const count = breaches?.get(r.password);
+              {sorted.map((r) => {
+                const count = breachByItem?.get(r.itemId);
                 return (
                   <tr key={r.itemId} className="rowlink" onClick={() => onOpenItem(r.itemId)}>
                     <td>{r.name}</td>
@@ -126,7 +136,7 @@ export function Health({ store, client, onOpenItem }: Props) {
                     <td>{r.reused > 0 ? <span className="tone-bad">{r.reused} other{r.reused > 1 ? "s" : ""}</span> : <span className="muted">no</span>}</td>
                     <td>{r.hasTotp ? "yes" : <span className="muted">no</span>}</td>
                     <td>
-                      {breaches === null ? (
+                      {breachByItem === null ? (
                         <span className="muted">—</span>
                       ) : count && count > 0 ? (
                         <span className="tone-bad">{count.toLocaleString()}</span>
@@ -143,6 +153,25 @@ export function Health({ store, client, onOpenItem }: Props) {
       )}
     </div>
   );
+}
+
+// On-device breach cache — itemId → count only (no password material; itemIds are UUIDs, so a stale
+// entry from another account simply never matches a current row). Survives Health unmount/remount.
+const BREACH_CACHE_KEY = "andvari:breach-cache:v1";
+function loadBreachCache(): Map<string, number> | null {
+  try {
+    const raw = localStorage.getItem(BREACH_CACHE_KEY);
+    return raw ? new Map(Object.entries(JSON.parse(raw) as Record<string, number>)) : null;
+  } catch {
+    return null;
+  }
+}
+function saveBreachCache(byItem: Map<string, number>): void {
+  try {
+    localStorage.setItem(BREACH_CACHE_KEY, JSON.stringify(Object.fromEntries(byItem)));
+  } catch {
+    /* private mode / quota — the in-memory map still works for this session */
+  }
 }
 
 function Tile({ label, value, tone, hint }: { label: string; value: string; tone?: "good" | "bad"; hint?: string }) {
