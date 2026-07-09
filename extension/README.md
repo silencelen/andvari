@@ -35,8 +35,12 @@ npm run typecheck    # tsc --noEmit
     under the VK**. Holds the decrypted set in memory only (ZK). `matches` returns host-matching
     logins (name + username, never the password until a fill).
   - `src/popup.ts` + `popup.html` — a real unlock form (email + master password) showing the login
-    count + Lock; `src/content.ts` detects login forms and queries the SW for host matches on focus.
-- **Next (`TODO(extension)`):** the inline fill dropdown + a `reveal` message that returns the chosen
-  password to the field, then a "Save to andvari?" prompt on submit (mirrors the Android flow); run
-  the ~5.8 s Argon2id in a Web Worker so the popup doesn't block; member (shared-vault) grants via
-  `sealedVk` (crypto_box_seal_open — identity key + `@noble` X25519); token refresh; then Firefox MV3.
+    count + Lock.
+  - `src/content.ts` — **the in-page autofill UI**: on login-field focus, a fill dropdown of matching
+    logins → click → SW `reveal` → the username/password are set in the fields; on submit, a "Save to
+    andvari?" banner → SW `save` (client-encrypts a new login under the personal vault key + pushes).
+    So the extension now **fills and saves** end to end.
+- **Next (`TODO(extension)`):** a shadow-root + injected stylesheet so the UI survives strict-CSP
+  sites (the spike uses inline styles); run the ~5.8 s Argon2id in a Web Worker so the popup doesn't
+  block; member (shared-vault) grants via `sealedVk` (crypto_box_seal_open — identity key + `@noble`
+  X25519); token refresh; then Firefox MV3.

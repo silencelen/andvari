@@ -39,10 +39,29 @@ export interface WireItem {
   formatVersion: number;
   blob: string | null;
 }
+export interface WireVault {
+  vaultId: string;
+  type: string; // "personal" | "shared"
+}
 export interface SyncResponse {
   rev: number;
+  vaults: WireVault[];
   grants: WireGrant[];
   items: WireItem[];
+}
+
+export interface ItemUpload {
+  formatVersion: number;
+  attachmentIds: string[];
+  blob: string;
+}
+export interface Mutation {
+  mutationId: string;
+  op: "put" | "delete";
+  itemId: string;
+  vaultId: string;
+  baseItemRev: number;
+  item?: ItemUpload;
 }
 
 export class AndvariApi {
@@ -89,6 +108,11 @@ export class AndvariApi {
   /** Full snapshot when since=0: vaults/grants/items as deltas over the global rev. */
   sync(since = 0): Promise<SyncResponse> {
     return this.json("GET", `/api/v1/sync?since=${since}`);
+  }
+
+  /** Save flow: push put/delete mutations (the client-encrypted item rides in item.blob). */
+  push(mutations: Mutation[]): Promise<{ rev: number }> {
+    return this.json("POST", "/api/v1/sync/push", { mutations });
   }
 }
 
