@@ -81,9 +81,28 @@ This is the whole point — please find the holes:
 - **Everyday use:** create logins, edit them, and actually use andvari for a few days. Anything
   confusing, ugly, or plain wrong is worth telling us.
 
-> **Autofill (phone and browser):** still being hardened — **please hold off testing autofill**
-> for now. We'll give a separate "go" when it's ready to hammer on. For this round, copy/paste
-> from andvari is the reliable path.
+### Autofill — fill & save logins in your browser and apps (Android)
+
+andvari can fill your saved logins and offer to save new ones as you sign in. **Two one-time setup
+steps, then it just works:**
+
+1. **Turn andvari on as your autofill service.** Android **Settings → search "autofill service" →
+   pick andvari** (some phones: Settings → Passwords/Passkeys & accounts → Autofill service).
+2. **The first time you use a login page in a given browser,** tap the username field. Instead of
+   filling, you'll see a **"Trust {your browser} to fill here"** row in the suggestion bar — tap it,
+   confirm, and reopen the page. **You do this once per browser** (a security step, so andvari only
+   trusts browsers you picked). **Chrome** additionally needs its own switch: Chrome → Settings →
+   **"Autofill using other services" → ON**.
+
+Once a browser is trusted:
+- **Fill:** tap a username or password field → andvari suggests your saved login → tap to fill.
+- **Save:** sign in somewhere new → andvari asks **"Save to andvari?"** → confirm → it's saved, and
+  fills next time.
+
+**Please try to break it:** lots of different sites (a good sandbox is **https://fill.dev**), your
+real logins, and apps as well as browsers. Tell us anything that won't fill, won't offer to save,
+fills the wrong field, or is confusing. (Windows/Mac/Linux: no autofill yet — use the web app +
+copy/paste; a browser extension is coming.)
 
 ---
 
