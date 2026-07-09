@@ -14,6 +14,7 @@ import android.view.autofill.AutofillManager
 import android.view.inputmethod.InlineSuggestionsRequest
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
+import io.silencelen.andvari.core.client.autofill.BrowserCertPins
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -92,19 +93,20 @@ class AndvariAutofillService : AutofillService() {
         // it makes the in-memory read slightly stale. getIfFresh enforces the inactivity
         // auto-lock (spec 01 §8): an idle-expired vault is locked here and the user gets
         // the unlock row instead of a silent credential fill.
+        val trusted = TrustedBrowsers.isTrusted(this, appPackage)
         val unlocked = VaultSession.getIfFresh()
         return if (unlocked == null) {
-            lockedResponse(form, inlineRequest).also { trace.finish(ctx, AutofillDebugLog.FillReason.LOCKED_ROW_SHOWN) }
+            lockedResponse(form, inlineRequest, trusted).also { trace.finish(ctx, AutofillDebugLog.FillReason.LOCKED_ROW_SHOWN) }
         } else {
             DatasetBuilder.buildUnlockedResponse(
-                this, unlocked.engine.items(), form, TrustedBrowsers.isTrusted(this, appPackage), inlineRequest, trace,
+                this, unlocked.engine.items(), form, trusted, inlineRequest, trace,
             ).also { trace.finishFromBuild(ctx) }
         }
     }
 
     /** Locked: an authentication row that launches the translucent unlock activity. */
     @Suppress("DEPRECATION") // setAuthentication(RemoteViews[, InlinePresentation]) works API 29-35
-    private fun lockedResponse(form: ParsedForm, inlineRequest: InlineSuggestionsRequest?): FillResponse {
+    private fun lockedResponse(form: ParsedForm, inlineRequest: InlineSuggestionsRequest?, trusted: Boolean): FillResponse {
         val ids = form.allIds.toTypedArray()
         // FLAG_MUTABLE lets the platform inject EXTRA_ASSIST_STRUCTURE + inline specs into the
         // launch intent; the flag constant only exists from API 31, and pre-31 PendingIntents
@@ -125,7 +127,9 @@ class AndvariAutofillService : AutofillService() {
         } else {
             b.setAuthentication(ids, pi.intentSender, menu)
         }
-        DatasetBuilder.saveInfoFor(form)?.let { b.setSaveInfo(it) } // offer save even if the user ignores the unlock row
+        // Same trust rule as the unlocked path: no save prompt in an untrusted known browser (a saved
+        // web login couldn't fill there). Native apps + trusted browsers get it.
+        if (form.appPackage !in BrowserCertPins.TABLE || trusted) DatasetBuilder.saveInfoFor(form)?.let { b.setSaveInfo(it) }
         return b.build()
     }
 
