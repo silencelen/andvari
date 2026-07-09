@@ -91,7 +91,9 @@ object StructureParser {
         return "combined" // only the full signal set reproduces the verdict
     }
 
-    private fun signalOf(node: AssistStructure.ViewNode): FieldSignal {
+    /** Field-classification signals (metadata only — never node text/values). `internal` so the
+     *  save-flow's [SaveExtractor] classifies fields with the exact same signals as the fill path. */
+    internal fun signalOf(node: AssistStructure.ViewNode): FieldSignal {
         val hints = node.autofillHints?.toList() ?: emptyList()
         val inputType = node.inputType
         val html = node.htmlInfo

@@ -10,6 +10,7 @@ import android.service.autofill.FillRequest
 import android.service.autofill.FillResponse
 import android.service.autofill.SaveCallback
 import android.service.autofill.SaveRequest
+import android.view.autofill.AutofillManager
 import android.view.inputmethod.InlineSuggestionsRequest
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
@@ -124,12 +125,31 @@ class AndvariAutofillService : AutofillService() {
         } else {
             b.setAuthentication(ids, pi.intentSender, menu)
         }
+        DatasetBuilder.saveInfoFor(form)?.let { b.setSaveInfo(it) } // offer save even if the user ignores the unlock row
         return b.build()
     }
 
+    /**
+     * "Save to andvari?" — the platform calls this when the user submits credentials in a form we
+     * set [android.service.autofill.SaveInfo] on. We hand the submitted structure to
+     * [SaveConfirmActivity] (via the IntentSender the framework launches after dismissing the save
+     * UI), which reads the typed values, unlocks the vault if needed, confirms with the user, and
+     * creates the login. runCatching so a failure degrades to a clean onSuccess() — a throw in this
+     * callback would crash the host app's process (never-crash rail).
+     */
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {
-        // Fill-only: no SaveInfo is ever set, so this should never fire. Reply cleanly.
-        callback.onSuccess()
+        val launched = runCatching {
+            val structure = request.fillContexts.lastOrNull()?.structure ?: return@runCatching false
+            val intent = Intent(this, SaveConfirmActivity::class.java)
+                .putExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE, structure)
+            // IMMUTABLE (least privilege): unlike the fill-auth PI, the save PI already carries the
+            // structure and the framework injects nothing into the save IntentSender.
+            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_CANCEL_CURRENT
+            val pi = PendingIntent.getActivity(this, nextRequestCode(), intent, flags)
+            callback.onSuccess(pi.intentSender) // framework launches the confirm activity after the save UI dismisses
+            true
+        }.getOrDefault(false)
+        if (!launched) runCatching { callback.onSuccess() } // couldn't stage the activity → clean no-op, never a crash
     }
 
     private companion object {

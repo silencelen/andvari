@@ -34,24 +34,15 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
 import io.silencelen.andvari.app.AndvariTheme
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
-import io.silencelen.andvari.core.client.Account
-import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
-import io.silencelen.andvari.core.client.InMemoryVaultCache
-import io.silencelen.andvari.core.client.SyncEngine
-import io.silencelen.andvari.core.client.sqliteVaultCache
 import io.silencelen.andvari.core.crypto.CryptoException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.io.IOException
 
 /**
@@ -144,7 +135,7 @@ class AutofillUnlockActivity : ComponentActivity() {
         errorText = null
         lifecycleScope.launch {
             val result = runCatching {
-                withContext(Dispatchers.IO) { unlockSession(store, session, password) }
+                withContext(Dispatchers.IO) { AutofillUnlock.unlock(this@AutofillUnlockActivity, store, session, password) }
             }
             result.onSuccess { unlocked ->
                 // Rebuild datasets exactly as the service would, from the durable cache.
@@ -159,55 +150,6 @@ class AutofillUnlockActivity : ComponentActivity() {
                 errorText = friendly(t)
             }
         }
-    }
-
-    /**
-     * Unlock the vault into VaultSession using the single-token-holder api. Mirrors
-     * AndvariViewModel.unlock: offline accountKeys fallback, hydrate() from the durable
-     * cache, best-effort sync tolerated. The password is used only inside this call.
-     */
-    private suspend fun unlockSession(store: SessionStore, session: Session, password: String): VaultSession.Unlocked =
-        VaultSession.unlockMutex.withLock {
-            // Inside the lock: reuse the winner's session if the main app (or a prior fill)
-            // unlocked while we waited — never mint a second token-holder that reuses the
-            // now-consumed refresh token (→ device revocation). getIfFresh: an idle-expired
-            // winner is dropped (its api/token-holder CLOSED by lock()) instead of adopted,
-            // and we mint the replacement holder below while still holding the mutex — the
-            // single-token-holder invariant is preserved.
-            VaultSession.getIfFresh()?.let { return@withLock it }
-            unlockLocked(store, session, password)
-        }
-
-    private suspend fun unlockLocked(store: SessionStore, session: Session, password: String): VaultSession.Unlocked {
-        val api = AndvariApi(store.baseUrl, HttpClient(OkHttp), session.tokens(), { store.updateTokens(it) }) // platform "android"
-        val keys = try {
-            api.accountKeys().also { if (store.cacheAllowed) store.saveAccountKeys(it) else store.clearAccountKeys() }
-        } catch (e: IOException) {
-            // Offline: fall back to the cached accountKeys (spec 02 §8).
-            store.loadAccountKeys() ?: run { api.close(); throw e }
-        } catch (t: Throwable) {
-            // A definitive auth failure (401 already tried a token refresh inside the api).
-            api.close(); throw t
-        }
-        val acct = try {
-            Account.unlock(session.userId, password, keys)
-        } catch (t: Throwable) {
-            api.close(); throw t // wrong password etc. — never leave the token-holder open unbound
-        }
-
-        val cache = if (store.cacheAllowed) {
-            sqliteVaultCache(File(applicationContext.noBackupFilesDir, "vault-${acct.userId}.db").absolutePath, acct.userId)
-        } else {
-            // Policy forbids the durable cache: delete any existing file (spec 02 §8) — the
-            // main-app bind() does the same; without this the autofill path would leave a
-            // durable ciphertext DB against policy.
-            for (s in listOf("", "-wal", "-shm")) File(applicationContext.noBackupFilesDir, "vault-${acct.userId}.db$s").delete()
-            InMemoryVaultCache()
-        }
-        val engine = SyncEngine(api, acct, cache).also { it.hydrate() }
-        VaultSession.bind(api, acct, engine, cache) // now THE token-holder; the main app reuses it
-        runCatching { engine.sync() } // best-effort; hydrate already gave cached items
-        return VaultSession.get() ?: VaultSession.Unlocked(api, acct, engine, cache)
     }
 
     /** Terminal EXCEPTION event for a throw while (re)building datasets; trace records

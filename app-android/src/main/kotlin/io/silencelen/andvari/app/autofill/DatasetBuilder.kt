@@ -10,6 +10,7 @@ import android.service.autofill.Dataset
 import android.service.autofill.FillResponse
 import android.service.autofill.InlinePresentation
 import android.service.autofill.Presentations
+import android.service.autofill.SaveInfo
 import android.view.autofill.AutofillId
 import android.view.autofill.AutofillValue
 import android.view.inputmethod.InlineSuggestionsRequest
@@ -69,7 +70,9 @@ object DatasetBuilder {
             // every plain text box), so offer a single "Open andvari" row instead of
             // vanishing. Bitwarden/1Password convention; tapping launches the app.
             val fallback = openAppDataset(context, form, inlineRequest) ?: return null
-            val response = runCatching { FillResponse.Builder().addDataset(fallback).build() }.getOrNull()
+            val rb = FillResponse.Builder().addDataset(fallback)
+            saveInfoFor(form)?.let { rb.setSaveInfo(it) } // still offer "Save to andvari?" when nothing matched
+            val response = runCatching { rb.build() }.getOrNull()
             // Only a DELIVERED row justifies the confident NO_URI_MATCH label downstream
             // (finishFromBuild); a failed build must read as UNKNOWN, not "no match".
             trace?.fallbackRowShown = response != null
@@ -77,7 +80,23 @@ object DatasetBuilder {
         }
         val b = FillResponse.Builder()
         datasets.forEach { b.addDataset(it) }
+        saveInfoFor(form)?.let { b.setSaveInfo(it) }
         return b.build()
+    }
+
+    /**
+     * SaveInfo for "Save to andvari?" — watches the form's username + password fields so the
+     * platform offers to save when the user submits credentials andvari doesn't already hold. Null
+     * when the form has no password field (nothing worth saving). Set on EVERY FillResponse (match,
+     * no-match fallback, and the locked auth row) so save is offered regardless of the fill outcome.
+     */
+    fun saveInfoFor(form: ParsedForm): SaveInfo? {
+        val pw = form.fields.filter { it.kind == FieldKind.PASSWORD }
+        if (pw.isEmpty()) return null
+        val user = form.fields.filter { it.kind == FieldKind.USERNAME }
+        val type = SaveInfo.SAVE_DATA_TYPE_PASSWORD or (if (user.isNotEmpty()) SaveInfo.SAVE_DATA_TYPE_USERNAME else 0)
+        val ids = (user + pw).map { it.id }.toTypedArray()
+        return runCatching { SaveInfo.Builder(type, ids).build() }.getOrNull()
     }
 
     /**
