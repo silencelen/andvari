@@ -305,8 +305,9 @@ private fun uriCensus(docs: List<io.silencelen.andvari.core.client.ItemDoc>): Ur
 }
 
 /** One-line plain-English translation of the terminal reason, for the screenshot. */
-/** Friendly name for a browser package id (the raw id is the fallback). */
-private fun browserLabel(pkg: String): String = when {
+/** Friendly name for a browser package id (the raw id is the fallback). `internal` so the autofill
+ *  dropdown's "Trust this browser" row + activity show the same label. */
+internal fun browserLabel(pkg: String): String = when {
     pkg.startsWith("com.sec.android.app.sbrowser") -> "Samsung Internet"
     pkg == "com.brave.browser" -> "Brave"
     pkg == "com.microsoft.emmx" -> "Edge"

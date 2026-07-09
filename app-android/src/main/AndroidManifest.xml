@@ -93,6 +93,13 @@
             android:noHistory="true"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Andvari.Translucent" />
+        <!-- "Trust {browser} to fill here" confirm, launched from the autofill dropdown row. -->
+        <activity
+            android:name="io.silencelen.andvari.app.autofill.TrustBrowserActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.Andvari.Translucent" />
 
         <!-- ProfileInstaller auto-init runs in the androidx.startup provider BEFORE
              Application.onCreate and has caused immediate startup crashes on some Android 15

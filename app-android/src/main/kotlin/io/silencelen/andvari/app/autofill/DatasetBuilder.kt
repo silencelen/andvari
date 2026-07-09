@@ -22,6 +22,7 @@ import androidx.autofill.inline.v1.InlineSuggestionUi
 import com.silencelen.andvari.R
 import io.silencelen.andvari.app.MainActivity
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.app.browserLabel
 import io.silencelen.andvari.core.client.autofill.BrowserCertPins
 import io.silencelen.andvari.core.client.autofill.FieldKind
 import io.silencelen.andvari.core.client.autofill.FillTarget
@@ -75,7 +76,9 @@ object DatasetBuilder {
             // (form.fields is USERNAME/PASSWORD only — the gate that keeps this row off
             // every plain text box), so offer a single "Open andvari" row instead of
             // vanishing. Bitwarden/1Password convention; tapping launches the app.
-            val fallback = openAppDataset(context, form, inlineRequest) ?: return null
+            // A known-untrusted browser (== !offerSave) gets the "Trust {browser}" onboarding row
+            // instead of the generic "Open andvari" — surfaces the one-tap fix where the wall is.
+            val fallback = (if (!offerSave) trustBrowserDataset(context, form, inlineRequest) else openAppDataset(context, form, inlineRequest)) ?: return null
             val rb = FillResponse.Builder().addDataset(fallback)
             if (offerSave) saveInfoFor(form)?.let { rb.setSaveInfo(it) } // offer save even when nothing matched
             val response = runCatching { rb.build() }.getOrNull()
@@ -296,6 +299,46 @@ object DatasetBuilder {
         }.getOrNull()
 
     private const val OPEN_APP_REQUEST_CODE = 0x0AFD // stable id; intent is always identical
+
+    /**
+     * "Trust {browser} to fill here" row — shown INSTEAD of "Open andvari" when the caller is a
+     * KNOWN browser andvari hasn't been trusted in yet (so nothing web can fill/save there). Tapping
+     * launches [TrustBrowserActivity], which captures the browser's real on-device signing digest
+     * and (with a confirm) approves it — surfacing the one-time trust step exactly where the user
+     * hits the wall instead of buried in Settings. Same dataset-auth mechanics as [openAppDataset].
+     */
+    @Suppress("DEPRECATION")
+    private fun trustBrowserDataset(context: Context, form: ParsedForm, inlineRequest: InlineSuggestionsRequest?): Dataset? =
+        runCatching {
+            val title = "Trust ${browserLabel(form.appPackage)} to fill here"
+            val subtitle = "Tap to let andvari fill & save in this browser"
+            val menu = presentationRow(context, title, subtitle)
+            val spec = inlineSpecs(inlineRequest).firstOrNull()
+            val inline = if (Build.VERSION.SDK_INT >= 30 && spec != null) buildInline(context, title, subtitle, spec) else null
+            // IMMUTABLE: the pkg is baked in and the framework injects nothing (unlike a fill-auth PI).
+            // Per-pkg request code so concurrent browsers don't share one PendingIntent's extras.
+            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            val launch = Intent(context, TrustBrowserActivity::class.java)
+                .putExtra(TrustBrowserActivity.EXTRA_PKG, form.appPackage)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // fires from the browser's task; route to andvari's
+            val pi = PendingIntent.getActivity(context, form.appPackage.hashCode(), launch, flags)
+            val b = if (Build.VERSION.SDK_INT >= 33) {
+                val pres = Presentations.Builder().setMenuPresentation(menu)
+                if (inline != null) pres.setInlinePresentation(inline)
+                Dataset.Builder(pres.build())
+            } else {
+                Dataset.Builder(menu)
+            }
+            for (f in form.fields) {
+                when {
+                    Build.VERSION.SDK_INT >= 33 -> b.setValue(f.id, null)
+                    Build.VERSION.SDK_INT >= 30 && inline != null -> b.setValue(f.id, null, menu, inline)
+                    else -> b.setValue(f.id, null)
+                }
+            }
+            b.setAuthentication(pi.intentSender)
+            b.build()
+        }.getOrNull()
 
     // ---- locked-path presentations ----
 
