@@ -104,15 +104,18 @@ Prioritized; each is additive and back-compatible.
   andvari?"** and creates the item. Android first (SaveInfo/SaveCallback + a confirm
   activity that unlocks if needed); web save happens through the browser extension. Pairs
   naturally with the Autofill Status diagnostics already shipped (B2) and with cards.
-- **Cards / wallet items + card autofill** — *owner-requested 2026-07-07.* A new additive
-  ItemDoc `type:"card"` (cardholder / number / expiry / brand / CVV — all ciphertext under
-  the item envelope; the 0.4.0 ExtrasOverlay + fail-closed-on-unknown machinery makes the
-  fields safe to add). Editor + detail UI on all three clients; Android autofill grows a
-  card-field classifier (`AUTOFILL_HINT_CREDIT_CARD_*`) and card datasets, and the save-flow
-  captures new cards too. **Design gate:** a new top-level `type` must degrade gracefully on
-  fielded clients that only know login/note (decide: render as a read-only "needs an app
-  update" item, reusing the F32 surface, vs. a generic secure note) — settle that before the
-  first `type:"card"` item can be written into a mixed fleet.
+- **Cards / wallet items + card autofill** — *owner-requested 2026-07-07.* **DESIGN GATE SETTLED
+  2026-07-09** via a 4-design tournament × 12 breakers × judge: full contract in
+  `docs/design/2026-07-09-cards-wallet.md`. Verdict: `ItemDoc + card: CardData?`, `type:"card"`,
+  all ciphertext; **cards seal at formatVersion 2 (per-doc floor)** backstopped by a ~10-line
+  **server monotonic-formatVersion guard** — NOT type-gate-at-fv1. Decisive code-verified reason:
+  the fielded **0.2.x MSI is pre-ExtrasOverlay** and has an automatic pull-side conflict-rewrite
+  that would silently strip an fv1 card with no user action; fv2 makes that a refused+audited
+  `fv_downgrade` write instead of data loss. Autofill: 6 new `FieldKind`s, CVV demotion +
+  token-bounded keywords (no substring "pan"/"exp"), per-frame-cluster card datasets, explicit
+  trust gate. Extension: popup Cards + copy only this batch (in-page checkout fill deferred behind
+  a frame-egress contract). **One owner decision** (rollout timing A/B) is in the design doc's last
+  section; default A (card-create dark until the 0.2.x MSI is retired). Target release 0.7.0.
 - **Browser extension** — *owner-requested 2026-07-07 (reaffirmed).* Reuses the `:core`/web
   `UriMatch` + `FieldClassifier` (already built + vector-tested for exactly this) and the
   same-origin API; carries the web save-flow. Chromium + Firefox. Go/no-go spike:
