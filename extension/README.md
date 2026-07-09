@@ -42,6 +42,13 @@ npm run typecheck    # tsc --noEmit
     So the extension now **fills and saves** end to end. The UI renders in a **closed shadow root**
     styled by a constructed `CSSStyleSheet` (`adoptedStyleSheets`) — page-CSS-isolated AND immune to
     the site's `style-src`, so it works on strict-CSP sites (github.com, banks), not just fill.dev.
-- **Next (`TODO(extension)`):** run the ~5.8 s Argon2id in a Web Worker so the popup doesn't block;
-  member (shared-vault) grants via `sealedVk` (crypto_box_seal_open — identity key + `@noble` X25519);
-  token refresh; then Firefox MV3.
+  - **KDF in a Web Worker** (`src/kdf-worker.ts`) — the ~5.8 s Argon2id runs off the SW event loop,
+    with an inline fallback where nested workers aren't allowed.
+  - **Member (shared-vault) grants** — `sealedVk` opened via `crypto_box_seal_open` reconstructed
+    from **tweetnacl** (box) + `@noble` blake2b (nonce), verified byte-identical to libsodium
+    (`web/src/crypto/noble-extension-poc.test.ts`). Shared-vault logins fill too now.
+  - **Token refresh** — a 401 rotates the single-use token pair and retries once.
+- **Firefox:** `manifest.firefox.json` + `TARGET=firefox npm run build` (background event page instead
+  of the SW; `browser_specific_settings`). The `chrome.*` calls work on both.
+- **Next:** broader field detection (multi-step / SPA login forms), more item types, and on-browser
+  verification on both Chromium and Firefox (the one thing that can't be run here).

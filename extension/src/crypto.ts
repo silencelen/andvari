@@ -1,7 +1,9 @@
 import { argon2id } from "@noble/hashes/argon2.js";
+import { blake2b } from "@noble/hashes/blake2.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
-import { sha256 } from "@noble/hashes/sha2.js";
+import { sha256, sha512 } from "@noble/hashes/sha2.js";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
+import nacl from "tweetnacl";
 
 /**
  * andvari crypto for the extension — pure-JS @noble, no WASM, no eval → runs under the MV3
@@ -33,8 +35,37 @@ function ad(...parts: string[]): Uint8Array {
 }
 export const adUvk = (userId: string): Uint8Array => ad("uvk", userId);
 export const adVk = (vaultId: string, userId: string): Uint8Array => ad("vk", vaultId, userId);
+export const adIdkey = (userId: string): Uint8Array => ad("idkey", userId);
 export const adItem = (vaultId: string, itemId: string, formatVersion: number): Uint8Array =>
   ad("item", vaultId, itemId, String(formatVersion));
+
+/**
+ * X25519 identity keypair from a 32-byte seed — == libsodium crypto_box_seed_keypair
+ * (sk = SHA512(seed)[:32]; pk = X25519_base(sk)). Verified byte-parity with libsodium.
+ */
+export function boxKeypairFromSeed(seed: Uint8Array): { publicKey: Uint8Array; privateKey: Uint8Array } {
+  const privateKey = sha512(seed).slice(0, 32); // unclamped (nacl.box.before clamps at use)
+  const clamped = new Uint8Array(privateKey);
+  clamped[0] &= 248;
+  clamped[31] &= 127;
+  clamped[31] |= 64; // X25519 clamp, only for the base-point multiply
+  return { publicKey: nacl.scalarMult.base(clamped), privateKey };
+}
+
+/**
+ * crypto_box_seal_open — open a libsodium sealed box (a member shared-vault grant's sealedVk).
+ * tweetnacl for the box (crypto_box_beforenm + open) + @noble blake2b for the sealed-box nonce;
+ * verified byte-parity with libsodium. Throws on a wrong key / corrupt box.
+ */
+export function sealOpen(recipientPub: Uint8Array, recipientPriv: Uint8Array, sealed: Uint8Array): Uint8Array {
+  if (sealed.length < 32 + 16) throw new Error("sealed box too short");
+  const epk = sealed.subarray(0, 32);
+  const nonce = blake2b(new Uint8Array([...epk, ...recipientPub]), { dkLen: 24 });
+  const key = nacl.box.before(epk, recipientPriv);
+  const pt = nacl.box.open.after(sealed.subarray(32), nonce, key);
+  if (!pt) throw new Error("crypto_box_seal_open failed (wrong key or corrupt box)");
+  return pt;
+}
 
 /**
  * Master key from the master password (== libsodium crypto_pwhash ARGON2ID13). ~5–6 s at the

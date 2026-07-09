@@ -4,8 +4,11 @@ import { argon2id } from "@noble/hashes/argon2.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
+import { blake2b } from "@noble/hashes/blake2.js";
+import { sha512 } from "@noble/hashes/sha2.js";
+import nacl from "tweetnacl";
 import { initSodium } from "./sodium";
-import { aeadEncrypt, aeadDecrypt } from "./provider";
+import { aeadEncrypt, aeadDecrypt, boxKeypairFromSeed, sealTo } from "./provider";
 import { sealWithNonce, ENVELOPE_VERSION, ENVELOPE_ALG_XCHACHA20POLY1305_IETF } from "./envelope";
 
 /**
@@ -72,5 +75,26 @@ describe.skipIf(!process.env.EXT_POC)("extension crypto: @noble (pure-JS, MV3-cl
     const nobleCt = xchacha20poly1305(key, nonce, ad).encrypt(pt);
     const nobleEnv = new Uint8Array([ENVELOPE_VERSION, ENVELOPE_ALG_XCHACHA20POLY1305_IETF, ...nonce, ...nobleCt]);
     expect(b64(nobleEnv)).toBe(b64(sodiumEnv));
+  });
+
+  it("crypto_box_seal_open (member shared-vault grant) — tweetnacl+@noble == libsodium", async () => {
+    await initSodium();
+    for (let i = 0; i < 5; i++) {
+      const seed = sha256(utf8(`box-seed-${i}`)); // 32 bytes, deterministic
+      const kp = boxKeypairFromSeed(seed); // libsodium crypto_box_seed_keypair
+      const msg = utf8(`{"v":1,"vaultId":"v${i}","vk":"key"}`);
+      const sealed = sealTo(kp.publicKey, msg); // libsodium crypto_box_seal
+      // Extension-side reconstruction (crypto.ts): sk = SHA512(seed)[:32]; pk = X25519_base(clamp(sk)).
+      const sk = sha512(seed).slice(0, 32);
+      const c = new Uint8Array(sk);
+      c[0] = c[0]! & 248;
+      c[31] = (c[31]! & 127) | 64;
+      expect(b64(nacl.scalarMult.base(c)), `keypair i=${i}`).toBe(b64(kp.publicKey));
+      // seal_open = blake2b(epk‖pk) nonce + tweetnacl box(before/open.after).
+      const epk = sealed.subarray(0, 32);
+      const nonce = blake2b(new Uint8Array([...epk, ...kp.publicKey]), { dkLen: 24 });
+      const pt = nacl.box.open.after(sealed.subarray(32), nonce, nacl.box.before(epk, sk));
+      expect(pt && b64(pt), `open i=${i}`).toBe(b64(msg));
+    }
   });
 });

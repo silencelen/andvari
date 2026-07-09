@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "andvari",
+  "version": "0.6.0",
+  "description": "Zero-knowledge password manager — fill and save logins. Requires the andvari server on your Tailscale network.",
+  "browser_specific_settings": {
+    "gecko": { "id": "andvari@monahanhosting.com", "strict_min_version": "121.0" }
+  },
+  "permissions": ["storage", "activeTab", "scripting", "alarms"],
+  "host_permissions": ["https://andvari.taila2dff2.ts.net/*"],
+  "background": { "scripts": ["background.js"], "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "andvari" },
+  "content_scripts": [
+    { "matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "run_at": "document_idle" }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
