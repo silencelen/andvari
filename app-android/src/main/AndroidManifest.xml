@@ -85,6 +85,14 @@
             android:noHistory="true"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Andvari.Translucent" />
+        <!-- "Save to andvari?" confirm/unlock overlay (autofill onSaveRequest). -->
+        <activity
+            android:name="io.silencelen.andvari.app.autofill.SaveConfirmActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Andvari.Translucent" />
 
         <!-- ProfileInstaller auto-init runs in the androidx.startup provider BEFORE
              Application.onCreate and has caused immediate startup crashes on some Android 15
