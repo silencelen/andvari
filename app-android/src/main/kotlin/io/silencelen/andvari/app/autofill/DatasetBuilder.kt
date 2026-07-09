@@ -22,6 +22,7 @@ import androidx.autofill.inline.v1.InlineSuggestionUi
 import com.silencelen.andvari.R
 import io.silencelen.andvari.app.MainActivity
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.core.client.autofill.BrowserCertPins
 import io.silencelen.andvari.core.client.autofill.FieldKind
 import io.silencelen.andvari.core.client.autofill.FillTarget
 import io.silencelen.andvari.core.client.autofill.UriMatch
@@ -64,6 +65,11 @@ object DatasetBuilder {
     ): FillResponse? {
         val datasets = buildDatasets(context, items, form, trusted, inlineRequest)
         trace?.let { annotate(it, items, form, trusted, datasets.size) }
+        // Only offer "Save to andvari?" where the saved login could actually FILL later: a native app
+        // (matches by package) or a TRUSTED browser. In an UNTRUSTED known browser the fill path nulls
+        // the web host, so a saved `https://host` login would never match there — a dead item. Skipping
+        // save keeps save/fill symmetric: the user trusts the browser once, then both work.
+        val offerSave = form.appPackage !in BrowserCertPins.TABLE || trusted
         if (datasets.isEmpty()) {
             // Honest failure (never absolute silence): the form HAS fillable login fields
             // (form.fields is USERNAME/PASSWORD only — the gate that keeps this row off
@@ -71,7 +77,7 @@ object DatasetBuilder {
             // vanishing. Bitwarden/1Password convention; tapping launches the app.
             val fallback = openAppDataset(context, form, inlineRequest) ?: return null
             val rb = FillResponse.Builder().addDataset(fallback)
-            saveInfoFor(form)?.let { rb.setSaveInfo(it) } // still offer "Save to andvari?" when nothing matched
+            if (offerSave) saveInfoFor(form)?.let { rb.setSaveInfo(it) } // offer save even when nothing matched
             val response = runCatching { rb.build() }.getOrNull()
             // Only a DELIVERED row justifies the confident NO_URI_MATCH label downstream
             // (finishFromBuild); a failed build must read as UNKNOWN, not "no match".
@@ -80,7 +86,7 @@ object DatasetBuilder {
         }
         val b = FillResponse.Builder()
         datasets.forEach { b.addDataset(it) }
-        saveInfoFor(form)?.let { b.setSaveInfo(it) }
+        if (offerSave) saveInfoFor(form)?.let { b.setSaveInfo(it) }
         return b.build()
     }
 
