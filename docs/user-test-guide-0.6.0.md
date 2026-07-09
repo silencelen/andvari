@@ -65,6 +65,12 @@ version on Windows.)*
 Download **https://andvari.taila2dff2.ts.net/downloads/andvari-0.6.0.deb** and install it
 (`sudo apt install ./andvari-0.6.0.deb`), then launch andvari and sign in.
 
+**Browser extension (autofill on any computer — Chrome / Edge / Brave / Firefox)**
+In the web app go to **Settings → Devices → Browser extension** and download the file for your
+browser. Unzip it to a folder you'll keep, then follow the short `INSTALL.txt` inside (about two
+minutes; the steps differ slightly per browser). Click the andvari toolbar icon and sign in — the
+first unlock takes a few seconds on purpose.
+
 ---
 
 ## What we especially want you to try to break
@@ -101,8 +107,22 @@ Once a browser is trusted:
 
 **Please try to break it:** lots of different sites (a good sandbox is **https://fill.dev**), your
 real logins, and apps as well as browsers. Tell us anything that won't fill, won't offer to save,
-fills the wrong field, or is confusing. (Windows/Mac/Linux: no autofill yet — use the web app +
-copy/paste; a browser extension is coming.)
+fills the wrong field, or is confusing.
+
+### Autofill on your computer — the browser extension
+
+The same fill-and-save works in computer browsers now (install it from **Settings → Devices** in
+the web app — see "How to get it" above):
+
+- **Fill:** click into a username or password field → a small andvari dropdown lists your matching
+  logins → click one to fill.
+- **Save:** submit a login andvari doesn't know → a **"Save to andvari?"** bar appears at the top
+  of the page.
+- The toolbar icon shows lock status; **Lock** wipes it from memory.
+- Honest limits to know: on **Firefox** the extension unloads when you close the browser (redo the
+  two-step load from `INSTALL.txt` — a signed version comes later), and multi-step logins (email
+  first, password on the next screen) may only half-work — telling us *where* is exactly the
+  feedback we want.
 
 ---
 

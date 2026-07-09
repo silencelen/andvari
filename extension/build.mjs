@@ -2,8 +2,13 @@
 // references dist-relative names, so `dist/` is what you "Load unpacked". @noble is bundled in
 // (pure JS, no WASM asset) — nothing loads over the network, and no eval, so the MV3 CSP is happy.
 import * as esbuild from "esbuild";
-import { cpSync, mkdirSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync } from "node:fs";
 
+// RELEASE=1 → minified, no sourcemaps (what gets zipped for /downloads).
+// Default = debuggable dev build for load-unpacked iteration.
+const release = process.env.RELEASE === "1";
+
+rmSync("dist", { recursive: true, force: true }); // no stale entry/sourcemap leftovers in the zip
 mkdirSync("dist", { recursive: true });
 
 await esbuild.build({
@@ -18,13 +23,13 @@ await esbuild.build({
   target: "es2022",
   outdir: "dist",
   logLevel: "info",
-  // Keep it debuggable during the spike; flip to true for a real release.
-  minify: false,
-  sourcemap: true,
+  minify: release,
+  sourcemap: !release,
 });
 
 // TARGET=firefox → the Firefox manifest (background.scripts event page); default = Chrome (SW).
 const firefox = process.env.TARGET === "firefox";
 cpSync(firefox ? "manifest.firefox.json" : "manifest.json", "dist/manifest.json");
 cpSync("popup.html", "dist/popup.html");
-console.log(`built → dist/ (${firefox ? "Firefox" : "Chrome"}; Load unpacked: extension/dist)`);
+cpSync("INSTALL.txt", "dist/INSTALL.txt"); // tester-facing steps travel inside the zip
+console.log(`built → dist/ (${firefox ? "Firefox" : "Chrome"}${release ? ", release" : ""}; Load unpacked: extension/dist)`);

@@ -8,9 +8,10 @@ import { QrSvg } from "./QrSvg";
  * points at something that actually exists:
  *  - web: the very origin the user is reading this on;
  *  - Android: the devstore (tailnet-only — labelled as such), with a scannable QR;
- *  - Windows: the /downloads/manifest.json the server already serves (B4 made it
- *    honest) — a link once the owner publishes an MSI, a plain "not yet" until then.
- * There is deliberately no browser-extension row: it does not exist yet.
+ *  - Windows/Linux: the /downloads/manifest.json the server already serves (B4 made it
+ *    honest) — a link once a build is published, a plain "not yet" until then.
+ *  - Browser extension: same manifest (`browserExtension` entry) — Chrome/Firefox zips
+ *    published to /downloads, loaded unpacked (household fleet; no store listing).
  *
  * All of this advertises pointers, so it hides on the public break-glass origin (same
  * posture as export suppression — shared isPrivateOrigin). No wire change: the manifest
@@ -35,15 +36,27 @@ interface PlatformBuild {
   version?: string;
   url?: string;
 }
+export interface ExtensionBuild {
+  version?: string;
+  chromeUrl?: string;
+  firefoxUrl?: string;
+}
 export interface DownloadsManifest {
   windows?: PlatformBuild | null;
   linux?: PlatformBuild | null;
+  browserExtension?: ExtensionBuild | null;
 }
 
-export type WindowsRow =
+export type PlatformRow =
   | { kind: "loading" }
   | { kind: "unpublished" }
   | { kind: "available"; version: string; url: string };
+export type WindowsRow = PlatformRow;
+
+export type ExtensionRow =
+  | { kind: "loading" }
+  | { kind: "unpublished" }
+  | { kind: "available"; version: string; chromeUrl?: string; firefoxUrl?: string };
 
 /**
  * Coerce whatever the manifest fetch parsed into a usable value. `r.json()` can
@@ -59,30 +72,72 @@ export function coerceManifest(parsed: unknown): DownloadsManifest | "error" {
 }
 
 /**
- * Pure decision for the Windows row — the whole point of the manifest fetch, kept
- * node-testable. `null` = still fetching, `"error"` = 404/network (the steady state
- * today; NOT an error to the user), otherwise the parsed manifest. Only a manifest
- * carrying BOTH a version and a url is a real download.
+ * Pure decision for a desktop-platform row — the whole point of the manifest fetch,
+ * kept node-testable. `null` = still fetching, `"error"` = 404/network (the steady
+ * state today; NOT an error to the user), otherwise the parsed manifest. Only a
+ * manifest entry carrying BOTH a version and a url is a real download.
  */
-export function windowsRowState(manifest: DownloadsManifest | null | "error"): WindowsRow {
+export function platformRowState(
+  manifest: DownloadsManifest | null | "error",
+  key: "windows" | "linux",
+): PlatformRow {
   if (manifest === null) return { kind: "loading" };
-  const win = manifest === "error" ? null : manifest.windows;
-  if (win && typeof win.url === "string" && win.url && typeof win.version === "string" && win.version) {
-    return { kind: "available", version: win.version, url: win.url };
+  const build = manifest === "error" ? null : manifest[key];
+  if (build && typeof build.url === "string" && build.url && typeof build.version === "string" && build.version) {
+    return { kind: "available", version: build.version, url: build.url };
   }
   return { kind: "unpublished" };
 }
 
-function WindowsRow({ state }: { state: WindowsRow }) {
+/** Kept as the named export the tests pin; now just the windows column of platformRowState. */
+export function windowsRowState(manifest: DownloadsManifest | null | "error"): WindowsRow {
+  return platformRowState(manifest, "windows");
+}
+
+/**
+ * Same decision for the browser-extension row. Available needs a version plus AT LEAST
+ * one browser zip (Chrome-family or Firefox) — a version with no usable link stays
+ * "unpublished" so we never render a dead row.
+ */
+export function extensionRowState(manifest: DownloadsManifest | null | "error"): ExtensionRow {
+  if (manifest === null) return { kind: "loading" };
+  const ext = manifest === "error" ? null : manifest.browserExtension;
+  if (ext && typeof ext.version === "string" && ext.version) {
+    const chromeUrl = typeof ext.chromeUrl === "string" && ext.chromeUrl ? ext.chromeUrl : undefined;
+    const firefoxUrl = typeof ext.firefoxUrl === "string" && ext.firefoxUrl ? ext.firefoxUrl : undefined;
+    if (chromeUrl || firefoxUrl) return { kind: "available", version: ext.version, chromeUrl, firefoxUrl };
+  }
+  return { kind: "unpublished" };
+}
+
+function PlatformRowView({ state, noun }: { state: PlatformRow; noun: string }) {
   if (state.kind === "loading") return <p className="muted">Checking…</p>;
   if (state.kind === "available") {
     return (
       <p className="muted">
-        <a href={state.url}>Download the Windows installer (andvari {state.version})</a>
+        <a href={state.url}>
+          Download the {noun} (andvari {state.version})
+        </a>
       </p>
     );
   }
-  return <p className="muted">The Windows installer isn’t published yet — it will appear here when it is.</p>;
+  return <p className="muted">The {noun} isn’t published yet — it will appear here when it is.</p>;
+}
+
+function ExtensionRowView({ state }: { state: ExtensionRow }) {
+  if (state.kind === "loading") return <p className="muted">Checking…</p>;
+  if (state.kind === "unpublished") {
+    return <p className="muted">The browser extension isn’t published yet — it will appear here when it is.</p>;
+  }
+  return (
+    <p className="muted">
+      Autofill on this computer’s browser. Download for{" "}
+      {state.chromeUrl && <a href={state.chromeUrl}>Chrome / Edge / Brave</a>}
+      {state.chromeUrl && state.firefoxUrl && " or "}
+      {state.firefoxUrl && <a href={state.firefoxUrl}>Firefox</a>} (andvari {state.version}), unzip it to a
+      folder you’ll keep, then follow the INSTALL.txt inside — about two minutes; the steps differ per browser.
+    </p>
+  );
 }
 
 export function DevicesCard({ origin }: { origin?: string }) {
@@ -130,7 +185,17 @@ export function DevicesCard({ origin }: { origin?: string }) {
 
           <div className="field">
             <label>Windows</label>
-            <WindowsRow state={windowsRowState(manifest)} />
+            <PlatformRowView state={platformRowState(manifest, "windows")} noun="Windows installer" />
+          </div>
+
+          <div className="field">
+            <label>Linux</label>
+            <PlatformRowView state={platformRowState(manifest, "linux")} noun="Linux package (.deb)" />
+          </div>
+
+          <div className="field">
+            <label>Browser extension</label>
+            <ExtensionRowView state={extensionRowState(manifest)} />
           </div>
         </>
       ) : (

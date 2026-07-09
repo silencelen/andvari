@@ -1,0 +1,34 @@
+// Release packaging: build both browser targets (minified, no sourcemaps) and zip each
+// → artifacts/andvari-extension-{chrome,firefox}-<version>.zip, ready for the server's
+// /downloads dir (the web Devices hub links them via manifest.json `browserExtension`).
+// The zip roots the files directly (manifest.json at top level) — unzip → Load unpacked.
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+
+const version = JSON.parse(readFileSync("manifest.json", "utf8")).version;
+// The version lives in three hand-edited files; a forgotten bump would silently ship a
+// firefox zip NAMED with the chrome version but CONTAINING the stale one. Refuse drift.
+const ffVersion = JSON.parse(readFileSync("manifest.firefox.json", "utf8")).version;
+const pkgVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
+if (version !== ffVersion || version !== pkgVersion) {
+  throw new Error(
+    `version drift: manifest.json=${version} manifest.firefox.json=${ffVersion} package.json=${pkgVersion} — bump all three`,
+  );
+}
+mkdirSync("artifacts", { recursive: true });
+
+// firefox first, chrome last: dist/ is left holding the CHROME build, which is what the
+// README's "Load + verify" (chrome://extensions → Load unpacked → extension/dist) assumes.
+for (const target of ["firefox", "chrome"]) {
+  execFileSync(process.execPath, ["build.mjs"], {
+    stdio: "inherit",
+    env: { ...process.env, RELEASE: "1", TARGET: target === "firefox" ? "firefox" : "" },
+  });
+  const zip = `artifacts/andvari-extension-${target}-${version}.zip`;
+  rmSync(zip, { force: true });
+  // -X: no extended attrs; cwd=dist so manifest.json sits at the zip root.
+  execFileSync("zip", ["-rX", `../${zip}`, "."], { cwd: "dist", stdio: "inherit" });
+  console.log(`packaged ${zip} (${(statSync(zip).size / 1024).toFixed(0)} KiB)`);
+}
+console.log(`\nextension ${version} packaged. Publish both zips to CT122 /opt/andvari/downloads`);
+console.log("and merge a browserExtension entry into manifest.json (see ops/windows-build.md for the merge pattern).");
