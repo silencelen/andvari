@@ -213,6 +213,11 @@ class SyncEngine(
         sync()
     }
 
+    /** Item undelete (F49): "Delete forever" — hard-delete a tombstoned item + its versions server-side. */
+    suspend fun purgeDeleted(itemId: String) {
+        api.purgeItem(itemId)
+    }
+
     /** Vaults whose key we hold, personal first then shared by name (mirrors web vaults()). */
     fun vaultInfos(): List<VaultInfo> = cache.vaults()
         .filter { account.hasVault(it.vaultId) }

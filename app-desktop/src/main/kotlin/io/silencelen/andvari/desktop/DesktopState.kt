@@ -469,6 +469,13 @@ class DesktopState(private val scope: CoroutineScope) {
         busy = false
     }
 
+    /** Item undelete (F49): "Delete forever" a tombstoned item, then refresh the trash list. */
+    fun purgeDeleted(itemId: String) = op {
+        engine!!.purgeDeleted(itemId)
+        deletedItems = engine!!.deletedItems()
+        busy = false
+    }
+
     fun closeTrash() {
         deletedItems = null
         screen = DesktopScreen.Vault

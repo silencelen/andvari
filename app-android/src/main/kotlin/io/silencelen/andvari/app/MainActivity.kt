@@ -876,12 +876,22 @@ fun TrashScreen(vm: AndvariViewModel, ui: UiState) {
         Column(Modifier.padding(pad).fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
             ErrorBar(ui.error, vm::clearError)
             NoticeBar(ui.notice, vm::clearNotice)
+            var confirmPurgeId by remember { mutableStateOf<String?>(null) }
             Text(
-                "Deleted items you can still restore. Restoring brings an item back to its vault on every device.",
+                "Deleted items are kept for 30 days, then removed automatically. Restore brings one back to its vault on every device; \"Delete forever\" removes it now.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(12.dp))
+            confirmPurgeId?.let { id ->
+                AlertDialog(
+                    onDismissRequest = { confirmPurgeId = null },
+                    title = { Text("Delete forever?") },
+                    text = { Text("This permanently removes the item and its history from every device. It can't be undone.") },
+                    confirmButton = { TextButton(onClick = { vm.purgeDeleted(id); confirmPurgeId = null }) { Text("Delete forever", color = MaterialTheme.colorScheme.error) } },
+                    dismissButton = { TextButton(onClick = { confirmPurgeId = null }) { Text("Keep") } },
+                )
+            }
             val deleted = ui.deletedItems
             when {
                 deleted == null -> Text(if (ui.busy) "Loading…" else "", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -903,6 +913,9 @@ fun TrashScreen(vm: AndvariViewModel, ui: UiState) {
                         val docToRestore = d.doc
                         if (docToRestore != null) {
                             TextButton(enabled = !ui.busy, onClick = { vm.restoreDeleted(d.itemId, d.vaultId, docToRestore) }) { Text("Restore") }
+                        }
+                        TextButton(enabled = !ui.busy, onClick = { confirmPurgeId = d.itemId }) {
+                            Text("Delete forever", color = MaterialTheme.colorScheme.error)
                         }
                     }
                 }
