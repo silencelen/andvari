@@ -1,9 +1,50 @@
+import type { KdfParams } from "./crypto";
+
 /**
- * Minimal andvari API client for the extension. Same wire as web/src/api/client.ts (Bearer auth,
- * JSON). Cross-origin fetch to the tailnet server works WITHOUT CORS because the manifest grants
- * host_permissions for that origin (spike doc Unknown 2). Only the fill/save surface is here; the
- * full account/lifecycle surface is not needed for autofill.
+ * andvari API client for the extension. Same wire as web/src/api/client.ts (Bearer JSON). Cross-
+ * origin fetch to the tailnet server works WITHOUT CORS via the manifest host_permissions (spike doc
+ * Unknown 2). Only the fill surface is here: prelogin → login → sync. Token refresh, save/push,
+ * lifecycle are TODO(extension) as the SW grows.
  */
+
+export interface PreloginResponse {
+  kdfSalt: string;
+  kdfParams: KdfParams;
+}
+export interface AccountKeys {
+  kdfSalt: string;
+  kdfParams: KdfParams;
+  wrappedUvk: string;
+  encryptedIdentitySeed: string;
+  identityPub: string;
+}
+export interface SessionResponse {
+  userId: string;
+  deviceId: string;
+  accessToken: string;
+  refreshToken: string;
+  accountKeys: AccountKeys;
+}
+export interface WireGrant {
+  vaultId: string;
+  userId: string;
+  role: string;
+  wrappedVk: string;
+  sealedVk?: string | null; // member grants (crypto_box_seal to identityPub) — TODO(extension)
+}
+export interface WireItem {
+  itemId: string;
+  vaultId: string;
+  deleted: boolean;
+  formatVersion: number;
+  blob: string | null;
+}
+export interface SyncResponse {
+  rev: number;
+  grants: WireGrant[];
+  items: WireItem[];
+}
+
 export class AndvariApi {
   constructor(
     private baseUrl: string,
@@ -31,9 +72,24 @@ export class AndvariApi {
     return this.json("GET", "/api/v1/client-policy");
   }
 
-  // TODO(extension): port the fill/save surface from web/src/api/client.ts as the SW grows —
-  // prelogin, login (→ tokens), accountKeys (→ wrapped keys), sync (→ ciphertext items),
-  // sync/push (save). All already exist server-side; this is a client-only port.
+  prelogin(email: string): Promise<PreloginResponse> {
+    return this.json("POST", "/api/v1/auth/prelogin", { email });
+  }
+
+  /** Login with the derived authKey (base64). Returns tokens + the account's wrapped keys. */
+  login(email: string, authKey: string, totp?: string): Promise<SessionResponse> {
+    return this.json("POST", "/api/v1/auth/login", {
+      email,
+      authKey,
+      device: { platform: "web", name: "Browser extension" },
+      ...(totp ? { totp } : {}),
+    });
+  }
+
+  /** Full snapshot when since=0: vaults/grants/items as deltas over the global rev. */
+  sync(since = 0): Promise<SyncResponse> {
+    return this.json("GET", `/api/v1/sync?since=${since}`);
+  }
 }
 
 export class ApiError extends Error {

@@ -26,11 +26,17 @@ npm run typecheck    # tsc --noEmit
 
 ## What's wired vs next
 
-- **Wired:** manifest (host_permissions + `'wasm-unsafe-eval'` CSP), esbuild build, `src/crypto.ts`
-  (@noble: Argon2id / HKDF / XChaCha20-Poly1305 envelope, vector-parity proven), `src/api.ts`
-  (Bearer JSON client + `clientPolicy` smoke test), `src/background.ts` (SW session + message
-  router + KDF-in-SW), `src/content.ts` (DOM login-form detection), `src/popup.ts` + `popup.html`.
-- **Next (`TODO(extension)`):** port login → accountKeys → unwrap VK → sync from
-  `web/src/api/client.ts` + `web/src/vault/account.ts`; run the KDF in a Web Worker (the ~5.8 s
-  Argon2id, spike doc); the fill dropdown + "Save to andvari?" content-script UI; a real unlock form
-  in the popup; then Firefox MV3.
+- **Wired — the extension unlocks and decrypts for real:**
+  - `src/crypto.ts` — @noble Argon2id / HKDF / XChaCha20-Poly1305 envelope + the item/UVK/VK
+    **associated-data** constructions (byte-exact vs core `Ad.kt`; vector-parity proven).
+  - `src/api.ts` — prelogin / login / sync (+ `clientPolicy` smoke test), Bearer JSON, no CORS.
+  - `src/background.ts` — the full **unlock flow**: prelogin → Argon2id → login (authKey) → unwrap
+    UVK from the returned accountKeys → sync → unwrap each vault key from its grant → **decrypt items
+    under the VK**. Holds the decrypted set in memory only (ZK). `matches` returns host-matching
+    logins (name + username, never the password until a fill).
+  - `src/popup.ts` + `popup.html` — a real unlock form (email + master password) showing the login
+    count + Lock; `src/content.ts` detects login forms and queries the SW for host matches on focus.
+- **Next (`TODO(extension)`):** the inline fill dropdown + a `reveal` message that returns the chosen
+  password to the field, then a "Save to andvari?" prompt on submit (mirrors the Android flow); run
+  the ~5.8 s Argon2id in a Web Worker so the popup doesn't block; member (shared-vault) grants via
+  `sealedVk` (crypto_box_seal_open — identity key + `@noble` X25519); token refresh; then Firefox MV3.

@@ -25,6 +25,17 @@ export const DEFAULT_KDF_PARAMS: KdfParams = { v: 1, alg: "argon2id13", ops: 3, 
 
 const utf8 = (s: string) => new TextEncoder().encode(s);
 
+// Associated data (spec 02 §2, mirrors core Ad.kt / web ad.ts): "andvari/v1|<parts joined by |>".
+const AD_NS = "andvari/v1";
+function ad(...parts: string[]): Uint8Array {
+  for (const p of parts) if (p.includes("|")) throw new Error("AD component must not contain '|'");
+  return utf8(`${AD_NS}|${parts.join("|")}`);
+}
+export const adUvk = (userId: string): Uint8Array => ad("uvk", userId);
+export const adVk = (vaultId: string, userId: string): Uint8Array => ad("vk", vaultId, userId);
+export const adItem = (vaultId: string, itemId: string, formatVersion: number): Uint8Array =>
+  ad("item", vaultId, itemId, String(formatVersion));
+
 /**
  * Master key from the master password (== libsodium crypto_pwhash ARGON2ID13). ~5–6 s at the
  * account's 64 MiB params in pure JS — run this in a Web Worker off the popup thread (spike doc).
