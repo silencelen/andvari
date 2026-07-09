@@ -1,5 +1,5 @@
 import { AndvariApi } from "./api";
-import { adItem, adUvk, adVk, authKey, deriveMasterKey, fromB64, open, toB64, wrapKey } from "./crypto";
+import { adItem, adUvk, adVk, authKey, deriveMasterKey, fromB64, open, seal, toB64, wrapKey } from "./crypto";
 
 /**
  * MV3 background service worker — the ONLY holder of unlocked vault material, in memory only (never
@@ -31,6 +31,8 @@ interface DecryptedItem {
 interface Session {
   userId: string;
   items: DecryptedItem[];
+  vaultKeys: Map<string, Uint8Array>;
+  personalVaultId: string;
 }
 let session: Session | null = null;
 const api = new AndvariApi(SERVER_URL);
@@ -40,7 +42,9 @@ type Msg =
   | { type: "status" }
   | { type: "lock" }
   | { type: "unlock"; email: string; password: string }
-  | { type: "matches"; host: string };
+  | { type: "matches"; host: string }
+  | { type: "reveal"; itemId: string }
+  | { type: "save"; url: string; username: string; password: string };
 
 chrome.runtime.onMessage.addListener((msg: Msg, _sender, sendResponse) => {
   handle(msg)
@@ -66,6 +70,10 @@ async function handle(msg: Msg): Promise<unknown> {
       return unlock(msg.email, msg.password);
     case "matches":
       return { ok: true, matches: matchesFor(msg.host) };
+    case "reveal":
+      return { ok: true, secret: revealItem(msg.itemId) };
+    case "save":
+      return saveLogin(msg.url, msg.username, msg.password);
   }
 }
 
@@ -102,8 +110,33 @@ async function unlock(email: string, password: string): Promise<unknown> {
       /* undecryptable / newer formatVersion — skip */
     }
   }
-  session = { userId: s.userId, items };
+  // The personal vault (save target) = the type="personal" vault we hold a key for (web store.ts parity).
+  const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
+  session = { userId: s.userId, items, vaultKeys, personalVaultId };
   return { ok: true, unlocked: true, count: items.length };
+}
+
+/** Reveal a chosen login's secret to fill (only on the user's explicit selection). */
+function revealItem(itemId: string): { username: string | null; password: string | null } | null {
+  const it = session?.items.find((i) => i.itemId === itemId);
+  if (!it) return null;
+  return { username: it.doc.login?.username ?? null, password: it.doc.login?.password ?? null };
+}
+
+/** Save flow: create a new login in the personal vault (client-encrypted) and push it. */
+async function saveLogin(url: string, username: string, password: string): Promise<unknown> {
+  if (!session || !session.personalVaultId) return { ok: false, error: "locked or no personal vault" };
+  const vk = session.vaultKeys.get(session.personalVaultId);
+  if (!vk) return { ok: false, error: "no personal vault key" };
+  const host = hostOf(url);
+  const itemId = crypto.randomUUID();
+  const doc: ItemDoc = { type: "login", name: host, login: { username, password, uris: [`https://${host}`] } };
+  const blob = toB64(seal(vk, new TextEncoder().encode(JSON.stringify(doc)), adItem(session.personalVaultId, itemId, 1)));
+  await api.push([
+    { mutationId: crypto.randomUUID(), op: "put", itemId, vaultId: session.personalVaultId, baseItemRev: 0, item: { formatVersion: 1, attachmentIds: [], blob } },
+  ]);
+  session.items.push({ itemId, vaultId: session.personalVaultId, doc }); // matchable immediately
+  return { ok: true };
 }
 
 /** Logins whose stored URI host matches the page host (exact or a registrable-domain suffix). */
