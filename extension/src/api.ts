@@ -3,8 +3,8 @@ import type { KdfParams } from "./crypto";
 /**
  * andvari API client for the extension. Same wire as web/src/api/client.ts (Bearer JSON). Cross-
  * origin fetch to the tailnet server works WITHOUT CORS via the manifest host_permissions (spike doc
- * Unknown 2). Only the fill surface is here: prelogin → login → sync. Token refresh, save/push,
- * lifecycle are TODO(extension) as the SW grows.
+ * Unknown 2). Surface: prelogin → login → sync → push (+ client-policy). A 401 rotates the token
+ * pair once and retries transparently; `onTokensRotated` lets a session custodian re-persist it.
  */
 
 export interface PreloginResponse {
@@ -35,6 +35,8 @@ export interface WireGrant {
 export interface WireItem {
   itemId: string;
   vaultId: string;
+  /** Server revision — the baseItemRev an update put must carry (conflict detection). */
+  rev: number;
   deleted: boolean;
   formatVersion: number;
   blob: string | null;
@@ -63,6 +65,25 @@ export interface Mutation {
   baseItemRev: number;
   item?: ItemUpload;
 }
+/** Per-mutation outcome. HTTP 200 does NOT mean applied — callers must check `status`
+ *  (a conflicted put answers 200 with status:"conflict" + the winning serverItem). */
+export interface MutationResult {
+  mutationId: string;
+  status: "applied" | "conflict" | "duplicate" | "denied";
+  newItemRev?: number;
+  serverItem?: WireItem;
+}
+export interface PushResponse {
+  rev: number;
+  results: MutationResult[];
+}
+
+export interface ClientPolicyResponse {
+  serverTime: number;
+  /** Idle-lock window in seconds; 0 disables (spec 01 §8). Optional: older servers omit it. */
+  autoLockSeconds?: number;
+  clipboardClearSeconds?: number;
+}
 
 export class AndvariApi {
   constructor(
@@ -71,9 +92,18 @@ export class AndvariApi {
     private refreshToken: string | null = null,
   ) {}
 
+  /** Fires after a 401→refresh rotation. Refresh tokens are SINGLE-USE: a custodian that
+   *  persists the session must re-persist on rotation — restoring a consumed pair reads as
+   *  token reuse server-side and revokes the whole device. */
+  onTokensRotated: ((access: string, refresh: string) => void) | null = null;
+
   setTokens(access: string | null, refresh: string | null): void {
     this.accessToken = access;
     this.refreshToken = refresh;
+  }
+
+  getTokens(): { access: string | null; refresh: string | null } {
+    return { access: this.accessToken, refresh: this.refreshToken };
   }
 
   private async json<T>(method: string, path: string, body?: unknown, retrying = false): Promise<T> {
@@ -92,9 +122,21 @@ export class AndvariApi {
     return (await resp.json()) as T;
   }
 
+  /** Coalesce concurrent 401s onto ONE rotation. Two API calls can be in flight in the SW at once
+   *  (e.g. the resync alarm's sync + a user save); if both 401, the first consumes the single-use
+   *  refresh token and the second would read the now-null token and fail spuriously. Sharing the
+   *  in-flight promise makes the second await the same rotation and retry with the fresh access. */
+  private refreshInFlight: Promise<boolean> | null = null;
+  private tryRefresh(): Promise<boolean> {
+    this.refreshInFlight ??= this.doRefresh().finally(() => {
+      this.refreshInFlight = null;
+    });
+    return this.refreshInFlight;
+  }
+
   /** Rotate the token pair (single-use refresh — consume it before the request so a reuse can't
    *  leak; reuse would revoke the whole device). Returns whether a fresh access token is now held. */
-  private async tryRefresh(): Promise<boolean> {
+  private async doRefresh(): Promise<boolean> {
     const rt = this.refreshToken;
     if (!rt) return false;
     this.refreshToken = null;
@@ -108,14 +150,15 @@ export class AndvariApi {
       const s = (await resp.json()) as { accessToken: string; refreshToken: string };
       this.accessToken = s.accessToken;
       this.refreshToken = s.refreshToken;
+      this.onTokensRotated?.(s.accessToken, s.refreshToken);
       return true;
     } catch {
       return false;
     }
   }
 
-  /** Unauthenticated liveness/CSP/host_permissions smoke check (spike verification step 3). */
-  clientPolicy(): Promise<{ serverTime: number }> {
+  /** Unauthenticated: liveness smoke check (spike verification step 3) + the fleet lock policy. */
+  clientPolicy(): Promise<ClientPolicyResponse> {
     return this.json("GET", "/api/v1/client-policy");
   }
 
@@ -138,8 +181,9 @@ export class AndvariApi {
     return this.json("GET", `/api/v1/sync?since=${since}`);
   }
 
-  /** Save flow: push put/delete mutations (the client-encrypted item rides in item.blob). */
-  push(mutations: Mutation[]): Promise<{ rev: number }> {
+  /** Save/update flow: push put/delete mutations (the client-encrypted item rides in item.blob).
+   *  Check results[] — see MutationResult. */
+  push(mutations: Mutation[]): Promise<PushResponse> {
     return this.json("POST", "/api/v1/sync/push", { mutations });
   }
 }

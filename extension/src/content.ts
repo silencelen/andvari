@@ -1,167 +1,338 @@
 /**
- * Content script — the in-page autofill UI: a fill dropdown on login fields + a "Save to andvari?"
- * banner. The SW holds the decrypted vault and does all crypto; this only renders UI, requests
- * matches/reveal, and sets field values. A secret reaches the page ONLY on an explicit user fill.
- *
- * Strict-CSP hardening: all UI lives in a CLOSED shadow root, styled by a constructed CSSStyleSheet
- * via adoptedStyleSheets — encapsulated from the page's CSS AND immune to the page's `style-src`
- * (unlike inline <style>/style="" attributes). Dynamic position is set via CSSOM (el.style.*), which
- * is not gated by CSP. So the UI renders identically on github.com, banks, and other locked-down sites.
+ * Content script — thin wiring between the pure detection engine (detect.ts), the shadow-DOM
+ * UI layer (content-ui.ts), and the service worker (messages.ts contract). Runs in every
+ * http(s) frame (all_frames); srcdoc/about:blank frames have an empty hostname and are skipped
+ * entirely. The SW holds the decrypted vault and enforces the reveal rules — a secret reaches
+ * this frame only host-bound, popup-granted, or via an explicit search-all pick (ZK).
  */
-interface LoginFields {
-  username: HTMLInputElement | null;
-  password: HTMLInputElement | null;
-}
-interface Match {
-  itemId: string;
-  name: string;
-  username: string | null;
-}
+import { findLoginForms, isSubmitLike, type LoginForm } from "./detect";
+import {
+  closeDropdown,
+  openDropdown,
+  showLinkOffer,
+  showSaveBanner,
+  showToast,
+  type DropdownState,
+} from "./content-ui";
+import { send, type MatchItem, type PendingSave, type Req, type RevealedSecret, type Res, type TabMsg } from "./messages";
 
-const UI_CSS = `
-:host { all: initial; }
-.dropdown { position: fixed; min-width: 220px; max-width: 360px; background: #fff; border: 1px solid #c9c9cf;
-  border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.18); font: 13px system-ui, sans-serif; color: #16161a;
-  overflow: hidden; }
-.dropdown .row { padding: 9px 11px; cursor: pointer; border-bottom: 1px solid #eee; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; }
-.dropdown .row:hover { background: #f2f2f5; }
-.brand { padding: 4px 11px; font-size: 11px; color: #8a8a92; }
-.banner { position: fixed; top: 14px; right: 14px; max-width: 300px; background: #fff; border: 1px solid #c9c9cf;
-  border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.2); padding: 13px; font: 13px system-ui, sans-serif;
-  color: #16161a; }
-.banner .actions { margin-top: 10px; display: flex; gap: 8px; }
-.banner button { font: 13px system-ui, sans-serif; padding: 5px 12px; border-radius: 6px; border: 1px solid #c9c9cf;
-  background: #f6f6f8; cursor: pointer; }
-.banner button.primary { background: #16161a; color: #fff; border-color: #16161a; }
-`;
+const isTop = window.self === window.top;
 
-let shadow: ShadowRoot | null = null;
-let hostEl: HTMLElement | null = null;
-function ui(): ShadowRoot {
-  if (shadow) return shadow;
-  hostEl = document.createElement("div");
-  (document.documentElement || document.body).appendChild(hostEl);
-  const root = hostEl.attachShadow({ mode: "closed" });
-  const sheet = new CSSStyleSheet();
-  sheet.replaceSync(UI_CSS);
-  root.adoptedStyleSheets = [sheet];
-  shadow = root;
-  return root;
+/** sendMessage rejects while the SW restarts or after an extension reload orphans this script —
+ *  every caller degrades to "do nothing" instead of throwing into the page's console. */
+function safeSend<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promise<Res<T> | undefined> {
+  return send(req).catch(() => undefined);
 }
 
-function findLoginFields(): LoginFields {
-  const password = document.querySelector<HTMLInputElement>('input[type="password"]');
-  let username: HTMLInputElement | null = null;
-  if (password) {
-    const inputs = Array.from(document.querySelectorAll<HTMLInputElement>("input"));
-    const pi = inputs.indexOf(password);
-    for (let i = pi - 1; i >= 0; i--) {
-      const t = inputs[i].type;
-      if (t === "text" || t === "email" || t === "tel") {
-        username = inputs[i];
-        break;
-      }
-    }
+// ---- form scan, cached per animation frame (focusin/input storms reuse one scan) ----
+
+let formsCache: LoginForm[] | null = null;
+function scanForms(): LoginForm[] {
+  if (!formsCache) {
+    formsCache = findLoginForms(document);
+    requestAnimationFrame(() => {
+      formsCache = null;
+    });
   }
-  return { username, password };
+  return formsCache;
 }
 
+function formFor(input: HTMLInputElement): LoginForm | null {
+  return (
+    scanForms().find((f) => f.username === input || f.password === input || f.newPasswords.includes(input)) ?? null
+  );
+}
+
+// ---- fill ----
+
+const nativeValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+
+/** React/Vue value tracking swallows direct `.value=` writes (the state stays empty while the
+ *  text looks filled) — write through the native prototype setter, then dispatch the composed
+ *  event pair frameworks listen for. */
 function setValue(input: HTMLInputElement, value: string): void {
   input.focus();
-  input.value = value;
-  input.dispatchEvent(new Event("input", { bubbles: true }));
-  input.dispatchEvent(new Event("change", { bubbles: true }));
+  nativeValueSetter.call(input, value);
+  input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: value, inputType: "insertReplacementText" }));
+  input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
 }
 
-let dropdown: HTMLElement | null = null;
-function closeDropdown(): void {
-  dropdown?.remove();
-  dropdown = null;
+/** Suppresses focusin→dropdown while OUR setValue calls input.focus() (those events are trusted). */
+let filling = false;
+
+/** Between dropdown-open and the user's pick, an SPA can swap the form subtree, detaching the
+ *  captured field refs — filling would write into orphan nodes that never reach the page. If the
+ *  refs are gone, re-scan and re-resolve to the live form of the same kind; null → skip the fill. */
+function liveForm(f: LoginForm): LoginForm | null {
+  const ref = f.password ?? f.username;
+  if (ref && ref.isConnected) return f;
+  formsCache = null; // force a fresh scan past the per-frame cache
+  const all = scanForms();
+  return all.find((x) => x.kind === f.kind) ?? all.find((x) => x.kind === "login") ?? all[0] ?? null;
 }
 
-async function fillMatch(itemId: string, fields: LoginFields): Promise<void> {
-  const r = (await chrome.runtime.sendMessage({ type: "reveal", itemId })) as
-    | { secret?: { username: string | null; password: string | null } }
-    | undefined;
-  const s = r?.secret;
-  if (!s) return;
-  if (fields.username && s.username) setValue(fields.username, s.username);
-  if (fields.password && s.password) setValue(fields.password, s.password);
-  closeDropdown();
-}
-
-async function showDropdown(anchor: HTMLInputElement, fields: LoginFields): Promise<void> {
-  const r = (await chrome.runtime.sendMessage({ type: "matches", host: location.host })) as { matches?: Match[] } | undefined;
-  const matches = r?.matches ?? [];
-  if (matches.length === 0) return;
-  closeDropdown();
-  const rect = anchor.getBoundingClientRect();
-  const box = document.createElement("div");
-  box.className = "dropdown";
-  box.style.left = `${rect.left}px`; // CSSOM (not CSP-gated); position:fixed → viewport coords
-  box.style.top = `${rect.bottom}px`;
-  box.style.width = `${Math.max(rect.width, 220)}px`;
-  for (const m of matches) {
-    const row = document.createElement("div");
-    row.className = "row";
-    row.textContent = m.username ? `${m.name} · ${m.username}` : m.name;
-    row.addEventListener("mousedown", (e) => {
-      e.preventDefault(); // keep focus on the field so it stays fillable
-      void fillMatch(m.itemId, fields);
-    });
-    box.appendChild(row);
+function fillForm(f: LoginForm, s: RevealedSecret): void {
+  const live = liveForm(f);
+  if (!live) return;
+  filling = true;
+  try {
+    if (live.username && s.username) setValue(live.username, s.username);
+    if (live.password && s.password) setValue(live.password, s.password);
+  } finally {
+    filling = false;
   }
-  const brand = document.createElement("div");
-  brand.className = "brand";
-  brand.textContent = "andvari";
-  box.appendChild(brand);
-  ui().appendChild(box);
-  dropdown = box;
+  updateSnapshot(live); // our dispatched events are !isTrusted — feed the capture engine directly
+  if (s.totpCode) void copyTotp(s.totpCode);
 }
 
-async function maybeOfferSave(fields: LoginFields): Promise<void> {
-  const username = fields.username?.value ?? "";
-  const password = fields.password?.value ?? "";
-  if (!password) return;
-  const r = (await chrome.runtime.sendMessage({ type: "matches", host: location.host })) as { matches?: Match[] } | undefined;
-  if ((r?.matches ?? []).some((m) => m.username === username)) return; // andvari already has this login
-  showSaveBanner(username, password);
+async function copyTotp(code: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(code);
+    showToast("2FA code copied — paste when asked");
+  } catch {
+    showToast(`2FA code: ${code}`); // clipboard needs document focus — surface the code instead
+  }
 }
 
-function showSaveBanner(username: string, password: string): void {
-  const bar = document.createElement("div");
-  bar.className = "banner";
-  const msg = document.createElement("div");
-  msg.textContent = `Save this login for ${location.host} to andvari?`;
-  const save = document.createElement("button");
-  save.className = "primary";
-  save.textContent = "Save";
-  const no = document.createElement("button");
-  no.textContent = "Not now";
-  save.addEventListener("click", () => {
-    void chrome.runtime.sendMessage({ type: "save", url: location.href, username, password });
-    bar.remove();
-  });
-  no.addEventListener("click", () => bar.remove());
-  const actions = document.createElement("div");
-  actions.className = "actions";
-  actions.append(save, no);
-  bar.append(msg, actions);
-  ui().appendChild(bar);
-  setTimeout(() => bar.remove(), 20_000);
+// ---- dropdown ----
+
+let lastOpen: { input: HTMLInputElement; t: number } | null = null;
+
+function maybeOpen(target: EventTarget | null): void {
+  if (filling || !(target instanceof HTMLInputElement)) return;
+  const f = formFor(target);
+  if (!f) return;
+  const now = Date.now();
+  if (lastOpen && lastOpen.input === target && now - lastOpen.t < 400) return; // focusin+click pair
+  lastOpen = { input: target, t: now };
+  void openFor(target, f);
 }
 
-const fields = findLoginFields();
-if (fields.password) {
-  const anchor = fields.username ?? fields.password;
-  anchor.addEventListener("focus", () => void showDropdown(anchor, fields));
-  // Close on a mousedown outside the dropdown — composedPath() pierces the shadow boundary.
-  document.addEventListener("mousedown", (e) => {
-    if (dropdown && !e.composedPath().includes(dropdown)) closeDropdown();
-  });
-  fields.password.form?.addEventListener("submit", () => void maybeOfferSave(fields));
-  fields.password.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") void maybeOfferSave(fields);
+async function openFor(anchor: HTMLInputElement, f: LoginForm): Promise<void> {
+  // Raw hostname on the wire — the SW runs urimatch.normalizeHost, one normalizer fleet-wide.
+  const res = await safeSend({ type: "matches", host: location.hostname });
+  if (!res) return;
+  const state: DropdownState = {
+    kind: res.locked ? "locked" : res.matches.length > 0 ? "matches" : "empty",
+    host: location.hostname,
+    matches: res.locked ? [] : res.matches,
+    isSignup: f.isSignup,
+  };
+  openDropdown(anchor, state, {
+    onPick: (m) => void fillItem(m.itemId, f, false),
+    onStrongPassword: () => void useStrongPassword(f),
+    onSearch: async (query) => {
+      const r = await safeSend({ type: "allItems", query });
+      return r && !r.locked ? r.items : [];
+    },
+    onSearchPick: (m) => void fillExplicit(m, f),
   });
 }
+
+async function fillItem(itemId: string, f: LoginForm, explicit: boolean): Promise<void> {
+  const r = await safeSend({ type: "reveal", itemId, host: location.hostname, explicit });
+  closeDropdown();
+  if (r?.ok && r.secret) fillForm(f, r.secret);
+}
+
+/** Search-all pick: explicit reveal (user chose it in OUR closed-shadow UI), then offer the
+ *  one-tap URI backfill so the item matches this site next time. */
+async function fillExplicit(m: MatchItem, f: LoginForm): Promise<void> {
+  const r = await safeSend({ type: "reveal", itemId: m.itemId, host: location.hostname, explicit: true });
+  closeDropdown();
+  if (!r?.ok || !r.secret) return;
+  fillForm(f, r.secret);
+  if (!m.siteMatch) {
+    showLinkOffer(
+      m.name,
+      location.hostname,
+      async () => (await safeSend({ type: "linkUri", itemId: m.itemId, host: location.hostname }))?.ok === true,
+    );
+  }
+}
+
+async function useStrongPassword(f: LoginForm): Promise<void> {
+  const r = await safeSend({ type: "generate" });
+  closeDropdown();
+  if (!r) return;
+  const live = liveForm(f);
+  if (!live) return;
+  const targets = live.newPasswords.length > 0 ? live.newPasswords : live.password ? [live.password] : [];
+  filling = true;
+  try {
+    for (const t of targets) setValue(t, r.password);
+  } finally {
+    filling = false;
+  }
+  updateSnapshot(live); // the generated secret must reach the save banner, not just the page
+}
+
+// ---- capture engine ----
+
+interface Snapshot {
+  username: string;
+  password: string;
+}
+
+/** Keyed by form ?? container: SPA re-renders replace nodes (old keys GC away), and reading
+ *  only at trigger time loses values on sites that clear fields before navigating — so keep
+ *  the last non-empty value seen per field. */
+const snapshots = new WeakMap<object, Snapshot>();
+
+function snapKey(f: LoginForm): object {
+  return f.form ?? f.container;
+}
+
+function updateSnapshot(f: LoginForm): void {
+  const key = snapKey(f);
+  const s = snapshots.get(key) ?? { username: "", password: "" };
+  const u = f.username?.value ?? "";
+  const p = f.password?.value ?? "";
+  if (u !== "") s.username = u;
+  if (p !== "") s.password = p;
+  snapshots.set(key, s);
+}
+
+let lastSent: { u: string; p: string; t: number } | null = null;
+/** A recent step-1 capture arms the password-page auto-open (multi-step logins). */
+let usernameStepAt = 0;
+
+function captureNow(f: LoginForm): void {
+  updateSnapshot(f);
+  const s = snapshots.get(snapKey(f)) ?? { username: "", password: "" };
+  const username = s.username;
+  const password = f.kind === "username-step" ? "" : s.password; // step 1 sends password:"" per contract
+  if (f.kind === "username-step" ? username === "" : password === "") return;
+  const now = Date.now();
+  // Enter + form submit + button click routinely ALL fire for one login attempt.
+  if (lastSent && lastSent.u === username && lastSent.p === password && now - lastSent.t < 1500) return;
+  lastSent = { u: username, p: password, t: now };
+  if (f.kind === "username-step") usernameStepAt = now;
+  // The send happens NOW, before the page can unload — the SW keeps it as the tab's pending
+  // save; the banner only appears if this document survives long enough to hear back.
+  void (async () => {
+    const res = await safeSend({ type: "capturedCredential", url: location.href, username, password });
+    if (res?.pending) offerBanner(res.pending);
+  })();
+}
+
+function offerBanner(pending: PendingSave): void {
+  showSaveBanner(
+    pending,
+    async () => {
+      const r = await safeSend({ type: "resolvePendingSave", action: "save" });
+      if (r?.ok) return { ok: true, text: "Saved to the hoard." };
+      return { ok: false, text: r?.error ?? "Could not save — unlock andvari and try again." };
+    },
+    () => void safeSend({ type: "resolvePendingSave", action: "dismiss" }),
+  );
+}
+
+// ---- wiring ----
+
+function init(): void {
+  document.addEventListener(
+    "focusin",
+    (e) => {
+      if (e.isTrusted) maybeOpen(e.target);
+    },
+    true,
+  );
+
+  document.addEventListener(
+    "input",
+    (e) => {
+      if (!e.isTrusted || !(e.target instanceof HTMLInputElement)) return;
+      const f = formFor(e.target);
+      if (f) updateSnapshot(f);
+    },
+    true,
+  );
+
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (!e.isTrusted || e.key !== "Enter" || !(e.target instanceof HTMLInputElement)) return;
+      const f = formFor(e.target);
+      if (!f) return;
+      if (e.target.type === "password" || (f.kind === "username-step" && f.username === e.target)) captureNow(f);
+    },
+    true,
+  );
+
+  // Deliberately not isTrusted-gated: requestSubmit()-driven submits are real logins too.
+  document.addEventListener(
+    "submit",
+    (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLFormElement)) return;
+      const f = scanForms().find((x) => x.form === t);
+      if (f) captureNow(f);
+    },
+    true,
+  );
+
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (!e.isTrusted) return;
+      if (e.target instanceof HTMLInputElement) maybeOpen(e.target); // reopen after dismissal
+      const control = e.composedPath().find((n): n is Element => n instanceof Element && isSubmitLike(n));
+      if (!control) return;
+      const all = scanForms();
+      // "Near the form": a formless group's button can sit outside the fields' container —
+      // when the page has exactly one login form, any submit-shaped click belongs to it.
+      const f = all.find((x) => (x.form ?? x.container).contains(control)) ?? (all.length === 1 ? all[0]! : null);
+      if (f) captureNow(f);
+    },
+    true,
+  );
+
+  // SPA route changes: an open dropdown is anchored to nodes that may be on their way out.
+  window.addEventListener("popstate", closeDropdown);
+  window.addEventListener("hashchange", closeDropdown);
+
+  let mutateTimer = 0;
+  new MutationObserver(() => {
+    window.clearTimeout(mutateTimer);
+    mutateTimer = window.setTimeout(() => {
+      formsCache = null;
+      // Multi-step: step 1 was captured and the password page/fragment just rendered with
+      // focus already on the password field — offer without another user gesture.
+      if (Date.now() - usernameStepAt < 120_000) {
+        const a = document.activeElement;
+        if (a instanceof HTMLInputElement && a.type === "password") {
+          lastOpen = null;
+          maybeOpen(a);
+        }
+      }
+    }, 150);
+  }).observe(document.documentElement, { childList: true, subtree: true });
+
+  chrome.runtime.onMessage.addListener((msg: TabMsg) => {
+    if (msg.type === "fillItem") {
+      // Popup-granted fill: the SW minted a one-shot grant, so the normal host-bound reveal
+      // path clears it — single secret-egress path. Frames without a form stay silent.
+      const all = scanForms();
+      const f = all.find((x) => x.kind === "login") ?? all[0];
+      if (f) void fillItem(msg.itemId, f, false);
+    } else if (msg.type === "offerPendingSave" && isTop) {
+      offerBanner(msg.pending);
+    }
+  });
+
+  void safeSend({ type: "pageInfo", host: location.hostname });
+
+  // Post-navigation re-offer — top frame only, or every iframe would grow a banner.
+  if (isTop) {
+    void (async () => {
+      const r = await safeSend({ type: "pendingSave" });
+      if (r?.pending) offerBanner(r.pending);
+    })();
+  }
+
+  // Autofocus bootstrap: the page put the cursor in a login field before we loaded.
+  maybeOpen(document.activeElement);
+}
+
+if (location.hostname !== "") init();

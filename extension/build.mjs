@@ -31,5 +31,7 @@ await esbuild.build({
 const firefox = process.env.TARGET === "firefox";
 cpSync(firefox ? "manifest.firefox.json" : "manifest.json", "dist/manifest.json");
 cpSync("popup.html", "dist/popup.html");
+cpSync("popup.css", "dist/popup.css"); // the ported treasury theme; popup.html <link>s it
+cpSync("icons", "dist/icons", { recursive: true }); // both manifests reference icons/icon{16,32,48,128}.png
 cpSync("INSTALL.txt", "dist/INSTALL.txt"); // tester-facing steps travel inside the zip
 console.log(`built → dist/ (${firefox ? "Firefox" : "Chrome"}${release ? ", release" : ""}; Load unpacked: extension/dist)`);

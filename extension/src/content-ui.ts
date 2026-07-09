@@ -1,0 +1,491 @@
+/**
+ * In-page UI layer: fill dropdown, save/update banner, link-offer banner, toast. Pure DOM —
+ * no chrome.* — the content script wires actions in via handlers.
+ *
+ * Strict-CSP hardening (carried over from 0.6.0): all UI lives in a CLOSED shadow root, styled
+ * by a constructed CSSStyleSheet via adoptedStyleSheets — encapsulated from the page's CSS AND
+ * immune to the page's `style-src` (unlike inline <style>/style="" attributes). Dynamic position
+ * is set via CSSOM (el.style.*), which is not gated by CSP.
+ *
+ * Theming trap the token layout answers: `all: initial` does NOT reset custom properties, and
+ * the page can out-cascade :host rules on the host element — so the full --anv-* token set is
+ * defined ON the component roots (.dropdown/.banner/.toast), never :host, making each surface
+ * self-sealed on any site. The serif ᛅ+wordmark header doubles as anti-spoof attribution: a
+ * distinctive treasury surface is harder for a page to convincingly fake.
+ */
+import type { MatchItem, PendingSave } from "./messages";
+
+const UI_CSS = `
+:host { all: initial; }
+
+.dropdown, .banner, .toast { all: initial; }
+.dropdown, .banner, .toast {
+  --anv-bg: #1e1b15;
+  --anv-bg-deep: #14120e;
+  --anv-bg-input: #262119;
+  --anv-edge: #38311f;
+  --anv-edge-strong: #4a3f28;
+  --anv-ink: #ede4d0;
+  --anv-ink-dim: #a79c85;
+  --anv-ink-faint: #6f6752;
+  --anv-gold: #d0a94a;
+  --anv-gold-bright: #e8c66a;
+  --anv-btn-ink: #1a1509;
+  --anv-danger: #cf6b5a;
+  --anv-ok: #7fa86a;
+  --anv-serif: "Iowan Old Style", Palatino, Georgia, serif;
+  --anv-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --anv-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+  --anv-radius: 10px;
+  --anv-shadow: 0 18px 50px -20px rgba(0, 0, 0, .7);
+}
+@media (prefers-color-scheme: light) {
+  .dropdown, .banner, .toast {
+    --anv-bg: #fbf8f1;
+    --anv-bg-deep: #f4efe4;
+    --anv-bg-input: #fff;
+    --anv-edge: #e0d8c5;
+    --anv-edge-strong: #c9bfa2;
+    --anv-ink: #2c2517;
+    --anv-ink-dim: #6b6047;
+    --anv-ink-faint: #9a8f74;
+    --anv-gold: #9a7420;
+    --anv-gold-bright: #7d5e14;
+    --anv-btn-ink: #fdf9f0;
+    --anv-danger: #b3402c;
+    --anv-ok: #4f7a3a;
+    --anv-shadow: 0 18px 50px -24px rgba(70, 55, 20, .35);
+  }
+}
+
+@keyframes anv-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .dropdown, .banner, .toast { animation: none; } }
+
+.dropdown {
+  position: fixed; z-index: 2147483647;
+  display: block; box-sizing: border-box;
+  min-width: 260px; max-width: 380px;
+  background: var(--anv-bg);
+  border: 1px solid var(--anv-edge);
+  border-radius: var(--anv-radius);
+  box-shadow: var(--anv-shadow);
+  color: var(--anv-ink);
+  font: 13px/1.45 var(--anv-sans);
+  overflow: hidden;
+  user-select: none;
+  animation: anv-in .16s ease-out;
+}
+
+.hdr {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 8px 12px;
+  background: var(--anv-bg-deep);
+  border-bottom: 1px solid var(--anv-edge);
+  font-family: var(--anv-serif);
+  font-size: 13.5px; font-weight: 600; letter-spacing: .02em;
+  color: var(--anv-ink);
+  cursor: default;
+}
+.hdr .sigil { color: var(--anv-gold); font-size: 15px; line-height: 1; text-shadow: 0 1px 12px rgba(208, 169, 74, .4); }
+.hdr .a-mark { color: var(--anv-gold); }
+
+.list { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.list > * + * { border-top: 1px solid var(--anv-edge); }
+
+.row {
+  display: flex; align-items: baseline; gap: 7px;
+  padding: 9px 12px;
+  cursor: pointer;
+  white-space: nowrap; overflow: hidden;
+}
+.row .name { color: var(--anv-ink); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.row .user { font-family: var(--anv-mono); font-size: 12px; color: var(--anv-ink-dim); overflow: hidden; text-overflow: ellipsis; }
+.row:hover { background: var(--anv-bg-deep); box-shadow: inset 2px 0 0 var(--anv-gold); }
+.row:hover .name { color: var(--anv-gold-bright); }
+.row.action { color: var(--anv-gold); font-size: 12.5px; }
+.row.action:hover { color: var(--anv-gold-bright); }
+
+.state { padding: 14px 12px; color: var(--anv-ink-dim); font-size: 12.5px; cursor: default; }
+
+.search { padding: 10px 12px; }
+.search-input {
+  width: 100%; box-sizing: border-box;
+  font: 13px var(--anv-sans);
+  color: var(--anv-ink);
+  background: var(--anv-bg-input);
+  border: 1px solid var(--anv-edge);
+  border-radius: 7px;
+  padding: 7px 9px;
+  outline: none;
+  user-select: text;
+}
+.search-input:focus { border-color: var(--anv-gold); }
+.search-input::placeholder { color: var(--anv-ink-faint); }
+
+.banner {
+  position: fixed; top: 16px; right: 16px; z-index: 2147483647;
+  display: block; box-sizing: border-box;
+  width: 330px; max-width: calc(100vw - 32px);
+  background: var(--anv-bg);
+  border: 1px solid var(--anv-edge);
+  border-radius: var(--anv-radius);
+  box-shadow: var(--anv-shadow);
+  color: var(--anv-ink);
+  font: 13px/1.5 var(--anv-sans);
+  overflow: hidden;
+  animation: anv-in .16s ease-out;
+}
+.banner .body { padding: 12px; }
+.banner .hl { font-family: var(--anv-mono); font-size: 12px; color: var(--anv-gold-bright); }
+.banner .actions { display: flex; gap: 8px; margin-top: 11px; }
+
+button.primary {
+  font: 600 12.5px var(--anv-sans);
+  color: var(--anv-btn-ink);
+  background: linear-gradient(180deg, var(--anv-gold-bright), var(--anv-gold));
+  border: 0; border-radius: 8px;
+  padding: 7px 16px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px -8px rgba(208, 169, 74, .6);
+}
+button.primary:hover { filter: brightness(1.06); }
+button.primary:disabled { opacity: .5; cursor: default; filter: none; }
+button.ghost {
+  font: 12.5px var(--anv-sans);
+  color: var(--anv-ink-dim);
+  background: transparent;
+  border: 1px solid var(--anv-edge);
+  border-radius: 8px;
+  padding: 7px 13px;
+  cursor: pointer;
+}
+button.ghost:hover { color: var(--anv-ink); border-color: var(--anv-edge-strong); }
+button.ghost:disabled { opacity: .5; cursor: default; }
+
+.result { display: block; margin-top: 11px; font-size: 12.5px; }
+.result.ok { color: var(--anv-ok); }
+.result.err { color: var(--anv-danger); }
+
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  z-index: 2147483647;
+  display: flex; align-items: baseline; gap: 7px;
+  box-sizing: border-box; max-width: calc(100vw - 32px);
+  padding: 9px 16px;
+  background: var(--anv-bg);
+  border: 1px solid var(--anv-edge-strong);
+  border-radius: 999px;
+  box-shadow: var(--anv-shadow);
+  color: var(--anv-ink);
+  font: 12.5px/1.4 var(--anv-sans);
+  animation: anv-in .16s ease-out;
+}
+.toast .sigil { font-family: var(--anv-serif); color: var(--anv-gold); }
+`;
+
+export interface DropdownState {
+  kind: "matches" | "locked" | "empty";
+  host: string;
+  matches: MatchItem[];
+  isSignup: boolean;
+}
+
+export interface DropdownHandlers {
+  onPick(item: MatchItem): void;
+  onStrongPassword(): void;
+  onSearch(query: string): Promise<MatchItem[]>;
+  onSearchPick(item: MatchItem): void;
+}
+
+let shadow: ShadowRoot | null = null;
+let hostEl: HTMLElement | null = null;
+let dropdownEl: HTMLElement | null = null;
+let anchorEl: HTMLElement | null = null;
+let bannerEl: HTMLElement | null = null;
+let toastEl: HTMLElement | null = null;
+let toastTimer = 0;
+
+function ui(): ShadowRoot {
+  if (shadow) return shadow;
+  hostEl = document.createElement("div");
+  (document.documentElement || document.body).appendChild(hostEl);
+  const root = hostEl.attachShadow({ mode: "closed" });
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(UI_CSS);
+  root.adoptedStyleSheets = [sheet];
+  shadow = root;
+
+  // Outside-close: composedPath() at document level is truncated at the CLOSED shadow
+  // boundary, so inner nodes never appear in it — test for the HOST element (which is in
+  // the retargeted path for any click inside our UI). The anchor is exempt so clicking the
+  // field again refreshes rather than close-then-reopen.
+  document.addEventListener("mousedown", (e) => {
+    if (!dropdownEl || !e.isTrusted) return;
+    const path = e.composedPath();
+    if (hostEl && path.includes(hostEl)) return;
+    if (anchorEl && path.includes(anchorEl)) return;
+    closeDropdown();
+  });
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.isTrusted && e.key === "Escape" && dropdownEl) closeDropdown();
+    },
+    true,
+  );
+  const reanchor = (): void => {
+    if (dropdownEl) positionDropdown();
+  };
+  document.addEventListener("scroll", reanchor, { capture: true, passive: true });
+  window.addEventListener("resize", reanchor, { passive: true });
+  return root;
+}
+
+function span(className: string, text: string): HTMLSpanElement {
+  const s = document.createElement("span");
+  s.className = className;
+  s.textContent = text;
+  return s;
+}
+
+function brandHeader(): HTMLElement {
+  const hdr = document.createElement("div");
+  hdr.className = "hdr";
+  const brand = document.createElement("span");
+  brand.append(span("a-mark", "and"), document.createTextNode("vari"));
+  hdr.append(span("sigil", "ᛅ"), brand);
+  return hdr;
+}
+
+function stateCard(text: string): HTMLElement {
+  const d = document.createElement("div");
+  d.className = "state";
+  d.textContent = text;
+  return d;
+}
+
+function matchRow(m: MatchItem, pick: () => void): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.appendChild(span("name", m.name));
+  if (m.username) row.appendChild(span("user", m.username));
+  row.addEventListener("mousedown", (e) => {
+    if (!e.isTrusted) return;
+    e.preventDefault(); // keep focus on the page field so it stays fillable
+    pick();
+  });
+  return row;
+}
+
+function actionRow(label: string, act: () => void): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "row action";
+  row.textContent = label;
+  row.addEventListener("mousedown", (e) => {
+    if (!e.isTrusted) return;
+    e.preventDefault();
+    act();
+  });
+  return row;
+}
+
+/** Placed via CSSOM (not CSP-gated); position:fixed → viewport coords, so scroll/resize
+ *  re-anchoring reads the anchor's LIVE rect each time. Closes if the anchor left the DOM. */
+function positionDropdown(): void {
+  if (!dropdownEl || !anchorEl) return;
+  if (!anchorEl.isConnected) {
+    closeDropdown();
+    return;
+  }
+  const r = anchorEl.getBoundingClientRect();
+  const w = Math.min(Math.max(r.width, 260), 380);
+  const left = Math.min(Math.max(r.left, 8), Math.max(8, window.innerWidth - w - 8));
+  dropdownEl.style.width = `${w}px`;
+  dropdownEl.style.left = `${left}px`;
+  const h = dropdownEl.offsetHeight;
+  const below = r.bottom + 4;
+  const top = below + h > window.innerHeight - 8 && r.top - 4 - h > 8 ? r.top - 4 - h : below;
+  dropdownEl.style.top = `${top}px`;
+}
+
+function renderMain(body: HTMLElement, state: DropdownState, h: DropdownHandlers): void {
+  body.textContent = "";
+  if (state.kind === "locked") {
+    body.appendChild(stateCard("Locked — click the andvari toolbar icon to unlock"));
+    return;
+  }
+  if (state.kind === "empty") body.appendChild(stateCard(`No saved login for ${state.host}`));
+  else for (const m of state.matches) body.appendChild(matchRow(m, () => h.onPick(m)));
+  if (state.isSignup) body.appendChild(actionRow("Use a strong password", () => h.onStrongPassword()));
+  body.appendChild(actionRow("Search all logins…", () => renderSearch(body, h)));
+}
+
+function renderSearch(body: HTMLElement, h: DropdownHandlers): void {
+  body.textContent = "";
+  const wrap = document.createElement("div");
+  wrap.className = "search";
+  const inp = document.createElement("input");
+  inp.className = "search-input";
+  inp.type = "text";
+  inp.placeholder = "Search all logins…";
+  wrap.appendChild(inp);
+  const results = document.createElement("div");
+  body.append(wrap, results);
+
+  // Key/input events are composed — without this, page-level listeners see every
+  // keystroke typed into OUR search box. (Capture-phase snooping remains possible;
+  // our own Escape-close is capture too, so it still runs.)
+  for (const type of ["keydown", "keyup", "keypress", "input"] as const) {
+    inp.addEventListener(type, (e) => e.stopPropagation());
+  }
+
+  let seq = 0;
+  const run = async (query: string): Promise<void> => {
+    const mine = ++seq;
+    const items = await h.onSearch(query);
+    if (mine !== seq || !dropdownEl) return; // stale response, or closed while in flight
+    results.textContent = "";
+    if (items.length === 0) results.appendChild(stateCard("No logins found"));
+    else for (const m of items) results.appendChild(matchRow(m, () => h.onSearchPick(m)));
+    positionDropdown(); // result list changes our height
+  };
+  inp.addEventListener("input", () => void run(inp.value));
+  void run("");
+  inp.focus();
+  positionDropdown();
+}
+
+export function openDropdown(anchor: HTMLElement, state: DropdownState, handlers: DropdownHandlers): void {
+  const root = ui();
+  closeDropdown();
+  anchorEl = anchor;
+  const box = document.createElement("div");
+  box.className = "dropdown";
+  box.appendChild(brandHeader());
+  const body = document.createElement("div");
+  body.className = "list";
+  box.appendChild(body);
+  renderMain(body, state, handlers);
+  root.appendChild(box);
+  dropdownEl = box;
+  positionDropdown();
+}
+
+export function closeDropdown(): void {
+  dropdownEl?.remove();
+  dropdownEl = null;
+  anchorEl = null;
+}
+
+function bannerShell(): { bar: HTMLElement; body: HTMLElement } {
+  const root = ui();
+  bannerEl?.remove(); // one banner at a time — newest wins
+  const bar = document.createElement("div");
+  bar.className = "banner";
+  bar.appendChild(brandHeader());
+  const body = document.createElement("div");
+  body.className = "body";
+  bar.appendChild(body);
+  root.appendChild(bar);
+  bannerEl = bar;
+  return { bar, body };
+}
+
+function closeBanner(which: HTMLElement): void {
+  which.remove();
+  if (bannerEl === which) bannerEl = null;
+}
+
+/** Save/update offer. Never shows the password itself — only host/name (ZK: the secret stays
+ *  in the SW's pending slot). onSave resolves to the honest result line to display. */
+export function showSaveBanner(
+  pending: PendingSave,
+  onSave: () => Promise<{ ok: boolean; text: string }>,
+  onDismiss: () => void,
+): void {
+  const { bar, body } = bannerShell();
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  if (pending.updatesItemId) msg.append("Update the password for ", span("hl", pending.updatesItemName ?? "this login"), "?");
+  else msg.append("Save this login for ", span("hl", pending.host), " to andvari?");
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const primary = document.createElement("button");
+  primary.className = "primary";
+  primary.textContent = pending.updatesItemId ? "Update" : "Save";
+  const ghost = document.createElement("button");
+  ghost.className = "ghost";
+  ghost.textContent = "Not now";
+  actions.append(primary, ghost);
+  body.append(msg, actions);
+
+  const idle = window.setTimeout(() => closeBanner(bar), 30_000);
+  primary.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    window.clearTimeout(idle);
+    primary.disabled = true;
+    ghost.disabled = true;
+    void onSave().then((r) => {
+      actions.remove();
+      body.appendChild(span(r.ok ? "result ok" : "result err", r.text));
+      window.setTimeout(() => closeBanner(bar), r.ok ? 4000 : 8000);
+    });
+  });
+  ghost.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    window.clearTimeout(idle);
+    closeBanner(bar);
+    onDismiss();
+  });
+}
+
+/** Post-fill URI backfill offer for an out-of-match (search-all) fill. */
+export function showLinkOffer(itemName: string, host: string, onLink: () => Promise<boolean>): void {
+  const { bar, body } = bannerShell();
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  msg.append("Link ", span("hl", itemName), " to ", span("hl", host), "?");
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const primary = document.createElement("button");
+  primary.className = "primary";
+  primary.textContent = "Link";
+  const ghost = document.createElement("button");
+  ghost.className = "ghost";
+  ghost.textContent = "No";
+  actions.append(primary, ghost);
+  body.append(msg, actions);
+
+  const idle = window.setTimeout(() => closeBanner(bar), 20_000);
+  primary.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    window.clearTimeout(idle);
+    primary.disabled = true;
+    ghost.disabled = true;
+    void onLink().then((ok) => {
+      actions.remove();
+      body.appendChild(span(ok ? "result ok" : "result err", ok ? "Linked." : "Could not link."));
+      window.setTimeout(() => closeBanner(bar), ok ? 3000 : 6000);
+    });
+  });
+  ghost.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    window.clearTimeout(idle);
+    closeBanner(bar);
+  });
+}
+
+export function showToast(text: string): void {
+  const root = ui();
+  toastEl?.remove();
+  const t = document.createElement("div");
+  t.className = "toast";
+  t.append(span("sigil", "ᛅ"), document.createTextNode(text));
+  root.appendChild(t);
+  toastEl = t;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    t.remove();
+    if (toastEl === t) toastEl = null;
+  }, 5000);
+}
