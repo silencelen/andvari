@@ -39,8 +39,9 @@ npm run typecheck    # tsc --noEmit
   - `src/content.ts` — **the in-page autofill UI**: on login-field focus, a fill dropdown of matching
     logins → click → SW `reveal` → the username/password are set in the fields; on submit, a "Save to
     andvari?" banner → SW `save` (client-encrypts a new login under the personal vault key + pushes).
-    So the extension now **fills and saves** end to end.
-- **Next (`TODO(extension)`):** a shadow-root + injected stylesheet so the UI survives strict-CSP
-  sites (the spike uses inline styles); run the ~5.8 s Argon2id in a Web Worker so the popup doesn't
-  block; member (shared-vault) grants via `sealedVk` (crypto_box_seal_open — identity key + `@noble`
-  X25519); token refresh; then Firefox MV3.
+    So the extension now **fills and saves** end to end. The UI renders in a **closed shadow root**
+    styled by a constructed `CSSStyleSheet` (`adoptedStyleSheets`) — page-CSS-isolated AND immune to
+    the site's `style-src`, so it works on strict-CSP sites (github.com, banks), not just fill.dev.
+- **Next (`TODO(extension)`):** run the ~5.8 s Argon2id in a Web Worker so the popup doesn't block;
+  member (shared-vault) grants via `sealedVk` (crypto_box_seal_open — identity key + `@noble` X25519);
+  token refresh; then Firefox MV3.
