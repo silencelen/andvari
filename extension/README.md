@@ -1,18 +1,20 @@
 # andvari browser extension (MV3)
 
-PC autofill for Chromium (Chrome/Edge/Brave) + Firefox. **Status: feature-complete for a first
-release** — real unlock (pure-JS `@noble` crypto, byte-identical to the fleet:
-`web/src/crypto/noble-extension-poc.test.ts`), member grants, fill dropdown + save banner
-(strict-CSP-proof shadow DOM), Web-Worker KDF, token refresh. The one unrun step is on-browser
-verification (below) — it needs a real browser.
-Full design + go/no-go: [`docs/design/2026-07-08-browser-extension-spike.md`](../docs/design/2026-07-08-browser-extension-spike.md).
+PC autofill for Chromium (Chrome/Edge/Brave) + Firefox. **Status: functional (v0.6.1).** Real
+unlock (pure-JS `@noble` crypto, byte-identical to the fleet: `web/src/crypto/noble-extension-poc.test.ts`),
+member grants, Web-Worker KDF, token refresh — plus the 0.6.1 rework: a session that survives the
+MV3 service-worker (chrome.storage.session custody + alarm autolock), a real detection engine
+(delegated focusin + MutationObserver, multi-step, all_frames iframes, React-safe fill), save AND
+update prompts that survive navigation, a themed functional popup, and treasury theming throughout.
+Design + go/no-go: [`docs/design/2026-07-08-browser-extension-spike.md`](../docs/design/2026-07-08-browser-extension-spike.md);
+rework audit + plan: [`docs/design/2026-07-09-extension-rework-plan.md`](../docs/design/2026-07-09-extension-rework-plan.md).
 
 ## Build
 
 ```bash
 cd extension
 npm install
-npm run build        # → dist/ dev build (readable, sourcemaps; esbuild — 0 wasm, 0 eval)
+npm run build        # → dist/ dev build (readable, sourcemaps; esbuild — 0 wasm, 0 eval; copies popup.html/popup.css/icons/INSTALL.txt)
 npm run typecheck    # tsc --noEmit
 npm run package      # → artifacts/andvari-extension-{chrome,firefox}-<ver>.zip (minified release)
 ```
@@ -25,9 +27,9 @@ desktop entries live in the same file, see `ops/windows-build.md`):
 
 ```json
 "browserExtension": {
-  "version": "0.6.0",
-  "chromeUrl": "/downloads/andvari-extension-chrome-0.6.0.zip",
-  "firefoxUrl": "/downloads/andvari-extension-firefox-0.6.0.zip"
+  "version": "0.6.1",
+  "chromeUrl": "/downloads/andvari-extension-chrome-0.6.1.zip",
+  "firefoxUrl": "/downloads/andvari-extension-firefox-0.6.1.zip"
 }
 ```
 
@@ -42,7 +44,8 @@ origin only). Each zip carries a tester-facing `INSTALL.txt`; Firefox loads are 
    `host_permissions` reaches the tailnet server with **no CORS** (be on Tailscale).
 3. Service-worker console (chrome://extensions → "service worker"): **no CSP violation** — confirms
    the bundled `@noble` crypto loads (the spike's whole premise: no WASM, no eval).
-4. Open a login page (e.g. https://fill.dev) → the content script logs "login form detected".
+4. Open a login page (e.g. https://fill.dev), unlock in the popup, then click a username/password
+   field → the andvari fill dropdown appears; submit an unknown login → the "Save to andvari?" bar.
 
 ## What's wired vs next
 
@@ -54,21 +57,31 @@ origin only). Each zip carries a tester-facing `INSTALL.txt`; Firefox loads are 
     UVK from the returned accountKeys → sync → unwrap each vault key from its grant → **decrypt items
     under the VK**. Holds the decrypted set in memory only (ZK). `matches` returns host-matching
     logins (name + username, never the password until a fill).
-  - `src/popup.ts` + `popup.html` — a real unlock form (email + master password) showing the login
-    count + Lock.
-  - `src/content.ts` — **the in-page autofill UI**: on login-field focus, a fill dropdown of matching
-    logins → click → SW `reveal` → the username/password are set in the fields; on submit, a "Save to
-    andvari?" banner → SW `save` (client-encrypts a new login under the personal vault key + pushes).
-    So the extension now **fills and saves** end to end. The UI renders in a **closed shadow root**
-    styled by a constructed `CSSStyleSheet` (`adoptedStyleSheets`) — page-CSS-isolated AND immune to
-    the site's `style-src`, so it works on strict-CSP sites (github.com, banks), not just fill.dev.
+  - `src/popup.ts` + `popup.html` + `popup.css` — the **functional, treasury-themed vault surface**:
+    current-site matches + search-all, per-row copy username/password + live TOTP, a password
+    generator, open-web-vault, Lock. The unlock form shows the "Unsealing…" KDF state.
+  - `src/content.ts` + `src/detect.ts` + `src/content-ui.ts` — the **detection engine + in-page UI**:
+    delegated focusin + a MutationObserver re-scan catch SPA/late-rendered/multi-step forms; fill uses
+    the native value setter (React/Vue-safe); a fill dropdown (matches / search-all / strong-password)
+    → SW `reveal` → fields set; captured logins raise a "Save to andvari?" / "Update password?" banner
+    that survives the post-login navigation. The UI renders in a **closed shadow root** styled by a
+    constructed `CSSStyleSheet` (`adoptedStyleSheets`) — page-CSS-isolated AND immune to the site's
+    `style-src`, so it works on strict-CSP sites (github.com, banks), not just fill.dev.
+  - `src/background.ts` session custody: the unlocked vault survives MV3 SW death via
+    `chrome.storage.session` (memory-backed, never disk); `chrome.alarms` drive policy autolock +
+    periodic resync. Secret egress stays `reveal`-only, host-bound or by an explicit gesture in our UI.
   - **KDF in a Web Worker** (`src/kdf-worker.ts`) — the ~5.8 s Argon2id runs off the SW event loop,
     with an inline fallback where nested workers aren't allowed.
   - **Member (shared-vault) grants** — `sealedVk` opened via `crypto_box_seal_open` reconstructed
     from **tweetnacl** (box) + `@noble` blake2b (nonce), verified byte-identical to libsodium
     (`web/src/crypto/noble-extension-poc.test.ts`). Shared-vault logins fill too now.
   - **Token refresh** — a 401 rotates the single-use token pair and retries once.
+- **Manifests (both):** branded icons (`icons/icon{16,32,48,128}.png` — the treasury coin + ᛅ rune),
+  content script in **all frames** (`"all_frames": true` — iframe logins) with the vault app's own
+  origin excluded (`exclude_matches` — never run the PM UI inside andvari itself), extension-page
+  CSP without `'wasm-unsafe-eval'` (nothing loads wasm).
 - **Firefox:** `manifest.firefox.json` + `TARGET=firefox npm run build` (background event page instead
   of the SW; `browser_specific_settings`). The `chrome.*` calls work on both.
-- **Next:** broader field detection (multi-step / SPA login forms), more item types, and on-browser
-  verification on both Chromium and Firefox (the one thing that can't be run here).
+- **Next:** more item types beyond logins, a signed Firefox `.xpi` (temporary `about:debugging` loads
+  vanish on restart), and continued on-browser verification on both Chromium and Firefox (a
+  headless-Chromium harness already exercises unlock / save / fill / multi-step / iframe / SPA / SW-kill).

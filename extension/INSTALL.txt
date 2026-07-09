@@ -29,8 +29,18 @@ Firefox only keeps unsigned extensions loaded until you close the browser
 3. Click "Load Temporary Add-on..." and pick manifest.json inside the folder.
 4. After restarting Firefox you'll need to repeat steps 2-3.
 
+Updating (already installed?)
+-----------------------------
+1. Download the new zip and unzip it OVER the same folder you used before
+   (replace everything).
+2. Open the extensions page and click the reload (circular arrow) icon on
+   the andvari card. Firefox: redo the temporary load.
+3. Reload any open tabs you want andvari active in.
+
 Using it
 --------
+- Just installed or updated? Reload any tabs that were already open — the
+  page part of andvari loads with the page.
 - Click into a username or password field on a login page: a small andvari
   dropdown lists your matching logins; click one to fill both fields.
 - Submit a login the extension doesn't know: a "Save to andvari?" bar

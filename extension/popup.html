@@ -2,31 +2,69 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <style>
-      body { font: 13px system-ui, sans-serif; width: 300px; padding: 14px; }
-      h3 { margin: 0 0 10px; }
-      input { display: block; width: 100%; box-sizing: border-box; margin-bottom: 6px; padding: 6px; }
-      button { margin-top: 6px; }
-      #msg { margin-top: 8px; color: #555; word-break: break-word; }
-      .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
-    </style>
+    <title>andvari</title>
+    <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <h3>andvari</h3>
-    <div id="locked">
-      <input id="email" type="email" placeholder="email" autocomplete="off" autocapitalize="off" />
-      <input id="password" type="password" placeholder="master password" autocomplete="off" />
-      <button id="unlock">Unlock</button>
-    </div>
-    <div id="unlocked" style="display: none">
-      <div class="row">
-        <span id="count"></span>
-        <button id="lock">Lock</button>
+    <header class="pop-head">
+      <span class="brand"><span class="sigil-sm">ᛅ</span><span class="a-mark">and</span>vari</span>
+      <span id="conn" class="dot off" title="server"></span>
+    </header>
+
+    <section id="locked" class="locked" hidden>
+      <div class="hero">
+        <div class="sigil">ᛅ</div>
+        <span class="brand"><span class="a-mark">and</span>vari</span>
+        <p>the keeper of the hoard</p>
       </div>
-    </div>
-    <div id="msg"></div>
-    <hr />
-    <button id="ping">Test server connection</button>
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="off" autocapitalize="off" spellcheck="false" />
+      </div>
+      <div class="field">
+        <label for="password">Master password</label>
+        <input id="password" type="password" autocomplete="off" />
+      </div>
+      <button id="unlock" class="primary">Unlock</button>
+      <div id="kdf" class="kdf" hidden>
+        <div class="bar"></div>
+        <div class="cap">about 6 seconds</div>
+      </div>
+    </section>
+
+    <section id="unlocked" class="unlocked" hidden>
+      <div class="toolbar">
+        <input id="search" type="search" placeholder="Search the hoard…" autocomplete="off" spellcheck="false" />
+        <button id="gen-toggle" class="ghost gen-toggle" title="Password generator">⚄</button>
+      </div>
+      <section id="generator" class="gen" hidden>
+        <div class="section-label">New password</div>
+        <div class="secret-row">
+          <button id="gen-pass" class="gen-pass" title="Click to copy"></button>
+          <button id="gen-again" class="ghost">Regenerate</button>
+        </div>
+        <span id="gen-flash" class="copy-flash" hidden>copied ✓</span>
+      </section>
+      <div id="site-label" class="section-label">This site</div>
+      <div id="site-list" class="list"></div>
+      <div class="section-label">All logins</div>
+      <div id="all-list" class="list"></div>
+    </section>
+
+    <!-- Shared message strip: unlock errors, ping results, copy failures — both views. -->
+    <div id="msg" class="msg" hidden></div>
+
+    <footer class="pop-foot">
+      <div class="foot-row">
+        <button id="lock" class="ghost" hidden>Lock</button>
+        <button id="open-vault" class="link">Open web vault</button>
+      </div>
+      <div class="foot-row">
+        <button id="ping" class="link dim">Test server connection</button>
+        <span id="count" class="muted" hidden></span>
+      </div>
+    </footer>
+
     <!-- external module only — the MV3 CSP forbids inline scripts -->
     <script type="module" src="popup.js"></script>
   </body>
