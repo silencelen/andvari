@@ -1,5 +1,33 @@
 # andvari — changelog
 
+## 0.6.0 — item history + undelete (2026-07-08, cross-platform release)
+
+The "fat-finger seatbelt" release — the version bump (0.5.0 → 0.6.0) that gathers this cycle's
+user-facing features into a coordinated release across web, Android, and desktop. Additive and
+backward-compatible: the server's per-platform `minVersion` gate is unset, so older 0.5.0 clients
+keep working. Web + server deployed to CT122; Android APK on devstore; Linux `.deb` published to
+`/downloads`; Windows `.msi` follows (owner build). Every server-side piece was DB-snapshotted,
+health-checked, and adversarially reviewed before ship.
+
+- **Item history — roll back a fat-fingered password.** Every item's last 10 ciphertext versions
+  (silently archived server-side since v1, previously unreachable — backlog F63) are now exposed
+  via a grant-checked `GET /items/{id}/versions` and decrypted client-side under the held vault key.
+  A per-item "Version history" panel (all three clients) reveals each past value and restores one
+  with a tap. Honest bound: "up to the last 10 saves." Zero-knowledge intact — the server stores and
+  learns nothing new. (Item AD binds `(vaultId, itemId, formatVersion)`, not rev, so an old version
+  opens under the current key; history resets at a future vault-key rotation, by design.)
+- **Undelete — a Trash to recover deleted items.** A grant-scoped `GET /items/deleted` lists
+  tombstoned items (each named from its last archived version, since a tombstone carries no
+  plaintext), and a dedicated `POST /items/{id}/restore` un-tombstones cleanly — a deliberate design
+  choice over a plain put, which would flag an edit-over-tombstone conflict and spawn a spurious
+  duplicate. A "Recently deleted" view on all three clients. (Attachments are not restored — their
+  blobs are hard-unlinked at delete; passwords/notes/fields return. Trash retention is currently
+  unbounded — a windowing decision, F49.)
+- **Recovery hardening (earlier in the cycle, additive under 0.5.0).** F57 escrow re-seal across all
+  three clients (a hostile server cannot redirect the UVK escrow — the new fingerprint is verified
+  from the printed sheet), F59 admin escrow-download, a passed account-recovery drill, and the
+  pre-migration integrity batch — together unblocking the real-secrets migration.
+
 ## v6-QW1 — TOTP-QR + devices hub + purge gauges (2026-07-08, deployed CT122)
 
 Additive to 0.5.0 (no client-version bump — web+server only; Android/desktop unchanged at
