@@ -65,7 +65,9 @@ object UriMatch {
     fun matches(saved: SavedUri, target: FillTarget): Boolean = when (saved) {
         is SavedUri.AndroidApp -> saved.pkg == target.packageName
         is SavedUri.Web -> {
-            val page = target.webHost
+            // Normalize the page host symmetrically with saved.host (case / www. / port / trailing
+            // dot) — the browser reports it raw, so "GitHub.com" would otherwise miss "github.com".
+            val page = target.webHost?.let { normalizeHost(it) }
             when {
                 page == null -> false // no trusted web domain → web items don't match by package
                 saved.host == page -> true

@@ -29,6 +29,23 @@ object BrowserCertPins {
     // NO_PIN_DIGEST, so the owner captures the real value on-device and we pin exactly that.
     private val EMPTY = emptySet<String>()
 
+    /**
+     * Pure trust decision, gate-tested here so the security rule can't drift. A browser's observed
+     * signing-cert digest(s) are trusted for web-domain matching iff:
+     *  - the package is a KNOWN browser ([TABLE] has it — an unknown package is never trusted), AND
+     *  - either a **verified static pin** matches (the shipped, cross-checked digests above),
+     *  - or the owner **approved exactly this digest on-device** (Autofill status → "Trust this
+     *    browser"): the device-local self-service path for browsers we can't ship a verifiable pin
+     *    for (Samsung Internet, Brave, Firefox — their digest is install-source-specific). The
+     *    caller passes the LIVE observed digest each time, so a re-signed/replaced browser drops
+     *    trust until re-approved. `approvedDigest` is null when the owner hasn't approved [pkg].
+     */
+    fun isTrusted(pkg: String, observedDigests: List<String>, approvedDigest: String?): Boolean {
+        val pins = TABLE[pkg] ?: return false // not a known browser → fail closed
+        if (pins.isNotEmpty() && observedDigests.any { it in pins }) return true // verified static pin
+        return approvedDigest != null && approvedDigest in observedDigests // owner-approved on this device
+    }
+
     /** package id → accepted signing-cert digest set (empty = known browser, fail closed). */
     val TABLE: Map<String, Set<String>> = buildMap {
         // Chrome + channels (Google-signed, verified)
