@@ -2,11 +2,12 @@
   "name": "andvari-extension",
   "version": "0.6.0",
   "private": true,
-  "description": "andvari browser extension (MV3) — PC autofill. Pure-JS @noble crypto (no WASM/eval).",
+  "description": "andvari browser extension (MV3) \u2014 PC autofill. Pure-JS @noble crypto (no WASM/eval).",
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "package": "node package.mjs"
   },
   "dependencies": {
     "@noble/ciphers": "^2.2.0",

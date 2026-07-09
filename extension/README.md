@@ -1,9 +1,10 @@
-# andvari browser extension (MV3 scaffold)
+# andvari browser extension (MV3)
 
-PC autofill. **Status: buildable scaffold** — build tooling, the pure-JS `@noble` crypto (proven
-byte-identical to the fleet — `web/src/crypto/noble-extension-poc.test.ts`), and the
-service-worker/content/popup message spine are wired. Unlock (account-key unwrap) and fill/save UI
-are the next port (clearly `TODO(extension)` in the source, pointing at the web modules to reuse).
+PC autofill for Chromium (Chrome/Edge/Brave) + Firefox. **Status: feature-complete for a first
+release** — real unlock (pure-JS `@noble` crypto, byte-identical to the fleet:
+`web/src/crypto/noble-extension-poc.test.ts`), member grants, fill dropdown + save banner
+(strict-CSP-proof shadow DOM), Web-Worker KDF, token refresh. The one unrun step is on-browser
+verification (below) — it needs a real browser.
 Full design + go/no-go: [`docs/design/2026-07-08-browser-extension-spike.md`](../docs/design/2026-07-08-browser-extension-spike.md).
 
 ## Build
@@ -11,9 +12,28 @@ Full design + go/no-go: [`docs/design/2026-07-08-browser-extension-spike.md`](..
 ```bash
 cd extension
 npm install
-npm run build        # → dist/ (esbuild bundles TS; @noble bundled in — 0 wasm, 0 eval)
+npm run build        # → dist/ dev build (readable, sourcemaps; esbuild — 0 wasm, 0 eval)
 npm run typecheck    # tsc --noEmit
+npm run package      # → artifacts/andvari-extension-{chrome,firefox}-<ver>.zip (minified release)
 ```
+
+## Distribute (household — no store listing)
+
+`npm run package`, then publish both zips to CT 122 `/opt/andvari/downloads/` and **merge** a
+`browserExtension` entry into `manifest.json` there (merge — never overwrite; the windows/linux
+desktop entries live in the same file, see `ops/windows-build.md`):
+
+```json
+"browserExtension": {
+  "version": "0.6.0",
+  "chromeUrl": "/downloads/andvari-extension-chrome-0.6.0.zip",
+  "firefoxUrl": "/downloads/andvari-extension-firefox-0.6.0.zip"
+}
+```
+
+The web app's **Settings → Devices** hub reads that entry and shows the download row (private
+origin only). Each zip carries a tester-facing `INSTALL.txt`; Firefox loads are session-temporary
+(`about:debugging`) until we sign an .xpi.
 
 ## Load + verify (on a real Chromium — I can't here)
 

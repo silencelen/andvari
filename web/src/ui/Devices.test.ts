@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { isExportOriginAllowed } from "../export/plan";
-import { coerceManifest, DevicesCard, windowsRowState } from "./Devices";
+import { coerceManifest, DevicesCard, extensionRowState, platformRowState, windowsRowState } from "./Devices";
 import { isPrivateOrigin } from "./origin";
 
 describe("coerceManifest (fetch-parse → state, review finding web-correctness-2)", () => {
@@ -54,6 +54,57 @@ describe("windowsRowState (downloads manifest → Windows row)", () => {
       kind: "available",
       version: "0.5.0",
       url: "/downloads/andvari-0.5.0.msi",
+    });
+  });
+
+  it("the linux column reads the same manifest independently", () => {
+    const m = { linux: { version: "0.6.0", url: "/downloads/andvari-desktop-0.6.0.deb" } };
+    expect(platformRowState(m, "linux")).toEqual({
+      kind: "available",
+      version: "0.6.0",
+      url: "/downloads/andvari-desktop-0.6.0.deb",
+    });
+    expect(platformRowState(m, "windows")).toEqual({ kind: "unpublished" });
+    expect(platformRowState(null, "linux")).toEqual({ kind: "loading" });
+    expect(platformRowState("error", "linux")).toEqual({ kind: "unpublished" });
+  });
+});
+
+describe("extensionRowState (downloads manifest → browser-extension row)", () => {
+  it("null = still fetching; error/absent/null entry = unpublished", () => {
+    expect(extensionRowState(null)).toEqual({ kind: "loading" });
+    expect(extensionRowState("error")).toEqual({ kind: "unpublished" });
+    expect(extensionRowState({})).toEqual({ kind: "unpublished" });
+    expect(extensionRowState({ browserExtension: null })).toEqual({ kind: "unpublished" });
+  });
+
+  it("needs a version AND at least one browser url — never a dead row", () => {
+    expect(extensionRowState({ browserExtension: { version: "0.6.0" } })).toEqual({ kind: "unpublished" });
+    expect(extensionRowState({ browserExtension: { chromeUrl: "/downloads/x.zip" } })).toEqual({
+      kind: "unpublished",
+    });
+    expect(extensionRowState({ browserExtension: { version: "", chromeUrl: "/downloads/x.zip" } })).toEqual({
+      kind: "unpublished",
+    });
+  });
+
+  it("either browser alone or both together = available with only the real links", () => {
+    expect(
+      extensionRowState({ browserExtension: { version: "0.6.0", chromeUrl: "/downloads/andvari-extension-chrome-0.6.0.zip" } }),
+    ).toEqual({ kind: "available", version: "0.6.0", chromeUrl: "/downloads/andvari-extension-chrome-0.6.0.zip", firefoxUrl: undefined });
+    expect(
+      extensionRowState({
+        browserExtension: {
+          version: "0.6.0",
+          chromeUrl: "/downloads/andvari-extension-chrome-0.6.0.zip",
+          firefoxUrl: "/downloads/andvari-extension-firefox-0.6.0.zip",
+        },
+      }),
+    ).toEqual({
+      kind: "available",
+      version: "0.6.0",
+      chromeUrl: "/downloads/andvari-extension-chrome-0.6.0.zip",
+      firefoxUrl: "/downloads/andvari-extension-firefox-0.6.0.zip",
     });
   });
 });
