@@ -372,11 +372,12 @@ private fun Row(item: VaultItem, onClick: () -> Unit) {
  */
 @Composable
 private fun TrashScreen(state: DesktopState) {
+    var confirmPurgeId by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = { state.closeTrash() }) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
         Text("Recently deleted", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "Deleted items you can still restore. Restoring brings an item back to its vault on every device.",
+            "Deleted items are kept for 30 days, then removed automatically. Restore brings one back to its vault on every device; \"Delete forever\" removes it now.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -404,9 +405,21 @@ private fun TrashScreen(state: DesktopState) {
                     if (docToRestore != null) {
                         TextButton(enabled = !state.busy, onClick = { state.restoreDeleted(d.itemId, d.vaultId, docToRestore) }) { Text("Restore") }
                     }
+                    TextButton(enabled = !state.busy, onClick = { confirmPurgeId = d.itemId }) {
+                        Text("Delete forever", color = MaterialTheme.colorScheme.error)
+                    }
                 }
             }
         }
+    }
+    confirmPurgeId?.let { id ->
+        AlertDialog(
+            onDismissRequest = { confirmPurgeId = null },
+            title = { Text("Delete forever?") },
+            text = { Text("This permanently removes the item and its history from every device. It can't be undone.") },
+            confirmButton = { TextButton(onClick = { state.purgeDeleted(id); confirmPurgeId = null }) { Text("Delete forever", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { confirmPurgeId = null }) { Text("Keep") } },
+        )
     }
 }
 

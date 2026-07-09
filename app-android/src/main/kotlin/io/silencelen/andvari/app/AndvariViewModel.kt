@@ -362,6 +362,12 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         _ui.value = _ui.value.copy(deletedItems = engine!!.deletedItems(), items = engine!!.items(), busy = false, notice = "Item restored.")
     }
 
+    /** Item undelete (F49): "Delete forever" a tombstoned item, then refresh the trash list. */
+    fun purgeDeleted(itemId: String) = op {
+        engine!!.purgeDeleted(itemId)
+        _ui.value = _ui.value.copy(deletedItems = engine!!.deletedItems(), busy = false, notice = "Item deleted for good.")
+    }
+
     fun closeTrash() { _ui.value = _ui.value.copy(screen = Screen.Vault, deletedItems = null) }
 
     fun signIn(email: String, password: String, totp: String? = null) = op {
