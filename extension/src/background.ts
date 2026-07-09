@@ -1,5 +1,5 @@
 import { AndvariApi } from "./api";
-import { adItem, adUvk, adVk, authKey, deriveMasterKey, fromB64, open, seal, toB64, wrapKey, type KdfParams } from "./crypto";
+import { adIdkey, adItem, adUvk, adVk, authKey, boxKeypairFromSeed, deriveMasterKey, fromB64, open, seal, sealOpen, toB64, wrapKey, type KdfParams } from "./crypto";
 
 /**
  * MV3 background service worker — the ONLY holder of unlocked vault material, in memory only (never
@@ -63,7 +63,7 @@ async function handle(msg: Msg): Promise<unknown> {
       return { ok: true, unlocked: session !== null, count: session?.items.length ?? 0 };
     case "lock": {
       session = null;
-      api.setToken(null);
+      api.setTokens(null, null);
       return { ok: true };
     }
     case "unlock":
@@ -115,16 +115,30 @@ async function unlock(email: string, password: string): Promise<unknown> {
   const pre = await api.prelogin(email);
   const mk = await deriveMasterKeyAsync(password, pre.kdfParams, fromB64(pre.kdfSalt));
   const s = await api.login(email, toB64(authKey(mk)));
-  api.setToken(s.accessToken);
+  api.setTokens(s.accessToken, s.refreshToken);
 
   const uvk = open(wrapKey(mk), fromB64(s.accountKeys.wrappedUvk), adUvk(s.userId));
+  // Identity keypair — for member (shared-vault) grants sealed to us.
+  const identity = boxKeypairFromSeed(open(uvk, fromB64(s.accountKeys.encryptedIdentitySeed), adIdkey(s.userId)));
   const sync = await api.sync(0);
 
   const vaultKeys = new Map<string, Uint8Array>();
   for (const g of sync.grants) {
-    if (!g.wrappedVk) continue; // member grants use sealedVk — TODO(extension): crypto_box_seal_open
     try {
-      vaultKeys.set(g.vaultId, open(uvk, fromB64(g.wrappedVk), adVk(g.vaultId, s.userId)));
+      let vk: Uint8Array;
+      if (g.sealedVk) {
+        // Member grant: crypto_box_seal to our identity key; payload {v,vaultId,vk} bound to the row.
+        const p = JSON.parse(
+          new TextDecoder().decode(sealOpen(identity.publicKey, identity.privateKey, fromB64(g.sealedVk))),
+        ) as { v: number; vaultId: string; vk: string };
+        if (p.v !== 1 || p.vaultId !== g.vaultId) continue; // reject a reseated/forged grant
+        vk = fromB64(p.vk);
+      } else if (g.wrappedVk) {
+        vk = open(uvk, fromB64(g.wrappedVk), adVk(g.vaultId, s.userId)); // owner / personal
+      } else {
+        continue;
+      }
+      vaultKeys.set(g.vaultId, vk);
     } catch {
       /* wrong key / not ours — skip */
     }

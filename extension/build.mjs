@@ -23,6 +23,8 @@ await esbuild.build({
   sourcemap: true,
 });
 
-cpSync("manifest.json", "dist/manifest.json");
+// TARGET=firefox → the Firefox manifest (background.scripts event page); default = Chrome (SW).
+const firefox = process.env.TARGET === "firefox";
+cpSync(firefox ? "manifest.firefox.json" : "manifest.json", "dist/manifest.json");
 cpSync("popup.html", "dist/popup.html");
-console.log("built → dist/ (Load unpacked: extension/dist)");
+console.log(`built → dist/ (${firefox ? "Firefox" : "Chrome"}; Load unpacked: extension/dist)`);

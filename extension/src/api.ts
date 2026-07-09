@@ -68,13 +68,15 @@ export class AndvariApi {
   constructor(
     private baseUrl: string,
     private accessToken: string | null = null,
+    private refreshToken: string | null = null,
   ) {}
 
-  setToken(token: string | null): void {
-    this.accessToken = token;
+  setTokens(access: string | null, refresh: string | null): void {
+    this.accessToken = access;
+    this.refreshToken = refresh;
   }
 
-  private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async json<T>(method: string, path: string, body?: unknown, retrying = false): Promise<T> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.accessToken) headers["authorization"] = `Bearer ${this.accessToken}`;
     const resp = await fetch(this.baseUrl + path, {
@@ -82,8 +84,34 @@ export class AndvariApi {
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
+    // On an expired access token, rotate once and retry (SW is single-threaded, so no cross-tab race).
+    if (resp.status === 401 && !retrying && (await this.tryRefresh())) {
+      return this.json<T>(method, path, body, true);
+    }
     if (!resp.ok) throw new ApiError(resp.status, await resp.text().catch(() => ""));
     return (await resp.json()) as T;
+  }
+
+  /** Rotate the token pair (single-use refresh — consume it before the request so a reuse can't
+   *  leak; reuse would revoke the whole device). Returns whether a fresh access token is now held. */
+  private async tryRefresh(): Promise<boolean> {
+    const rt = this.refreshToken;
+    if (!rt) return false;
+    this.refreshToken = null;
+    try {
+      const resp = await fetch(this.baseUrl + "/api/v1/auth/refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ refreshToken: rt }),
+      });
+      if (!resp.ok) return false;
+      const s = (await resp.json()) as { accessToken: string; refreshToken: string };
+      this.accessToken = s.accessToken;
+      this.refreshToken = s.refreshToken;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Unauthenticated liveness/CSP/host_permissions smoke check (spike verification step 3). */
