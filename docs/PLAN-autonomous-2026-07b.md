@@ -28,15 +28,26 @@ owner: park under "Parked for owner", continue with the documented default, neve
       serving this tree at 0.10.0 (`index.DURsfIDT.js` — no redundant redeploy). The
       spec 02 §3.1 conformance window is CLOSED once the owner installs the new APK/deb.
       Owner steps (not gating): install APK + deb when convenient; Windows MSI still open.
-- [ ] **S2. Import destination vault picker** (owner dev-note 2026-07-10) — the guided
-      importers commit to Personal only. Add a writable-vault picker (F18 choice rule:
-      personal + owner/writer shared; shown when >1 choice) to the import CONFIRM step on
-      web + Android + desktop; core commit path (`importAll`) takes the vaultId
-      (per-import, v1). **F75 dedupe scoping must follow the chosen vault** — the
-      fingerprint pass currently assumes the personal scope; re-derive against the
-      destination (this is the review's likely attack surface, name it in the tests).
-      Review + web deploy checkpoint; natives ride the next cut or an ad-hoc 0.10.x if S3
-      lands one anyway.
+- [x] **S2. Import destination vault picker** — **DONE 2026-07-10.** Contract pinned by the
+      lead (core importProjections/importAll + web store twins take vaultId, default
+      personal), then 2 workstreams wired the F18-rule picker into all three confirm steps
+      with the plan+vault pair assigned in ONE state write (never re-read the picker).
+      New tests: web store S2 pair (32 total) + server ImportSharedVaultTest (per-vault
+      projections, destination landing, idempotent replay). **Review 7 confirmed / 0
+      refuted, all fixed:** the HIGH — natives allowed a destination change in the Retry
+      state (a re-plan after a PARTIAL import mints new ids → the landed rows duplicate
+      into the new vault and the partial can never converge); web-parity locks added, plus
+      web's "Choose a different file" escape hatch closed in the error state. Also: import
+      state (the parsed CSV = every password in the file) now dies on lock/sign-out on both
+      natives (it survived before — plaintext in a "locked" heap + cross-account resurface),
+      a state-level busy guard on confirm (the Compose enabled flag lags a frame), a
+      non-locking pick error when a vault vanishes mid-sync (web), and honest "KEEP the
+      CSV" copy when the destination was grace-deleted mid-import (importAll parks the rows
+      and returns normally — success copy was a lie). ACCEPTED GAP (documented): no web
+      component-test infra exists (node env, no jsdom), so the ImportPanel's plan↔commit
+      pairing has no mutant tripwire — it rests on the paired-state structure; a
+      component-test harness is a future infra item. Web deploy checkpoint; natives ride
+      the next cut.
 - [ ] **S3. Extension in-page card fill** (owner dev-note: "support storing autofill
       creditcard and payment details" — the buildable half) — design pass FIRST
       (frame-origin egress contract per the cards design's deferral: card data may only

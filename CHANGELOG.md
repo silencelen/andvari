@@ -1,5 +1,19 @@
 # andvari — changelog
 
+## Unreleased
+
+### choose where imports land (S2)
+
+- **Imports can now target any vault you can write to.** The import confirm step gains a
+  destination picker (shown only when you actually have a choice; readers' vaults are never
+  offered). Changing the destination re-checks the file against *that* vault, so the
+  "already in your vault" dedupe is honest per destination, and the final summary names the
+  vault the rows landed in. Once an import attempt starts — including a failed partial one —
+  the destination and file are locked so Retry stays an exact, duplicate-free replay. The
+  parsed file (which holds every password in it) is now wiped on lock and sign-out, and an
+  import whose destination vault was deleted mid-flight tells you to KEEP the CSV instead of
+  falsely reporting success.
+
 ## 0.10.0 — smarter matching + vault choice + save integrity (2026-07-10, cross-platform release)
 
 Everything below ships together to phone and desktop with this cut; the web app and browser

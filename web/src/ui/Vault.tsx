@@ -19,7 +19,7 @@ import {
   type VaultItem,
   type VaultStore,
 } from "../vault/store";
-import { ImportError, type ImportFormat, type ImportPlan, type ImportReport, type ParsedRow, parseCsvImport, planImport, rowOrdinalsByLine } from "../import/csv";
+import { ImportError, type ImportFormat, type ImportPlan, type ImportReport, type Parsed, type ParsedRow, parseCsvImport, planImport, rowOrdinalsByLine } from "../import/csv";
 import { isExportOriginAllowed } from "../export/plan";
 import { Admin } from "./Admin";
 import { ExportPanel, type ExportMode } from "./ExportPanel";
@@ -1826,18 +1826,23 @@ function ReportTiles({ report, done }: { report: ImportReport; done: boolean }) 
  * never leaves the browser. The plan's itemIds are minted once, so a mid-import failure is
  * fixed with Retry (idempotent replay of the SAME plan — each itemId doubles as the push
  * mutationId) rather than re-parsing; re-parsing mints new ids and would duplicate.
- * The plan compares against the personal vault (store.importProjections, A8): items already
- * there are skipped — including rows a previous import renamed to "name (k)" (rule 1 also
+ * The plan compares against the DESTINATION vault (store.importProjections(vaultId), A8/S2 —
+ * default personal, switchable to any writable shared vault): items already there are
+ * skipped — including rows a previous import renamed to "name (k)" (rule 1 also
  * matches through the stripped base name). One exception keeps this short of a blanket
  * "re-import is safe": a row whose totp value doesn't parse is unmatchable by design (A7,
  * fp = null) and re-imports as a renamed copy — the preview shows it before anything lands.
+ * S2 invariant: `planned` pairs each plan with the vault whose projections produced it, and
+ * the commit reads THAT vault — never the picker — so plan and importDocs cannot disagree.
  */
 function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: () => void; onDone: () => void }) {
   const fileInput = useRef<HTMLInputElement | null>(null);
   const [source, setSource] = useState<ImportSource | null>(null);
   const [fileName, setFileName] = useState("");
   const [format, setFormat] = useState<ImportFormat | null>(null);
-  const [plan, setPlan] = useState<ImportPlan | null>(null);
+  const [planned, setPlanned] = useState<{ plan: ImportPlan; vault: VaultInfo } | null>(null);
+  /** The parse, retained so a destination change can re-plan without re-reading the file. */
+  const [parsed, setParsed] = useState<Parsed | null>(null);
   /** physical line → 1-based data-row ordinal, so errors render "row N (file line M)" (A9). */
   const [rowNoByLine, setRowNoByLine] = useState<Map<number, number>>(new Map());
   const [mangled, setMangled] = useState(false);
@@ -1845,10 +1850,20 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [importErr, setImportErr] = useState("");
+  /** S2: a non-locking notice for a failed destination PICK (vault vanished mid-sync) —
+   *  deliberately not importErr, which would flip importLocked and freeze the very picker
+   *  the user needs to choose again with. */
+  const [pickErr, setPickErr] = useState("");
   const [finished, setFinished] = useState(false);
 
+  // F18 idiom (mirrors newItemVaultChoices): personal + shared vaults we can WRITE to —
+  // readers never appear. Computed per render, not memoized: the first sync can finish
+  // while this panel is open and newly-held vaults must surface without a remount.
+  const vaultChoices = store.vaults().filter((v) => v.type === "personal" || v.role === "owner" || v.role === "writer");
+
   const reset = () => {
-    setPlan(null);
+    setPlanned(null);
+    setParsed(null);
     setFormat(null);
     setRowNoByLine(new Map());
     setMangled(false);
@@ -1872,20 +1887,24 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
     try {
       // A8: the plan needs the vault's projections — REFUSE honestly when this device has
       // never completed a sync, rather than silently planning against an empty vault
-      // (which would quietly re-import everything as new).
-      if (store.lastSyncAt === null) {
+      // (which would quietly re-import everything as new). The personal-vault lookup shares
+      // the gate: post-sync it always exists, pre-sync store.vaults() may be empty.
+      const personal = vaultChoices.find((v) => v.type === "personal");
+      if (store.lastSyncAt === null || !personal) {
         setParseErr(
           "Your vault hasn't finished its first sync on this device, so the import can't check what you already have. Wait for the sync (or press Sync now in the top bar), then pick the file again.",
         );
         return;
       }
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const parsed = parseCsvImport(bytes);
-      setFormat(parsed.format);
+      const p = parseCsvImport(bytes);
+      setFormat(p.format);
+      setParsed(p);
       setRowNoByLine(rowOrdinalsByLine(bytes));
-      setMangled(looksHtmlMangled(parsed.rows)); // A10 — hint only, never auto-decode
-      // ids minted ONCE here, reused verbatim on Retry.
-      setPlan(planImport(parsed, store.importProjections(), () => crypto.randomUUID()));
+      setMangled(looksHtmlMangled(p.rows)); // A10 — hint only, never auto-decode
+      // ids minted ONCE here, reused verbatim on Retry. Every fresh parse plans against
+      // the DEFAULT destination — personal (S2 picker contract).
+      setPlanned({ plan: planImport(p, store.importProjections(personal.vaultId), () => crypto.randomUUID()), vault: personal });
     } catch (e) {
       setParseErr(friendlyParseError(e, source));
     } finally {
@@ -1893,15 +1912,38 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
     }
   };
 
+  // Locked once an import attempt starts: re-planning after a partial import would mint new
+  // ids (breaking Retry's idempotent replay) and strand already-landed rows in the old vault.
+  const importLocked = busy || finished || importErr !== "";
+
+  const changeDestination = (vaultId: string) => {
+    const vault = vaultChoices.find((v) => v.vaultId === vaultId);
+    if (!vault || !parsed || importLocked) return;
+    // A sync-time removal can race the click (the option came from a render-closure
+    // snapshot) — never re-plan against a vault we no longer hold: its projections read
+    // empty and every row plans as "to import" (native importSetVault parity).
+    if (!store.vaults().some((v) => v.vaultId === vault.vaultId)) {
+      setPickErr("That vault isn't available any more — it may have been removed. Pick another destination.");
+      return;
+    }
+    setPickErr("");
+    // A plan is only valid against the vault whose projections it compared (the F75 dedupe
+    // verdicts differ per vault) — so re-plan from the retained parse. planImport is
+    // synchronous and plan+vault land in ONE state commit, so Confirm can never fire against
+    // a stale pairing; fresh ids are safe here — nothing has been pushed yet (importLocked).
+    setPlanned({ plan: planImport(parsed, store.importProjections(vault.vaultId), () => crypto.randomUUID()), vault });
+  };
+
   const runImport = async () => {
-    if (!plan) return;
+    if (!planned) return;
     setBusy(true);
     setImportErr("");
-    setProgress({ done: 0, total: plan.items.length });
+    setProgress({ done: 0, total: planned.plan.items.length });
     try {
       // Reuse plan.items on every attempt: each carries its own itemId, used as the push
       // mutationId → the server dedupes an already-applied put, so Retry never duplicates.
-      await store.importDocs(plan.items, (done, total) => setProgress({ done, total }));
+      // Destination = the vault CAPTURED with the plan (S2 invariant), never the picker.
+      await store.importDocs(planned.plan.items, (done, total) => setProgress({ done, total }), planned.vault.vaultId);
       setFinished(true);
     } catch {
       setImportErr(
@@ -1912,8 +1954,11 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
     }
   };
 
-  const report = plan?.report ?? null;
-  const nothingToImport = plan !== null && plan.items.length === 0;
+  const report = planned?.plan.report ?? null;
+  const nothingToImport = planned !== null && planned.plan.items.length === 0;
+  // Destination shown in the plan summary + final report — "your personal vault" keeps the
+  // pre-S2 copy for the default; a shared vault is named so the reader knows who sees it.
+  const destLabel = planned ? (planned.vault.type === "personal" ? "your personal vault" : `“${planned.vault.name}” (shared)`) : "";
 
   return (
     <div className="sheet">
@@ -1942,18 +1987,34 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
           <ReportTiles report={report} done />
           <ReportBuckets report={report} />
           <div className="msg info" style={{ display: "block" }}>
-            Added {report.imported} {report.imported === 1 ? "item" : "items"} to your personal vault.
+            Added {report.imported} {report.imported === 1 ? "item" : "items"} to {destLabel}.
             Now delete <strong>{fileName || "the CSV file"}</strong> and empty your trash.
           </div>
           <div className="actions">
             <button type="button" className="primary" onClick={onDone}>Done</button>
           </div>
         </>
-      ) : plan && report ? (
+      ) : planned && report ? (
         <>
           <div className="muted" style={{ marginBottom: 12 }}>
-            {fileName && <>“{fileName}” · </>}detected {format ? FORMAT_LABEL[format] : "password"} export
+            {fileName && <>“{fileName}” · </>}detected {format ? FORMAT_LABEL[format] : "password"} export · into {destLabel}
           </div>
+
+          {pickErr && <div className="muted" style={{ marginBottom: 8 }}>{pickErr}</div>}
+          {/* S2: destination picker (F18 idiom — rendered only when there is a real choice).
+              Changing it re-plans against that vault's projections (changeDestination). */}
+          {vaultChoices.length > 1 && (
+            <div className="field">
+              <label>Import into</label>
+              <select value={planned.vault.vaultId} disabled={importLocked} onChange={(e) => changeDestination(e.target.value)}>
+                {vaultChoices.map((v) => (
+                  <option key={v.vaultId} value={v.vaultId}>
+                    {v.name}{v.type === "personal" ? "" : " (shared)"}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Detection is authoritative; a pick/detect mismatch is information, not an error. */}
           {source && format && source.expects.length > 0 && !source.expects.includes(format) && (
@@ -2016,7 +2077,11 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
               </button>
             )}
             <div className="spacer" />
-            <button type="button" className="ghost" disabled={busy} onClick={() => { reset(); setFileName(""); }}>Choose a different file</button>
+            {/* Locked in the PARTIAL state (importErr): reset() would wipe the plan's idempotent
+                ids and a re-pick re-plans against personal by default — the exact cross-vault
+                duplicate path importLocked exists to close. After a CLEAN finish it's fine
+                (rows landed + synced; the next plan dedupes them). */}
+            <button type="button" className="ghost" disabled={busy || importErr !== ""} onClick={() => { reset(); setFileName(""); }}>Choose a different file</button>
           </div>
         </>
       ) : source ? (

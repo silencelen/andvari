@@ -486,6 +486,17 @@ private fun ImportDialogs(state: DesktopState) {
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary,
                             )
                         }
+                        // S2: destination picker — the F18 choice rule (personal + owner/writer
+                        // shared, never reader) via newItemVaultChoices, shown only when there's
+                        // >1 choice. Selecting RE-PLANS against that vault: every count/bucket
+                        // below re-derives, so the picker AND Confirm are importBusy-disabled
+                        // until the fresh plan lands. Read once per preview open (each choice
+                        // decrypts vault metadata; the list must not shift under the dialog).
+                        val vaultChoices = remember { state.newItemVaultChoices() }
+                        if (vaultChoices.size > 1) {
+                            Spacer(Modifier.height(8.dp))
+                            VaultPicker("Import into", vaultChoices, state.importVaultId, enabled = !state.importBusy) { state.importSetVault(it) }
+                        }
                         Spacer(Modifier.height(8.dp))
                         Text("From ${fmt?.let { formatLabel(it) } ?: "password"} export:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("• ${report.imported} to import", style = MaterialTheme.typography.bodySmall)
@@ -516,13 +527,18 @@ private fun ImportDialogs(state: DesktopState) {
     if (state.importDone) {
         val report = state.importReport
         val notes = report?.noteItems?.size ?: 0
+        // S2: the summary names the DESTINATION vault — "your vault" hid which vault the
+        // rows landed in. Resolved once (decrypts metadata); fallback keeps the old copy.
+        val destName = remember(state.importVaultId) {
+            state.newItemVaultChoices().find { it.vaultId == state.importVaultId }?.let { vaultChoiceLabel(it) }
+        }
         AlertDialog(
             onDismissRequest = { state.importDismiss() },
             confirmButton = { TextButton(onClick = { state.importDismiss() }) { Text("Done") } },
             title = { Text("Imported") },
             text = {
                 Text(
-                    "Added ${report?.imported ?: 0} item(s) to your vault" +
+                    "Added ${report?.imported ?: 0} item(s) to ${destName ?: "your vault"}" +
                         (if (notes > 0) " ($notes as secure notes)" else "") +
                         ". Now delete the CSV file and empty your trash.",
                 )

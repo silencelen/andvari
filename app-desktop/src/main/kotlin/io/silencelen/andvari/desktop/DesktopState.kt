@@ -203,6 +203,16 @@ class DesktopState(private val scope: CoroutineScope) {
         private set
     var importDone by mutableStateOf(false)
         private set
+    // S2: the import's DESTINATION vault. Always assigned WITH importPlan (importFromFile /
+    // importSetVault) and read with it in importConfirm — the F75 dedupe fingerprints the
+    // plan against this vault, so plan and commit must never name different ones. Survives
+    // importDone so the summary can name the vault; cleared on dismiss.
+    var importVaultId by mutableStateOf<String?>(null)
+        private set
+    // S2: the parsed file, retained ONLY while the preview is open — importSetVault re-plans
+    // from it against another vault's projections. Plaintext (like importPlan.items, which
+    // outlives it anyway); dropped in importDismiss.
+    private var importParsed: CsvImport.Parsed? = null
     // Export & backup (spec 07) — preflight dialogs + post-backup summary.
     var backupPreflight by mutableStateOf<BackupPreflight?>(null)
         private set
@@ -568,9 +578,14 @@ class DesktopState(private val scope: CoroutineScope) {
             importFormat = parsed.format
             importMangled = looksHtmlMangled(parsed)
             importRowOrdinals = CsvImport.rowOrdinalsByLine(bytes) // A9, same reader as parse
-            // Vault-aware plan (F75): `existing` = the personal vault's light projections,
+            // Vault-aware plan (F75): `existing` = the DESTINATION vault's light projections,
             // built by the core-owned builder — never raw item lists mapped here (A8).
-            importPlan = CsvImport.plan(parsed, eng.importProjections()) { acct.newItemId() }
+            // S2: default destination = personal; ONE variable feeds the projections here and
+            // (as importVaultId) the eventual importAll. The picker re-plans via importSetVault.
+            val dest = acct.personalVaultId
+            importParsed = parsed
+            importVaultId = dest
+            importPlan = CsvImport.plan(parsed, eng.importProjections(dest)) { acct.newItemId() }
         } catch (e: CsvImport.ImportException) {
             importError = friendlyImport(e.code, source)
         } catch (t: Throwable) {
@@ -582,12 +597,64 @@ class DesktopState(private val scope: CoroutineScope) {
      * Encrypt-and-push the planned items. Reuses plan.items on every call so a mid-import
      * failure is fixed with Retry (idempotent replay of the same itemIds), NOT a re-parse.
      */
+    /**
+     * S2: switch the import's destination vault — RE-PLANS the parsed file against that
+     * vault's projections (the F75 dedupe is per-vault; a plan fingerprinted against one
+     * vault must never commit into another). Plan and importVaultId are assigned together
+     * after the off-thread plan, and importConfirm reads them together — the invariant is
+     * structural. importBusy covers the re-plan: Confirm disables and re-entry no-ops.
+     */
+    fun importSetVault(vaultId: String) {
+        val acct = account ?: return
+        val eng = engine ?: return
+        val parsed = importParsed ?: return
+        // Web importLocked parity: after an import ATTEMPT (error = partial, done = landed)
+        // a re-plan would mint new ids — breaking Retry's idempotent replay and duplicating
+        // the already-landed rows into the new destination. Only Retry or Dismiss remain.
+        if (importBusy || importError != null || importDone || vaultId == importVaultId) return
+        // Refuse-not-degrade (A8), now gating the CHOSEN vault: the picker only offers held
+        // vaults, but a sync-time removal can race the click — never re-plan against a vault
+        // we no longer hold (it would plan as if the vault were empty).
+        if (eng.vaultInfos().none { it.vaultId == vaultId }) {
+            importPlan = null
+            importError = "That vault isn’t available any more — sync and try the import again."
+            return
+        }
+        importBusy = true; importError = null
+        scope.launch {
+            try {
+                val plan = withContext(Dispatchers.Default) {
+                    CsvImport.plan(parsed, eng.importProjections(vaultId)) { acct.newItemId() }
+                }
+                importPlan = plan
+                importVaultId = vaultId
+                importProgress = null
+            } catch (t: Throwable) {
+                importError = t.message ?: "could not re-check that file" // plan/vault unchanged — still a matched pair
+            } finally {
+                importBusy = false
+            }
+        }
+    }
+
     fun importConfirm() {
+        if (importBusy) return // state-level: the button's enabled flag lags a frame behind a re-plan
+        // S2: plan + destination read together — they were assigned together (importFromFile /
+        // importSetVault), which is what keeps the F75 invariant (never re-read the picker).
         val plan = importPlan ?: return
+        val dest = importVaultId
         importBusy = true; importError = null; importProgress = 0 to plan.items.size
         scope.launch {
             try {
-                engine!!.importAll(plan.items) { done, total -> importProgress = done to total }
+                engine!!.importAll(plan.items, onProgress = { done, total -> importProgress = done to total }, vaultId = dest)
+                // The destination can be deleted INTO GRACE mid-import: denials park (F21) and
+                // importAll returns normally — success copy telling the user to delete the CSV
+                // would then be a lie. A held/gone destination is not a success.
+                if (dest != null && engine?.vaultInfos()?.none { it.vaultId == dest } == true) {
+                    importBusy = false
+                    importError = "The destination vault was removed while importing — the rows are parked and will land only if it is restored. KEEP the CSV file."
+                    return@launch
+                }
                 importReport = plan.report
                 importDone = true
                 importBusy = false
@@ -602,7 +669,7 @@ class DesktopState(private val scope: CoroutineScope) {
     fun importDismiss() {
         importPlan = null; importFormat = null; importReport = null; importSource = null
         importError = null; importProgress = null; importBusy = false; importDone = false
-        importMangled = false
+        importMangled = false; importVaultId = null; importParsed = null
     }
 
     private fun friendlyImport(code: String, source: ImportSource?): String = when (code) {
@@ -1070,6 +1137,7 @@ class DesktopState(private val scope: CoroutineScope) {
     }
 
     private fun clearSecondary() {
+        importDismiss() // the parsed CSV + plan hold every password in the file — never outlive the session
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
         backupPreflight = null; backupResult = null; csvPreflight = null
         // F19: drop any in-flight move state + memoized gesture ids/fileKeys on lock/sign-out.
