@@ -383,7 +383,7 @@ data class AdminUserSummary(
 )
 
 @Serializable
-data class InviteRequest(val email: String, val isAdmin: Boolean = false)
+data class InviteRequest(val email: String, val isAdmin: Boolean = false, val ttlMinutes: Int? = null)
 
 @Serializable
 data class InviteResponse(val inviteToken: String, val email: String, val expiresAt: Long)

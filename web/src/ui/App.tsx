@@ -5,6 +5,7 @@ import { initSodium } from "../crypto/sodium";
 import { Account } from "../vault/account";
 import { VaultStore } from "../vault/store";
 import { Welcome, type LoginMeta } from "./Welcome";
+import { peekPendingEnroll } from "../enroll/enrolllink";
 import { BrandSigil } from "./Sigil";
 import { Vault } from "./Vault";
 import { inactivityNotice } from "./format";
@@ -59,7 +60,16 @@ export function App() {
       const client = makeClient(session, baseUrl);
       clientRef.current = client;
       await loadPolicy();
-      setPhase(session?.tokens ? { kind: "unlock", session } : { kind: "welcome" });
+      // One-scan onboarding: a captured enroll link is consumed on the signed-OUT Welcome
+      // (FreshStart prefills the Enroll tab). If a session already exists we boot to Unlock —
+      // surface a notice instead of silently swallowing the scanned link (never repoint the
+      // session's server from a link).
+      const pendingEnroll = peekPendingEnroll();
+      setPhase(
+        session?.tokens
+          ? { kind: "unlock", session, notice: pendingEnroll ? "You're signed in on this browser. To set up a NEW account from that invite link, sign out first." : undefined }
+          : { kind: "welcome" },
+      );
     })();
   }, [baseUrl, loadPolicy]);
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type {
   AdminDeviceSummary,
@@ -8,8 +8,12 @@ import type {
   ClientPolicy,
   InviteResponse,
 } from "../api/types";
+import { composeEnrollLink } from "../enroll/enrolllink";
 import { fmtDate, humanSize } from "./format";
+import { isPrivateOrigin } from "./origin";
+import { QrSvg } from "./QrSvg";
 import { ViewHeader } from "./ViewHeader";
+import { qrModules } from "../vendor/qrcode-generator";
 
 type Tab = "users" | "audit" | "policy" | "status";
 
@@ -252,21 +256,53 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
   );
 }
 
+/** QR-minted invites get a short TTL — a photographed QR cannot be revoked (no invite
+ *  list/revoke surface exists), so expiry is the only containment. 60 min fits a real
+ *  install-app + join-network + scan + set-password + type-sheet flow. */
+const QR_INVITE_TTL_MINUTES = 60;
+
+/** v1 containment (design §Server work 2): the QR path is offered only on a private origin.
+ *  The link embeds that origin, and public register is server-refused anyway — a public QR
+ *  would sail through the ceremony and die at the last step. Pure, so a refactor that drops
+ *  or inverts this gate trips a unit test rather than silently exposing it. */
+export function shouldOfferQr(origin: string): boolean {
+  return isPrivateOrigin(origin);
+}
+
+/** The vendored QR encoder THROWS a bare string on capacity overflow — never let a long
+ *  origin+email white-screen Admin; the caller falls back to the copyable link. Pure. */
+export function tryQrModules(link: string): boolean[][] | null {
+  try {
+    return qrModules(link, "M");
+  } catch {
+    return null;
+  }
+}
+
 function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () => void }) {
   const [email, setEmail] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
   const [result, setResult] = useState<InviteResponse | null>(null);
+  const [resultLink, setResultLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // The enroll link embeds location.origin verbatim. On the public break-glass origin that
+  // link would sail through the whole ceremony and then die at register (public-register is
+  // server-refused) — so the QR path simply doesn't exist there. The plain token stays: a
+  // token minted anywhere is redeemed wherever the member actually enrolls.
+  const qrAvailable = shouldOfferQr(window.location.origin);
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const mint = async (withQr: boolean) => {
     setBusy(true);
     setErr("");
     setResult(null);
+    setResultLink(null);
     try {
-      setResult(await client.adminInvite(email.trim(), isAdmin));
+      const r = await client.adminInvite(email.trim(), isAdmin, withQr ? QR_INVITE_TTL_MINUTES : undefined);
+      setResult(r);
+      setResultLink(withQr ? composeEnrollLink(window.location.origin, r.inviteToken, r.email) : null);
       setEmail("");
       setIsAdmin(false);
       onInvited();
@@ -277,11 +313,20 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
     }
   };
 
-  const copy = async (token: string) => {
-    await navigator.clipboard.writeText(token);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await mint(false);
   };
+
+  const copy = async (value: string, link: boolean) => {
+    await navigator.clipboard.writeText(value);
+    (link ? setCopiedLink : setCopied)(true);
+    window.setTimeout(() => (link ? setCopiedLink : setCopied)(false), 1200);
+  };
+
+  // The vendored encoder THROWS (a bare string) on capacity overflow — never let a long
+  // origin+email white-screen Admin; fall back to the copyable link.
+  const modules = useMemo(() => (resultLink ? tryQrModules(resultLink) : null), [resultLink]);
 
   return (
     <form className="sheet" style={{ marginBottom: 20 }} onSubmit={submit}>
@@ -297,6 +342,11 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
           <span>admin</span>
         </label>
         <button className="ghost" disabled={busy || !email.trim()}>{busy ? "Inviting…" : "Invite"}</button>
+        {qrAvailable && (
+          <button type="button" className="ghost" disabled={busy || !email.trim()} onClick={() => void mint(true)}>
+            {busy ? "Inviting…" : "Invite with QR"}
+          </button>
+        )}
       </div>
       {result && (
         <div className="token-box">
@@ -305,8 +355,24 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
           </div>
           <div className="secret-row">
             <input readOnly className="mono token" value={result.inviteToken} onFocus={(e) => e.target.select()} />
-            <button type="button" className="ghost" onClick={() => copy(result.inviteToken)}>{copied ? "Copied ✓" : "Copy"}</button>
+            <button type="button" className="ghost" onClick={() => void copy(result.inviteToken, false)}>{copied ? "Copied ✓" : "Copy"}</button>
           </div>
+          {resultLink && (
+            <div style={{ marginTop: 12 }}>
+              {modules ? (
+                <QrSvg modules={modules} ariaLabel={`Enrollment QR code for ${result.email}`} />
+              ) : (
+                <div className="msg info" style={{ display: "block" }}>QR too dense to render — use the link below instead.</div>
+              )}
+              <div className="secret-row" style={{ marginTop: 8 }}>
+                <input readOnly className="mono token" value={resultLink} onFocus={(e) => e.target.select()} />
+                <button type="button" className="ghost" onClick={() => void copy(resultLink, true)}>{copiedLink ? "Copied ✓" : "Copy link"}</button>
+              </div>
+              <div className="muted" style={{ marginTop: 8 }}>
+                Valid for about {QR_INVITE_TTL_MINUTES} minutes (expires {fmtDate(result.expiresAt)}). They scan this with their phone camera (or open the link) <strong>while on the same network as this page's address</strong> — for a phone that isn't on the tailnet yet, mint from the LAN address instead. Hand them the <strong>printed recovery sheet in person</strong>: enrollment asks them to type its first 16 characters, and that step is the real security check — the QR only saves typing.
+              </div>
+            </div>
+          )}
         </div>
       )}
     </form>

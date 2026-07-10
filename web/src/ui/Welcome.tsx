@@ -3,6 +3,7 @@ import { ApiClient, ApiError } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { fromB64 } from "../crypto/bytes";
 import { shortFormMatches } from "../crypto/escrow";
+import { clearPendingEnroll, enrollPrefillFor, peekPendingEnroll, type EnrollPayload } from "../enroll/enrolllink";
 import { Account, IdentityMismatchError, deviceName } from "../vault/account";
 import { VaultStore } from "../vault/store";
 import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
@@ -109,7 +110,40 @@ function Unlock({ client, session, notice, onReady, onForget }: { client: ApiCli
 
 /** No session: sign in to an existing account, or enroll with an invite. */
 function FreshStart({ client, policy, policyError, onRetryPolicy, notice, onReady }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; onRetryPolicy: () => Promise<void>; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
+  // One-scan onboarding: peek (never consume) the captured enroll link so a StrictMode
+  // double-invoked initializer reads the same value both times. The seed is read ONCE here.
+  const [pending] = useState<EnrollPayload | null>(() => peekPendingEnroll());
+  // Only a link minted for THIS exact origin applies (a mismatch → a notice + manual entry).
+  const validPrefill = enrollPrefillFor(pending, window.location.origin);
+  const [consented, setConsented] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
   const [tab, setTab] = useState<"signin" | "enroll">("signin");
+
+  // Consume-semantics rule 4 (normative): a captured link must NOT auto-advance into the
+  // prefilled form. Show an explicit origin-consent step first, so a silent drive-by
+  // navigation (a hostile page replaying a photographed QR link) can't stage an enrollment
+  // the member never saw and accepted.
+  if (validPrefill && !consented && !dismissed) {
+    return (
+      <div className="auth-shell">
+        <div className="card">
+          <div className="card-hero">
+            <div className="sigil"><BrandSigil /></div>
+            <h1 className="brand"><span className="a-mark">and</span>vari</h1>
+            <p>the keeper of the hoard</p>
+          </div>
+          <div className="msg info" style={{ display: "block" }}>
+            Set up a <strong>new andvari account</strong> at <strong>{window.location.origin}</strong>? You'll need the <strong>printed recovery sheet</strong> from the person who invited you.
+          </div>
+          <button type="button" className="primary" onClick={() => { setConsented(true); setTab("enroll"); }}>Continue</button>
+          <div style={{ textAlign: "center", marginTop: 12 }}>
+            <button type="button" className="link" onClick={() => { setDismissed(true); clearPendingEnroll(); }}>Not now</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="auth-shell">
       <div className="card">
@@ -120,11 +154,16 @@ function FreshStart({ client, policy, policyError, onRetryPolicy, notice, onRead
         </div>
         {/* F26: why a full sign-in is required ("This device's access was revoked."). */}
         {notice && <div className="msg info">{notice}</div>}
+        {pending && !validPrefill && (
+          <div className="msg err" style={{ display: "block" }}>
+            This invite link is for a different address ({pending.o}) — open the exact link you were given, or sign in / enroll by hand.
+          </div>
+        )}
         <div className="tabs">
           <button className={tab === "signin" ? "active" : ""} onClick={() => setTab("signin")}>Sign in</button>
           <button className={tab === "enroll" ? "active" : ""} onClick={() => setTab("enroll")}>Enroll</button>
         </div>
-        {tab === "signin" ? <SignIn client={client} onReady={onReady} /> : <Enroll client={client} policy={policy} policyError={policyError} onRetryPolicy={onRetryPolicy} onReady={onReady} />}
+        {tab === "signin" ? <SignIn client={client} onReady={onReady} /> : <Enroll client={client} policy={policy} policyError={policyError} onRetryPolicy={onRetryPolicy} onReady={onReady} prefill={consented ? validPrefill : null} />}
       </div>
     </div>
   );
@@ -222,9 +261,14 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
   );
 }
 
-function Enroll({ client, policy, policyError, onRetryPolicy, onReady }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
-  const [invite, setInvite] = useState("");
-  const [email, setEmail] = useState("");
+function Enroll({ client, policy, policyError, onRetryPolicy, onReady, prefill }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; prefill?: EnrollPayload | null }) {
+  // A prefill applies ONLY if the link was minted FOR this exact origin — the page IS served
+  // by payload.o, so a mismatch means a redirect or a hand-mangled link; fall through to
+  // manual entry rather than silently enrolling against the wrong server. The link carries no
+  // key material and no fingerprint (that stays the typed-sheet channel below).
+  const linkValid = !!prefill && prefill.o === window.location.origin;
+  const [invite, setInvite] = useState(linkValid ? prefill!.t : "");
+  const [email, setEmail] = useState(linkValid ? prefill!.e : "");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -272,6 +316,9 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady }: { clien
         installId: installId(), // F28: same stable id as sign-in
       });
       const s = await net(client.register(request));
+      // The invite is now consumed server-side — drop the captured link so a later sign-out
+      // remount does not resurface the spent token with this member's locked-in email.
+      clearPendingEnroll();
       client.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
       saveSession({
         baseUrl: client.baseUrl,
@@ -298,6 +345,11 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady }: { clien
   return (
     <form onSubmit={submit}>
       {err && <div className="msg err">{err}</div>}
+      {linkValid && (
+        <div className="msg info" style={{ display: "block" }}>
+          Setting up a <strong>new account</strong> at <strong>{window.location.origin}</strong>. Your admin should hand you the <strong>printed recovery sheet</strong> in person — you'll confirm its first 16 characters below.
+        </div>
+      )}
       <div className="field">
         <label>Invite token</label>
         <input className="mono" value={invite} onChange={(e) => setInvite(e.target.value)} placeholder="from your administrator" />
@@ -305,7 +357,8 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady }: { clien
       <div className="row">
         <div className="field" style={{ flex: 1 }}>
           <label>Email</label>
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+          <input type="email" value={email} readOnly={linkValid} onChange={(e) => setEmail(e.target.value)} />
+          {linkValid && <span className="muted">from your invite — wrong address? ask your admin for a new one</span>}
         </div>
         <div className="field" style={{ flex: 1 }}>
           <label>Name</label>
@@ -380,9 +433,12 @@ function groupHex(hex: string): string {
 function enrollError(code: string): string {
   switch (code) {
     case "invalid_invite": return "That invite token is not valid.";
-    case "invite_used": return "That invite has already been used.";
+    // Benign double-use dominates (a second family device scanning the same QR) — nudge to
+    // Sign in rather than alarming.
+    case "invite_used": return "That invite has already been used. Already set up this account? Switch to Sign in.";
     case "invite_expired": return "That invite has expired.";
     case "email_taken": return "An account with that email already exists.";
+    case "invite_email_mismatch": return "This invite was created for a different email address — ask your admin for a new invite.";
     case "escrow_fingerprint_mismatch": return "Recovery fingerprint mismatch — do not proceed; contact your admin.";
     default: return "Enrollment failed (" + code + ").";
   }

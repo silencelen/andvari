@@ -577,7 +577,7 @@ fun Application.andvariModule(services: Services) {
         post("/api/v1/admin/users") {
             val p = requireAdmin(call, service)
             val req = call.receive<InviteRequest>()
-            call.respond(services.admin.createInvite(req.email, req.isAdmin, p.userId).first)
+            call.respond(services.admin.createInvite(req.email, req.isAdmin, p.userId, req.ttlMinutes).first)
         }
         post("/api/v1/admin/users/{id}/disable") {
             val p = requireAdmin(call, service)

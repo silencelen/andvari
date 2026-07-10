@@ -29,11 +29,15 @@ class AdminService(private val repo: Repo) {
     }
 
     /** Create an invite; returns the plaintext token ONCE (only its hash is stored). */
-    fun createInvite(email: String, isAdmin: Boolean, byUserId: String): Pair<InviteResponse, String> = repo.db.tx { c ->
+    fun createInvite(email: String, isAdmin: Boolean, byUserId: String, ttlMinutes: Int? = null): Pair<InviteResponse, String> = repo.db.tx { c ->
         if (repo.userByEmail(email) != null) throw BadRequest("email_taken")
         val token = ServerCrypto.newToken()
         val tokenHash = ServerCrypto.hashToken(token)
-        val expiresAt = now() + inviteTtlMs
+        // Optional short TTL (S4 QR invites), clamped to [5 min, 72 h]; absent → 72 h unchanged.
+        // There is NO invite list/revoke surface, so this clamp is the SOLE containment for a
+        // photographed/leaked QR — never honor a client-requested TTL outside these bounds.
+        val ttlMs = ttlMinutes?.let { it.coerceIn(5, 72 * 60) * 60_000L } ?: inviteTtlMs
+        val expiresAt = now() + ttlMs
         c.exec(
             "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES(?,?,?,?,?)",
             tokenHash, email.lowercase(), isAdmin, now(), expiresAt,
