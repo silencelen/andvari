@@ -30,5 +30,8 @@ echo "==> Android: :app-android:assembleDebug (the only compile gate for the app
 echo "==> TypeScript: web vitest (RFC pins + vector consumption) + typecheck"
 (cd "$REPO_DIR/web" && npx vitest run --silent && npx tsc --noEmit)
 
+echo "==> Extension: typecheck + node --test (the LIVE browser fill path runs the same shared vectors)"
+(cd "$REPO_DIR/extension" && npm run typecheck && npm test)
+
 echo "==> verify: Kotlin + TypeScript green off the same spec/test-vectors; server + crypto suites pass"
 echo "    (run scripts/e2e.sh for the live server + WebSocket + crash-idempotency E2E)"

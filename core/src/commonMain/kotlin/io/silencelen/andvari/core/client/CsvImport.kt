@@ -584,12 +584,19 @@ object CsvImport {
     private val RENAMED = Regex("^(.+) \\(([0-9]+)\\)$")
     private fun baseNameOf(name: String): String? = RENAMED.matchEntire(name)?.groupValues?.get(1)
 
-    /** Url equality class per spec 02 §3.1 — [UriMatch.parseSavedUri]; null (unparseable/empty)
-     *  → the NO_URI sentinel at call sites. Prefixes keep web hosts and app ids disjoint. */
-    private fun uriClass(raw: String): String? = when (val s = UriMatch.parseSavedUri(raw)) {
-        is SavedUri.Web -> "w:${s.host}"
-        is SavedUri.AndroidApp -> "a:${s.pkg}"
-        null -> null
+    /** Url equality class per spec 02 §3.1 — [UriMatch.parseSavedUri]; null (EMPTY only)
+     *  → the NO_URI sentinel at call sites. A non-empty uri that fails to parse (A5 junk
+     *  like ".example.com" — parseable before 2026-07-10) keys a verbatim `j:` class
+     *  instead of dropping: dropping collapsed junk-uri-only items into NO_URI, where a
+     *  re-import could false-merge rows differing only by that junk uri (web csv.ts twin). */
+    private fun uriClass(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        return when (val s = UriMatch.parseSavedUri(trimmed)) {
+            is SavedUri.Web -> "w:${s.host}"
+            is SavedUri.AndroidApp -> "a:${s.pkg}"
+            null -> "j:${trimmed.lowercase()}"
+        }
     }
 
     /** TOTP fingerprint for rules 1–2 (A7): compared by PARSED parameters (secret bytes +

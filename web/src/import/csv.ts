@@ -479,10 +479,15 @@ function baseNameOf(name: string): string | null {
 }
 
 /** The spec 02 §3.1 equivalence class of ONE uri (normalizeHost/parseSavedUri), or null
- *  when the uri has no class (empty/unparseable). */
+ *  when the uri is EMPTY (no class). A non-empty uri that fails to parse (A5 junk like
+ *  ".example.com" — parseable before 2026-07-10) keys a verbatim `j:` class instead of
+ *  dropping to null: silently dropping it collapsed junk-uri-only items into the NO_URI
+ *  class, where a re-import could false-merge rows that differ only by that junk uri. */
 function uriClass(raw: string): string | null {
-  const s = parseSavedUri(raw);
-  if (s === null) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const s = parseSavedUri(trimmed);
+  if (s === null) return `j:${trimmed.toLowerCase()}`;
   return s.kind === "app" ? `a:${s.pkg}` : `w:${s.host}`;
 }
 

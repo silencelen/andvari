@@ -22,6 +22,7 @@ import { DEFAULT_GENERATOR, generatePassword } from "./generator";
 import type { CardItem, MatchItem, PendingSave, Req, Res, TabMsg } from "./messages";
 import { currentCode } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
+import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -584,7 +585,7 @@ function matchesFor(host: string): DecryptedItem[] {
   const webHost = normalizeHost(host);
   if (!webHost) return [];
   const target: FillTarget = { webHost, packageName: "" };
-  return loginItems().filter((it) => matchLogins(it.doc.login?.uris ?? [], target));
+  return loginItems().filter((it) => matchLogins(it.doc.login?.uris ?? [], target, pslResolve));
 }
 
 function toMatchItem(it: DecryptedItem, siteMatch: boolean): MatchItem {
@@ -626,7 +627,7 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
 
   const webHost = normalizeHost(msg.host);
   let allowed =
-    msg.explicit === true || (webHost !== null && matchLogins(it.doc.login?.uris ?? [], { webHost, packageName: "" }));
+    msg.explicit === true || (webHost !== null && matchLogins(it.doc.login?.uris ?? [], { webHost, packageName: "" }, pslResolve));
   const tabId = sender.tab?.id;
   // A popup fill grant is redeemable ONLY by the tab's TOP frame (fillFromPopup targets frameId 0).
   // Without this, a host-matched top frame leaves the grant armed and a hostile cross-origin

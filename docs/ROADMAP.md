@@ -123,6 +123,13 @@ Prioritized; each is additive and back-compatible.
   when the 0.2.x MSI is retired. Owner steps: Windows MSI (`ops/windows-build.md`), Fold
   autofill re-run, extension load-unpacked. Deferred: in-page extension card fill (frame-
   egress contract), combined-expiry LIST dropdowns, Skipti honesty line placement on natives.
+  **Owner dev-note 2026-07-10 (re-request): "support storing autofill creditcard and payment
+  details."** Storage/UI/Android-autofill already shipped above but card-create is DARK
+  (Option A) — so the visible to-dos are: (1) the Option-A unhide flip once the 0.2.x MSI
+  retires (checklist in the cards design doc §build-order), (2) extension in-page card fill
+  behind a breaker-passed frame-origin egress design, (3) scope decision on non-card payment
+  types (IBAN / bank account) as a new template. Tracked in
+  `docs/PLAN-autonomous-2026-07.md` §"Owner dev-notes queued".
 - **Browser extension** — *owner-requested 2026-07-07 (reaffirmed).* Reuses the `:core`/web
   `UriMatch` + `FieldClassifier` (already built + vector-tested for exactly this) and the
   same-origin API; carries the web save-flow. Chromium + Firefox. Go/no-go spike:
