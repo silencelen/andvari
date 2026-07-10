@@ -76,12 +76,27 @@ origin only). Each zip carries a tester-facing `INSTALL.txt`; Firefox loads are 
     from **tweetnacl** (box) + `@noble` blake2b (nonce), verified byte-identical to libsodium
     (`web/src/crypto/noble-extension-poc.test.ts`). Shared-vault logins fill too now.
   - **Token refresh** — a 401 rotates the single-use token pair and retries once.
+  - **Cards, copy-only (0.7.0)** — the popup lists `type:"card"` items in a "Cards" group beneath
+    the logins: a masked identity line only ("Visa ••4242" — the full number/CVV never enter the
+    popup DOM), with hover buttons that copy number / expiry (MM/YY) / security code straight to
+    the clipboard through the same explicit-reveal path as passwords (`revealCardField`, popup-only —
+    the SW refuses it from pages). **In-page card fill is deliberately deferred**: handing a PAN to
+    checkout iframes needs the frame-origin egress contract (a grant redeemable only by the frame
+    that detected the card form) before a card secret may ever cross into page DOM — popup copy
+    covers the household until that ships. With it: the item read ceiling is now fv 2 with per-item
+    carried re-seal fv (new logins still seal at fv 1 — `src/format.ts`, pinned by
+    `web/src/extension-pins.test.ts`), and a lone password-typed field whose name/id token-matches
+    `cvv`/`cvc`/`csc` suppresses the save/update banner, so those checkout security codes can't be
+    offered as an overwrite of a stored login password (names outside that set — e.g.
+    `securityCode` — pick up the core classifier's fuller CSC demotion with the deferred in-page
+    card-fill slice; the id is only consulted when the name is empty).
 - **Manifests (both):** branded icons (`icons/icon{16,32,48,128}.png` — the treasury coin + ᛅ rune),
   content script in **all frames** (`"all_frames": true` — iframe logins) with the vault app's own
   origin excluded (`exclude_matches` — never run the PM UI inside andvari itself), extension-page
   CSP without `'wasm-unsafe-eval'` (nothing loads wasm).
 - **Firefox:** `manifest.firefox.json` + `TARGET=firefox npm run build` (background event page instead
   of the SW; `browser_specific_settings`). The `chrome.*` calls work on both.
-- **Next:** more item types beyond logins, a signed Firefox `.xpi` (temporary `about:debugging` loads
+- **Next:** in-page card fill (behind the frame-origin egress contract above), more item types
+  beyond logins/cards, a signed Firefox `.xpi` (temporary `about:debugging` loads
   vanish on restart), and continued on-browser verification on both Chromium and Firefox (a
   headless-Chromium harness already exercises unlock / save / fill / multi-step / iframe / SPA / SW-kill).

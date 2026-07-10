@@ -198,6 +198,10 @@ let lastSent: { u: string; p: string; t: number } | null = null;
 let usernameStepAt = 0;
 
 function captureNow(f: LoginForm): void {
+  // CVV-negative rule (cards design 2026-07-09): the form's lone password-typed field is a
+  // checkout security code — never raise save/update for it (an "update" would overwrite the
+  // stored merchant password with a CVV). Fill/dropdown behavior stays untouched.
+  if (f.suppressSave) return;
   updateSnapshot(f);
   const s = snapshots.get(snapKey(f)) ?? { username: "", password: "" };
   const username = s.username;

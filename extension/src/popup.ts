@@ -6,7 +6,7 @@
  * TOTP chips re-polled each second. The SW holds all key material — this page only messages it.
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
-import { send, type MatchItem, type Req, type Res } from "./messages";
+import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
 
 const SERVER_URL = "https://andvari.taila2dff2.ts.net";
 const FLASH_MS = 1200;
@@ -61,6 +61,7 @@ function showView(unlocked: boolean): void {
     // Drop rendered vault rows/codes on lock — nothing lingers in the DOM.
     el("site-list").replaceChildren();
     el("all-list").replaceChildren();
+    renderCards([]); // empties AND hides the Cards group
     el<HTMLInputElement>("search").value = "";
     el("gen-pass").textContent = "";
     el("generator").hidden = true;
@@ -127,6 +128,9 @@ async function loadUnlocked(): Promise<void> {
   const n = all.items.length;
   el("count").textContent = `${n} login${n === 1 ? "" : "s"} in the hoard`;
   renderList(el("all-list"), all.items, "The hoard is empty");
+  const cards = await ask({ type: "cardItems" });
+  if (!cards || cards.locked) return relocked();
+  renderCards(cards.items);
   startTotp();
   el<HTMLInputElement>("search").focus();
 }
@@ -330,15 +334,82 @@ async function tickTotp(): Promise<void> {
   }
 }
 
+/* ---- cards: copy-only group beneath the logins (cards design 2026-07-09) ----
+ * Mounted from code so popup.html stays untouched this slice; rows reuse the login-row
+ * styling. NO fill affordance — in-page card fill is deferred behind the frame-origin
+ * egress contract. The row shows the masked identity line only; number/expiry/CVV go
+ * straight from the SW to the clipboard (copyPassword's exact path), never into this DOM. */
+
+const cardsLabel = document.createElement("div");
+cardsLabel.className = "section-label";
+cardsLabel.textContent = "Cards";
+cardsLabel.hidden = true;
+const cardsList = document.createElement("div");
+cardsList.className = "list";
+cardsList.hidden = true;
+el("all-list").after(cardsLabel, cardsList);
+
+/** Empty = hidden: login-only hoards see no Cards group at all. */
+function renderCards(items: CardItem[]): void {
+  cardsLabel.hidden = items.length === 0;
+  cardsList.hidden = items.length === 0;
+  cardsList.replaceChildren();
+  for (const it of items) cardsList.append(cardRow(it));
+}
+
+/** Card row = copy-only: no click-to-fill (unlike login rows), just per-field copy buttons
+ *  gated on the SW's has* flags. The subtitle is the SW's masked line ("Visa ••4242"). */
+function cardRow(it: CardItem): HTMLElement {
+  const r = document.createElement("div");
+  r.className = "item";
+  r.title = "Copy card details";
+
+  const glyph = document.createElement("span");
+  glyph.className = "glyph";
+  glyph.textContent = (it.name.trim().charAt(0) || "ᛅ").toUpperCase();
+
+  const body = document.createElement("div");
+  body.className = "body";
+  const name = document.createElement("div");
+  name.className = "name";
+  name.textContent = it.name;
+  const sub = document.createElement("div");
+  sub.className = "sub";
+  sub.textContent = it.subtitle;
+  body.append(name, sub);
+
+  const acts = document.createElement("span");
+  acts.className = "acts";
+  if (it.hasNumber) acts.append(actBtn("num", "Copy card number", (btn) => void copyCardField(it.itemId, "number", btn)));
+  if (it.hasExpiry) acts.append(actBtn("exp", "Copy expiry (MM/YY)", (btn) => void copyCardField(it.itemId, "expiry", btn)));
+  if (it.hasCvv) acts.append(actBtn("cvv", "Copy security code", (btn) => void copyCardField(it.itemId, "cvv", btn)));
+
+  r.append(glyph, body, acts);
+  return r;
+}
+
+/** Same secret-clipboard path as copyPassword: the SW answers exactly one field, it goes
+ *  straight to the clipboard, the button flashes — the value is never rendered. */
+async function copyCardField(itemId: string, field: "number" | "expiry" | "cvv", btn: HTMLElement): Promise<void> {
+  const r = await ask({ type: "revealCardField", itemId, field });
+  if (!r?.ok || r.value == null) {
+    showMsg("err", r?.error ?? "Nothing to copy on this card.");
+    return;
+  }
+  if (await toClipboard(r.value)) flash(btn);
+}
+
 /* ---- search-all (debounced; out-of-order responses dropped) ---- */
 
 async function runSearch(): Promise<void> {
   const q = el<HTMLInputElement>("search").value.trim();
   const seq = ++searchSeq;
-  const r = await ask({ type: "allItems", query: q || undefined });
+  const query = q || undefined;
+  const [r, c] = await Promise.all([ask({ type: "allItems", query }), ask({ type: "cardItems", query })]);
   if (seq !== searchSeq) return; // a newer query superseded this response
   if (!r || r.locked) return relocked();
   renderList(el("all-list"), r.items, q ? `Nothing in the hoard matches “${q}”` : "The hoard is empty");
+  renderCards(c && !c.locked ? c.items : []);
 }
 
 el<HTMLInputElement>("search").addEventListener("input", () => {
