@@ -8,8 +8,8 @@ import android.view.View
 import android.view.WindowManager
 import android.view.autofill.AutofillManager
 import android.view.inputmethod.InlineSuggestionsRequest
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.fragment.app.FragmentActivity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -35,6 +35,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import io.silencelen.andvari.app.AndvariTheme
+import io.silencelen.andvari.app.QuickUnlock
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
@@ -60,7 +61,7 @@ import java.io.IOException
  * and revoke the whole device. If a session is already bound (a race), we reuse it and never
  * mint a second token-holder.
  */
-class AutofillUnlockActivity : ComponentActivity() {
+class AutofillUnlockActivity : FragmentActivity() {
 
     private var busy by mutableStateOf(false)
     private var errorText by mutableStateOf<String?>(null)
@@ -124,7 +125,62 @@ class AutofillUnlockActivity : ComponentActivity() {
         // Exclude the whole overlay (incl. the master-password field) from autofill —
         // belt-and-suspenders with the service self-guard.
         window.decorView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+
+        // Quick unlock (spec 01 §8 / design §3): over the still-rendered password card, auto-show
+        // the BiometricPrompt when eligible + enrolled + within the 30-day window. Any
+        // failure/cancel leaves the password card in place (never neither, design §5).
+        val dir = applicationContext.noBackupFilesDir
+        if (QuickUnlock.isEligible(applicationContext, store) &&
+            QuickUnlock.isEnrolled(dir, session.userId) &&
+            QuickUnlock.isFresh(store, session.userId)
+        ) {
+            tryBiometricUnlock(store, session, structure, inlineRequest)
+        }
     }
+
+    /** Recover the UVK behind a BiometricPrompt, then unlock via the UVK path and finish exactly
+     *  like the password path. Never crashes the fill callback (runCatching rails). */
+    private fun tryBiometricUnlock(
+        store: SessionStore,
+        session: Session,
+        structure: AssistStructure,
+        inlineRequest: InlineSuggestionsRequest?,
+    ) {
+        if (busy) return
+        lifecycleScope.launch {
+            when (val r = QuickUnlock.recoverUvk(this@AutofillUnlockActivity, applicationContext.noBackupFilesDir, session.userId)) {
+                is QuickUnlock.Recover.Ok -> {
+                    busy = true
+                    errorText = null
+                    val result = runCatching {
+                        withContext(Dispatchers.IO) { AutofillUnlock.unlockWithUvk(this@AutofillUnlockActivity, store, session, r.uvk) }
+                    }
+                    result.onSuccess { unlocked ->
+                        finishAfterUnlock(runCatching {
+                            DatasetBuilder.responseForUnlocked(
+                                this@AutofillUnlockActivity, structure, unlocked.engine.items(), inlineRequest, trace,
+                            )
+                        }.onFailure { recordException(it) }.getOrNull())
+                    }.onFailure { t ->
+                        busy = false
+                        // design §5: a stale/foreign UVK (identity SEED won't open) wipes the blob;
+                        // an identityPub MISMATCH is a hard fault — keep the blob (evidence), banner.
+                        if (t is CryptoException && !isIdentityMismatch(t)) {
+                            QuickUnlock.wipe(applicationContext.noBackupFilesDir, session.userId)
+                        }
+                        errorText = friendly(t)
+                    }
+                }
+                // Card is already on screen; surface the mapped reason (wipe-class events already
+                // deleted the blob inside recoverUvk).
+                is QuickUnlock.Recover.Fallback -> r.reason?.let { errorText = it }
+                is QuickUnlock.Recover.Wiped -> errorText = r.reason
+            }
+        }
+    }
+
+    private fun isIdentityMismatch(t: Throwable): Boolean =
+        t.message?.contains("identity key mismatch") == true
 
     private fun unlockAndFinish(
         store: SessionStore,

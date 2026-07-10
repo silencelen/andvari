@@ -3,15 +3,24 @@ package io.silencelen.andvari.app.autofill
 import android.content.Context
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import io.silencelen.andvari.app.KdfReKey
+import io.silencelen.andvari.app.OfflineData
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
+import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.VaultCache
 import io.silencelen.andvari.core.client.sqliteVaultCache
+import io.silencelen.andvari.core.model.AccountKeys
+import io.silencelen.andvari.core.model.ClientPolicy
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.IOException
@@ -31,6 +40,11 @@ import java.io.IOException
  */
 object AutofillUnlock {
 
+    /** Detached scope for the A6 KDF re-key: it must OUTLIVE the noHistory activity that finishes
+     *  the moment the FillResponse is delivered. Best-effort — if the process dies first, the
+     *  upgrade simply retries at the next online full-password unlock (design §4 step 4). */
+    private val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     suspend fun unlock(context: Context, store: SessionStore, session: Session, password: String): VaultSession.Unlocked =
         VaultSession.unlockMutex.withLock {
             // Inside the lock: reuse the winner's session if the main app (or a prior fill/save)
@@ -39,23 +53,97 @@ object AutofillUnlock {
             // api/token-holder is CLOSED by lock()) instead of adopting it, and we mint the
             // replacement below while still holding the mutex.
             VaultSession.getIfFresh()?.let { AutofillHardLock.arm(); return@withLock it }
-            unlockLocked(context.applicationContext, store, session, password).also { AutofillHardLock.arm() }
+            val appContext = context.applicationContext
+            val r = unlockLocked(appContext, store, session, VaultSession.UnlockProvenance.PASSWORD) { keys ->
+                Account.unlock(session.userId, password, keys)
+            }
+            // A1: a real master password was verified — stamp the 30-day window (even offline).
+            store.stampFullPasswordUnlock(session.userId)
+            // A6: F61 KDF upgrade runs DETACHED (never blocks the fill), online + policy known +
+            // not a recovery temp password (A5). The password is held for the async derivation.
+            if (r.online && r.policy != null && !store.mustChangePassword) {
+                val account = r.unlocked.account
+                val keys = r.keys
+                val policy = r.policy
+                bgScope.launch { KdfReKey.maybeUpgrade(r.unlocked.api, store, session.userId, password, keys, policy, account) }
+            }
+            AutofillHardLock.arm()
+            r.unlocked
         }
 
-    private suspend fun unlockLocked(appContext: Context, store: SessionStore, session: Session, password: String): VaultSession.Unlocked {
+    /**
+     * Quick-unlock sibling (spec 01 §8): unlock from a biometric-recovered UVK. Shares ALL of
+     * [unlockLocked]'s scaffolding — the mutex/winner-reuse, single-token-holder invariant, F74
+     * throw-path hygiene, cache selection, policy/revocation enforcement. It does NOT stamp the
+     * 30-day window and does NOT re-key (A1/§7: a quick unlock has no password). The caller
+     * (AutofillUnlockActivity) recovers the UVK behind BiometricPrompt and hands it here; the
+     * `Account` keeps the reference, so the caller must not reuse/zero it after.
+     */
+    suspend fun unlockWithUvk(context: Context, store: SessionStore, session: Session, uvk: ByteArray): VaultSession.Unlocked =
+        VaultSession.unlockMutex.withLock {
+            VaultSession.getIfFresh()?.let { AutofillHardLock.arm(); return@withLock it }
+            unlockLocked(context.applicationContext, store, session, VaultSession.UnlockProvenance.QUICK) { keys ->
+                Account.unlockWithUvk(session.userId, uvk, keys)
+            }.unlocked.also { AutofillHardLock.arm() }
+        }
+
+    /** What [unlockLocked] surfaces so the password path can stamp + drive the F61 re-key without
+     *  a second server round-trip. `online` = the accountKeys/policy came from the network (not the
+     *  offline cache fallback). */
+    private class Locked(
+        val unlocked: VaultSession.Unlocked,
+        val keys: AccountKeys,
+        val policy: ClientPolicy?,
+        val online: Boolean,
+    )
+
+    private suspend fun unlockLocked(
+        appContext: Context,
+        store: SessionStore,
+        session: Session,
+        provenance: VaultSession.UnlockProvenance,
+        buildAccount: (AccountKeys) -> Account,
+    ): Locked {
         val api = AndvariApi(store.baseUrl, HttpClient(OkHttp), session.tokens(), { store.updateTokens(it) }) // platform "android"
+
+        // A4: the autofill process fetches /client-policy on its ONLINE path (cheap, unauthenticated)
+        // so an admin's `offlineCacheAllowed` flip reaches this process too, and persists
+        // policyFetchedAt for QuickUnlock.isEligible's 7-day staleness gate. A fetch failure = offline.
+        var policy: ClientPolicy? = null
+        runCatching { api.clientPolicy() }.onSuccess { p ->
+            policy = p
+            store.cacheAllowed = p.offlineCacheAllowed
+            store.autoLockSeconds = p.autoLockSeconds
+            store.policyFetchedAt = System.currentTimeMillis()
+            store.bumpServerTimeFloor(p.serverTime) // A2 (review [2]): trusted duration anchor
+            VaultSession.setAutoLockSeconds(p.autoLockSeconds)
+            // Policy forbids durable at-rest key material → drop cache + cached keys + the
+            // quick-unlock blob (spec 01 §8.1 / A4). Session stays valid.
+            if (!p.offlineCacheAllowed) OfflineData.purgeCacheForbidden(appContext.noBackupFilesDir, store, session.userId)
+        }
+
+        var online = false
         val keys = try {
-            api.accountKeys().also { if (store.cacheAllowed) store.saveAccountKeys(it) else store.clearAccountKeys() }
+            api.accountKeys().also {
+                online = true
+                if (store.cacheAllowed) store.saveAccountKeys(it) else store.clearAccountKeys()
+            }
+        } catch (e: ApiException) {
+            // A3: a definitive 401 (survived the api's own refresh) means this device is revoked —
+            // purge EVERYTHING (cache + keys + quick-unlock blob + store.clear()) so a stolen,
+            // overlay-only device can no longer open the cached vault. Then rethrow.
+            if (e.status == 401) OfflineData.purgeRevoked(appContext.noBackupFilesDir, store, session.userId)
+            api.close(); throw e
         } catch (e: IOException) {
             // Offline: fall back to the cached accountKeys (spec 02 §8).
             store.loadAccountKeys() ?: run { api.close(); throw e }
         } catch (t: Throwable) {
-            api.close(); throw t // definitive auth failure (401 already tried a token refresh inside the api)
+            api.close(); throw t
         }
         val acct = try {
-            Account.unlock(session.userId, password, keys)
+            buildAccount(keys)
         } catch (t: Throwable) {
-            api.close(); throw t // wrong password etc. — never leave the token-holder open unbound
+            api.close(); throw t // wrong password / stale-or-foreign UVK / identity mismatch — never leave the holder open
         }
 
         // F74 (review [1]): cache open + hydrate do raw sqlite reads — a corrupt
@@ -76,9 +164,10 @@ object AutofillUnlock {
             if (VaultSession.get()?.api !== api) api.close()
             throw t
         }
-        VaultSession.bind(api, acct, engine, cache!!) // now THE token-holder; the main app reuses it
+        VaultSession.bind(api, acct, engine, cache!!, provenance) // now THE token-holder; the main app reuses it
         runCatching { engine.sync() } // best-effort; hydrate already gave cached items
-        return VaultSession.get() ?: VaultSession.Unlocked(api, acct, engine, cache)
+        val unlocked = VaultSession.get() ?: VaultSession.Unlocked(api, acct, engine, cache, provenance)
+        return Locked(unlocked, keys, policy, online)
     }
 }
 

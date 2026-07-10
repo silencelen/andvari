@@ -248,7 +248,7 @@ following MUST fall back to the full master-password prompt, and where marked
 | `encryptedIdentitySeed` fails to open under the recovered UVK | *wipe* (stale/foreign UVK); password prompt |
 | Seed-derived identityPub ≠ server identityPub | HARD FAIL (§5 security fault — same as the password path; do NOT retry, do NOT wipe evidence) |
 | `BiometricPrompt` temporary lockout (`ERROR_LOCKOUT`) | password prompt this time; blob retained |
-| `BiometricPrompt` permanent lockout (`ERROR_LOCKOUT_PERMANENT`) | *wipe*; password prompt (re-enroll after a full unlock) |
+| `BiometricPrompt` lockout, temporary or permanent (`ERROR_LOCKOUT[_PERMANENT]`) | password prompt; **blob KEPT** (a lockout is attacker-/child-triggerable and the key is already auth-gated — destroying enrollment buys nothing) |
 | User cancels the prompt | password prompt; blob retained |
 
 There is deliberately **no app-level failed-attempt counter**: `BiometricPrompt` +
@@ -261,7 +261,17 @@ most **30 days** since the last successful full-master-password unlock on that
 device (`lastFullPasswordUnlockAt`, stamped by every full-password unlock,
 including offline ones and the autofill overlay's). Past the window the client
 MUST require the master password (the blob is retained; a successful full unlock
-re-stamps the window). Why 30 and why time- rather than use-based: the rule exists
+re-stamps the window).
+
+**Clock-tamper safety (normative).** The window MUST NOT be evaluated on a clock the
+device holder can set. A stamp in the future fails closed (stale). Within one boot the
+monotonic clock (`elapsedRealtime`) is authoritative and its delta MUST also be under the
+window. **Across a reboot** the client MUST evaluate the window against a *server-attested*
+time anchor recorded after the stamp (`ClientPolicy.serverTime`, persisted monotonically);
+with no such anchor the elapsed duration is unknowable and the client MUST fail closed and
+require the master password. A device-clock high-water mark MAY be kept as an additional
+one-way ratchet, but MUST NOT be the sole guard: it only advances while the app observes
+it, so a dormant device freezes it. Why 30 and why time- rather than use-based: the rule exists
 (a) so users do not lose master-password muscle memory — the classic quick-unlock
 failure mode is "enabled biometrics in March, forgot the password by June", which
 for a ZK design with only org-escrow recovery is an availability incident (A5);

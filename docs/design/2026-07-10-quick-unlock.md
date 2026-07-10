@@ -188,7 +188,7 @@ The normative table lives in spec 01 §8.1. Build-contract mapping:
 | identity seed won't open under recovered UVK | `unlockWithUvk` (CryptoException) | password prompt | wiped |
 | identityPub mismatch | `unlockWithUvk` | HARD FAIL banner (same as password path) | kept (evidence) |
 | Temp lockout / user cancel | BiometricPrompt callback | password prompt | kept |
-| Permanent lockout | BiometricPrompt callback | password prompt | wiped |
+| Permanent lockout | BiometricPrompt callback | password prompt | **kept** (A8) |
 | >30 d stale | `isFresh` pre-check | password prompt + why-copy | kept; re-stamped on success |
 | `offlineCacheAllowed=false` seen | applyPolicy/probes | quick unlock disappears | wiped |
 | Wrong-password-class errors on the fallback | existing paths | unchanged | n/a |
@@ -240,6 +240,18 @@ confirmation. Without this, "re-enroll" and "toggle off/on in Settings" each sil
 30-day clock with no password ever entered — an indefinite bypass of the periodic rule.
 
 **A2. The 30-day rule must not trust the wall clock.**
+*(Hardened by the build review, 2026-07-10 [2] — the rule below is the SHIPPED one.)*
+`highWaterWallMs` ratchets only from the DEVICE clock as this app observes it, so a dormant
+phone freezes it, and a reboot resets `elapsedRealtime` (voiding the monotonic cross-check). An
+attacker could then set the clock to a moment INSIDE the window and quick-unlock forever.
+Elapsed time cannot be bounded from an attacker-settable clock at all. Shipped rule:
+**same boot** → the monotonic clock proves duration (plus the wall guards); **cross boot** →
+require a SERVER-attested anchor taken after the stamp (`serverTimeFloorMs > stampWallMs`, from
+`ClientPolicy.serverTime`, persisted monotonically) and measure the window against it — with no
+anchor, fail CLOSED (master password). Practical effect: the first unlock after a reboot needs
+the password unless the app has since reached the server, matching Android's own
+before-first-unlock posture.
+
 Freshness fails CLOSED on clock tampering: any stamp in the future (`now < stamp − skew`) is
 STALE → password required (safe direction; self-heals on the next full unlock, which re-stamps).
 Persist a monotonically non-decreasing `highWaterWallMs` and evaluate against `max(now,

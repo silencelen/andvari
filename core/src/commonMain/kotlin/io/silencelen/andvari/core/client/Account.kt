@@ -262,10 +262,50 @@ class Account private constructor(
             } catch (e: CryptoException) {
                 throw CryptoException("wrong master password")
             }
-            // The identity keypair is DERIVED from the UVK-sealed seed — which the server
-            // cannot forge. Fingerprints and sealed-grant opening must use this derived
-            // keypair, never a server-sent value; a mismatching server identityPub is a
-            // pubkey-substitution attempt (spec 01 §5) and unlock hard-fails.
+            // Password path validates the password by the wrappedUvk open above; from here the
+            // work is identical to the UVK (quick-unlock) path — one shared tail, no drift.
+            return unlockFromUvk(userId, uvk, keys, crypto)
+        }
+
+        /**
+         * Unlock from a platform-recovered UVK (quick unlock, spec 01 §8.1) — the shared tail
+         * of [unlock] with the password/wrapKey/wrappedUvk stage removed (there is no password;
+         * the caller hands over the UVK a hardware-backed Keystore just decrypted).
+         *
+         * VALIDATION BY CONSEQUENCE (design §1): a wrong/stale/foreign UVK is not checked
+         * against anything server-sent — it simply fails the [encryptedIdentitySeed] AEAD open
+         * inside the shared tail, surfacing as a plain [CryptoException] (NEVER softened to
+         * "wrong master password"; there is no password to be wrong). The caller treats that as
+         * an invalid quick-unlock secret → wipe the blob + fall back to the password prompt
+         * (spec 01 §8.1 failure table), never as a soft/retriable error.
+         *
+         * The spec 01 §5 seed-derived identityPub substitution check runs here too — it is IN
+         * the shared tail, so a quick unlock can NEVER skip it and let a hostile server slip in a
+         * pubkey it controls; that hard-fail keeps its distinct identity-mismatch message.
+         *
+         * The returned [Account] keeps the passed [uvk] reference (see [enroll]/[unlock]: the
+         * private ctor owns it). The caller must hand over a fresh array and not reuse/zero it.
+         */
+        fun unlockWithUvk(userId: String, uvk: ByteArray, keys: AccountKeys, crypto: CryptoProvider = createCryptoProvider()): Account =
+            unlockFromUvk(userId, uvk, keys, crypto)
+
+        /**
+         * Shared unlock tail (spec 01 §5) reached by BOTH [unlock] (after it recovers the UVK
+         * from the password) and [unlockWithUvk] (given the UVK directly). Keeping it single-
+         * sourced is the invariant that stops the quick-unlock path from ever diverging on the
+         * pubkey-substitution hard-fail below.
+         *
+         * The identity keypair is DERIVED from the UVK-sealed seed — which the server cannot
+         * forge. Fingerprints and sealed-grant opening must use this derived keypair, never a
+         * server-sent value; a mismatching server identityPub is a pubkey-substitution attempt
+         * (spec 01 §5) and unlock hard-fails with a DISTINCT message (not the wrong-password /
+         * wrong-UVK CryptoException the AEAD open throws) so callers can tell a security fault
+         * apart from a bad secret. The `encryptedIdentitySeed` open is left un-caught on purpose:
+         * on the UVK path its failure is exactly the "the recovered UVK is not this account's UVK"
+         * signal (validation by consequence); on the password path an honest server's UVK always
+         * opens it, so it never fires there.
+         */
+        private fun unlockFromUvk(userId: String, uvk: ByteArray, keys: AccountKeys, crypto: CryptoProvider): Account {
             val identitySeed = Envelope.openB64(crypto, uvk, keys.encryptedIdentitySeed, Ad.idkey(userId))
             val identity = crypto.boxKeypairFromSeed(identitySeed)
             if (!identity.publicKey.contentEquals(Bytes.fromB64(keys.identityPub))) {
@@ -445,6 +485,21 @@ class Account private constructor(
     fun newFileKey(): ByteArray = crypto.randomBytes(32)
 
     fun cryptoProvider(): CryptoProvider = crypto
+
+    /**
+     * Quick-unlock ENROLLMENT ONLY (spec 01 §8.1, design §1): returns a COPY of the UVK for a
+     * platform's hardware-backed cipher to wrap (Android Keystore AES-GCM). Pass it STRAIGHT
+     * into the cipher and DROP/zero the reference immediately (R1) — a COPY, so a caller that
+     * forgets to zero cannot corrupt this session's live UVK.
+     *
+     * This is the ONE deliberate widening of the class's key encapsulation. The honest defense:
+     * the UVK already lives in this process's heap for the whole unlocked session, so a same-
+     * process accessor adds no new EXPOSURE CLASS (T5/R1 unchanged); the rejected alternative —
+     * threading a `javax.crypto.Cipher` into commonMain to wrap the UVK internally — leaks a JVM
+     * platform type into the multiplatform core for zero security delta. Do NOT reach for this
+     * for anything other than quick-unlock enrollment.
+     */
+    fun uvkCopyForPlatformWrap(): ByteArray = uvk.copyOf()
 
     fun decryptItem(item: WireItem): ItemDoc {
         val blob = item.blob ?: throw CryptoException("item has no blob (tombstone?)")
