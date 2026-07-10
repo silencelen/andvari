@@ -92,6 +92,9 @@ class AutofillUnlockActivity : ComponentActivity() {
         // getIfFresh enforces the inactivity window (spec 01 §8): an idle-expired vault is
         // locked and falls through to the master-password prompt below.
         VaultSession.getIfFresh()?.let { unlocked ->
+            // F12: (re)arm the autofill-process hard-lock — this serve may be the last thing
+            // that ever looks at the session in this process (no-op when auto-lock is off).
+            AutofillHardLock.arm()
             // Any throwable building the response must degrade to CANCELED, never crash the
             // host app's fill flow (an uncaught throw in this callback path kills the process).
             finishAfterUnlock(runCatching {

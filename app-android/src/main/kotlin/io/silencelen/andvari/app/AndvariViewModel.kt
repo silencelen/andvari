@@ -75,6 +75,16 @@ data class UiState(
     val needsUpdateCount: Int = 0,
     val policy: ClientPolicy? = null,
     val busy: Boolean = false,
+    // F74: quiet background/periodic sync runs under THIS flag, never `busy` — enable-state
+    // of every user affordance (Save, buttons, dialogs) keys off `busy` ONLY, so an offline
+    // sync stall can't grey the editor out mid-typing. Not mirrored into the autolock-defer
+    // signal either (see the init collector).
+    val syncing: Boolean = false,
+    // F58: the last login/register response's mustChangePassword — a recovery TEMP password
+    // is the live credential. Drives the prominent, NON-dismissable banner (MainActivity)
+    // directing the user to change it in the WEB app; persists across nav/lock (backed by
+    // SessionStore.mustChangePassword) until a fresh login returns false.
+    val mustChangePassword: Boolean = false,
     val error: String? = null,
     val notice: String? = null,
     val baseUrl: String = SessionStore.DEFAULT_BASE_URL,
@@ -229,7 +239,7 @@ internal fun importFormatLabel(format: CsvImport.ImportFormat): String = when (f
 }
 
 class AndvariViewModel(private val store: SessionStore, private val cacheDir: File) : ViewModel() {
-    private val _ui = MutableStateFlow(UiState(baseUrl = store.baseUrl, lastExportAt = store.lastExportAt))
+    private val _ui = MutableStateFlow(UiState(baseUrl = store.baseUrl, lastExportAt = store.lastExportAt, mustChangePassword = store.mustChangePassword))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     init {
@@ -253,6 +263,10 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         // onFillRequest must never close the engine under a running import/export.
         // Single choke point: every op helper flips busy/importBusy through _ui, so
         // collecting _ui catches them all (no unpaired begin/end calls to leak).
+        // `syncing` (F74) is deliberately EXCLUDED: a quiet background sync — which can
+        // stall for tens of seconds offline — must not hold the auto-lock open past the
+        // policy window. A lock landing mid-sync is safe: the durable queue survives it,
+        // and backgroundSync swallows the resulting teardown error instead of surfacing it.
         viewModelScope.launch {
             _ui.collect { VaultSession.setOperationInProgress(it.busy || it.importBusy) }
         }
@@ -364,14 +378,17 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             }
             val session = store.load()
             val probe = newApi()
-            runCatching { probe.clientPolicy() }.onSuccess { p ->
-                applyPolicy(p) // UI state + persisted fallbacks + auto-lock gate
-                // Policy may forbid the durable cache; honor it the moment we learn it,
-                // deleting any existing file (spec 02 §8) — but only when no live engine holds
-                // it (when bound, a later lock/rebind enforces the purge safely).
-                if (!p.offlineCacheAllowed && session != null && !bound) purgeOfflineData(session.userId)
+            try { // F74: close() in finally — no throw path may leak the transient probe
+                runCatching { probe.clientPolicy() }.onSuccess { p ->
+                    applyPolicy(p) // UI state + persisted fallbacks + auto-lock gate
+                    // Policy may forbid the durable cache; honor it the moment we learn it,
+                    // deleting any existing file (spec 02 §8) — but only when no live engine holds
+                    // it (when bound, a later lock/rebind enforces the purge safely).
+                    if (!p.offlineCacheAllowed && session != null && !bound) purgeOfflineData(session.userId)
+                }
+            } finally {
+                probe.close()
             }
-            probe.close()
             if (!bound) {
                 _ui.value = _ui.value.copy(
                     screen = if (session != null && session.accessToken.isNotEmpty()) Screen.Unlock(session.email) else Screen.Welcome,
@@ -388,14 +405,17 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         // immediately (no app restart needed).
         viewModelScope.launch {
             val probe = newApi()
-            runCatching { probe.clientPolicy() }
-                .onSuccess { p ->
-                    applyPolicy(p)
-                    // Same policy enforcement as start(): a forbidding server purges the cache.
-                    if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
-                }
-                .onFailure { _ui.value = _ui.value.copy(policy = null) }
-            probe.close()
+            try { // F74: close() in finally — no throw path may leak the transient probe
+                runCatching { probe.clientPolicy() }
+                    .onSuccess { p ->
+                        applyPolicy(p)
+                        // Same policy enforcement as start(): a forbidding server purges the cache.
+                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
+                    }
+                    .onFailure { _ui.value = _ui.value.copy(policy = null) }
+            } finally {
+                probe.close()
+            }
         }
     }
 
@@ -484,32 +504,43 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
 
     fun signIn(email: String, password: String, totp: String? = null) = op {
         val a = newApi()
-        val pre = a.prelogin(email)
-        // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on Main (ANrs/jank).
-        val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams) }
-        val s = try {
-            a.login(LoginRequest(email, authKey, Account.deviceInfo(android.os.Build.MODEL ?: "android"), totp = totp))
-        } catch (e: ApiException) {
-            when (e.code) {
-                "totp_required", "bad_totp_code" -> {
-                    a.close()
-                    _ui.value = _ui.value.copy(
-                        busy = false,
-                        loginTotpRequired = true,
-                        error = if (totp == null) "Enter the 6-digit code from your authenticator." else "That code didn't work — try again.",
-                    )
-                    return@op
+        try {
+            val pre = a.prelogin(email)
+            // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on Main (ANrs/jank).
+            val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams) }
+            val s = try {
+                a.login(LoginRequest(email, authKey, Account.deviceInfo(android.os.Build.MODEL ?: "android"), totp = totp))
+            } catch (e: ApiException) {
+                when (e.code) {
+                    "totp_required", "bad_totp_code" -> {
+                        a.close()
+                        _ui.value = _ui.value.copy(
+                            busy = false,
+                            loginTotpRequired = true,
+                            error = if (totp == null) "Enter the 6-digit code from your authenticator." else "That code didn't work — try again.",
+                        )
+                        return@op
+                    }
+                    "public_login_requires_totp" ->
+                        throw ApiException(e.status, e.code, "this account has no server-TOTP enrolled; public access is blocked")
+                    else -> throw e
                 }
-                "public_login_requires_totp" ->
-                    throw ApiException(e.status, e.code, "this account has no server-TOTP enrolled; public access is blocked")
-                else -> throw e
             }
+            val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys) }
+            store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            persistAccountKeys(s.accountKeys)
+            bind(a, acct)
+            // F58: a recovery TEMP password logs in with mustChangePassword=true — persist it
+            // (only a login/register response carries the flag) and raise the blocking banner.
+            store.mustChangePassword = s.mustChangePassword
+            _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint, mustChangePassword = s.mustChangePassword)
+        } catch (t: Throwable) {
+            // F74: no throw path (prelogin/KDF/login/Account.unlock) may leak the transient
+            // client. Once bind() succeeded the api is VaultSession-OWNED — never close it
+            // here (the success-path token-holder the live session uses).
+            if (VaultSession.get()?.api !== a) a.close()
+            throw t
         }
-        val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys) }
-        store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
-        persistAccountKeys(s.accountKeys)
-        bind(a, acct)
-        _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint)
         syncNow(engine!!)
         toVault()
     }
@@ -531,15 +562,29 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
                 store.loadAccountKeys() ?: run { a.close(); throw e }
             } catch (e: ApiException) {
                 a.close()
-                if (e.status == 401) { purgeOfflineData(session.userId); store.clear() }
+                // Definitive rejection: this device's session is dead (e.g. the web password
+                // change revoked every other session, spec 03 §3) — wipe it, including the
+                // persisted F58 flag (store.clear()); mirror the clear into UI state.
+                if (e.status == 401) { purgeOfflineData(session.userId); store.clear(); _ui.value = _ui.value.copy(mustChangePassword = false) }
                 throw e
+            } catch (t: Throwable) {
+                a.close(); throw t // F74: a generic throw must never leak the transient client
             }
             val acct = try {
                 // KDF off the Main thread (argon2id 64 MiB — the unlock spinner must animate).
                 withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys) }
             } catch (t: Throwable) { a.close(); throw t }
-            bind(a, acct)
-            _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowFingerprint = keys.escrowFingerprint)
+            // F74 (review [1]): bind() itself can throw — sqliteVaultCache open + SyncEngine
+            // hydrate() do raw cache reads, and a corrupt vault-<userId>.db throws there. The
+            // ownership guard preserves the never-close-the-adopted-holder invariant: once
+            // VaultSession has adopted `a`, it owns it and lock() closes it.
+            try {
+                bind(a, acct)
+                _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowFingerprint = keys.escrowFingerprint)
+            } catch (t: Throwable) {
+                if (VaultSession.get()?.api !== a) a.close()
+                throw t
+            }
         }
         // Tolerate an offline sync — hydrate() already populated the cached vault.
         runCatching { syncNow(engine!!) }.onFailure {
@@ -550,23 +595,39 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     }
 
     fun enroll(invite: String, email: String, name: String, password: String) = op {
-        val policy = _ui.value.policy ?: newApi().also { it.close() }.let { newApi().clientPolicy() }
-        val a = newApi()
-        val recoveryPub = Bytes.fromB64(a.recoveryPubkey())
-        // Key generation + KDF are CPU-bound (argon2id) — off the Main thread.
-        val (req, acct) = withContext(Dispatchers.Default) {
-            Account.enroll(
-                inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
-                password = password, params = policy.kdfParams,
-                recoveryPublicKey = recoveryPub, recoveryFingerprint = policy.recoveryFingerprint,
-                deviceName = android.os.Build.MODEL ?: "android",
-            )
+        // F74: the old fallback built a client, closed it UNUSED, then leaked the second one
+        // it actually called (`newApi().also { it.close() }.let { newApi().clientPolicy() }`).
+        // One probe, closed in finally (AndvariApi has close() but isn't Closeable — no .use).
+        val policy = _ui.value.policy ?: run {
+            val probe = newApi()
+            try { probe.clientPolicy() } finally { probe.close() }
         }
-        val s = a.register(req)
-        store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
-        persistAccountKeys(s.accountKeys)
-        bind(a, acct)
-        _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint)
+        val a = newApi()
+        try {
+            val recoveryPub = Bytes.fromB64(a.recoveryPubkey())
+            // Key generation + KDF are CPU-bound (argon2id) — off the Main thread.
+            val (req, acct) = withContext(Dispatchers.Default) {
+                Account.enroll(
+                    inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
+                    password = password, params = policy.kdfParams,
+                    recoveryPublicKey = recoveryPub, recoveryFingerprint = policy.recoveryFingerprint,
+                    deviceName = android.os.Build.MODEL ?: "android",
+                )
+            }
+            val s = a.register(req)
+            store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            persistAccountKeys(s.accountKeys)
+            bind(a, acct)
+            // F58: symmetric with signIn — a register response carries the flag too (false
+            // for a fresh enrollment, but the wire says so, not us).
+            store.mustChangePassword = s.mustChangePassword
+            _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint, mustChangePassword = s.mustChangePassword)
+        } catch (t: Throwable) {
+            // F74: same rule as signIn — close the transient client on ANY pre-bind throw,
+            // never the VaultSession-owned success-path holder.
+            if (VaultSession.get()?.api !== a) a.close()
+            throw t
+        }
         syncNow(engine!!)
         toVault()
     }
@@ -810,24 +871,36 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     /**
      * Quiet poll sync (spec 03 §6: on foreground + every 5 min while foregrounded and
      * unlocked): refresh policy first (so autoLock/clipboard windows track admin changes
-     * made mid-session), then push-queue + pull. Reuses [UiState.busy] as the overlap
-     * guard — read and set on the main thread, so it cannot interleave with a
-     * user-initiated op. Transient network failures stay silent (this runs unattended);
-     * anything else (rev regression, denied writes) surfaces like a manual sync.
+     * made mid-session), then push-queue + pull. Runs under [UiState.syncing], NEVER
+     * [UiState.busy] (F74): busy greys out Save/buttons, and an offline sync can stall for
+     * tens of seconds — the user must keep typing/saving through it. Both flags guard the
+     * overlap (read and set on the main thread, so they can't interleave with a
+     * user-initiated op), and `syncing` deliberately does NOT defer the auto-lock (see the
+     * init collector): a mid-sync lock closes the engine under us, which the catch below
+     * treats as an expected teardown, not a user-facing error. Transient network failures
+     * stay silent (this runs unattended); anything else (rev regression, denied writes)
+     * surfaces like a manual sync.
      */
     fun backgroundSync() {
         val current = VaultSession.get() ?: return
-        if (_ui.value.busy || _ui.value.importBusy) return
-        _ui.value = _ui.value.copy(busy = true)
+        if (_ui.value.busy || _ui.value.importBusy || _ui.value.syncing) return
+        _ui.value = _ui.value.copy(syncing = true)
         viewModelScope.launch {
             runCatching { current.api.clientPolicy() }.onSuccess { applyPolicy(it) }
             try {
                 syncNow(current.engine)
-                _ui.value = _ui.value.copy(items = current.engine.items(), needsUpdateCount = current.engine.needsUpdateCount(), busy = false)
+                if (VaultSession.get() !== current) { // locked/rebound mid-sync — publish nothing stale
+                    _ui.value = _ui.value.copy(syncing = false)
+                    return@launch
+                }
+                _ui.value = _ui.value.copy(items = current.engine.items(), needsUpdateCount = current.engine.needsUpdateCount(), syncing = false)
                 refreshLifecycle() // a background pull may have delivered notices/offers
             } catch (t: Throwable) {
-                _ui.value = _ui.value.copy(busy = false, error = if (t is IOException) _ui.value.error else t.message)
-                refreshLifecycle() // even a denied/park cycle leaves notices to show
+                // Locked/rebound mid-sync (auto-lock is NOT deferred for `syncing`): the
+                // engine was closed under us — expected teardown, swallow it.
+                val torn = VaultSession.get() !== current
+                _ui.value = _ui.value.copy(syncing = false, error = if (t is IOException || torn) _ui.value.error else t.message)
+                if (!torn) refreshLifecycle() // even a denied/park cycle leaves notices to show
             }
         }
     }
@@ -1358,6 +1431,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             store.clear()
             _ui.value = _ui.value.copy(
                 screen = Screen.Welcome, items = emptyList(), needsUpdateCount = 0, busy = false,
+                mustChangePassword = false, // store.clear() dropped the persisted F58 flag with the account
                 notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
                 lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
                 sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),

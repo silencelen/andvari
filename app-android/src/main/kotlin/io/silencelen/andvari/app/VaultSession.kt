@@ -71,6 +71,10 @@ object VaultSession {
      *  (Autofill-status screen); [idleExpired]/[getIfFresh] remain the enforcement. */
     fun idleSeconds(): Long = (SystemClock.elapsedRealtime() - lastInteractionElapsedMs) / 1000
 
+    /** The armed policy window in ms (0 = disabled) — read by the autofill hard-lock
+     *  scheduler (F12) to compute its delay; [getIfFresh] remains the enforcement. */
+    fun autoLockMillis(): Long = autoLockMs
+
     // ---- in-flight operation deferral ----
     //
     // Invariant: an idle-expiry-driven lock() must NEVER close the engine/api while a

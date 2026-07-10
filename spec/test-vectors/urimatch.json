@@ -311,6 +311,36 @@
             "htmlType": null,
             "htmlNameOrId": null,
             "expected": "none"
+        },
+        {
+            "hints": [
+                "one-time-code"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "none"
+        },
+        {
+            "hints": [
+                "oneTimeCode"
+            ],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 128,
+            "htmlType": "password",
+            "htmlNameOrId": "otp",
+            "expected": "none"
+        },
+        {
+            "hints": [
+                "personName"
+            ],
+            "inputTypeClass": 0,
+            "inputTypeVariation": 0,
+            "htmlType": null,
+            "htmlNameOrId": null,
+            "expected": "username"
         }
     ],
     "classifyCard": [

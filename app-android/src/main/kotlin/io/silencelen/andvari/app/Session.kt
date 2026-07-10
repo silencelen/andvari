@@ -48,6 +48,18 @@ class SessionStore(context: Context) {
         set(v) = prefs.edit().putInt("autoLockSeconds", v).apply()
 
     /**
+     * F58: the last login/register response's `mustChangePassword` — true while a recovery
+     * TEMP password is the live credential. Only a SessionResponse carries the flag (sync
+     * and accountKeys don't), so it is persisted here for the Unlock path / relaunches and
+     * drives the non-dismissable "set a new password in the web app" banner. Clears
+     * naturally: the web password change (spec 03 §3) revokes every OTHER session, so this
+     * device's next unlock 401s → sign-out → a fresh login returns false and overwrites it.
+     */
+    var mustChangePassword: Boolean
+        get() = prefs.getBoolean("mustChangePassword", false)
+        set(v) = prefs.edit().putBoolean("mustChangePassword", v).apply()
+
+    /**
      * When the last spec 07 backup was produced (unix ms; 0 = never). Recorded LOCALLY
      * only — the server is never told an export happened (spec 07 §2.6). Drives the
      * "Last backup: N days ago" line + the >90-day nudge in Settings.
@@ -113,7 +125,7 @@ class SessionStore(context: Context) {
     fun clearAccountKeys() { prefs.edit().remove("accountKeys").apply() }
 
     fun clear() {
-        prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove("accountKeys").apply()
+        prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove("accountKeys").remove("mustChangePassword").apply()
     }
 
     /**

@@ -98,6 +98,10 @@ class AndvariAutofillService : AutofillService() {
         return if (unlocked == null) {
             lockedResponse(form, inlineRequest, trusted).also { trace.finish(ctx, AutofillDebugLog.FillReason.LOCKED_ROW_SHOWN) }
         } else {
+            // F12: in an autofill-only process nothing else observes idle expiry — (re)arm
+            // the delayed hard-lock so the keys this serve just used don't linger in RAM
+            // past the policy window (no-op when auto-lock is disabled).
+            AutofillHardLock.arm()
             DatasetBuilder.buildUnlockedResponse(
                 this, unlocked.engine.items(), form, trusted, inlineRequest, trace,
             ).also { trace.finishFromBuild(ctx) }
