@@ -46,6 +46,8 @@ export function Sharing({ account, store, client, onSynced, onBackup }: Props) {
         <IncomingTransferCard key={t.vaultId} offer={t} account={account} store={store} client={client} onChanged={refresh} />
       ))}
 
+      <UndecryptableGrantsWarning store={store} />
+
       <div className="sheet">
         <h2>Vaults</h2>
         <p className="muted" style={{ marginTop: 0 }}>
@@ -75,12 +77,10 @@ export function Sharing({ account, store, client, onSynced, onBackup }: Props) {
         <MemberPanel key={v.vaultId} vault={v} account={account} store={store} client={client} onChanged={refresh} onBackup={onBackup} />
       ))}
 
-      {ownedShared.length === 0 && memberShared.length > 0 && (
-        <p className="muted" style={{ marginTop: 14 }}>
-          You are a member of the shared vault{memberShared.length > 1 ? "s" : ""} above —
-          only the owner manages who has access.
-        </p>
-      )}
+      {/* F20: non-owners see WHO ELSE is in a shared vault they belong to (read-only). */}
+      {memberShared.map((v) => (
+        <MemberRosterPanel key={v.vaultId} vault={v} client={client} />
+      ))}
 
       <RecentlyDeleted store={store} refreshKey={tick} onChanged={refresh} />
     </div>
@@ -325,6 +325,81 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup }: { v
       />
 
       <DeleteVaultControl vault={vault} store={store} onDeleted={onChanged} onBackup={onBackup} />
+    </div>
+  );
+}
+
+// ---- read-only roster (member-role vaults, F20) ----
+
+/**
+ * A writer/reader's read-only view of who else is in a shared vault they belong to. The server
+ * already returns the roster to any grant-holder (listVaultMembers 403s only when the caller has
+ * NO grant — owner-gating is on the mutating routes, not this GET), so this is pure transparency:
+ * no role selects, no remove, no transfer, no add, no delete. Management stays owner-only in
+ * MemberPanel above.
+ */
+function MemberRosterPanel({ vault, client }: { vault: VaultInfo; client: ApiClient }) {
+  const [members, setMembers] = useState<VaultMemberSummary[] | null>(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    client
+      .vaultMembers(vault.vaultId)
+      .then(setMembers)
+      .catch((e) => setErr(friendlyError(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, vault.vaultId]);
+
+  return (
+    <div className="sheet">
+      <h2>“{vault.name}” members</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        You're a {vault.role ?? "member"} of this shared vault. Only its owner can add, remove, or
+        change who has access.
+      </p>
+      {err && <div className="msg err">{err}</div>}
+      {!members ? (
+        <p className="muted">loading…</p>
+      ) : (
+        <div className="attach-list">
+          {members.map((m) => (
+            <div className="attach-row" key={m.userId}>
+              <span className="attach-name">
+                {m.displayName} <span className="muted">{m.email}</span>
+                {(m.status ?? "active") !== "active" && <span className="tag" style={{ color: "var(--danger)" }}>disabled</span>}
+              </span>
+              <span className="tag">{m.role}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- undecryptable-grant warning (F20) ----
+
+/**
+ * A PERSISTENT, non-dismissable warning (distinct from the dismissable lifecycle notices): this
+ * device holds a grant to a shared vault it cannot open — the vault key was sealed to a different
+ * device/identity, or this app predates the grant's format. The store retains only the id (the
+ * name is unreadable by definition) and clears the entry automatically once a later pull opens the
+ * grant or the grant is revoked, so this row appears and disappears on its own with no user action.
+ */
+function UndecryptableGrantsWarning({ store }: { store: VaultStore }) {
+  const vaultIds = store.undecryptableGrantVaults(); // derived each render — a background sync clears it
+  if (vaultIds.length === 0) return null;
+  const one = vaultIds.length === 1;
+  return (
+    <div className="sheet" style={{ borderLeft: "3px solid var(--danger)" }}>
+      <h2>Can't open a shared vault on this device</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        You were added to {one ? "a shared vault" : `${vaultIds.length} shared vaults`}, but this
+        device can't unlock {one ? "it" : "them"} yet — the key may have been sealed to another of
+        your devices, or this app is out of date. Open andvari on the device you enrolled with, or
+        update this app; the warning clears on its own once it opens. Your other vaults are
+        unaffected.
+      </p>
     </div>
   );
 }

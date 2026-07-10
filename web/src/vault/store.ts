@@ -85,7 +85,7 @@ export interface LifecycleNotice {
   id: string;
   vaultId: string;
   vaultName: string;
-  kind: "deleted" | "removed" | "left" | "anomaly" | "restored" | "transfer-complete" | "transfer-anomaly";
+  kind: "deleted" | "removed" | "left" | "anomaly" | "restored" | "added" | "transfer-complete" | "transfer-anomaly";
   /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
   purgeAt?: number;
   /** verified delete: N of the member's edits parked for replay on restore (F21). */
@@ -214,6 +214,14 @@ export class VaultStore {
   private incomingByVault = new Map<string, IncomingTransfer>();
   /** Highest transfer seq we have already surfaced a completion notice for (dedup). */
   private lastTransferSeqSeen = new Map<string, number>();
+  /** F20: vaults an "added to vault" notice has already fired for — fires once per store lifetime
+   *  (mirrors the transfer-complete seq dedup) so a dismissed notice never re-surfaces on a re-pull. */
+  private addedNoticed = new Set<string>();
+  /** F20: shared vaults whose grant this device can't open (sealed to a key we don't hold, or a
+   *  newer grant format). A PERSISTENT, non-dismissable warning — distinct from the dismissable
+   *  lifecycle notices; cleared automatically when a later pull opens the grant, the grant is
+   *  revoked, or a resync no longer re-delivers it. */
+  private undecryptableGrants = new Set<string>();
 
   /** Wall-clock time of the last SUCCESSFUL sync, or null before the first one —
    *  the export flow's "vault as of last sync <time>" banner reads this (spec 07). */
@@ -348,6 +356,10 @@ export class VaultStore {
       this.itemsById.clear();
       this.vaultsById.clear();
       this.undecryptableById.clear();
+      // F20: a resync re-delivers every current grant — drop the warning set so a vault no longer
+      // granted (revoked while offline) doesn't leave a stale "can't open" row; still-bad grants
+      // below re-populate it. (addedNoticed is left intact: since=0 never fires an added notice.)
+      this.undecryptableGrants.clear();
     }
 
     // EVERY grant goes through addGrant: the role update always applies (a role change
@@ -356,13 +368,22 @@ export class VaultStore {
     // A LIVE grant re-arriving for a vault in the holding area is a reinstate signal
     // (restore / re-add) — collected here, acted on after items apply.
     const reinstated = new Set<string>();
+    const newlyAdded = new Set<string>(); // F20: grants for vaults not held before this pull
     for (const grant of resp.grants) {
+      const heldBefore = this.account.hasVault(grant.vaultId); // BEFORE addGrant opens the key
       try {
         this.account.addGrant(grant);
         this.grantWireByVault.set(grant.vaultId, grant); // retain the grant blob (§6, normative)
+        this.undecryptableGrants.delete(grant.vaultId); // opened now → clear any stale F20 warning
         if (this.holding.has(grant.vaultId)) reinstated.add(grant.vaultId);
+        else if (!heldBefore && since > 0 && !resyncing) newlyAdded.add(grant.vaultId); // a genuine add
       } catch {
-        /* undecryptable grant — this vault's items stay skipped below */
+        // F20: undecryptable grant — sealed to an identity this device doesn't hold, or a newer
+        // grant format. The vault's items stay skipped below; retain the id so the UI shows a
+        // PERSISTENT "can't open this shared vault on this device" warning until a later pull opens
+        // it. Guarded on !heldBefore so a re-delivered grant for a vault we ALREADY hold (a role
+        // update whose sealedVk happens to fail to re-open) never fabricates a false warning.
+        if (!heldBefore) this.undecryptableGrants.add(grant.vaultId);
       }
     }
     for (const vault of resp.vaults) {
@@ -388,6 +409,25 @@ export class VaultStore {
       // Transfer state (spec 03 §11): recompute the verified incoming offer + surface a
       // completion notice for a newly-seen accepted transfer.
       await this.applyTransferState(vault, prePullNames.has(vault.vaultId) && since > 0 && !resyncing);
+    }
+
+    // F20: a calm "you were added to <vault>" notice for each vault whose key we did NOT hold
+    // before this pull but now do. Never on a since=0 / resync pull (newlyAdded is empty then —
+    // the hazard: notices fire only for verifiable NEW state), never for a reinstated (restored /
+    // re-added held) vault (that path emits "restored"), never for a personal vault, never for a
+    // vault we OWN, and once per vault for the store's lifetime (mirrors the transfer-complete
+    // dedup). Emitted AFTER vaults apply so the name decrypts under the freshly-opened key.
+    for (const vaultId of newlyAdded) {
+      if (reinstated.has(vaultId) || this.addedNoticed.has(vaultId)) continue;
+      const v = this.vaultsById.get(vaultId);
+      if (!v || v.type === "personal" || !this.account.hasVault(vaultId)) continue;
+      // An owner grant is our OWN wrappedVk (opened under the UVK), so a second active device sees
+      // a vault THIS account just created as a brand-new grant. "You were added to X" would be a
+      // lie there. Ownership handed TO us arrives on a vault we already held (promotion), so it is
+      // already excluded by heldBefore — and it emits its own transfer-complete notice regardless.
+      if (this.account.roleFor(vaultId) === "owner") continue;
+      this.addedNoticed.add(vaultId);
+      this.pushNotice({ id: crypto.randomUUID(), vaultId, vaultName: this.account.decryptVaultName(vaultId, v.metaBlob), kind: "added" });
     }
 
     const conflictsToMaterialize: WireItem[] = [];
@@ -671,6 +711,7 @@ export class VaultStore {
     this.vaultsById.delete(vaultId);
     this.grantWireByVault.delete(vaultId);
     this.incomingByVault.delete(vaultId);
+    this.undecryptableGrants.delete(vaultId); // F20: access gone → the "can't open" warning is moot
     this.account.removeVault(vaultId);
   }
 
@@ -1051,6 +1092,14 @@ export class VaultStore {
 
   clearNotices(): void {
     this.noticeList = [];
+  }
+
+  /** F20: shared vaults this device was granted but cannot open (grant sealed to a key we don't
+   *  hold, or a newer format). A PERSISTENT, non-dismissable warning surface (the Sharing view),
+   *  distinct from the dismissable lifecycle notices; clears itself once a later pull opens the
+   *  grant or the grant is revoked. The name can't be decrypted, so only the id is exposed. */
+  undecryptableGrantVaults(): string[] {
+    return [...this.undecryptableGrants].sort();
   }
 
   /** Vaults soft-hidden in the holding area (Settings → Recently removed). */

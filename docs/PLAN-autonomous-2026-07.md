@@ -51,10 +51,18 @@ per cycle boundary if still open.
       16451100 → devstore; `.deb` 0.9.0 + manifest merge → CT122 `/downloads` (extension entry
       preserved at 0.7.0); server+web redeployed at 0.9.0 (DB snapshot `pre-090`, schema v5
       untouched, 296 items intact). Windows MSI remains the owner step.
-- [ ] **4. skipti-loose-ends** — F18 vault picker for NEW items on both natives (kills
-      "silently lands in Personal"; core `saveWithUploads(vaultId)` exists) + vault-name
-      tags on rows/detail + desktop Move/Copy (F19 parity); F20 member transparency; LC-1.
-      Web deploy checkpoint only if web files changed; else commit-only.
+- [x] **4. skipti-loose-ends** — **DONE 2026-07-10** (LC-1 `1f8903c`; F18/F19/F20 in the
+      follow-up commit). LC-1 moved the denial verdict from provenance ("was it a replay?")
+      to state ("is the vault held?") — the tests pin both behaviours but honestly do NOT
+      reproduce the race (documented in `LifecycleReplayLossTest`'s KDoc). The F18/F20
+      workstreams' structured reports came back degenerate ("probe", retry-cap) while the
+      TREE was real — salvaged by reading the code, not the reports; a trailing lambda in
+      `DesktopState.moveOrCopyItem` had bound to `finalSync: Boolean` instead of
+      `onProgress` and only `:app-desktop:classes` (NOT in verify.sh) caught it.
+      4-lens review: **1 confirmed / 0 refuted** — the "you were added to X" notice fired on
+      the OWNER's own vault on a second device (owner grants carry a UVK-opened `wrappedVk`,
+      so `heldBefore` is false); fixed with a `roleFor === "owner"` skip + a test verified to
+      FAIL with the guard reverted (mutation-checked). Web tests 294 → 295, gates green.
 - [ ] **5. Extension update-available signal** (owner dev-note 2026-07-10, tier 1) — SW
       version-check against `/downloads/manifest.json` (cached, ~daily), popup badge +
       "download & reload" pointer, Devices-hub line. NO silent reinstall (unpacked Chrome

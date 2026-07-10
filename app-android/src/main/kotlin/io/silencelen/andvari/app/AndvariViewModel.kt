@@ -131,6 +131,12 @@ data class UiState(
     val sharingMembers: Map<String, List<VaultMemberSummary>> = emptyMap(),
     val deletedVaults: List<DeletedVaultInfo> = emptyList(),
     val heldVaults: List<HeldVaultInfo> = emptyList(),
+    /** F20: count of shared vaults granted to this account whose grant can't be OPENED on THIS
+     *  device (sealed to a device key we don't hold, or a newer grant format). Such a grant is
+     *  swallowed by hydrate/pull (runCatching over addGrant), so the vault is absent from
+     *  [items]/vaultInfos(); this drives a persistent, non-dismissable warning on the vault list.
+     *  Recomputed every refreshLifecycle; 0 clears the warning (a later sync opened/revoked it). */
+    val undecryptableSharedVaultCount: Int = 0,
     /** Bulk "copy items to Personal first" progress + its post-copy note (delete dialog). */
     val copyProgress: Pair<Int, Int>? = null,
     val copiedNote: String? = null,
@@ -801,8 +807,12 @@ class AndvariViewModel(
         toVault()
     }
 
-    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), onSaved: () -> Unit = {}) = op {
-        engine!!.saveWithUploads(itemId, doc, uploads)
+    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op {
+        // F18: [vaultId] is the NEW-item vault picker's choice. saveWithUploads HONORS it only
+        // when itemId == null; for an existing item it re-targets the item's OWN vault (its blob
+        // AD binds that vault; the server enforces vault_mismatch), so a stray picker value can
+        // never re-home an edited item. The editor also passes null when editing (belt + braces).
+        engine!!.saveWithUploads(itemId, doc, uploads, vaultId)
         refreshItems()
         onSaved()
     }
@@ -829,6 +839,25 @@ class AndvariViewModel(
         refreshLifecycle()
     }
 
+    /**
+     * F20: count of shared vaults whose grant this device can't OPEN — a grant blob WAS delivered
+     * (it's in cache.grants()) but addGrant() failed (sealed to an identity we don't hold, or a
+     * newer grant format), so [Account.hasVault] is false and the vault is silently absent from
+     * vaultInfos()/[items]. Computed app-side from public cache/account reads because the Kotlin
+     * SyncEngine — unlike web's store — tracks no undecryptable-grant set (surfacing it there would
+     * be a core change). Removed/held/deleted vaults are dropVault()'d out of cache.vaults(), so
+     * they never count here; a grant that later opens flips hasVault true and drops out. Mirrors
+     * web's undecryptableGrants set.
+     */
+    private fun undecryptableSharedCount(): Int {
+        val current = VaultSession.get() ?: return 0
+        val acct = current.account
+        val grantedIds = current.cache.grants().mapTo(HashSet()) { it.vaultId }
+        return current.cache.vaults().count {
+            it.type == "shared" && it.vaultId in grantedIds && !acct.hasVault(it.vaultId)
+        }
+    }
+
     /** Mirror the engine's lifecycle read-surfaces into UI state (cheap in-memory reads),
      *  and lazily resolve the owner display name behind any verified incoming offer. */
     private fun refreshLifecycle() {
@@ -838,6 +867,7 @@ class AndvariViewModel(
             lifecycleNotices = e.notices(),
             incomingTransfers = incoming,
             heldVaults = e.heldVaultInfos(),
+            undecryptableSharedVaultCount = undecryptableSharedCount(),
         )
         val missing = incoming.filter { it.vaultId !in _ui.value.transferOwnerNames }
         if (missing.isNotEmpty()) {
@@ -1563,6 +1593,7 @@ class AndvariViewModel(
             backupPreflight = null, backupResult = null, csvPreflight = null,
             lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
             sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
+            undecryptableSharedVaultCount = 0,
             copyProgress = null, copiedNote = null, moveProgress = null,
         )
     }
@@ -1610,6 +1641,7 @@ class AndvariViewModel(
                 notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
                 lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
                 sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
+                undecryptableSharedVaultCount = 0,
                 copyProgress = null, copiedNote = null, moveProgress = null,
             )
         }
