@@ -500,8 +500,13 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
         if (uri != null) scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    ctx.contentResolver.openInputStream(uri)?.use { readBounded(it, CsvImport.MAX_BYTES) }
+                    // Two distinct nulls: a null STREAM is a read failure (throw), a null from
+                    // readBounded means over-cap — that one must reach onSuccess so the
+                    // dedicated size message below fires (folding both into one elvis-throw
+                    // made the 10 MiB copy dead code).
+                    val stream = ctx.contentResolver.openInputStream(uri)
                         ?: throw IllegalStateException("could not read the selected file")
+                    stream.use { readBounded(it, CsvImport.MAX_BYTES) }
                 }
             }
             result.onSuccess { bytes ->
@@ -705,12 +710,19 @@ private fun ImportDialogs(vm: AndvariViewModel, ui: UiState) {
                         if (report.errors.isNotEmpty()) {
                             Spacer(Modifier.height(6.dp))
                             Text("${report.errors.size} row(s) couldn’t be read:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                            report.errors.forEach { err ->
+                            // Capped hard: this Column is non-lazy, and a mass-mangled file
+                            // yields up to 9,999 error rows — composing them all is a
+                            // multi-second main-thread freeze (the one enumeration the
+                            // collapseAt house rule missed).
+                            report.errors.take(MAX_ERROR_ROWS_SHOWN).forEach { err ->
                                 // A9: lead with the data-row ordinal — a multi-line quoted
                                 // note makes the physical line unmatchable to the row a
                                 // spreadsheet shows (core's rowOrdinalsByLine, same reader).
                                 val where = ui.importRowOrdinals[err.line]?.let { "row $it (file line ${err.line})" } ?: "file line ${err.line}"
                                 Text("• $where: ${importRowErrorLabel(err.code)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            }
+                            if (report.errors.size > MAX_ERROR_ROWS_SHOWN) {
+                                Text("…and ${report.errors.size - MAX_ERROR_ROWS_SHOWN} more — fix the export and pick the file again to re-check.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                             }
                         }
                         ui.importProgress?.let { (done, total) ->
@@ -749,12 +761,26 @@ private fun ImportBucket(title: String, names: List<String>, collapseAt: Int = 5
     var expanded by remember(names) { mutableStateOf(false) }
     Spacer(Modifier.height(6.dp))
     Text("${names.size} $title", style = MaterialTheme.typography.bodySmall)
-    val shown = if (expanded || names.size <= collapseAt) names else names.take(collapseAt)
+    // Expansion is capped too: the dialog Column is non-lazy, so "Show all" on a
+    // thousands-name bucket would compose them all in one frame (same freeze class as the
+    // uncapped error list was).
+    val shown = when {
+        names.size <= collapseAt -> names
+        expanded -> names.take(BUCKET_EXPAND_CAP)
+        else -> names.take(collapseAt)
+    }
     shown.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     if (names.size > collapseAt) {
         TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Show fewer" else "…and ${names.size - collapseAt} more") }
+        if (expanded && names.size > BUCKET_EXPAND_CAP) {
+            Text("(showing the first $BUCKET_EXPAND_CAP of ${names.size})", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
+
+/** Non-lazy dialog enumerations stop here — past this, composition itself is the bottleneck. */
+private const val BUCKET_EXPAND_CAP = 100
+private const val MAX_ERROR_ROWS_SHOWN = 8
 
 private fun importRowErrorLabel(code: String): String = when (code) {
     "wrong_field_count" -> "wrong number of fields"

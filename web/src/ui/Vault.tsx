@@ -2044,12 +2044,17 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
                 <table className="table">
                   <thead><tr><th>Row</th><th>Problem</th></tr></thead>
                   <tbody>
-                    {report.errors.map((err, idx) => (
+                    {/* Capped: a mass-mangled file yields up to 9,999 error rows — that many
+                        <tr>s is real DOM/jank cost for zero review value. */}
+                    {report.errors.slice(0, 100).map((err, idx) => (
                       <tr key={`${err.line}-${idx}`}>
                         <td className="mono">row {rowNoByLine.get(err.line) ?? "?"} (file line {err.line})</td>
                         <td>{problemLabel(err.code)}</td>
                       </tr>
                     ))}
+                    {report.errors.length > 100 && (
+                      <tr><td colSpan={2}>…and {report.errors.length - 100} more rows not shown — fix the export and re-select the file.</td></tr>
+                    )}
                   </tbody>
                 </table>
               </div>

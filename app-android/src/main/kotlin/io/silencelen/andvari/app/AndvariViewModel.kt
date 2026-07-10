@@ -1154,13 +1154,16 @@ class AndvariViewModel(
      * against an empty `existing` (that would silently disable the dedupe).
      */
     fun importParse(bytes: ByteArray) {
-        val acct = account
-        val eng = engine
-        if (acct == null || eng == null || eng.vaultInfos().none { it.vaultId == acct.personalVaultId }) {
-            importReject("Couldn’t check your vault for items you already have — unlock and sync first, then try the import again.")
-            return
-        }
         try {
+            // The pre-flight runs INSIDE the catch: vaultInfos() is a live DB read, and a
+            // binder-thread autofill hard-lock can close the cache between the null-check
+            // and the query — outside the try that's an uncaught main-thread crash.
+            val acct = account
+            val eng = engine
+            if (acct == null || eng == null || eng.vaultInfos().none { it.vaultId == acct.personalVaultId }) {
+                importReject("Couldn’t check your vault for items you already have — unlock and sync first, then try the import again.")
+                return
+            }
             val parsed = CsvImport.parse(bytes)
             val detected = importFormatLabel(parsed.format)
             val source = _ui.value.importSource
