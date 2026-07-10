@@ -80,9 +80,9 @@ class AndvariAutofillService : AutofillService() {
         val form = StructureParser.parse(structure)
         trace.setForm(form)
         trace.setTrust(ctx, form)
-        if (form.fields.isEmpty()) {
+        if (!form.fillable) {
             trace.finish(ctx, AutofillDebugLog.FillReason.NO_FIELDS)
-            return null // no username/password field classified
+            return null // no login field and no PAN-anchored card form — a card-only checkout proceeds
         }
 
         val inlineRequest: InlineSuggestionsRequest? =
@@ -107,6 +107,7 @@ class AndvariAutofillService : AutofillService() {
     /** Locked: an authentication row that launches the translucent unlock activity. */
     @Suppress("DEPRECATION") // setAuthentication(RemoteViews[, InlinePresentation]) works API 29-35
     private fun lockedResponse(form: ParsedForm, inlineRequest: InlineSuggestionsRequest?, trusted: Boolean): FillResponse {
+        // allIds covers login AND card fields, so unlock-and-refill works from a card-only checkout.
         val ids = form.allIds.toTypedArray()
         // FLAG_MUTABLE lets the platform inject EXTRA_ASSIST_STRUCTURE + inline specs into the
         // launch intent; the flag constant only exists from API 31, and pre-31 PendingIntents
