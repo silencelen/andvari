@@ -55,6 +55,11 @@ sealed interface DesktopScreen {
     data object Trash : DesktopScreen
 }
 
+/** F74: the Settings server-TOTP status fetch as an honest tri-state — Failed must STOP
+ *  the spinner and offer Retry, instead of spinning forever beside its own error (the old
+ *  shape used totpStatus==null for both "checking" and "check failed"). */
+enum class TotpLoad { Pending, Ready, Failed }
+
 /**
  * Plain state holder for the desktop app (no AndroidX ViewModel). Drives the shared
  * :core client (Account + AndvariApi[java engine] + SyncEngine) and exposes Compose
@@ -109,6 +114,14 @@ class DesktopState(private val scope: CoroutineScope) {
         private set
     var signInTotpRequired by mutableStateOf(false)
         private set
+    // F58: the sign-in SessionResponse flagged this account "must change password" — an admin
+    // recovery left a TEMPORARY password live. Desktop has no change-password screen (deferred),
+    // so the UI shows a prominent, non-dismissable root banner directing to the web app.
+    // Deliberately survives lock(): the temp password is still what unlocks, and accountKeys()
+    // (the unlock path) doesn't carry the flag — so within a run the nag can only clear via
+    // sign-out or a fresh sign-in that returns false (i.e. after the change actually happened).
+    var mustChangePassword by mutableStateOf(false)
+        private set
     // F57: this account's escrow is sealed to a superseded org recovery key (re-ceremony) — the
     // vault screen offers a re-seal. escrowFingerprint is the CURRENT org fingerprint (re-seal
     // target + the value the user verifies against the new printed sheet).
@@ -124,6 +137,10 @@ class DesktopState(private val scope: CoroutineScope) {
     var deletedItems by mutableStateOf<List<DeletedItemView>?>(null)
         private set
     var totpStatus by mutableStateOf<TotpStatus?>(null)
+        private set
+    // F74: tri-state for the status fetch above — totpStatus==null alone can't distinguish
+    // "still checking" from "check failed", which left a live spinner beside a stale error.
+    var totpLoad by mutableStateOf(TotpLoad.Pending)
         private set
     var totpSetupInfo by mutableStateOf<TotpSetupResponse?>(null)
         private set
@@ -224,6 +241,7 @@ class DesktopState(private val scope: CoroutineScope) {
         persistAccountKeys(s.accountKeys)
         bind(a, acct); syncNow(engine!!)
         escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
+        mustChangePassword = s.mustChangePassword // F58: a recovery temp password forces the banner
         signInTotpRequired = false
         toVault()
     }
@@ -268,6 +286,7 @@ class DesktopState(private val scope: CoroutineScope) {
         persistAccountKeys(s.accountKeys)
         bind(a, acct); syncNow(engine!!)
         escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
+        mustChangePassword = s.mustChangePassword // F58: never true for a fresh enroll; wired for truth
         toVault()
     }
 
@@ -310,6 +329,15 @@ class DesktopState(private val scope: CoroutineScope) {
 
     /** Server-declared role for a vault (mirrors web's account.roleFor) — null when unknown. */
     fun roleFor(vaultId: String): String? = account?.roleFor(vaultId)
+
+    /** F81: vaultId → decrypted vault name for every held vault EXCEPT the personal one — the
+     *  gold shared-vault badge on rows/detail. Decrypts each vault's metaBlob, so the UI calls
+     *  it once per items-change (under remember(items)), never per row recomposition. */
+    fun sharedVaultNames(): Map<String, String> {
+        val acct = account ?: return emptyMap()
+        return engine?.vaultInfos()?.filterNot { it.vaultId == acct.personalVaultId }
+            ?.associate { it.vaultId to it.name }.orEmpty()
+    }
 
     // ---- inactivity auto-lock + poll cadence (spec 01 §8 / spec 03 §6) ----
 
@@ -509,14 +537,21 @@ class DesktopState(private val scope: CoroutineScope) {
     // ---- settings / server TOTP ----
 
     fun openSettings() {
-        totpStatus = null; totpSetupInfo = null; totpError = null
+        totpSetupInfo = null
         backupPreflight = null; backupResult = null; csvPreflight = null
         lastExportAt = store.lastExportAt
         screen = DesktopScreen.Settings
+        loadTotpStatus()
+    }
+
+    /** F74: (re)fetch the server-TOTP status — Pending spins, Failed shows the error AND a
+     *  Retry that re-runs exactly this, Ready renders the real enrolled/not-enrolled blocks. */
+    fun loadTotpStatus() {
+        totpLoad = TotpLoad.Pending; totpStatus = null; totpError = null
         scope.launch {
             runCatching { api!!.totpStatus() }
-                .onSuccess { totpStatus = it }
-                .onFailure { totpError = it.message ?: "couldn't load TOTP status" }
+                .onSuccess { totpStatus = it; totpLoad = TotpLoad.Ready }
+                .onFailure { totpError = it.message ?: "couldn't load TOTP status"; totpLoad = TotpLoad.Failed }
         }
     }
 
@@ -891,6 +926,7 @@ class DesktopState(private val scope: CoroutineScope) {
             session?.userId?.let { deleteCache(it) }
             store.clear()
             clearSecondary(); signInTotpRequired = false
+            mustChangePassword = false // F58: sign-out drops the account; the flag re-arrives at the next sign-in
             busy = false
             screen = DesktopScreen.Welcome; items = emptyList(); needsUpdateCount = 0
         }

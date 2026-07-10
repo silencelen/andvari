@@ -175,15 +175,52 @@ class MainActivity : ComponentActivity() {
 fun AndvariApp(vm: AndvariViewModel) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     Surface(Modifier.fillMaxSize()) {
-        when (val screen = ui.screen) {
-            is Screen.Loading -> Centered { Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary) }
-            is Screen.Welcome -> WelcomeScreen(vm, ui)
-            is Screen.Unlock -> UnlockScreen(vm, ui, screen.email)
-            is Screen.Vault -> VaultScreen(vm, ui)
-            is Screen.Sharing -> SharingScreen(vm, ui)
-            is Screen.Settings -> SettingsScreen(vm, ui)
-            is Screen.Trash -> TrashScreen(vm, ui)
-            is Screen.AutofillStatus -> AutofillStatusScreen(vm, ui)
+        Column(Modifier.fillMaxSize()) {
+            // F58: sits ABOVE the screen switch so it survives every in-app navigation —
+            // no screen can compose it away while the flag is true.
+            MustChangePasswordBanner(ui)
+            Box(Modifier.weight(1f)) {
+                when (val screen = ui.screen) {
+                    is Screen.Loading -> Centered { Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary) }
+                    is Screen.Welcome -> WelcomeScreen(vm, ui)
+                    is Screen.Unlock -> UnlockScreen(vm, ui, screen.email)
+                    is Screen.Vault -> VaultScreen(vm, ui)
+                    is Screen.Sharing -> SharingScreen(vm, ui)
+                    is Screen.Settings -> SettingsScreen(vm, ui)
+                    is Screen.Trash -> TrashScreen(vm, ui)
+                    is Screen.AutofillStatus -> AutofillStatusScreen(vm, ui)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * F58: a recovery TEMP password is the live credential (the login response said
+ * mustChangePassword=true). Prominent and NON-dismissable — no close affordance, shown on
+ * every screen (including Unlock: the user should know BEFORE typing the temp password) —
+ * until a fresh login returns false. Full native change-password screens are deliberately
+ * deferred; the fix happens in the WEB app (spec 03 §3 then revokes this device's session,
+ * forcing the fresh login that clears the flag).
+ */
+@Composable
+private fun MustChangePasswordBanner(ui: UiState) {
+    if (!ui.mustChangePassword) return
+    Card(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+    ) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text("Temporary password in use", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error)
+                Text(
+                    "Your password was reset by recovery and the temporary one is still active. Open andvari in your web browser and set a new master password now.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
         }
     }
 }

@@ -88,7 +88,9 @@ const N_PW = 0x10;
 
 const USERNAME_HINTS = new Set(["username", "emailaddress", "email", "newusername", "personname"]);
 const PASSWORD_HINTS = new Set(["password", "newpassword", "currentpassword"]);
-const NEGATIVE_HINTS = new Set(["smsotpcode", "otpcode", "cardnumber", "creditcardnumber", "postalcode", "creditcardsecuritycode"]);
+// F11: "onetimecode" joins the negatives (lockstep with core + web) so a password is never
+// offered into a one-time-code box — the extension has no vector test, so keep this in sync by hand.
+const NEGATIVE_HINTS = new Set(["smsotpcode", "otpcode", "onetimecode", "cardnumber", "creditcardnumber", "postalcode", "creditcardsecuritycode"]);
 const NAME_POSITIVE_USER = ["user", "email", "login", "account", "userid"];
 const NAME_POSITIVE_PASS = ["pass", "pwd", "passwd"];
 const NAME_NEGATIVE = ["search", "otp", "captcha", "code", "query", "phone"];

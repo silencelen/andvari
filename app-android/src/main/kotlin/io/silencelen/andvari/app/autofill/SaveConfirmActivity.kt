@@ -205,7 +205,16 @@ class SaveConfirmActivity : ComponentActivity() {
         // password prompt rather than saving against a stale/closed engine.
         val engine = VaultSession.getIfFresh()?.engine ?: run { unlocked = false; return }
         busy = true; errorText = null
+        // Review 2026-07-10 [0]: this activity runs in the autofill-only process where the
+        // ViewModel's operationInProgress collector never exists — mirror the in-flight save
+        // into the process-wide flag OURSELVES, or the F12 hard-lock timer (and any
+        // getIfFresh observer) can close the engine under this save at idle expiry. touch()
+        // restarts the idle clock at the user's explicit Save tap. finally covers coroutine
+        // cancellation too, so activity death can't latch the flag.
+        VaultSession.touch()
+        VaultSession.setOperationInProgress(true)
         lifecycleScope.launch {
+            try {
             runCatching {
                 val doc = when (plan) {
                     is CardPlan.Update -> {
@@ -249,6 +258,9 @@ class SaveConfirmActivity : ComponentActivity() {
                 if (creds.savable) { busy = false; cardStageDone = true } // login stage next — never lost
                 else finish()
             }.onFailure { busy = false; errorText = friendly(it) }
+            } finally {
+                VaultSession.setOperationInProgress(false)
+            }
         }
     }
 
@@ -258,7 +270,12 @@ class SaveConfirmActivity : ComponentActivity() {
         // password prompt rather than saving against a stale/closed engine.
         val engine = VaultSession.getIfFresh()?.engine ?: run { unlocked = false; return }
         busy = true; errorText = null
+        // Review 2026-07-10 [0]: mirror the in-flight save process-wide (see doSaveCard) —
+        // the ViewModel's collector doesn't exist in the autofill-only process.
+        VaultSession.touch()
+        VaultSession.setOperationInProgress(true)
         lifecycleScope.launch {
+            try {
             runCatching {
                 val doc = ItemDoc(
                     type = "login",
@@ -270,6 +287,9 @@ class SaveConfirmActivity : ComponentActivity() {
                 setResult(RESULT_OK)
                 finish()
             }.onFailure { busy = false; errorText = friendly(it) }
+            } finally {
+                VaultSession.setOperationInProgress(false)
+            }
         }
     }
 

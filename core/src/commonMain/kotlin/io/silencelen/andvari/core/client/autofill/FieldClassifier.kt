@@ -40,7 +40,12 @@ object FieldClassifier {
     // W3C autofill tokens + Android View hints.
     private val USERNAME_HINTS = setOf("username", "emailaddress", "email", "newusername", "personname")
     private val PASSWORD_HINTS = setOf("password", "newpassword", "current-password", "new-password")
-    private val NEGATIVE_HINTS = setOf("smsotpcode", "otpcode", "postalcode")
+    // "onetimecode" = the normalized W3C "one-time-code" / Android "oneTimeCode" token (hints are
+    // lowercased + "_"/"-"-stripped at classify() step 0, so both collapse to this exact form before
+    // the set check) — andvari's OWN Welcome TOTP box is the canonical one-time-code field, and a
+    // PASSWORD must never be offered into it even though it carries htmlType=password (the negative
+    // hint fires in step 1, ahead of the legacy htmlType=="password"→PASSWORD rule).
+    private val NEGATIVE_HINTS = setOf("smsotpcode", "otpcode", "postalcode", "onetimecode")
     // Android AUTOFILL_HINT_CREDIT_CARD_* + W3C cc-* (normalized). cardnumber/creditcardnumber/
     // creditcardsecuritycode graduated out of NEGATIVE_HINTS in 0.7.0 — still never
     // USERNAME/PASSWORD by construction; checked before the password/username hint sets so an

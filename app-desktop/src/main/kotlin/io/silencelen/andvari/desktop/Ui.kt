@@ -10,8 +10,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -62,6 +68,20 @@ fun DesktopApp(state: DesktopState) {
                     "Version $v is available — download from ${downloadsUrl(state.baseUrl)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
+        }
+        // F58: an admin recovery left a TEMPORARY master password live on this account.
+        // Deliberately non-dismissable (the web mustChange banner idiom) and rendered at the
+        // root, above every screen, so no view change escapes it. Desktop can't change the
+        // password yet (native screen deferred) — direct to the web app, which can.
+        if (state.mustChangePassword) {
+            Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Recovery sign-in — set a new master password now. This app can't change it yet: open ${state.baseUrl} in your browser and use Settings → Change master password.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                 )
             }
@@ -175,17 +195,20 @@ private fun SignIn(state: DesktopState) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
+    val ready = email.isNotBlank() && password.isNotBlank() && (!state.signInTotpRequired || code.isNotBlank())
+    // F72: THE submit path — button and every field's Enter land here; the gate makes a
+    // held/double Enter (or Enter while incomplete) a no-op.
+    val submit = { if (ready && !state.busy) state.signIn(email.trim(), password, code.trim().ifBlank { null }) }
     Column(Modifier.fillMaxWidth()) {
-        Field("Email", email, { email = it })
-        Secret("Master password", password) { password = it }
+        Field("Email", email, { email = it }, onEnter = submit)
+        Secret("Master password", password, onEnter = submit) { password = it }
         if (state.signInTotpRequired) {
-            Field("One-time code", code, { code = it }, mono = true)
+            Field("One-time code", code, { code = it }, mono = true, onEnter = submit)
             Text("This account has server-TOTP enabled — enter a code from your authenticator.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.height(12.dp))
-        val ready = email.isNotBlank() && password.isNotBlank() && (!state.signInTotpRequired || code.isNotBlank())
-        Primary("Sign in", ready && !state.busy, state.busy) { state.signIn(email.trim(), password, code.trim().ifBlank { null }) }
+        Primary("Sign in", ready && !state.busy, state.busy, submit)
     }
 }
 
@@ -199,12 +222,14 @@ private fun Enroll(state: DesktopState) {
     var fpOk by remember { mutableStateOf(false) }
     val fp = state.policy?.recoveryFingerprint ?: ""
     val ready = invite.isNotBlank() && email.isNotBlank() && password.length >= 8 && password == confirm && fpOk && fp.isNotEmpty()
+    // F72: single gated submit — Enter can't create a vault before the fingerprint box is ticked.
+    val submit = { if (ready && !state.busy) state.enroll(invite.trim(), email.trim(), name.trim(), password) }
     Column(Modifier.fillMaxWidth()) {
-        Field("Invite token", invite, { invite = it }, mono = true)
-        Field("Email", email, { email = it })
-        Field("Name (optional)", name, { name = it })
-        Secret("Master password", password) { password = it }
-        Secret("Confirm password", confirm) { confirm = it }
+        Field("Invite token", invite, { invite = it }, mono = true, onEnter = submit)
+        Field("Email", email, { email = it }, onEnter = submit)
+        Field("Name (optional)", name, { name = it }, onEnter = submit)
+        Secret("Master password", password, onEnter = submit) { password = it }
+        Secret("Confirm password", confirm, onEnter = submit) { confirm = it }
         if (fp.isEmpty()) {
             Text("This server has no recovery key configured yet — enrollment is disabled until the escrow ceremony is done.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
         } else {
@@ -217,21 +242,24 @@ private fun Enroll(state: DesktopState) {
             }
         }
         Spacer(Modifier.height(12.dp))
-        Primary("Create vault", ready && !state.busy, state.busy) { state.enroll(invite.trim(), email.trim(), name.trim(), password) }
+        Primary("Create vault", ready && !state.busy, state.busy, submit)
     }
 }
 
 @Composable
 private fun Unlock(state: DesktopState, email: String) {
     var password by remember { mutableStateOf("") }
+    // F72: Enter in the password field = Unlock (the most-repeated interaction in the app).
+    // The handler lives on the FIELD, so Tab→Enter on "Sign out" below still signs out.
+    val submit = { if (password.isNotBlank() && !state.busy) state.unlock(email, password) }
     Column(Modifier.fillMaxSize().padding(28.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Sigil(); Spacer(Modifier.height(8.dp))
         Text(email, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(20.dp))
         ErrorBar(state.error, state::clearError)
-        Secret("Master password", password) { password = it }
+        Secret("Master password", password, onEnter = submit) { password = it }
         Spacer(Modifier.height(12.dp))
-        Primary("Unlock", password.isNotBlank() && !state.busy, state.busy) { state.unlock(email, password) }
+        Primary("Unlock", password.isNotBlank() && !state.busy, state.busy, submit)
         TextButton(onClick = state::signOut) { Text("Sign out / use a different account") }
     }
 }
@@ -255,6 +283,10 @@ private fun Vault(state: DesktopState) {
             (d.login?.uris ?: emptyList()).any { u -> u.lowercase().contains(q) } ||
             (d.type == "card" && CardDisplay.subtitle(d).lowercase().contains(q))
     }
+    // F81: decrypted names for held vaults OTHER than the personal one — the gold badge on
+    // rows/detail. Each lookup decrypts vault metaBlobs, so build the map once per items-change
+    // (sync/refresh replace `items`), never per row recomposition (search keystrokes recompose).
+    val vaultBadges = remember(state.items) { state.sharedVaultNames() }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("andvari", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
@@ -281,12 +313,17 @@ private fun Vault(state: DesktopState) {
                 onSave = { doc, uploads -> state.saveItem(editing!!.first, doc, uploads); editing = null },
                 onCancel = { editing = null },
             )
-            current != null -> Detail(state, current, { editing = current.itemId to current.doc }, { state.deleteItem(current.itemId); detailId = null }, { detailId = null })
+            current != null -> Detail(state, current, vaultBadges[current.vaultId], { editing = current.itemId to current.doc }, { state.deleteItem(current.itemId); detailId = null }, { detailId = null })
             else -> Column(Modifier.fillMaxSize().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(query, { query = it }, Modifier.weight(1f), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
                     Spacer(Modifier.width(8.dp))
                     Button(onClick = { editing = null to ItemDoc(type = "login", name = "", login = LoginData(uris = listOf(""))) }) { Text("Add") }
+                    // F81: notes are mintable on desktop too — the same blank ItemDoc mint as
+                    // web's startNew("note"); the Editor already branches on doc.type ("New
+                    // note": name + notes + attachments only) and builtDoc copies from it.
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = { editing = null to ItemDoc(type = "note", name = "", notes = null) }) { Text("Add note") }
                     // Card creation stays dark until the Option A gate clears (the fielded 0.2.x
                     // MSI is retired) — the flip list lives in the cards design doc. Everything
                     // downstream (row/detail/editor/history for EXISTING cards) renders regardless.
@@ -305,7 +342,7 @@ private fun Vault(state: DesktopState) {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     if (filtered.isEmpty()) {
                         Center { Spacer(Modifier.height(48.dp)); Text("ᛝ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary); Text(if (state.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    } else filtered.forEach { item -> Row(item) { detailId = item.itemId }; Spacer(Modifier.height(8.dp)) }
+                    } else filtered.forEach { item -> Row(item, vaultBadges[item.vaultId]) { detailId = item.itemId }; Spacer(Modifier.height(8.dp)) }
                 }
             }
         }
@@ -512,7 +549,7 @@ private fun rowErrorLine(e: CsvImport.RowError, ordinals: Map<Int, Int>): String
 }
 
 @Composable
-private fun Row(item: VaultItem, onClick: () -> Unit) {
+private fun Row(item: VaultItem, vaultBadge: String? = null, onClick: () -> Unit) {
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         androidx.compose.foundation.layout.Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Text((item.doc.name.firstOrNull() ?: '?').uppercase(), color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Serif, modifier = Modifier.padding(end = 12.dp))
@@ -527,6 +564,13 @@ private fun Row(item: VaultItem, onClick: () -> Unit) {
                     },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
                 )
+            }
+            // F81: shared-vault badge — the decrypted vault name in gold (primary = treasury
+            // gold), the same labelSmall tag style as the type tag beside it. Personal = none.
+            // Width-capped so a long vault name can't squeeze out the item name column.
+            if (vaultBadge != null) {
+                Text(vaultBadge, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 140.dp).padding(end = 8.dp))
             }
             Text(item.doc.type, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -638,7 +682,7 @@ private fun ItemHistorySection(state: DesktopState, item: VaultItem, readOnly: B
 }
 
 @Composable
-private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onDelete: () -> Unit, onBack: () -> Unit) {
+private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, onEdit: () -> Unit, onDelete: () -> Unit, onBack: () -> Unit) {
     val doc = item.doc
     // Reader-role members get no Edit/Delete affordances (mirrors web): the push would be
     // denied server-side and the denied mutation's typed work destroyed.
@@ -658,6 +702,11 @@ private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onD
             else -> "Secure note"
         }
         Text(kindLine + (if (readOnly) " · view only" else ""), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // F81: which SHARED vault this item lives in — gold, mirroring the row badge (personal
+        // items get no line; "yours" is the default that needs no label).
+        if (vaultBadge != null) {
+            Text(vaultBadge, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 2.dp))
+        }
         ErrorBar(state.error, state::clearError)
         NoticeBar(state.notice, state::clearNotice)
         Spacer(Modifier.height(16.dp))
@@ -959,11 +1008,18 @@ private fun SettingsScreen(state: DesktopState) {
                 val setup = state.totpSetupInfo
                 when {
                     setup != null -> TotpSetupBlock(state, setup)
-                    status == null -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    // F74 tri-state: a FAILED status fetch stops the spinner and offers Retry —
+                    // the old shape (spinner + error side by side, status forever null) spun
+                    // eternally beside its own stale message.
+                    state.totpLoad == TotpLoad.Failed -> {
+                        Text(state.totpError ?: "couldn't load TOTP status", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = state::loadTotpStatus) { Text("Retry") }
+                    }
+                    status == null -> Row(verticalAlignment = Alignment.CenterVertically) { // Pending
                         CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
                         Text("Checking…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        state.totpError?.let { Spacer(Modifier.width(8.dp)); Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                     }
                     status.enrolled -> TotpEnrolledBlock(state)
                     else -> {
@@ -1022,15 +1078,20 @@ private fun BackupPreflightDialog(
     val score = Strength.estimateStrength(passphrase)
     val ready = selected.isNotEmpty() && passphrase.isNotEmpty() && passphrase == confirm &&
         score >= Strength.BACKUP_FLOOR && !state.busy
+    // F72: Enter in either passphrase field = the confirm button (the AWT save dialog it opens
+    // is modal, so key autorepeat dies there); Escape = Cancel, same busy gate as the scrim.
+    // `ready` is captured at composition, so re-read state.busy live like the other forms.
+    val submit = { if (ready && !state.busy) onChooseDestination(selected, includeAttachments, passphrase) }
+    val dismiss = { if (!state.busy) state.backupDismiss() }
     AlertDialog(
-        onDismissRequest = { if (!state.busy) state.backupDismiss() },
+        onDismissRequest = dismiss,
         confirmButton = {
-            TextButton(onClick = { onChooseDestination(selected, includeAttachments, passphrase) }, enabled = ready) { Text("Choose where to save") }
+            TextButton(onClick = submit, enabled = ready) { Text("Choose where to save") }
         },
         dismissButton = { TextButton(onClick = state::backupDismiss, enabled = !state.busy) { Text("Cancel") } },
         title = { Text("Back up vault") },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
+            Column(Modifier.verticalScroll(rememberScrollState()).dismissOnEscape(dismiss)) {
                 pre.offlineNote?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(8.dp))
@@ -1060,8 +1121,8 @@ private fun BackupPreflightDialog(
                     plan.overCap.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
                 }
                 Spacer(Modifier.height(8.dp))
-                Secret("Backup passphrase", passphrase) { passphrase = it }
-                Secret("Confirm passphrase", confirm) { confirm = it }
+                Secret("Backup passphrase", passphrase, onEnter = submit) { passphrase = it }
+                Secret("Confirm passphrase", confirm, onEnter = submit) { confirm = it }
                 if (passphrase.isNotEmpty()) {
                     val ok = score >= Strength.BACKUP_FLOOR
                     Text(
@@ -1096,7 +1157,7 @@ private fun BackupResultDialog(r: BackupResult, onDone: () -> Unit) {
         confirmButton = { TextButton(onClick = onDone) { Text("Done") } },
         title = { Text("Backup saved") },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
+            Column(Modifier.verticalScroll(rememberScrollState()).dismissOnEscape(onDone)) { // F72
                 Text(
                     "Backed up ${r.items} item(s) across ${r.vaults} vault(s)" +
                         (if (r.attachments > 0) " with ${r.attachments} attachment(s)." else "."),
@@ -1121,15 +1182,16 @@ private fun BackupResultDialog(r: BackupResult, onDone: () -> Unit) {
 
 @Composable
 private fun CsvPreflightDialog(state: DesktopState, pre: CsvPreflight, onChooseDestination: () -> Unit) {
+    val dismiss = { if (!state.busy) state.csvDismiss() } // F72: Escape = Cancel (no fields → no Enter path)
     AlertDialog(
-        onDismissRequest = { if (!state.busy) state.csvDismiss() },
+        onDismissRequest = dismiss,
         confirmButton = {
             TextButton(onClick = onChooseDestination, enabled = !state.busy && pre.loginCount > 0) { Text("Choose where to save") }
         },
         dismissButton = { TextButton(onClick = state::csvDismiss, enabled = !state.busy) { Text("Cancel") } },
         title = { Text("Export for another password manager?") },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
+            Column(Modifier.verticalScroll(rememberScrollState()).dismissOnEscape(dismiss)) {
                 pre.offlineNote?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(8.dp))
@@ -1182,29 +1244,33 @@ private fun backupNudge(lastExportAt: Long): Boolean =
 @Composable
 private fun TotpSetupBlock(state: DesktopState, setup: TotpSetupResponse) {
     var code by remember { mutableStateOf("") }
+    val submit = { if (code.isNotBlank() && !state.busy) state.confirmTotp(code) } // F72
     Column {
         Text("Add it to your authenticator (URI or secret), then confirm with a code.",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         CopyPlainRow("otpauth URI", setup.otpauthUri)
         CopyPlainRow("Secret (base32)", setup.secretBase32)
-        Field("One-time code", code, { code = it }, mono = true)
+        Field("One-time code", code, { code = it }, mono = true, onEnter = submit)
         state.totpError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         Spacer(Modifier.height(8.dp))
-        Primary("Confirm", code.isNotBlank() && !state.busy, state.busy) { state.confirmTotp(code) }
+        Primary("Confirm", code.isNotBlank() && !state.busy, state.busy, submit)
     }
 }
 
 @Composable
 private fun TotpEnrolledBlock(state: DesktopState) {
     var code by remember { mutableStateOf("") }
+    // F72: Enter in the code field = Disable — unambiguous (typing a code INTO the disable
+    // field is the whole intent of this block), same gate as the button.
+    val submit = { if (code.isNotBlank() && !state.busy) { state.disableTotp(code); code = "" } }
     Column {
         Text("Enrolled.", color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodyMedium)
         Text("To turn it off, enter a current code from your authenticator.",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Field("One-time code", code, { code = it }, mono = true)
+        Field("One-time code", code, { code = it }, mono = true, onEnter = submit)
         state.totpError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         Spacer(Modifier.height(8.dp))
-        OutlinedButton(onClick = { state.disableTotp(code); code = "" }, enabled = code.isNotBlank() && !state.busy,
+        OutlinedButton(onClick = submit, enabled = code.isNotBlank() && !state.busy,
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Disable") }
     }
 }
@@ -1224,16 +1290,43 @@ private fun CopyPlainRow(label: String, value: String) {
 }
 
 // ---- building blocks ----
+
+// F72: desktop keyboard affordances. Enter-to-submit attaches to a form's single-line text
+// FIELDS (the canonical compose-desktop per-field preview pattern) — never to a whole form
+// container, where a preview handler would steal Enter from focused buttons (Tab→Enter must
+// keep activating them; that's also why Escape, which no widget here claims, MAY wrap whole
+// dialog contents). Every submit lambda is the form's ONE submit path — button and Enter both
+// call it — and carries its own ready/busy gate, so a held key's repeats and Enter-while-busy
+// are no-ops rather than queued double submits.
+
+/** Enter/NumPad-Enter (key-down, preview phase) fires [submit] and consumes the key — repeats
+ *  included, so autorepeat can't outrun the gate INSIDE the call site's submit function. Null
+ *  [submit] = plain passthrough: Field passes null for multi-line fields, where Enter must
+ *  stay a newline. */
+private fun Modifier.submitOnEnter(submit: (() -> Unit)?): Modifier =
+    if (submit == null) this else onPreviewKeyEvent { e ->
+        if (e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter)) { submit(); true } else false
+    }
+
+/** Escape (key-down) anywhere in the wrapped subtree fires [dismiss] — the keyboard twin of a
+ *  dialog's onDismissRequest; call sites pass the SAME busy-gated lambda so Escape can never
+ *  cancel more than a click on the scrim/Cancel could. */
+private fun Modifier.dismissOnEscape(dismiss: () -> Unit): Modifier =
+    onPreviewKeyEvent { e ->
+        if (e.type == KeyEventType.KeyDown && e.key == Key.Escape) { dismiss(); true } else false
+    }
+
 @Composable
-private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true) {
-    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp), label = { Text(label) }, singleLine = singleLine,
+private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true, onEnter: (() -> Unit)? = null) {
+    // F72 multi-line guard: onEnter is dropped (not just unused) when singleLine=false.
+    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).submitOnEnter(onEnter.takeIf { singleLine }), label = { Text(label) }, singleLine = singleLine,
         textStyle = if (mono) MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace) else MaterialTheme.typography.bodyMedium)
 }
 
 @Composable
-private fun Secret(label: String, value: String, onChange: (String) -> Unit) {
+private fun Secret(label: String, value: String, onEnter: (() -> Unit)? = null, onChange: (String) -> Unit) {
     var show by remember { mutableStateOf(false) }
-    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp), label = { Text(label) }, singleLine = true,
+    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).submitOnEnter(onEnter), label = { Text(label) }, singleLine = true,
         visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
         trailingIcon = { IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) } })
