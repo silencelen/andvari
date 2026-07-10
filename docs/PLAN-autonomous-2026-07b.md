@@ -61,6 +61,20 @@ owner: park under "Parked for owner", continue with the documented default, neve
       the contract already named uris in the safe subset). The in-page focus dropdown
       remains the primary autofill path, so nothing is lost. Ext bumped 0.8.1→0.9.0.
       **Slotted ahead of S3** — a shipped-defect on the popup's primary action.
+- [ ] **BUG-0 (OPEN, blocked on owner): Android 0.10.0 import crash** — owner report
+      2026-07-10: "v0.10.0 for android crashes when trying the import feature"; owner
+      offered wireless debugging. Triage so far (session 2026-07-10): NOT R8 (release
+      isMinifyEnabled=false — debug gate is representative); NOT the import VM
+      (importParse/importConfirm catch Throwable → importError); NOT the file read
+      (runCatching + bounded); the preview composable is fully null-guarded; core
+      parse/plan/import passes jvm + server tests; only import-path code changed
+      0.9.0→0.10.0 is the cycle-6 uriClass `j:` fix (non-throwing) + normalizeHost A5.
+      Suspect: Compose-layer or device/SAF-specific — NEEDS THE LOGCAT. adb is installed
+      on huginn; when the owner supplies pair `IP:port` + code + connect `IP:port`:
+      `adb pair`, `adb connect`, `adb logcat` (filter `AndroidRuntime:E`), reproduce, fix,
+      ship 0.10.1 APK (deploys pre-approved). NOTE: main has moved past the shipped APK
+      (S2 rewrote the import flow + picker) — reproduce the fix against MAIN and re-test
+      the whole S2 import path before cutting 0.10.1.
 - [ ] **S3. Extension in-page card fill** (owner dev-note: "support storing autofill
       creditcard and payment details" — the buildable half) — design pass FIRST
       (frame-origin egress contract per the cards design's deferral: card data may only
