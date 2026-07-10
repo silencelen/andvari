@@ -4,7 +4,10 @@
 A1 vault plaintext (credentials, TOTP seeds, notes, attachments). A2 master
 passwords. A3 UVKs/VKs/identity keys. A4 the org recovery seed. A5 account
 availability (lockout = losing access to everything). A6 metadata (who has how many
-items, sizes, timing).
+items, sizes, timing). A7 the at-rest quick-unlock secret (Android: the
+Keystore-wrapped UVK blob + its non-exportable hardware key, spec 01 §8.1) — the
+only durable on-device artifact that, combined with a live authenticator, opens a
+vault without the master password.
 
 ## Adversaries & guarantees
 
@@ -50,6 +53,26 @@ an accepted residual until P6 owner-signed grants — the "you were added to <va
 transparency for honest servers only and is NOT an F16 defense. Shared-vault membership
 topology (which userId holds which role on which vaultId) is server-visible metadata,
 subsumed by A6/R4.
+
+## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
+
+Enabling quick unlock changes the at-rest story of exactly one asset: a
+Keystore-wrapped copy of the UVK now persists on the device. What each attacker
+gets:
+
+| Attacker | Outcome |
+|---|---|
+| **Device in hand, UNLOCKED, vault app locked** | Can *see* the biometric-unlock offer but cannot pass `BiometricPrompt` (BIOMETRIC_STRONG / Class 3 — spoof-resistance per the Android CDD; screen PIN/pattern deliberately NOT accepted, spec 01 §8.1). The honest **narrowing vs T3**: where a stolen device previously required the master password, it now falls to the owner's biometric — a sleeping/coerced owner or a Class-3 sensor bypass is the new (accepted, opt-in) exposure. Coercion is out of scope, same as for the master password. An OPEN vault remains T4. |
+| **Device powered off / locked (thief, border search of hardware)** | The blob is AES-256-GCM ciphertext under a non-exportable TEE/StrongBox key with `setUnlockedDeviceRequired(true)` — unusable before first device unlock. No offline brute-force surface exists: the wrapping key never leaves hardware, and the blob without it is just 32 random-looking bytes plus tag. Chip-level key extraction is nation-state class (Non-goals). |
+| **Malicious app on the device (non-root)** | App-sandbox private file (`noBackupFilesDir`); Keystore keys are per-UID — another app can neither read the blob nor request the cipher. Fake-overlay biometric phishing yields nothing: the prompt is bound to OUR key's `CryptoObject`. Root/accessibility malware is T5, out of scope — and quick unlock does not *worsen* T5 (unlocked-process memory already holds the UVK; a keylogger already gets the master password). |
+| **ADB / backup extraction** | `android:allowBackup="false"` + the blob and cache both under `noBackupFilesDir` ⇒ neither `adb backup` nor cloud backup carries the blob; a leaked blob alone is useless without the hardware key (above). ADB shell as the app's uid implies a compromised/debug device — T5. |
+| **The server** | Learns nothing — quick unlock is wire-invisible (spec 01 §8); the server story is unchanged (T1 unaffected). |
+
+Residual accepted: the `lastFullPasswordUnlockAt` freshness stamp is advisory
+plaintext — resettable only by an attacker already inside the app sandbox (T5),
+who still cannot use the Keystore key. The A5 risk of *forgetting* the master
+password behind a working biometric is bounded by the normative 30-day periodic
+full-password rule (spec 01 §8.1).
 
 ## Autofill (client-side, Android)
 
