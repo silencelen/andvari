@@ -45,7 +45,13 @@ per cycle boundary if still open.
       server-side while the admin-known temp password stayed live); A2 hardened to fail closed
       cross-boot without a server-attested time anchor. Owner step (not a gate): on-device
       biometric feel-check.
-- [ ] **3. Cut 0.9.0 natives** — version bump ×4 (verify.sh consistency gate), CHANGELOG,
+- [x] **3. Cut 0.9.0 natives** — **DONE 2026-07-10 [`b538e69`].** Version bump ×4 + CHANGELOG;
+      gates green (a `:server:test` WS-ticket timeout on the first run was a load flake —
+      re-ran isolated 98/98, then a clean full verify before cutting). Shipped: APK vc
+      16451100 → devstore; `.deb` 0.9.0 + manifest merge → CT122 `/downloads` (extension entry
+      preserved at 0.7.0); server+web redeployed at 0.9.0 (DB snapshot `pre-090`, schema v5
+      untouched, 296 items intact). Windows MSI remains the owner step.
+
       APK → devstore (`scripts/ship.sh release`), deb → `/downloads` + manifest merge
       (linux entry only unless the extension changed), full gates on the release commit
       first. Ships quick-unlock + the QW-2/QW-3 native fixes together. Telegram statement.
