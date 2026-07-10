@@ -48,6 +48,19 @@ owner: park under "Parked for owner", continue with the documented default, neve
       pairing has no mutant tripwire — it rests on the paired-state structure; a
       component-test harness is a future infra item. Web deploy checkpoint; natives ride
       the next cut.
+- [x] **EXT-HOTFIX. Extension popup: click a login → its detail, not a blind fill** —
+      **DONE 2026-07-10 (owner dev-note).** 0.8.1 popup rows called `fillFromPopup`, which
+      `chrome.tabs.sendMessage`s the active tab's top frame — so it fails "page not
+      reachable" on EVERY non-fillable tab (New Tab / chrome:// / PDF / store) and on any
+      tab whose content script the extension update orphaned; the user opens the popup to
+      look up a credential, not to fill. Row-click now opens an in-popup **detail view**
+      (username+copy, password reveal/copy, live TOTP, saved uris as **http/https-sanitized
+      links** — a `javascript:`/`data:` uri renders as inert text; new `siteurl.ts` +
+      `siteurl.test.ts`, node-harness pinned). Fill demoted to an explicit "Fill this page"
+      button (unchanged path, failure now graceful). `MatchItem` gained `uris` (non-secret;
+      the contract already named uris in the safe subset). The in-page focus dropdown
+      remains the primary autofill path, so nothing is lost. Ext bumped 0.8.1→0.9.0.
+      **Slotted ahead of S3** — a shipped-defect on the popup's primary action.
 - [ ] **S3. Extension in-page card fill** (owner dev-note: "support storing autofill
       creditcard and payment details" — the buildable half) — design pass FIRST
       (frame-origin egress contract per the cards design's deferral: card data may only

@@ -7,6 +7,7 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
+import { displaySite, safeSiteUrl } from "./siteurl";
 
 const SERVER_URL = "https://andvari.taila2dff2.ts.net";
 const FLASH_MS = 1200;
@@ -52,6 +53,10 @@ function setConn(ok: boolean): void {
 }
 
 function showView(unlocked: boolean): void {
+  // The detail view is a transient overlay of the unlocked list — only openDetail() shows it,
+  // so any list/lock transition drops it (and any revealed password rendered inside it).
+  el("detail").hidden = true;
+  el("detail-body").replaceChildren();
   el("locked").hidden = unlocked;
   el("unlocked").hidden = !unlocked;
   el("lock").hidden = !unlocked;
@@ -190,14 +195,15 @@ function renderList(list: HTMLElement, items: MatchItem[], emptyText: string, sl
   for (const it of items) list.append(row(it));
 }
 
-/** Row = fill on click (nested copy/TOTP buttons stop propagation, so the row can't be a
- *  <button> itself — divs with button semantics instead). */
+/** Row = open the item's detail on click (nested copy/TOTP buttons stop propagation, so the
+ *  row can't be a <button> itself — divs with button semantics instead). Fill moved INTO the
+ *  detail as an explicit action: a blind row-click fill fails on every non-fillable tab. */
 function row(it: MatchItem): HTMLElement {
   const r = document.createElement("div");
   r.className = "item";
   r.setAttribute("role", "button");
   r.tabIndex = 0;
-  r.title = "Fill on this page";
+  r.title = "View details";
 
   const glyph = document.createElement("span");
   glyph.className = "glyph";
@@ -222,15 +228,149 @@ function row(it: MatchItem): HTMLElement {
   acts.append(actBtn("pass", "Copy password", (btn) => void copyPassword(it, btn)));
   r.append(acts);
 
-  const fill = () => void fillItem(it.itemId);
-  r.addEventListener("click", fill);
+  const open = () => openDetail(it);
+  r.addEventListener("click", open);
   r.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      fill();
+      open();
     }
   });
   return r;
+}
+
+// ---- item detail: the item's data + a site link, instead of a blind active-tab fill ----
+
+/** Show the detail overlay for [it]. openDetail is the ONLY caller that reveals #detail;
+ *  showView() hides it on every list/lock transition (and clears any revealed password). */
+function openDetail(it: MatchItem): void {
+  renderDetail(it);
+  clearMsg();
+  el("unlocked").hidden = true;
+  el("detail").hidden = false;
+  el<HTMLButtonElement>("detail-back").focus();
+}
+
+function closeDetail(): void {
+  el("detail").hidden = true;
+  el("detail-body").replaceChildren(); // drop any revealed password from the DOM
+  el("unlocked").hidden = false;
+  el<HTMLInputElement>("search").focus(); // return focus to the list (hiding #detail-back would strand it on <body>)
+}
+
+/** One labelled detail row: a value cell + a right-aligned actions cell. */
+function detailField(label: string): { field: HTMLElement; value: HTMLElement; acts: HTMLElement } {
+  const field = document.createElement("div");
+  field.className = "detail-field";
+  const lab = document.createElement("div");
+  lab.className = "detail-label";
+  lab.textContent = label;
+  const rowEl = document.createElement("div");
+  rowEl.className = "detail-row";
+  const value = document.createElement("span");
+  value.className = "detail-value";
+  const acts = document.createElement("span");
+  acts.className = "acts";
+  rowEl.append(value, acts);
+  field.append(lab, rowEl);
+  return { field, value, acts };
+}
+
+/** Reveal toggles the password INTO the DOM on an explicit click (cleared on Back/lock);
+ *  copy keeps sending it straight to the clipboard. Same explicit-reveal path as the list. */
+async function toggleReveal(it: MatchItem, value: HTMLElement, btn: HTMLButtonElement): Promise<void> {
+  if (value.dataset["shown"] === "1") {
+    value.textContent = "••••••••••";
+    delete value.dataset["shown"];
+    btn.textContent = "show";
+    return;
+  }
+  const r = await ask({ type: "reveal", itemId: it.itemId, host: tabHost ?? "", explicit: true });
+  if (!r?.ok || r.secret?.password == null) {
+    showMsg("err", r?.error ?? "No password on this item.");
+    return;
+  }
+  value.textContent = r.secret.password;
+  value.dataset["shown"] = "1";
+  btn.textContent = "hide";
+}
+
+function renderDetail(it: MatchItem): void {
+  el("detail-name").textContent = it.name || "Login";
+  const body = el("detail-body");
+  body.replaceChildren();
+
+  if (it.username) {
+    const { field, value, acts } = detailField("Username");
+    value.textContent = it.username;
+    acts.append(actBtn("copy", "Copy username", (btn) => void copyUsername(it, btn)));
+    body.append(field);
+  }
+
+  {
+    const { field, value, acts } = detailField("Password");
+    value.classList.add("secret");
+    value.textContent = "••••••••••";
+    acts.append(
+      actBtn("show", "Reveal password", (btn) => void toggleReveal(it, value, btn)),
+      actBtn("copy", "Copy password", (btn) => void copyPassword(it, btn)),
+    );
+    body.append(field);
+  }
+
+  if (it.hasTotp) {
+    const field = document.createElement("div");
+    field.className = "detail-field";
+    const lab = document.createElement("div");
+    lab.className = "detail-label";
+    lab.textContent = "One-time code";
+    field.append(lab, totpChip(it.itemId)); // joins the list's 1 s ticker (queried by class)
+    body.append(field);
+  }
+
+  // Saved sites — each uri sanitized to an http(s) link (a saved uri could be javascript:/
+  // data:; those render as inert text, never a clickable target).
+  const sites = document.createElement("div");
+  sites.className = "detail-field";
+  const sitesLabel = document.createElement("div");
+  sitesLabel.className = "detail-label";
+  sitesLabel.textContent = it.uris.length > 1 ? "Sites" : "Site";
+  sites.append(sitesLabel);
+  if (it.uris.length === 0) {
+    const none = document.createElement("div");
+    none.className = "detail-value muted";
+    none.textContent = "no site saved";
+    sites.append(none);
+  } else {
+    for (const raw of it.uris) {
+      const href = safeSiteUrl(raw);
+      if (href) {
+        const a = document.createElement("a");
+        a.className = "site-link";
+        a.href = href;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = displaySite(raw);
+        sites.append(a);
+      } else {
+        const span = document.createElement("div");
+        span.className = "detail-value muted";
+        span.textContent = raw; // shown, never linked
+        sites.append(span);
+      }
+    }
+  }
+  body.append(sites);
+
+  // Fill: the old row-click action, now explicit. On failure the user still has the copy
+  // buttons + the link above, so a non-fillable tab is no longer a dead end.
+  const fill = document.createElement("button");
+  fill.type = "button";
+  fill.className = "primary detail-fill";
+  fill.textContent = "Fill this page";
+  fill.title = "Type this login into the current tab";
+  fill.addEventListener("click", () => void fillItem(it.itemId));
+  body.append(fill);
 }
 
 function actBtn(label: string, title: string, onClick: (btn: HTMLButtonElement) => void): HTMLButtonElement {
@@ -538,6 +678,14 @@ el("ping").addEventListener("click", async () => {
   setConn(r?.ok === true);
   if (r?.ok) showMsg("info", `server reachable (t=${r.serverTime})`);
   else showMsg("err", `server: ${r?.error ?? "no response"}`);
+});
+
+el("detail-back").addEventListener("click", closeDetail);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !el("detail").hidden) {
+    e.preventDefault();
+    closeDetail();
+  }
 });
 
 void refresh();

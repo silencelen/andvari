@@ -58,6 +58,16 @@
       <div id="all-list" class="list"></div>
     </section>
 
+    <!-- Item detail: clicking a login opens its data + a link here, instead of blind-filling
+         the active tab (which fails on any non-fillable page). Fill is an explicit action. -->
+    <section id="detail" class="detail" hidden>
+      <div class="detail-head">
+        <button id="detail-back" class="ghost detail-back" title="Back to the list">‹ Back</button>
+        <span id="detail-name" class="detail-name"></span>
+      </div>
+      <div id="detail-body" class="detail-body"></div>
+    </section>
+
     <!-- Shared message strip: unlock errors, ping results, copy failures — both views. -->
     <div id="msg" class="msg" hidden></div>
 
