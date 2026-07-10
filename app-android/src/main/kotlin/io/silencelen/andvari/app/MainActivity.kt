@@ -633,12 +633,19 @@ private fun ImportSourceDialog(vm: AndvariViewModel, ui: UiState, onChooseFile: 
                             Text(s.label, Modifier.fillMaxWidth())
                         }
                     }
+                    Spacer(Modifier.height(8.dp))
+                    // Skip the guided steps and pick any CSV straight away — detection is
+                    // authoritative, so a file from an unlisted source still imports under
+                    // whatever format it actually is. (Source stays null → no mismatch hint.)
+                    TextButton(onClick = { vm.importChooseFile(); onChooseFile() }, modifier = Modifier.fillMaxWidth()) {
+                        Text("My file is from somewhere else", Modifier.fillMaxWidth())
+                    }
                 } else {
                     source.steps.forEachIndexed { i, step ->
                         Text("${i + 1}. $step", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 3.dp))
                     }
                     Spacer(Modifier.height(6.dp))
-                    TextButton(onClick = vm::importSourceBack) { Text("My file is from somewhere else") }
+                    TextButton(onClick = vm::importSourceBack) { Text("← Choose a different source") }
                 }
             }
         },
