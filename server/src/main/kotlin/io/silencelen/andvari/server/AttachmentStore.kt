@@ -205,11 +205,35 @@ class AttachmentStore(
     /**
      * GC (spec 02 §6): drop rows older than the TTL that their item does not
      * reference (or whose item is gone/tombstoned), plus stray files with no row.
+     *
+     * F56: all filesystem work (the directory listing and every unlink) happens OUTSIDE the
+     * single-connection DB lock — the previous shape did both inside the tx, so a populated
+     * blob dir stalled EVERY route for the whole sweep (measured 591 ms max request stall at
+     * 10k files; ~0.1 ms after — perf addendum §3). Same post-commit-unlink pattern as
+     * Service.push: rows are the source of truth, files deleted only after the tx commits.
+     * A crash between commit and unlink leaves stray files the NEXT sweep removes (rows are
+     * already gone, so they fail the `known` check once past the TTL).
+     *
+     * TOCTOU guards (2026-07-09 review): moving the unlinks outside the lock opened a race
+     * the in-tx shape could not have — an idempotent re-upload of a swept id (a documented
+     * store() contract) whose commit tx was WAITING on the sweep's lock can INSERT a fresh
+     * row and rename its blob into place before the sweep thread reaches the unlink loop;
+     * the old code then deleted the just-committed ciphertext behind that upload's 200, and
+     * the idempotent branch never rewrites the file, so the loss was permanent. So each pass
+     * carries its own guard: the SWEPT-ROW pass re-checks row absence under a short db.read
+     * and additionally skips fresh-mtime files (renameTo/copyTo give a re-committed blob a
+     * fresh mtime; every legitimately swept file is > TTL old, so this skips nothing in the
+     * normal path); the STRAY pass re-stats lazily and is protected by the same mtime
+     * cutoff, which also protects in-flight .part files. A file skipped by a guard becomes
+     * a stray a FUTURE sweep removes once it is past the TTL and still rowless.
      */
     fun sweepOrphans(): Int {
         val cutoff = now() - orphanTtlMs
+        // Snapshot the directory before touching the DB (a big listing is pure fs work).
+        val dirFiles = dir.listFiles()?.toList() ?: emptyList()
+        val toUnlink = mutableListOf<String>()
         var removed = 0
-        repo.db.tx { c ->
+        val known = repo.db.tx { c ->
             val candidates = c.queryAll(
                 "SELECT attachmentId, itemId FROM attachments WHERE createdAt < ?", cutoff,
             ) { rs -> rs.getString(1) to rs.getString(2) }
@@ -219,17 +243,30 @@ class AttachmentStore(
                 }?.contains(aid) ?: false
                 if (!referenced) {
                     c.exec("DELETE FROM attachments WHERE attachmentId=?", aid)
-                    file(aid).delete()
+                    toUnlink += aid
                     removed++
                 }
             }
-            // Stray files (crash between file write and row insert, or failed rename).
-            val known = c.queryAll("SELECT attachmentId FROM attachments") { it.getString(1) }.toSet()
-            dir.listFiles()?.forEach { f ->
-                val name = f.name.removeSuffix(".part")
-                if ((f.name.endsWith(".part") || name !in known) && f.lastModified() < cutoff && name !in known) {
-                    if (f.delete()) removed++
-                }
+            // Read AFTER the deletes so the just-orphaned ids are not "known" to the stray pass.
+            c.queryAll("SELECT attachmentId FROM attachments") { it.getString(1) }.toSet()
+        }
+        // Post-commit: drop ids whose row was re-committed (idempotent re-upload) while we
+        // held or released the lock — one short indexed-PK read, then unlink outside it.
+        val resurrected = repo.db.read { c -> toUnlink.filterTo(HashSet()) { rowById(c, it) != null } }
+        toUnlink.forEach { aid ->
+            if (aid in resurrected) return@forEach
+            val f = file(aid)
+            // Belt to the row re-check: a commit landing between the read above and this
+            // delete gave the file a fresh mtime — leave it; if it somehow ends up rowless
+            // again, a future sweep's stray pass takes it once past the TTL.
+            if (f.lastModified() < cutoff) f.delete()
+        }
+        // …then stray files (crash between file write and row insert, or failed rename).
+        // Files already unlinked above fail delete() and are not double-counted.
+        dirFiles.forEach { f ->
+            val name = f.name.removeSuffix(".part")
+            if ((f.name.endsWith(".part") || name !in known) && f.lastModified() < cutoff && name !in known) {
+                if (f.delete()) removed++
             }
         }
         return removed

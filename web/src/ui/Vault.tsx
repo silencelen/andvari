@@ -6,7 +6,7 @@ import { shortFormMatches } from "../crypto/escrow";
 import { generatePassword } from "../crypto/generator";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import { randomBytes } from "../crypto/provider";
-import { base32Decode, parseOtpauthUri, totpCode, totpSecondsRemaining } from "../crypto/totp";
+import { normalizeTotp, parseOtpauthUri, totpCode, totpSecondsRemaining } from "../crypto/totp";
 import type { Account } from "../vault/account";
 import { CARD_CREATE_ENABLED, brand, brandLabel, cardSubtitle, digitsOnly, expiryLabel, groupNumber, isExpired, luhnValid, padMonth, yearTo4 } from "../vault/card";
 import {
@@ -19,7 +19,7 @@ import {
   type VaultItem,
   type VaultStore,
 } from "../vault/store";
-import { ImportError, type ImportFormat, type ImportPlan, parseCsvImport, planImport } from "../import/csv";
+import { ImportError, type ImportFormat, type ImportPlan, type ImportReport, type ParsedRow, parseCsvImport, planImport, rowOrdinalsByLine } from "../import/csv";
 import { isExportOriginAllowed } from "../export/plan";
 import { Admin } from "./Admin";
 import { ExportPanel, type ExportMode } from "./ExportPanel";
@@ -364,7 +364,7 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
               {/* Dark until the Option A gate clears (0.2.x MSI retired) — see CARD_CREATE_ENABLED.
                   Everything downstream (row/detail/editor for EXISTING cards) renders regardless. */}
               {CARD_CREATE_ENABLED && <button className="ghost" onClick={() => startNew("card")}>+ Card</button>}
-              <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setExportMode(null); setImportOpen(true); }}>Import CSV</button>
+              <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setExportMode(null); setImportOpen(true); }}>Import</button>
               {/* Hidden on the public break-glass origin (spec 07 — see exportAllowed). The two
                   export destinations live under one menu so the toolbar can't crush the search box. */}
               {exportAllowed && (
@@ -1406,20 +1406,8 @@ function StrengthBar({ password }: { password: string }) {
   );
 }
 
-/** Accept either a full otpauth URI or a bare base32 secret (wrap the latter). */
-function normalizeTotp(input: string): string {
-  const t = input.trim();
-  if (!t) return "";
-  if (t.toLowerCase().startsWith("otpauth://")) return t;
-  try {
-    base32Decode(t);
-    return `otpauth://totp/andvari?secret=${t.replace(/\s/g, "")}`;
-  } catch {
-    return t;
-  }
-}
-
-/** True when [normalizeTotp]'s output is a parseable otpauth URI — the save-time gate
+/** True when the SHARED normalizeTotp's output (crypto/totp.ts — A5: one normalize for
+ *  editors and CSV adapters alike) is a parseable otpauth URI — the save-time gate
  *  (the Detail view would otherwise render the stored value as "invalid" forever). */
 function isValidTotp(normalized: string): boolean {
   try {
@@ -1430,22 +1418,135 @@ function isValidTotp(normalized: string): boolean {
   }
 }
 
-// ---- CSV import (spec 06) ----
+// ---- CSV import (spec 06 + design 2026-07-09 guided importers) ----
 
-function friendlyParseError(e: unknown): string {
+/** A guided source card: export instructions + which detected format(s) the pick predicts.
+ *  Header DETECTION stays authoritative — the pick informs instructions and the calm
+ *  mismatch hint only (a Bitwarden file picked under "Chrome" imports fine). */
+interface ImportSource {
+  id: string;
+  label: string;
+  /** Formats this source is expected to emit; [] = anything (the "somewhere else" escape). */
+  expects: ImportFormat[];
+  steps: string[];
+  note?: string;
+}
+
+const IMPORT_SOURCES: ImportSource[] = [
+  {
+    id: "chrome",
+    label: "Chrome",
+    expects: ["chrome"],
+    steps: [
+      "Open the ⋮ menu → Passwords and autofill → Google Password Manager.",
+      "Choose Settings in the left rail, then “Export passwords” → Download file.",
+      "Confirm with your computer's sign-in and save the CSV.",
+    ],
+  },
+  {
+    id: "edge",
+    label: "Edge",
+    expects: ["chrome"],
+    steps: [
+      "Open the … menu → Settings → Profiles → Passwords.",
+      "Click the ⋯ next to “Add password” → “Export passwords”.",
+      "Confirm with your computer's sign-in and save the CSV.",
+    ],
+  },
+  {
+    id: "brave",
+    label: "Brave",
+    expects: ["chrome"],
+    steps: [
+      "Open the ☰ menu → Settings → Autofill and passwords → Password Manager.",
+      "Choose Settings in the left rail → “Export passwords”.",
+      "Confirm with your computer's sign-in and save the CSV.",
+    ],
+  },
+  {
+    id: "opera",
+    label: "Opera",
+    expects: ["chrome"],
+    steps: [
+      "Open Settings → Autofill and passwords → Password Manager.",
+      "Choose Settings in the left rail → “Export passwords”.",
+      "Confirm with your computer's sign-in and save the CSV.",
+    ],
+  },
+  {
+    id: "firefox",
+    label: "Firefox",
+    expects: ["firefox"],
+    steps: [
+      "Open the ☰ menu → Passwords.",
+      "Click the ⋯ menu (top right) → “Export passwords…”.",
+      "Confirm with your computer's sign-in and save the CSV.",
+    ],
+  },
+  {
+    id: "bitwarden",
+    label: "Bitwarden",
+    expects: ["bitwarden"],
+    steps: [
+      "Sign in to the Bitwarden web vault (or desktop app) → Tools → “Export vault”.",
+      "Pick the .csv file format (not .json).",
+      "Confirm with your master password and save the file.",
+    ],
+  },
+  {
+    id: "1password",
+    label: "1Password",
+    expects: ["1password"],
+    steps: [
+      "In the 1Password desktop app (version 8 or newer), open File → Export → your account.",
+      "Choose the CSV format.",
+      "Confirm with your account password and save the file.",
+    ],
+    note: "1Password 7 and older export a different CSV shape — update to 1Password 8+, or route through Bitwarden/another CSV as an intermediate.",
+  },
+  {
+    // A10: pin the FILE-DOWNLOAD export path — the in-browser-tab route HTML-mangles values.
+    id: "lastpass",
+    label: "LastPass",
+    expects: ["lastpass"],
+    steps: [
+      "Sign in to your vault at lastpass.com.",
+      "Open Advanced Options in the left menu → “Export”.",
+      "Confirm with your master password — LastPass downloads a lastpass_export.csv file.",
+    ],
+    note: "Use that downloaded file directly. Don't copy CSV text out of a browser tab into a file — that route mangles characters like “&”.",
+  },
+];
+
+/** The escape hatch: no expectations, detection does all the work. */
+const OTHER_SOURCE: ImportSource = {
+  id: "other",
+  label: "somewhere else",
+  expects: [],
+  steps: [
+    "Export your passwords as a CSV file from wherever they live today.",
+    "Pick that file below — the format is detected from the file itself (Chromium browsers, Firefox, Bitwarden, 1Password 8+, LastPass, and Apple/Safari exports are recognized).",
+  ],
+};
+
+function friendlyParseError(e: unknown, source: ImportSource | null): string {
   if (e instanceof ImportError) {
     switch (e.code) {
       case "too_large":
-        return "That file is larger than 10 MiB — far bigger than any real browser password export. Double-check you picked the right file.";
+        return "That file is larger than 10 MiB — far bigger than any real password export. Double-check you picked the right file.";
       case "too_many_rows":
-        return "That file has more than 10,000 logins. Split it into smaller files and import them one at a time.";
+        return "That file has more than 10,000 rows. Split it into smaller files and import them one at a time.";
       case "unrecognized_header":
-        return "This doesn’t look like a Chrome, Edge, or Firefox password export. In your browser’s password manager choose “Export passwords” and import the CSV it saves.";
+        // Older 1Password CSV shapes vary wildly — the one source that earns a bespoke hint.
+        if (source?.id === "1password") {
+          return "This doesn't look like a 1Password 8 CSV export — older 1Password versions write a different file. Export from 1Password 8 or newer as CSV, or use Bitwarden/another CSV export as an intermediate.";
+        }
+        return "This doesn't look like a password export andvari recognizes (Chromium browsers, Firefox, Bitwarden, 1Password 8+, or LastPass). Follow the export steps shown here, then pick the file it saves.";
       default:
         return `That file could not be read (${e.code}).`;
     }
   }
-  return "That file could not be read. Make sure it’s the CSV your browser exported.";
+  return "That file could not be read. Make sure it's the CSV your password manager exported.";
 }
 
 function problemLabel(code: string): string {
@@ -1459,19 +1560,109 @@ function problemLabel(code: string): string {
   }
 }
 
-const FORMAT_LABEL: Record<ImportFormat, string> = { chrome: "Chrome / Edge", firefox: "Firefox" };
+const FORMAT_LABEL: Record<ImportFormat, string> = {
+  chrome: "Chrome/Edge (Chromium)",
+  firefox: "Firefox",
+  bitwarden: "Bitwarden",
+  "1password": "1Password",
+  lastpass: "LastPass",
+};
+
+/** A10 heuristic: multiple values carrying HTML entities smell like a copy-paste-from-a-
+ *  browser-tab export (the classic LastPass trap). Hint ONLY — never auto-decode. */
+const HTML_MANGLE = /&(amp|lt|gt|quot|#\d+);/;
+function looksHtmlMangled(rows: ParsedRow[]): boolean {
+  let hits = 0;
+  for (const r of rows) {
+    for (const v of [r.name, r.url, r.username, r.password, r.notes, r.totp ?? ""]) {
+      if (HTML_MANGLE.test(v)) {
+        hits++;
+        if (hits >= 2) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** House idiom for the report's name lists: inline when short, summarized + expandable
+ *  when long — every bucket stays enumerated BY NAME (A9), never reduced to a count. */
+function NameList({ names }: { names: string[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const LIMIT = 8;
+  if (names.length <= LIMIT) return <>{names.join(", ")}</>;
+  if (expanded) {
+    return (
+      <>
+        {names.join(", ")}{" "}
+        <button type="button" className="link" onClick={() => setExpanded(false)}>show fewer</button>
+      </>
+    );
+  }
+  return (
+    <>
+      {names.slice(0, LIMIT).join(", ")}{" "}
+      <button type="button" className="link" onClick={() => setExpanded(true)}>…and {names.length - LIMIT} more</button>
+    </>
+  );
+}
+
+/** Every report bucket, enumerated by name — rendered on the preview AND the finished
+ *  screen so nothing about what the plan did is a surprise afterwards. */
+function ReportBuckets({ report }: { report: ImportReport }) {
+  const bucket = (names: string[], intro: string) =>
+    names.length > 0 ? (
+      <div className="msg info" style={{ display: "block" }}>
+        {intro} <NameList names={names} />.
+      </div>
+    ) : null;
+  return (
+    <>
+      {bucket(report.alreadyInVault, "Already in your vault — skipped:")}
+      {bucket(report.passwordDiffers, "Same site and username as your vault, but a different password — imported separately (renamed) so you can review which one is current:")}
+      {bucket(report.totpDiffers, "Same login as your vault, but a different 2FA secret — imported separately (renamed) for review:")}
+      {bucket(report.flagged, "Renamed so every item keeps a distinct name:")}
+      {bucket(report.archivedSkipped, "Archived in the export — not imported:")}
+      {bucket(report.unknownTypeSkipped, "Item types andvari can't import yet — skipped:")}
+      {bucket(report.totpUnsupported, "One-time-code secrets in a format andvari can't verify — kept as text in each item's notes:")}
+      {bucket(report.noteItems, "Secure notes imported:")}
+    </>
+  );
+}
+
+function ReportTiles({ report, done }: { report: ImportReport; done: boolean }) {
+  return (
+    <div className="tiles" style={{ marginTop: 4 }}>
+      <div className="tile"><div className="tile-value tone-good">{report.imported}</div><div className="tile-label">{done ? "Imported" : "To import"}</div></div>
+      {report.alreadyInVault.length > 0 && <div className="tile"><div className="tile-value">{report.alreadyInVault.length}</div><div className="tile-label">Already in vault</div></div>}
+      {report.collapsed > 0 && <div className="tile"><div className="tile-value">{report.collapsed}</div><div className="tile-label">Merged (dupes)</div></div>}
+      {report.flagged.length > 0 && <div className="tile"><div className="tile-value tone-mid">{report.flagged.length}</div><div className="tile-label">Renamed</div></div>}
+      {report.skippedEmpty > 0 && <div className="tile"><div className="tile-value">{report.skippedEmpty}</div><div className="tile-label">Skipped (empty)</div></div>}
+      {report.errors.length > 0 && <div className="tile"><div className="tile-value tone-bad">{report.errors.length}</div><div className="tile-label">Rows with problems</div></div>}
+    </div>
+  );
+}
 
 /**
- * Import a browser CSV export entirely on this device (spec 06): parse + plan locally,
- * preview, then encrypt-and-push. The file never leaves the browser. The plan's itemIds
- * are minted once, so a mid-import failure is fixed with Retry (idempotent replay of the
- * SAME plan) rather than re-parsing — re-parsing would mint new ids and duplicate.
+ * Guided import (design 2026-07-09): source grid → per-source export steps → file input →
+ * vault-aware plan preview → encrypt-and-push. Everything happens on this device; the file
+ * never leaves the browser. The plan's itemIds are minted once, so a mid-import failure is
+ * fixed with Retry (idempotent replay of the SAME plan — each itemId doubles as the push
+ * mutationId) rather than re-parsing; re-parsing mints new ids and would duplicate.
+ * The plan compares against the personal vault (store.importProjections, A8): items already
+ * there are skipped — including rows a previous import renamed to "name (k)" (rule 1 also
+ * matches through the stripped base name). One exception keeps this short of a blanket
+ * "re-import is safe": a row whose totp value doesn't parse is unmatchable by design (A7,
+ * fp = null) and re-imports as a renamed copy — the preview shows it before anything lands.
  */
 function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: () => void; onDone: () => void }) {
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const [source, setSource] = useState<ImportSource | null>(null);
   const [fileName, setFileName] = useState("");
   const [format, setFormat] = useState<ImportFormat | null>(null);
   const [plan, setPlan] = useState<ImportPlan | null>(null);
+  /** physical line → 1-based data-row ordinal, so errors render "row N (file line M)" (A9). */
+  const [rowNoByLine, setRowNoByLine] = useState<Map<number, number>>(new Map());
+  const [mangled, setMangled] = useState(false);
   const [parseErr, setParseErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -1481,10 +1672,18 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
   const reset = () => {
     setPlan(null);
     setFormat(null);
+    setRowNoByLine(new Map());
+    setMangled(false);
     setParseErr("");
     setImportErr("");
     setFinished(false);
     setProgress(null);
+  };
+
+  const pickSource = (s: ImportSource) => {
+    reset();
+    setFileName("");
+    setSource(s);
   };
 
   const onFile = async (files: FileList | null) => {
@@ -1493,12 +1692,24 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
     reset();
     setFileName(file.name);
     try {
+      // A8: the plan needs the vault's projections — REFUSE honestly when this device has
+      // never completed a sync, rather than silently planning against an empty vault
+      // (which would quietly re-import everything as new).
+      if (store.lastSyncAt === null) {
+        setParseErr(
+          "Your vault hasn't finished its first sync on this device, so the import can't check what you already have. Wait for the sync (or press Sync now in the top bar), then pick the file again.",
+        );
+        return;
+      }
       const bytes = new Uint8Array(await file.arrayBuffer());
       const parsed = parseCsvImport(bytes);
       setFormat(parsed.format);
-      setPlan(planImport(parsed, () => crypto.randomUUID())); // ids minted ONCE, reused on retry
+      setRowNoByLine(rowOrdinalsByLine(bytes));
+      setMangled(looksHtmlMangled(parsed.rows)); // A10 — hint only, never auto-decode
+      // ids minted ONCE here, reused verbatim on Retry.
+      setPlan(planImport(parsed, store.importProjections(), () => crypto.randomUUID()));
     } catch (e) {
-      setParseErr(friendlyParseError(e));
+      setParseErr(friendlyParseError(e, source));
     } finally {
       if (fileInput.current) fileInput.current.value = "";
     }
@@ -1523,21 +1734,21 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
     }
   };
 
-  const report = plan?.report;
+  const report = plan?.report ?? null;
   const nothingToImport = plan !== null && plan.items.length === 0;
 
   return (
     <div className="sheet">
       <button type="button" className="link" onClick={onClose}>← back to vault</button>
-      <h2 style={{ marginTop: 12 }}>Import from browser CSV</h2>
-      <div className="muted" style={{ marginBottom: 18 }}>Chrome, Edge, or Firefox exported passwords · everything stays on this device</div>
+      <h2 style={{ marginTop: 12 }}>Import passwords</h2>
+      <div className="muted" style={{ marginBottom: 18 }}>from a browser or another password manager · everything stays on this device</div>
 
       {/* Always-visible plaintext caution. */}
       <div className="msg info" style={{ display: "block" }}>
-        <strong>⚠ This file holds every password in plaintext.</strong> Nothing about it is
-        uploaded — parsing happens here in your browser and each login is encrypted before it
-        is saved. After importing, delete the CSV and empty your trash. Importing the same file
-        again creates duplicate copies.
+        <strong>⚠ An exported CSV holds every password in plaintext.</strong> Nothing about it
+        is uploaded — parsing happens here in your browser and each item is encrypted before it
+        is saved. Items already in your vault are skipped — the preview shows exactly what will
+        be imported. When you're done, delete the CSV and empty your trash.
       </div>
 
       <input
@@ -1548,51 +1759,57 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
         onChange={(e) => onFile(e.target.files)}
       />
 
-      {finished ? (
+      {finished && report ? (
         <>
-          <div className="tiles" style={{ marginTop: 4 }}>
-            <div className="tile"><div className="tile-value tone-good">{report?.imported ?? 0}</div><div className="tile-label">Imported</div></div>
-            {(report?.collapsed ?? 0) > 0 && <div className="tile"><div className="tile-value">{report!.collapsed}</div><div className="tile-label">Merged</div></div>}
-            {(report?.flagged.length ?? 0) > 0 && <div className="tile"><div className="tile-value tone-mid">{report!.flagged.length}</div><div className="tile-label">Renamed</div></div>}
-            {(report?.skippedEmpty ?? 0) > 0 && <div className="tile"><div className="tile-value">{report!.skippedEmpty}</div><div className="tile-label">Skipped</div></div>}
-            {(report?.errors.length ?? 0) > 0 && <div className="tile"><div className="tile-value tone-bad">{report!.errors.length}</div><div className="tile-label">Errors</div></div>}
-          </div>
+          <ReportTiles report={report} done />
+          <ReportBuckets report={report} />
           <div className="msg info" style={{ display: "block" }}>
-            Added {report?.imported ?? 0} {(report?.imported ?? 0) === 1 ? "login" : "logins"} to your personal vault.
+            Added {report.imported} {report.imported === 1 ? "item" : "items"} to your personal vault.
             Now delete <strong>{fileName || "the CSV file"}</strong> and empty your trash.
           </div>
           <div className="actions">
             <button type="button" className="primary" onClick={onDone}>Done</button>
           </div>
         </>
-      ) : plan ? (
+      ) : plan && report ? (
         <>
           <div className="muted" style={{ marginBottom: 12 }}>
-            {fileName && <>“{fileName}” · </>}detected {format ? FORMAT_LABEL[format] : "browser"} export
-          </div>
-          <div className="tiles" style={{ marginTop: 4 }}>
-            <div className="tile"><div className="tile-value tone-good">{report!.imported}</div><div className="tile-label">To import</div></div>
-            <div className="tile"><div className="tile-value">{report!.collapsed}</div><div className="tile-label">Merged (dupes)</div></div>
-            <div className="tile"><div className="tile-value tone-mid">{report!.flagged.length}</div><div className="tile-label">Renamed</div></div>
-            <div className="tile"><div className="tile-value">{report!.skippedEmpty}</div><div className="tile-label">Skipped (empty)</div></div>
+            {fileName && <>“{fileName}” · </>}detected {format ? FORMAT_LABEL[format] : "password"} export
           </div>
 
-          {report!.flagged.length > 0 && (
+          {/* Detection is authoritative; a pick/detect mismatch is information, not an error. */}
+          {source && format && source.expects.length > 0 && !source.expects.includes(format) && (
             <div className="msg info" style={{ display: "block" }}>
-              Same site with different passwords — imported separately and renamed for you to review:{" "}
-              {report!.flagged.join(", ")}.
+              This file looks like a {FORMAT_LABEL[format]} export rather than one from {source.label} —
+              no problem, it's imported as {FORMAT_LABEL[format]}.
             </div>
           )}
 
-          {report!.errors.length > 0 && (
+          {/* A10: the copy-paste-from-a-browser-tab trap (classic LastPass). Hint only. */}
+          {mangled && (
+            <div className="msg info" style={{ display: "block" }}>
+              Several values in this file look HTML-mangled {"— “&” written as “&amp;”, for example —"}
+              which happens when CSV text is copied out of a browser tab instead of downloaded.
+              Nothing was decoded automatically; for a clean import, re-export via Advanced Options → Export
+              so a real file downloads.
+            </div>
+          )}
+
+          <ReportTiles report={report} done={false} />
+          <ReportBuckets report={report} />
+
+          {report.errors.length > 0 && (
             <div className="field">
-              <label>Rows skipped ({report!.errors.length})</label>
+              <label>Rows skipped ({report.errors.length})</label>
               <div className="table-scroll">
                 <table className="table">
-                  <thead><tr><th>Line</th><th>Problem</th></tr></thead>
+                  <thead><tr><th>Row</th><th>Problem</th></tr></thead>
                   <tbody>
-                    {report!.errors.map((err, idx) => (
-                      <tr key={`${err.line}-${idx}`}><td className="mono">{err.line}</td><td>{problemLabel(err.code)}</td></tr>
+                    {report.errors.map((err, idx) => (
+                      <tr key={`${err.line}-${idx}`}>
+                        <td className="mono">row {rowNoByLine.get(err.line) ?? "?"} (file line {err.line})</td>
+                        <td>{problemLabel(err.code)}</td>
+                      </tr>
                     ))}
                   </tbody>
                 </table>
@@ -1600,7 +1817,7 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
             </div>
           )}
 
-          {nothingToImport && <div className="msg info" style={{ display: "block" }}>Nothing to import from this file.</div>}
+          {nothingToImport && <div className="msg info" style={{ display: "block" }}>Nothing new to import from this file.</div>}
           {importErr && <div className="msg err">{importErr}</div>}
 
           {busy && progress && (
@@ -1617,18 +1834,45 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
               <button type="button" className="primary" disabled={busy} onClick={runImport}>{busy ? "Retrying…" : "Retry"}</button>
             ) : (
               <button type="button" className="primary" disabled={busy || nothingToImport} onClick={runImport}>
-                {busy ? "Importing…" : `Import ${report!.imported} ${report!.imported === 1 ? "login" : "logins"}`}
+                {busy ? "Importing…" : `Import ${report.imported} ${report.imported === 1 ? "item" : "items"}`}
               </button>
             )}
             <div className="spacer" />
             <button type="button" className="ghost" disabled={busy} onClick={() => { reset(); setFileName(""); }}>Choose a different file</button>
           </div>
         </>
-      ) : (
+      ) : source ? (
         <>
+          <div className="field">
+            <label>Export from {source.label}</label>
+            <ol className="steps">
+              {source.steps.map((step, i) => (
+                <li key={i}>{step}</li>
+              ))}
+            </ol>
+            {source.note && <div className="muted">{source.note}</div>}
+          </div>
           {parseErr && <div className="msg err">{parseErr}</div>}
           <div className="actions">
-            <button type="button" className="primary" onClick={() => fileInput.current?.click()}>Choose CSV file…</button>
+            <button type="button" className="primary" onClick={() => fileInput.current?.click()}>Choose the exported CSV…</button>
+            <div className="spacer" />
+            <button type="button" className="ghost" onClick={() => { reset(); setFileName(""); setSource(null); }}>
+              {source.id === "other" ? "← pick a source" : "My file is from somewhere else"}
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label>Where is your file from?</label>
+          </div>
+          <div className="source-grid">
+            {IMPORT_SOURCES.map((s) => (
+              <button key={s.id} type="button" className="source-card" onClick={() => pickSource(s)}>{s.label}</button>
+            ))}
+          </div>
+          <div className="actions">
+            <button type="button" className="ghost" onClick={() => pickSource(OTHER_SOURCE)}>My file is from somewhere else</button>
             <div className="spacer" />
             <button type="button" className="ghost" onClick={onClose}>Cancel</button>
           </div>

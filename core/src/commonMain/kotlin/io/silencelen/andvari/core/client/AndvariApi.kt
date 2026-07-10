@@ -78,7 +78,7 @@ data class Tokens(val accessToken: String, val refreshToken: String)
  * (android versionName, desktop packageVersion) stay equal to it, so a release bump can't
  * skew across artifacts again (0.4.0 shipped with two modules still claiming 0.3.0).
  */
-const val ANDVARI_CLIENT_VERSION = "0.7.0"
+const val ANDVARI_CLIENT_VERSION = "0.8.0"
 
 /**
  * Kotlin API client (sibling of web/src/api/client.ts). Auto-refreshes the access

@@ -1,5 +1,44 @@
 # andvari — changelog
 
+## 0.8.0 — guided importers (2026-07-09, cross-platform release)
+
+Queue item 5 (design: `docs/design/2026-07-09-guided-importers.md` — a 2-breaker design
+pass amended the contract BEFORE build, 5 workstreams built it, and a 5-lens adversarial
+review gated it). Everything client-side and zero-knowledge: import files never leave the
+device; the server sees only ordinary encrypted puts.
+
+- **Guided per-source import on all three clients.** The bare "CSV upload" became named
+  flows — Chrome / Edge / Brave / Opera (one shared Chromium parser), Firefox, Bitwarden,
+  1Password, LastPass — each with real export instructions. The pick tailors instructions
+  and hints only; header detection stays authoritative (specificity-ordered required sets,
+  so a pre-2023 LastPass file can never misroute into the Chrome parser). **Desktop gains
+  the entire import flow** (it had none).
+- **Three new format adapters, both impls, vector-pinned** (`import-foreign.json`; the
+  original `import.json` byte-frozen and still passing identically): Bitwarden (logins +
+  secure notes, custom fields preserved into notes, multi-URI splits, unknown types
+  enumerated), LastPass (secure-note rows import as notes; pre-2023 7-column exports
+  supported; HTML-mangle heuristic warns on copy-paste exports), 1Password 8 (archived
+  items skipped + enumerated; the Apple/Safari CSV header imports through the same
+  adapter). Foreign TOTP seeds only land in the TOTP field when they actually parse —
+  steam:// and friends are preserved as text and enumerated, never stored as broken 2FA.
+- **Vault-aware dedupe (F75).** The plan now checks the personal vault: exact matches are
+  skipped ("already in your vault" — URL matching by the same normalizer autofill uses,
+  TOTP compared by parsed parameters), same-site-different-secret imports as a renamed NEW
+  item with "password differs" / "2FA differs" called out — the existing vault item is
+  never touched, and re-importing your own export is a clean no-op. Refuse-not-degrade:
+  if the vault can't be checked, the import says so instead of silently skipping the check.
+- **Import report, grown up.** Every skip/rename path enumerated by name (notes imported,
+  already-in-vault, differs, archived, unsupported types, unsupported TOTP), errors as
+  "row N (file line M)" so multi-line notes can't desync the numbers, and one shared TOTP
+  normalizer across all editors (core-hoisted).
+- **F56 perf pack (measured at 10k items, fixes applied server-side, wire untouched):**
+  the sync pull's OR-join lost its index bound and scanned every granted item on every
+  pull — rewritten as two disjoint indexed arms (no-op pull query ~150× faster); orphan GC
+  no longer holds the DB lock across filesystem work (max request stall 591 ms → ≤16 ms);
+  a partial index makes the Trash janitor scan O(tombstones). Full measurements in
+  `docs/design/2026-07-09-importers-perf-addendum.md`; pull paging deliberately
+  recommend-only (10.4 MB / ~300 ms at 10k does not justify a wire change yet).
+
 ## 0.7.0 — cards & wallet items (2026-07-09, cross-platform release; card-create dark under Option A)
 
 The full cards cycle in one day (design: `docs/design/2026-07-09-cards-wallet.md`,

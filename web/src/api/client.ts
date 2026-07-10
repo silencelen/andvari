@@ -37,7 +37,7 @@ import type {
   WsTicketResponse,
 } from "./types";
 
-export const CLIENT_VERSION = "0.7.0";
+export const CLIENT_VERSION = "0.8.0";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
 
 export class ApiError extends Error {

@@ -345,7 +345,21 @@ class Service(
         val results = repo.db.tx { c ->
             mutations.map { m -> applyMutation(c, principal, m, affectedUsers, filesToUnlink, ip) }
         }
-        filesToUnlink.forEach { attachments.file(it).delete() }
+        // Post-commit unlink carries the same TOCTOU as sweepOrphans' swept-row pass
+        // (2026-07-09 review): an idempotent re-upload of one of these ids, its commit tx
+        // queued behind this batch's lock, can INSERT a fresh row and rename its blob into
+        // place before this thread unlinks — deleting just-committed ciphertext behind that
+        // upload's 200, unrepairably (the idempotent branch never rewrites the file, and an
+        // edit-over-tombstone put can re-reference the row). Re-check row absence and unlink
+        // INSIDE one short db.read: store()'s commit needs the same lock, so check+unlink
+        // are atomic against it. Unlike the sweep (whole-dir, hundreds of ms) this is
+        // bounded by the batch's tombstoned attachments — the lock hold is microseconds —
+        // and unlike an mtime cutoff it still deletes young blobs of deleted items promptly.
+        if (filesToUnlink.isNotEmpty()) {
+            repo.db.read { c ->
+                filesToUnlink.forEach { if (attachments.rowById(c, it) == null) attachments.file(it).delete() }
+            }
+        }
         val rev = repo.db.read { repo.currentRev(it) }
         if (affectedUsers.isNotEmpty()) onChange(affectedUsers, rev)
         return PushResponse(rev, results)

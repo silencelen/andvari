@@ -1,0 +1,1215 @@
+{
+  "cases": [
+    {
+      "name": "bitwarden-basic",
+      "csv": "folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n,1,login,GitHub,,,0,https://github.com,jacob,s3cret!,JBSWY3DPEHPK3PXP\n,,login,Work VPN,team creds,PIN: 4321,0,\"https://vpn.corp.example,https://vpn2.corp.example\",jacob,vpnpass,\n,true,login,Forum,,,0,https://forum.example,jo,fpw,\n,0,note,Wifi,pass: hunter2,SSID: nest,0,,,,\n,,card,Visa ending 4242,,,0,,,,\n",
+      "existing": null,
+      "expect": {
+        "format": "bitwarden",
+        "report": {
+          "imported": 4,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [
+            "Visa ending 4242"
+          ],
+          "totpUnsupported": [],
+          "noteItems": [
+            "Wifi"
+          ],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "GitHub",
+            "notes": null,
+            "favorite": true,
+            "login": {
+              "username": "jacob",
+              "password": "s3cret!",
+              "uris": [
+                "https://github.com"
+              ],
+              "totp": "otpauth://totp/andvari?secret=JBSWY3DPEHPK3PXP"
+            }
+          },
+          {
+            "type": "login",
+            "name": "Work VPN",
+            "notes": "team creds\n— custom fields —\nPIN: 4321",
+            "favorite": false,
+            "login": {
+              "username": "jacob",
+              "password": "vpnpass",
+              "uris": [
+                "https://vpn.corp.example",
+                "https://vpn2.corp.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Forum",
+            "notes": null,
+            "favorite": true,
+            "login": {
+              "username": "jo",
+              "password": "fpw",
+              "uris": [
+                "https://forum.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "note",
+            "name": "Wifi",
+            "notes": "pass: hunter2\n— custom fields —\nSSID: nest",
+            "favorite": false,
+            "login": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "bitwarden-org-collections",
+      "csv": "collections,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\nEngineering,login,Jira,,,0,https://jira.corp.example,kai,jirapw,\nEngineering,note,Runbook,steps here,,0,,,,\n",
+      "existing": null,
+      "expect": {
+        "format": "bitwarden",
+        "report": {
+          "imported": 2,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [
+            "Runbook"
+          ],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Jira",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "kai",
+              "password": "jirapw",
+              "uris": [
+                "https://jira.corp.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "note",
+            "name": "Runbook",
+            "notes": "steps here",
+            "favorite": false,
+            "login": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "lastpass-8col",
+      "csv": "url,username,password,totp,extra,name,grouping,fav\nhttps://bank.example,jo,bankpw,,,Bank,Finance,0\nhttp://sn,,,,\"NoteType:Bank Account\nrouting: 123456\",Acct numbers,Finance,0\nhttps://mail.example/inbox,ana,mailpw,,keep me,,Personal,1\nhttps://2fa.example,kai,2fapw,otpauth://totp/2FA:kai?secret=JBSWY3DPEHPK3PXP&digits=6,,TwoFA,,1\nhttps://broken.example,jo\n",
+      "existing": null,
+      "expect": {
+        "format": "lastpass",
+        "report": {
+          "imported": 4,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [
+            "Acct numbers"
+          ],
+          "errors": [
+            {
+              "line": 7,
+              "code": "wrong_field_count"
+            }
+          ]
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Bank",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "jo",
+              "password": "bankpw",
+              "uris": [
+                "https://bank.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "note",
+            "name": "Acct numbers",
+            "notes": "NoteType:Bank Account\nrouting: 123456",
+            "favorite": false,
+            "login": null
+          },
+          {
+            "type": "login",
+            "name": "mail.example",
+            "notes": "keep me",
+            "favorite": true,
+            "login": {
+              "username": "ana",
+              "password": "mailpw",
+              "uris": [
+                "https://mail.example/inbox"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "TwoFA",
+            "notes": null,
+            "favorite": true,
+            "login": {
+              "username": "kai",
+              "password": "2fapw",
+              "uris": [
+                "https://2fa.example"
+              ],
+              "totp": "otpauth://totp/2FA:kai?secret=JBSWY3DPEHPK3PXP&digits=6"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "lastpass-7col-pre2023",
+      "csv": "url,username,password,extra,name,grouping,fav\nhttps://old.example,jo,oldpw,,Old Site,,0\nhttp://sn,,,Body of note,Note From 2019,,0\n",
+      "existing": null,
+      "expect": {
+        "format": "lastpass",
+        "report": {
+          "imported": 2,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [
+            "Note From 2019"
+          ],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Old Site",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "jo",
+              "password": "oldpw",
+              "uris": [
+                "https://old.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "note",
+            "name": "Note From 2019",
+            "notes": "Body of note",
+            "favorite": false,
+            "login": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "onepassword-basic",
+      "csv": "title,url,username,password,otpauth,favorite,archived,tags,notes\nGitHub,https://github.com,jacob,ghpw,otpauth://totp/GitHub:jacob?secret=JBSWY3DPEHPK3PXP,,,work,signin note\nOld Bank,https://oldbank.example,jo,obpw,,,TRUE,,\nForum,https://forum.example,kai,fpw,,true,,,\n",
+      "existing": null,
+      "expect": {
+        "format": "1password",
+        "report": {
+          "imported": 2,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [
+            "Old Bank"
+          ],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "GitHub",
+            "notes": "signin note",
+            "favorite": false,
+            "login": {
+              "username": "jacob",
+              "password": "ghpw",
+              "uris": [
+                "https://github.com"
+              ],
+              "totp": "otpauth://totp/GitHub:jacob?secret=JBSWY3DPEHPK3PXP"
+            }
+          },
+          {
+            "type": "login",
+            "name": "Forum",
+            "notes": null,
+            "favorite": true,
+            "login": {
+              "username": "kai",
+              "password": "fpw",
+              "uris": [
+                "https://forum.example"
+              ],
+              "totp": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "apple-safari-via-1password",
+      "csv": "Title,URL,Username,Password,Notes,OTPAuth\nApple ID,https://appleid.apple.com,jo@icloud.example,applepw,my note,otpauth://totp/Apple:jo?secret=JBSWY3DPEHPK3PXP\n",
+      "existing": null,
+      "expect": {
+        "format": "1password",
+        "report": {
+          "imported": 1,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Apple ID",
+            "notes": "my note",
+            "favorite": false,
+            "login": {
+              "username": "jo@icloud.example",
+              "password": "applepw",
+              "uris": [
+                "https://appleid.apple.com"
+              ],
+              "totp": "otpauth://totp/Apple:jo?secret=JBSWY3DPEHPK3PXP"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "andvari-export-detects-chrome",
+      "csv": "name,url,username,password,note,totp\nVault Item,https://site.example,jo,pw,exported,JBSWY3DPEHPK3PXP\n",
+      "existing": null,
+      "expect": {
+        "format": "chrome",
+        "report": {
+          "imported": 1,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Vault Item",
+            "notes": "exported",
+            "favorite": false,
+            "login": {
+              "username": "jo",
+              "password": "pw",
+              "uris": [
+                "https://site.example"
+              ],
+              "totp": "JBSWY3DPEHPK3PXP"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "totp-matrix-lastpass",
+      "csv": "url,username,password,totp,extra,name,grouping,fav\nhttps://t1.example,u,p,steam://ABCD1234,,Steam,,0\nhttps://t2.example,u,p,otpauth://hotp/X?secret=JBSWY3DPEHPK3PXP&counter=1,,Hotp,,0\nhttps://t3.example,u,p,not a secret!,,Garbage,,0\nhttps://t4.example,u,p,JBSWY3DPEHPK3PXP,,BareUpper,,0\nhttps://t5.example,u,p,jbswy3dpehpk3pxp,,barelower,,0\nhttps://t6.example,u,p,JBSW Y3DP EHPK 3PXP,,Spaced,,0\nhttps://t7.example,u,p,otpauth://totp/My Site?secret=JBSWY3DPEHPK3PXP,,SpacedUri,,0\n",
+      "existing": null,
+      "expect": {
+        "format": "lastpass",
+        "report": {
+          "imported": 7,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [
+            "Steam",
+            "Hotp",
+            "Garbage"
+          ],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Steam",
+            "notes": "Unsupported TOTP (kept as text): steam://ABCD1234",
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://t1.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Hotp",
+            "notes": "Unsupported TOTP (kept as text): otpauth://hotp/X?secret=JBSWY3DPEHPK3PXP&counter=1",
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://t2.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Garbage",
+            "notes": "Unsupported TOTP (kept as text): not a secret!",
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://t3.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "BareUpper",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://t4.example"
+              ],
+              "totp": "otpauth://totp/andvari?secret=JBSWY3DPEHPK3PXP"
+            }
+          },
+          {
+            "type": "login",
+            "name": "barelower",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://t5.example"
+              ],
+              "totp": "otpauth://totp/andvari?secret=jbswy3dpehpk3pxp"
+            }
+          },
+          {
+            "type": "login",
+            "name": "Spaced",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://t6.example"
+              ],
+              "totp": "otpauth://totp/andvari?secret=JBSWY3DPEHPK3PXP"
+            }
+          },
+          {
+            "type": "login",
+            "name": "SpacedUri",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://t7.example"
+              ],
+              "totp": "otpauth://totp/MySite?secret=JBSWY3DPEHPK3PXP"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "dedupe-exact-uri-shapes",
+      "csv": "name,url,username,password,note,totp\nGitHub,https://github.com/login,jacob,pw1,,\nGitHub,GITHUB.COM,jacob,pw1,,\nGitHub,http://www.github.com,jacob,pw1,,\nMulti,https://b.example/deep?q=1,kai,pw2,,\nNewbie,https://new.example,jo,npw,,\n",
+      "existing": {
+        "logins": [
+          {
+            "name": "GitHub",
+            "uris": [
+              "https://www.github.com/"
+            ],
+            "username": "jacob",
+            "password": "pw1",
+            "totp": null
+          },
+          {
+            "name": "Multi",
+            "uris": [
+              "https://a.example",
+              "https://b.example/x"
+            ],
+            "username": "kai",
+            "password": "pw2",
+            "totp": null
+          }
+        ],
+        "notes": [],
+        "names": [
+          "GitHub",
+          "Multi"
+        ]
+      },
+      "expect": {
+        "format": "chrome",
+        "report": {
+          "imported": 1,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [
+            "GitHub",
+            "GitHub",
+            "GitHub",
+            "Multi"
+          ],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Newbie",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "jo",
+              "password": "npw",
+              "uris": [
+                "https://new.example"
+              ],
+              "totp": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "dedupe-password-differs",
+      "csv": "name,url,username,password,note,totp\nGitHub,https://github.com,jacob,newpw,,\nGitHub,https://github.com,jacob,thirdpw,,\n",
+      "existing": {
+        "logins": [
+          {
+            "name": "GitHub",
+            "uris": [
+              "https://github.com"
+            ],
+            "username": "jacob",
+            "password": "oldpw",
+            "totp": null
+          }
+        ],
+        "notes": [],
+        "names": [
+          "GitHub"
+        ]
+      },
+      "expect": {
+        "format": "chrome",
+        "report": {
+          "imported": 2,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [
+            "GitHub (2)",
+            "GitHub (3)"
+          ],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "GitHub (2)",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "jacob",
+              "password": "newpw",
+              "uris": [
+                "https://github.com"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "GitHub (3)",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "jacob",
+              "password": "thirdpw",
+              "uris": [
+                "https://github.com"
+              ],
+              "totp": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "dedupe-totp-differs",
+      "csv": "name,url,username,password,note,totp\nTwoFA,https://2fa.example,kai,pw,,otpauth://totp/T?secret=MFRGGZDFMZTWQ2LK\nTwoFA,https://2fa.example,kai,otherpw,,otpauth://totp/T?secret=MFRGGZDFMZTWQ2LK\nTwoFA,https://2fa.example,kai,pw,,JBSWY3DPEHPK3PXP\n",
+      "existing": {
+        "logins": [
+          {
+            "name": "TwoFA",
+            "uris": [
+              "https://2fa.example"
+            ],
+            "username": "kai",
+            "password": "pw",
+            "totp": "otpauth://totp/T?secret=JBSWY3DPEHPK3PXP"
+          }
+        ],
+        "notes": [],
+        "names": [
+          "TwoFA"
+        ]
+      },
+      "expect": {
+        "format": "chrome",
+        "report": {
+          "imported": 2,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [
+            "TwoFA"
+          ],
+          "passwordDiffers": [
+            "TwoFA (3)"
+          ],
+          "totpDiffers": [
+            "TwoFA (2)"
+          ],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "TwoFA (2)",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "kai",
+              "password": "pw",
+              "uris": [
+                "https://2fa.example"
+              ],
+              "totp": "otpauth://totp/T?secret=MFRGGZDFMZTWQ2LK"
+            }
+          },
+          {
+            "type": "login",
+            "name": "TwoFA (3)",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "kai",
+              "password": "otherpw",
+              "uris": [
+                "https://2fa.example"
+              ],
+              "totp": "otpauth://totp/T?secret=MFRGGZDFMZTWQ2LK"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "dedupe-totp-wildcard-7col",
+      "csv": "url,username,password,extra,name,grouping,fav\nhttps://w.example,u,p,,Legacy,,0\nhttps://w.example,u,q,,Legacy,,0\n",
+      "existing": {
+        "logins": [
+          {
+            "name": "Legacy",
+            "uris": [
+              "https://w.example"
+            ],
+            "username": "u",
+            "password": "p",
+            "totp": "otpauth://totp/L?secret=JBSWY3DPEHPK3PXP"
+          }
+        ],
+        "notes": [],
+        "names": [
+          "Legacy"
+        ]
+      },
+      "expect": {
+        "format": "lastpass",
+        "report": {
+          "imported": 1,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [
+            "Legacy"
+          ],
+          "passwordDiffers": [
+            "Legacy (2)"
+          ],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Legacy (2)",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "q",
+              "uris": [
+                "https://w.example"
+              ],
+              "totp": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "dedupe-empty-discriminator",
+      "csv": "name,url,username,password,note\nRecovery codes,,,12345,\nRecovery codes,,,99999,\nRouter admin,,admin,routerpw,\n",
+      "existing": {
+        "logins": [
+          {
+            "name": "Recovery codes",
+            "uris": [],
+            "username": "",
+            "password": "12345",
+            "totp": null
+          },
+          {
+            "name": "Router admin",
+            "uris": [
+              ""
+            ],
+            "username": "admin",
+            "password": "routerpw",
+            "totp": null
+          }
+        ],
+        "notes": [],
+        "names": [
+          "Recovery codes",
+          "Router admin"
+        ]
+      },
+      "expect": {
+        "format": "chrome",
+        "report": {
+          "imported": 1,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [
+            "Recovery codes",
+            "Router admin"
+          ],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Recovery codes",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "",
+              "password": "99999",
+              "uris": [],
+              "totp": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "dedupe-note-crlf",
+      "csv": "folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n,,note,Wifi,\"line1\nline2\",,0,,,,\n,,note,Router,\"a\nb\",,0,,,,\n,,note,Wifi,different body,,0,,,,\n",
+      "existing": {
+        "logins": [],
+        "notes": [
+          {
+            "name": "Wifi",
+            "notes": "line1\r\nline2"
+          },
+          {
+            "name": "Router",
+            "notes": "a\rb"
+          }
+        ],
+        "names": [
+          "Wifi",
+          "Router"
+        ]
+      },
+      "expect": {
+        "format": "bitwarden",
+        "report": {
+          "imported": 1,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [
+            "Wifi",
+            "Router"
+          ],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [
+            "Wifi"
+          ],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "note",
+            "name": "Wifi",
+            "notes": "different body",
+            "favorite": false,
+            "login": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "notes-multi-in-file",
+      "csv": "folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n,,note,Recovery,codes for a,,0,,,,\n,,note,Recovery,codes for b,,0,,,,\n,,note,Recovery,codes for a,,0,,,,\n,,note,,,,0,,,,\n,,login,Empty1,,,0,https://e.example,,,\n",
+      "existing": null,
+      "expect": {
+        "format": "bitwarden",
+        "report": {
+          "imported": 2,
+          "skippedEmpty": 2,
+          "collapsed": 1,
+          "flagged": [
+            "Recovery (2)"
+          ],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [
+            "Recovery",
+            "Recovery (2)"
+          ],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "note",
+            "name": "Recovery",
+            "notes": "codes for a",
+            "favorite": false,
+            "login": null
+          },
+          {
+            "type": "note",
+            "name": "Recovery (2)",
+            "notes": "codes for b",
+            "favorite": false,
+            "login": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "rename-until-free",
+      "csv": "name,url,username,password,note\nSite,https://s.example,u,p2,\nDup (2),https://d2.example,x,pw,\nDup,https://d.example,y,pw1,\nDup,https://d.example,y,pw2,\n",
+      "existing": {
+        "logins": [
+          {
+            "name": "Site",
+            "uris": [
+              "https://s.example"
+            ],
+            "username": "u",
+            "password": "p1",
+            "totp": null
+          }
+        ],
+        "notes": [],
+        "names": [
+          "Site",
+          "Site (2)"
+        ]
+      },
+      "expect": {
+        "format": "chrome",
+        "report": {
+          "imported": 4,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [
+            "Dup (3)"
+          ],
+          "alreadyInVault": [],
+          "passwordDiffers": [
+            "Site (3)"
+          ],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Site (3)",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p2",
+              "uris": [
+                "https://s.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Dup (2)",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "x",
+              "password": "pw",
+              "uris": [
+                "https://d2.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Dup",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "y",
+              "password": "pw1",
+              "uris": [
+                "https://d.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Dup (3)",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "y",
+              "password": "pw2",
+              "uris": [
+                "https://d.example"
+              ],
+              "totp": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "truthiness-matrix",
+      "csv": "url,username,password,totp,extra,name,grouping,fav\nhttps://f0.example,u,p,,,Fav0,,1\nhttps://f1.example,u,p,,,Fav1,,true\nhttps://f2.example,u,p,,,Fav2,,y\nhttps://f3.example,u,p,,,Fav3,,YES\nhttps://f4.example,u,p,,,Fav4,,\" 1 \"\nhttps://f5.example,u,p,,,Fav5,,0\nhttps://f6.example,u,p,,,Fav6,,false\nhttps://f7.example,u,p,,,Fav7,,\nhttps://f8.example,u,p,,,Fav8,,no\nhttps://f9.example,u,p,,,Fav9,,2\n",
+      "existing": null,
+      "expect": {
+        "format": "lastpass",
+        "report": {
+          "imported": 10,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "Fav0",
+            "notes": null,
+            "favorite": true,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://f0.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Fav1",
+            "notes": null,
+            "favorite": true,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://f1.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Fav2",
+            "notes": null,
+            "favorite": true,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://f2.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Fav3",
+            "notes": null,
+            "favorite": true,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://f3.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Fav4",
+            "notes": null,
+            "favorite": true,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://f4.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Fav5",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://f5.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Fav6",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://f6.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Fav7",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://f7.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Fav8",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://f8.example"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "Fav9",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u",
+              "password": "p",
+              "uris": [
+                "https://f9.example"
+              ],
+              "totp": null
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "reject": [
+    {
+      "name": "onepassword-old-shape",
+      "csv": "title,url,username,password\nOld,https://o.example,u,p\n",
+      "error": "unrecognized_header"
+    }
+  ]
+}

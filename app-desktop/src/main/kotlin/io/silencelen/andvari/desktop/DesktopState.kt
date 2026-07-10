@@ -129,11 +129,23 @@ class DesktopState(private val scope: CoroutineScope) {
         private set
     var totpError by mutableStateOf<String?>(null)
         private set
-    // CSV import (spec 06): a preview/plan kept across a retry so an interrupted import
-    // replays the SAME itemIds idempotently instead of duplicating.
+    // CSV import (spec 06 + guided importers): a preview/plan kept across a retry so an
+    // interrupted import replays the SAME itemIds idempotently instead of duplicating.
     var importPlan by mutableStateOf<CsvImport.ImportPlan?>(null)
         private set
     var importFormat by mutableStateOf<CsvImport.ImportFormat?>(null)
+        private set
+    // The guide the user picked — instructions + the preview's mismatch hint only; header
+    // detection stays authoritative (a Bitwarden file picked under "Chrome" imports fine).
+    var importSource by mutableStateOf<ImportSource?>(null)
+        private set
+    // A10 LastPass mangle heuristic: several parsed values look HTML-entity-encoded
+    // (&amp; and friends) — the preview shows a re-export hint. Never auto-decoded.
+    var importMangled by mutableStateOf(false)
+
+    /** A9: physical file line → 1-based data-row ordinal, so a row error reads
+     *  "row N (file line M)" even when a multi-line quoted note shifts physical lines. */
+    var importRowOrdinals by mutableStateOf<Map<Int, Int>>(emptyMap())
         private set
     var importReport by mutableStateOf<CsvImport.ImportReport?>(null)
         private set
@@ -360,20 +372,46 @@ class DesktopState(private val scope: CoroutineScope) {
         backgroundSync()
     }
 
-    // ---- CSV import (spec 06) ----
+    // ---- CSV import (spec 06 + guided importers, design 2026-07-09) ----
 
-    /** Length precheck (never read a multi-GB file) → parse + plan a browser CSV on-device. */
-    fun importFromFile(file: File) {
-        val acct = account ?: return
+    /**
+     * Bounded read → parse → vault-aware plan, all on-device (nothing is uploaded).
+     * [source] is the guide the user picked — it informs instructions and the mismatch
+     * hint ONLY; header detection stays authoritative. The plan step REFUSES (A8) when
+     * the personal vault's projections aren't available rather than silently planning
+     * against an empty vault (every duplicate would sail in unflagged).
+     */
+    fun importFromFile(file: File, source: ImportSource) {
         importDismiss()
-        if (file.length() > CsvImport.MAX_BYTES) { importError = friendlyImport("too_large"); return }
-        val bytes = try { file.readBytes() } catch (t: Throwable) { importError = "Couldn't read ${file.name}: ${t.message}"; return }
+        importSource = source
+        val eng = engine
+        val acct = account
+        // A8: the existing-items seam is core-owned and REFUSES rather than degrades —
+        // locked, or a personal vault that hasn't hydrated/synced yet, must never plan
+        // against an empty `existing` (that would silently disable the dedupe). Mirrors
+        // the Android ViewModel's gate exactly.
+        if (eng == null || acct == null || eng.vaultInfos().none { it.vaultId == acct.personalVaultId }) {
+            importError = "Couldn’t check your vault for items you already have — unlock and sync first, then try the import again."
+            return
+        }
+        // BOUNDED read (mirrors Android's readBounded): the cap is enforced while
+        // streaming, so a mislabeled multi-GB pick is rejected without being buffered.
+        val bytes = try {
+            file.inputStream().use { readBounded(it, CsvImport.MAX_BYTES) }
+        } catch (t: Throwable) {
+            importError = "Couldn't read ${file.name}: ${t.message}"; return
+        }
+        if (bytes == null) { importError = friendlyImport("too_large", source); return }
         try {
             val parsed = CsvImport.parse(bytes)
             importFormat = parsed.format
-            importPlan = CsvImport.plan(parsed) { acct.newItemId() }
+            importMangled = looksHtmlMangled(parsed)
+            importRowOrdinals = CsvImport.rowOrdinalsByLine(bytes) // A9, same reader as parse
+            // Vault-aware plan (F75): `existing` = the personal vault's light projections,
+            // built by the core-owned builder — never raw item lists mapped here (A8).
+            importPlan = CsvImport.plan(parsed, eng.importProjections()) { acct.newItemId() }
         } catch (e: CsvImport.ImportException) {
-            importError = friendlyImport(e.code)
+            importError = friendlyImport(e.code, source)
         } catch (t: Throwable) {
             importError = t.message ?: "could not read that file"
         }
@@ -401,15 +439,53 @@ class DesktopState(private val scope: CoroutineScope) {
     }
 
     fun importDismiss() {
-        importPlan = null; importFormat = null; importReport = null
+        importPlan = null; importFormat = null; importReport = null; importSource = null
         importError = null; importProgress = null; importBusy = false; importDone = false
+        importMangled = false
     }
 
-    private fun friendlyImport(code: String): String = when (code) {
-        "too_large" -> "That file is larger than 10 MiB — far bigger than any real browser password export."
-        "too_many_rows" -> "That file has more than 10,000 logins. Split it into smaller files and import each."
-        "unrecognized_header" -> "This doesn’t look like a Chrome, Edge, or Firefox password export."
+    private fun friendlyImport(code: String, source: ImportSource?): String = when (code) {
+        "too_large" -> "That file is larger than 10 MiB — far bigger than any real password export."
+        "too_many_rows" -> "That file has more than 10,000 rows. Split it into smaller files and import each."
+        "unrecognized_header" -> when (source) {
+            // Per-source hint (design): older 1Password CSV shapes vary too wildly to read.
+            ImportSource.ONEPASSWORD ->
+                "This doesn’t look like a 1Password 8 CSV. Older 1Password export shapes vary — export from 1Password 8+ as CSV, or use a Bitwarden CSV as an intermediate."
+            null -> "This doesn’t look like a password export this app understands."
+            else -> "This doesn’t look like a ${source.label} export — or any password CSV this app understands. Re-check the export steps and try again."
+        }
         else -> "That file could not be read ($code)."
+    }
+
+    /**
+     * Read at most [limit] bytes from [input]; return null if the source is larger (so a
+     * multi-GB pick is rejected without ever being buffered in memory). Mirrors Android's
+     * readBounded and CsvImport's own size cap, so a file that fits here also passes parse().
+     */
+    private fun readBounded(input: java.io.InputStream, limit: Int): ByteArray? {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val r = input.read(buf)
+            if (r < 0) break
+            total += r
+            if (total > limit) return null
+            out.write(buf, 0, r)
+        }
+        return out.toByteArray()
+    }
+
+    /** A10: fires when MULTIPLE parsed values carry HTML entities — one legitimate
+     *  "&amp;" in a single note shouldn't cry wolf, a file full of them should. */
+    private fun looksHtmlMangled(parsed: CsvImport.Parsed): Boolean {
+        var hits = 0
+        for (row in parsed.rows) {
+            for (v in listOf(row.name, row.url, row.username, row.password, row.notes, row.totp ?: "")) {
+                if (HTML_ENTITY.containsMatchIn(v) && ++hits >= 2) return true
+            }
+        }
+        return false
     }
 
     /** Seed-derived identity short code (spec 01 §5) — read out during sharing verification. */
@@ -919,5 +995,86 @@ class DesktopState(private val scope: CoroutineScope) {
 
     private companion object {
         const val POLL_INTERVAL_MS = 5L * 60 * 1000 // spec 03 §6 poll interval
+
+        /** A10's pinned pattern — the entities a LastPass in-page export mangles values with. */
+        val HTML_ENTITY = Regex("&(amp|lt|gt|quot|#\\d+);")
     }
+}
+
+/**
+ * Guided-import sources (design 2026-07-09): the eight picker entries. Each carries its
+ * display label, the format(s) a file from it is EXPECTED to detect as, and 2–4 numbered
+ * export steps. The pick informs instructions and the preview's mismatch hint only —
+ * header detection stays authoritative.
+ *
+ * [expectedFormats] matches on ImportFormat.name STRINGS deliberately: the three new core
+ * constants land in a parallel workstream and "1password" cannot be a Kotlin identifier,
+ * so this file must not hard-reference a guessed spelling (both plausible ones are listed).
+ */
+enum class ImportSource(val label: String, val expectedFormats: Set<String>, val steps: List<String>) {
+    CHROME(
+        "Chrome", setOf("CHROME"),
+        listOf(
+            "Open chrome://password-manager/settings (Menu ⋮ → Passwords and autofill → Google Password Manager → Settings).",
+            "Under “Export passwords”, choose Download file.",
+            "Save the CSV, then choose it here.",
+        ),
+    ),
+    EDGE(
+        "Edge", setOf("CHROME"),
+        listOf(
+            "Open edge://wallet/passwords.",
+            "Click ⋯ next to “Saved passwords” and choose Export passwords.",
+            "Confirm with your device sign-in and save the CSV.",
+        ),
+    ),
+    BRAVE(
+        "Brave", setOf("CHROME"),
+        listOf(
+            "Open brave://password-manager/settings.",
+            "Under “Export passwords”, choose Download file.",
+            "Save the CSV, then choose it here.",
+        ),
+    ),
+    OPERA(
+        "Opera", setOf("CHROME"),
+        listOf(
+            "Open opera://settings/passwords.",
+            "Next to “Saved Passwords”, click ⋮ and choose Export passwords.",
+            "Save the CSV, then choose it here.",
+        ),
+    ),
+    FIREFOX(
+        "Firefox", setOf("FIREFOX"),
+        listOf(
+            "Menu ☰ → Passwords (about:logins).",
+            "Click ⋯ (top right) → Export passwords…",
+            "Confirm with your device sign-in and save the CSV.",
+        ),
+    ),
+    BITWARDEN(
+        "Bitwarden", setOf("BITWARDEN"),
+        listOf(
+            "In the web vault or desktop app: Tools → Export vault.",
+            "File format: .csv (not .json).",
+            "Confirm your master password and save the file.",
+        ),
+    ),
+    ONEPASSWORD(
+        "1Password", setOf("ONEPASSWORD", "ONE_PASSWORD"),
+        listOf(
+            "In the 1Password 8 desktop app: File → Export → your account.",
+            "Format: CSV, then confirm your account password.",
+            "1Password 8 or newer only — older exports vary too much to read reliably.",
+        ),
+    ),
+    LASTPASS(
+        // A10: the instruction block pins the file-download export path.
+        "LastPass", setOf("LASTPASS"),
+        listOf(
+            "In your LastPass vault: Advanced Options → Export.",
+            "Choose the file download — if a page of text opens instead, values can arrive HTML-mangled; don’t copy-paste it.",
+            "Save the CSV, then choose it here.",
+        ),
+    ),
 }

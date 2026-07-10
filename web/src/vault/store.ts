@@ -23,6 +23,7 @@ import {
   verifyProof,
 } from "../crypto/lifecycleproof";
 import { randomBytes, sha256 } from "../crypto/provider";
+import type { ImportProjections } from "../import/csv";
 import { ITEM_FORMAT_VERSION, type Account } from "./account";
 
 export interface VaultItem {
@@ -939,6 +940,42 @@ export class VaultStore {
   /** Item undelete (F49): "Delete forever" — hard-delete a tombstoned item (+ its versions). */
   async purgeDeleted(itemId: string): Promise<void> {
     await this.api.purgeItem(itemId);
+  }
+
+  /**
+   * F75 (guided importers): light projections of the PERSONAL vault for the vault-aware
+   * import plan — the store-owned `existing` seam (design 2026-07-09 A8; core
+   * SyncEngine.importProjections is the Kotlin twin). Personal vault ONLY — imports land
+   * there, and a copy living in a shared vault is not the same item. Absent fields map
+   * to ""/[]/null (A7) so the planner's keys are total; `names` carries ALL personal
+   * display names (every item type) — the A9 rename-collision set. REFUSES (throws)
+   * rather than silently planning against an empty projection when this device has
+   * never completed a sync — the caller shows the honest "couldn't check your vault"
+   * copy instead of quietly re-importing everything as new.
+   */
+  importProjections(): ImportProjections {
+    if (this._lastSyncAt === null) {
+      throw new Error("vault not synced on this device yet — import would plan against an empty projection");
+    }
+    const logins: ImportProjections["logins"] = [];
+    const notes: ImportProjections["notes"] = [];
+    const names: string[] = [];
+    for (const it of this.itemsById.values()) {
+      if (it.vaultId !== this.account.personalVaultId) continue;
+      names.push(it.doc.name);
+      if (it.doc.type === "login") {
+        logins.push({
+          name: it.doc.name,
+          uris: it.doc.login?.uris ?? [],
+          username: it.doc.login?.username ?? "",
+          password: it.doc.login?.password ?? "",
+          totp: it.doc.login?.totp ?? null,
+        });
+      } else if (it.doc.type === "note") {
+        notes.push({ name: it.doc.name, notes: it.doc.notes ?? "" });
+      }
+    }
+    return { logins, notes, names };
   }
 
   /**

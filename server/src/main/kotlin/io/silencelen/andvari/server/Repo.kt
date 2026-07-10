@@ -329,10 +329,20 @@ class Repo(val db: Db) {
                 sealedVk = rs.getString("sealedVk"),
             )
         }
+        // F56: the natural `(i.rev>? OR g.rev>?)` OR-join defeats idx_items_vault_rev's rev
+        // bound (EQP: `SEARCH i (vaultId=?)` — a full per-vault scan on EVERY pull, ~2.7 ms
+        // per no-op incremental pull at 10k items). Split into two DISJOINT arms — same rows,
+        // both indexed (`vaultId=? AND rev>?` / `rev<=?`): arm 1 = normal delta; arm 2 = the
+        // grant-rev backfill (new member / role change) delivering only the items arm 1's rev
+        // bound excludes, so UNION ALL needs no dedup pass. Measured: no-op pull 2.7 ms →
+        // 0.02 ms; 10-row delta 2.8 ms → 0.07 ms; full since=0 unchanged (perf addendum §2).
         val items = c.queryAll(
             """SELECT i.* FROM items i JOIN grants g ON g.vaultId=i.vaultId
-               WHERE g.userId=? AND g.revokedAt IS NULL AND (i.rev>? OR g.rev>?)""",
-            userId, since, since,
+               WHERE g.userId=? AND g.revokedAt IS NULL AND i.rev>?
+               UNION ALL
+               SELECT i.* FROM items i JOIN grants g ON g.vaultId=i.vaultId
+               WHERE g.userId=? AND g.revokedAt IS NULL AND g.rev>? AND i.rev<=?""",
+            userId, since, userId, since, since,
         ) { rs -> itemRow(rs) }
         // ONE scan of the caller's revoked grants (#9B): removedGrantsInfo is the detail,
         // removedGrants is derived as its vaultId list — the JOIN to vaults never drops a

@@ -88,5 +88,45 @@ class TotpTest {
     fun rejectsNonTotpUri() {
         assertFailsWith<CryptoException> { Totp.parseUri("otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP") }
         assertFailsWith<CryptoException> { Totp.parseUri("otpauth://totp/x?digits=6") }
+        // A5 reject-don't-corrupt (2026-07-09 review [1]): an EMPTY secret param must fail —
+        // Kotlin once accepted it (empty HMAC key → SecretKeySpec crash at render) while the
+        // web twin rejected it, so the same CSV built different vault content per client.
+        assertFailsWith<CryptoException> { Totp.parseUri("otpauth://totp/Site?secret=") }
+        assertFailsWith<CryptoException> { Totp.parseUri("otpauth://totp/Site?secret=&issuer=X") }
+    }
+
+    // ---- Totp.normalize (spec 06 §9.2, A5) — the ONE shared normalize ----
+
+    @Test
+    fun normalize_bareBase32_wrapsPreservingOriginalCase() {
+        assertEquals("otpauth://totp/andvari?secret=JBSWY3DPEHPK3PXP", Totp.normalize("JBSWY3DPEHPK3PXP"))
+        assertEquals("otpauth://totp/andvari?secret=jbswy3dpehpk3pxp", Totp.normalize("jbswy3dpehpk3pxp"))
+        assertEquals("otpauth://totp/andvari?secret=JBSWY3DP====", Totp.normalize("JBSWY3DP====")) // padding-tolerant
+    }
+
+    @Test
+    fun normalize_stripsAllAsciiWhitespace() {
+        assertEquals("otpauth://totp/andvari?secret=JBSWY3DPEHPK3PXP", Totp.normalize(" JBSW Y3DP\tEHPK\n3PXP\r"))
+        // Inside an otpauth URI too — ALL ASCII whitespace goes, label included (pinned).
+        assertEquals(
+            "otpauth://totp/MySite?secret=JBSWY3DPEHPK3PXP",
+            Totp.normalize("otpauth://totp/My Site?secret=JBSWY3DPEHPK3PXP"),
+        )
+    }
+
+    @Test
+    fun normalize_otpauthPrefixPassesThrough_caseInsensitive() {
+        assertEquals("OTPAUTH://totp/X?secret=AAAA", Totp.normalize("OTPAUTH://totp/X?secret=AAAA"))
+        // Passing through does NOT mean valid: hotp still fails parseUri afterwards.
+        val hotp = Totp.normalize("otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP")
+        assertEquals("otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP", hotp)
+        assertFailsWith<CryptoException> { Totp.parseUri(hotp) }
+    }
+
+    @Test
+    fun normalize_nonBase32_returnedUnchanged() {
+        assertEquals("steam://ABCD1234", Totp.normalize("steam://ABCD1234"))
+        assertEquals("notasecret!", Totp.normalize("not a secret!")) // spaces stripped, then unchanged
+        assertEquals("", Totp.normalize("   "))
     }
 }

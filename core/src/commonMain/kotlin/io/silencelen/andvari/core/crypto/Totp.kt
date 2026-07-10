@@ -1,11 +1,20 @@
 package io.silencelen.andvari.core.crypto
 
-/** RFC 4648 base32 (case-insensitive, padding and whitespace ignored) — TOTP secrets. */
+/** RFC 4648 base32 (case-insensitive, padding and ASCII whitespace ignored) — TOTP secrets. */
 object Base32 {
     private const val ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
+    /** Cross-port determinism (2026-07-09 review; the CardNormalize.TRIMMABLE precedent):
+     *  the decoder ignores ONLY '=' padding plus this pinned ASCII whitespace set — never
+     *  Char.isWhitespace()/JS `\s`, which disagree at the Unicode margins (JS `\s` strips
+     *  U+FEFF where JVM keeps it; JVM isWhitespace strips U+001C..U+001F and Unicode
+     *  spaces where JS differs). Any other character (U+FEFF, NBSP, …) fails decode on
+     *  EVERY client, so a secret one twin could never parse back is never stored (A5
+     *  reject-don't-corrupt). The web twin pins the same set in base32Decode. */
+    private const val IGNORED = "= \t\n\u000B\u000C\r"
+
     fun decode(text: String): ByteArray {
-        val clean = text.uppercase().filter { it != '=' && !it.isWhitespace() }
+        val clean = text.uppercase().filter { it !in IGNORED }
         val out = ArrayList<Byte>(clean.length * 5 / 8)
         var buffer = 0
         var bits = 0
@@ -77,6 +86,31 @@ object Totp {
     fun secondsRemaining(config: TotpConfig, unixSeconds: Long): Int =
         (config.periodSeconds - (unixSeconds % config.periodSeconds)).toInt()
 
+    /**
+     * The ONE shared TOTP normalize (spec 06 §9.2, design 2026-07-09 A5; the web twin is
+     * `normalizeTotp` in web/src/totp.ts) — byte-exact and delegated to by every editor
+     * and import adapter (private copies are deleted):
+     * strip ALL ASCII whitespace (TAB LF FF CR SPACE); empty → unchanged; an `otpauth://`
+     * prefix (case-insensitive) → returned as-is; else if the string base32-decodes when
+     * uppercased (padding-tolerant, the [Base32] decoder) it wraps to
+     * `otpauth://totp/andvari?secret=<s>` with the ORIGINAL case preserved (matching the
+     * historical web editor behavior); anything else is returned unchanged. Validity is a
+     * SEPARATE question: a value is usable iff [parseUri] accepts the normalized string.
+     */
+    fun normalize(raw: String): String {
+        val s = buildString(raw.length) {
+            for (c in raw) if (c != ' ' && c != '\t' && c != '\n' && c != '\u000C' && c != '\r') append(c)
+        }
+        if (s.isEmpty()) return s
+        if (s.lowercase().startsWith("otpauth://")) return s
+        return try {
+            Base32.decode(s)
+            "otpauth://totp/andvari?secret=$s"
+        } catch (e: CryptoException) {
+            s
+        }
+    }
+
     /** Parse an otpauth://totp/… URI (the storage format inside item plaintext, spec 02 §3). */
     fun parseUri(uri: String): TotpConfig {
         val prefix = "otpauth://totp/"
@@ -90,18 +124,32 @@ object Totp {
                 if (eq < 0) it to "" else it.take(eq).lowercase() to percentDecode(it.substring(eq + 1))
             }
         } else emptyMap()
-        val secret = params["secret"] ?: throw CryptoException("otpauth URI missing secret")
+        // A5 reject-don't-corrupt (2026-07-09 review): this parse is the ONE validity gate
+        // for editors and import adapters, so it must reject what [code] cannot evaluate —
+        // an empty/blank secret (empty HMAC key crashes SecretKeySpec at render time) and
+        // digits/period outside code()'s own require()s — instead of storing a config whose
+        // 2FA display throws later. Byte-exact with web parseOtpauthUri.
+        val secret = params["secret"]?.takeIf { it.isNotEmpty() } ?: throw CryptoException("otpauth URI missing secret")
         val algorithm = when (params["algorithm"]?.uppercase() ?: "SHA1") {
             "SHA1" -> TotpAlgorithm.SHA1
             "SHA256" -> TotpAlgorithm.SHA256
             "SHA512" -> TotpAlgorithm.SHA512
             else -> throw CryptoException("unsupported otpauth algorithm")
         }
+        val secretBytes = Base32.decode(secret)
+        if (secretBytes.isEmpty()) throw CryptoException("otpauth secret decodes to empty key")
+        // toIntOrNull semantics are pinned (full-string match, 32-bit range; junk → the
+        // default) — the TS twin mirrors them with an explicit toIntOrNull port, never
+        // Number.parseInt's partial parse ("8x" → 8, "0" || 6 → 6).
+        val digits = params["digits"]?.toIntOrNull() ?: 6
+        if (digits !in 6..10) throw CryptoException("otpauth digits out of range")
+        val period = params["period"]?.toIntOrNull() ?: 30
+        if (period <= 0) throw CryptoException("otpauth period out of range")
         return TotpConfig(
-            secret = Base32.decode(secret),
+            secret = secretBytes,
             algorithm = algorithm,
-            digits = params["digits"]?.toIntOrNull() ?: 6,
-            periodSeconds = params["period"]?.toIntOrNull() ?: 30,
+            digits = digits,
+            periodSeconds = period,
             label = label,
             issuer = params["issuer"] ?: label.substringBefore(':', ""),
         )
