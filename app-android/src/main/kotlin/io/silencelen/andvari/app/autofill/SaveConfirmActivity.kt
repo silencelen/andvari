@@ -39,8 +39,11 @@ import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
 import io.silencelen.andvari.core.client.ApiException
+import io.silencelen.andvari.core.client.CardData
+import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
+import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.crypto.CryptoException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -48,28 +51,53 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 
 /**
+ * Card confirm variant, resolved POST-unlock (the normalized-PAN dedupe needs the decrypted
+ * working set). [display] is brand + masked last4 ("Visa ••4242") — the ONLY card identity
+ * the confirm surface ever shows: never a full PAN, never any CVV.
+ */
+private sealed interface CardPlan {
+    val display: String
+
+    data class Update(override val display: String, val itemId: String) : CardPlan
+    data class New(override val display: String) : CardPlan
+}
+
+/**
  * "Save to andvari?" — launched by [AndvariAutofillService.onSaveRequest] via an IntentSender after
  * the platform's save UI dismisses, receiving the submitted form's EXTRA_ASSIST_STRUCTURE. Reads the
- * typed credentials ([SaveExtractor] — the one place autofill touches field VALUES), unlocks the
- * vault if needed (the shared single-token-holder [AutofillUnlock]), shows the user exactly what
- * will be saved, and on confirm creates a login (encrypted client-side, pushed) in the personal
- * vault via the SAME engine the app uses. Values live only in memory here and are never logged.
- * FLAG_SECURE + excluded-from-autofill, mirroring the unlock overlay.
+ * typed values ([SaveExtractor] — the one place autofill touches field VALUES), unlocks the vault if
+ * needed (the shared single-token-holder [AutofillUnlock]), shows the user exactly what will be
+ * saved, and on confirm writes through the SAME engine the app uses. Values live only in memory here
+ * and are never logged. FLAG_SECURE + excluded-from-autofill, mirroring the unlock overlay.
+ *
+ * 0.7.0 cards: when the extraction carries a Luhn-valid card, a CARD stage runs first, then the
+ * login stage if a login was also captured — card-first, but a plain login form's path is never
+ * lost. Update-vs-new is decided by normalized-PAN dedupe against the working set's card items:
+ *  - PAN match → "Update card?": `.copy()` on the EXISTING doc + card (never a field-by-field
+ *    rebuild — the 0.2.x bug), name untouched, only captured fields overwrite, brand recomputed.
+ *  - no match → "Save card to andvari?": a NEW ItemDoc(type="card") into the personal vault.
+ *    Saving a NEW card from a checkout IS a create path, so it is gated behind
+ *    [CardDisplay.CREATE_ENABLED] (dark today, exactly like the natives' "+ Card" buttons —
+ *    Option A: no card may be CREATED anywhere until the fielded 0.2.x desktop MSI retires).
+ *    The UPDATE variant stays live: it can only touch a card that already exists (as fv2).
  */
 class SaveConfirmActivity : ComponentActivity() {
     private var busy by mutableStateOf(false)
     private var errorText by mutableStateOf<String?>(null)
     private var unlocked by mutableStateOf(false)
+    private var cardPlan by mutableStateOf<CardPlan?>(null)
+    private var cardStageDone by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Set BEFORE any content: login AND card confirms render secret-adjacent material here.
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         setResult(RESULT_CANCELED) // back / dismiss = don't save
 
         val structure = intent.assistStructure()
         if (structure == null) { finish(); return }
         val creds = SaveExtractor.extract(structure)
-        if (!creds.savable) { finish(); return } // no password captured → nothing to save
+        if (!creds.savable && creds.card == null) { finish(); return } // nothing savable captured
 
         VaultSession.setAutoLockSeconds(SessionStore(applicationContext).autoLockSeconds)
         unlocked = VaultSession.getIfFresh() != null
@@ -78,18 +106,27 @@ class SaveConfirmActivity : ComponentActivity() {
         val session = store.load()
         if (session == null || session.accessToken.isEmpty()) { finish(); return } // signed out
 
+        // Already unlocked → resolve the card stage now; when the create gate / no-change dedupe
+        // leaves nothing savable at all, exit before showing any UI.
+        if (unlocked && !resolveStages(creds)) { finish(); return }
+
         setContent {
             AndvariTheme {
-                if (!unlocked) {
-                    UnlockToSaveCard(
-                        email = session.email, site = creds.title(), busy = busy, error = errorText,
-                        onUnlock = { pw -> doUnlock(store, session, pw) }, onCancel = { finish() },
+                val plan = cardPlan
+                when {
+                    !unlocked -> UnlockToSaveCard(
+                        email = session.email, subject = saveSubject(creds), busy = busy, error = errorText,
+                        onUnlock = { pw -> doUnlock(store, session, pw, creds) }, onCancel = { finish() },
                     )
-                } else {
-                    SaveCard(
+                    plan != null && !cardStageDone -> CardSaveCard(
+                        plan = plan, busy = busy, error = errorText,
+                        onConfirm = { doSaveCard(plan, creds) }, onSkip = { advancePastCard(creds) },
+                    )
+                    creds.savable -> SaveCard(
                         site = creds.title(), username = creds.username, busy = busy, error = errorText,
                         onSave = { doSave(creds) }, onCancel = { finish() },
                     )
+                    else -> {} // both stages consumed — a finish() is already in flight
                 }
             }
         }
@@ -97,13 +134,121 @@ class SaveConfirmActivity : ComponentActivity() {
         window.decorView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
     }
 
-    private fun doUnlock(store: SessionStore, session: Session, password: String) {
+    /** What the unlock prompt says it is unlocking FOR ("a card & login for github.com"). */
+    private fun saveSubject(creds: SavedCredentials): String {
+        val what = buildList {
+            if (creds.card != null) add("a card")
+            if (creds.savable) add("a login")
+        }.joinToString(" & ")
+        val site = (if (!creds.savable) creds.card?.webDomain else null) ?: creds.title()
+        return "$what for $site"
+    }
+
+    /**
+     * Post-unlock stage resolution: decide the card variant from the decrypted working set.
+     * Returns false when NOTHING (card or login) remains savable — the caller should finish.
+     */
+    private fun resolveStages(creds: SavedCredentials): Boolean {
+        cardPlan = creds.card?.let { runCatching { cardPlanFor(it) }.getOrNull() }
+        return cardPlan != null || creds.savable
+    }
+
+    private fun cardPlanFor(card: SavedCard): CardPlan? {
+        val engine = VaultSession.getIfFresh()?.engine ?: return null
+        val display = "${CardDisplay.brandLabel(CardNormalize.brand(card.number)) ?: "Card"} ${CardDisplay.maskedLast4(card.number)}"
+        // Dedupe by normalized PAN across the working set's card items (card.number is already
+        // digits-only canonical; stored numbers normalize the same way at save, but re-normalize
+        // defensively — another writer could have stored separators).
+        val match = engine.items()
+            .firstOrNull { it.doc.type == "card" && CardNormalize.digitsOnly(it.doc.card?.number ?: "") == card.number }
+        if (match != null) {
+            // Update only when the checkout actually captured something NEW for this card —
+            // otherwise there is nothing to confirm and the stage is skipped.
+            val c = match.doc.card ?: CardData()
+            val changed = (card.cardholderName != null && card.cardholderName != c.cardholderName) ||
+                (card.expMonth != null && card.expMonth != c.expMonth) ||
+                (card.expYear != null && card.expYear != c.expYear) ||
+                (card.securityCode != null && card.securityCode != c.securityCode)
+            return if (changed) CardPlan.Update(display, match.itemId) else null
+        }
+        // Option A create gate: a NEW card from a checkout is a CREATE, and creation is dark
+        // until the 0.2.x desktop MSI retires ([CardDisplay.CREATE_ENABLED] — the same one-line
+        // flip as the natives' "+ Card" buttons). The Update branch above is deliberately NOT
+        // gated: updating an existing card cannot mint the first fv2 doc, creation can.
+        return if (CardDisplay.CREATE_ENABLED) CardPlan.New(display) else null
+    }
+
+    /** "Not now" on the card stage: fall through to the login stage, or exit if there is none. */
+    private fun advancePastCard(creds: SavedCredentials) {
+        errorText = null
+        if (creds.savable) cardStageDone = true else finish()
+    }
+
+    private fun doUnlock(store: SessionStore, session: Session, password: String, creds: SavedCredentials) {
         if (busy) return
         busy = true; errorText = null
         lifecycleScope.launch {
             runCatching { withContext(Dispatchers.IO) { AutofillUnlock.unlock(this@SaveConfirmActivity, store, session, password) } }
-                .onSuccess { busy = false; unlocked = true }
+                .onSuccess {
+                    busy = false
+                    if (!resolveStages(creds)) { finish(); return@onSuccess } // e.g. gated new card, nothing changed, no login
+                    unlocked = true
+                }
                 .onFailure { busy = false; errorText = friendly(it) }
+        }
+    }
+
+    private fun doSaveCard(plan: CardPlan, creds: SavedCredentials) {
+        if (busy) return
+        val card = creds.card ?: run { advancePastCard(creds); return }
+        // Re-check freshness: an idle auto-lock between unlock and confirm drops us back to the
+        // password prompt rather than saving against a stale/closed engine.
+        val engine = VaultSession.getIfFresh()?.engine ?: run { unlocked = false; return }
+        busy = true; errorText = null
+        lifecycleScope.launch {
+            runCatching {
+                val doc = when (plan) {
+                    is CardPlan.Update -> {
+                        // Re-read at save time (a sync may have advanced it since resolve), then
+                        // .copy() on the EXISTING doc + card — never a field-by-field rebuild.
+                        // Name untouched; only captured (non-null) fields overwrite; number stays
+                        // the matched number; brand recomputed (the stored field is display-only).
+                        val existing = engine.items().firstOrNull { it.itemId == plan.itemId }
+                            ?: throw IllegalStateException("This card is no longer in the vault.")
+                        val c = existing.doc.card ?: CardData()
+                        existing.doc.copy(
+                            card = c.copy(
+                                cardholderName = card.cardholderName ?: c.cardholderName,
+                                expMonth = card.expMonth ?: c.expMonth,
+                                expYear = card.expYear ?: c.expYear,
+                                securityCode = card.securityCode ?: c.securityCode,
+                                brand = CardNormalize.brand(c.number ?: card.number),
+                            ),
+                        )
+                    }
+                    is CardPlan.New -> ItemDoc(
+                        // Create path — reachable only with CardDisplay.CREATE_ENABLED (see
+                        // cardPlanFor). Canonical fields straight from the extractor; brand
+                        // recomputed from the number at save, like every card writer.
+                        type = "card",
+                        name = plan.display, // "<Brand> ••<last4>"
+                        card = CardData(
+                            cardholderName = card.cardholderName,
+                            number = card.number,
+                            expMonth = card.expMonth,
+                            expYear = card.expYear,
+                            securityCode = card.securityCode,
+                            brand = CardNormalize.brand(card.number),
+                        ),
+                    )
+                }
+                val itemId = (plan as? CardPlan.Update)?.itemId // null → new item in the personal vault
+                withContext(Dispatchers.IO) { engine.save(itemId, doc) }
+            }.onSuccess {
+                setResult(RESULT_OK) // something was saved, whatever the login stage decides
+                if (creds.savable) { busy = false; cardStageDone = true } // login stage next — never lost
+                else finish()
+            }.onFailure { busy = false; errorText = friendly(it) }
         }
     }
 
@@ -132,7 +277,7 @@ class SaveConfirmActivity : ComponentActivity() {
         t is CryptoException -> t.message ?: "Wrong master password."
         t is ApiException && t.status == 401 -> "Session expired — open andvari and sign in again."
         t is IOException -> "Offline — try saving again when you're connected."
-        else -> t.message ?: "Couldn't save this login."
+        else -> t.message ?: "Couldn't save."
     }
 
     @Suppress("DEPRECATION")
@@ -179,10 +324,52 @@ private fun SaveCard(
     }
 }
 
+/**
+ * The card stage ("Update card?" / "Save card to andvari?"). Shows brand + masked last4 ONLY —
+ * never the full PAN, never any CVV (FLAG_SECURE is set in onCreate; verified). "Not now" falls
+ * through to the login stage when one was captured.
+ */
+@Composable
+private fun CardSaveCard(
+    plan: CardPlan,
+    busy: Boolean,
+    error: String?,
+    onConfirm: () -> Unit,
+    onSkip: () -> Unit,
+) {
+    val isUpdate = plan is CardPlan.Update
+    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(20.dp)) {
+                Text(if (isUpdate) "Update card?" else "Save card to andvari?", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    if (isUpdate) "This card is already in your vault — its details (expiry, security code, cardholder) will be updated from this checkout. Its name and number stay as they are."
+                    else "A new card will be saved to your personal vault.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(16.dp))
+                LabeledValue("Card", plan.display)
+                if (error != null) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                Spacer(Modifier.height(20.dp))
+                Button(onClick = onConfirm, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    if (busy) CircularProgressIndicator(Modifier.height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                    else Text(if (isUpdate) "Update card" else "Save card")
+                }
+                TextButton(onClick = onSkip, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Not now") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun UnlockToSaveCard(
     email: String,
-    site: String,
+    subject: String,
     busy: Boolean,
     error: String?,
     onUnlock: (String) -> Unit,
@@ -194,7 +381,7 @@ private fun UnlockToSaveCard(
             Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
                 Text("Unlock to save", style = MaterialTheme.typography.titleLarge)
-                Text("$email · saving a login for $site", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("$email · saving $subject", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(16.dp))
                 OutlinedTextField(
                     value = password, onValueChange = { password = it }, label = { Text("Master password") }, singleLine = true,

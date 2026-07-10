@@ -24,17 +24,23 @@ import io.silencelen.andvari.app.MainActivity
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.app.browserLabel
 import io.silencelen.andvari.core.client.autofill.BrowserCertPins
+import io.silencelen.andvari.core.client.autofill.CardFill
 import io.silencelen.andvari.core.client.autofill.FieldKind
 import io.silencelen.andvari.core.client.autofill.FillTarget
 import io.silencelen.andvari.core.client.autofill.UriMatch
 
 /**
- * Turns matched vault items into a [FillResponse]. Matching is PER FIELD: each field's
+ * Turns matched vault items into a [FillResponse]. LOGIN matching is PER FIELD: each field's
  * [FillTarget] embeds that field's own frame domain (only when the requesting package is a
  * trusted browser — otherwise null → androidapp:// package matching only), so one frame's
- * domain can never fill another frame's field. Provides a dropdown (RemoteViews) menu
- * presentation always, plus an inline presentation when an InlineSuggestionsRequest is
- * present (API 30+). Item plaintext is read only from the already-decrypted VaultItems.
+ * domain can never fill another frame's field. CARD datasets (0.7.0) are appended after the
+ * login datasets under the same [MAX_DATASETS] cap: every `type=="card"` item is offered
+ * (deliberately NOT UriMatch-bound — wallet posture), values planned by the pure core
+ * [CardFill.plan] (frame-cluster zero-fill + type-pinning), gated by an EXPLICIT browser-trust
+ * check (a known-but-untrusted browser gets ZERO card datasets). Provides a dropdown
+ * (RemoteViews) menu presentation always, plus an inline presentation when an
+ * InlineSuggestionsRequest is present (API 30+). Item plaintext is read only from the
+ * already-decrypted VaultItems; card presentations show brand + last4 + expiry ONLY.
  */
 object DatasetBuilder {
     const val MAX_DATASETS = 10
@@ -52,7 +58,7 @@ object DatasetBuilder {
         trace?.setForm(form)
         trace?.setTrust(context, form)
         trace?.inline = inlineRequest != null
-        if (form.fields.isEmpty()) return null
+        if (!form.fillable) return null // no login fields and no PAN-anchored card form
         return buildUnlockedResponse(context, items, form, TrustedBrowsers.isTrusted(context, form.appPackage), inlineRequest, trace)
     }
 
@@ -72,10 +78,10 @@ object DatasetBuilder {
         // save keeps save/fill symmetric: the user trusts the browser once, then both work.
         val offerSave = form.appPackage !in BrowserCertPins.TABLE || trusted
         if (datasets.isEmpty()) {
-            // Honest failure (never absolute silence): the form HAS fillable login fields
-            // (form.fields is USERNAME/PASSWORD only — the gate that keeps this row off
-            // every plain text box), so offer a single "Open andvari" row instead of
-            // vanishing. Bitwarden/1Password convention; tapping launches the app.
+            // Honest failure (never absolute silence): the form HAS fillable fields —
+            // classified USERNAME/PASSWORD or CC_* fields only, the gate that keeps this
+            // row off every plain text box — so offer a single "Open andvari" row instead
+            // of vanishing. Bitwarden/1Password convention; tapping launches the app.
             // A known-untrusted browser (== !offerSave) gets the "Trust {browser}" onboarding row
             // instead of the generic "Open andvari" — surfaces the one-tap fix where the wall is.
             val fallback = (if (!offerSave) trustBrowserDataset(context, form, inlineRequest) else openAppDataset(context, form, inlineRequest)) ?: return null
@@ -94,18 +100,40 @@ object DatasetBuilder {
     }
 
     /**
-     * SaveInfo for "Save to andvari?" — watches the form's username + password fields so the
-     * platform offers to save when the user submits credentials andvari doesn't already hold. Null
-     * when the form has no password field (nothing worth saving). Set on EVERY FillResponse (match,
-     * no-match fallback, and the locked auth row) so save is offered regardless of the fill outcome.
+     * SaveInfo for "Save to andvari?" — the login rule is unchanged: watch the form's username +
+     * password fields, REQUIRE a password (SAVE_DATA_TYPE_PASSWORD [+USERNAME]). 0.7.0 cards: any
+     * classified cc field ids are added as OPTIONAL ids so the platform hands their values to
+     * onSaveRequest alongside the login trigger; a form with NO password field but WITH a
+     * CC_NUMBER instead uses the number field(s) as the required trigger with
+     * SAVE_DATA_TYPE_CREDIT_CARD — card-only checkouts offer save too. Null when the form has
+     * neither (nothing worth saving). Set on EVERY FillResponse (match, no-match fallback, and
+     * the locked auth row) so save is offered regardless of the fill outcome.
      */
     fun saveInfoFor(form: ParsedForm): SaveInfo? {
         val pw = form.fields.filter { it.kind == FieldKind.PASSWORD }
-        if (pw.isEmpty()) return null
+        val ccNumber = form.ccFields.filter { it.kind == FieldKind.CC_NUMBER }
+        if (pw.isEmpty() && ccNumber.isEmpty()) return null
         val user = form.fields.filter { it.kind == FieldKind.USERNAME }
-        val type = SaveInfo.SAVE_DATA_TYPE_PASSWORD or (if (user.isNotEmpty()) SaveInfo.SAVE_DATA_TYPE_USERNAME else 0)
-        val ids = (user + pw).map { it.id }.toTypedArray()
-        return runCatching { SaveInfo.Builder(type, ids).build() }.getOrNull()
+        var type = 0
+        if (pw.isNotEmpty()) type = SaveInfo.SAVE_DATA_TYPE_PASSWORD or (if (user.isNotEmpty()) SaveInfo.SAVE_DATA_TYPE_USERNAME else 0)
+        if (ccNumber.isNotEmpty()) type = type or SaveInfo.SAVE_DATA_TYPE_CREDIT_CARD
+        // Required ids trigger the save UI; the rest of the cc fields ride along as optional so
+        // the submitted structure carries expiry/name/CSC values for the extractor.
+        // Card-only forms: the design contract is CC_NUMBER as the SOLE required id — the
+        // platform shows the save UI only once EVERY required view changed, so requiring every
+        // PAN-ish field (a gift/loyalty input also classifies CC_NUMBER via the token fallback)
+        // would silently suppress the prompt whenever one stays empty. Pick the anchor of the
+        // RICHEST frame cluster (the real payment block has expiry/CVV siblings; a lone gift
+        // input doesn't), tree order on ties. Residual platform limit (no OR semantics): a user
+        // who fills only a DIFFERENT PAN field gets no prompt — documented, accepted.
+        val requiredCc = ccNumber.maxByOrNull { anchor -> form.ccFields.count { it.webDomain == anchor.webDomain } }
+        val required = (if (pw.isNotEmpty()) user + pw else listOfNotNull(requiredCc)).map { it.id }
+        val optional = form.ccFields.map { it.id }.filterNot { it in required }
+        return runCatching {
+            val b = SaveInfo.Builder(type, required.toTypedArray())
+            if (optional.isNotEmpty()) b.setOptionalIds(optional.toTypedArray())
+            b.build()
+        }.getOrNull()
     }
 
     /**
@@ -179,7 +207,90 @@ object DatasetBuilder {
             val dataset = buildDataset(context, item, username, password, userFields, passFields, spec)
             if (dataset != null) out.add(dataset)
         }
+        // Card datasets ride AFTER the login datasets, under the same cap. runCatching rail:
+        // a card-path failure degrades to "login datasets only", never a lost fill.
+        runCatching { appendCardDatasets(context, items, form, trusted, specs, maxInline, out) }
         return out
+    }
+
+    /**
+     * Card datasets (0.7.0): one per `type=="card"` item whose [CardFill.plan] fills anything on
+     * this form. Cards are deliberately NOT UriMatch-bound (wallet posture — any checkout in a
+     * trusted surface may summon the card list), which is exactly why the browser-trust gate must
+     * be EXPLICIT here: the login path's UriMatch would have nulled an untrusted browser's web
+     * host, but cards never consult it. A KNOWN browser that is not trusted gets ZERO card
+     * datasets; native apps (not in the pin table) and trusted browsers pass. The hostile-iframe
+     * zero-fill + LIST/TEXT type-pinning live in core (CardFill.plan, vector-tested).
+     */
+    private fun appendCardDatasets(
+        context: Context,
+        items: List<VaultItem>,
+        form: ParsedForm,
+        trusted: Boolean,
+        specs: List<InlinePresentationSpec>,
+        maxInline: Int,
+        out: MutableList<Dataset>,
+    ) {
+        if (form.ccFields.isEmpty()) return
+        if (form.appPackage in BrowserCertPins.TABLE && !trusted) return // explicit trust gate
+        val ccFields = form.ccFields.mapIndexed { i, f ->
+            CardFill.CcField(index = i, kind = f.kind, frameDomain = f.webDomain, autofillType = f.autofillType, options = f.options, maxLength = f.maxLength)
+        }
+        for (item in items) {
+            if (out.size >= MAX_DATASETS) break
+            if (item.doc.type != "card") continue
+            val card = item.doc.card ?: continue
+            // Per-item rail: one malformed card degrades to a skip, not a dead response.
+            runCatching {
+                val plan = CardFill.plan(ccFields, card)
+                if (plan.isEmpty()) return@runCatching
+                val spec = specForIndex(specs, out.size, maxInline)
+                buildCardDataset(context, item, form, plan, spec)?.let { out.add(it) }
+            }
+        }
+    }
+
+    /**
+     * One card dataset. Presentation: [CardFill.presentationLine] — brand + masked last4
+     * (+ expiry when composable) ONLY, never a full PAN or any CVV (test-pinned in core) —
+     * with the item name as the subtitle. HAZARD guard (type-pinned 1:1): forList on a TEXT
+     * node or forText on a LIST node crashes/no-ops the fill, so [CardFill.Value] is mapped
+     * MECHANICALLY — Text→forText, ListIndex→forList — never improvised.
+     */
+    @Suppress("DEPRECATION") // 2-arg setValue at 33 (Presentations ctor companion) + legacy overloads pre-33
+    private fun buildCardDataset(
+        context: Context,
+        item: VaultItem,
+        form: ParsedForm,
+        plan: List<CardFill.Planned>,
+        inlineSpec: InlinePresentationSpec?,
+    ): Dataset? {
+        val title = CardFill.presentationLine(item.doc)
+        val subtitle = item.doc.name.takeIf { it.isNotBlank() }
+        val menu = presentationRow(context, title, subtitle)
+        val inline = if (inlineSpec != null) buildInline(context, title, subtitle, inlineSpec) else null
+        val values = plan.mapNotNull { p ->
+            val f = form.ccFields.getOrNull(p.index) ?: return@mapNotNull null
+            f.id to when (val v = p.value) {
+                is CardFill.Value.Text -> AutofillValue.forText(v.text)
+                is CardFill.Value.ListIndex -> AutofillValue.forList(v.index)
+            }
+        }
+        if (values.isEmpty()) return null
+        return if (Build.VERSION.SDK_INT >= 33) {
+            val presBuilder = Presentations.Builder().setMenuPresentation(menu)
+            if (inline != null) presBuilder.setInlinePresentation(inline)
+            val b = Dataset.Builder(presBuilder.build())
+            for ((id, av) in values) b.setValue(id, av)
+            runCatching { b.build() }.getOrNull()
+        } else {
+            val b = Dataset.Builder(menu) // dataset-wide menu presentation (API 26+)
+            val useInline = Build.VERSION.SDK_INT >= 30 && inline != null
+            for ((id, av) in values) {
+                if (useInline) b.setValue(id, av, menu, inline!!) else b.setValue(id, av)
+            }
+            runCatching { b.build() }.getOrNull()
+        }
     }
 
     private fun targetFor(field: ParsedField, form: ParsedForm, trusted: Boolean): FillTarget =
@@ -287,7 +398,7 @@ object DatasetBuilder {
             }
             // Null values: the dataset must reference at least one field id to be shown,
             // but fills nothing — the tap only fires the authentication intent.
-            for (f in form.fields) {
+            for (f in form.fields + form.ccFields) { // cc ids too, or a card-only form shows nothing
                 when {
                     Build.VERSION.SDK_INT >= 33 -> b.setValue(f.id, null)
                     Build.VERSION.SDK_INT >= 30 && inline != null -> b.setValue(f.id, null, menu, inline)
@@ -335,7 +446,7 @@ object DatasetBuilder {
             } else {
                 Dataset.Builder(menu)
             }
-            for (f in form.fields) {
+            for (f in form.fields + form.ccFields) { // cc ids too, or a card-only form shows nothing
                 when {
                     Build.VERSION.SDK_INT >= 33 -> b.setValue(f.id, null)
                     Build.VERSION.SDK_INT >= 30 && inline != null -> b.setValue(f.id, null, menu, inline)

@@ -67,7 +67,7 @@ object AutofillDebugLog {
         NO_STRUCTURE, // request carried no AssistStructure / no activity component
         SELF_FILL, // the requester is andvari itself (self-guard)
         SIGNED_OUT, // no persisted session / empty token — no unlock row possible
-        NO_FIELDS, // structure parsed but zero USERNAME/PASSWORD fields classified
+        NO_FIELDS, // structure parsed but nothing fillable: no USERNAME/PASSWORD field and no PAN-anchored card form
         LOCKED_ROW_SHOWN, // vault locked → "Unlock andvari" authentication row offered
         NO_ITEMS, // unlocked, fields present, but zero usable login items in the vault
         NO_URI_MATCH, // unlocked, login items exist, none match this app/site (fallback row shown)
@@ -90,11 +90,12 @@ object AutofillDebugLog {
 
     @Serializable
     data class FieldSummary(
-        val kind: String, // USERNAME / PASSWORD
+        val kind: String, // USERNAME / PASSWORD / CC_* (a kind name, never a value)
         val host: String? = null, // frame domain, host-only (never a full URI)
         val signal: String = "", // winning classifier signal, e.g. "hint:password"
         // RAW candidate count for THIS field: logins that carry a credential of the
-        // field's kind AND match its target — BEFORE the MAX_DATASETS cap (-1 = unknown).
+        // field's kind AND match its target — BEFORE the MAX_DATASETS cap (-1 = unknown;
+        // card fields always stay -1 — their candidates are not counted per field).
         val matches: Int = -1,
     )
 
@@ -191,7 +192,7 @@ object AutofillDebugLog {
         val pins = BrowserCertPins.TABLE[pkg]
         when {
             pins == null ->
-                if (form.fields.any { it.webDomain != null }) TrustReason.NOT_IN_PINS to null
+                if ((form.fields + form.ccFields).any { it.webDomain != null }) TrustReason.NOT_IN_PINS to null
                 else TrustReason.NATIVE_APP to null
             pins.isEmpty() -> TrustReason.NO_PIN_DIGEST to TrustedBrowsers.observedCertDigest(context, pkg)
             TrustedBrowsers.isTrusted(context, pkg) -> TrustReason.TRUSTED to null
@@ -207,9 +208,9 @@ object AutofillDebugLog {
     class FillTrace(private val origin: String = "service") {
         var pkg: String? = null
         var inline: Boolean = false
-        var formFieldCount: Int = -1 // classified USERNAME/PASSWORD fields (-1 = form never parsed)
+        var formFieldCount: Int = -1 // classified fillable fields, login + card (-1 = form never parsed)
         var loginItemCount: Int = -1 // usable login items seen by DatasetBuilder (-1 = not counted)
-        var datasetCount: Int = -1 // credential datasets built, fallback row excluded (-1 = not counted)
+        var datasetCount: Int = -1 // credential + card datasets built, fallback row excluded (-1 = not counted)
         var fallbackRowShown: Boolean = false // the "Open andvari" row made it into the response
         private var trust: TrustReason? = null
         private var observedDigest: String? = null
@@ -218,8 +219,11 @@ object AutofillDebugLog {
 
         fun setForm(form: ParsedForm) {
             runCatching {
-                formFieldCount = form.fields.size
-                fields = form.fields.map {
+                // Login fields FIRST — setMatchCounts is index-parallel to form.fields, so the
+                // card fields ride at the tail with kind/host/signal only (matches stays -1).
+                val all = form.fields + form.ccFields
+                formFieldCount = all.size
+                fields = all.map {
                     FieldSummary(
                         kind = it.kind.name,
                         host = it.webDomain?.let { d -> UriMatch.normalizeHost(d) },
