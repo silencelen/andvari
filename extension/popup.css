@@ -200,16 +200,41 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .acts .fill-btn { min-width: 46px; text-align: center; }
 .item .fill-btn.did, .item .fill-btn.did:hover { color: var(--ok); border-color: var(--ok); background: transparent; }
 
+/* Item detail overlay: the item's data + a site link (replaces blind row-click fill). */
+.detail { padding: 4px 16px 14px; }
+.detail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.detail-back { padding: 4px 8px; font-size: 12px; }
+.detail-name { font-family: var(--serif); font-weight: 600; font-size: 15px; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-body { display: flex; flex-direction: column; gap: 12px; }
+.detail-field { display: flex; flex-direction: column; gap: 3px; }
+.detail-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); }
+.detail-row { display: flex; align-items: center; gap: 8px; }
+.detail-value { font-family: var(--mono); font-size: 12.5px; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.detail-value.secret { letter-spacing: 0.08em; }
+.detail-value.muted { color: var(--ink-faint); }
+/* Detail action buttons reuse the list pill, but stay visible (no hover-reveal here). */
+.detail .acts { display: flex; gap: 4px; flex: none; }
+.detail .fill-btn {
+  flex: none; font: inherit; font-size: 11.5px; font-weight: 600; color: var(--gold); min-width: 46px; text-align: center;
+  background: transparent; border: 1px solid var(--edge-strong); border-radius: 7px; padding: 4px 9px; cursor: pointer; transition: 0.14s;
+}
+.detail .fill-btn:hover { color: var(--btn-ink); background: linear-gradient(180deg, var(--gold-bright), var(--gold)); border-color: transparent; }
+.detail .fill-btn.did, .detail .fill-btn.did:hover { color: var(--ok); border-color: var(--ok); background: transparent; }
+.detail .totp-chip { align-self: flex-start; }
+.site-link { display: block; font-family: var(--mono); font-size: 12px; color: var(--gold); text-decoration: none; padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-link:hover { text-decoration: underline; color: var(--gold-bright); }
+.detail-fill { width: 100%; margin-top: 4px; }
+
 /* Live TOTP chip — mono code + countdown ring, always visible on rows that carry a code. */
-.item .totp-chip {
+.item .totp-chip, .detail .totp-chip {
   flex: none; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
   font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.05em; color: var(--gold-bright);
   background: rgba(208, 169, 74, 0.08); border: 1px solid var(--edge-strong);
   border-radius: 999px; padding: 3px 8px; transition: 0.14s;
 }
-.item .totp-chip:hover { border-color: var(--gold-deep); }
-.item .totp-chip .ring { width: 12px; height: 12px; }
-.item .totp-chip .ring::after { inset: 2.5px; }
+.item .totp-chip:hover, .detail .totp-chip:hover { border-color: var(--gold-deep); }
+.item .totp-chip .ring, .detail .totp-chip .ring { width: 12px; height: 12px; }
+.item .totp-chip .ring::after, .detail .totp-chip .ring::after { inset: 2.5px; }
 
 .empty { text-align: center; color: var(--ink-faint); padding: 26px 0 22px; font-size: 12.5px; }
 .empty .sigil { font-family: var(--serif); font-size: 30px; color: var(--gold-deep); }
@@ -228,8 +253,8 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .gen-pass:hover { border-color: var(--gold-deep); }
 .gen .copy-flash { display: block; padding: 0 2px 8px; }
 
-/* ---- item detail idioms (web .totp/.ring, popup-scaled; ring is reused by the chips) ---- */
-.detail { padding: 12px 14px; border-top: 1px solid var(--edge); }
+/* ---- shared idioms (web .totp/.ring, popup-scaled; ring is reused by the chips; the
+   .detail overlay's own padding lives in the item-detail block above) ---- */
 .secret-row { display: flex; gap: 6px; align-items: stretch; margin-bottom: 8px; }
 .secret-row input { flex: 1; }
 .copy-flash { color: var(--ok); font-size: 11.5px; }

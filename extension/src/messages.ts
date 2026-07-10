@@ -23,6 +23,9 @@ export interface MatchItem {
   itemId: string;
   name: string;
   username: string | null;
+  /** Saved site uris (non-secret — the popup detail view renders them as sanitized links).
+   *  NOT a secret egress: uris are addresses, not credentials (contract note above). */
+  uris: string[];
   /** true when the item's uris matched the requesting host (vs a search-all row). */
   siteMatch: boolean;
   hasTotp: boolean;

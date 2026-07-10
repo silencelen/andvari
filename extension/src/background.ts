@@ -593,6 +593,7 @@ function toMatchItem(it: DecryptedItem, siteMatch: boolean): MatchItem {
     itemId: it.itemId,
     name: it.doc.name,
     username: it.doc.login?.username ?? null,
+    uris: it.doc.login?.uris ?? [],
     siteMatch,
     hasTotp: Boolean(it.doc.login?.totp),
   };
