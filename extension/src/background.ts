@@ -1,4 +1,5 @@
 import { AndvariApi, type MutationResult, type SyncResponse } from "./api";
+import { cardSubtitle, composeShortExpiry, digitsOnly } from "./card";
 import {
   adIdkey,
   adItem,
@@ -15,8 +16,9 @@ import {
   wrapKey,
   type KdfParams,
 } from "./crypto";
+import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "./format";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
-import type { MatchItem, PendingSave, Req, Res, TabMsg } from "./messages";
+import type { CardItem, MatchItem, PendingSave, Req, Res, TabMsg } from "./messages";
 import { currentCode } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 
@@ -46,7 +48,8 @@ const RESYNC_PERIOD_MIN = 5;
 const GRANT_TTL_MS = 30_000; // popup fill grant: covers the content script's reveal round-trip
 const BADGE_BG = "#d0a94a"; //  aged gold on…
 const BADGE_INK = "#1a1509"; // …treasury charcoal (web --gold / --btn-ink)
-const ITEM_FORMAT_VERSION = 1; // we seal at v1; a newer item must fail closed, not downgrade on re-seal
+// formatVersion discipline lives in format.ts (MAX_ITEM_FORMAT_VERSION read ceiling;
+// LOGIN_FORMAT_VERSION new-login seal fv) — chrome-free so the web pin suite imports it.
 // Automated (non-user) messages that must NOT re-arm the idle lock — else a page auto-reloading
 // (pageInfo) or the popup's 1 s status/TOTP poll would defer autolock forever while the user is
 // away. `status` is here too: merely leaving the popup open (it polls status every second for
@@ -59,6 +62,16 @@ interface LoginData {
   uris?: string[];
   totp?: string;
 }
+/** Card fields (spec 02 §3, fv 2 docs) — read-only here: the extension lists/copies cards but
+ *  never creates or edits them. Field names mirror web api/types CardData / core CardData. */
+interface CardData {
+  cardholderName?: string;
+  number?: string;
+  expMonth?: string;
+  expYear?: string;
+  securityCode?: string;
+  brand?: string;
+}
 /** Parsed plaintext doc. Unknown fields (notes, favorite, passwordHistory, …) survive re-encrypts
  *  via object spread; `attachments` is typed because a put's wire attachmentIds must mirror it —
  *  an update that sent [] would orphan the item's attachment blobs server-side. */
@@ -66,12 +79,16 @@ interface ItemDoc {
   type: string;
   name: string;
   login?: LoginData;
+  card?: CardData;
   attachments?: { id: string }[];
 }
 interface DecryptedItem {
   itemId: string;
   vaultId: string;
   rev: number;
+  /** The fv this item was decrypted (or last sealed) at — every re-seal AD-binds and rewires
+   *  this same value (monotonic client rule, web Account.itemFv parity; format.ts has the law). */
+  formatVersion: number;
   doc: ItemDoc;
 }
 
@@ -181,7 +198,9 @@ function ensureLoaded(): Promise<void> {
         email: snap.email,
         personalVaultId: snap.personalVaultId,
         vaultKeys: new Map(Object.entries(snap.vaultKeys).map(([id, b]) => [id, fromB64(b)])),
-        items: snap.items,
+        // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
+        // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
+        items: snap.items.map((i) => ({ ...i, formatVersion: i.formatVersion ?? 1 })),
       };
       autoLockSeconds = snap.autoLockSeconds;
     }
@@ -300,8 +319,18 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         .map((i) => toMatchItem(i, false));
       return { locked: false, items } satisfies Res<"allItems">;
     }
+    case "cardItems": {
+      if (!session) return { locked: true, items: [] } satisfies Res<"cardItems">;
+      const q = (msg.query ?? "").trim().toLowerCase();
+      const items = cardItems()
+        .map(toCardItem)
+        .filter((c) => !q || c.name.toLowerCase().includes(q) || c.subtitle.toLowerCase().includes(q));
+      return { locked: false, items } satisfies Res<"cardItems">;
+    }
     case "reveal":
       return reveal(msg, sender);
+    case "revealCardField":
+      return revealCardField(msg, sender);
     case "fillFromPopup":
       return fillFromPopup(msg.itemId);
     case "capturedCredential":
@@ -436,18 +465,20 @@ function decryptItems(sync: SyncResponse, vaultKeys: Map<string, Uint8Array>): D
   const items: DecryptedItem[] = [];
   for (const it of sync.items) {
     if (it.deleted || !it.blob) continue;
-    // Fail closed on a newer formatVersion (web account.ts parity): our write path re-seals at v1,
-    // so decrypting a v2 item and later updating it would silently DOWNGRADE + drop v2's fields.
-    if (it.formatVersion > ITEM_FORMAT_VERSION) continue;
+    // Fail closed above the read ceiling (web account.ts parity): an fv this client doesn't
+    // understand may carry doc semantics an edit would corrupt. Items we CAN read carry their
+    // fv onto the session item, and every re-seal AD-binds + rewires that SAME fv (the server
+    // refuses per-item fv downgrades) — so nothing we touch can ever downgrade or upgrade.
+    if (it.formatVersion > MAX_ITEM_FORMAT_VERSION) continue;
     const vk = vaultKeys.get(it.vaultId);
     if (!vk) continue;
     try {
       const doc = JSON.parse(
         new TextDecoder().decode(open(vk, fromB64(it.blob), adItem(it.vaultId, it.itemId, it.formatVersion))),
       ) as ItemDoc;
-      items.push({ itemId: it.itemId, vaultId: it.vaultId, rev: it.rev, doc });
+      items.push({ itemId: it.itemId, vaultId: it.vaultId, rev: it.rev, formatVersion: it.formatVersion, doc });
     } catch {
-      /* undecryptable / newer formatVersion — skip */
+      /* undecryptable — skip */
     }
   }
   return items;
@@ -476,6 +507,25 @@ function toMatchItem(it: DecryptedItem, siteMatch: boolean): MatchItem {
     username: it.doc.login?.username ?? null,
     siteMatch,
     hasTotp: Boolean(it.doc.login?.totp),
+  };
+}
+
+// ---- cards (popup copy-only group — the fill/save paths above stay login-only by design) ----
+
+function cardItems(): DecryptedItem[] {
+  return session ? session.items.filter((i) => i.doc.type === "card") : [];
+}
+
+/** Masked, list-safe projection — the number/expiry/CVV never ride a list (messages contract). */
+function toCardItem(it: DecryptedItem): CardItem {
+  const c = it.doc.card;
+  return {
+    itemId: it.itemId,
+    name: it.doc.name,
+    subtitle: cardSubtitle(c?.number),
+    hasNumber: digitsOnly(c?.number ?? "") !== "",
+    hasExpiry: composeShortExpiry(c?.expMonth ?? "", c?.expYear ?? "") !== null,
+    hasCvv: (c?.securityCode ?? "") !== "",
   };
 }
 
@@ -517,6 +567,35 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
     ok: true,
     secret: { username: it.doc.login?.username ?? null, password: it.doc.login?.password ?? null, totpCode },
   };
+}
+
+/** Card copy egress — POPUP ONLY (a sender with a tab is a content script ⇒ refused): the
+ *  in-page path must have NO route to card data until the frame-origin egress contract ships
+ *  (cards design 2026-07-09). Cards are deliberately not uri-bound, so there is no host gate —
+ *  the gate is the explicit click on a copy button in OUR popup plus the unlocked session.
+ *  ONE field per request: the popup receives exactly what lands on the clipboard, no more. */
+function revealCardField(
+  msg: Extract<Req, { type: "revealCardField" }>,
+  sender: chrome.runtime.MessageSender,
+): Res<"revealCardField"> {
+  if (sender.tab !== undefined) return { ok: false, error: "not allowed from a page" };
+  if (!session) return { ok: false, error: "locked" };
+  const c = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "card")?.doc.card;
+  if (!c) return { ok: false, error: "unknown item" };
+  switch (msg.field) {
+    case "number": {
+      const d = digitsOnly(c.number ?? "");
+      return d !== "" ? { ok: true, value: d } : { ok: false, error: "no number on this card" };
+    }
+    case "expiry": {
+      const e = composeShortExpiry(c.expMonth ?? "", c.expYear ?? "");
+      return e !== null ? { ok: true, value: e } : { ok: false, error: "no expiry on this card" };
+    }
+    case "cvv": {
+      const s = c.securityCode ?? "";
+      return s !== "" ? { ok: true, value: s } : { ok: false, error: "no security code on this card" };
+    }
+  }
 }
 
 /** Explicit popup pick → mint the tab's one-shot grant, then tell the tab to run its normal
@@ -665,11 +744,20 @@ async function resolvePendingSave(
 
 // ---- writes (seal → push → confirm) ----
 
-/** Seal + push one put over the existing envelope path; answers the per-mutation result. */
-async function putItem(itemId: string, vaultId: string, doc: ItemDoc, baseItemRev: number): Promise<MutationResult | undefined> {
+/** Seal + push one put over the existing envelope path; answers the per-mutation result.
+ *  `formatVersion` is computed ONCE by the caller and used for BOTH the AD binding and the
+ *  wire field (web ItemUpload pattern) — restating it anywhere would let the two diverge
+ *  into an AD mismatch. */
+async function putItem(
+  itemId: string,
+  vaultId: string,
+  doc: ItemDoc,
+  baseItemRev: number,
+  formatVersion: number,
+): Promise<MutationResult | undefined> {
   const vk = session?.vaultKeys.get(vaultId);
   if (!vk) return undefined;
-  const blob = toB64(seal(vk, new TextEncoder().encode(JSON.stringify(doc)), adItem(vaultId, itemId, 1)));
+  const blob = toB64(seal(vk, new TextEncoder().encode(JSON.stringify(doc)), adItem(vaultId, itemId, formatVersion)));
   writesInFlight++; // hold off resync's wholesale session.items replace until this rev lands
   try {
     const resp = await api.push([
@@ -680,7 +768,7 @@ async function putItem(itemId: string, vaultId: string, doc: ItemDoc, baseItemRe
         vaultId,
         baseItemRev,
         // attachmentIds mirrors the doc (web putMutation parity) — [] on an update would orphan blobs.
-        item: { formatVersion: 1, attachmentIds: doc.attachments?.map((a) => a.id) ?? [], blob },
+        item: { formatVersion, attachmentIds: doc.attachments?.map((a) => a.id) ?? [], blob },
       },
     ]);
     return resp.results[0];
@@ -690,10 +778,16 @@ async function putItem(itemId: string, vaultId: string, doc: ItemDoc, baseItemRe
 }
 
 async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; error?: string }> {
-  const r = await putItem(target.itemId, target.vaultId, doc, target.rev);
+  // Monotonic re-seal: never below the fv the item arrived at (web Account.itemFv parity —
+  // the server refuses fv downgrades). The extension's per-doc floor is constant
+  // LOGIN_FORMAT_VERSION: every putExisting caller filters type==="login", and the extension
+  // never writes card docs (a card's floor would be 2).
+  const fv = Math.max(LOGIN_FORMAT_VERSION, target.formatVersion);
+  const r = await putItem(target.itemId, target.vaultId, doc, target.rev, fv);
   if (r?.status !== "applied") return { ok: false, error: `save failed (${r?.status ?? "no vault key"})` };
   target.doc = doc;
   target.rev = r.newItemRev ?? target.rev + 1;
+  target.formatVersion = fv; // what this write actually sealed at (web store.ts parity)
   persistSession();
   return { ok: true };
 }
@@ -702,9 +796,11 @@ async function putNewLogin(host: string, username: string, password: string): Pr
   if (!session || !session.personalVaultId) return { ok: false, error: "locked or no personal vault" };
   const itemId = crypto.randomUUID();
   const doc: ItemDoc = { type: "login", name: host, login: { username, password, uris: [`https://${host}`] } };
-  const r = await putItem(itemId, session.personalVaultId, doc, 0);
+  // NEW items seal at the login doc floor — the extension only ever creates logins (format.ts).
+  const r = await putItem(itemId, session.personalVaultId, doc, 0, LOGIN_FORMAT_VERSION);
   if (r?.status !== "applied") return { ok: false, error: `save failed (${r?.status ?? "no vault key"})` };
-  session.items.push({ itemId, vaultId: session.personalVaultId, rev: r.newItemRev ?? 1, doc }); // matchable immediately
+  const rev = r.newItemRev ?? 1; // matchable immediately:
+  session.items.push({ itemId, vaultId: session.personalVaultId, rev, formatVersion: LOGIN_FORMAT_VERSION, doc });
   persistSession();
   return { ok: true };
 }

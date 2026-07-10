@@ -23,6 +23,11 @@ export interface LoginForm {
   /** Generator fill targets: every new-password field (primary + confirm). Empty when !isSignup. */
   newPasswords: HTMLInputElement[];
   isSignup: boolean;
+  /** CVV-negative rule (cards design 2026-07-09): true when the form's LONE password-typed
+   *  field is name/id-token-matched cvv|cvc|csc — a checkout CVV box, not a login password.
+   *  The capture engine must not offer save/update for it (an "update" would overwrite the
+   *  stored merchant password with a CVV). Fill/dropdown behavior is deliberately unchanged. */
+  suppressSave: boolean;
 }
 
 /** autocomplete tokens whose canonical hint name differs even after classify()'s own [-_] strip. */
@@ -34,6 +39,71 @@ const AUTOCOMPLETE_HINT_MAP: Record<string, string> = {
 
 /** Mirrors urimatch's NAME_NEGATIVE (not exported there) — gates the username-fallback pool. */
 const NAME_NEGATIVE_RX = /search|otp|captcha|code|query|phone/;
+
+/** CVV keywords for the save-suppression rule — the tight core of the core classifier's
+ *  CSC_DEMOTION set (FieldClassifier.kt), whole-token-run matched, never substring. */
+const CVV_TOKENS = ["cvv", "cvc", "csc"];
+
+/** name/id → lowercase ASCII tokens: split on non-alphanumerics, camelCase boundaries, and
+ *  letter↔digit boundaries ("cardVerificationValue" → [card,verification,value]; "cvv2" →
+ *  [cvv,2]). The digit boundary is one deliberate widening over core FieldClassifier.tokens()
+ *  (which keeps digits glued to letters): checkout CVVs are routinely named cvv2/cvc2 (Visa's
+ *  own branding), and this feeds a SUPPRESSION rule only — it can mute a save banner, never
+ *  classify a fill target — so widening is fail-safe. */
+function tokens(raw: string): string[] {
+  const out: string[] = [];
+  let sb = "";
+  const flush = () => {
+    if (sb !== "") {
+      out.push(sb.toLowerCase());
+      sb = "";
+    }
+  };
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw.charAt(i);
+    const isDigit = c >= "0" && c <= "9";
+    const isUpper = c >= "A" && c <= "Z";
+    if (!isDigit && !isUpper && !(c >= "a" && c <= "z")) {
+      flush(); // separator (incl. non-ASCII — fine for a suppression heuristic)
+      continue;
+    }
+    if (sb !== "") {
+      const p = raw.charAt(i - 1); // sb non-empty ⇒ raw[i-1] was appended (separators flush)
+      const pDigit = p >= "0" && p <= "9";
+      const nextLower = i + 1 < raw.length && raw.charAt(i + 1) >= "a" && raw.charAt(i + 1) <= "z";
+      if (isUpper && (pDigit || (p >= "a" && p <= "z") || (p >= "A" && p <= "Z" && nextLower))) flush();
+      else if (isDigit !== pDigit) flush(); // letter↔digit boundary (see doc comment)
+    }
+    sb += c;
+  }
+  flush();
+  return out;
+}
+
+/** WHOLE-TOKEN-RUN match (core FieldClassifier.tokenMatch parity): kw matches iff it EQUALS
+ *  the concatenation of a contiguous run of whole tokens — it can neither start nor end
+ *  mid-token ("cvc" never matches cv_code or mycvv; "cvv" DOES match cvv2's [cvv,2] run head). */
+function tokenMatch(toks: string[], kw: string): boolean {
+  for (let i = 0; i < toks.length; i++) {
+    let acc = "";
+    for (let j = i; j < toks.length; j++) {
+      acc += toks[j]!;
+      if (acc.length > kw.length) break;
+      if (acc.length === kw.length) {
+        if (acc === kw) return true;
+        break;
+      }
+    }
+  }
+  return false;
+}
+
+/** True when a field's name/id reads as a card security code — exported for the cross-suite
+ *  pin test (web/src/extension-pins.test.ts). Pure string → verdict, no DOM. */
+export function isCvvNameOrId(nameOrId: string): boolean {
+  const toks = tokens(nameOrId);
+  return CVV_TOKENS.some((kw) => tokenMatch(toks, kw));
+}
 
 const SUBMIT_TEXT_RX = /sign.?in|log.?in|continue|next|submit|anmelden|einloggen/i;
 
@@ -172,6 +242,7 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
       password: null,
       newPasswords: [],
       isSignup: false,
+      suppressSave: false,
     };
   }
 
@@ -203,7 +274,14 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
     }
   }
 
-  return { kind: "login", form, container, username, password: primary.input, newPasswords, isSignup };
+  // CVV-negative rule: only a genuinely password-TYPED input qualifies (a text field that
+  // classify()'d password off a name keyword can't be a CVV box), and only when it is the
+  // form's ONLY password field — a real username+password+cvv checkout keeps its banner path
+  // (not lone), and a login form named normally is untouched.
+  const suppressSave =
+    passwords.length === 1 && primary.input.type === "password" && isCvvNameOrId(primary.input.name || primary.input.id);
+
+  return { kind: "login", form, container, username, password: primary.input, newPasswords, isSignup, suppressSave };
 }
 
 /** All fillable login forms under `root`, document order: formed groups first, then formless

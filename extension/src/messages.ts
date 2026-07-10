@@ -8,7 +8,12 @@
  *  - A secret (password/TOTP) leaves the SW only via `reveal`, and only when the
  *    requesting page's host matches the item's saved uris — OR under a one-shot
  *    fill grant minted by an explicit user click in the popup (`fillFromPopup`).
- *  - List/match responses never carry passwords — name/username/uris only.
+ *  - List/match responses never carry passwords — name/username/uris only. Card lists
+ *    carry a MASKED identity line ("Visa ••4242"), never the number/expiry/CVV.
+ *  - A card secret leaves the SW only via `revealCardField` — popup-only (the SW refuses
+ *    tab senders), one field per request, straight to a clipboard write. The in-page fill
+ *    path has NO route to card data (in-page card fill is deferred behind the
+ *    frame-origin egress contract — cards design 2026-07-09).
  *  - Locked state is FIRST-CLASS: list calls answer `{locked:true}` rather than
  *    pretending "no matches", so the UI can render an honest locked state.
  */
@@ -21,6 +26,19 @@ export interface MatchItem {
   /** true when the item's uris matched the requesting host (vs a search-all row). */
   siteMatch: boolean;
   hasTotp: boolean;
+}
+
+/** A listable card — masked identity ONLY (SW-computed); `has*` flags let the popup render
+ *  copy buttons without ever holding the fields themselves. */
+export interface CardItem {
+  itemId: string;
+  name: string;
+  /** "Visa ••4242" / "Card ••4242" / "card" — derived from the decrypted number SW-side. */
+  subtitle: string;
+  hasNumber: boolean;
+  /** true only when the stored halves compose to MM/YY (card.ts composeShortExpiry). */
+  hasExpiry: boolean;
+  hasCvv: boolean;
 }
 
 export interface RevealedSecret {
@@ -47,6 +65,8 @@ export type Req =
   | { type: "matches"; host: string }
   /** Popup/content: all logins, optionally filtered by a query (name/username/uri contains). */
   | { type: "allItems"; query?: string }
+  /** Popup: all cards for the copy-only Cards group (query filters name/subtitle). */
+  | { type: "cardItems"; query?: string }
   /** Secret for a fill. `host` = the requesting page's host. The SW hands out the secret
    *  only when (a) the item's uris match `host`, (b) a one-shot popup grant covers it, or
    *  (c) `explicit` is set — the user picked the item from the search-all list rendered in
@@ -57,6 +77,11 @@ export type Req =
   /** Popup: user explicitly picked an item to fill into the active tab → SW mints a
    *  one-shot grant for (tabId,itemId) and forwards {type:"fillItem"} to that tab. */
   | { type: "fillFromPopup"; itemId: string }
+  /** Popup ONLY (the SW refuses senders with a tab, i.e. content scripts): one card field
+   *  for a copy — the value goes straight to the popup's clipboard write, never into a page
+   *  or the popup DOM. Cards are deliberately not uri-bound, so there is no host gate; the
+   *  gate is the explicit click on a copy button in OUR popup plus the unlocked session. */
+  | { type: "revealCardField"; itemId: string; field: "number" | "expiry" | "cvv" }
   /** Content: page captured a submitted credential. SW decides save-vs-update and
    *  stores it as the pending save for the tab (survives navigation). */
   | { type: "capturedCredential"; url: string; username: string; password: string }
@@ -102,7 +127,11 @@ export type Res<T extends Req["type"]> = T extends "status"
                             ? { ok: boolean; code?: string; secondsLeft?: number }
                             : T extends "pageInfo"
                               ? { matchCount: number; locked: boolean }
-                              : never;
+                              : T extends "cardItems"
+                                ? { locked: boolean; items: CardItem[] }
+                                : T extends "revealCardField"
+                                  ? { ok: boolean; value?: string; error?: string }
+                                  : never;
 
 /** SW → content (chrome.tabs.sendMessage): fill this item now (popup-granted). The
  *  content script performs its normal `reveal` round-trip with its own host — the SW
