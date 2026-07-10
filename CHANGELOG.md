@@ -1,12 +1,38 @@
 # andvari — changelog
 
-## 0.7.0 cards phases 1–2 — fv2 foundation, server guard, web card items (2026-07-09, server+web deployed CT122)
+## 0.7.0 — cards & wallet items (2026-07-09, cross-platform release; card-create dark under Option A)
 
-The first two slices of cards/wallet items (design: `docs/design/2026-07-09-cards-wallet.md`,
-tournament-settled). Additive: fielded 0.6.0 web/Android, the 0.2.x desktop MSI, and the 0.6.1
-extension keep working untouched; **card creation ships dark** (`CARD_CREATE_ENABLED=false`,
-the Option A rollout gate — flips when the 0.2.x MSI is retired). All version strings move to
-0.7.0 (native artifacts build at their later phases).
+The full cards cycle in one day (design: `docs/design/2026-07-09-cards-wallet.md`,
+tournament-settled), built phase-by-phase as parallel subagent workstreams with an
+adversarial review gating every slice (4 review workflows, 15 confirmed findings across
+them, ALL fixed same-day). Additive end to end: fielded 0.6.0 web/Android, the 0.2.x
+desktop MSI, and the 0.6.1 extension keep working untouched. **Card CREATION ships dark on
+every client** (`CARD_CREATE_ENABLED` ×2 + the extension's save-flow scope — the Option A
+rollout gate; the flip checklist lives in the design doc and fires when the 0.2.x MSI is
+retired). Server+web deployed to CT122; Android APK on devstore; Linux `.deb` + 0.7.0
+extension zips on `/downloads`; Windows `.msi` = owner build (`ops/windows-build.md`).
+
+- **Native card UI (Android + desktop).** Thin per-client editor/detail sections over a new
+  shared core `CardDisplay` (brand recomputed from the IIN at every render — a stale stored
+  brand is never trusted); live Luhn warn-not-block; unparseable-expiry warn on both natives;
+  masked CVV with reveal; grouped-number reveal with bare-digit copy on the policy-cleared
+  clipboard; expired chip; "Visa ••4242" row + history subtitles; CSV preflight now names
+  skipped cards and points at vault backups (core `ExportCsv.Warnings.cardItems`).
+- **Android card autofill.** A pure core `CardFill` planner — hostile-iframe zero-fill
+  (only frame clusters anchored by their own card-number field receive values), LIST/TEXT
+  type-pinning with two-pass option matching (a placeholder row never outranks the real one),
+  a fit-guard so a declared maxlength can never truncate a fill into a wrong value, and
+  presentations that never contain a full PAN or CVV — consumed by thin service glue with an
+  explicit browser-trust gate (untrusted browsers get zero card datasets; cards are
+  deliberately not URI-bound). Save side: Luhn-preferring capture (a gift-card code can't
+  displace the real PAN), CVV-vs-password precedence, PAN-dedupe driving "Update card?"
+  (live) vs "Save card?" (dark until the gate flips). Real-device Fold re-run = owner step.
+- **Extension Cards popup (copy-only).** Masked card rows with number/expiry/CVV copy via
+  the popup-only reveal route (content scripts have no path to card data); a CVV-negative
+  save rule (a lone password-typed cvv/cvc/csc field can't be offered as a login-password
+  overwrite); fv discipline done right — read ceiling 2, logins STILL seal at fv1, re-seals
+  monotonic — structurally pinned from the web test suite. In-page card fill stays
+  deliberately deferred behind the frame-egress contract.
 
 - **formatVersion 2 with a per-doc floor (core + web).** Card-bearing docs seal at fv2;
   logins/notes stay fv1 (bit-compatible with the whole fielded fleet). Reseals are monotonic —

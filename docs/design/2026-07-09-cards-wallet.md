@@ -241,10 +241,22 @@ Extension: fv-const pin; CVV suppression. e2e.sh: create card on web → row fv=
    - extension: no create path (copy-only popup; the save-flow writes logins only)
 5. **Android autofill (the L chunk):** StructureParser clusters/formKind; DatasetBuilder card datasets;
    SaveInfo optionalIds; SaveExtractor; SaveConfirmActivity variants; all the safety fixtures; real-device
-   Fold protocol re-run.
-6. **Desktop:** thin Compose mirror; ships as the 0.7.0 MSI (the Option A artifact).
-7. **Extension:** popup Cards group + fv const bump + detect.ts CVV-negative rule.
+   Fold protocol re-run. **DONE 2026-07-09 [`3255c1f`] — core CardFill planner (fixtures as JVM tests:
+   hostile-iframe zero-fill, LIST/TEXT type-pinning, fit-guard, no-PAN presentations) + thin glue.
+   3-lens review: 3 real defects fixed (Luhn-preferring capture vs gift-card fields; ONE
+   richest-cluster required id so an unfilled gift input can't suppress the save prompt; maxLength
+   fit-guard + two-pass LIST matching). Fold re-run = owner step. Combined-expiry LIST dropdowns +
+   two-Luhn-valid-PAN ordering = documented accepted limits.**
+6. **Desktop:** thin Compose mirror; ships as the 0.7.0 MSI (the Option A artifact). **DONE with step 4
+   (see above); MSI build = owner step (`ops/windows-build.md`).**
+7. **Extension:** popup Cards group + fv const bump + detect.ts CVV-negative rule. **DONE 2026-07-09
+   [`f68abcb`] — copy-only popup Cards (popup-only reveal egress), CVV save-suppression, and the fv
+   discipline SPLIT (read ceiling 2 in src/format.ts; logins still seal fv1; monotonic re-seals) —
+   the naive "bump the const" would have sealed logins at fv2 and broken fleet bit-compat. 3-lens
+   review: 2 low fixed (README scope, structural pin strengthening).**
 8. **Release:** APK/deb/MSI cut; card-create UI held dark until the Option A gate clears; announce.
+   **CUT 2026-07-09: APK → devstore, .deb + 0.7.0 extension zips + manifest → CT122 /downloads;
+   MSI + Fold protocol + extension load-unpacked = owner steps; card-create dark per Option A.**
 
 Each slice ends with the standing high-effort adversarial review; verify.sh + e2e.sh green before any
 deploy; `--rerun-tasks` on the android assemble after the core FieldKind signature change.
