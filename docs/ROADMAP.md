@@ -126,7 +126,19 @@ Prioritized; each is additive and back-compatible.
 - **Browser extension** — *owner-requested 2026-07-07 (reaffirmed).* Reuses the `:core`/web
   `UriMatch` + `FieldClassifier` (already built + vector-tested for exactly this) and the
   same-origin API; carries the web save-flow. Chromium + Firefox. Go/no-go spike:
-  libsodium-WASM under an MV3 service-worker CSP + host_permissions vs. CORS.
+  libsodium-WASM under an MV3 service-worker CSP + host_permissions vs. CORS. *(SHIPPED
+  0.6.1/0.7.0 — the item below is the open follow-on.)*
+- **Extension self-update / update-available signal** — *owner dev note 2026-07-10.* The
+  self-hosted, load-unpacked extension has no store-update path, so a newer version on
+  CT122 `/downloads` is invisible to an installed copy today. Two honest tiers: (1) **cheap,
+  do first** — the SW periodically fetches `/downloads/manifest.json` (already carries the
+  `browserExtension` version), compares to its own `MAX_ITEM_FORMAT_VERSION`-adjacent version
+  const, and surfaces an "update available → download & reload" badge in the popup + Devices
+  hub (no silent reinstall — Chrome forbids it for unpacked). (2) **real auto-update** — a
+  signed Firefox `.xpi` with an `update_url` + `updates.json` on CT122 auto-updates natively;
+  Chrome needs the Web Store or an enterprise `update_url` + CRX (owner call whether store
+  distribution is wanted). Start with (1); it's ~a version-check + popup surface reusing the
+  manifest the Devices hub already reads.
 - **Owner-signed grants** (Ed25519 signing identity) — closes F16 fully: grants and lifecycle
   ops carry a sender signature under a per-account signing key, so a malicious server can no
   longer inject vaults/credentials or forge a transfer even to a client that holds no VK. The
