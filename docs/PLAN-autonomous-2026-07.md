@@ -135,11 +135,10 @@ per cycle boundary if still open.
       trust-model change), P3 escrow-free guest tier (M-L, public-origin decision).
       No build — next session pitches a follow-up plan from these + the queued dev-notes.
 
-**PLAN COMPLETE 2026-07-10 — all 8 cycles.** Next session: ratify a successor plan from
-the §"Owner dev-notes queued" items (card/payment unhide + in-page fill + IBAN scope;
-import destination vault picker), the assess-doc pitches (P1 one-scan onboarding is the
-default), the 0.10.0 native cut (F71/F82 + eTLD+1 are sitting on main un-shipped to
-phone/desktop), and extension tier-2 distribution.
+**PLAN COMPLETE 2026-07-10 — all 8 cycles.** Successor plan **RATIFIED same day**
+("ratify the successor plan and keep going") → **[PLAN-autonomous-2026-07b.md](PLAN-autonomous-2026-07b.md)**
+(S1 0.10.0 cut → S2 import vault picker → S3 in-page card fill + IBAN scope → S4 one-scan
+onboarding → S5 wrap). This file is closed; sessions resume from the successor.
 
 ## Standing rules for this run
 
