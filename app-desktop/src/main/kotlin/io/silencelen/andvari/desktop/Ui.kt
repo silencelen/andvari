@@ -16,11 +16,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.core.client.AttachmentRef
+import io.silencelen.andvari.core.client.CardData
+import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.crypto.Base32
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.GeneratorOptions
@@ -273,6 +276,13 @@ private fun Vault(state: DesktopState) {
                     OutlinedTextField(query, { query = it }, Modifier.weight(1f), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
                     Spacer(Modifier.width(8.dp))
                     Button(onClick = { editing = null to ItemDoc(type = "login", name = "", login = LoginData(uris = listOf(""))) }) { Text("Add") }
+                    // Card creation stays dark until the Option A gate clears (the fielded 0.2.x
+                    // MSI is retired) — the flip list lives in the cards design doc. Everything
+                    // downstream (row/detail/editor/history for EXISTING cards) renders regardless.
+                    if (CardDisplay.CREATE_ENABLED) {
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = { editing = null to ItemDoc(type = "card", name = "", card = CardData()) }) { Text("Add card") }
+                    }
                 }
                 ErrorBar(state.error, state::clearError)
                 NoticeBar(state.notice, state::clearNotice)
@@ -357,7 +367,15 @@ private fun Row(item: VaultItem, onClick: () -> Unit) {
             Text((item.doc.name.firstOrNull() ?: '?').uppercase(), color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Serif, modifier = Modifier.padding(end = 12.dp))
             Column(Modifier.weight(1f)) {
                 Text(item.doc.name.ifBlank { "(untitled)" }, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
-                Text(if (item.doc.type == "login") item.doc.login?.username?.ifBlank { "login" } ?: "login" else "secure note", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                Text(
+                    when (item.doc.type) {
+                        "login" -> item.doc.login?.username?.ifBlank { "login" } ?: "login"
+                        // "Visa ••4242" — brand + last4 identify the card, never the full PAN.
+                        "card" -> CardDisplay.subtitle(item.doc)
+                        else -> "secure note"
+                    },
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
+                )
             }
             Text(item.doc.type, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -448,6 +466,9 @@ private fun ItemHistorySection(state: DesktopState, item: VaultItem, readOnly: B
                 val pw = v.doc.login?.password
                 Text(
                     when {
+                        // Card versions identify by brand + ••last4 (no reveal here — web parity);
+                        // Restore below works on them like any other doc.
+                        v.doc.type == "card" -> CardDisplay.subtitle(v.doc)
                         pw == null && v.doc.type == "login" -> "(no password)"
                         pw == null -> "note"
                         revealed -> pw
@@ -478,7 +499,14 @@ private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onD
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
         Text(doc.name, style = MaterialTheme.typography.headlineMedium)
-        Text((if (doc.type == "login") "Login" else "Secure note") + (if (readOnly) " · view only" else ""), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // Cards identify themselves by brand + ••last4 (design contract) — the one line that
+        // lets the user pick the right card without revealing the full PAN.
+        val kindLine = when {
+            doc.type == "login" -> "Login"
+            doc.type == "card" -> if (doc.card?.number.isNullOrEmpty()) "Card" else CardDisplay.subtitle(doc)
+            else -> "Secure note"
+        }
+        Text(kindLine + (if (readOnly) " · view only" else ""), color = MaterialTheme.colorScheme.onSurfaceVariant)
         ErrorBar(state.error, state::clearError)
         NoticeBar(state.notice, state::clearNotice)
         Spacer(Modifier.height(16.dp))
@@ -487,6 +515,25 @@ private fun Detail(state: DesktopState, item: VaultItem, onEdit: () -> Unit, onD
             login.password?.takeIf { it.isNotBlank() }?.let { CopyRow("Password", it, secret = true, clearSeconds = clipClear) }
             login.totp?.takeIf { it.isNotBlank() }?.let { TotpRow(it, clearSeconds = clipClear) }
             login.uris.firstOrNull()?.takeIf { it.isNotBlank() }?.let { ReadOnly("Website", it) }
+        }
+        if (doc.type == "card") doc.card?.let { card ->
+            card.cardholderName?.takeIf { it.isNotBlank() }?.let { CopyRow("Cardholder", it, secret = false, clearSeconds = clipClear) }
+            // Reveal shows the grouped form; Copy hands checkout forms the bare digits (web parity).
+            card.number?.takeIf { it.isNotBlank() }?.let { CopyRow("Card number", it, secret = true, clearSeconds = clipClear, display = CardDisplay.groupNumber(it)) }
+            CardDisplay.expiryLabel(card)?.let { exp ->
+                Column(Modifier.padding(vertical = 6.dp)) {
+                    Text("Expiry", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(exp, fontFamily = FontFamily.Monospace)
+                        val today = java.time.LocalDate.now()
+                        if (CardDisplay.isExpired(card.expMonth, card.expYear, today.year, today.monthValue)) {
+                            Spacer(Modifier.width(8.dp))
+                            Text("expired", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+            card.securityCode?.takeIf { it.isNotBlank() }?.let { CopyRow("Security code", it, secret = true, clearSeconds = clipClear) }
         }
         doc.notes?.takeIf { it.isNotBlank() }?.let { ReadOnly("Notes", it) }
         if (doc.attachments.isNotEmpty()) {
@@ -538,11 +585,17 @@ private fun Editor(
     onCancel: () -> Unit,
 ) {
     val isLogin = initial.type == "login"
+    val isCard = initial.type == "card"
     var name by remember { mutableStateOf(initial.name) }
     var username by remember { mutableStateOf(initial.login?.username ?: "") }
     var password by remember { mutableStateOf(initial.login?.password ?: "") }
     var website by remember { mutableStateOf(initial.login?.uris?.firstOrNull() ?: "") }
     var totp by remember { mutableStateOf(initial.login?.totp ?: "") }
+    var cardholder by remember { mutableStateOf(initial.card?.cardholderName ?: "") }
+    var cardNumber by remember { mutableStateOf(initial.card?.number ?: "") }
+    var expMonth by remember { mutableStateOf(initial.card?.expMonth ?: "") }
+    var expYear by remember { mutableStateOf(initial.card?.expYear ?: "") }
+    var securityCode by remember { mutableStateOf(initial.card?.securityCode ?: "") }
     var notes by remember { mutableStateOf(initial.notes ?: "") }
     var attachments by remember { mutableStateOf(initial.attachments) }
     var pending by remember { mutableStateOf(listOf<PendingUpload>()) }
@@ -551,7 +604,7 @@ private fun Editor(
     val crypto = remember { createCryptoProvider() }
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onCancel) { Text("cancel") }
-        Text(if (itemId != null) "Edit" else if (isLogin) "New login" else "New note", style = MaterialTheme.typography.headlineMedium)
+        Text(if (itemId != null) "Edit" else if (isLogin) "New login" else if (isCard) "New card" else "New note", style = MaterialTheme.typography.headlineMedium)
         Field("Name", name, { name = it })
         if (isLogin) {
             Field("Username", username, { username = it }, mono = true)
@@ -563,6 +616,36 @@ private fun Editor(
             // further typing. Normalization + validation happen once, on Save.
             Field("TOTP (otpauth:// or base32)", totp, { totp = it; totpError = null }, mono = true)
             totpError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp)) }
+        }
+        if (isCard) {
+            // Live signals off the RAW typed number (separators and all — digits-only happens
+            // once, in builtDoc, the TOTP idiom): decisive-prefix brand label in the field
+            // label, and a Luhn line that WARNS once a plausible PAN length is present but
+            // never blocks Save — storing what the user typed beats rejecting an odd-but-real
+            // number.
+            val cardDigits = CardNormalize.digitsOnly(cardNumber)
+            val cardBrand = CardDisplay.brandLabel(CardNormalize.brand(cardDigits))
+            Field("Cardholder name", cardholder, { cardholder = it })
+            Field(if (cardBrand != null) "Card number · $cardBrand" else "Card number", cardNumber, { cardNumber = it }, mono = true)
+            if (cardDigits.length >= 12 && !CardNormalize.luhnValid(cardDigits)) {
+                Text("this number doesn’t pass the usual check — you can still save it", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+            }
+            // Free-typed expiry (keyboard-first, unlike web's selects): padMonth/yearTo4 accept
+            // "1" and "27" and normalize at save; a half that can't be read is stored absent,
+            // so warn (never block) while it doesn't parse.
+            androidx.compose.foundation.layout.Row(Modifier.fillMaxWidth()) {
+                OutlinedTextField(expMonth, { expMonth = it }, Modifier.weight(1f).padding(vertical = 4.dp), label = { Text("Expiry month (MM)") }, singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace))
+                Spacer(Modifier.width(8.dp))
+                OutlinedTextField(expYear, { expYear = it }, Modifier.weight(1f).padding(vertical = 4.dp), label = { Text("Expiry year (YYYY)") }, singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace))
+            }
+            if ((expMonth.isNotBlank() && CardNormalize.padMonth(expMonth) == null) || (expYear.isNotBlank() && CardNormalize.yearTo4(expYear) == null)) {
+                Text("expiry wants a month 1–12 and a 2- or 4-digit year — a part that can’t be read won’t be saved", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+            }
+            // Masked-with-reveal (unlike the login password's plain field): a CVV is glanceable-
+            // short and worth shielding from shoulders by default. Digits-only at save.
+            Secret("Security code (optional — stored encrypted like everything else)", securityCode) { securityCode = it }
         }
         Field("Notes", notes, { notes = it }, singleLine = false)
         Spacer(Modifier.height(8.dp))
@@ -597,12 +680,24 @@ private fun Editor(
         Spacer(Modifier.height(16.dp))
         // copy()-based edit, never a field-by-field rebuild: carries favorite, passwordHistory,
         // extra URIs beyond the first, and unknown-field extras (spec 02 §3) through the save.
+        // Card values normalize ONCE here (web submit parity): digits-only number/CVV, padded
+        // month, 4-digit year (a half that doesn't parse is stored absent), and brand ALWAYS
+        // recomputed from the number — display-only, never authored, so it can never go stale.
+        // CardData.copy preserves its @Transient extras (the house rule vs the 0.2.x rebuild bug).
         fun builtDoc(totpValue: String) = initial.copy(name = name.trim(), notes = notes.ifBlank { null },
             login = if (isLogin) (initial.login ?: LoginData()).copy(
                 username = username, password = password,
                 uris = buildList { if (website.isNotBlank()) add(website); addAll(initial.login?.uris.orEmpty().drop(1)) },
                 totp = totpValue.ifBlank { null },
             ) else null,
+            card = if (isCard) (initial.card ?: CardData()).copy(
+                cardholderName = cardholder.trim().ifEmpty { null },
+                number = CardNormalize.digitsOnly(cardNumber).ifEmpty { null },
+                expMonth = CardNormalize.padMonth(expMonth),
+                expYear = CardNormalize.yearTo4(expYear),
+                securityCode = CardNormalize.digitsOnly(securityCode).ifEmpty { null },
+                brand = CardNormalize.brand(cardNumber),
+            ) else initial.card,
             attachments = attachments)
         Primary("Save", name.isNotBlank() && !busy, busy) {
             val normalizedTotp = if (isLogin) normalizeTotp(totp) else ""
@@ -893,6 +988,7 @@ private fun CsvPreflightDialog(state: DesktopState, pre: CsvPreflight, onChooseD
                 Spacer(Modifier.height(8.dp))
                 Text("${pre.loginCount} login(s) will be written.", style = MaterialTheme.typography.bodySmall)
                 NamedSkips("Not exported (secure notes):", pre.warnings.noteItems)
+                NamedSkips("Not exported (cards — a vault backup includes them):", pre.warnings.cardItems)
                 NamedSkips("Attachments can't be represented in CSV:", pre.warnings.withAttachments)
                 NamedSkips("Only the first website is kept:", pre.warnings.extraUris)
                 NamedSkips("Written, but a reimport would skip them (no username or password):", pre.warnings.emptyUsernameAndPassword)
@@ -990,13 +1086,14 @@ private fun Secret(label: String, value: String, onChange: (String) -> Unit) {
         trailingIcon = { IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) } })
 }
 
+/** [display] is what a reveal shows (e.g. a grouped card number); Copy always hands over the raw [value]. */
 @Composable
-private fun CopyRow(label: String, value: String, secret: Boolean, clearSeconds: Int) {
+private fun CopyRow(label: String, value: String, secret: Boolean, clearSeconds: Int, display: String = value) {
     var show by remember { mutableStateOf(!secret) }
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(if (show) value else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
+            Text(if (show) display else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
             if (secret) IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) }
             TextButton(onClick = { copyWithAutoClear(value, clearSeconds) }) { Text("Copy") }
         }

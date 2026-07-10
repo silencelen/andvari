@@ -111,6 +111,7 @@ class ExportTest {
             listOf(
                 ItemDoc(type = "note", name = "A note"),
                 ItemDoc(type = "note", name = "Note with file", attachments = listOf(ref)),
+                ItemDoc(type = "card", name = "Visa card", card = CardData(number = "4242424242424242", brand = "visa")),
                 login("Login with file", "u", "p", attachments = listOf(ref)),
                 login("Two uris", "u", "p", uris = listOf("a.test", "b.test")),
                 login("Empty both"),
@@ -118,9 +119,46 @@ class ExportTest {
             ),
         )
         assertEquals(listOf("A note", "Note with file"), w.noteItems)
+        assertEquals(listOf("Visa card"), w.cardItems)
         assertEquals(listOf("Note with file", "Login with file"), w.withAttachments)
         assertEquals(listOf("Two uris"), w.extraUris)
         assertEquals(listOf("Empty both"), w.emptyUsernameAndPassword)
+    }
+
+    @Test
+    fun csv_warnings_cardsSplitOutOfNoteItems_writerStaysLoginsOnly() {
+        val docs = listOf(
+            ItemDoc(type = "card", name = "Visa", card = CardData(number = "4242424242424242", brand = "visa")),
+            ItemDoc(type = "note", name = "Wifi", notes = "router"),
+            login("GitHub", "u", "p"),
+        )
+        val w = ExportCsv.warnings(docs)
+        assertEquals(listOf("Visa"), w.cardItems)
+        assertEquals(listOf("Wifi"), w.noteItems) // never the card — cards have their own list
+        // CSV rows unchanged by the card type: only the login row is written (vector-pinned shape).
+        assertEquals("name,url,username,password,note,totp\r\nGitHub,,u,p,,\r\n", ExportCsv.write(docs))
+    }
+
+    @Test
+    fun csv_warnings_cardsMirrorNotes_attachmentEligible_neverLoginGated() {
+        val docs = listOf(
+            ItemDoc(
+                type = "card",
+                name = "Amex",
+                card = CardData(number = "378282246310005"),
+                attachments = listOf(AttachmentRef(id = "1", name = "front.jpg", size = 1, fileKey = "a2V5")),
+                // A stray login block on a card must not drag it into the login-gated lists
+                // (same containment notes have always had).
+                login = LoginData(username = "", password = "", uris = listOf("https://a.test", "https://b.test")),
+            ),
+            ItemDoc(type = "note", name = "NoteScan", attachments = listOf(AttachmentRef(id = "2", name = "b.bin", size = 1, fileKey = "a2V5"))),
+        )
+        val w = ExportCsv.warnings(docs)
+        assertEquals(listOf("Amex"), w.cardItems)
+        assertEquals(listOf("NoteScan"), w.noteItems)
+        assertEquals(listOf("Amex", "NoteScan"), w.withAttachments) // type-blind, exactly as notes today
+        assertEquals(emptyList<String>(), w.extraUris) // login-only lists stay login-only
+        assertEquals(emptyList<String>(), w.emptyUsernameAndPassword)
     }
 
     // ---- AD ----

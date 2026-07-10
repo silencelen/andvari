@@ -212,9 +212,16 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     var editorItemId by mutableStateOf<String?>(null)
         private set
 
-    fun openEditor(itemId: String?) {
+    /** Doc type for a NEW-item session ([editorItemId] == null): "login" | "card". Part of
+     *  the editor session for the same reason the id is — a restored editor after an
+     *  Activity recreation must rebuild the SAME kind of blank doc. */
+    var editorNewType by mutableStateOf("login")
+        private set
+
+    fun openEditor(itemId: String?, newType: String = "login") {
         editorPendingUploads.clear() // a fresh editor session never inherits stale picks
         editorItemId = itemId
+        editorNewType = newType
         editorOpen = true
     }
 

@@ -228,6 +228,17 @@ Extension: fv-const pin; CVV suppression. e2e.sh: create card on web → row fv=
 4. **Android UI:** CardEditor/CardDetail sections (copy()-based; Trash/History inherit). **FIRST item of
    this phase: core `ExportCsv.Warnings` + `cardItems` split + the native CSV-warning line — spec 07 §1
    now enumerates cards, web complies, core routes cards into noteItems until this lands.**
+   **DONE 2026-07-09 together with step 6 (one native-UI slice: core ExportCsv.cardItems + new core
+   `CardDisplay` + both natives' card editor/detail/rows/preflight-line). 4-lens adversarial review:
+   1 real defect (Android silently dropped an unparseable expiry half — warn line added, desktop
+   parity), found via three lenses, fixed. Deferred cosmetics recorded here: desktop's pre-existing
+   Save-requires-name rule also applies to cards (web allows empty names — unify at a QW); the
+   flip-time create affordance differs (Android FAB→dropdown vs desktop second button — pick at flip).**
+
+   **OPTION A FLIP CHECKLIST (when the 0.2.x MSI is retired — flip ALL, one commit + web redeploy):**
+   - web: `CARD_CREATE_ENABLED` in `web/src/vault/card.ts` (+ its pin test)
+   - natives: `CardDisplay.CREATE_ENABLED` in core (+ its pin test) — gates both Compose clients' create entry points AND the Android autofill "Save card" NEW-item variant (update-existing stays live)
+   - extension: no create path (copy-only popup; the save-flow writes logins only)
 5. **Android autofill (the L chunk):** StructureParser clusters/formKind; DatasetBuilder card datasets;
    SaveInfo optionalIds; SaveExtractor; SaveConfirmActivity variants; all the safety fixtures; real-device
    Fold protocol re-run.

@@ -42,6 +42,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import io.silencelen.andvari.core.client.AttachmentRef
+import io.silencelen.andvari.core.client.CardData
+import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.client.ItemDoc
@@ -49,6 +51,7 @@ import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.PasswordGenerator
 import io.silencelen.andvari.core.crypto.Totp
@@ -370,9 +373,12 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
     // Snapshot the initial doc per editor session (remember, not derived live): edits build
     // on initial.copy(), and the base must not shift under the user mid-session. null with
     // a non-null id = the target item no longer exists.
-    val editorInitial = if (!vm.editorOpen) null else remember(editorItemId) {
-        if (editorItemId == null) ItemDoc(type = "login", name = "", login = LoginData(uris = listOf("")))
-        else vm.item(editorItemId)?.doc
+    val editorInitial = if (!vm.editorOpen) null else remember(editorItemId, vm.editorNewType) {
+        when {
+            editorItemId != null -> vm.item(editorItemId)?.doc
+            vm.editorNewType == "card" -> ItemDoc(type = "card", name = "", card = CardData())
+            else -> ItemDoc(type = "login", name = "", login = LoginData(uris = listOf("")))
+        }
     }
     if (vm.editorOpen && editorItemId != null && editorInitial == null) {
         // Deleted on another device (tombstone synced) — never rebase a blank doc onto the
@@ -421,7 +427,21 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
         },
         floatingActionButton = {
             if (editorInitial == null && detailId == null) {
-                ExtendedFloatingActionButton(onClick = { vm.openEditor(null) }, text = { Text("Add") }, icon = { Icon(Icons.Default.Add, null) })
+                // Option A rollout gate (design 2026-07-09): card CREATION stays dark until the
+                // fielded 0.2.x desktop MSI is retired — the gate const lives in core beside the
+                // display helpers. Everything downstream for EXISTING cards renders regardless.
+                if (!CardDisplay.CREATE_ENABLED) {
+                    ExtendedFloatingActionButton(onClick = { vm.openEditor(null) }, text = { Text("Add") }, icon = { Icon(Icons.Default.Add, null) })
+                } else {
+                    var addMenu by remember { mutableStateOf(false) }
+                    Box {
+                        ExtendedFloatingActionButton(onClick = { addMenu = true }, text = { Text("Add") }, icon = { Icon(Icons.Default.Add, null) })
+                        DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                            DropdownMenuItem(text = { Text("Login") }, onClick = { addMenu = false; vm.openEditor(null) })
+                            DropdownMenuItem(text = { Text("Card") }, onClick = { addMenu = false; vm.openEditor(null, newType = "card") })
+                        }
+                    }
+                }
             }
         },
     ) { pad ->
@@ -545,7 +565,15 @@ private fun VaultRow(item: VaultItem, onClick: () -> Unit) {
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(item.doc.name.ifBlank { "(untitled)" }, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
-                Text(if (item.doc.type == "login") item.doc.login?.username?.ifBlank { "login" } ?: "login" else "secure note", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                Text(
+                    when (item.doc.type) {
+                        "login" -> item.doc.login?.username?.ifBlank { "login" } ?: "login"
+                        // Brand + ••last4 (mirrors web) — enough to pick the right card, never the PAN.
+                        "card" -> CardDisplay.subtitle(item.doc)
+                        else -> "secure note"
+                    },
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
+                )
             }
             Text(item.doc.type, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -577,6 +605,8 @@ private fun ItemHistorySection(vm: AndvariViewModel, ui: UiState, item: VaultIte
                 val pw = v.doc.login?.password
                 Text(
                     when {
+                        // Card versions identify by brand + ••last4 (mirrors web) — never the PAN.
+                        v.doc.type == "card" -> CardDisplay.subtitle(v.doc)
                         pw == null && v.doc.type == "login" -> "(no password)"
                         pw == null -> "note"
                         revealed -> pw
@@ -616,7 +646,16 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
         ErrorBar(ui.error, vm::clearError)
         NoticeBar(ui.notice, vm::clearNotice)
         Text(doc.name, style = MaterialTheme.typography.headlineMedium)
-        Text((if (doc.type == "login") "Login" else "Secure note") + (if (readOnly) " · view only" else ""), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // Cards identify themselves by brand + ••last4 (design contract, mirrors web) — the one
+        // line that lets the user confirm the right card without revealing the full PAN.
+        Text(
+            when {
+                doc.type == "login" -> "Login"
+                doc.type == "card" -> if (doc.card?.number.isNullOrEmpty()) "Card" else CardDisplay.subtitle(doc)
+                else -> "Secure note"
+            } + (if (readOnly) " · view only" else ""),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Spacer(Modifier.height(16.dp))
         // Vault-secret copies clear after the org policy window, clamped to >=1 s exactly
         // like web's useCopy (Math.max(1, n)): a policy of 0 still clears — never "keep
@@ -627,6 +666,17 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
             login.password?.takeIf { it.isNotBlank() }?.let { SecretCopyRow("Password", it, ctx, clipClear) }
             login.totp?.takeIf { it.isNotBlank() }?.let { TotpRow(it, ctx, clipClear) }
             login.uris.firstOrNull()?.takeIf { it.isNotBlank() }?.let { ReadOnlyRow("Website", it) }
+        }
+        if (doc.type == "card") doc.card?.let { card ->
+            card.cardholderName?.takeIf { it.isNotBlank() }?.let { CopyRow("Cardholder", it, ctx, clipClear) }
+            // Reveal shows the grouped form; Copy carries the BARE stored digits (what a
+            // checkout field wants) through the same policy-cleared clipboard as passwords.
+            card.number?.takeIf { it.isNotBlank() }?.let { SecretCopyRow("Card number", it, ctx, clipClear, display = CardDisplay.groupNumber(it)) }
+            CardDisplay.expiryLabel(card)?.let { label ->
+                val today = java.time.LocalDate.now()
+                ExpiryRow(label, CardDisplay.isExpired(card.expMonth, card.expYear, today.year, today.monthValue))
+            }
+            card.securityCode?.takeIf { it.isNotBlank() }?.let { SecretCopyRow("Security code", it, ctx, clipClear) }
         }
         doc.notes?.takeIf { it.isNotBlank() }?.let { ReadOnlyRow("Notes", it) }
         if (doc.attachments.isNotEmpty()) {
@@ -689,6 +739,7 @@ private fun AttachmentRow(ref: AttachmentRef, enabled: Boolean, onClick: () -> U
 private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initial: ItemDoc, onSave: (ItemDoc, List<PendingUpload>) -> Unit, onCancel: () -> Unit) {
     val ctx = LocalContextCompat()
     val isLogin = initial.type == "login"
+    val isCard = initial.type == "card"
     // rememberSaveable: every typed field survives Activity recreation (rotation / fold
     // posture change) — plain `remember` silently wiped them all.
     var name by rememberSaveable { mutableStateOf(initial.name) }
@@ -696,6 +747,14 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     var password by rememberSaveable { mutableStateOf(initial.login?.password ?: "") }
     var website by rememberSaveable { mutableStateOf(initial.login?.uris?.firstOrNull() ?: "") }
     var totp by rememberSaveable { mutableStateOf(initial.login?.totp ?: "") }
+    // Card fields load VERBATIM (no normalization): merely opening the editor on an old card
+    // must never change what a later Save writes back — normalization happens once, inside
+    // builtDoc (the TOTP idiom).
+    var cardholder by rememberSaveable { mutableStateOf(initial.card?.cardholderName ?: "") }
+    var cardNumber by rememberSaveable { mutableStateOf(initial.card?.number ?: "") }
+    var cardExpMonth by rememberSaveable { mutableStateOf(initial.card?.expMonth ?: "") }
+    var cardExpYear by rememberSaveable { mutableStateOf(initial.card?.expYear ?: "") }
+    var cardSecurityCode by rememberSaveable { mutableStateOf(initial.card?.securityCode ?: "") }
     var notes by rememberSaveable { mutableStateOf(initial.notes ?: "") }
     var attachments by rememberSaveable(stateSaver = attachmentListSaver) { mutableStateOf(initial.attachments) }
     // Pending pick BYTES live in the ViewModel (they can't go in SavedState) — see
@@ -764,7 +823,7 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
 
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onCancel) { Text("cancel") }
-        Text(if (itemId != null) "Edit" else if (isLogin) "New login" else "New note", style = MaterialTheme.typography.headlineMedium)
+        Text(if (itemId != null) "Edit" else if (isLogin) "New login" else if (isCard) "New card" else "New note", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(8.dp))
         ErrorBar(ui.error, vm::clearError)
         Field("Name", name, { name = it })
@@ -780,6 +839,36 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
             // Normalization + validation happen once, on Save.
             Field("TOTP (otpauth:// or base32)", totp, { totp = it; totpError = null }, mono = true)
             InlineError(totpError)
+        }
+        if (isCard) {
+            Field("Cardholder name", cardholder, { cardholder = it })
+            // RAW text while typing (separators and all) — digits-only ONCE, on Save, exactly
+            // like the TOTP field above. The label badge + warn line read the live digits; the
+            // Luhn check WARNS, never blocks: an odd-but-real card must still be savable.
+            val cardDigits = CardNormalize.digitsOnly(cardNumber)
+            Field(
+                "Card number" + (CardDisplay.brandLabel(CardNormalize.brand(cardDigits))?.let { " · $it" } ?: ""),
+                cardNumber, { cardNumber = it }, mono = true, keyboard = KeyboardType.Number,
+            )
+            if (cardDigits.length >= 12 && !CardNormalize.luhnValid(cardDigits)) {
+                Text("this number doesn’t pass the usual check — you can still save it", color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+            }
+            // Free-text expiry (this file has no select idiom) — padMonth/yearTo4 normalize on
+            // Save, so "1"/"27" store as "01"/"2027". Every card field is optional. A half that
+            // doesn't parse is stored ABSENT (overwriting any stored value), so warn — never
+            // block — while it can't be read (desktop Ui.kt parity; web's selects make bad
+            // input impossible).
+            Field("Expiry month (MM)", cardExpMonth, { cardExpMonth = it }, mono = true, keyboard = KeyboardType.Number)
+            Field("Expiry year (YYYY)", cardExpYear, { cardExpYear = it }, mono = true, keyboard = KeyboardType.Number)
+            if ((cardExpMonth.isNotBlank() && CardNormalize.padMonth(cardExpMonth) == null) ||
+                (cardExpYear.isNotBlank() && CardNormalize.yearTo4(cardExpYear) == null)
+            ) {
+                Text("expiry wants a month 1–12 and a 2- or 4-digit year — a part that can’t be read won’t be saved", color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+            }
+            // Masked-with-reveal: a CVV is glanceable-short and worth shielding from shoulders
+            // by default. Digits-only is applied once, on Save, beside the other normalizations.
+            SecretField("Security code", cardSecurityCode) { cardSecurityCode = it }
+            Text("Optional — stored encrypted like everything else.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
         }
         Field("Notes", notes, { notes = it }, singleLine = false)
         Spacer(Modifier.height(12.dp))
@@ -813,6 +902,17 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
                 uris = buildList { if (website.isNotBlank()) add(website); addAll(initial.login?.uris.orEmpty().drop(1)) },
                 totp = totpValue.ifBlank { null },
             ) else null,
+            // Cards normalize ONCE here (mirrors the web submit): .copy() on the EXISTING
+            // CardData so unknown-field extras survive; blanks → null; brand is ALWAYS
+            // recomputed from the number — the stored field is display-only, never stale.
+            card = if (isCard) (initial.card ?: CardData()).copy(
+                cardholderName = cardholder.trim().ifBlank { null },
+                number = CardNormalize.digitsOnly(cardNumber).ifBlank { null },
+                expMonth = CardNormalize.padMonth(cardExpMonth),
+                expYear = CardNormalize.yearTo4(cardExpYear),
+                securityCode = CardNormalize.digitsOnly(cardSecurityCode).ifBlank { null },
+                brand = CardNormalize.brand(cardNumber),
+            ) else initial.card,
             attachments = attachments,
         )
         PrimaryButton("Save", enabled = name.isNotBlank() && !ui.busy, busy = ui.busy) {
@@ -1297,6 +1397,7 @@ private fun CsvPreflightDialog(vm: AndvariViewModel, ui: UiState, pre: CsvPrefli
                 Spacer(Modifier.height(8.dp))
                 Text("${pre.loginCount} login(s) will be written.", style = MaterialTheme.typography.bodySmall)
                 NamedSkips("Not exported (secure notes):", pre.warnings.noteItems)
+                NamedSkips("Cards can't go in a CSV — back up the vault to include them:", pre.warnings.cardItems)
                 NamedSkips("Attachments can't be represented in CSV:", pre.warnings.withAttachments)
                 NamedSkips("Only the first website is kept:", pre.warnings.extraUris)
                 NamedSkips("Written, but a reimport would skip them (no username or password):", pre.warnings.emptyUsernameAndPassword)
@@ -1384,15 +1485,33 @@ private fun CopyRow(label: String, value: String, ctx: Context, clearSeconds: In
     }
 }
 
+/** [display] lets the reveal show a formatted view (e.g. a grouped card number) while Copy
+ *  still carries the bare stored [value]. */
 @Composable
-private fun SecretCopyRow(label: String, value: String, ctx: Context, clearSeconds: Int) {
+private fun SecretCopyRow(label: String, value: String, ctx: Context, clearSeconds: Int, display: String = value) {
     var show by remember { mutableStateOf(false) }
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(if (show) value else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
+            Text(if (show) display else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
             IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) }
             TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds) }) { Text("Copy") }
+        }
+    }
+}
+
+/** Read-only expiry line with the "expired" marker — flagged strictly AFTER the last moment
+ *  of the printed month (a card is good THROUGH it); absent/garbled halves never flag. */
+@Composable
+private fun ExpiryRow(label: String, expired: Boolean) {
+    Column(Modifier.padding(vertical = 6.dp)) {
+        Text("Expiry", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, fontFamily = FontFamily.Monospace)
+            if (expired) {
+                Spacer(Modifier.width(8.dp))
+                Text("expired", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+            }
         }
     }
 }
