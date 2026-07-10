@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### smarter site matching — eTLD+1 / Public Suffix List (extension 0.8.1 + web; natives ride the next cut)
+
+- **Logins now match the whole site, not just the exact host you saved.** A login saved at
+  `login.example.co.uk` fills on `example.co.uk` and `accounts.example.co.uk` — registrable-domain
+  (eTLD+1) matching against a vendored Public Suffix List snapshot, the same base-domain behavior
+  as Bitwarden/1Password. Two things deliberately got *stricter* at the same time: a saved bare
+  public suffix (`github.io`, `co.uk`) no longer fills every site under it, and a match is refused
+  whenever the two sides' registrable domains are positively known and **different** — so
+  `foo.github.io` can never fill `bar.github.io`, and a saved `compute.amazonaws.com` no longer
+  fills every EC2 tenant host. Home-network names (`nas.local`, `pihole.lan`) are untouched: when
+  the list doesn't know a domain's TLD, matching stays exactly as before. (One honest caveat,
+  same as Bitwarden/1Password: a multi-tenant hosting provider missing from the list's private
+  section matches across its tenants until a list refresh — spec 02 §3.1 records it.)
+  Snapshot dated 2026-07-09 (10,230 rules, ICANN + private
+  sections; refresh procedure in `spec/psl/README.md`); the fill decision never leaves the device.
+  Design breaker-passed (1 fatal / 8 serious found *before* build and amended, A1–A12); 40 new
+  shared vectors run on all three implementations — including, for the first time, natively in the
+  extension — and the 25 original matching vectors are byte-frozen and keep their exact outcomes.
+  Web and extension (0.8.1) carry the new rules now; Android/desktop follow at the next native cut
+  (spec 02 §3.1 conformance note records the window).
+
 ### browser extension 0.8.0 — update-available signal
 
 - **The extension now tells you when a newer build is published.** An unpacked browser extension

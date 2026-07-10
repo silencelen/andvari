@@ -123,18 +123,44 @@ native-app convention **`androidapp://<packageName>`** (Bitwarden-compatible).
 for matching** (Android's `ViewNode.getWebDomain()` exposes only the domain — two
 services on one host are indistinguishable, so give services distinct hostnames).
 
-**Match rules (normative, all clients).** A page host matches a saved host iff:
-- **exact equality**, OR
-- the saved host has **≥ 2 labels** (contains at least one dot) AND the page host ends
-  with `"." + savedHost` (**label-boundary subdomain suffix**). Saved `example.com`
-  matches `login.example.com`; it does NOT match `evil-example.com` or
-  `example.com.evil.net`. A **single-label / bare-TLD** saved host (`com`, `router`,
-  `localhost`) matches **exact-only** — never as a suffix — so junk like an imported
-  `com` entry can never fill every `*.com` site.
+**Match rules (normative; amended 2026-07-10 — one addition + two tightenings, design
+`docs/design/2026-07-10-etld1-psl-matching.md`).** Hosts with an **empty label** after
+normalization (`.example.com`, `a..example.com`) are unparseable and never match (the
+trailing-dot strip still applies first). Clients resolve each side against the vendored
+PSL snapshot (`spec/psl/`, explicit rules only — the PSL's implicit `*` fallback is NOT
+applied) into one of REGISTRABLE(domain) / PUBLIC-SUFFIX / UNKNOWN, where PUBLIC-SUFFIX
+covers exact, wildcard-derived, and exception-derived suffixes alike. A page host matches
+a saved host iff, in order:
+- **exact equality**, OR else
+- **[tightening] never when either side is a bare PUBLIC-SUFFIX** — saved `github.io`
+  fills no tenant under it; a page at `b.kawasaki.jp` gets no `kawasaki.jp` item;
+- **[addition] both sides REGISTRABLE → registrable-domain equality** decides. Saved
+  `login.example.co.uk` now matches `example.co.uk` and `accounts.example.co.uk`; saved
+  `foo.github.io` never matches `bar.github.io`; **[tightening]** known-but-unequal
+  registrables refuse even when the old suffix relation holds (saved
+  `compute.amazonaws.com` no longer fills `ec2-x.us-east-1.compute.amazonaws.com`);
+- **either side UNKNOWN → the pre-amendment rule, bit-for-bit:** the saved host has
+  **≥ 2 labels** AND the page host ends with `"." + savedHost` (label-boundary subdomain
+  suffix). Intranet hosts (`pihole.lan`, `nas.local`) keep today's behavior; a
+  **single-label** saved host (`com`, `router`, `localhost`) stays **exact-only**.
 - **IP-literal** hosts match exact-only. `androidapp://<pkg>` matches by exact package
-  string. An unparseable / empty saved URI never matches. Cross-registrable-domain fill
-  is impossible by construction (no PSL in v1; eTLD+1 base-domain matching is a v2
-  loosening).
+  string. An unparseable / empty saved URI never matches. Staleness: a suffix the snapshot
+  doesn't know **at TLD level** resolves UNKNOWN and degrades to the old rules
+  (under-match). The one residual over-breadth is a multi-tenant hosting domain missing
+  from the **private section** under a known TLD (`foo.newpaas.app` ↔ `bar.newpaas.app`
+  both resolve REGISTRABLE `newpaas.app` and R-EQ matches them) — identical to
+  Bitwarden/1Password base-domain behavior; bounded by the refresh posture in
+  `spec/psl/README.md`, not eliminated by it.
+
+> **Conformance note (2026-07-10).** eTLD+1 matching is **client-version-gated** — there
+> is NO formatVersion change and no wire change. Carrying the amended rules: web (deploy
+> 2026-07-10, reports 0.10.0) and extension ≥ 0.8.1. Pre-dating them (old rules, including
+> the bare-suffix and known-unequal fills the amendment forbids): Android ≤ 0.9.0,
+> desktop ≤ 0.9.0, and the 0.2.x MSI, until the next native cut — which ships as
+> **≥ 0.10.0** (the in-tree versions were bumped with this amendment so no rebuild can
+> ever field a second, behaviorally-different "0.9.0"; desktop is inside that gate — no
+> deb rebuilds before the cut). Until then a phone may decline a match the PC fills (and
+> vice-versa for bare-suffix junk); this note is the recorded exception.
 
 **webDomain trust.** A fill request's web domain is honored ONLY when the requesting
 package is an allowlisted trusted browser; otherwise clients match by package name

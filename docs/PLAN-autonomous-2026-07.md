@@ -77,13 +77,27 @@ per cycle boundary if still open.
       because an unlocked popup open already re-arms via matches/allItems). Tier 2 (signed
       .xpi update_url / store distribution) stays parked for owner. Deploy checkpoint: web +
       extension zips → `/downloads` + manifest `browserExtension.version` → 0.8.0.
-- [ ] **6. eTLD+1 / PSL matching** — UriMatch upgrade both impls: registrable-domain
-      matching (login.example.co.uk ↔ example.co.uk) with a vendored, size-bounded PSL
-      snapshot (document staleness posture) or a curated-suffix fallback — DESIGN CHOICE
-      inside the cycle, breaker-passed; vector file extension (its own new section/file;
-      existing vectors byte-frozen); extension + web + core in lockstep. This changes
-      match behavior — the design doc must pin the no-loosening invariant (never match a
-      DIFFERENT registrable domain) and the review must attack it.
+- [x] **6. eTLD+1 / PSL matching** — **DONE 2026-07-10.** Full vendored PSL (10,230 rules,
+      snapshot 2026-07-09, ICANN+private) → `scripts/gen-psl.py` → three generated data
+      files; three-state resolver (REGISTRABLE/PUBLIC_SUFFIX/UNKNOWN, explicit rules only —
+      no implicit `*`); match = exact → R-SUFFIX-BARE (bare suffix exact-only BOTH roles) →
+      R-EQ (both known → registrable equality) → R-OLD (any unknown → old rules bit-for-bit;
+      `.lan`/`.local` untouched). **Breakers 1 FATAL / 8 SERIOUS / 4 MINOR pre-build →
+      amendments A1–A12** (the FATAL: exact-rule-membership tightening missed all 283
+      wildcard-derived suffixes — `us-east-1.compute.amazonaws.com` kept filling every EC2
+      tenant; fixed by the discriminated resolver). All 25 frozen vectors byte-preserved; 47
+      new shared vectors incl. the extension's FIRST native vector run (cycle-5 harness).
+      verify.sh now gates the extension (A7); package.mjs refuses failing tests + caps
+      content.js 60KB (A8 — verified 20.0KB, PSL rides only the SW bundle). **Build review
+      13 raised → 11 confirmed / 2 refuted, all 11 fixed:** normalizeHost made IDEMPOTENT
+      ×3 (www-loop-strip + single-colon port rule — the extension double-normalizes and
+      diverged from core on www.www/IPv6 hosts; IPv6 sites had silently stopped filling),
+      Kotlin isIpLiteral ASCII-only (unicode-digit parity gap), csv uriClass `j:` verbatim
+      class ×2 (A5 junk would false-merge on re-import), package.mjs glob (not a hardcoded
+      file list), gen-psl whitespace-split + charset whitelist, spec §3.1 staleness wording
+      honest (private-section gap = Bitwarden-parity, not "never widens"), versions bumped
+      ×4 → 0.10.0 (no second behaviorally-different "0.9.0" can ever field), A8 doc wording.
+      Gates green at 0.10.0. Checkpoint: web deploy + extension 0.8.1 publish.
 - [ ] **7. Web polish pack** — vault-list virtualization >~500 items (hand-rolled window
       per the F56 addendum recommendation, React-profiler note in the commit); PROD-1
       (audit appender wiring — verify what's actually unreferenced, fix or document);
@@ -114,3 +128,16 @@ per cycle boundary if still open.
   Store) — needs a distribution decision; tier 1 ships regardless.
 - Real-secrets migration date — after owner TOTP + drills + 30-day soak.
 - 0.2.x MSI retirement (= the card-create Option-A flip trigger).
+
+## Owner dev-notes queued (post-cycle-8 candidates)
+
+- **Card / payment autofill+storage** (dev-note 2026-07-10): *"support storing autofill
+  creditcard and payment details."* State check: card **storage + UI + Android card
+  autofill + extension copy-only Cards popup shipped in 0.7.0** — but card-CREATE is dark
+  everywhere (Option A) until the 0.2.x MSI retires, so from the owner's seat it doesn't
+  exist yet. The genuinely-new work: (a) flip card-create when the MSI retires (checklist
+  in the cards design doc §build-order — an owner step + a small unhide pass), (b)
+  extension IN-PAGE card fill, deliberately deferred behind the frame-origin egress
+  contract (cards design 2026-07-09) — needs its own breaker-passed design cycle, (c)
+  possibly non-card payment types (IBAN/bank account) as a new item template — scope
+  decision. Next session: pitch these three as a cycle with honest costs.

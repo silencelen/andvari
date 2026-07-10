@@ -17,6 +17,17 @@ if (version !== ffVersion || version !== pkgVersion) {
 }
 mkdirSync("artifacts", { recursive: true });
 
+// A7: refuse to zip a build whose tests fail — mirrors the version-drift refusal above.
+// (verify.sh also runs these, but package.mjs is callable standalone and must self-defend.)
+// Same GLOB as `npm test` — node expands it itself — so a future test file can never be
+// silently skipped here while npm test runs it.
+execFileSync(process.execPath, ["--test", "src/**/*.test.ts"], { stdio: "inherit" });
+
+// A8: content.js is injected into EVERY page — it must never carry the ~144 KB PSL blob
+// (pslData is imported ONLY by psl.ts, which only background.ts uses). Cap it well below
+// blob size so a future import-chain slip fails the package, not the users' page loads.
+const CONTENT_JS_CAP = 60 * 1024; // today ~20.5 KB
+
 // firefox first, chrome last: dist/ is left holding the CHROME build, which is what the
 // README's "Load + verify" (chrome://extensions → Load unpacked → extension/dist) assumes.
 for (const target of ["firefox", "chrome"]) {
@@ -24,11 +35,17 @@ for (const target of ["firefox", "chrome"]) {
     stdio: "inherit",
     env: { ...process.env, RELEASE: "1", TARGET: target === "firefox" ? "firefox" : "" },
   });
+  const contentSize = statSync("dist/content.js").size;
+  if (contentSize > CONTENT_JS_CAP) {
+    throw new Error(
+      `dist/content.js is ${contentSize} bytes (> ${CONTENT_JS_CAP}) — did the PSL blob leak into the per-page bundle? (design A8)`,
+    );
+  }
   const zip = `artifacts/andvari-extension-${target}-${version}.zip`;
   rmSync(zip, { force: true });
   // -X: no extended attrs; cwd=dist so manifest.json sits at the zip root.
   execFileSync("zip", ["-rX", `../${zip}`, "."], { cwd: "dist", stdio: "inherit" });
-  console.log(`packaged ${zip} (${(statSync(zip).size / 1024).toFixed(0)} KiB)`);
+  console.log(`packaged ${zip} (${(statSync(zip).size / 1024).toFixed(0)} KiB, content.js ${(contentSize / 1024).toFixed(1)} KiB)`);
 }
 console.log(`\nextension ${version} packaged. Publish both zips to CT122 /opt/andvari/downloads`);
 console.log("and merge a browserExtension entry into manifest.json (see ops/windows-build.md for the merge pattern).");
