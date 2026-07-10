@@ -36,7 +36,16 @@ per cycle boundary if still open.
       token-holder). Both fixed; 0 refuted. Gates green. Also synced the web + extension
       `urimatch.ts` NEGATIVE_HINTS mirrors for F11 (cross-module seam the vector caught).
       Natives ride the 0.9.0 cut (cycle 3).
-- [ ] **2. Quick-unlock (F84 + F61)** — the owner-requested cycle. Order: spec pass FIRST
+- [x] **2. Quick-unlock (F84 + F61)** — **DONE 2026-07-10** (design+breakers `c06c978`,
+      build+review `b987680`). Breakers: 0 fatal / 9 serious → amendments A1–A10. Build review:
+      3 LOW confirmed, 0 refuted; the MAX-effort core-crypto lens found NOTHING (UVK boundary
+      held). Notables: A3 closed a pre-existing hole (autofill-only process never purged on a
+      definitive 401 → a revoked device kept opening the cached vault offline forever); A5
+      blocks F61's silent re-key while `mustChangePassword` (it would clear the flag
+      server-side while the admin-known temp password stayed live); A2 hardened to fail closed
+      cross-boot without a server-attested time anchor. Owner step (not a gate): on-device
+      biometric feel-check.
+- [ ] **2-OLD (superseded, kept for the record). Quick-unlock (F84 + F61)** — the owner-requested cycle. Order: spec pass FIRST
       (spec 01/05 additions: cacheAllowed gating, the at-rest wrapped-secret row in the
       threat model, the F61 KDF-upgrade-on-full-unlock rule + its quick-unlock interplay,
       the periodic-full-password rule) → design doc + 2-breaker pass → build (core
