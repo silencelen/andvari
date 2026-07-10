@@ -45,15 +45,6 @@ per cycle boundary if still open.
       server-side while the admin-known temp password stayed live); A2 hardened to fail closed
       cross-boot without a server-attested time anchor. Owner step (not a gate): on-device
       biometric feel-check.
-- [ ] **2-OLD (superseded, kept for the record). Quick-unlock (F84 + F61)** — the owner-requested cycle. Order: spec pass FIRST
-      (spec 01/05 additions: cacheAllowed gating, the at-rest wrapped-secret row in the
-      threat model, the F61 KDF-upgrade-on-full-unlock rule + its quick-unlock interplay,
-      the periodic-full-password rule) → design doc + 2-breaker pass → build (core
-      `Account.unlockWithUvk` ≈15 lines; Android BiometricPrompt + Keystore AES-GCM wrap of
-      the UVK, invalidated on biometric enrollment change; wire into AutofillUnlockActivity
-      + MainActivity unlock) → adversarial review (key-handling lens at max) → commit.
-      **Windows/desktop quick-unlock stays DEFERRED** (backlog: past the MSI refresh).
-      On-device biometric feel-check = owner step at the end, not a blocker.
 - [ ] **3. Cut 0.9.0 natives** — version bump ×4 (verify.sh consistency gate), CHANGELOG,
       APK → devstore (`scripts/ship.sh release`), deb → `/downloads` + manifest merge
       (linux entry only unless the extension changed), full gates on the release commit
