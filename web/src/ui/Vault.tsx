@@ -31,6 +31,63 @@ import { estimateStrength } from "./strength";
 
 type View = "vault" | "sharing" | "health" | "settings" | "admin" | "trash";
 
+/**
+ * F76: make hardware/gesture Back step through the vault's open UI layers instead of leaving
+ * the SPA — leaving drops the in-memory keys and costs a full argon2 unlock. While any layer
+ * is open ([deep]) we keep ONE sentinel history entry armed; a real Back pops it, we close the
+ * topmost layer ([closeTop]) and re-arm. When the last layer is closed via an in-app control
+ * we consume the sentinel with a self-initiated back() (flagged so the handler ignores it), so
+ * no dangling entry lingers. A lock/sign-out unmounts Vault → the effect cleanup drops the
+ * listener; a stray sentinel is harmless (same-URL pushState, consumed by the next Back).
+ */
+function useBackGuard(deep: boolean, closeTop: () => void) {
+  const armed = useRef(false);
+  const selfPop = useRef(false);
+  const deepRef = useRef(deep);
+  const closeRef = useRef(closeTop);
+  deepRef.current = deep;
+  closeRef.current = closeTop;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onPop = () => {
+      if (selfPop.current) {
+        selfPop.current = false;
+        armed.current = false;
+        return;
+      }
+      if (deepRef.current) {
+        closeRef.current(); // close exactly one layer
+        window.history.pushState({ andvariBack: true }, ""); // re-arm — the browser consumed our sentinel
+      } else {
+        armed.current = false; // nothing open — let the pop stand (navigate away)
+      }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      // Lock / sign-out can unmount us with a layer still open (deep→shallow never fires, so
+      // effect-2's self-pop never runs). Consume the armed sentinel here or it lingers as the
+      // current history top and — across repeated lock cycles — accumulates, each stray
+      // silently eating a later Back press. The listener is already detached, so this same-URL
+      // pop is invisible. (A mid-layer browser RELOAD can't be reconciled — no cleanup runs —
+      // but a reload already dropped the keys, so F76's "don't waste an unlock" point is moot.)
+      if (armed.current) window.history.back();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (deep && !armed.current) {
+      window.history.pushState({ andvariBack: true }, "");
+      armed.current = true;
+    } else if (!deep && armed.current) {
+      selfPop.current = true; // a layer closed via an in-app control — reclaim our sentinel
+      window.history.back();
+    }
+  }, [deep]);
+}
+
 interface Props {
   account: Account;
   store: VaultStore;
@@ -88,6 +145,18 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
     () => typeof window !== "undefined" && isExportOriginAllowed(window.location.origin),
     [],
   );
+
+  // F76: any open layer makes Back close it instead of leaving the vault. Topmost-first order
+  // mirrors how the layers stack (editor/import/export over a view; detail over the list).
+  const deep = view !== "vault" || selected !== null || editing !== null || importOpen || exportMode !== null;
+  const closeTop = useCallback(() => {
+    if (editing) return setEditing(null);
+    if (importOpen) return setImportOpen(false);
+    if (exportMode) return setExportMode(null);
+    if (selected) return setSelected(null);
+    if (view !== "vault") return setView("vault");
+  }, [editing, importOpen, exportMode, selected, view]);
+  useBackGuard(deep, closeTop);
 
   const refresh = () => {
     setItems(store.list());
@@ -172,7 +241,21 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
-    return items.filter((it) => it.doc.name.toLowerCase().includes(q) || (it.doc.login?.username ?? "").toLowerCase().includes(q) || (it.doc.login?.uris?.[0] ?? "").toLowerCase().includes(q));
+    // F79: search name + username + EVERY uri (not just the first) + notes + a card's
+    // brand/••last4 identity — so a login found only by its 2nd website, a secure note found
+    // by its body, and a card found by "visa" all match. Secrets (passwords/PANs/CVVs) are
+    // never search keys.
+    return items.filter((it) => {
+      const d = it.doc;
+      if (d.name.toLowerCase().includes(q)) return true;
+      if ((d.notes ?? "").toLowerCase().includes(q)) return true;
+      if (d.type === "login" && d.login) {
+        if ((d.login.username ?? "").toLowerCase().includes(q)) return true;
+        if ((d.login.uris ?? []).some((u) => u.toLowerCase().includes(q))) return true;
+      }
+      if (d.type === "card") return cardSubtitle(d).toLowerCase().includes(q);
+      return false;
+    });
   }, [items, query]);
 
   // Vault metadata for badges + the new-item picker (recomputed whenever items refresh).
@@ -1159,6 +1242,11 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
   const [fileErr, setFileErr] = useState("");
   const [saveErr, setSaveErr] = useState("");
   const [busy, setBusy] = useState(false);
+  // F78: the editor password is masked by default (reveal toggle), and Generate over an
+  // EXISTING password asks first — a mistyped-then-generated field silently losing what the
+  // user typed was the reported footgun.
+  const [showPw, setShowPw] = useState(false);
+  const [confirmGen, setConfirmGen] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const isLogin = doc.type === "login";
   const login = doc.login ?? {};
@@ -1168,7 +1256,18 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
   const setLogin = (patch: Partial<NonNullable<ItemDoc["login"]>>) => setDoc({ ...doc, login: { ...login, ...patch } });
   const setCard = (patch: Partial<NonNullable<ItemDoc["card"]>>) => setDoc({ ...doc, card: { ...card, ...patch } });
 
-  const gen = () => setLogin({ password: generatePassword() });
+  // Generate: an empty field fills immediately; a non-empty one arms an inline confirm
+  // (house style — no native dialogs) so a real password is never clobbered by a stray tap.
+  // Either way the new password is revealed, so the user sees what will be saved.
+  const gen = () => {
+    if ((login.password ?? "").length > 0 && !confirmGen) {
+      setConfirmGen(true);
+      return;
+    }
+    setLogin({ password: generatePassword() });
+    setShowPw(true);
+    setConfirmGen(false);
+  };
 
   // Live editor signals off the typed number: decisive-prefix brand badge, and a Luhn check
   // that WARNS once a plausible PAN length is present — never blocks Save (store-what-the-
@@ -1298,9 +1397,13 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
           <div className="field">
             <label>Password</label>
             <div className="secret-row">
-              <input className="mono" value={login.password ?? ""} onChange={(e) => setLogin({ password: e.target.value })} />
-              <button type="button" className="ghost" onClick={gen}>Generate</button>
+              {/* Masked by default (F78); typing stays possible — a password field the user
+                  can't read is the login-editor's one blind spot the reveal toggle fixes. */}
+              <input className="mono" type={showPw ? "text" : "password"} value={login.password ?? ""} onChange={(e) => { setLogin({ password: e.target.value }); setConfirmGen(false); }} />
+              <button type="button" className="ghost" onClick={() => setShowPw((s) => !s)}>{showPw ? "Hide" : "Show"}</button>
+              <button type="button" className="ghost" onClick={gen}>{confirmGen ? "Replace?" : "Generate"}</button>
             </div>
+            {confirmGen && <span className="muted" style={{ color: "var(--gold)" }}>this replaces the current password — tap “Replace?” to confirm, or edit the field to cancel</span>}
             {login.password && <StrengthBar password={login.password} />}
           </div>
           <div className="field">

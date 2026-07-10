@@ -43,6 +43,15 @@ The server now fronts a public break-glass origin; these close availability and 
 
 ### QW-2 — "Web daily-UX & spec truth" (web, combined effort ~M as one batch)
 
+> **DONE 2026-07-09 (additive on 0.8.0, not yet deployed).** F60 master-password floor
+> (score≥3, enforced at enroll + change-password incl. forced-change, non-ASCII SHOULD-warn,
+> `strength.test.ts`), F79 search (notes + all URIs + card identity, web+desktop+Android),
+> F76 Back-guard (`useBackGuard` steps through layers instead of leaving the SPA), F64
+> session-TTL admin fields (clamped ≥1), F78 masked editor password + Generate-overwrite
+> confirm. F59 was already shipped; F75's copy is now TRUE post-importers (no change). 3-lens
+> adversarial review: 1 MEDIUM (F76 sentinel leak on lock-while-deep) found + fixed. Web
+> deploy to CT122 pending owner go (no version bump; native F79 rides the next APK/deb).
+
 - **F60** *(yes, medium)* — master password floor is length≥8 while throwaway backup exports demand score≥3; spec 05 T8 claims enforcement that doesn't exist. **Fix:** `estimateStrength` score≥3 in Welcome enrollment + Settings change-password (covers the forced-change path), non-ASCII SHOULD-warn per spec 01 §1. *Do before real secrets migrate.*
 - **F79** *(yes, medium)* — search ignores notes and every URI after the first; desktop matches name+username only. **Fix:** two one-line predicate extensions (`Vault.tsx:169`, desktop `Ui.kt:199`); optionally mirror on Android.
 - **F75** *(yes, medium)* — export panel promises re-import dedupe that doesn't exist (import panel says the opposite; `planImport` never consults the vault). **Fix now:** one-line copy correction in `ExportPanel.tsx:403` + test (error-truth doctrine). The vault-aware merge half folds into **importers** (see §3).

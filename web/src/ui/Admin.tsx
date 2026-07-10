@@ -471,6 +471,13 @@ function PolicyTab({ client }: { client: ApiClient }) {
         {numField("Clipboard clear", policy.clipboardClearSeconds, (n) => patch({ clipboardClearSeconds: n }), "seconds")}
       </div>
 
+      {/* F64: session lifetimes were live policy knobs with no UI. Clamp ≥1 — a 0 TTL would
+          mint already-expired tokens and lock everyone out on the next refresh. */}
+      <div className="row">
+        {numField("Access-token lifetime", policy.sessionAccessTtlSeconds, (n) => patch({ sessionAccessTtlSeconds: Math.max(1, n) }), "seconds")}
+        {numField("Refresh-token lifetime", policy.sessionRefreshTtlDays, (n) => patch({ sessionRefreshTtlDays: Math.max(1, n) }), "days")}
+      </div>
+
       <label className="check">
         <input type="checkbox" checked={policy.offlineCacheAllowed} onChange={(e) => patch({ offlineCacheAllowed: e.target.checked })} />
         <span>Allow clients to keep an encrypted offline cache</span>

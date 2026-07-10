@@ -7,6 +7,8 @@ import { Account } from "../vault/account";
 import { DevicesCard } from "./Devices";
 import { fmtDate } from "./format";
 import { QrSvg } from "./QrSvg";
+import { MasterPasswordHint } from "./Welcome";
+import { meetsMasterPasswordFloor } from "./strength";
 
 interface Props {
   client: ApiClient;
@@ -218,10 +220,12 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Props) {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
 
-  const canSubmit = current && next.length >= 8 && next === confirm;
+  // F60: same master-password floor as enrollment (score≥3), covering the forced-change path.
+  const canSubmit = current && meetsMasterPasswordFloor(next) && next === confirm;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!meetsMasterPasswordFloor(next)) return setErr("Choose a stronger new password — mix length with upper/lower case, digits, or symbols."); // F60: enforce, not just disable
     setBusy(true);
     setErr("");
     setMsg("");
@@ -258,7 +262,7 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Props) {
       <div className="field">
         <label>New master password</label>
         <input type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} />
-        {next && next.length < 8 && <span className="muted">at least 8 characters</span>}
+        <MasterPasswordHint password={next} />
       </div>
       <div className="field">
         <label>Confirm new master password</label>

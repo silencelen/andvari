@@ -408,7 +408,14 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
 
     val filtered = ui.items.filter {
         val q = query.trim().lowercase()
-        q.isEmpty() || it.doc.name.lowercase().contains(q) || (it.doc.login?.username ?: "").lowercase().contains(q)
+        // F79 parity with web/desktop: name + username + EVERY uri + notes + card brand/••last4.
+        val d = it.doc
+        q.isEmpty() ||
+            d.name.lowercase().contains(q) ||
+            (d.notes ?: "").lowercase().contains(q) ||
+            (d.login?.username ?: "").lowercase().contains(q) ||
+            (d.login?.uris ?: emptyList()).any { u -> u.lowercase().contains(q) } ||
+            (d.type == "card" && CardDisplay.subtitle(d).lowercase().contains(q))
     }
 
     Scaffold(
