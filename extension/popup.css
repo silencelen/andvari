@@ -129,6 +129,16 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 /* The message strip is shared by both views (unlock errors, ping results, copy failures). */
 #msg { margin: 2px 16px 12px; }
 
+/* Self-update banner — a calm gold note above both views; not an error, so it borrows the
+   info palette rather than the danger one. Hidden until the SW confirms a newer build. */
+.update-banner {
+  margin: 10px 16px 0; padding: 8px 10px; border-radius: var(--radius);
+  font-size: 12.5px; color: var(--gold-bright);
+  background: rgba(208, 169, 74, 0.1); border: 1px solid rgba(208, 169, 74, 0.25);
+}
+.update-link { color: var(--gold-bright); font-weight: 600; text-decoration: underline; white-space: nowrap; }
+.update-link:hover { color: var(--gold); }
+
 /* ---- "Unsealing…" — honest KDF progress (the ~6 s Argon2id), indeterminate gold sweep ---- */
 .kdf { margin-top: 12px; }
 .kdf .bar {

@@ -63,12 +63,20 @@ per cycle boundary if still open.
       the OWNER's own vault on a second device (owner grants carry a UVK-opened `wrappedVk`,
       so `heldBefore` is false); fixed with a `roleFor === "owner"` skip + a test verified to
       FAIL with the guard reverted (mutation-checked). Web tests 294 → 295, gates green.
-- [ ] **5. Extension update-available signal** (owner dev-note 2026-07-10, tier 1) — SW
-      version-check against `/downloads/manifest.json` (cached, ~daily), popup badge +
-      "download & reload" pointer, Devices-hub line. NO silent reinstall (unpacked Chrome
-      forbids it); tier 2 (signed .xpi update_url / store distribution) stays a ROADMAP
-      item needing an owner decision. Bump extension version ×3 (package.mjs drift-guard),
-      rebuild zips, publish to `/downloads` + manifest merge at the checkpoint.
+- [x] **5. Extension update-available signal** — **DONE 2026-07-10.** Pure `isNewerVersion`
+      (fails closed on malformed; unit-tested via Node's built-in runner — new `npm test` in
+      extension/, node 22 native TS, tsconfig excludes `*.test.ts`) + SW `checkForUpdate`
+      (daily `updatecheck` alarm + onInstalled/onStartup + throttled wake IIFE; fetches the
+      PUBLIC `/downloads/manifest.json`, stores non-secret `updateInfo` in storage.local,
+      20h throttle, transient failure never clears a real signal, `updateStatus` re-validates
+      vs the installed version so no stale nag after an in-place update) + popup banner (both
+      views, Firefox/Chrome zip by UA) + Devices-hub posture line. **Toolbar badge deliberately
+      NOT used** — `pageInfo` already owns the per-tab match-count badge; an update badge would
+      collide. Version bumped ×3 (0.7.0→0.8.0, drift-guard satisfied). 3-lens review: **0
+      confirmed / 1 refuted** (the refuted one — updateStatus re-arming autolock — collapsed
+      because an unlocked popup open already re-arms via matches/allItems). Tier 2 (signed
+      .xpi update_url / store distribution) stays parked for owner. Deploy checkpoint: web +
+      extension zips → `/downloads` + manifest `browserExtension.version` → 0.8.0.
 - [ ] **6. eTLD+1 / PSL matching** — UriMatch upgrade both impls: registrable-domain
       matching (login.example.co.uk ↔ example.co.uk) with a vendored, size-bounded PSL
       snapshot (document staleness posture) or a curated-suffix fallback — DESIGN CHOICE

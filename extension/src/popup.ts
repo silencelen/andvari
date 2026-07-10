@@ -89,6 +89,32 @@ async function refresh(): Promise<void> {
   (email.value ? el("password") : email).focus();
 }
 
+/** Render the self-update banner from the SW's SW-validated verdict. `latest` is non-null only
+ *  when a strictly-newer build is published, so we show the banner iff it is present. The SW
+ *  answers whether locked or not, so the banner surfaces on the unlock screen too. */
+async function renderUpdate(): Promise<void> {
+  const banner = el("update");
+  const link = el<HTMLAnchorElement>("update-link");
+  const r = await ask({ type: "updateStatus" });
+  if (!r || !r.latest) {
+    banner.hidden = true;
+    return;
+  }
+  el("update-text").textContent = `Update available — andvari ${r.latest}. `;
+  // Firefox gets the Firefox zip; everything else (Chrome/Edge/Brave) the Chrome zip. Fall back
+  // to whichever URL exists so a single-target publish still links somewhere real.
+  const isFirefox = /firefox/i.test(navigator.userAgent);
+  const url = (isFirefox ? r.firefoxUrl : r.chromeUrl) ?? r.chromeUrl ?? r.firefoxUrl;
+  if (url) {
+    link.href = url;
+    link.textContent = "Download & reload";
+    link.hidden = false;
+  } else {
+    link.hidden = true; // a version with no usable link: still tell them one exists
+  }
+  banner.hidden = false;
+}
+
 /** Email is deliberately non-secret (remembered for convenience) — the ZK line is the master
  *  password and keys, which never touch chrome.storage.local. */
 async function rememberedEmail(): Promise<string | null> {
@@ -515,5 +541,6 @@ el("ping").addEventListener("click", async () => {
 });
 
 void refresh();
+void renderUpdate();
 // Passive connectivity dot — quiet ping on open, result only in the header dot.
 void ask({ type: "ping" }).then((r) => setConn(r?.ok === true));

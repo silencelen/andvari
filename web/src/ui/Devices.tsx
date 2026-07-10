@@ -131,13 +131,20 @@ function ExtensionRowView({ state }: { state: ExtensionRow }) {
     return <p className="muted">The browser extension isn’t published yet — it will appear here when it is.</p>;
   }
   return (
-    <p className="muted">
-      Autofill on this computer’s browser. Download for{" "}
-      {state.chromeUrl && <a href={state.chromeUrl}>Chrome / Edge / Brave</a>}
-      {state.chromeUrl && state.firefoxUrl && " or "}
-      {state.firefoxUrl && <a href={state.firefoxUrl}>Firefox</a>} (andvari {state.version}), unzip it to a
-      folder you’ll keep, then follow the INSTALL.txt inside — about two minutes; the steps differ per browser.
-    </p>
+    <>
+      <p className="muted">
+        Autofill on this computer’s browser. Download for{" "}
+        {state.chromeUrl && <a href={state.chromeUrl}>Chrome / Edge / Brave</a>}
+        {state.chromeUrl && state.firefoxUrl && " or "}
+        {state.firefoxUrl && <a href={state.firefoxUrl}>Firefox</a>} (andvari {state.version}), unzip it to a
+        folder you’ll keep, then follow the INSTALL.txt inside — about two minutes; the steps differ per browser.
+      </p>
+      <p className="muted">
+        Because it’s loaded unpacked, the extension can’t update itself — it will flag inside its popup when a
+        newer version ({state.version} is current) is published here. Updating means re-downloading above and
+        reloading it in your browser’s extensions page.
+      </p>
+    </>
   );
 }
 
