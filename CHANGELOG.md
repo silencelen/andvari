@@ -1,6 +1,12 @@
 # andvari — changelog
 
-## Unreleased
+## 0.10.0 — smarter matching + vault choice + save integrity (2026-07-10, cross-platform release)
+
+Everything below ships together to phone and desktop with this cut; the web app and browser
+extension (0.8.1) have been serving the same features since their per-cycle deploys. This cut
+closes the spec 02 §3.1 conformance window — every current client now carries the eTLD+1
+matching rules. Card creation stays dark on every client (Option A) until the 0.2.x desktop
+MSI is retired.
 
 ### web polish + desktop save integrity (cycle 7)
 
