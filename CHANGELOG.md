@@ -1,5 +1,28 @@
 # andvari — changelog
 
+## Unreleased
+
+### skipti loose ends (F18, F19 parity, F20, LC-1)
+
+- **Choose the vault when you create an item (F18).** Android and desktop new-item editors now
+  offer a vault picker instead of silently filing everything in Personal. Only vaults you can
+  write to are offered, and the picker appears only for a genuinely new item with more than one
+  choice. Items now carry a vault-name tag in the list and on the detail view. Editing an existing
+  item can never move it — core resolves the vault as `existing ?: picked ?: personal`.
+- **Move and Copy on desktop (F19 parity).** The same safe gesture the web and Android clients
+  use: the copy is created and confirmed in the destination *before* anything is deleted, so a
+  failed move never loses the item. A retry reuses the gesture only while the source is unchanged;
+  a permission failure ends it rather than blindly replaying.
+- **See who else is in a shared vault (F20).** Any member — not just the owner — can now view the
+  vault's roster, read-only. You get a calm "you were added to <vault>" notice when someone shares
+  a vault with you (never on a first sync of a new device, never for a vault you own or restored),
+  and a shared vault this device cannot open now says so plainly instead of silently vanishing.
+- **A re-delete during restore no longer eats a parked edit (LC-1).** If a shared vault was
+  deleted, restored, and deleted again while you had an unsent offline edit, that edit could be
+  dropped. Denials are now staged and judged against the vault's actual state after a fresh sync
+  rather than against how the write arrived, so a held vault re-parks the edit instead of
+  discarding it.
+
 ## 0.9.0 — quick unlock + native robustness (2026-07-10, cross-platform release)
 
 Biometric unlock on Android, plus the two quick-win batches that make the daily-driver clients

@@ -8,6 +8,10 @@ import io.ktor.client.engine.java.Java
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
+import io.silencelen.andvari.core.client.CopyDeniedException
+import io.silencelen.andvari.core.client.ItemChangedException
+import io.silencelen.andvari.core.client.MoveGesture
+import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.UpgradeRequiredException
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.CsvImport
@@ -136,6 +140,13 @@ class DesktopState(private val scope: CoroutineScope) {
     // Item undelete (feature): the Trash screen's deleted items (null = not loaded / loading).
     var deletedItems by mutableStateOf<List<DeletedItemView>?>(null)
         private set
+    // F19 move/copy: the running gesture's attachment progress (null unless attachments copy)
+    // and an INLINE error kept separate from the global `error` bar so the Detail control can
+    // show it beside a Retry button (web MoveCopyControl parity).
+    var moveProgress by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+    var moveError by mutableStateOf<String?>(null)
+        private set
     var totpStatus by mutableStateOf<TotpStatus?>(null)
         private set
     // F74: tri-state for the status fetch above — totpStatus==null alone can't distinguish
@@ -190,6 +201,12 @@ class DesktopState(private val scope: CoroutineScope) {
     // The engine's OWN cache instance, kept for surfaces the engine doesn't re-export
     // (vault rows / envelopes — the spec 07 export enumerates from them).
     private var cache: VaultCache? = null
+    // F19 gestures memoized per (item|target|mode): a RETRY of a transiently-failed move/copy
+    // reuses the SAME gesture (fresh ids were minted ONCE) so the server's mutation dedup
+    // converges instead of duplicating. Kept ONLY across a failed attempt of the same
+    // UNCHANGED item — a rev change remints (a stale gesture would rebuild attachments from a
+    // stale snapshot); Cancel/mode-change discards. Mirrors Android's moveGestures.
+    private val moveGestures = mutableMapOf<String, MoveGesture>()
 
     private fun newApi(tokens: Tokens? = null) =
         AndvariApi(store.baseUrl, HttpClient(Java), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
@@ -312,8 +329,11 @@ class DesktopState(private val scope: CoroutineScope) {
         busy = false; escrowStale = false; notice = "Account re-protected — your recovery is up to date."
     }
 
-    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), onSaved: () -> Unit = {}) =
-        op { engine!!.saveWithUploads(itemId, doc, uploads); refreshItems(); onSaved() }
+    // F18: [vaultId] is honored ONLY for a NEW item (itemId == null) — the core save guard
+    // keeps an existing item in its own vault (server enforces vault_mismatch), so a restore
+    // (itemId != null) leaves it null and lands the item back where it was.
+    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) =
+        op { engine!!.saveWithUploads(itemId, doc, uploads, vaultId); refreshItems(); onSaved() }
 
     /** Item history (feature): load + decrypt the currently-viewed item's archived versions. */
     fun loadItemVersions(itemId: String, vaultId: String) = op {
@@ -337,6 +357,71 @@ class DesktopState(private val scope: CoroutineScope) {
         val acct = account ?: return emptyMap()
         return engine?.vaultInfos()?.filterNot { it.vaultId == acct.personalVaultId }
             ?.associate { it.vaultId to it.name }.orEmpty()
+    }
+
+    /**
+     * F18: vaults a NEW item may be created in — the personal vault plus any shared vault we can
+     * WRITE to (owner/writer). vaultInfos() is personal-first, so `.first()` is the default the
+     * picker starts on. Existing items never move via the editor (the core save guard fences a
+     * changed vaultId), so this is a new-item / move-target list only. Each call decrypts vault
+     * metadata, so the UI reads it once (under remember), never per recomposition.
+     */
+    fun newItemVaultChoices(): List<VaultInfo> =
+        engine?.vaultInfos()?.filter { it.type == "personal" || it.role == "owner" || it.role == "writer" }.orEmpty()
+
+    /** F19: discard an item's memoized gestures + the inline move state — on Cancel or a
+     *  mode switch, so the next gesture is minted fresh (a lingering gesture would replay a
+     *  stale snapshot). A transient failure deliberately does NOT call this: the memo must
+     *  survive so Retry replays the SAME ids (server dedup converges, never a duplicate). */
+    fun clearMoveState(itemId: String) {
+        moveGestures.keys.filter { it.startsWith("$itemId|") }.forEach { moveGestures.remove(it) }
+        moveError = null
+        moveProgress = null
+    }
+
+    /**
+     * F19 (design §8): move (copy-leg-first, THEN delete source) or copy [itemId] into
+     * [targetVaultId]. All gesture logic lives in core [SyncEngine.runGesture] (copy confirmed
+     * before any delete, per-gesture idempotent mutationIds) — this only picks/reuses the
+     * gesture and maps failures to inline copy. Sets the global [busy] so the idle auto-lock
+     * defers (never yanks the engine mid-move). onDone fires ONLY on success (the caller closes
+     * the picker + leaves the detail). Mirrors Android's moveOrCopyItem.
+     */
+    fun moveOrCopyItem(itemId: String, targetVaultId: String, move: Boolean, onDone: () -> Unit) {
+        val e = engine ?: return
+        val gKey = "$itemId|$targetVaultId|$move"
+        busy = true; moveError = null; moveProgress = null
+        scope.launch {
+            try {
+                val current = e.item(itemId)
+                    ?: throw ApiException(409, "vault_state_changed", "This item is no longer here — it may have been removed or its vault deleted.")
+                // Reuse the memo ONLY while the source content is unchanged — a different rev
+                // IS different content, so remint (a stale gesture would rebuild attachments
+                // from a stale snapshot). Fresh ids are minted exactly once per gesture.
+                val memo = moveGestures[gKey]
+                val g = if (memo != null && memo.sourceRev == current.rev) memo
+                        else e.newMoveGesture(itemId, targetVaultId, move).also { moveGestures[gKey] = it }
+                // Named: a trailing lambda would bind to `finalSync: Boolean`, not onProgress.
+                e.runGesture(g, onProgress = { done, total -> moveProgress = done to total })
+                moveGestures.remove(gKey)
+                val target = e.vaultInfos().find { it.vaultId == targetVaultId }?.name ?: "the other vault"
+                refreshItems() // clears busy; a MOVE also empties the detail (source item is gone)
+                moveProgress = null
+                notice = if (move) "Moved to “$target”." else "Copied to “$target”."
+                onDone()
+            } catch (t: Throwable) {
+                moveProgress = null; busy = false
+                when {
+                    // Copy denied / source changed / a 403 are TERMINAL — drop the gesture so a
+                    // fresh attempt re-reads state (never a blind replay of a doomed gesture).
+                    t is CopyDeniedException -> { moveGestures.remove(gKey); moveError = "You don't have permission to add items to that vault — nothing was moved." }
+                    t is ItemChangedException -> { moveGestures.remove(gKey); moveError = "This item changed while moving — go back, review it, and try again." }
+                    t is ApiException && t.status == 403 -> { moveGestures.remove(gKey); moveError = t.message ?: "Move denied — nothing was moved." }
+                    // Transient — KEEP the gesture so Retry replays the same ids (no duplicate).
+                    else -> moveError = "That didn't finish. Press Retry — it won't create a duplicate."
+                }
+            }
+        }
     }
 
     // ---- inactivity auto-lock + poll cadence (spec 01 §8 / spec 03 §6) ----
@@ -935,6 +1020,8 @@ class DesktopState(private val scope: CoroutineScope) {
     private fun clearSecondary() {
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
         backupPreflight = null; backupResult = null; csvPreflight = null
+        // F19: drop any in-flight move state + memoized gesture ids/fileKeys on lock/sign-out.
+        moveError = null; moveProgress = null; moveGestures.clear()
     }
 
     private fun cacheFile(userId: String) = File(store.cacheDir, "vault-$userId.db")

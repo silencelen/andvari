@@ -51,6 +51,7 @@ import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Strength
+import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.crypto.GeneratorOptions
@@ -220,6 +221,39 @@ private fun MustChangePasswordBanner(ui: UiState) {
                 Text("Temporary password in use", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error)
                 Text(
                     "Your password was reset by recovery and the temporary one is still active. Open andvari in your web browser and set a new master password now.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * F20: a persistent, NON-dismissable warning that a shared vault granted to this account can't be
+ * opened on THIS device — its grant was sealed to a device key we don't hold, or it needs a newer
+ * app (a newer grant format). Such a grant is silently swallowed on hydrate/pull (runCatching over
+ * addGrant), so the vault vanishes from the list; this row makes the absence legible. Sibling of the
+ * needsUpdate banner (both "stored safely, can't show it here"), distinct from the dismissable
+ * lifecycle notices, and self-clearing once a later sync opens the grant (or it's revoked). No vault
+ * name is shown — with no key, nothing about the vault decrypts. Mirrors web's F20 warning.
+ */
+@Composable
+private fun UnopenableVaultWarning(count: Int) {
+    Card(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+    ) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text(
+                    if (count == 1) "Can't open this shared vault on this device" else "Can't open $count shared vaults on this device",
+                    style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    "Someone shared a vault with you, but this device can't unlock it — its key was sealed to a different device, or it needs a newer version of andvari. Open andvari on the device you first set up (or update this app); it'll appear here on its own once it can be opened.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
@@ -525,7 +559,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
             when {
                 // Completion callbacks capture the STABLE vm, never composition state: a
                 // save finishing across an Activity recreation still closes the editor.
-                editorInitial != null -> ItemEditor(vm, ui, editorItemId, editorInitial, onSave = { doc, uploads -> vm.saveItem(editorItemId, doc, uploads) { vm.closeEditor() } }, onCancel = { vm.closeEditor() })
+                editorInitial != null -> ItemEditor(vm, ui, editorItemId, editorInitial, onSave = { doc, uploads, vId -> vm.saveItem(editorItemId, doc, uploads, vId) { vm.closeEditor() } }, onCancel = { vm.closeEditor() })
                 current != null -> ItemDetail(vm, ui, current, onEdit = { vm.openEditor(current.itemId) }, onDelete = { vm.deleteItem(current.itemId); detailId = null }, onBack = { detailId = null })
                 else -> Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
                     OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
@@ -539,6 +573,11 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                     if (ui.needsUpdateCount > 0) {
                         Text(needsUpdateLine(ui.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 4.dp))
                     }
+                    // F20: persistent, non-dismissable warning — a shared vault was granted to this
+                    // account but its grant can't be opened on THIS device, so it's absent from the
+                    // list above. Sibling of the needsUpdate banner; clears itself once a sync opens
+                    // the grant. (See AndvariViewModel.undecryptableSharedCount.)
+                    if (ui.undecryptableSharedVaultCount > 0) UnopenableVaultWarning(ui.undecryptableSharedVaultCount)
                     Spacer(Modifier.height(8.dp))
                     if (filtered.isEmpty()) {
                         Centered { Spacer(Modifier.height(60.dp)); Text("ᛝ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary); Text(if (ui.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -899,10 +938,21 @@ private fun AttachmentRow(ref: AttachmentRef, enabled: Boolean, onClick: () -> U
 }
 
 @Composable
-private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initial: ItemDoc, onSave: (ItemDoc, List<PendingUpload>) -> Unit, onCancel: () -> Unit) {
+private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initial: ItemDoc, onSave: (ItemDoc, List<PendingUpload>, String?) -> Unit, onCancel: () -> Unit) {
     val ctx = LocalContextCompat()
     val isLogin = initial.type == "login"
     val isCard = initial.type == "card"
+    // F18 (mirrors web's newItemVaultChoices): a NEW item (itemId == null) may be created in the
+    // personal vault or any shared vault this device can WRITE to (owner|writer). An EXISTING item
+    // never changes vault — its choice list is empty, so the picker never shows and its value stays
+    // null (saveWithUploads ignores it regardless — the HAZARD is closed at both layers).
+    val vaultChoices = remember(itemId) {
+        if (itemId == null) vm.vaultInfos().filter { it.type == "personal" || it.role == "owner" || it.role == "writer" }
+        else emptyList()
+    }
+    // Default = Personal (vaultInfos() sorts personal first). rememberSaveable keeps the pick across
+    // a rotation mid-edit; keyed on itemId so a fresh editor session re-defaults to Personal.
+    var targetVaultId by rememberSaveable(itemId) { mutableStateOf(vaultChoices.firstOrNull()?.vaultId) }
     // rememberSaveable: every typed field survives Activity recreation (rotation / fold
     // posture change) — plain `remember` silently wiped them all.
     var name by rememberSaveable { mutableStateOf(initial.name) }
@@ -989,6 +1039,8 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
         Text(if (itemId != null) "Edit" else if (isLogin) "New login" else if (isCard) "New card" else "New note", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(8.dp))
         ErrorBar(ui.error, vm::clearError)
+        // F18: show the vault picker ONLY for a new item with a real choice (>1 writable vault).
+        if (vaultChoices.size > 1) VaultPickerField(vaultChoices, targetVaultId) { targetVaultId = it }
         Field("Name", name, { name = it })
         if (isLogin) {
             Field("Username", username, { username = it }, mono = true)
@@ -1085,7 +1137,26 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
             if (isLogin && totp.isNotBlank() && runCatching { Totp.parseUri(normalizedTotp) }.isFailure) {
                 totpError = "TOTP secret isn't valid base32 or an otpauth:// link"
             } else {
-                onSave(builtDoc(normalizedTotp), pendingUploads.toList())
+                onSave(builtDoc(normalizedTotp), pendingUploads.toList(), targetVaultId)
+            }
+        }
+    }
+}
+
+/**
+ * F18 vault picker (mirrors web's Editor `<select>`): choose which vault a NEW item is created in.
+ * Uses the RadioButton idiom already established for vault selection in MoveCopyControl — Android's
+ * house form of web's dropdown. Personal sorts first in vaultInfos(), so it's listed first and is
+ * the default. Always enabled, like the editor's other inputs (only Save gates on busy).
+ */
+@Composable
+private fun VaultPickerField(choices: List<VaultInfo>, selectedId: String?, onSelect: (String) -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Text("Vault", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        choices.forEach { v ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = v.vaultId == selectedId, onClick = { onSelect(v.vaultId) })
+                Text(v.name + if (v.type == "personal") "" else " (shared)", style = MaterialTheme.typography.bodyMedium)
             }
         }
     }

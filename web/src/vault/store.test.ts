@@ -815,3 +815,125 @@ describe("VaultStore save() post-push reconcile (mirror of remove())", () => {
     }
   });
 });
+
+/**
+ * F20 (member transparency): an "added to vault" notice fires ONCE for a genuinely new grant
+ * (never on the fresh-device since=0 pull), and an undecryptable grant becomes a persistent
+ * warning that clears itself once a later pull opens it.
+ */
+describe("VaultStore F20 member transparency", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  it("fires an 'added' notice once for a newly-granted vault, but never on the fresh-device (since=0) pull", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+
+    // Fresh-device pull (since=0, full snapshot): the grant is delivered but this is the device's
+    // FIRST sight of everything — the hazard says notices fire only for verifiable NEW state, so
+    // no "added" notice may fire here.
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+    await store.sync();
+    expect(store.notices().some((n) => n.kind === "added")).toBe(false);
+
+    // A SECOND shared vault is granted on a later DELTA pull → exactly one "added" notice, named.
+    const { request: req2, vaultId: v2 } = s.owner.buildCreateSharedVault("Work");
+    const vault2: WireVault = { vaultId: v2, type: "shared", rev: 6, metaBlob: req2.metaBlob, createdAt: 0 };
+    const grant2: WireGrant = { vaultId: v2, userId: s.member.userId, role: "writer", wrappedVk: "", rev: 7, sealedVk: s.owner.wrapVkForMember(s.member.identityPub, v2) };
+    api.queue.push({ rev: 7, full: false, vaults: [vault2], grants: [grant2], items: [], removedGrants: [] });
+    await store.sync();
+
+    const added = store.notices().filter((n) => n.kind === "added");
+    expect(added).toHaveLength(1);
+    expect(added[0]!.vaultId).toBe(v2);
+    expect(added[0]!.vaultName).toBe("Work");
+
+    // An idempotent re-pull of the same grant must NOT fire a second notice (fires once).
+    api.queue.push({ rev: 8, full: false, vaults: [vault2], grants: [{ ...grant2, rev: 8 }], items: [], removedGrants: [] });
+    await store.sync();
+    expect(store.notices().filter((n) => n.kind === "added")).toHaveLength(1);
+  });
+
+  /**
+   * The owner's SECOND device sees a vault the same account created on device A as a brand-new
+   * grant on a delta pull (owner grants carry a `wrappedVk` the UVK opens, so `addGrant` succeeds
+   * and `heldBefore` is false). "You were added to Work" would misattribute the account's own
+   * creation to someone else sharing with it. Owner-role grants never emit the notice.
+   */
+  it("never fires an 'added' notice for a vault this account owns (the owner's second device)", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.owner); // the OWNER's second device
+
+    api.queue.push({ rev: 5, full: true, vaults: [], grants: [], items: [], removedGrants: [] });
+    await store.sync(); // establishes a cursor, so the next pull is a genuine delta (since > 0)
+
+    // Device A creates "Work". Device B holds the same UVK but has never seen this vault, so
+    // `removeVault` drops the key `buildCreateSharedVault` cached locally — without it the account
+    // would already hold the VK, `heldBefore` would be true, and this test would pass even with
+    // the owner guard reverted.
+    const { request: req2, vaultId: v2 } = s.owner.buildCreateSharedVault("Work");
+    s.owner.removeVault(v2);
+
+    // Device B's delta pull delivers the vault + the owner's OWN grant (wrappedVk, no sealedVk):
+    // `addGrant` opens it under the UVK, so heldBefore=false and it lands in `newlyAdded`.
+    const vault2: WireVault = { vaultId: v2, type: "shared", rev: 6, metaBlob: req2.metaBlob, createdAt: 0 };
+    const ownerGrant2: WireGrant = { vaultId: v2, userId: s.owner.userId, role: "owner", wrappedVk: req2.wrappedVk, rev: 7, sealedVk: "" };
+    api.queue.push({ rev: 7, full: false, vaults: [vault2], grants: [ownerGrant2], items: [], removedGrants: [] });
+    await store.sync();
+
+    expect(store.vaults().some((v) => v.vaultId === v2)).toBe(true); // the vault DID arrive & open
+    expect(s.owner.roleFor(v2)).toBe("owner");
+    expect(store.notices().filter((n) => n.kind === "added")).toHaveLength(0); // ...silently
+  });
+
+  it("retains an undecryptable grant as a persistent warning, and clears it when a later pull opens it", async () => {
+    const s = await scenario();
+    const stranger = await enroll("stranger@example.com");
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+
+    // The grant's VK is sealed to a DIFFERENT identity (another household device) — this device
+    // cannot open it, so addGrant throws and the vault never becomes usable.
+    const badGrant: WireGrant = { ...s.grant, sealedVk: s.owner.wrapVkForMember(stranger.identityPub, s.vaultId) };
+    api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [badGrant], items: [s.item], removedGrants: [] });
+    await store.sync();
+
+    expect(s.member.hasVault(s.vaultId)).toBe(false); // never opened
+    expect(store.undecryptableGrantVaults()).toEqual([s.vaultId]); // persistent warning surfaced
+    expect(store.vaults().some((v) => v.vaultId === s.vaultId)).toBe(false); // not a usable vault
+    expect(store.notices().some((n) => n.kind === "added")).toBe(false); // no false "added" — we can't open it
+
+    // A later pull re-delivers the grant sealed correctly to THIS device → it opens → warning clears.
+    api.queue.push({ rev: 6, full: false, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
+    await store.sync();
+
+    expect(s.member.hasVault(s.vaultId)).toBe(true);
+    expect(store.undecryptableGrantVaults()).toEqual([]); // cleared once openable
+    expect(store.get(s.itemId)?.doc).toEqual(DOC);
+  });
+
+  it("clears the undecryptable-grant warning when the grant is revoked", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const s = await scenario();
+      const stranger = await enroll("stranger2@example.com");
+      const api = new FakeApi();
+      const store = new VaultStore(api.asClient(), s.member);
+
+      const badGrant: WireGrant = { ...s.grant, sealedVk: s.owner.wrapVkForMember(stranger.identityPub, s.vaultId) };
+      api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [badGrant], items: [s.item], removedGrants: [] });
+      await store.sync();
+      expect(store.undecryptableGrantVaults()).toEqual([s.vaultId]);
+
+      // Access revoked before this device ever opened it — the "can't open" row is moot, drop it.
+      api.queue.push({ rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId] });
+      await store.sync();
+      expect(store.undecryptableGrantVaults()).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

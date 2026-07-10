@@ -509,6 +509,8 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
       return { warn: false, body: `You left “${name}”.` };
     case "restored":
       return { warn: false, body: `“${name}” was restored.` };
+    case "added":
+      return { warn: false, body: `You were added to “${name}”.` };
     case "transfer-complete":
       return { warn: false, body: n.becameMine ? `You are now the owner of “${name}”.` : `“${name}” now has a new owner.` };
     case "transfer-anomaly":

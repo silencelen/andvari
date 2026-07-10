@@ -29,6 +29,7 @@ import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Strength
+import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.crypto.Escrow
@@ -287,6 +288,10 @@ private fun Vault(state: DesktopState) {
     // rows/detail. Each lookup decrypts vault metaBlobs, so build the map once per items-change
     // (sync/refresh replace `items`), never per row recomposition (search keystrokes recompose).
     val vaultBadges = remember(state.items) { state.sharedVaultNames() }
+    // F18: the new-item picker's writable-vault choices (personal + owner/writer shared). Each
+    // choice decrypts vault metadata, so — like vaultBadges — recompute only when the item set
+    // changes (sync/refresh replace `items`), never per search keystroke.
+    val newItemVaultChoices = remember(state.items) { state.newItemVaultChoices() }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("andvari", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
@@ -310,7 +315,14 @@ private fun Vault(state: DesktopState) {
                 itemId = editing!!.first, initial = editing!!.second, busy = state.busy,
                 maxAttachmentBytes = state.policy?.attachmentMaxBytes ?: DEFAULT_ATTACHMENT_MAX_BYTES,
                 newRef = state::newAttachmentRef,
-                onSave = { doc, uploads -> state.saveItem(editing!!.first, doc, uploads); editing = null },
+                // F18: offer the vault picker ONLY for a NEW item (existing items never move
+                // vaults) and ONLY when a writable SHARED vault exists — a personal-only user
+                // never sees it (mirrors web's `selected === null && hasWritableShared`). Read
+                // once per editor open (each choice decrypts vault metadata).
+                vaultChoices = if (editing!!.first == null)
+                    newItemVaultChoices.takeIf { c -> c.any { it.type != "personal" } }
+                else null,
+                onSave = { doc, uploads, vaultId -> state.saveItem(editing!!.first, doc, uploads, vaultId); editing = null },
                 onCancel = { editing = null },
             )
             current != null -> Detail(state, current, vaultBadges[current.vaultId], { editing = current.itemId to current.doc }, { state.deleteItem(current.itemId); detailId = null }, { detailId = null })
@@ -770,9 +782,99 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
                     dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
                 )
             }
+            // F19: move/copy into another writable vault (mirrors web + Android). Only for a
+            // writer/owner of the SOURCE — a reader's delete leg would be denied anyway, and
+            // this whole block is already gated on !readOnly. Each choice decrypts vault meta,
+            // so read once per item shown.
+            val writable = remember(item.itemId) { state.newItemVaultChoices() }
+            val moveTargets = writable.filter { it.vaultId != item.vaultId }
+            if (moveTargets.isNotEmpty()) {
+                val sourceName = writable.find { it.vaultId == item.vaultId }?.name ?: "this vault"
+                MoveCopyControl(state, item, moveTargets, sourceName, onMoved = onBack)
+            }
         }
     }
 }
+
+/**
+ * F19 (design §8): move or copy this item into another vault. All gesture safety lives in core
+ * [SyncEngine.runGesture] via [DesktopState.moveOrCopyItem] (copy-leg-first, confirmed before any
+ * delete; a retry reuses the SAME gesture so server dedup converges — never duplicates; a denied
+ * copy or a changed source aborts with the source untouched). This composable is only the picker:
+ * mode → target dropdown → Move/Copy, with the inline error + Retry from [DesktopState.moveError].
+ * Escape cancels (F72 idiom). onMoved (→ back to the list) fires only on success.
+ */
+@Composable
+private fun MoveCopyControl(state: DesktopState, item: VaultItem, targets: List<VaultInfo>, sourceName: String, onMoved: () -> Unit) {
+    var mode by remember(item.itemId) { mutableStateOf<String?>(null) } // "move" | "copy" | null
+    var target by remember(item.itemId) { mutableStateOf(targets.firstOrNull()?.vaultId ?: "") }
+    if (mode == null) {
+        androidx.compose.foundation.layout.Row(Modifier.padding(top = 6.dp)) {
+            // Entering a mode discards any stale inline error/gesture from the other mode.
+            TextButton(onClick = { state.clearMoveState(item.itemId); mode = "move" }) { Text("Move to vault…") }
+            Spacer(Modifier.width(8.dp))
+            TextButton(onClick = { state.clearMoveState(item.itemId); mode = "copy" }) { Text("Copy to vault…") }
+        }
+        return
+    }
+    val cancel = { state.clearMoveState(item.itemId); mode = null }
+    val moveError = state.moveError
+    val progress = state.moveProgress
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp).dismissOnEscape(cancel)) {
+        Text(if (mode == "move") "Move to another vault" else "Copy to another vault", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        moveError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp)) }
+        if (mode == "move") {
+            Text("Members of “$sourceName” may still have copies from before the move.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 4.dp))
+        }
+        androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
+            VaultPicker(null, targets, target, enabled = !state.busy) { target = it }
+            Spacer(Modifier.width(8.dp))
+            Button(enabled = !state.busy && target.isNotEmpty(), onClick = {
+                // onMoved leaves the detail on success only; a failure sets moveError + (for a
+                // transient one) keeps the gesture so this same button reads "Retry".
+                state.moveOrCopyItem(item.itemId, target, move = mode == "move") { mode = null; onMoved() }
+            }) {
+                Text(when {
+                    state.busy && progress != null && progress.second > 0 -> "Copying… ${progress.first}/${progress.second}"
+                    state.busy -> "Working…"
+                    moveError != null -> "Retry"
+                    mode == "move" -> "Move"
+                    else -> "Copy"
+                })
+            }
+            Spacer(Modifier.width(8.dp))
+            TextButton(enabled = !state.busy, onClick = cancel) { Text("Cancel") }
+        }
+    }
+}
+
+/**
+ * A held-vault dropdown (F18 new-item picker + F19 move/copy target). [label] shows a small
+ * caption above (null = inline, no caption). Compose's [DropdownMenu] handles Escape/outside-
+ * click dismissal itself, so it's keyboard-reachable and dismissable out of the box.
+ */
+@Composable
+private fun VaultPicker(label: String?, choices: List<VaultInfo>, selected: String?, enabled: Boolean = true, onSelect: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val current = choices.find { it.vaultId == selected } ?: choices.firstOrNull()
+    Column(Modifier.padding(vertical = 4.dp)) {
+        if (label != null) Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box {
+            OutlinedButton(onClick = { open = true }, enabled = enabled) {
+                Text(current?.let { vaultChoiceLabel(it) } ?: "Choose a vault")
+                Icon(Icons.Default.ArrowDropDown, null)
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                choices.forEach { v ->
+                    DropdownMenuItem(text = { Text(vaultChoiceLabel(v)) }, onClick = { onSelect(v.vaultId); open = false })
+                }
+            }
+        }
+    }
+}
+
+/** "Name" for personal, "Name (shared)" otherwise — matches the web picker/option copy. */
+private fun vaultChoiceLabel(v: VaultInfo): String = v.name + if (v.type == "personal") "" else " (shared)"
 
 @Composable
 private fun Editor(
@@ -781,9 +883,14 @@ private fun Editor(
     busy: Boolean,
     maxAttachmentBytes: Long,
     newRef: (String, Long) -> AttachmentRef,
-    onSave: (ItemDoc, List<PendingUpload>) -> Unit,
+    vaultChoices: List<VaultInfo>? = null,
+    onSave: (ItemDoc, List<PendingUpload>, String?) -> Unit,
     onCancel: () -> Unit,
 ) {
+    // F18: which vault a NEW item is created in. Non-null only for new items with a writable
+    // shared vault (see the call site); default = the first choice, which is personal
+    // (vaultInfos is personal-first). Threaded into onSave → saveItem's vaultId.
+    var vaultId by remember { mutableStateOf(vaultChoices?.firstOrNull()?.vaultId) }
     val isLogin = initial.type == "login"
     val isCard = initial.type == "card"
     var name by remember { mutableStateOf(initial.name) }
@@ -805,6 +912,11 @@ private fun Editor(
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onCancel) { Text("cancel") }
         Text(if (itemId != null) "Edit" else if (isLogin) "New login" else if (isCard) "New card" else "New note", style = MaterialTheme.typography.headlineMedium)
+        // F18: shown only when there's a choice to make (>1 writable vault). A single-vault
+        // user's new item lands in Personal exactly as before — no picker.
+        if (vaultChoices != null && vaultChoices.size > 1) {
+            VaultPicker("Vault", vaultChoices, vaultId) { vaultId = it }
+        }
         Field("Name", name, { name = it })
         if (isLogin) {
             Field("Username", username, { username = it }, mono = true)
@@ -906,7 +1018,7 @@ private fun Editor(
             if (isLogin && totp.isNotBlank() && runCatching { Totp.parseUri(normalizedTotp) }.isFailure) {
                 totpError = "TOTP secret isn't valid base32 or an otpauth:// link"
             } else {
-                onSave(builtDoc(normalizedTotp), pending)
+                onSave(builtDoc(normalizedTotp), pending, vaultId)
             }
         }
     }
