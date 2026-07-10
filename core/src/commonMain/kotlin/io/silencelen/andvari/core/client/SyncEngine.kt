@@ -143,8 +143,12 @@ class SyncEngine(
     private val suppressDrop = mutableSetOf<String>()
 
     /** One denied mutation awaiting its park-vs-genuine verdict. [stagedBefore] is the
-     *  pull-start counter at staging time: only a pull that STARTED later may classify it. */
-    private class StagedDenial(val mutation: Mutation, val stagedBefore: Long)
+     *  pull-start counter at staging time: only a pull that STARTED later may classify it.
+     *  [wasReplay] marks an edit that was itself a restore-replay (F21), so a GENUINE denial
+     *  of it drains into the calm "recovered edits refused" notice instead of throwing.
+     *  Not durable: a restart reloads it as false (LC-1 comment on [hydrate]) — that costs a
+     *  harsher notice at worst, never the edit. */
+    private class StagedDenial(val mutation: Mutation, val stagedBefore: Long, val wasReplay: Boolean = false)
 
     /** Denied mutations staged between flush and the fresh pull that reveals their vault's
      *  fate (F21). In-memory INDEX only — the durable truth is the queue's staged-denied
@@ -295,6 +299,10 @@ class SyncEngine(
         // Reload durably staged denials (F21): a process death between a denial and the
         // pull that classifies it must not destroy the edit. stagedBefore=0 → the first
         // completed pull after this restart is fresh enough to classify them.
+        // LC-1: `wasReplay` is an in-memory nicety (it only picks the NOTICE wording for a
+        // genuine refusal), so reloading it as false is safe — the park-vs-drop verdict is
+        // taken from the vault's held state, never from this flag. Worst case after a crash:
+        // a recovered edit refused on a live vault surfaces as a normal denial, not a calm one.
         for (m in cache.stagedDenied()) {
             preParkedByVault.getOrPut(m.vaultId) { mutableListOf() }.add(StagedDenial(m, 0))
         }
@@ -1178,15 +1186,17 @@ class SyncEngine(
                 val wasReplay = replayedMutationIds.remove(m.mutationId)
                 if (r.status == "denied") {
                     deniedCount++
-                    if (wasReplay) {
-                        // Recovered-edit replay denied on the now-live vault (role changed
-                        // across the grace): drained into a calm notice, durably dropped.
-                        replayDeniedByVault[m.vaultId] = (replayDeniedByVault[m.vaultId] ?: 0) + 1
-                        cache.dequeue(m.mutationId)
-                    } else {
-                        cache.markStagedDenied(m.mutationId)
-                        preParkedByVault.getOrPut(m.vaultId) { mutableListOf() }.add(StagedDenial(m, pullStartCounter))
-                    }
+                    // LC-1 (P2, data loss): a REPLAYED edit used to be dequeued right here, on the
+                    // assumption that a denial could only mean "the vault is live again and my role
+                    // changed". But a denial equally means "the vault went in-grace AGAIN" — an
+                    // owner re-deleting during (or just after) the restore. Dropping it then
+                    // destroyed the member's parked offline edit and defeated the very F21
+                    // protection the replay exists to provide. Every denial — replayed or not —
+                    // now stages and lets surfaceStagedDenials decide against the vault's ACTUAL
+                    // fate after a fresh pull: held → re-park (survives the next restore);
+                    // live → durable drop (calm notice for a replay, thrown denial otherwise).
+                    cache.markStagedDenied(m.mutationId)
+                    preParkedByVault.getOrPut(m.vaultId) { mutableListOf() }.add(StagedDenial(m, pullStartCounter, wasReplay))
                 } else {
                     // PDD-1: on a conflicting PUT the server keeps OUR value live (LWW) and
                     // returns the DISPLACED (losing) version as serverItem. Capture it and
@@ -1237,7 +1247,14 @@ class SyncEngine(
                     ripe.forEach { cache.dequeue(it.mutation.mutationId) } // queue → held.parked, atomically
                 }
             } else {
-                genuine += ripe.size
+                // Vault is LIVE: a genuine refusal. LC-1 — a replayed edit refused here (the
+                // member's role changed across the grace) stays a CALM notice, never a throw;
+                // only a first-hand denial is escalated to the caller.
+                val (replays, firstHand) = ripe.partition { it.wasReplay }
+                if (replays.isNotEmpty()) {
+                    replayDeniedByVault[vaultId] = (replayDeniedByVault[vaultId] ?: 0) + replays.size
+                }
+                genuine += firstHand.size
                 ripe.forEach { cache.dequeue(it.mutation.mutationId) } // definitive durable drop
             }
             if (tooFresh.isEmpty()) {
@@ -1247,6 +1264,10 @@ class SyncEngine(
                 entries.addAll(tooFresh)
             }
         }
+        // LC-1: the calm "recovered edits refused" notices are now MINTED here (the verdict moved
+        // out of flushQueue), and pull()'s drain already ran before this — so drain again, and do
+        // it BEFORE the throw below: a first-hand denial must not swallow the replay notices.
+        drainReplayDenied()
         if (genuine > 0) throw ApiException(403, "denied", "write denied for $genuine mutation(s)")
     }
 

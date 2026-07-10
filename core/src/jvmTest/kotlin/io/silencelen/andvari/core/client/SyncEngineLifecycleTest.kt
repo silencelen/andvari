@@ -850,14 +850,23 @@ class SyncEngineLifecycleTest {
         s.server.queue.add(SyncResponse(9, false, listOf(restoredVault), listOf(s.grant.copy(role = "reader", rev = 9)), listOf(s.item.copy(rev = 9)), emptyList()))
         s.engine.sync() // must NOT throw — the replay denial is a notice, not a failure
 
-        val kinds = s.engine.notices().filter { it.vaultId == s.vaultId }.map { it.kind }
-        assertTrue("restored" in kinds)
-        assertTrue("replay-denied" in kinds, "got $kinds")
+        // LC-1: the replay is denied by the flush that pull() runs right AFTER reinstating — i.e.
+        // after this pull's snapshot was fetched. Classifying it against that same snapshot is the
+        // unsound step the old fast-path took (and the race that let a re-delete destroy the edit).
+        // The verdict now waits for a pull that STARTED after the denial: this sync leaves the edit
+        // staged — never dropped, never re-pushed — and the next one settles it.
+        assertTrue("restored" in s.engine.notices().filter { it.vaultId == s.vaultId }.map { it.kind })
         assertNotNull(s.engine.item(s.itemId)) // the vault is live again
-        assertTrue(s.cache.pending().isEmpty() && s.cache.stagedDenied().isEmpty()) // durably dropped
+        assertTrue(s.cache.pending().isEmpty(), "a staged denial is never re-pushed (no retry loop)")
+        assertEquals(1, s.cache.stagedDenied().size, "the edit is held for the classifying pull, not dropped")
+
         val before = s.server.pushes.size
-        s.engine.sync()
+        s.engine.sync() // a fresh pull completes → the verdict lands: vault LIVE → calm drop
         assertEquals(before, s.server.pushes.size) // no retry loop
+
+        val kinds = s.engine.notices().filter { it.vaultId == s.vaultId }.map { it.kind }
+        assertTrue("replay-denied" in kinds, "got $kinds")
+        assertTrue(s.cache.pending().isEmpty() && s.cache.stagedDenied().isEmpty()) // durably dropped
     }
 
     @Test
