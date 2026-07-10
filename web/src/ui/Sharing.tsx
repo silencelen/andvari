@@ -6,6 +6,7 @@ import { shortIdentityFingerprint } from "../crypto/sharedgrant";
 import type { Account } from "../vault/account";
 import type { DeletedVaultInfo, IncomingTransfer, VaultInfo, VaultStore } from "../vault/store";
 import { UNREACHABLE } from "./errors";
+import { ViewHeader } from "./ViewHeader";
 
 interface Props {
   account: Account;
@@ -40,7 +41,7 @@ export function Sharing({ account, store, client, onSynced, onBackup }: Props) {
 
   return (
     <div>
-      <h2 className="view-title" style={{ margin: "22px 0 4px" }}>Sharing</h2>
+      <ViewHeader title="Sharing" />
 
       {incoming.map((t) => (
         <IncomingTransferCard key={t.vaultId} offer={t} account={account} store={store} client={client} onChanged={refresh} />
@@ -56,7 +57,7 @@ export function Sharing({ account, store, client, onSynced, onBackup }: Props) {
         </p>
         <div className="list">
           {vaults.map((v) => (
-            <div className="item" key={v.vaultId} style={{ cursor: "default" }}>
+            <div className="item static" key={v.vaultId}>
               <span className="glyph">{v.name.charAt(0).toUpperCase()}</span>
               <span className="body">
                 <div className="name">{v.name}</div>

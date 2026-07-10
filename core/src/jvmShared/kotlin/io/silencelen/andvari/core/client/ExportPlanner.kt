@@ -1,19 +1,14 @@
-package io.silencelen.andvari.desktop
-
-import io.silencelen.andvari.core.client.Account
-import io.silencelen.andvari.core.client.AttachmentRef
-import io.silencelen.andvari.core.client.Backup
-import io.silencelen.andvari.core.client.BackupSkippedItem
-import io.silencelen.andvari.core.client.ExportCsv
-import io.silencelen.andvari.core.client.VaultCache
-import io.silencelen.andvari.core.client.VaultItem
+package io.silencelen.andvari.core.client
 
 /**
- * Pure planning helpers for the spec 07 export flows (Backup + CSV). Deliberately
- * app-layer: :core's Export.kt is platform-free and takes already-ordered docs /
- * already-fetched plaintexts; ordering, vault enumeration and the §2.5 attachment cap
- * are the CALLER's job. app-android carries an identical copy (the two app modules
- * share no code outside :core — see the export report).
+ * Pure planning helpers for the spec 07 export flows (Backup + CSV) — the ONE copy both
+ * JVM natives compile (F82: the per-app "identical twins" had already drifted; android
+ * grew [BackupRequest] in B8, desktop didn't). Deliberately thin over Export.kt, which
+ * is platform-free and takes already-ordered docs / already-fetched plaintexts —
+ * ordering, vault enumeration and the §2.5 attachment cap live HERE. Reads go through
+ * [SyncEngine]'s read-only surface ([SyncEngine.envelopes]/[SyncEngine.vaultRows]),
+ * never a carried reference to the engine's private cache (a close-ordering hazard).
+ * Web's plan.ts stays its own copy — inherent to the non-KMP stack.
  */
 
 /** One vault line in the export preflight (name decrypted client-side, never sent anywhere). */
@@ -37,6 +32,20 @@ data class CsvPreflight(
     val warnings: ExportCsv.Warnings,
     val loginCount: Int,
     val offlineNote: String?,
+)
+
+/**
+ * A confirmed backup preflight, pending its destination pick. Held in the app's state
+ * holder (Android: the ViewModel, NOT Compose `remember`) so a configuration change —
+ * Fold unfold / rotation / split-screen resize — while the system picker is foreground
+ * doesn't drop it and silently no-op the launcher result (leaving an empty file).
+ * Holding the passphrase there is acceptable: the vault is unlocked, so its keys are
+ * already in process memory; it is never written to SavedState/disk.
+ */
+data class BackupRequest(
+    val vaults: Set<String>,
+    val includeAttachments: Boolean,
+    val passphrase: String,
 )
 
 /** Post-backup summary for the success dialog (named skips per spec — never counts only). */
@@ -64,9 +73,9 @@ object ExportPlanner {
      * then shared vaults by decrypted name (case-insensitive) then vaultId. Only vaults
      * whose VK is held are listed — those are the ones export can include at all.
      */
-    fun vaultLines(cache: VaultCache, account: Account): List<ExportVault> {
-        val counts = cache.allItems().groupingBy { it.vaultId }.eachCount()
-        val known = cache.vaults().filter { account.hasVault(it.vaultId) }.map { v ->
+    fun vaultLines(engine: SyncEngine, account: Account): List<ExportVault> {
+        val counts = engine.items().groupingBy { it.vaultId }.eachCount()
+        val known = engine.vaultRows().filter { account.hasVault(it.vaultId) }.map { v ->
             ExportVault(
                 vaultId = v.vaultId,
                 type = v.type,
@@ -92,9 +101,9 @@ object ExportPlanner {
 
     /** Items in export order (spec 07 §1): [vaultOrder] position, then updatedAt, then
      *  itemId as the final deterministic tiebreak. Vaults not in [vaultOrder] are excluded. */
-    fun orderedItems(cache: VaultCache, vaultOrder: List<String>): List<VaultItem> {
+    fun orderedItems(engine: SyncEngine, vaultOrder: List<String>): List<VaultItem> {
         val pos = vaultOrder.withIndex().associate { (i, id) -> id to i }
-        return cache.allItems()
+        return engine.items()
             .filter { it.vaultId in pos }
             .sortedWith(compareBy({ pos[it.vaultId] }, { it.updatedAt }, { it.itemId }))
     }
@@ -121,8 +130,8 @@ object ExportPlanner {
      * VK or a newer formatVersion (spec 02 §3 fail-closed); the cache keeps the envelope
      * and hydrate() retries, which is exactly the surface export enumerates from.
      */
-    fun undecryptable(cache: VaultCache): List<BackupSkippedItem> =
-        cache.envelopes()
-            .filter { !it.deleted && cache.getItem(it.itemId) == null }
+    fun undecryptable(engine: SyncEngine): List<BackupSkippedItem> =
+        engine.envelopes()
+            .filter { !it.deleted && engine.item(it.itemId) == null }
             .map { BackupSkippedItem(it.itemId, it.vaultId, it.formatVersion) }
 }

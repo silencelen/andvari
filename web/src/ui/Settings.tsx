@@ -9,6 +9,7 @@ import { fmtDate } from "./format";
 import { QrSvg } from "./QrSvg";
 import { MasterPasswordHint } from "./Welcome";
 import { meetsMasterPasswordFloor } from "./strength";
+import { ViewHeader } from "./ViewHeader";
 
 interface Props {
   client: ApiClient;
@@ -20,7 +21,7 @@ interface Props {
 export function Settings({ client, account, policy, onPasswordChanged }: Props) {
   return (
     <div>
-      <h2 className="view-title" style={{ margin: "22px 0 4px" }}>Settings</h2>
+      <ViewHeader title="Settings" />
       <IdentityCard account={account} />
       <BackupCard account={account} />
       <TotpCard client={client} />

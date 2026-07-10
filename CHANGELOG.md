@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### web polish + desktop save integrity (cycle 7)
+
+- **Big vaults stay fast.** Past 500 items the web vault list now renders only the rows in
+  view (a windowed list with no inner scrollbar — scrolling feels identical), so a
+  10,000-item vault costs ~200 DOM nodes instead of ~70,000 rebuilt on every keystroke.
+  Smaller vaults render exactly as before.
+- **A failed desktop save can no longer lose your edits.** The editor stays open — fields,
+  attachments, and error in place — until the save actually succeeds; Cancel is disabled
+  while a save is in flight; upload progress shows per attachment. **Retrying after a
+  partial failure now works**: an attachment the first attempt already uploaded is
+  recognized instead of wedging every retry with a cryptic server error (new items keep
+  their draft identity across retries for the same reason). Attachment saves to disk go
+  through the same write-then-verify-then-move discipline exports use, and every desktop
+  save dialog now asks before overwriting an existing file.
+- **Consistency pass across the web app**: one shared view header, keyboard-reachable
+  Health rows, inline-SVG sigils (no more font-dependent runes), your email in the app bar
+  instead of a raw account id, carded boot screen, and inert rows no longer pretend to be
+  clickable. Vault-list rows clip gracefully at large accessibility font sizes.
+- Under the hood: the two native export planners (which had already drifted apart) are now
+  one shared implementation, and the natives read export data through the sync engine's
+  own read surface instead of carrying a private cache reference.
+
 ### smarter site matching — eTLD+1 / Public Suffix List (extension 0.8.1 + web; natives ride the next cut)
 
 - **Logins now match the whole site, not just the exact host you saved.** A login saved at

@@ -2,7 +2,9 @@ import { useMemo, useState } from "react";
 import { ApiClient } from "../api/client";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import type { VaultStore } from "../vault/store";
+import { EmptySigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength } from "./strength";
+import { ViewHeader } from "./ViewHeader";
 
 interface Props {
   store: VaultStore;
@@ -93,13 +95,14 @@ export function Health({ store, client, onOpenItem }: Props) {
 
   return (
     <div>
-      <div className="toolbar" style={{ alignItems: "center" }}>
-        <h2 className="view-title">Vault health</h2>
-        <div className="spacer" />
-        <button className="ghost" onClick={scan} disabled={scanning || rows.length === 0}>
-          {scanning ? `Scanning… ${progress.done}/${progress.total}` : breachByItem ? "Rescan for breaches" : "Scan for breaches"}
-        </button>
-      </div>
+      <ViewHeader
+        title="Vault health"
+        actions={
+          <button className="ghost" onClick={scan} disabled={scanning || rows.length === 0}>
+            {scanning ? `Scanning… ${progress.done}/${progress.total}` : breachByItem ? "Rescan for breaches" : "Scan for breaches"}
+          </button>
+        }
+      />
       {scanErr && <div className="msg err">{scanErr}</div>}
 
       <div className="tiles">
@@ -111,7 +114,7 @@ export function Health({ store, client, onOpenItem }: Props) {
 
       {rows.length === 0 ? (
         <div className="empty">
-          <div className="sigil">ᛝ</div>
+          <div className="sigil"><EmptySigil /></div>
           <p>No logins with passwords yet — nothing to assess.</p>
         </div>
       ) : (
@@ -130,7 +133,20 @@ export function Health({ store, client, onOpenItem }: Props) {
               {sorted.map((r) => {
                 const count = breachByItem?.get(r.itemId);
                 return (
-                  <tr key={r.itemId} className="rowlink" onClick={() => onOpenItem(r.itemId)}>
+                  <tr
+                    key={r.itemId}
+                    className="rowlink"
+                    // F80: the row is a click target, so the keyboard gets the same
+                    // affordance (Space is prevented — it must not page-scroll).
+                    tabIndex={0}
+                    onClick={() => onOpenItem(r.itemId)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onOpenItem(r.itemId);
+                      }
+                    }}
+                  >
                     <td>{r.name}</td>
                     <td><StrengthTag score={r.strength} /></td>
                     <td>{r.reused > 0 ? <span className="tone-bad">{r.reused} other{r.reused > 1 ? "s" : ""}</span> : <span className="muted">no</span>}</td>

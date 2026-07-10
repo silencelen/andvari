@@ -13,6 +13,7 @@ import io.silencelen.andvari.core.client.ItemChangedException
 import io.silencelen.andvari.core.client.MoveGesture
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.UpgradeRequiredException
+import io.silencelen.andvari.core.client.AttachmentPlan
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.DecryptedItemVersion
@@ -21,16 +22,20 @@ import io.silencelen.andvari.core.client.Backup
 import io.silencelen.andvari.core.client.BackupAttachmentEntry
 import io.silencelen.andvari.core.client.BackupItem
 import io.silencelen.andvari.core.client.BackupPayload
+import io.silencelen.andvari.core.client.BackupPreflight
+import io.silencelen.andvari.core.client.BackupResult
 import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupVault
+import io.silencelen.andvari.core.client.CsvPreflight
 import io.silencelen.andvari.core.client.ExportCsv
+import io.silencelen.andvari.core.client.ExportPlanner
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.sqliteVaultCache
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.PendingUpload
+import io.silencelen.andvari.core.client.PlannedAttachment
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
-import io.silencelen.andvari.core.client.VaultCache
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Escrow
@@ -105,6 +110,15 @@ class DesktopState(private val scope: CoroutineScope) {
     var busy by mutableStateOf(false)
         private set
     var error by mutableStateOf<String?>(null)
+    /** F71 review: the editor's INLINE save error. Kept apart from the global [error] —
+     *  backgroundSync writes that one every 5 min / on focus, and piping it into the editor
+     *  painted "sync failed" above Save mid-composition as if the user's edit had failed. */
+    var saveError by mutableStateOf<String?>(null)
+    /** F71 review: the NEW-item draft id, stable across save retries within one editor
+     *  session (attachments committed by a failed attempt are bound to it — a fresh mint
+     *  per retry trips the push's attachment_mismatch forever). One editor at a time on
+     *  desktop, so one field; cleared on success and on cancel. */
+    private var draftItemId: String? = null
         private set
     var notice by mutableStateOf<String?>(null)
         private set
@@ -146,6 +160,10 @@ class DesktopState(private val scope: CoroutineScope) {
     var moveProgress by mutableStateOf<Pair<Int, Int>?>(null)
         private set
     var moveError by mutableStateOf<String?>(null)
+        private set
+    // F71: the in-flight save's per-upload attachment progress (null unless a save with
+    // new attachments is running) — the editor shows it while it stays open under `busy`.
+    var saveProgress by mutableStateOf<Pair<Int, Int>?>(null)
         private set
     var totpStatus by mutableStateOf<TotpStatus?>(null)
         private set
@@ -197,10 +215,9 @@ class DesktopState(private val scope: CoroutineScope) {
 
     private var api: AndvariApi? = null
     private var account: Account? = null
+    // F82: raw-row reads (vault rows / envelopes — the spec 07 export enumerates from
+    // them) go through the engine's read surface; no carried cache reference here.
     private var engine: SyncEngine? = null
-    // The engine's OWN cache instance, kept for surfaces the engine doesn't re-export
-    // (vault rows / envelopes — the spec 07 export enumerates from them).
-    private var cache: VaultCache? = null
     // F19 gestures memoized per (item|target|mode): a RETRY of a transiently-failed move/copy
     // reuses the SAME gesture (fresh ids were minted ONCE) so the server's mutation dedup
     // converges instead of duplicating. Kept ONLY across a failed attempt of the same
@@ -234,6 +251,11 @@ class DesktopState(private val scope: CoroutineScope) {
     }
 
     fun clearError() { error = null }
+    fun clearSaveError() { saveError = null }
+    /** Editor closed (cancel or success): the next editor session starts a fresh draft.
+     *  NOT part of [clearSaveError] — dismissing the inline error must keep the draft id,
+     *  or the very next retry re-mints and re-wedges on attachment_mismatch. */
+    fun endEditorSession() { saveError = null; draftItemId = null }
     fun clearNotice() { notice = null }
 
     fun signIn(email: String, password: String, totp: String? = null) = op {
@@ -332,8 +354,34 @@ class DesktopState(private val scope: CoroutineScope) {
     // F18: [vaultId] is honored ONLY for a NEW item (itemId == null) — the core save guard
     // keeps an existing item in its own vault (server enforces vault_mismatch), so a restore
     // (itemId != null) leaves it null and lands the item back where it was.
-    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) =
-        op { engine!!.saveWithUploads(itemId, doc, uploads, vaultId); refreshItems(); onSaved() }
+    // F71: [onSaved] fires ONLY on success — the editor closes there and nowhere else, so a
+    // failed save/upload keeps the typed fields + picked attachments editable with the error
+    // beside them (the Android op{}+onSaved contract).
+    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op {
+        saveError = null
+        if (itemId == null && draftItemId == null) draftItemId = account?.newItemId()
+        try {
+            // Named: a trailing lambda binds to the LAST parameter (the runGesture rule).
+            engine!!.saveWithUploads(
+                itemId, doc, uploads, vaultId,
+                onProgress = { done, total -> saveProgress = done to total },
+                newItemId = if (itemId == null) draftItemId else null,
+            )
+        } catch (e: UpgradeRequiredException) {
+            throw e // the blocking upgrade screen owns 426 — never an inline save error
+        } catch (t: Throwable) {
+            // Route the failure to the EDITOR's error surface and stop: the editor stays
+            // open (F71) and the global bar stays quiet — op's generic catch never sees it.
+            busy = false
+            saveError = t.message ?: "save failed"
+            return@op
+        } finally {
+            saveProgress = null
+        }
+        draftItemId = null
+        refreshItems()
+        onSaved()
+    }
 
     /** Item history (feature): load + decrypt the currently-viewed item's archived versions. */
     fun loadItemVersions(itemId: String, vaultId: String) = op {
@@ -612,9 +660,15 @@ class DesktopState(private val scope: CoroutineScope) {
         return AttachmentRef(id = acct.newItemId(), name = name, size = size, fileKey = Bytes.toB64(acct.newFileKey()))
     }
 
-    /** Download + decrypt an attachment off the UI thread and write it to [dest]. */
+    /** Download + decrypt an attachment off the UI thread and write it to [dest] via the
+     *  same temp-then-atomic-move discipline as the exports ([writeVerifiedAtomically],
+     *  F71): a failed write must never leave a torn file — or destroy a pre-existing
+     *  one — at [dest]. */
     fun saveAttachmentTo(ref: AttachmentRef, dest: File) = op {
-        withContext(Dispatchers.IO) { dest.writeBytes(engine!!.downloadAttachment(ref)) }
+        withContext(Dispatchers.IO) {
+            val bytes = engine!!.downloadAttachment(ref)
+            try { writeVerifiedAtomically(dest, bytes) } finally { bytes.fill(0) } // attachment plaintext — wipe our copy
+        }
         busy = false
         notice = "Saved ${ref.name} to ${dest.absolutePath}"
     }
@@ -717,10 +771,10 @@ class DesktopState(private val scope: CoroutineScope) {
             } catch (t: Throwable) {
                 busy = false; error = t.message ?: "sync failed"; return@launch
             }
-            val c = cache; val acct = account
-            if (c == null || acct == null) { busy = false; return@launch }
+            val acct = account
+            if (acct == null) { busy = false; return@launch }
             items = e.items()
-            backupPreflight = BackupPreflight(ExportPlanner.vaultLines(c, acct), offlineNote(offline))
+            backupPreflight = BackupPreflight(ExportPlanner.vaultLines(e, acct), offlineNote(offline))
             busy = false
         }
     }
@@ -731,10 +785,10 @@ class DesktopState(private val scope: CoroutineScope) {
     /** Live §2.5 attachment plan for the preflight dialog's current vault selection
      *  (pure in-memory reads — cheap enough for recomposition). */
     fun attachmentPlan(selected: Set<String>): AttachmentPlan {
-        val c = cache ?: return AttachmentPlan(emptyList(), 0L, emptyList())
+        val e = engine ?: return AttachmentPlan(emptyList(), 0L, emptyList())
         val order = backupPreflight?.vaults?.map { it.vaultId }?.filter { it in selected }
             ?: return AttachmentPlan(emptyList(), 0L, emptyList())
-        return ExportPlanner.planAttachments(ExportPlanner.orderedItems(c, order))
+        return ExportPlanner.planAttachments(ExportPlanner.orderedItems(e, order))
     }
 
     /**
@@ -750,12 +804,11 @@ class DesktopState(private val scope: CoroutineScope) {
     fun backupRun(selectedVaults: Set<String>, includeAttachments: Boolean, passphrase: String, dest: File) {
         val e = engine ?: return
         val acct = account ?: return
-        val c = cache ?: return
         busy = true; error = null; backupPreflight = null
         scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    buildAndWriteBackup(e, acct, c, selectedVaults, includeAttachments, passphrase, dest)
+                    buildAndWriteBackup(e, acct, selectedVaults, includeAttachments, passphrase, dest)
                 }
                 store.lastExportAt = System.currentTimeMillis()
                 lastExportAt = store.lastExportAt
@@ -771,7 +824,6 @@ class DesktopState(private val scope: CoroutineScope) {
     private suspend fun buildAndWriteBackup(
         e: SyncEngine,
         acct: Account,
-        c: VaultCache,
         selectedVaults: Set<String>,
         includeAttachments: Boolean,
         passphrase: String,
@@ -780,16 +832,16 @@ class DesktopState(private val scope: CoroutineScope) {
         val crypto = acct.cryptoProvider()
 
         // Snapshot every input up front (cheap in-memory reads): a concurrent manual lock
-        // can close the engine/cache underneath a long build, and reads-then-crypto keeps
+        // can close the engine's cache underneath a long build, and reads-then-crypto keeps
         // that window to "attachment downloads fail → named skips", never a torn payload.
-        val allLines = ExportPlanner.vaultLines(c, acct)
+        val allLines = ExportPlanner.vaultLines(e, acct)
         val lines = allLines.filter { it.vaultId in selectedVaults }
-        val exportItems = ExportPlanner.orderedItems(c, lines.map { it.vaultId })
+        val exportItems = ExportPlanner.orderedItems(e, lines.map { it.vaultId })
         // Enumerate undecryptable envelopes (missing VK / newer formatVersion) — but not
         // those of a VK-held vault the user explicitly deselected.
         val deselected = allLines.map { it.vaultId }.toSet() - selectedVaults
-        val undecryptable = ExportPlanner.undecryptable(c).filter { it.vaultId !in deselected }
-        val formatVersions = c.envelopes().associate { it.itemId to it.formatVersion }
+        val undecryptable = ExportPlanner.undecryptable(e).filter { it.vaultId !in deselected }
+        val formatVersions = e.envelopes().associate { it.itemId to it.formatVersion }
 
         // §2.5: fetch each opted-in attachment plaintext one at a time through the normal
         // client path; ONE retry, then skip BY NAME — never silently, never fatal. The
@@ -882,9 +934,9 @@ class DesktopState(private val scope: CoroutineScope) {
             } catch (t: Throwable) {
                 busy = false; error = t.message ?: "sync failed"; return@launch
             }
-            val c = cache; val acct = account
-            if (c == null || acct == null) { busy = false; return@launch }
-            val docs = orderedDocs(c, acct)
+            val acct = account
+            if (acct == null) { busy = false; return@launch }
+            val docs = orderedDocs(e, acct)
             items = e.items()
             csvPreflight = CsvPreflight(ExportCsv.warnings(docs), docs.count { it.type == "login" }, offlineNote(offline))
             busy = false
@@ -898,13 +950,13 @@ class DesktopState(private val scope: CoroutineScope) {
      *  never delete a pre-existing file at [dest] — the helper only ever cleans up
      *  its own temp, so no delete in the catch here). */
     fun csvRun(dest: File) {
+        val e = engine ?: return
         val acct = account ?: return
-        val c = cache ?: return
         busy = true; error = null; csvPreflight = null
         scope.launch {
             try {
                 val count = withContext(Dispatchers.IO) {
-                    val docs = orderedDocs(c, acct)
+                    val docs = orderedDocs(e, acct)
                     val bytes = ExportCsv.write(docs).encodeToByteArray()
                     try { writeVerifiedAtomically(dest, bytes) } finally { bytes.fill(0) } // plaintext passwords — wipe our copy
                     docs.count { it.type == "login" }
@@ -963,9 +1015,9 @@ class DesktopState(private val scope: CoroutineScope) {
     }
 
     /** All VK-held docs in the pinned export order (vault order, then updatedAt). */
-    private fun orderedDocs(c: VaultCache, acct: Account): List<ItemDoc> {
-        val order = ExportPlanner.vaultLines(c, acct).map { it.vaultId }
-        return ExportPlanner.orderedItems(c, order).map { it.doc }
+    private fun orderedDocs(e: SyncEngine, acct: Account): List<ItemDoc> {
+        val order = ExportPlanner.vaultLines(e, acct).map { it.vaultId }
+        return ExportPlanner.orderedItems(e, order).map { it.doc }
     }
 
     private fun offlineNote(offline: Boolean): String? {
@@ -979,7 +1031,7 @@ class DesktopState(private val scope: CoroutineScope) {
 
     fun lock() {
         // Retain the ciphertext cache on lock (spec 05 T3); close its handle.
-        engine?.close(); api?.close(); api = null; account = null; engine = null; cache = null
+        engine?.close(); api?.close(); api = null; account = null; engine = null
         clearVaultClipboard() // a copied secret must not outlive the unlocked session
         clearSecondary()
         screen = DesktopScreen.Unlock(store.load()?.email ?: ""); items = emptyList(); needsUpdateCount = 0
@@ -1006,7 +1058,7 @@ class DesktopState(private val scope: CoroutineScope) {
                 temp.close()
             }
             // Close the engine (releases the DB handle — Windows won't delete an open file) first.
-            engine?.close(); a?.close(); api = null; account = null; engine = null; cache = null
+            engine?.close(); a?.close(); api = null; account = null; engine = null
             clearVaultClipboard()
             session?.userId?.let { deleteCache(it) }
             store.clear()
@@ -1065,7 +1117,6 @@ class DesktopState(private val scope: CoroutineScope) {
         } else {
             deleteCache(acct.userId); InMemoryVaultCache()
         }
-        cache = newCache
         engine = SyncEngine(a, acct, newCache).also { it.hydrate() }
     }
 

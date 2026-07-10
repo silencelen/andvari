@@ -195,6 +195,11 @@ Prioritized; each is additive and back-compatible.
   (pull UNION-ALL rewrite, GC out of the DB lock, tombstone partial index — addendum doc).
   Deferred, recorded in the design doc: LastPass template parsing, 1pux adapter, pull
   paging (recommend-only), web list virtualization at >500 items.
+  **Owner dev-note 2026-07-10 — import destination vault picker:** imports currently
+  commit to the Personal vault only; the user should choose the destination vault
+  (writable vaults, F18 picker semantics) at the confirm step, web + natives, per-import
+  for v1. F75 dedupe scoping must follow the chosen vault. Tracked in
+  `docs/PLAN-autonomous-2026-07.md` §"Owner dev-notes queued".
 
 ## Horizons & cycle doctrine (2026-07-08 brainstorm — the spine behind the queues)
 
