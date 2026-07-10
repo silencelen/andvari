@@ -286,8 +286,9 @@ decrypted `ItemDoc`s, attachment plaintext, or fileKeys outside item ciphertext.
 Decryption happens only in memory after the user supplies the master password; lock
 and relaunch drop all key material.
 
-- The DB file gets no extra encryption in v1 (envelopes are already AEAD; DB-file
-  wrapping is the spec 01 §8 quick-unlock follow-up — Android Keystore / DPAPI+PIN).
+- The DB file gets no extra encryption in v1 (envelopes are already AEAD). Note:
+  quick unlock (spec 01 §8) wraps the **UVK**, not this DB — whole-file DB wrapping
+  remains a possible future hardening, independent of quick unlock.
 - Clients MUST honor `ClientPolicy.offlineCacheAllowed`: when false, no durable cache
   is created and any existing cache file for the account is deleted (re-evaluated on
   every successful policy fetch).

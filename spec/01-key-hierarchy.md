@@ -35,8 +35,8 @@ wrapKey = HKDF-SHA-256(ikm = MK, salt = empty, info = "andvari/v1/wrap", L = 32)
 
 RFC 5869, full extract-then-expand. `salt = empty` means the RFC's default
 (HashLen zero bytes). Info strings are the literal ASCII bytes shown. MK never leaves
-the KDF step; authKey and wrapKey MUST NOT be persisted (only re-derived), except as
-covered by quick-unlock (§8).
+the KDF step; authKey and wrapKey MUST NOT be persisted (only re-derived) — with no
+exception: quick-unlock (§8) persists a hardware-wrapped UVK, never these.
 
 ## 3. Login verifier
 
@@ -131,25 +131,186 @@ covered by quick-unlock (§8).
   UVK → wrappedUvk′, send `{newSalt, newKdfParams, newAuthKey, newWrappedUvk}` with
   the CURRENT authKey as proof. UVK, identity keys, vault keys, items: unchanged.
   Server revokes all other sessions on success.
-- **KDF upgrade**: if prelogin's kdfParams are weaker than current policy, the client
-  (after a successful unlock) re-derives with policy params and performs the same
-  atomic update with the password unchanged. `kdfParams.v` gates format changes.
-  **Status (v5): implemented in no client yet** — the server enforces the KDF floor at
-  register/password-change only, so raising the org default does not migrate existing
-  accounts until this ships. Deferred; tracked in the v5 findings tail (F61).
+- **KDF upgrade (F61, normative)**: after every successful **full-master-password**
+  unlock with server connectivity, the client compares the account's stored
+  `kdfParams` against the current org policy's `kdfParams`
+  (`GET /client-policy`) and, when an upgrade is due, **silently re-keys with the
+  password it just verified**: re-derive MK′/authKey′/wrapKey′ under the policy
+  params (fresh 16-byte salt), re-wrap UVK, and perform the same atomic
+  `PUT /account/password` — the password itself is unchanged and the user is not
+  prompted. Rules:
+  - **Upgrade-only, never sideways or down.** An upgrade is due iff policy params
+    are ≥ the account's on **both** cost axes (`ops`, `memBytes`) and > on at least
+    one, with `policy.v ≥ account.v`. Policy params that are lower or mixed
+    (one axis up, one down) MUST NOT trigger a re-key — the policy JSON comes from
+    the server, and a compromised server must not be able to talk a client into
+    weakening its own KDF (spec 05 T1).
+  - **Client-side sanity bounds.** Regardless of policy, a client MUST refuse to
+    re-key to `memBytes < 67108864` (64 MiB — the §9 floor) or `ops < 3`, and
+    SHOULD refuse absurd cost inflation (`ops > 10` or `memBytes > 1 GiB`) — a
+    hostile policy must be able to neither weaken the KDF nor turn every unlock
+    into a memory-exhaustion DoS.
+  - **Full-password unlocks only.** A quick-unlock (§8) unlock CANNOT upgrade —
+    the client never has the password in hand — and MUST NOT count as a
+    full-password unlock for any §7/§8 purpose. The §8 periodic-full-password rule
+    is what guarantees a biometric-happy user still types the master password at
+    least every 30 days, which bounds fleet KDF-upgrade latency after a policy
+    bump to ~one period.
+  - **Offline full unlocks skip silently** (the PUT needs the server) and the
+    check simply re-runs at the next online full-password unlock. Latency-critical
+    unlock paths (the Android autofill unlock overlay) MAY defer the re-key to the
+    next main-app unlock; interactive app unlocks SHOULD perform it inline.
+  - **Known costs (accepted):** the atomic update revokes all *other* sessions
+    (§3 wire semantics — no wire change for F61), so a policy bump signs the
+    user's other devices out once as each device re-keys first; re-keying costs
+    two extra Argon2id derivations at unlock. A failed re-key (race with another
+    device, network drop) is non-fatal: the unlock already succeeded, and the
+    upgrade retries next time.
+  - The quick-unlock wrapped UVK (§8) survives a KDF upgrade untouched — the UVK
+    itself never changes (§4).
+  - Side effect: converging on policy params also heals that account's
+    prelogin-divergence oracle (spec 05 R4).
 
 ## 8. Quick unlock (platform-local, never server-visible)
 
-Quick unlock wraps the **UVK** (not the password, not MK) in platform hardware:
-- **Android:** UVK encrypted by an AES-GCM key in Android Keystore with
-  `setUserAuthenticationRequired(true)` (biometric/credential-gated), stored in app
-  storage. Invalidate on biometric enrollment change.
-- **Windows:** UVK wrapped by DPAPI (user scope) XOR-combined with a key derived from
-  a short app PIN — Argon2id(PIN, deviceSalt, ops=3, mem=64 MiB) — so neither DPAPI
-  alone nor the PIN alone suffices. Windows Hello proper is P5.
-- **Web:** none in v1. Session-memory only; a reload re-prompts for the master
-  password.
-Quick unlock never weakens the server story: the server still only ever sees authKey.
+Quick unlock wraps the **UVK** — never the master password, MK, or a derived
+authKey/wrapKey — in platform hardware. It is strictly device-local: the server is
+never told quick-unlock exists, never sees the wrapped blob, and the wire protocol
+is unchanged. Quick unlock never weakens the server story: the server still only
+ever sees authKey. A quick unlock yields exactly the capability a full-password
+unlock yields **except** knowledge of the password itself — so it can never perform
+the §7 password change / KDF upgrade, and it MUST NOT count as a full-password
+unlock anywhere the spec distinguishes the two.
+
+### 8.1 Android (NORMATIVE, v1)
+
+**Eligibility & enrollment.** Quick unlock is per-device, per-account **opt-in**,
+offered only while the vault is unlocked (the UVK is in memory). It REQUIRES:
+
+- org policy `offlineCacheAllowed == true` (spec 03 §7). The wrapped UVK is durable
+  vault-opening secret material at rest; an org that forbids the (ciphertext-only!)
+  offline cache has asked for *nothing durable on the device that helps open the
+  vault*, and the honest reading gates the strictly-more-sensitive quick-unlock
+  secret under the same bit. When a policy fetch shows `offlineCacheAllowed=false`,
+  the client MUST delete the wrapped blob and its Keystore key (same re-evaluation
+  points as the cache purge, spec 02 §8).
+- `BiometricManager.canAuthenticate(BIOMETRIC_STRONG) == BIOMETRIC_SUCCESS`.
+  Class-3 (strong) biometrics ONLY; `DEVICE_CREDENTIAL` MUST NOT be an accepted
+  authenticator — a 4-digit screen PIN is routinely weaker than the master password
+  and shoulder-surfed far more often.
+
+**Construction.** A dedicated AES-256-GCM key is generated inside Android Keystore
+(alias `andvari-qu-<userId>`) with:
+
+- purposes ENCRYPT|DECRYPT, GCM, no padding, 256-bit;
+- `setUserAuthenticationRequired(true)` with **auth-per-use** binding
+  (API 30+: `setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG)`;
+  API 29: `setUserAuthenticationValidityDurationSeconds(-1)`, which is
+  biometric-only auth-per-use) — every decrypt (and the enrollment encrypt)
+  requires a fresh `BiometricPrompt` with the cipher as its `CryptoObject`;
+- `setInvalidatedByBiometricEnrollment(true)` (explicit, though it is the default
+  for auth-per-use keys): adding a new fingerprint/face permanently invalidates
+  the key;
+- `setUnlockedDeviceRequired(true)`: the key is unusable while the device is
+  locked or before first unlock after boot;
+- StrongBox attempted (`setIsStrongBoxBacked(true)`), falling back to the TEE on
+  `StrongBoxUnavailableException` — TEE-backed is acceptable; software-only
+  Keystore is not a supported target (minSdk 29 devices ship a TEE).
+
+The UVK is sealed as `ct = AES-GCM(key, iv = Keystore-generated, aad =
+UTF-8("andvari/v1|quick-unlock|{userId}"), plaintext = UVK)`. The AAD binds the
+blob to the account so a blob copied between profiles/users cannot open (and a
+tampered file fails the tag). The blob lives in a versioned JSON file
+`quick-unlock-<userId>.json` under **`noBackupFilesDir`** (same posture as the
+offline cache DB): `{ "v": 1, "alias", "iv", "ct", "createdAt",
+"lastFullPasswordUnlockAt" }` — all base64url where binary. The app already sets
+`android:allowBackup="false"`; `noBackupFilesDir` is belt-and-suspenders so no
+future backup-config change can exfiltrate the blob via `adb backup`/cloud backup.
+
+**Use.** Unlock screens (main app + the autofill unlock overlay) that find an
+eligible, fresh (see the periodic rule) blob MAY offer/auto-show a
+`BiometricPrompt` (negative button = "Use master password"). On success the client
+decrypts the UVK and unlocks via the UVK path (core `Account.unlockWithUvk`),
+which MUST perform the same seed-derived `identityPub` verification as the
+password path (§5) — a mismatch is a security fault and hard-fails, never falls
+back silently. Vault keys are then obtained exactly as after a password unlock
+(grants opened under UVK / identity key, from cache or sync).
+
+**Failed / invalidated key — fail to the password, never weaken.** Any of the
+following MUST fall back to the full master-password prompt, and where marked
+*wipe* MUST first delete both the blob file and the Keystore key:
+
+| Event | Action |
+|---|---|
+| `KeyPermanentlyInvalidatedException` (biometric enrollment changed) | *wipe*; notify "biometrics changed"; re-enroll only after a successful full-password unlock |
+| Keystore key missing / unrecoverable, blob file missing/corrupt/unknown `v` | *wipe* remnants; password prompt |
+| AES-GCM open fails (tag/AAD mismatch) | *wipe*; password prompt |
+| `encryptedIdentitySeed` fails to open under the recovered UVK | *wipe* (stale/foreign UVK); password prompt |
+| Seed-derived identityPub ≠ server identityPub | HARD FAIL (§5 security fault — same as the password path; do NOT retry, do NOT wipe evidence) |
+| `BiometricPrompt` temporary lockout (`ERROR_LOCKOUT`) | password prompt this time; blob retained |
+| `BiometricPrompt` permanent lockout (`ERROR_LOCKOUT_PERMANENT`) | *wipe*; password prompt (re-enroll after a full unlock) |
+| User cancels the prompt | password prompt; blob retained |
+
+There is deliberately **no app-level failed-attempt counter**: `BiometricPrompt` +
+Keystore already rate-limit and lock out biometric attempts system-wide, and an
+app-side counter stored next to the blob would be trivially resettable by exactly
+the attacker it pretends to stop.
+
+**Periodic full-password rule (normative).** Quick unlock MAY serve unlocks for at
+most **30 days** since the last successful full-master-password unlock on that
+device (`lastFullPasswordUnlockAt`, stamped by every full-password unlock,
+including offline ones and the autofill overlay's). Past the window the client
+MUST require the master password (the blob is retained; a successful full unlock
+re-stamps the window). Why 30 and why time- rather than use-based: the rule exists
+(a) so users do not lose master-password muscle memory — the classic quick-unlock
+failure mode is "enabled biometrics in March, forgot the password by June", which
+for a ZK design with only org-escrow recovery is an availability incident (A5);
+and (b) to bound §7 KDF-upgrade latency for biometric-only users. Both pressures
+are calendar-shaped, not count-shaped — a use-count cap (M unlocks) punishes
+heavy autofill users hundreds of times faster than light users for zero
+threat-model gain (the at-rest exposure window is temporal), so M is deliberately
+unbounded. 30 days is long enough to be unobtrusive (~12 password entries/year)
+and short enough that a forgotten password is caught while escrow recovery and the
+user's own memory are still warm. The timestamp is advisory plaintext (not
+integrity-bound): an attacker who can rewrite app-private files to stretch the
+window is already past the app sandbox (spec 05 T5, out of scope) and still
+cannot use the Keystore key without the biometric.
+
+**What clears the quick-unlock secret** (blob + Keystore key), beyond the failure
+table above:
+
+- **Sign-out** — always, alongside the cache purge (spec 02 §8).
+- **Definitive server rejection** (device revoked; invalid-session 401 that
+  survives refresh) — same purge path as the cached `accountKeys`.
+- **Policy flip** `offlineCacheAllowed → false` — on the next policy fetch.
+- **User disable** in Settings (no password required to *disable* — reducing
+  standing secret material must never be gated).
+- **Password change: does NOT clear it.** The UVK survives a password change by
+  §7/§4 invariant, so the wrapped blob stays **cryptographically valid** — this is
+  explicit and intended (changing the password on the web does not silently break
+  the phone's biometric unlock). Device-side hygiene still applies: a password
+  change made *elsewhere* revokes this device's session (§7), and the resulting
+  definitive 401 purges the blob with the rest of the offline material until the
+  next sign-in + re-enroll. A KDF upgrade (§7) likewise leaves the blob valid.
+- **UVK-invalidating events** are covered by the failure table (the seed no longer
+  opens → wipe): none exist in v1 (UVK never rotates), so this is future-proofing,
+  not a live path.
+
+### 8.2 Windows (design sketch — DEFERRED, not normative)
+
+Deferred past the 0.7.0 MSI refresh (backlog). The standing sketch — UVK wrapped
+by DPAPI (user scope) XOR-combined with a key derived from a short app PIN,
+Argon2id(PIN, deviceSalt, ops=3, mem=64 MiB), so neither DPAPI alone nor the PIN
+alone suffices; Windows Hello proper later — is a starting point only and gets its
+own design + breaker pass when scheduled. Until then the desktop client has no
+quick unlock: master password only. The §8.1 policy gating
+(`offlineCacheAllowed`), periodic full-password rule, and clearing events apply to
+ANY future platform quick-unlock as written.
+
+### 8.3 Web
+
+None in v1 (unchanged). Session-memory only; a reload re-prompts for the master
+password.
 
 ### Auto-lock (policy `autoLockSeconds`)
 
