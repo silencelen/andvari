@@ -12,14 +12,21 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
+import io.silencelen.andvari.core.client.AttachmentPlan
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.Backup
 import io.silencelen.andvari.core.client.BackupAttachmentEntry
 import io.silencelen.andvari.core.client.BackupItem
 import io.silencelen.andvari.core.client.BackupPayload
+import io.silencelen.andvari.core.client.BackupPreflight
+import io.silencelen.andvari.core.client.BackupRequest
+import io.silencelen.andvari.core.client.BackupResult
 import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupVault
 import io.silencelen.andvari.core.client.CopyDeniedException
+import io.silencelen.andvari.core.client.CsvPreflight
+import io.silencelen.andvari.core.client.ExportPlanner
+import io.silencelen.andvari.core.client.PlannedAttachment
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
@@ -841,19 +848,19 @@ class AndvariViewModel(
 
     /**
      * F20: count of shared vaults whose grant this device can't OPEN — a grant blob WAS delivered
-     * (it's in cache.grants()) but addGrant() failed (sealed to an identity we don't hold, or a
-     * newer grant format), so [Account.hasVault] is false and the vault is silently absent from
-     * vaultInfos()/[items]. Computed app-side from public cache/account reads because the Kotlin
-     * SyncEngine — unlike web's store — tracks no undecryptable-grant set (surfacing it there would
-     * be a core change). Removed/held/deleted vaults are dropVault()'d out of cache.vaults(), so
-     * they never count here; a grant that later opens flips hasVault true and drops out. Mirrors
-     * web's undecryptableGrants set.
+     * (it's in the engine's grant rows) but addGrant() failed (sealed to an identity we don't
+     * hold, or a newer grant format), so [Account.hasVault] is false and the vault is silently
+     * absent from vaultInfos()/[items]. Computed app-side from the engine's read surface (F82)
+     * because the Kotlin SyncEngine — unlike web's store — tracks no undecryptable-grant set.
+     * Removed/held/deleted vaults are dropVault()'d out of the vault rows, so they never count
+     * here; a grant that later opens flips hasVault true and drops out. Mirrors web's
+     * undecryptableGrants set.
      */
     private fun undecryptableSharedCount(): Int {
         val current = VaultSession.get() ?: return 0
         val acct = current.account
-        val grantedIds = current.cache.grants().mapTo(HashSet()) { it.vaultId }
-        return current.cache.vaults().count {
+        val grantedIds = current.engine.grants().mapTo(HashSet()) { it.vaultId }
+        return current.engine.vaultRows().count {
             it.type == "shared" && it.vaultId in grantedIds && !acct.hasVault(it.vaultId)
         }
     }
@@ -1271,7 +1278,7 @@ class AndvariViewModel(
             _ui.value = _ui.value.copy(
                 busy = false,
                 items = current.engine.items(),
-                backupPreflight = BackupPreflight(ExportPlanner.vaultLines(current.cache, current.account), offlineNote(offline)),
+                backupPreflight = BackupPreflight(ExportPlanner.vaultLines(current.engine, current.account), offlineNote(offline)),
             )
         }
     }
@@ -1313,7 +1320,7 @@ class AndvariViewModel(
         val current = VaultSession.get() ?: return AttachmentPlan(emptyList(), 0L, emptyList())
         val order = _ui.value.backupPreflight?.vaults?.map { it.vaultId }?.filter { it in selected }
             ?: return AttachmentPlan(emptyList(), 0L, emptyList())
-        return ExportPlanner.planAttachments(ExportPlanner.orderedItems(current.cache, order))
+        return ExportPlanner.planAttachments(ExportPlanner.orderedItems(current.engine, order))
     }
 
     /**
@@ -1387,20 +1394,20 @@ class AndvariViewModel(
         readBack: () -> ByteArray?,
     ): BackupResult {
         val account = current.account
-        val cache = current.cache
+        val engine = current.engine
         val crypto = account.cryptoProvider()
 
         // Snapshot every input up front (cheap in-memory reads): a concurrent manual lock
-        // can close the engine/cache underneath a long build, and reads-then-crypto keeps
+        // can close the engine's cache underneath a long build, and reads-then-crypto keeps
         // that window to "attachment downloads fail → named skips", never a torn payload.
-        val allLines = ExportPlanner.vaultLines(cache, account)
+        val allLines = ExportPlanner.vaultLines(engine, account)
         val lines = allLines.filter { it.vaultId in selectedVaults }
-        val items = ExportPlanner.orderedItems(cache, lines.map { it.vaultId })
+        val items = ExportPlanner.orderedItems(engine, lines.map { it.vaultId })
         // Enumerate undecryptable envelopes (missing VK / newer formatVersion) — but not
         // those of a VK-held vault the user explicitly deselected.
         val deselected = allLines.map { it.vaultId }.toSet() - selectedVaults
-        val undecryptable = ExportPlanner.undecryptable(cache).filter { it.vaultId !in deselected }
-        val formatVersions = cache.envelopes().associate { it.itemId to it.formatVersion }
+        val undecryptable = ExportPlanner.undecryptable(engine).filter { it.vaultId !in deselected }
+        val formatVersions = engine.envelopes().associate { it.itemId to it.formatVersion }
 
         // §2.5: fetch each opted-in attachment plaintext one at a time through the normal
         // client path; ONE retry, then skip BY NAME — never silently, never fatal. The
@@ -1567,8 +1574,8 @@ class AndvariViewModel(
 
     /** All VK-held docs in the pinned export order (vault order, then updatedAt). */
     private fun orderedDocs(current: VaultSession.Unlocked): List<ItemDoc> {
-        val order = ExportPlanner.vaultLines(current.cache, current.account).map { it.vaultId }
-        return ExportPlanner.orderedItems(current.cache, order).map { it.doc }
+        val order = ExportPlanner.vaultLines(current.engine, current.account).map { it.vaultId }
+        return ExportPlanner.orderedItems(current.engine, order).map { it.doc }
     }
 
     private fun offlineNote(offline: Boolean): String? {
@@ -1716,7 +1723,7 @@ class AndvariViewModel(
         }
         val newEngine = SyncEngine(a, acct, cache).also { it.hydrate() }
         // VaultSession closes any previously-bound engine/api (defensive: never two conns).
-        VaultSession.bind(a, acct, newEngine, cache, provenance)
+        VaultSession.bind(a, acct, newEngine, provenance)
     }
 
     /** Sync + record the wall-clock time of the last SUCCESS — the timestamp the spec 07

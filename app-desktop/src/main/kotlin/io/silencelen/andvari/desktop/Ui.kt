@@ -22,6 +22,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.core.client.AttachmentRef
+import io.silencelen.andvari.core.client.BackupPreflight
+import io.silencelen.andvari.core.client.BackupResult
+import io.silencelen.andvari.core.client.CsvPreflight
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.CsvImport
@@ -313,6 +316,12 @@ private fun Vault(state: DesktopState) {
         when {
             editing != null -> Editor(
                 itemId = editing!!.first, initial = editing!!.second, busy = state.busy,
+                // F71: the editor renders the save error INLINE and shows upload progress —
+                // it must stay open (typed fields + picked attachments intact) until the
+                // save actually resolves.
+                error = state.saveError,
+                onErrorDismiss = state::clearSaveError,
+                saveProgress = state.saveProgress,
                 maxAttachmentBytes = state.policy?.attachmentMaxBytes ?: DEFAULT_ATTACHMENT_MAX_BYTES,
                 newRef = state::newAttachmentRef,
                 // F18: offer the vault picker ONLY for a NEW item (existing items never move
@@ -322,8 +331,11 @@ private fun Vault(state: DesktopState) {
                 vaultChoices = if (editing!!.first == null)
                     newItemVaultChoices.takeIf { c -> c.any { it.type != "personal" } }
                 else null,
-                onSave = { doc, uploads, vaultId -> state.saveItem(editing!!.first, doc, uploads, vaultId); editing = null },
-                onCancel = { editing = null },
+                // F71: close ONLY via saveItem's success callback (the Android op{}+onSaved
+                // contract) — the old `saveItem(...); editing = null` closed optimistically
+                // and a failed save/upload discarded everything typed.
+                onSave = { doc, uploads, vaultId -> state.saveItem(editing!!.first, doc, uploads, vaultId) { state.endEditorSession(); editing = null } },
+                onCancel = { state.endEditorSession(); editing = null },
             )
             current != null -> Detail(state, current, vaultBadges[current.vaultId], { editing = current.itemId to current.doc }, { state.deleteItem(current.itemId); detailId = null }, { detailId = null })
             else -> Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -751,6 +763,8 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
         if (doc.attachments.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
             Text("Attachments", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val overwrite = remember { OverwriteGate() } // F71: XAWT SAVE never asks before replacing
+            OverwriteConfirmDialog(overwrite)
             doc.attachments.forEach { ref ->
                 AttachmentLine(ref) {
                     TextButton(enabled = !state.busy, onClick = {
@@ -758,7 +772,10 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
                         dialog.file = ref.name
                         dialog.isVisible = true
                         val dir = dialog.directory; val file = dialog.file
-                        if (dir != null && file != null) state.saveAttachmentTo(ref, File(dir, file))
+                        if (dir != null && file != null) {
+                            val dest = File(dir, file)
+                            overwrite.request(dest) { state.saveAttachmentTo(ref, dest) }
+                        }
                     }) { Text("Save") }
                 }
             }
@@ -881,6 +898,9 @@ private fun Editor(
     itemId: String?,
     initial: ItemDoc,
     busy: Boolean,
+    error: String?,
+    onErrorDismiss: () -> Unit,
+    saveProgress: Pair<Int, Int>?,
     maxAttachmentBytes: Long,
     newRef: (String, Long) -> AttachmentRef,
     vaultChoices: List<VaultInfo>? = null,
@@ -910,7 +930,9 @@ private fun Editor(
     var totpError by remember { mutableStateOf<String?>(null) }
     val crypto = remember { createCryptoProvider() }
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
-        TextButton(onClick = onCancel) { Text("cancel") }
+        // Busy-gated like every other dialog's Cancel here: a mid-save click would unmount
+        // the editor and destroy the very draft F71 keeps alive for the retry.
+        TextButton(onClick = onCancel, enabled = !busy) { Text("cancel") }
         Text(if (itemId != null) "Edit" else if (isLogin) "New login" else if (isCard) "New card" else "New note", style = MaterialTheme.typography.headlineMedium)
         // F18: shown only when there's a choice to make (>1 writable vault). A single-vault
         // user's new item lands in Personal exactly as before — no picker.
@@ -1011,6 +1033,13 @@ private fun Editor(
                 brand = CardNormalize.brand(cardNumber),
             ) else initial.card,
             attachments = attachments)
+        // F71: a failed save lands its error HERE, beside the Save it belongs to — the
+        // editor stays open with everything typed still editable; per-upload progress
+        // shows while `busy` disables Save.
+        ErrorBar(error, onErrorDismiss)
+        saveProgress?.let { (done, total) ->
+            Text("Uploading attachment $done of $total…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 4.dp))
+        }
         Primary("Save", name.isNotBlank() && !busy, busy) {
             // A5: ONE shared byte-exact TOTP normalize — core Totp.normalize (the private
             // copy this file carried is deleted). Blank stays blank (stored null by builtDoc).
@@ -1148,20 +1177,58 @@ private fun SettingsScreen(state: DesktopState) {
     }
 }
 
+/**
+ * F71: java.awt.FileDialog(SAVE) on Linux (XAWT) has NO overwrite prompt — picking an
+ * existing name replaces the file silently. Every SAVE-dialog destination routes through
+ * [request]: a fresh path runs the action immediately; an existing file waits for an
+ * explicit "Replace" in [OverwriteConfirmDialog] (Cancel returns to whatever dialog the
+ * picker came from). Windows' native dialog asks by itself — a second ask there is the
+ * price of one consistent code path.
+ */
+private class OverwriteGate {
+    var pending by mutableStateOf<Pair<File, () -> Unit>?>(null)
+        private set
+
+    fun request(dest: File, action: () -> Unit) {
+        if (dest.exists()) pending = dest to action else action()
+    }
+
+    fun cancel() { pending = null }
+    fun confirm() { pending?.second?.invoke(); pending = null }
+}
+
+@Composable
+private fun OverwriteConfirmDialog(gate: OverwriteGate) {
+    val file = gate.pending?.first ?: return
+    AlertDialog(
+        onDismissRequest = gate::cancel,
+        title = { Text("Replace \"${file.name}\"?") },
+        text = { Text("A file with that name already exists there. Replacing it can't be undone.") },
+        confirmButton = { TextButton(onClick = gate::confirm) { Text("Replace") } },
+        dismissButton = { TextButton(onClick = gate::cancel) { Text("Cancel") } },
+    )
+}
+
 // ---- export & backup (spec 07) ----
 
 /** The spec 07 export dialogs. Destinations come from java.awt.FileDialog(SAVE) — the
- *  same pattern as the attachment "Save" button — invoked from the confirm buttons. */
+ *  same pattern as the attachment "Save" button — invoked from the confirm buttons,
+ *  each gated on [OverwriteGate] (F71: XAWT never asks before replacing). */
 @Composable
 private fun ExportDialogs(state: DesktopState) {
+    val overwrite = remember { OverwriteGate() }
+    OverwriteConfirmDialog(overwrite)
     state.backupPreflight?.let { pre ->
         BackupPreflightDialog(state, pre) { selected, includeAttachments, passphrase ->
             val dialog = FileDialog(null as Frame?, "Save vault backup", FileDialog.SAVE)
             dialog.file = "andvari-backup-${exportDateSuffix()}.andvari"
             dialog.isVisible = true
             val dir = dialog.directory; val file = dialog.file
-            // Cancelled picker → the preflight dialog stays open for another go.
-            if (dir != null && file != null) state.backupRun(selected, includeAttachments, passphrase, File(dir, file))
+            // Cancelled picker (or a declined overwrite) → the preflight stays open for another go.
+            if (dir != null && file != null) {
+                val dest = File(dir, file)
+                overwrite.request(dest) { state.backupRun(selected, includeAttachments, passphrase, dest) }
+            }
         }
     }
     state.backupResult?.let { BackupResultDialog(it, state::backupResultDismiss) }
@@ -1171,7 +1238,10 @@ private fun ExportDialogs(state: DesktopState) {
             dialog.file = "andvari-export-${exportDateSuffix()}.csv"
             dialog.isVisible = true
             val dir = dialog.directory; val file = dialog.file
-            if (dir != null && file != null) state.csvRun(File(dir, file))
+            if (dir != null && file != null) {
+                val dest = File(dir, file)
+                overwrite.request(dest) { state.csvRun(dest) }
+            }
         }
     }
 }

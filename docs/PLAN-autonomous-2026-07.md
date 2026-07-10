@@ -98,11 +98,28 @@ per cycle boundary if still open.
       honest (private-section gap = Bitwarden-parity, not "never widens"), versions bumped
       ×4 → 0.10.0 (no second behaviorally-different "0.9.0" can ever field), A8 doc wording.
       Gates green at 0.10.0. Checkpoint: web deploy + extension 0.8.1 publish.
-- [ ] **7. Web polish pack** — vault-list virtualization >~500 items (hand-rolled window
-      per the F56 addendum recommendation, React-profiler note in the commit); PROD-1
-      (audit appender wiring — verify what's actually unreferenced, fix or document);
-      SB-4 client debt (F71, F82 — land before any next spec-07 change — F80 cosmetics
-      last). Web deploy checkpoint.
+- [x] **7. Web polish pack** — **DONE 2026-07-10.** PROD-1 was found ALREADY SHIPPED
+      (`0eebbfd`, appender + boot-assert test — verified, not re-done). Two parallel
+      workstreams (disjoint files, honest reports this time): [web] hand-rolled window
+      (virtual.ts ~25 lines + 9 vitest cases, engages >500, page stays the scroller,
+      10k items ≈ 200 DOM nodes vs 70k) + all 7 F80 items (ViewHeader, .check, carded
+      hero, .item.static, keyboard Health rows, SVG sigils, email in appbar); [native]
+      F71 (editor closes only via onSaved, inline error + upload progress, atomic
+      attachment writes, overwrite confirms, core saveWithUploads onProgress) + F82
+      (ExportPlanner twins DELETED → one jvmShared copy, union shape with android's
+      BackupRequest; SyncEngine envelopes()/vaultRows()/grants() read surface; carried
+      private-cache refs gone from BOTH natives). **Review 6 confirmed / 0 refuted, all
+      fixed** — the HIGH: F71's designed retry WEDGED on `attachment_id_taken` (retry
+      re-encrypts with a fresh secretstream header → sha differs → server dedup refuses
+      the once-minted id forever); fixed by treating id_taken for our own refs as
+      already-committed (save + gesture legs) PLUS a `newItemId` draft param so a NEW
+      item's retry reuses the first attempt's id (else `attachment_mismatch` at push) —
+      2 new server-integration tests, MUTATION-CHECKED. Also: Cancel busy-gated,
+      dedicated saveError (backgroundSync's global error no longer paints inside the
+      editor), useLayoutEffect first-frame fix, overflow guard at accessibility fonts,
+      focus-past-overscan documented as the accepted react-window-parity tradeoff.
+      Gates green (web 308, extension 8/8 inside verify.sh, desktop compiles). Web
+      deploy checkpoint; F71/F82 ride the 0.10.0 native cut.
 - [ ] **8. Assess-only docs + exploration pass** — `docs/assess/2026-07-ios.md` (honest
       feasibility: KMP core vs crypto/keystore/autofill surfaces) and
       `docs/assess/2026-07-passkeys.md` (what passkey support would even mean for a
@@ -130,6 +147,16 @@ per cycle boundary if still open.
 - 0.2.x MSI retirement (= the card-create Option-A flip trigger).
 
 ## Owner dev-notes queued (post-cycle-8 candidates)
+
+- **Import destination vault picker** (dev-note 2026-07-10): *"when importing data from an
+  external csv or password manager, the user should have the option to choose which vault
+  they are imported into."* Today the guided importers commit everything to the Personal
+  vault — the import-flow sibling of the F18 "silently lands in Personal" fix (cycle 4).
+  Scope: a writable-vault picker (same choices rule as F18: personal + owner/writer shared,
+  shown when >1 choice) on the import CONFIRM step, web + Android + desktop; core commit
+  path takes the vaultId (per-import, not per-row, for v1). Note: the vault-dedupe pass
+  (F75) currently fingerprints against the whole vault set — re-check its scoping when the
+  destination is a shared vault. Natural pairing with the card/payment cycle pitch below.
 
 - **Card / payment autofill+storage** (dev-note 2026-07-10): *"support storing autofill
   creditcard and payment details."* State check: card **storage + UI + Android card

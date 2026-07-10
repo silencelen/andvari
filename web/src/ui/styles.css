@@ -105,6 +105,9 @@ body {
   color: var(--gold);
   text-shadow: 0 2px 20px rgba(208, 169, 74, 0.3);
 }
+/* The sigils are inline SVG (F80 — see Sigil.tsx); text-shadow can't reach SVG
+   strokes, so the hero glow is restated as a drop-shadow. */
+.card-hero .sigil svg { filter: drop-shadow(0 2px 14px rgba(208, 169, 74, 0.35)); }
 .card-hero h1 { font-family: var(--serif); font-size: 27px; margin: 12px 0 4px; font-weight: 600; }
 .card-hero p { color: var(--ink-dim); font-size: 14px; margin: 0; }
 
@@ -166,6 +169,10 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 }
 .appbar .brand { font-size: 20px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+/* F80: the appbar shows the account EMAIL (a raw userId prefix reads as debug
+   output) — flex so a long address ellipsizes instead of pushing Lock off the bar. */
+.appbar .who { display: inline-flex; align-items: center; min-width: 0; }
+.appbar .userid { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 .dot.off { background: var(--ink-faint); }
 
@@ -196,6 +203,17 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
   padding: 13px 15px; cursor: pointer; font: inherit; color: inherit; transition: 0.14s;
 }
 .item:hover { border-color: var(--edge-strong); transform: translateY(-1px); }
+/* Inert rows (F80 — e.g. Sharing's vault roster): the row look without the click
+   affordance, so nothing lifts under a cursor that can't do anything there. */
+.item.static { cursor: default; }
+.item.static:hover { border-color: var(--edge); transform: none; }
+/* F56: the vault list virtualizes past 500 rows, and windowing needs one fixed
+   stride — so the row height is pinned for BOTH render paths (plain and windowed
+   stay identical). Geometry mirrored in Vault.tsx ROW_H/LIST_GAP. */
+/* overflow guard: the pin has ~1px slack at 16px default fonts — larger browser
+   default / minimum-font accessibility settings must clip inside the row, not paint
+   the sub line across the gap onto the next row. */
+.vault-list .item { height: 72px; overflow: hidden; }
 .item .glyph {
   width: 38px; height: 38px; flex: none; border-radius: 9px; display: grid; place-items: center;
   font-family: var(--serif); font-size: 18px; font-weight: 600;
@@ -257,6 +275,8 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 }
 
 .view-title { font-family: var(--serif); font-weight: 600; font-size: 22px; margin: 0; }
+/* ---- shared view header (F80 — see ViewHeader.tsx) ---- */
+.view-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 22px 0 14px; }
 
 /* ---- summary tiles (health) ---- */
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 18px; }
@@ -284,6 +304,9 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .table td.mono, .table .mono { font-family: var(--mono); font-size: 12.5px; }
 .table tr.rowlink { cursor: pointer; transition: background 0.12s; }
 .table tr.rowlink:hover { background: var(--bg-input); }
+/* F80: rowlinks are focusable (tabIndex) — inset outline because the row spans the
+   scroll container edge-to-edge, so an outset ring would be clipped. */
+.table tr.rowlink:focus-visible { outline: 2px solid var(--gold-deep); outline-offset: -2px; background: var(--bg-input); }
 .table tr.subrow > td { background: var(--bg-input); padding: 12px 16px; }
 .table.inner { font-size: 13px; }
 .table.inner th, .table.inner td { padding: 6px 10px; border-bottom: 1px solid var(--edge); }

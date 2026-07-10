@@ -183,6 +183,20 @@ class SyncEngine(
     fun items(): List<VaultItem> = cache.allItems().sortedBy { it.doc.name.lowercase() }
     fun item(itemId: String): VaultItem? = cache.getItem(itemId)
 
+    // ---- read-only cache pass-throughs (F82) ----
+    // The spec 07 export planner and the F20 undecryptable-grant count enumerate raw wire
+    // rows. Exposing them here keeps [cache] private — the natives used to carry the
+    // engine's own cache instance for these reads, a close-ordering hazard.
+
+    /** Persisted item envelopes (ciphertext rows), tombstones included. */
+    fun envelopes(): List<WireItem> = cache.envelopes()
+
+    /** Persisted vault rows as delivered — [vaultInfos] is the decrypted/filtered view. */
+    fun vaultRows(): List<WireVault> = cache.vaults()
+
+    /** Persisted grant rows as delivered, openable or not (a sealed grant still counts). */
+    fun grants(): List<WireGrant> = cache.grants()
+
     /**
      * Guided importers (design 2026-07-09, amendment A8): the PERSONAL vault's light
      * projections for the vault-aware import plan — the one engine-owned entry point all
@@ -916,7 +930,15 @@ class SyncEngine(
                     ?: throw CryptoException("an attachment vanished from the source item")
                 val plain = downloadAttachment(srcRef)
                 val enc = Attachments.encrypt(account.cryptoProvider(), Bytes.fromB64(a.newFileKey), plain)
-                api.uploadAttachment(a.newId, g.newItemId, g.targetVaultId, enc.header + enc.ciphertext)
+                try {
+                    api.uploadAttachment(a.newId, g.newItemId, g.targetVaultId, enc.header + enc.ciphertext)
+                } catch (e: ApiException) {
+                    // Gesture RETRY (memo reused while the source rev is unchanged): this
+                    // attempt's re-encryption carries a fresh random secretstream header, so a
+                    // copy leg that partially landed before the failure now trips the server's
+                    // sha-matched dedup on its own once-minted id. Ours-by-construction: skip.
+                    if (e.code != "attachment_id_taken") throw e
+                }
                 newRefs.add(AttachmentRef(id = a.newId, name = a.name, size = a.size, fileKey = a.newFileKey))
                 onProgress?.invoke(++done, g.attachments.size)
             }
@@ -1085,8 +1107,25 @@ class SyncEngine(
      * cycle is [syncMutex]-serialized against every other caller, and the epoch guard
      * additionally refuses to classify off any pull that started before the denial
      * (the native equivalent of the web store's second-sync review fix).
+     *
+     * F71: [onProgress] mirrors [runGesture]'s per-upload (done, total) callback — fires
+     * only when there are uploads. Call sites MUST pass it NAMED: a trailing lambda binds
+     * to the LAST parameter, which stops being onProgress the day one is appended (the
+     * exact runGesture mistake that shipped once).
      */
-    suspend fun saveWithUploads(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload>, vaultId: String? = null) {
+    suspend fun saveWithUploads(
+        itemId: String?,
+        doc: ItemDoc,
+        uploads: List<PendingUpload>,
+        vaultId: String? = null,
+        onProgress: ((done: Int, total: Int) -> Unit)? = null,
+        newItemId: String? = null,
+    ) {
+        // [newItemId] (F71 review): a RETRY of a failed NEW-item save must reuse the id the
+        // first attempt minted — attachments committed by that attempt are bound to it, and
+        // a fresh mint would trip the push's attachment_mismatch validation forever. Used
+        // only when [itemId] is null (an edit's identity is the itemId); callers keep one
+        // draft id per editor session and clear it on success/cancel.
         val existing = itemId?.let { cache.getItem(it) }
         // Save guard (design §6): an edit to an itemId we no longer hold must NOT silently
         // teleport into the personal vault — the item's vault may have been deleted or its
@@ -1095,10 +1134,25 @@ class SyncEngine(
             throw ApiException(409, "vault_state_changed", "This item is no longer here — it may have been removed or its vault deleted.")
         }
         val effectiveVault = existing?.vaultId ?: vaultId ?: account.personalVaultId
-        val id = itemId ?: account.newItemId()
-        for (u in uploads) {
-            val enc = Attachments.encrypt(account.cryptoProvider(), Bytes.fromB64(u.ref.fileKey), u.data)
-            api.uploadAttachment(u.ref.id, id, effectiveVault, enc.header + enc.ciphertext)
+        val id = itemId ?: newItemId ?: account.newItemId()
+        if (uploads.isNotEmpty()) {
+            var done = 0
+            onProgress?.invoke(0, uploads.size)
+            for (u in uploads) {
+                val enc = Attachments.encrypt(account.cryptoProvider(), Bytes.fromB64(u.ref.fileKey), u.data)
+                try {
+                    api.uploadAttachment(u.ref.id, id, effectiveVault, enc.header + enc.ciphertext)
+                } catch (e: ApiException) {
+                    // Retry after a PARTIAL failure (F71: the editor stays open and the user
+                    // re-clicks Save with the same once-minted refs): this attempt re-encrypted
+                    // from plaintext, and secretstream's random header makes the bytes differ
+                    // from what the earlier attempt committed — the server's sha-matched dedup
+                    // then refuses the id. The id is a UUID this editor session minted, so
+                    // "taken" can only mean OUR earlier attempt landed: continue, don't wedge.
+                    if (e.code != "attachment_id_taken") throw e
+                }
+                onProgress?.invoke(++done, uploads.size)
+            }
         }
         syncMutex.withLock {
             push(listOf(putMutation(id, effectiveVault, doc, existing?.rev ?: 0)))

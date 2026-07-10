@@ -5,6 +5,7 @@ import { initSodium } from "../crypto/sodium";
 import { Account } from "../vault/account";
 import { VaultStore } from "../vault/store";
 import { Welcome, type LoginMeta } from "./Welcome";
+import { BrandSigil } from "./Sigil";
 import { Vault } from "./Vault";
 import { inactivityNotice } from "./format";
 import {
@@ -192,9 +193,11 @@ export function App() {
   if (phase.kind === "loading") {
     return (
       <div className="auth-shell">
-        <div className="card-hero">
-          <div className="sigil">ᛅ</div>
-          <p className="muted">unsealing…</p>
+        <div className="card">
+          <div className="card-hero" style={{ marginBottom: 0 }}>
+            <div className="sigil"><BrandSigil /></div>
+            <p className="muted">unsealing…</p>
+          </div>
         </div>
       </div>
     );
@@ -206,6 +209,7 @@ export function App() {
         account={phase.account}
         store={phase.store}
         client={clientRef.current!}
+        email={loadSession()?.email ?? ""}
         policy={policy}
         isAdmin={phase.meta.isAdmin}
         mustChangePassword={phase.meta.mustChangePassword}

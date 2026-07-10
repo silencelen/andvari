@@ -7,6 +7,7 @@ import { Account, IdentityMismatchError, deviceName } from "../vault/account";
 import { VaultStore } from "../vault/store";
 import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
 import { installId, saveSession, type Session } from "./session";
+import { BrandSigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength, masterPasswordHasNonAscii, meetsMasterPasswordFloor } from "./strength";
 
 type Mode = { unlock: Session } | { fresh: true };
@@ -86,7 +87,7 @@ function Unlock({ client, session, notice, onReady, onForget }: { client: ApiCli
     <div className="auth-shell">
       <form className="card" onSubmit={submit}>
         <div className="card-hero">
-          <div className="sigil">ᛅ</div>
+          <div className="sigil"><BrandSigil /></div>
           <h1>Welcome back</h1>
           <p>{session.email}</p>
         </div>
@@ -113,7 +114,7 @@ function FreshStart({ client, policy, policyError, onRetryPolicy, notice, onRead
     <div className="auth-shell">
       <div className="card">
         <div className="card-hero">
-          <div className="sigil">ᛅ</div>
+          <div className="sigil"><BrandSigil /></div>
           <h1 className="brand"><span className="a-mark">and</span>vari</h1>
           <p>the keeper of the hoard</p>
         </div>

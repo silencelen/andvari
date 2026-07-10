@@ -9,6 +9,7 @@ import type {
   InviteResponse,
 } from "../api/types";
 import { fmtDate, humanSize } from "./format";
+import { ViewHeader } from "./ViewHeader";
 
 type Tab = "users" | "audit" | "policy" | "status";
 
@@ -16,7 +17,7 @@ export function Admin({ client }: { client: ApiClient }) {
   const [tab, setTab] = useState<Tab>("users");
   return (
     <div>
-      <h2 className="view-title" style={{ margin: "22px 0 14px" }}>Administration</h2>
+      <ViewHeader title="Administration" />
       <div className="tabs">
         {(["users", "audit", "policy", "status"] as Tab[]).map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>

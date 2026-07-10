@@ -4,7 +4,6 @@ import android.os.SystemClock
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.SyncEngine
-import io.silencelen.andvari.core.client.VaultCache
 import kotlinx.coroutines.sync.Mutex
 
 /**
@@ -32,13 +31,12 @@ object VaultSession {
      */
     enum class UnlockProvenance { PASSWORD, QUICK }
 
-    /** [cache] is the SAME instance the engine owns — exposed read-only for surfaces the
-     *  engine doesn't re-export (vault rows / envelopes, used by the spec 07 export). */
+    // F82: the engine's cache is no longer carried here — raw-row reads (vault rows /
+    // envelopes / grants, spec 07 export + F20) go through SyncEngine's read surface.
     class Unlocked(
         val api: AndvariApi,
         val account: Account,
         val engine: SyncEngine,
-        val cache: VaultCache,
         val provenance: UnlockProvenance = UnlockProvenance.PASSWORD,
     )
 
@@ -140,12 +138,11 @@ object VaultSession {
         api: AndvariApi,
         account: Account,
         engine: SyncEngine,
-        cache: VaultCache,
         provenance: UnlockProvenance = UnlockProvenance.PASSWORD,
     ) {
         touch() // spec 01 §8: the auto-lock timer resets on unlock
         val prev = state
-        state = Unlocked(api, account, engine, cache, provenance)
+        state = Unlocked(api, account, engine, provenance)
         prev?.let {
             if (it.engine !== engine) runCatching { it.engine.close() }
             if (it.api !== api) runCatching { it.api.close() } // never close a reused token-holder

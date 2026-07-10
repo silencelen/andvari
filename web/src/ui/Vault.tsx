@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { ApiClient, ApiError, type SessionEndKind } from "../api/client";
 import type { AttachmentRef, ClientPolicy, ItemDoc } from "../api/types";
 import { toB64 } from "../crypto/bytes";
@@ -27,7 +27,9 @@ import { humanSize } from "./format";
 import { Health } from "./Health";
 import { Settings } from "./Settings";
 import { Sharing } from "./Sharing";
+import { EmptySigil } from "./Sigil";
 import { estimateStrength } from "./strength";
+import { windowRange, type WindowRange } from "./virtual";
 
 type View = "vault" | "sharing" | "health" | "settings" | "admin" | "trash";
 
@@ -92,6 +94,9 @@ interface Props {
   account: Account;
   store: VaultStore;
   client: ApiClient;
+  /** F80: the signed-in email for the appbar — a raw userId prefix reads as debug
+   *  output. Empty when the persisted session predates the field (fallback below). */
+  email: string;
   policy: ClientPolicy | null;
   isAdmin: boolean;
   mustChangePassword: boolean;
@@ -106,7 +111,7 @@ interface Props {
   onRevoked: (kind: SessionEndKind) => void;
 }
 
-export function Vault({ account, store, client, policy, isAdmin, mustChangePassword, escrowStale, escrowFingerprint, onLock, onRevoked }: Props) {
+export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowFingerprint, onLock, onRevoked }: Props) {
   const [view, setView] = useState<View>("vault");
   const [items, setItems] = useState<VaultItem[]>(store.list());
   // Lifecycle notices (spec 03 §11) — the banner reflects the store's list after every sync.
@@ -322,6 +327,22 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
 
   const current = selected ? store.get(selected) : null;
 
+  // One row for BOTH list paths — the virtualizer below is a slicing layer over
+  // this exact element, not a second row implementation (F56).
+  const renderRow = (it: VaultItem) => (
+    <button className="item" key={it.itemId} onClick={() => openItem(it)}>
+      <span className="glyph">{(it.doc.name || "?").charAt(0).toUpperCase()}</span>
+      <span className="body">
+        <div className="name">{it.doc.name || "(untitled)"}</div>
+        <div className="sub">{it.doc.type === "login" ? it.doc.login?.username || it.doc.login?.uris?.[0] || "login" : it.doc.type === "card" ? cardSubtitle(it.doc) : "secure note"}</div>
+      </span>
+      {it.vaultId !== account.personalVaultId && (
+        <span className="tag" style={{ color: "var(--gold)" }}>{vaultNameById.get(it.vaultId) ?? "shared"}</span>
+      )}
+      <span className="tag">{it.doc.type}</span>
+    </button>
+  );
+
   return (
     <div>
       <div className="appbar">
@@ -338,7 +359,7 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
         </div>
         <div className="row">
           <span
-            className="muted"
+            className="muted who"
             title={
               online
                 ? "Connected"
@@ -348,7 +369,7 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
             }
           >
             <span className={`dot ${online ? "on" : "off"}`} />
-            <span className="userid">{account.userId.slice(0, 8)}</span>
+            <span className="userid">{email || account.userId.slice(0, 8)}</span>
           </span>
           {/* F29: while degraded, let the user pull over plain HTTP right now instead
               of waiting out the poll window. */}
@@ -459,28 +480,80 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
             </div>
             {filtered.length === 0 ? (
               <div className="empty">
-                <div className="sigil">ᛝ</div>
+                <div className="sigil"><EmptySigil /></div>
                 <p>{items.length === 0 ? "Your hoard is empty. Add your first secret." : "Nothing matches that search."}</p>
               </div>
+            ) : filtered.length > VIRTUAL_THRESHOLD ? (
+              <VirtualList items={filtered} renderRow={renderRow} />
             ) : (
-              <div className="list">
-                {filtered.map((it) => (
-                  <button className="item" key={it.itemId} onClick={() => openItem(it)}>
-                    <span className="glyph">{(it.doc.name || "?").charAt(0).toUpperCase()}</span>
-                    <span className="body">
-                      <div className="name">{it.doc.name || "(untitled)"}</div>
-                      <div className="sub">{it.doc.type === "login" ? it.doc.login?.username || it.doc.login?.uris?.[0] || "login" : it.doc.type === "card" ? cardSubtitle(it.doc) : "secure note"}</div>
-                    </span>
-                    {it.vaultId !== account.personalVaultId && (
-                      <span className="tag" style={{ color: "var(--gold)" }}>{vaultNameById.get(it.vaultId) ?? "shared"}</span>
-                    )}
-                    <span className="tag">{it.doc.type}</span>
-                  </button>
-                ))}
-              </div>
+              <div className="list vault-list">{filtered.map(renderRow)}</div>
             )}
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// F56 vault-list windowing geometry. ROW_H/LIST_GAP mirror styles.css
+// (.vault-list .item height / .list gap) — the three must move together.
+const ROW_H = 72;
+const LIST_GAP = 8;
+const STRIDE = ROW_H + LIST_GAP;
+const OVERSCAN = 8;
+/** Perf addendum 2026-07-09: below ~500 rows the plain render wins on simplicity. */
+const VIRTUAL_THRESHOLD = 500;
+
+/**
+ * F56: fixed-stride window over the vault list, engaged only past VIRTUAL_THRESHOLD.
+ * The PAGE stays the scroller (no inner scrollbar, so the two render paths feel
+ * identical); the visible slice derives from the host's viewport offset, recomputed
+ * on scroll/resize behind one rAF. Keyboard focus needs no special casing in the
+ * Tab direction: focusing a row near the window's edge makes the browser scroll it
+ * into view, that scroll lands here, and the slice follows (overscan keeps the next
+ * rows mounted for Tab). Accepted tradeoff (react-window has it too): a focused row
+ * wheel-scrolled PAST the overscan unmounts and focus falls to body — restoring it
+ * would yank the scroll back, which is worse; the plain ≤500 path keeps it mounted.
+ *
+ * The measuring effect is a LAYOUT effect: the initial state assumes scrollTop 0, and
+ * a mount while scrolled deep (filter cleared) or a shrink via the background sync's
+ * post-paint render would otherwise paint one stale/blank frame before correcting.
+ */
+function VirtualList({ items, renderRow }: { items: VaultItem[]; renderRow: (it: VaultItem) => ReactElement }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const [range, setRange] = useState<WindowRange>(() => windowRange(0, window.innerHeight, STRIDE, OVERSCAN, items.length));
+
+  useLayoutEffect(() => {
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const host = hostRef.current;
+      if (!host) return;
+      // The host's viewport offset IS the list-relative scrollTop, negated.
+      const next = windowRange(-host.getBoundingClientRect().top, window.innerHeight, STRIDE, OVERSCAN, items.length);
+      setRange((r) => (next.start === r.start && next.end === r.end ? r : next));
+    };
+    const schedule = () => {
+      if (!frame) frame = window.requestAnimationFrame(update);
+    };
+    update();
+    // Capture-phase: scroll doesn't bubble, so any non-document ancestor scroller
+    // would otherwise be invisible here.
+    window.addEventListener("scroll", schedule, true);
+    window.addEventListener("resize", schedule);
+    return () => {
+      window.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", schedule);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [items.length]);
+
+  return (
+    // The spacer holds the full scroll height (last row carries no trailing gap);
+    // the absolutely-placed slice sits exactly where its rows would have laid out.
+    <div ref={hostRef} style={{ position: "relative", height: items.length * STRIDE - LIST_GAP }}>
+      <div className="list vault-list" style={{ position: "absolute", top: range.start * STRIDE, left: 0, right: 0 }}>
+        {items.slice(range.start, range.end).map(renderRow)}
       </div>
     </div>
   );

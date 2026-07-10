@@ -164,9 +164,9 @@ object AutofillUnlock {
             if (VaultSession.get()?.api !== api) api.close()
             throw t
         }
-        VaultSession.bind(api, acct, engine, cache!!, provenance) // now THE token-holder; the main app reuses it
+        VaultSession.bind(api, acct, engine, provenance) // now THE token-holder; the main app reuses it
         runCatching { engine.sync() } // best-effort; hydrate already gave cached items
-        val unlocked = VaultSession.get() ?: VaultSession.Unlocked(api, acct, engine, cache, provenance)
+        val unlocked = VaultSession.get() ?: VaultSession.Unlocked(api, acct, engine, provenance)
         return Locked(unlocked, keys, policy, online)
     }
 }

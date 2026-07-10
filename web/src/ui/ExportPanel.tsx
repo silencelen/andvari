@@ -318,7 +318,7 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
                 {v.type === "personal" ? (
                   <span className="attach-name">{v.name}</span>
                 ) : (
-                  <label className="attach-name" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <label className="check attach-name" style={{ margin: 0, alignItems: "center" }}>
                     <input type="checkbox" checked={!excluded.has(v.vaultId)} onChange={() => toggleVault(v.vaultId)} disabled={busy} />
                     {v.name} <span className="muted">(shared)</span>
                   </label>
@@ -336,7 +336,7 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
           {mode === "backup" ? (
             <>
               <div className="field">
-                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label className="check" style={{ margin: 0 }}>
                   <input type="checkbox" checked={includeAttachments} onChange={(e) => setIncludeAttachments(e.target.checked)} disabled={busy} />
                   Include attachment files ({attachmentPlan.included.length}, {humanSize(attachmentPlan.totalBytes)})
                 </label>
@@ -420,7 +420,7 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
                 manager right away, then delete it and empty your trash.
               </div>
               <div className="field">
-                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label className="check" style={{ margin: 0 }}>
                   <input type="checkbox" checked={plaintextAck} onChange={(e) => setPlaintextAck(e.target.checked)} />
                   I understand this file is unencrypted
                 </label>
