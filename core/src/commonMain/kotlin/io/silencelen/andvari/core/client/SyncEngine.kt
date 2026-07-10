@@ -198,15 +198,21 @@ class SyncEngine(
     fun grants(): List<WireGrant> = cache.grants()
 
     /**
-     * Guided importers (design 2026-07-09, amendment A8): the PERSONAL vault's light
+     * Guided importers (design 2026-07-09, amendment A8): the DESTINATION vault's light
      * projections for the vault-aware import plan — the one engine-owned entry point all
      * native clients use, so no call site ever maps raw item lists (the web twin is
-     * `store.importProjections()`). Callers gate on the personal vault being present/
-     * hydrated FIRST (refuse-not-degrade); an empty working set here plans as if the
-     * vault were empty, which is only correct once that gate has passed.
+     * `store.importProjections()`). Callers gate on the vault being present/hydrated
+     * FIRST (refuse-not-degrade); an empty working set here plans as if the vault were
+     * empty, which is only correct once that gate has passed.
+     *
+     * S2 (owner dev-note 2026-07-10): [vaultId] is the import destination — null keeps
+     * the personal-vault behavior. The SAME vaultId MUST feed [importAll], or the F75
+     * dedupe fingerprints against one vault while the rows land in another.
      */
-    fun importProjections(): CsvImport.ImportProjections =
-        CsvImport.projections(items().filter { it.vaultId == account.personalVaultId }.map { it.doc })
+    fun importProjections(vaultId: String? = null): CsvImport.ImportProjections {
+        val target = vaultId ?: account.personalVaultId
+        return CsvImport.projections(items().filter { it.vaultId == target }.map { it.doc })
+    }
 
     /**
      * Item history (feature): fetch this item's archived versions (server keeps the last 10) and
@@ -1171,8 +1177,11 @@ class SyncEngine(
     suspend fun importAll(
         items: List<CsvImport.PlannedItem>,
         onProgress: ((done: Int, total: Int) -> Unit)? = null,
+        vaultId: String? = null,
     ) = syncMutex.withLock {
-        val vaultId = account.personalVaultId
+        // S2: the destination vault — must be the SAME vault the plan's projections came
+        // from (importProjections), or the dedupe verdicts are meaningless. Null = personal.
+        @Suppress("NAME_SHADOWING") val vaultId = vaultId ?: account.personalVaultId
         var done = 0
         for (chunk in items.chunked(SERVER_BATCH_MAX)) {
             push(chunk.map {

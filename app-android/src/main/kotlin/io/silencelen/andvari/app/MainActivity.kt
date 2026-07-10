@@ -654,6 +654,12 @@ private fun ImportDialogs(vm: AndvariViewModel, ui: UiState) {
     ui.importPlan?.let { plan ->
         if (!ui.importDone) {
             val report = plan.report
+            // S2: destination choices, the F18 rule verbatim (personal + owner/writer shared
+            // — never reader). Read once per preview open: each vaultInfos() call decrypts
+            // vault metadata, and the choice list must not shift under an open dialog.
+            val vaultChoices = remember {
+                vm.vaultInfos().filter { it.type == "personal" || it.role == "owner" || it.role == "writer" }
+            }
             AlertDialog(
                 onDismissRequest = { if (!ui.importBusy) vm.importDismiss() },
                 confirmButton = {
@@ -676,6 +682,14 @@ private fun ImportDialogs(vm: AndvariViewModel, ui: UiState) {
                         // Post-parse info lines (calm): source-vs-detected mismatch + A10 mangle.
                         ui.importFormatNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 2.dp)) }
                         ui.importMangleNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 2.dp)) }
+                        // S2: shown only when there's a choice to make (F18 rule, like the
+                        // editor's picker). Selecting RE-PLANS against that vault — every
+                        // count/bucket below re-derives, and Confirm is importBusy-disabled
+                        // until the fresh plan lands (importSetVault guards re-entry).
+                        if (vaultChoices.size > 1) {
+                            Spacer(Modifier.height(6.dp))
+                            VaultPickerField(vaultChoices, ui.importVaultId) { vm.importSetVault(it) }
+                        }
                         Text("• ${report.imported} to import", style = MaterialTheme.typography.bodySmall)
                         if (report.collapsed > 0) Text("• ${report.collapsed} exact duplicates in the file merged", style = MaterialTheme.typography.bodySmall)
                         if (report.skippedEmpty > 0) Text("• ${report.skippedEmpty} empty rows skipped", style = MaterialTheme.typography.bodySmall)
@@ -711,11 +725,17 @@ private fun ImportDialogs(vm: AndvariViewModel, ui: UiState) {
         }
     }
     if (ui.importDone) {
+        // S2: the summary names the DESTINATION vault — "your vault" hid which vault the
+        // rows landed in. Resolved once (vaultInfos decrypts); fallback keeps the old copy.
+        val destName = remember(ui.importVaultId) {
+            vm.vaultInfos().find { it.vaultId == ui.importVaultId }
+                ?.let { it.name + if (it.type == "personal") "" else " (shared)" }
+        }
         AlertDialog(
             onDismissRequest = vm::importDismiss,
             confirmButton = { TextButton(onClick = vm::importDismiss) { Text("Done") } },
             title = { Text("Imported") },
-            text = { Text("Added ${ui.importReport?.imported ?: 0} item(s) to your vault. Now delete the CSV file and empty your trash.") },
+            text = { Text("Added ${ui.importReport?.imported ?: 0} item(s) to ${destName ?: "your vault"}. Now delete the CSV file and empty your trash.") },
         )
     }
 }

@@ -112,6 +112,11 @@ data class UiState(
     val importProgress: Pair<Int, Int>? = null,
     val importBusy: Boolean = false,
     val importDone: Boolean = false,
+    // S2: the import's DESTINATION vault. Always set in the SAME copy() as importPlan
+    // (importParse / importSetVault) and read from one snapshot in importConfirm — the
+    // F75 dedupe fingerprints the plan against this vault, so plan and commit must never
+    // name different ones. Survives importDone so the summary can name the vault.
+    val importVaultId: String? = null,
     // Guided importers (design 2026-07-09): source-picker open flag + the picked source.
     // The source tailors the export instructions and the mismatch hint ONLY — header
     // detection stays authoritative. The two nullable notes are the post-parse info lines
@@ -1119,6 +1124,12 @@ class AndvariViewModel(
 
     // ---- CSV import (spec 06 + guided importers, design 2026-07-09) ----
 
+    // S2: the parsed file, retained ONLY while the preview is open — importSetVault
+    // re-plans from it against another vault's projections. Plaintext (exactly like
+    // importPlan.items, which outlives it anyway); dropped in importDismiss. Not in
+    // UiState: nothing composes off it.
+    private var importParsed: CsvImport.Parsed? = null
+
     /** Open the guided source picker (the step BEFORE the system file picker). */
     fun importBegin() { _ui.value = _ui.value.copy(importSourceSheet = true, importSource = null) }
 
@@ -1153,9 +1164,14 @@ class AndvariViewModel(
             val parsed = CsvImport.parse(bytes)
             val detected = importFormatLabel(parsed.format)
             val source = _ui.value.importSource
+            // S2: default destination = personal; ONE variable feeds the projections here
+            // and (as importVaultId, set in the same copy) the eventual importAll.
+            val dest = acct.personalVaultId
+            importParsed = parsed
             _ui.value = _ui.value.copy(
                 importFormat = parsed.format,
-                importPlan = CsvImport.plan(parsed, eng.importProjections()) { acct.newItemId() },
+                importPlan = CsvImport.plan(parsed, eng.importProjections(dest)) { acct.newItemId() },
+                importVaultId = dest,
                 // Mismatch line (calm, informational): the picked source only ever tailored
                 // instructions — detection decided what the file IS.
                 importFormatNote = if (source != null && !source.expects(parsed.format))
@@ -1179,15 +1195,65 @@ class AndvariViewModel(
     }
 
     /**
+     * S2: switch the import's destination vault — RE-PLANS the parsed file against that
+     * vault's projections (the F75 dedupe is per-vault; a plan fingerprinted against one
+     * vault must never commit into another). The fresh plan and importVaultId land in ONE
+     * copy(), so importConfirm's single snapshot can never pair them mismatched.
+     * importBusy covers the re-plan: Confirm disables and a second tap here no-ops.
+     */
+    fun importSetVault(vaultId: String) {
+        val acct = account
+        val eng = engine
+        val parsed = importParsed
+        if (acct == null || eng == null || parsed == null) return
+        // Web importLocked parity: after an import ATTEMPT (error = partial, done = landed)
+        // a re-plan would mint new ids — breaking Retry's idempotent replay and duplicating
+        // the already-landed rows into the new destination. Only Retry or Dismiss remain.
+        val st = _ui.value
+        if (st.importBusy || st.importError != null || st.importDone || vaultId == st.importVaultId) return
+        // Refuse-not-degrade (A8), now gating the CHOSEN vault: the picker only offers
+        // held vaults, but a sync-time removal can race the tap — never re-plan against
+        // a vault we no longer hold (it would plan as if the vault were empty).
+        if (eng.vaultInfos().none { it.vaultId == vaultId }) {
+            importReject("That vault isn’t available any more — sync and try the import again.")
+            return
+        }
+        _ui.value = _ui.value.copy(importBusy = true, importError = null)
+        viewModelScope.launch {
+            try {
+                val plan = withContext(Dispatchers.Default) {
+                    CsvImport.plan(parsed, eng.importProjections(vaultId)) { acct.newItemId() }
+                }
+                _ui.value = _ui.value.copy(importPlan = plan, importVaultId = vaultId, importBusy = false, importProgress = null)
+            } catch (t: Throwable) {
+                // plan/vault left unchanged — still a matched pair, so Confirm stays safe.
+                _ui.value = _ui.value.copy(importBusy = false, importError = t.message ?: "could not re-check that file")
+            }
+        }
+    }
+
+    /**
      * Encrypt-and-push the planned items. Reuses plan.items on every call so a mid-import
      * failure is fixed with Retry (idempotent replay of the same itemIds), NOT a re-parse.
      */
     fun importConfirm() {
-        val plan = _ui.value.importPlan ?: return
+        // S2: plan + destination from ONE snapshot — they were set together, and reading
+        // them together is what keeps the F75 invariant (never re-read the picker).
+        val snap = _ui.value
+        if (snap.importBusy) return // state-level: the button's enabled flag lags a frame behind a re-plan
+        val plan = snap.importPlan ?: return
+        val dest = snap.importVaultId
         _ui.value = _ui.value.copy(importBusy = true, importError = null, importProgress = 0 to plan.items.size)
         viewModelScope.launch {
             try {
-                engine!!.importAll(plan.items) { done, total -> _ui.value = _ui.value.copy(importProgress = done to total) }
+                engine!!.importAll(plan.items, onProgress = { done, total -> _ui.value = _ui.value.copy(importProgress = done to total) }, vaultId = dest)
+                // The destination can be deleted INTO GRACE mid-import: denials park (F21) and
+                // importAll returns normally — success copy telling the user to delete the CSV
+                // would then be a lie. A held/gone destination is not a success.
+                if (dest != null && engine?.vaultInfos()?.none { it.vaultId == dest } == true) {
+                    _ui.value = _ui.value.copy(importBusy = false, importError = "The destination vault was removed while importing — the rows are parked and will land only if it is restored. KEEP the CSV file.")
+                    return@launch
+                }
                 _ui.value = _ui.value.copy(importBusy = false, importDone = true, importReport = plan.report, items = engine?.items() ?: emptyList())
             } catch (t: Throwable) {
                 _ui.value = _ui.value.copy(importBusy = false, importError = "Import interrupted — press Retry to finish (no duplicates will be created).")
@@ -1196,9 +1262,10 @@ class AndvariViewModel(
     }
 
     fun importDismiss() {
+        importParsed = null
         _ui.value = _ui.value.copy(
             importPlan = null, importFormat = null, importReport = null, importError = null,
-            importProgress = null, importBusy = false, importDone = false,
+            importProgress = null, importBusy = false, importDone = false, importVaultId = null,
             importSourceSheet = false, importSource = null, importFormatNote = null, importMangleNote = null,
         )
     }
@@ -1591,6 +1658,7 @@ class AndvariViewModel(
         VaultSession.lock()
         pendingBackupRequest = null // a stashed export must not survive a lock (see stash docs)
         closeEditor() // the editor session (and its picked plaintext bytes) dies with the lock
+        importDismiss() // the parsed CSV + plan hold every password in the file — never outlive the lock
         moveGestures.clear() // gestures reference the dead engine's item state
         movePickerMode = null
         movePickerItemId = null
@@ -1631,6 +1699,7 @@ class AndvariViewModel(
             VaultSession.lock()
             pendingBackupRequest = null // never carry a stashed export into a different account
             closeEditor()
+            importDismiss() // account A's plaintext CSV/plan must never resurface in account B's session
             moveGestures.clear()
             movePickerMode = null
             movePickerItemId = null

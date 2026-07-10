@@ -937,3 +937,79 @@ describe("VaultStore F20 member transparency", () => {
     }
   });
 });
+
+describe("VaultStore import destination vault (S2)", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  /** Member holds personal + shared (writer), with one item in EACH vault, post-sync. */
+  async function seeded() {
+    const s = await scenario("writer");
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    const personalId = s.member.newItemId();
+    const personalItem: WireItem = {
+      itemId: personalId,
+      vaultId: s.member.personalVaultId,
+      rev: 5,
+      createdAt: 0,
+      updatedAt: 0,
+      deleted: false,
+      conflict: false,
+      formatVersion: 1,
+      attachmentIds: [],
+      blob: s.member.encryptItem(s.member.personalVaultId, personalId, {
+        type: "login",
+        name: "Personal login",
+        login: { username: "me", password: "solo" },
+      }).blob,
+    };
+    api.queue.push({ rev: 6, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item, personalItem], removedGrants: [] });
+    await store.sync();
+    return { s, api, store };
+  }
+
+  it("importProjections(sharedVaultId) projects ONLY that vault's items", async () => {
+    const { s, store } = await seeded();
+    // Shared destination: only the shared item's identity feeds the F75 dedupe…
+    const shared = store.importProjections(s.vaultId);
+    expect(shared.names).toEqual(["Shared login"]);
+    expect(shared.logins.map((l) => l.username)).toEqual(["fam"]);
+    // …and the no-arg default is still personal-only — the projections never bleed across.
+    const personal = store.importProjections();
+    expect(personal.names).toEqual(["Personal login"]);
+    expect(personal.logins.map((l) => l.username)).toEqual(["me"]);
+  });
+
+  it("importDocs(..., sharedVaultId) commits every row into that vault, sealed under its VK", async () => {
+    const { s, api, store } = await seeded();
+    await store.importDocs(
+      [
+        { itemId: s.member.newItemId(), doc: { type: "login", name: "Imported login", login: { username: "new", password: "pw" } } },
+        { itemId: s.member.newItemId(), doc: { type: "note", name: "Imported note" } },
+      ],
+      undefined,
+      s.vaultId,
+    );
+    const puts = api.pushes.flat().filter((m) => m.op === "put");
+    expect(puts).toHaveLength(2);
+    for (const m of puts) {
+      expect(m.vaultId).toBe(s.vaultId); // rows land in the CHOSEN vault, not personal
+      // …and are encrypted under the shared VK: the OWNER can open what the member pushed.
+      const doc = s.owner.decryptItem({
+        itemId: m.itemId,
+        vaultId: s.vaultId,
+        rev: 1,
+        createdAt: 0,
+        updatedAt: 0,
+        deleted: false,
+        conflict: false,
+        formatVersion: m.item!.formatVersion,
+        attachmentIds: [],
+        blob: m.item!.blob,
+      });
+      expect(doc.name).toMatch(/^Imported/);
+    }
+  });
+});

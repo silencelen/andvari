@@ -994,15 +994,18 @@ export class VaultStore {
    * never completed a sync — the caller shows the honest "couldn't check your vault"
    * copy instead of quietly re-importing everything as new.
    */
-  importProjections(): ImportProjections {
+  importProjections(vaultId?: string): ImportProjections {
     if (this._lastSyncAt === null) {
       throw new Error("vault not synced on this device yet — import would plan against an empty projection");
     }
+    // S2: the destination vault's projections — the SAME vaultId must feed importDocs, or
+    // the F75 dedupe fingerprints one vault while the rows land in another. Default personal.
+    const target = vaultId ?? this.account.personalVaultId;
     const logins: ImportProjections["logins"] = [];
     const notes: ImportProjections["notes"] = [];
     const names: string[] = [];
     for (const it of this.itemsById.values()) {
-      if (it.vaultId !== this.account.personalVaultId) continue;
+      if (it.vaultId !== target) continue;
       names.push(it.doc.name);
       if (it.doc.type === "login") {
         logins.push({
@@ -1029,8 +1032,9 @@ export class VaultStore {
   async importDocs(
     items: { itemId: string; doc: ItemDoc }[],
     onProgress?: (done: number, total: number) => void,
+    destinationVaultId?: string,
   ): Promise<void> {
-    const vaultId = this.account.personalVaultId;
+    const vaultId = destinationVaultId ?? this.account.personalVaultId;
     const total = items.length;
     let done = 0;
     for (let start = 0; start < items.length; start += VaultStore.SERVER_BATCH_MAX) {
