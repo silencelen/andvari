@@ -414,9 +414,24 @@ export interface AttachmentRef {
   fileKey: string;
 }
 
-/** The plaintext item document (spec 02 §3). */
+/** Card fields (spec 02 §3, formatVersion 2) — all ciphertext inside the item envelope;
+ *  the server sees only the plaintext formatVersion integer. Canonical stored forms
+ *  (adapters derive display/fill variants): number digits-only, expMonth "01".."12",
+ *  expYear 4-digit, securityCode 3-4 digits (storing it is an explicit per-card choice),
+ *  brand visa|mastercard|amex|discover derived from the IIN at every save — display-only,
+ *  never authored, so it can't go stale. Mirrors core CardData. */
+export interface CardData {
+  cardholderName?: string;
+  number?: string;
+  expMonth?: string;
+  expYear?: string;
+  securityCode?: string;
+  brand?: string;
+}
+
+/** The plaintext item document (spec 02 §3). `type` is chosen at creation, never changes. */
 export interface ItemDoc {
-  type: "login" | "note";
+  type: "login" | "note" | "card";
   name: string;
   notes?: string;
   favorite?: boolean;
@@ -427,5 +442,6 @@ export interface ItemDoc {
     totp?: string;
     passwordHistory?: { password: string; retiredAt: number }[];
   };
+  card?: CardData;
   attachments?: AttachmentRef[];
 }

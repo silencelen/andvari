@@ -215,11 +215,19 @@ Extension: fv-const pin; CVV suppression. e2e.sh: create card on web → row fv=
 0. **Pre-flight:** vzdump CT122 + DB snapshot (doctrine, though schema is untouched); confirm owner MSI status.
 1. **Core** (contract everything consumes): CardData + serializer; ITEM_FORMAT_VERSION=2 + docFloor +
    monotonic reseal; FieldKind ×6 + classifier changes + `CardForm.refine`; CardNormalize; all vectors +
-   the mixed-fleet JVM suite incl. the 0.2.x simulation.
+   the mixed-fleet JVM suite incl. the 0.2.x simulation. **DONE (`4ab5049`, reviewed 7/7 fixed).**
 2. **Server:** the monotonic-fv guard + audit + tests. **Deploy FIRST** (no-op for all fielded traffic).
+   **DONE in `4ab5049`; deployed with the web slice (guard is the backstop, deployed together).**
 3. **Web:** fv floor (5 sites) + card editor/detail/row + the generic needs-update banner + Warnings.cardItems
-   + tests. Deploy with/right after server.
-4. **Android UI:** CardEditor/CardDetail sections (copy()-based; Trash/History inherit).
+   + tests. Deploy with/right after server. **DONE 2026-07-09 (3-workstream build + 7-lens adversarial
+   review: 5 low findings fixed — CVV digits-only at save + masked editor CVV, detail brand+••last4
+   headline, pinned ASCII `trimAscii` in BOTH CardNormalize ports (+6 card.json divergence vectors:
+   U+FEFF/U+001C), floor-1 monotonic test leg; 2 refuted. Integrator extras: coordinated 0.7.0 version
+   bump; `VaultItem.formatVersion` records the TRUE stored fv → backups Android-parity. Card-create
+   dark behind `CARD_CREATE_ENABLED=false` in web/src/vault/card.ts — the Option A flip point.)**
+4. **Android UI:** CardEditor/CardDetail sections (copy()-based; Trash/History inherit). **FIRST item of
+   this phase: core `ExportCsv.Warnings` + `cardItems` split + the native CSV-warning line — spec 07 §1
+   now enumerates cards, web complies, core routes cards into noteItems until this lands.**
 5. **Android autofill (the L chunk):** StructureParser clusters/formKind; DatasetBuilder card datasets;
    SaveInfo optionalIds; SaveExtractor; SaveConfirmActivity variants; all the safety fixtures; real-device
    Fold protocol re-run.

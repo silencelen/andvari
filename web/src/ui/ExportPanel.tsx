@@ -178,7 +178,11 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
       //    (VK held, decrypt failed — newer formatVersion or corrupt blob), minus any
       //    vault the user deselected above (the Kotlin call sites apply the same
       //    filter) — enumerated so a restore can see what the backup is missing,
-      //    never silently omitted. Everything in `items` decrypted as formatVersion 1.
+      //    never silently omitted. Item formatVersion is informational (spec 07 §3;
+      //    restore reseals at its own floor): recorded as the item's ACTUAL stored fv
+      //    (VaultItem.formatVersion, captured from the wire at decrypt / the upload at
+      //    save) — Kotlin-twin parity with Android's stored-fv recording, correct even
+      //    on the fv1 legacy-restore edge where the floor and the stored fv diverge.
       const payload: BackupPayload = {
         v: 1,
         exportedAt: Date.now(),
@@ -189,7 +193,7 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
         items: orderedItems.map((it) => ({
           itemId: it.itemId,
           vaultId: it.vaultId,
-          formatVersion: 1,
+          formatVersion: it.formatVersion,
           updatedAt: it.updatedAt,
           doc: it.doc,
         })),
@@ -381,6 +385,12 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
               {warnings.noteItems.length > 0 && (
                 <div className="msg info" style={{ display: "block" }}>
                   Secure notes are not part of the CSV format and will be left out: {warnings.noteItems.join(", ")}.
+                </div>
+              )}
+              {warnings.cardItems.length > 0 && (
+                <div className="msg info" style={{ display: "block" }}>
+                  Cards can't be represented in a CSV and will be left out: {warnings.cardItems.join(", ")}.
+                  Back up the vault (.andvari) to include them.
                 </div>
               )}
               {warnings.withAttachments.length > 0 && (

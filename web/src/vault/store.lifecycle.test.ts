@@ -160,7 +160,7 @@ async function seededMember(role = "writer"): Promise<Seed> {
     conflict: false,
     formatVersion: 1,
     attachmentIds: [],
-    blob: owner.encryptItem(vaultId, itemId, DOC),
+    blob: owner.encryptItem(vaultId, itemId, DOC).blob,
   };
   const api = new FakeApi();
   const store = new VaultStore(api.asClient(), member);

@@ -89,9 +89,13 @@ describe("itemdoc.json (spec 02 §3 unknown-field round-trip)", () => {
     const vaultId = account.personalVaultId;
 
     const doc = JSON.parse(c.docJson) as ItemDoc;
-    const decrypted = account.decryptItem(wireItem(itemId, vaultId, account.encryptItem(vaultId, itemId, doc), 1));
+    // The wire fv comes from the upload (encryptItem computes floor + monotonic reseal),
+    // so this round-trip stays valid for any vector case regardless of its doc floor.
+    const up = account.encryptItem(vaultId, itemId, doc);
+    const decrypted = account.decryptItem(wireItem(itemId, vaultId, up.blob, up.formatVersion));
     const edited = applyEdit(decrypted, c.edit) as ItemDoc;
-    const redecrypted = account.decryptItem(wireItem(itemId, vaultId, account.encryptItem(vaultId, itemId, edited), 1));
+    const reUp = account.encryptItem(vaultId, itemId, edited);
+    const redecrypted = account.decryptItem(wireItem(itemId, vaultId, reUp.blob, reUp.formatVersion));
 
     const reencoded = JSON.parse(JSON.stringify(redecrypted));
     assertPaths("aead-round-trip", "unknown", reencoded, c.expectUnknownPaths);

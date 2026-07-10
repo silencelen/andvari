@@ -8,6 +8,7 @@ import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import { randomBytes } from "../crypto/provider";
 import { base32Decode, parseOtpauthUri, totpCode, totpSecondsRemaining } from "../crypto/totp";
 import type { Account } from "../vault/account";
+import { CARD_CREATE_ENABLED, brand, brandLabel, cardSubtitle, digitsOnly, expiryLabel, groupNumber, isExpired, luhnValid, padMonth, yearTo4 } from "../vault/card";
 import {
   CopyDeniedError,
   ItemChangedError,
@@ -185,11 +186,23 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
   );
   const hasWritableShared = newItemVaultChoices.some((v) => v.type !== "personal");
 
-  const startNew = (type: "login" | "note") => {
+  // fv fail-close surface (design 2026-07-09): items sealed by a NEWER client sit in the
+  // store's undecryptable set instead of degrading — surface a count so "invisible" reads
+  // as "stored safely, pending an app update", for this fv bump and every future one.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const needsUpdate = useMemo(() => store.needsUpdateCount(), [store, items]);
+
+  const startNew = (type: "login" | "note" | "card") => {
     setSelected(null);
     setImportOpen(false);
     setExportMode(null);
-    setEditing(type === "login" ? { type, name: "", login: { username: "", password: "", uris: [""] } } : { type, name: "", notes: "" });
+    setEditing(
+      type === "login"
+        ? { type, name: "", login: { username: "", password: "", uris: [""] } }
+        : type === "card"
+          ? { type, name: "", card: {} }
+          : { type, name: "", notes: "" },
+    );
   };
 
   const openItem = (it: VaultItem) => {
@@ -276,6 +289,19 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
 
       <NoticesBanner notices={notices} onDismiss={dismissNotice} />
 
+      {/* Calm, no-shame copy (the newer client is someone else's device, not an error), and
+          deliberately non-dismissable — it clears itself once the items decrypt post-update
+          (the mustChange banner idiom, not the dismissable notices one). */}
+      {needsUpdate > 0 && (
+        <div className="banner">
+          <span>
+            {needsUpdate === 1
+              ? "1 item in your vaults was saved with a newer version of andvari — it’s stored safely and will appear here once this app is updated."
+              : `${needsUpdate} items in your vaults were saved with a newer version of andvari — they’re stored safely and will appear here once this app is updated.`}
+          </span>
+        </div>
+      )}
+
       <div className="wrap">
         {view === "health" ? (
           <Health store={store} client={client} onOpenItem={goToItem} />
@@ -335,6 +361,9 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
               <input placeholder="Search vault…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus={finePointer} />
               <button className="ghost" onClick={() => startNew("login")}>+ Login</button>
               <button className="ghost" onClick={() => startNew("note")}>+ Note</button>
+              {/* Dark until the Option A gate clears (0.2.x MSI retired) — see CARD_CREATE_ENABLED.
+                  Everything downstream (row/detail/editor for EXISTING cards) renders regardless. */}
+              {CARD_CREATE_ENABLED && <button className="ghost" onClick={() => startNew("card")}>+ Card</button>}
               <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setExportMode(null); setImportOpen(true); }}>Import CSV</button>
               {/* Hidden on the public break-glass origin (spec 07 — see exportAllowed). The two
                   export destinations live under one menu so the toolbar can't crush the search box. */}
@@ -357,7 +386,7 @@ export function Vault({ account, store, client, policy, isAdmin, mustChangePassw
                     <span className="glyph">{(it.doc.name || "?").charAt(0).toUpperCase()}</span>
                     <span className="body">
                       <div className="name">{it.doc.name || "(untitled)"}</div>
-                      <div className="sub">{it.doc.type === "login" ? it.doc.login?.username || it.doc.login?.uris?.[0] || "login" : "secure note"}</div>
+                      <div className="sub">{it.doc.type === "login" ? it.doc.login?.username || it.doc.login?.uris?.[0] || "login" : it.doc.type === "card" ? cardSubtitle(it.doc) : "secure note"}</div>
                     </span>
                     {it.vaultId !== account.personalVaultId && (
                       <span className="tag" style={{ color: "var(--gold)" }}>{vaultNameById.get(it.vaultId) ?? "shared"}</span>
@@ -627,7 +656,9 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
       <button className="link" onClick={onBack}>← back to vault</button>
       <h2 style={{ marginTop: 12 }}>{doc.name}</h2>
       <div className="muted" style={{ marginBottom: 18 }}>
-        {doc.type === "login" ? "Login" : "Secure note"}
+        {/* Cards identify themselves by brand + ••last4 (design contract) — the one line
+            that lets the user pick the right card without revealing the full PAN. */}
+        {doc.type === "login" ? "Login" : doc.type === "card" ? (doc.card?.number ? cardSubtitle(doc) : "Card") : "Secure note"}
         {vaultName && <> · in “{vaultName}”</>}
         {readOnly && <> · view only</>}
       </div>
@@ -660,6 +691,48 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
             </div>
           )}
           {doc.login.password && <HealthLine password={doc.login.password} client={client} />}
+        </>
+      )}
+
+      {doc.type === "card" && doc.card && (
+        <>
+          {doc.card.cardholderName && (
+            <div className="field">
+              <label>Cardholder</label>
+              <div className="secret-row">
+                <input readOnly value={doc.card.cardholderName} />
+                <button className="ghost" onClick={() => copy("cardholder", doc.card!.cardholderName!)}>Copy</button>
+              </div>
+            </div>
+          )}
+          {doc.card.number && (
+            <div className="field">
+              <label>Card number {flash === "card number" && <span className="copy-flash">copied ✓</span>}</label>
+              {/* Reveal shows the grouped form; Copy hands checkout forms the bare digits. */}
+              <div className="secret-row">
+                <PasswordField value={groupNumber(doc.card.number)} />
+                <button className="ghost" onClick={() => copy("card number", doc.card!.number!)}>Copy</button>
+              </div>
+            </div>
+          )}
+          {expiryLabel(doc.card) !== null && (
+            <div className="field">
+              <label>Expiry</label>
+              <div className="secret-row" style={{ alignItems: "center" }}>
+                <input readOnly className="mono" value={expiryLabel(doc.card)!} />
+                {isExpired(doc.card.expMonth, doc.card.expYear) && <span className="tag expired">expired</span>}
+              </div>
+            </div>
+          )}
+          {doc.card.securityCode && (
+            <div className="field">
+              <label>Security code {flash === "security code" && <span className="copy-flash">copied ✓</span>}</label>
+              <div className="secret-row">
+                <PasswordField value={doc.card.securityCode} />
+                <button className="ghost" onClick={() => copy("security code", doc.card!.securityCode!)}>Copy</button>
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -852,7 +925,7 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
           {v.doc.type === "login" && v.doc.login?.password ? (
             <PasswordField value={v.doc.login.password} />
           ) : (
-            <span className="muted" style={{ flex: 1 }}>{v.doc.type === "login" ? "(no password in this version)" : "note"}</span>
+            <span className="muted" style={{ flex: 1 }}>{v.doc.type === "login" ? "(no password in this version)" : v.doc.type === "card" ? cardSubtitle(v.doc) : "note"}</span>
           )}
           {!readOnly && (
             <button className="ghost" disabled={restoringRev !== null} onClick={() => restore(v)}>
@@ -999,6 +1072,19 @@ function PasswordField({ value }: { value: string }) {
   );
 }
 
+/** Editable sibling of PasswordField — masked by default with a reveal toggle. The editor
+ *  CVV renders through this (design: SecretField); login passwords keep the plain editor
+ *  idiom (generate-and-glance), a deliberate difference, not an oversight. */
+function SecretInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="secret-row">
+      <input className="mono" type={show ? "text" : "password"} inputMode="numeric" autoComplete="off" value={value} onChange={(e) => onChange(e.target.value)} />
+      <button type="button" className="ghost" onClick={() => setShow((s) => !s)}>{show ? "Hide" : "Show"}</button>
+    </div>
+  );
+}
+
 function TotpView({ uri, onCopy }: { uri: string; onCopy: (code: string) => void }) {
   const [code, setCode] = useState("······");
   const [remaining, setRemaining] = useState(30);
@@ -1053,6 +1139,17 @@ function HealthLine({ password, client }: { password: string; client: ApiClient 
   );
 }
 
+const MONTH_CHOICES = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"];
+
+/** Expiry-year picker: a rolling 16-year window, PLUS any stored out-of-window values
+ *  (verbatim, prepended) — editing an old card must never silently change its year. */
+function expiryYearChoices(stored: (string | undefined)[]): string[] {
+  const first = new Date().getFullYear();
+  const ys = Array.from({ length: 16 }, (_, i) => String(first + i));
+  for (const y of stored) if (y && !ys.includes(y)) ys.unshift(y);
+  return ys;
+}
+
 function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: ItemDoc; policy: ClientPolicy | null; vaultChoices?: VaultInfo[]; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => Promise<void>; onCancel: () => void }) {
   const [doc, setDoc] = useState<ItemDoc>(structuredClone(initial));
   // New items only: which vault to create in (existing items never move vaults).
@@ -1065,10 +1162,23 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
   const fileInput = useRef<HTMLInputElement | null>(null);
   const isLogin = doc.type === "login";
   const login = doc.login ?? {};
+  const isCard = doc.type === "card";
+  const card = doc.card ?? {};
 
   const setLogin = (patch: Partial<NonNullable<ItemDoc["login"]>>) => setDoc({ ...doc, login: { ...login, ...patch } });
+  const setCard = (patch: Partial<NonNullable<ItemDoc["card"]>>) => setDoc({ ...doc, card: { ...card, ...patch } });
 
   const gen = () => setLogin({ password: generatePassword() });
+
+  // Live editor signals off the typed number: decisive-prefix brand badge, and a Luhn check
+  // that WARNS once a plausible PAN length is present — never blocks Save (store-what-the-
+  // user-typed beats rejecting an odd-but-real number).
+  const cardDigits = digitsOnly(card.number ?? "");
+  const cardBrand = brandLabel(brand(cardDigits));
+  const luhnWarn = cardDigits.length >= 12 && !luhnValid(cardDigits);
+  // Injects the doc's stored years from `initial` so an old card's value stays offered for
+  // the whole edit session — editing must never silently change it.
+  const yearChoices = expiryYearChoices([card.expYear, initial.card?.expYear]);
 
   const maxBytes = policy?.attachmentMaxBytes ?? 25 * 1024 * 1024;
 
@@ -1124,6 +1234,24 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
         // Detail view would treat as truthy and render as a broken TOTP row.
         toSave = { ...doc, login: { ...login, totp: undefined } };
       }
+    } else if (isCard) {
+      // Cards normalize ONCE here too — spread-only (account.ts contract), so unknown keys
+      // inside `card` survive the rewrite. brand is ALWAYS recomputed from the number
+      // (display-only; a user-authored or stale brand must never persist). digits-only
+      // strips separators AND stray non-digits from a hand-typed number; a card whose
+      // every field normalizes to absent is a legal empty shell.
+      toSave = {
+        ...doc,
+        card: {
+          ...card,
+          cardholderName: (card.cardholderName ?? "").trim() || undefined,
+          number: cardDigits || undefined,
+          expMonth: padMonth(card.expMonth ?? "") ?? undefined,
+          expYear: yearTo4(card.expYear ?? "") ?? undefined,
+          securityCode: digitsOnly(card.securityCode ?? "") || undefined,
+          brand: brand(cardDigits) ?? undefined,
+        },
+      };
     }
     setBusy(true);
     setSaveErr("");
@@ -1144,7 +1272,7 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
   return (
     <form className="sheet" onSubmit={submit}>
       <button type="button" className="link" onClick={onCancel}>← cancel</button>
-      <h2 style={{ marginTop: 12 }}>{initial.name ? "Edit" : isLogin ? "New login" : "New note"}</h2>
+      <h2 style={{ marginTop: 12 }}>{initial.name ? "Edit" : isLogin ? "New login" : isCard ? "New card" : "New note"}</h2>
       {vaultChoices && vaultChoices.length > 1 && (
         <div className="field">
           <label>Vault</label>
@@ -1188,9 +1316,54 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
           </div>
         </>
       )}
+      {isCard && (
+        <>
+          <div className="field">
+            <label>Cardholder name</label>
+            <input value={card.cardholderName ?? ""} onChange={(e) => setCard({ cardholderName: e.target.value })} />
+          </div>
+          <div className="field">
+            <label>Card number {cardBrand && <span className="tag brand">{cardBrand}</span>}</label>
+            {/* RAW text while typing (separators and all) — digits-only ONCE, in submit (the
+                TOTP idiom). The badge + Luhn line read the live digits; warn, never block. */}
+            <input className="mono" inputMode="numeric" autoComplete="off" value={card.number ?? ""} onChange={(e) => setCard({ number: e.target.value })} />
+            {luhnWarn && (
+              <div className="muted" style={{ marginTop: 6, color: "var(--gold)" }}>
+                this number doesn’t pass the usual check — you can still save it
+              </div>
+            )}
+          </div>
+          <div className="field">
+            <label>Expiry</label>
+            {/* Both selects offer an empty choice — every card field is optional. The month
+                VALUE renders through padMonth so a foreign-written "1" displays as "01". */}
+            <div className="row">
+              <select value={padMonth(card.expMonth ?? "") ?? ""} onChange={(e) => setCard({ expMonth: e.target.value })} style={{ width: "auto" }}>
+                <option value="">month</option>
+                {MONTH_CHOICES.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              <select value={card.expYear ?? ""} onChange={(e) => setCard({ expYear: e.target.value })} style={{ width: "auto" }}>
+                <option value="">year</option>
+                {yearChoices.map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="field">
+            <label>Security code <span className="muted">· optional — stored encrypted like everything else</span></label>
+            {/* Masked-with-reveal (unlike the login password's plain editor field): a CVV is
+                glanceable-short and worth shielding from shoulders by default. Digits-only
+                is applied once, at submit, beside the other card normalizations. */}
+            <SecretInput value={card.securityCode ?? ""} onChange={(v) => setCard({ securityCode: v })} />
+          </div>
+        </>
+      )}
       <div className="field">
         <label>Notes</label>
-        <textarea rows={isLogin ? 3 : 6} value={doc.notes ?? ""} onChange={(e) => setDoc({ ...doc, notes: e.target.value })} />
+        <textarea rows={isLogin || isCard ? 3 : 6} value={doc.notes ?? ""} onChange={(e) => setDoc({ ...doc, notes: e.target.value })} />
       </div>
 
       <div className="field">

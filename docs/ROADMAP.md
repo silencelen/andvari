@@ -116,6 +116,10 @@ Prioritized; each is additive and back-compatible.
   trust gate. Extension: popup Cards + copy only this batch (in-page checkout fill deferred behind
   a frame-egress contract). **One owner decision** (rollout timing A/B) is in the design doc's last
   section; default A (card-create dark until the 0.2.x MSI is retired). Target release 0.7.0.
+  **STATUS 2026-07-09: phases 1 (core+server, `4ab5049`) + 2 (web) BUILT, reviewed, deployed to
+  CT122 server+web; card-create dark behind `CARD_CREATE_ENABLED` (Option A default stands — owner
+  told, defaulting silently sanctioned). Remaining: 3 Android UI (first item: core ExportCsv
+  cardItems), 4 Android autofill (L), 5 desktop, 6 extension, 7 release.**
 - **Browser extension** — *owner-requested 2026-07-07 (reaffirmed).* Reuses the `:core`/web
   `UriMatch` + `FieldClassifier` (already built + vector-tested for exactly this) and the
   same-origin API; carries the web save-flow. Chromium + Firefox. Go/no-go spike:

@@ -1,5 +1,43 @@
 # andvari — changelog
 
+## 0.7.0 cards phases 1–2 — fv2 foundation, server guard, web card items (2026-07-09, server+web deployed CT122)
+
+The first two slices of cards/wallet items (design: `docs/design/2026-07-09-cards-wallet.md`,
+tournament-settled). Additive: fielded 0.6.0 web/Android, the 0.2.x desktop MSI, and the 0.6.1
+extension keep working untouched; **card creation ships dark** (`CARD_CREATE_ENABLED=false`,
+the Option A rollout gate — flips when the 0.2.x MSI is retired). All version strings move to
+0.7.0 (native artifacts build at their later phases).
+
+- **formatVersion 2 with a per-doc floor (core + web).** Card-bearing docs seal at fv2;
+  logins/notes stay fv1 (bit-compatible with the whole fielded fleet). Reseals are monotonic —
+  `encryptItem` seals at `max(docFloor, the fv the item was decrypted at)` via a per-item map,
+  and returns its fv so the wire field can never diverge from the AEAD AD. Web's five hardcoded
+  `formatVersion: 1` sites now read the upload's own fv; `VaultItem` records the true stored fv
+  (backup payloads now Android-parity even on the legacy-restore edge).
+- **Server monotonic-fv guard (deployed).** A put/restore whose fv is below the stored row's is
+  refused (`denied`, audited `push_denied/fv_downgrade`) with row + history untouched — the
+  backstop that turns the 0.2.x desktop's automatic card-stripping conflict rewrite into a
+  logged refusal instead of silent ciphertext loss. Provable no-op for all pre-card traffic;
+  pinned end-to-end in e2e (forged fv1 downgrade over a real fv2 card row → denied, card intact).
+- **Web card items (render/edit dark-launched).** Card editor (live IIN brand badge, Luhn
+  warn-not-block, MM/YYYY selects preserving out-of-window stored years, digits-only + zero-pad
+  + brand recompute at save — spread-only, unknown keys survive), detail view (brand + ••last4
+  identity line, grouped reveal, copy-with-auto-clear, expired chip, masked CVV), list-row
+  subtitles ("Visa ••4242"), and a calm fv-generic "N items … newer version" banner off the
+  fail-closed undecryptable count (closes the web banner gap for every future format bump).
+- **CardNormalize everywhere the same.** Pure TS port of core's CardNormalize (ASCII-only Luhn,
+  IIN→brand, expiry adapters) consuming the same frozen `card.json` vectors; both ports now trim
+  a pinned ASCII whitespace set (`trimAscii`) because platform `trim()`s disagree at the Unicode
+  margins (JS strips U+FEFF, JVM strips U+001C–1F) — divergence vector-pinned in card.json.
+- **CSV export honesty.** `CsvWarnings.cardItems` split out of the note catch-all; the export UI
+  names skipped cards and points at `.andvari` backups (which carry cards as ordinary items).
+  Spec 07 §1 updated; core's matching `cardItems` lands first thing in the Android phase.
+- Autofill classifier groundwork (6 card `FieldKind`s, CVV demotion, token-bounded card keyword
+  fallback firing only where the legacy verdict was NONE — card-free login verdicts bit-identical,
+  204 card vectors) ships in core now; Android/desktop/extension consume it in phases 3–7.
+- Adversarial review: phase 1 — 7 confirmed findings, all fixed; phase 2 — 7-lens review, 5 low
+  findings confirmed → all fixed same-day, 2 refuted with traces.
+
 ## 0.6.0 — item history + undelete (2026-07-08, cross-platform release)
 
 The "fat-finger seatbelt" release — the version bump (0.5.0 → 0.6.0) that gathers this cycle's
