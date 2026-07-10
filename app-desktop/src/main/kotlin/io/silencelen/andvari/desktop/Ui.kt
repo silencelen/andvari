@@ -244,7 +244,16 @@ private fun Vault(state: DesktopState) {
     var importFlow by remember { mutableStateOf(false) } // the guided source-picker steps
     val filtered = state.items.filter {
         val q = query.trim().lowercase()
-        q.isEmpty() || it.doc.name.lowercase().contains(q) || (it.doc.login?.username ?: "").lowercase().contains(q)
+        // F79: name + username + EVERY uri + notes + a card's brand/••last4 (never secrets),
+        // matching the web predicate — so a 2nd-website login, a note's body, and a card by
+        // "visa" all match, not just name+username.
+        val d = it.doc
+        q.isEmpty() ||
+            d.name.lowercase().contains(q) ||
+            (d.notes ?: "").lowercase().contains(q) ||
+            (d.login?.username ?: "").lowercase().contains(q) ||
+            (d.login?.uris ?: emptyList()).any { u -> u.lowercase().contains(q) } ||
+            (d.type == "card" && CardDisplay.subtitle(d).lowercase().contains(q))
     }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {

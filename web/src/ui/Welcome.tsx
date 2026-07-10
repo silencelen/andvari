@@ -7,6 +7,7 @@ import { Account, IdentityMismatchError, deviceName } from "../vault/account";
 import { VaultStore } from "../vault/store";
 import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
 import { installId, saveSession, type Session } from "./session";
+import { STRENGTH_LABELS, estimateStrength, masterPasswordHasNonAscii, meetsMasterPasswordFloor } from "./strength";
 
 type Mode = { unlock: Session } | { fresh: true };
 
@@ -247,11 +248,15 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady }: { clien
   // shortFormMatches is false whenever fp is empty (nothing to match), so shortOk already
   // encodes the "server has a recovery key" precondition — no separate `&& fp` needed.
   const shortOk = shortFormMatches(shortFp, fp);
-  const canSubmit = invite && email && password.length >= 8 && password === confirm && shortOk && fpConfirmed;
+  // F60: the master-password floor (score≥3) replaces the old length≥8 gate — the password
+  // that wraps the whole vault must be at least as strong as an exported backup already demands.
+  const pwStrongEnough = meetsMasterPasswordFloor(password);
+  const canSubmit = invite && email && pwStrongEnough && password === confirm && shortOk && fpConfirmed;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!policy || !fp) return setErr(policyError ? POLICY_UNAVAILABLE : "Server has no recovery key configured — enrollment is disabled.");
+    if (!meetsMasterPasswordFloor(password)) return setErr("Choose a stronger master password — mix length with upper/lower case, digits, or symbols."); // F60: enforce, not just disable
     setBusy(true);
     setErr("");
     try {
@@ -309,7 +314,7 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady }: { clien
       <div className="field">
         <label>Master password</label>
         <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
-        {password && password.length < 8 && <span className="muted">at least 8 characters</span>}
+        <MasterPasswordHint password={password} />
       </div>
       <div className="field">
         <label>Confirm master password</label>
@@ -380,4 +385,28 @@ function enrollError(code: string): string {
     case "escrow_fingerprint_mismatch": return "Recovery fingerprint mismatch — do not proceed; contact your admin.";
     default: return "Enrollment failed (" + code + ").";
   }
+}
+
+/**
+ * F60 master-password hint (shared by enrollment + change-password): shows the live strength
+ * label, whether it clears the floor, and a non-blocking non-ASCII caution (spec 01 §1). Purely
+ * advisory — the actual gate lives in the forms' canSubmit + submit guards.
+ */
+export function MasterPasswordHint({ password }: { password: string }) {
+  if (!password) return null;
+  const score = estimateStrength(password);
+  const ok = meetsMasterPasswordFloor(password);
+  const nonAscii = masterPasswordHasNonAscii(password);
+  return (
+    <>
+      <span className="muted" style={{ color: ok ? "var(--ok)" : "var(--danger)" }}>
+        strength: {STRENGTH_LABELS[score]}{ok ? " ✓" : " — needs at least “good”"}
+      </span>
+      {nonAscii && (
+        <span className="muted" style={{ display: "block", color: "var(--gold)" }}>
+          contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it
+        </span>
+      )}
+    </>
+  );
 }
