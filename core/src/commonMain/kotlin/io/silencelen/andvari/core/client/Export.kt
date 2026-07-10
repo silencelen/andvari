@@ -43,7 +43,8 @@ object ExportCsv {
      * `""`, CRLF/lone-CR inside values normalized to LF before writing, no trimming, no
      * formula-injection mangling (leading =+-@ verbatim — warn in UI instead). Rows with
      * empty username AND password are still WRITTEN (only a reimport skips them, spec 06
-     * §1); note-type items are skipped (enumerate them via [warnings]).
+     * §1); non-login items (notes AND cards — CSV has no card columns) are skipped
+     * (enumerate them via [warnings]).
      */
     fun write(items: List<ItemDoc>): String {
         val sb = StringBuilder()
@@ -68,8 +69,11 @@ object ExportCsv {
     /** What a CSV export drops, BY NAME (spec 07 §1 — the UI must enumerate names, never
      *  counts). Categories are independent: one item may appear in several lists. */
     data class Warnings(
-        /** Non-login (note-type) items — not written at all. */
+        /** Non-login, non-card (note-type) items — not written at all. */
         val noteItems: List<String>,
+        /** Card-type items — not written at all (only a `.andvari` backup carries them);
+         *  split out of [noteItems] so the UI can point at the backup path specifically. */
+        val cardItems: List<String>,
         /** Items carrying attachments — attachments are not representable in CSV. */
         val withAttachments: List<String>,
         /** Login items with more than one URI — the tail is dropped (only uris[0] exports). */
@@ -80,18 +84,22 @@ object ExportCsv {
 
     fun warnings(items: List<ItemDoc>): Warnings {
         val notes = ArrayList<String>()
+        val cards = ArrayList<String>()
         val attach = ArrayList<String>()
         val uris = ArrayList<String>()
         val empty = ArrayList<String>()
         for (doc in items) {
-            if (doc.type != "login") notes.add(doc.name)
+            // Cards interact with the other lists exactly as notes always have: still eligible
+            // for [Warnings.withAttachments] (that check is type-blind), never for the login-only lists.
+            if (doc.type == "card") cards.add(doc.name)
+            else if (doc.type != "login") notes.add(doc.name)
             if (doc.attachments.isNotEmpty()) attach.add(doc.name)
             if (doc.type == "login") {
                 if ((doc.login?.uris?.size ?: 0) > 1) uris.add(doc.name)
                 if (doc.login?.username.isNullOrEmpty() && doc.login?.password.isNullOrEmpty()) empty.add(doc.name)
             }
         }
-        return Warnings(notes, attach, uris, empty)
+        return Warnings(notes, cards, attach, uris, empty)
     }
 
     private fun field(value: String): String {
