@@ -61,38 +61,83 @@ owner: park under "Parked for owner", continue with the documented default, neve
       the contract already named uris in the safe subset). The in-page focus dropdown
       remains the primary autofill path, so nothing is lost. Ext bumped 0.8.1→0.9.0.
       **Slotted ahead of S3** — a shipped-defect on the popup's primary action.
-- [ ] **BUG-0 (OPEN, blocked on owner): Android 0.10.0 import crash** — owner report
-      2026-07-10: "v0.10.0 for android crashes when trying the import feature"; owner
-      offered wireless debugging. Triage so far (session 2026-07-10): NOT R8 (release
-      isMinifyEnabled=false — debug gate is representative); NOT the import VM
-      (importParse/importConfirm catch Throwable → importError); NOT the file read
-      (runCatching + bounded); the preview composable is fully null-guarded; core
-      parse/plan/import passes jvm + server tests; only import-path code changed
-      0.9.0→0.10.0 is the cycle-6 uriClass `j:` fix (non-throwing) + normalizeHost A5.
-      Suspect: Compose-layer or device/SAF-specific — NEEDS THE LOGCAT. adb is installed
-      on huginn; when the owner supplies pair `IP:port` + code + connect `IP:port`:
-      `adb pair`, `adb connect`, `adb logcat` (filter `AndroidRuntime:E`), reproduce, fix,
-      ship 0.10.1 APK (deploys pre-approved). NOTE: main has moved past the shipped APK
-      (S2 rewrote the import flow + picker) — reproduce the fix against MAIN and re-test
-      the whole S2 import path before cutting 0.10.1.
+- [ ] **BUG-0 (OPEN, blocked on owner — but the protocol got 10× cheaper): Android 0.10.0
+      import crash** — owner report 2026-07-10: "v0.10.0 for android crashes when trying
+      the import feature"; owner offered wireless debugging. Original triage: NOT R8; NOT
+      the import VM (catches Throwable); NOT the file read; core parse/plan passes tests.
+      **ADDENDUM (2026-07-10, 10-agent static+dynamic hunt `wf_1ad64358`, 0 errors):**
+      - **NEW OWNER PROTOCOL — no adb/logcat needed.** The shipped APK self-captures
+        crashes: `AndvariApplication` writes any uncaught throw (any thread; no coroutine
+        handler swallows it) to `files/last-crash.txt`, and MainActivity shows a
+        screenshot-able plain-view trace on the NEXT launch (deliberately before
+        FLAG_SECURE, MainActivity.kt:87-95). Owner steps: reproduce the import crash once
+        → reopen andvari → screenshot the crash screen. **If NO crash screen appears,
+        that is also an answer** — the failure was an ANR/OOM/system kill, not an
+        exception (points at file-specific freeze or memory, not a throw).
+      - **Ruled out with evidence** (each survived only if max-effort refuters failed):
+        the autolock-during-SAF-picker guard crash (lock() nulls state BEFORE closing,
+        VaultSession.kt:159-161; all lockers main-thread with importParse); main-thread
+        parse ANR (MEASURED at the 10 MiB/10k-row caps in a worktree at the shipped
+        commit: 0.4 s warm / 1.3 s cold JVM — real exports are ms); process-death-during-
+        picker (the SAF result redelivers and the import RESUMES after unlock); the whole
+        0.9.0→0.10.0 import diff (byte-identical pipeline; PSL unreachable from import;
+        uriClass changes total + fenced). Core fuzz-exonerated (12 hostile-input tests:
+        9,999-error files, NUL/BOM/RTL/astral, cap-sized inputs).
+      - **One REAL shipped defect found + FIXED on main this session:** the confirm
+        dialog's error list was the single uncapped non-lazy enumeration (name buckets
+        have collapseAt=5; errors had nothing) — a recognized-header file with thousands
+        of malformed rows composes ~10k Texts in one frame = multi-second freeze/possible
+        ANR, which reads as a crash. Fixed ×3 clients (Android errors cap 8 + summary;
+        Android/desktop bucket expansion capped at 100; web errors table capped at 100),
+        plus: importParse pre-flight guard moved INSIDE its catch (latent binder-thread
+        ISE — the one refactor-from-a-crash the lenses flagged), and the dead "larger
+        than 10 MiB" copy made live (two-null separation in the picker). If the owner's
+        CSV was mass-mangled, this WAS the crash; the crash-screen protocol discriminates.
+      - If a crash screen appears: fix whatever the trace says against MAIN (S2 rewrote
+        the import flow — re-test the S2 picker path before cutting). If none appears:
+        suspect the file (freeze class, now fixed) or OOM (readBounded double-buffers
+        ~30 MB transient at cap — known, unfixed, low-likelihood). Fix batch rides the
+        next native cut.
+- [x] **S4. One-scan household onboarding (P1) — WEB SLICE DONE + DEPLOYED 2026-07-10
+      [`005611b`]. REORDERED AHEAD OF S3** — reasoning (tree-verified, recorded in the
+      design doc §Reorder rationale): S3's value is DARK until the owner retires the 0.2.x
+      MSI (card-create is `false`-pinned on every client → no card items can exist to
+      fill), while S4 is live on day one and needed BEFORE the family enrolls at the
+      real-secrets migration. Design v2 = `docs/design/2026-07-10-one-scan-onboarding.md`,
+      breaker-amended (2 breakers, 1 FATAL + 11 serious): the QR carries **origin + token
+      (fragment-only) + bound email — NO fingerprint** (a public, echoable value = theater
+      + a ceremony-collapse foot-gun; both breakers said drop it), scope is CO-LOCATED
+      enrollment (the printed sheet is the anchor; remote one-scan was never real), and
+      **v1 is WEB+SERVER ONLY** (the native `andvari://` handler carries the entire
+      drive-by FATAL surface for the thinnest value — designed, deferred). Shipped:
+      Admin "Invite with QR" (60-min TTL clamp server-side, private-origin only,
+      overflow-safe), Welcome module-load capture + origin-consent step + prefill
+      (read-only bound email) + clear-on-success + hashchange re-capture, EnrollLink
+      parser twins pinned by 57 shared vectors (caught a real BOM twin-divergence),
+      assetlinks.json, invite single-use regression test. Review: 18 agents, 0 HIGH,
+      13 confirmed → all fixed or explicitly scoped (TTL countdown → static lifetime
+      copy; Kotlin compose UTF-16 pin deferred to the native-mint cut, filed in the
+      design doc). Deploy verified: served sha == built (`index.DaB3NJnP.js`), assetlinks
+      application/json, 296 items intact, clean boot; snapshot
+      `andvari.db.pre-s4-onboarding-2026-07-10` + vzdump pbs-local taken first.
+      **DEFERRED (next security-focused native cut, NOT smuggled into a feature cut):
+      the native typed-sheet fingerprint gate (spec-04-§2(3) — natives still show
+      display+checkbox) + the F60 master-password floor on natives + the native
+      `andvari://` consumer (consume-semantics spec ready in the design doc).**
 - [ ] **S3. Extension in-page card fill** (owner dev-note: "support storing autofill
       creditcard and payment details" — the buildable half) — design pass FIRST
       (frame-origin egress contract per the cards design's deferral: card data may only
       egress to a frame whose ORIGIN matches the tab's top-level origin AND an explicit
       per-fill user gate; breakers attack cross-origin iframes hardest), then build:
       detect card forms (reuse core CardFill token rules in the content script), popup/
-      in-page explicit fill, extension version ×3 bump + publish. IBAN/bank-account item
-      type: SCOPE DECISION ONLY this cycle — a one-page addendum (template fields, fv
-      posture, per-surface cost), parked for owner ratification; do not build it.
-      Card-create UNHIDE stays gated on the 0.2.x MSI retirement (owner step) — not ours.
-- [ ] **S4. One-scan household onboarding (P1)** — the exploration walk's default pick,
-      ratified with this plan. Design + breakers first (enrollment currently rides
-      invite tokens + manual server URL entry; the QR carries server origin + invite
-      token + fingerprint commitment — NEVER key material; attack: QR shoulder-surf,
-      token TTL/single-use, MITM origin substitution vs the pinned recovery fingerprint),
-      then build: owner web "Add family member" surface mints QR; Android scans it
-      (camera permission — new), prefills enroll; desktop/web paste-link fallback.
-      Review + ship checkpoint (web deploy + APK if Android changed).
+      in-page explicit fill, extension version ×3 bump + publish (NOTE: the S3 design
+      doc's version note is stale — extension is at 0.9.0, S3 would cut 0.10.0).
+      IBAN/bank-account item type: SCOPE DECISION ONLY this cycle — a one-page addendum
+      (template fields, fv posture, per-surface cost), parked for owner ratification; do
+      not build it. Card-create UNHIDE stays gated on the 0.2.x MSI retirement (owner
+      step) — not ours. **Sequencing note (2026-07-10): consider the deferred S4 native
+      security items (typed-gate + F60 floor) BEFORE S3 — they harden the live enrollment
+      path; S3 remains dark-valued until the MSI retires.**
 - [ ] **S5. Wrap + successor pitch** — reconcile ROADMAP/backlog checkmarks, refresh the
       PICKUP doc for the next human session, one exploration-lane completeness pass over
       this plan's residue → pitch the next queue (candidates already visible: passkeys
