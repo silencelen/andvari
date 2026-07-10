@@ -9,7 +9,27 @@ import { openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../c
 import { CryptoError } from "../crypto/sodium";
 import type { AccountKeys, CreateVaultRequest, ItemDoc, ItemVersion, RegisterRequest, WireGrant, WireItem } from "../api/types";
 
-const ITEM_FORMAT_VERSION = 1;
+/** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed; core parity). */
+export const ITEM_FORMAT_VERSION = 2;
+
+/**
+ * Lowest formatVersion a doc may seal at (spec 02 §3): card-bearing docs 2, logins/notes 1.
+ * The floor is the one plaintext signal a zero-knowledge server gets — it turns a pre-card
+ * client's rewrite (a plain decode silently drops the unknown `card` key) into a
+ * server-refused fv downgrade instead of silent loss, while fv1 docs stay fully readable
+ * on every fielded client.
+ */
+export function docFloor(doc: ItemDoc): number {
+  return doc.card != null || doc.type === "card" ? 2 : 1;
+}
+
+/** encryptItem's result: the sealed blob plus the formatVersion it was sealed (and AD-bound)
+ *  at — read the wire fv from HERE, never restate it, or the two diverge into an AD mismatch.
+ *  (The wire ItemUpload in api/types adds attachmentIds, which the store derives from the doc.) */
+export interface ItemUpload {
+  formatVersion: number;
+  blob: string;
+}
 
 /**
  * spec 01 §5 MUST (F31, core Account.unlock parity): the server-sent `identityPub` did
@@ -36,6 +56,12 @@ function uuidv4(): string {
 export class Account {
   /** vaultId → role from the latest grant seen (spec 03 §10: role changes re-deliver the grant). */
   private readonly vaultRoles = new Map<string, string>();
+
+  /** itemId → highest formatVersion this session decrypted or sealed it at. Reseals take
+   *  max(docFloor, this): the server enforces per-item monotonic fv, so an edit must never
+   *  re-seal below the version it arrived at. In-memory only by design — web holds no
+   *  durable cache, and every doc reaching a reseal was decrypted here first. */
+  private readonly itemFv = new Map<string, number>();
 
   private constructor(
     readonly userId: string,
@@ -251,22 +277,35 @@ export class Account {
     };
   }
 
-  encryptItem(vaultId: string, itemId: string, doc: ItemDoc): string {
-    const blob = seal(this.vk(vaultId), utf8(JSON.stringify(doc)), adItem(vaultId, itemId, ITEM_FORMAT_VERSION));
-    return toB64(blob);
+  /**
+   * Seal an item doc under its vault VK. The formatVersion — also bound into the AD —
+   * is max(docFloor, the fv this itemId was last decrypted/sealed at), so callers never
+   * thread fv explicitly: new docs seal at their floor, existing items re-seal
+   * monotonically (decryptItem/decryptItemVersion feed the per-item memory). The wire
+   * fv and the AD fv come from this ONE computation.
+   */
+  encryptItem(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
+    const fv = Math.max(docFloor(doc), this.itemFv.get(itemId) ?? 1);
+    this.itemFv.set(itemId, fv);
+    const blob = seal(this.vk(vaultId), utf8(JSON.stringify(doc)), adItem(vaultId, itemId, fv));
+    return { formatVersion: fv, blob: toB64(blob) };
   }
 
   decryptItem(item: WireItem): ItemDoc {
     if (!item.blob) throw new CryptoError("item has no blob (tombstone?)");
     // Fail closed on documents from a NEWER format: unknown-field preservation (spec 02 §3)
-    // is scoped WITHIN a formatVersion, and editing a v2 doc here would re-seal it silently
-    // downgraded to v1. CryptoError rides the existing catch paths ("undecryptable").
+    // is scoped WITHIN a formatVersion, and editing a v3 doc here would re-seal it silently
+    // downgraded. CryptoError rides the existing catch paths ("undecryptable").
     if (item.formatVersion > ITEM_FORMAT_VERSION) throw new CryptoError(`item formatVersion ${item.formatVersion} is newer than this client supports`);
     const plain = open(this.vk(item.vaultId), fromB64(item.blob), adItem(item.vaultId, item.itemId, item.formatVersion));
     // CONTRACT (spec 02 §3): the parsed doc may carry fields this client version does not
     // know — they MUST survive a rewrite. Never rebuild a decrypted doc field-by-field;
     // edit via spread/structuredClone only, so unknown keys round-trip through encryptItem.
-    return JSON.parse(fromUtf8(plain)) as ItemDoc;
+    const doc = JSON.parse(fromUtf8(plain)) as ItemDoc;
+    // Remember the fv monotonically (an OLDER archived version arriving via
+    // decryptItemVersion must not lower it) so a later re-seal can't downgrade.
+    this.itemFv.set(item.itemId, Math.max(this.itemFv.get(item.itemId) ?? 1, item.formatVersion));
+    return doc;
   }
 
   /**

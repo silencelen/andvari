@@ -191,9 +191,10 @@ describe("backup round-trip (own impl — random params + attachment sections)",
 });
 
 describe("csvWarnings (spec 07 §1 — by NAME, independent categories)", () => {
-  it("enumerates all four categories", () => {
+  it("enumerates all five categories", () => {
     const docs = [
       { type: "note", name: "Wifi", notes: "router" },
+      { type: "card", name: "Visa", card: { number: "4242424242424242", brand: "visa" } },
       {
         type: "login",
         name: "Extra",
@@ -205,8 +206,47 @@ describe("csvWarnings (spec 07 §1 — by NAME, independent categories)", () => 
     ] as unknown as ItemDoc[];
     const w = csvWarnings(docs);
     expect(w.noteItems).toEqual(["Wifi"]);
+    expect(w.cardItems).toEqual(["Visa"]);
     expect(w.withAttachments).toEqual(["Extra"]);
     expect(w.extraUris).toEqual(["Extra"]);
     expect(w.emptyUsernameAndPassword).toEqual(["EmptyBoth", "NoLoginBlock"]);
+  });
+
+  it("cards split out of noteItems; notes keep their list; the writer stays logins-only", () => {
+    const docs = [
+      { type: "card", name: "Visa", card: { number: "4242424242424242", brand: "visa" } },
+      { type: "note", name: "Wifi", notes: "router" },
+      { type: "login", name: "GitHub", login: { username: "u", password: "p" } },
+    ] as unknown as ItemDoc[];
+    const w = csvWarnings(docs);
+    expect(w.cardItems).toEqual(["Visa"]);
+    expect(w.noteItems).toEqual(["Wifi"]); // never the card — cards have their own list
+    // CSV rows unchanged by the card type: only the login row is written (vector-pinned shape).
+    expect(writeCsv(docs)).toBe("name,url,username,password,note,totp\r\nGitHub,,u,p,,\r\n");
+  });
+
+  it("cards mirror notes against the other lists: attachment-eligible, login-only lists never", () => {
+    const docs = [
+      {
+        type: "card",
+        name: "Amex",
+        card: { number: "378282246310005" },
+        attachments: [{ id: "1", name: "front.jpg", size: 1, fileKey: "a2V5" }],
+        // A stray login block on a card must not drag it into the login-gated lists
+        // (same containment notes have always had).
+        login: { username: "", password: "", uris: ["https://a.test", "https://b.test"] },
+      },
+      {
+        type: "note",
+        name: "NoteScan",
+        attachments: [{ id: "2", name: "b.bin", size: 1, fileKey: "a2V5" }],
+      },
+    ] as unknown as ItemDoc[];
+    const w = csvWarnings(docs);
+    expect(w.cardItems).toEqual(["Amex"]);
+    expect(w.noteItems).toEqual(["NoteScan"]);
+    expect(w.withAttachments).toEqual(["Amex", "NoteScan"]); // type-blind, exactly as notes today
+    expect(w.extraUris).toEqual([]); // login-only lists stay login-only
+    expect(w.emptyUsernameAndPassword).toEqual([]);
   });
 });

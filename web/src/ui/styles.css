@@ -207,6 +207,16 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .item .sub { font-size: 12.5px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); border: 1px solid var(--edge); border-radius: 5px; padding: 2px 6px; }
 
+/* ---- card chips ---- */
+/* The .item .tag geometry restated: these render OUTSIDE list rows too (editor label badge,
+   detail expiry), and tone via the palette vars so both themes derive correctly. */
+.tag.brand, .tag.expired {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  border: 1px solid var(--edge); border-radius: 5px; padding: 2px 6px; white-space: nowrap;
+}
+.tag.brand { color: var(--gold); border-color: color-mix(in oklab, var(--gold) 45%, transparent); }
+.tag.expired { color: var(--danger); border-color: color-mix(in oklab, var(--danger) 45%, transparent); }
+
 .empty { text-align: center; color: var(--ink-faint); padding: 60px 0; }
 .empty .sigil { font-family: var(--serif); font-size: 40px; color: var(--gold-deep); }
 

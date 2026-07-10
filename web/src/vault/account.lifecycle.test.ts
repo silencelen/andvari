@@ -85,7 +85,7 @@ describe("Account vault-lifecycle crypto (spec 03 §11)", () => {
     const itemId = owner.newItemId();
     const item = {
       itemId, vaultId, rev: 2, createdAt: 0, updatedAt: 0, deleted: false, conflict: false,
-      formatVersion: 1, attachmentIds: [], blob: owner.encryptItem(vaultId, itemId, { type: "note" as const, name: "secret" }),
+      formatVersion: 1, attachmentIds: [], blob: owner.encryptItem(vaultId, itemId, { type: "note" as const, name: "secret" }).blob,
     };
     member.removeVault(vaultId);
     expect(member.hasVault(vaultId)).toBe(false);

@@ -41,7 +41,8 @@ export const CSV_HEADER = "name,url,username,password,note,totp";
  * `""`, CRLF/lone-CR inside values normalized to LF before writing, no trimming, no
  * formula-injection mangling (leading =+-@ verbatim — warn in UI instead). Rows with
  * empty username AND password are still WRITTEN (only a reimport skips them, spec 06
- * §1); note-type items are skipped (enumerate them via [csvWarnings]).
+ * §1); non-login items (notes AND cards — CSV has no card columns) are skipped
+ * (enumerate them via [csvWarnings]).
  */
 export function writeCsv(items: ItemDoc[]): string {
   let out = CSV_HEADER + "\r\n";
@@ -64,8 +65,11 @@ export function writeCsv(items: ItemDoc[]): string {
 /** What a CSV export drops, BY NAME (spec 07 §1 — the UI must enumerate names, never
  *  counts). Categories are independent: one item may appear in several lists. */
 export interface CsvWarnings {
-  /** Non-login (note-type) items — not written at all. */
+  /** Non-login, non-card (note-type) items — not written at all. */
   noteItems: string[];
+  /** Card-type items — not written at all (only a `.andvari` backup carries them);
+   *  split out of [noteItems] so the UI can point at the backup path specifically. */
+  cardItems: string[];
   /** Items carrying attachments — attachments are not representable in CSV. */
   withAttachments: string[];
   /** Login items with more than one URI — the tail is dropped (only uris[0] exports). */
@@ -76,18 +80,22 @@ export interface CsvWarnings {
 
 export function csvWarnings(items: ItemDoc[]): CsvWarnings {
   const noteItems: string[] = [];
+  const cardItems: string[] = [];
   const withAttachments: string[] = [];
   const extraUris: string[] = [];
   const emptyUsernameAndPassword: string[] = [];
   for (const doc of items) {
-    if (doc.type !== "login") noteItems.push(doc.name);
+    // Cards interact with the other lists exactly as notes always have: still eligible
+    // for [withAttachments] (that check is type-blind), never for the login-only lists.
+    if (doc.type === "card") cardItems.push(doc.name);
+    else if (doc.type !== "login") noteItems.push(doc.name);
     if ((doc.attachments?.length ?? 0) > 0) withAttachments.push(doc.name);
     if (doc.type === "login") {
       if ((doc.login?.uris?.length ?? 0) > 1) extraUris.push(doc.name);
       if (!doc.login?.username && !doc.login?.password) emptyUsernameAndPassword.push(doc.name);
     }
   }
-  return { noteItems, withAttachments, extraUris, emptyUsernameAndPassword };
+  return { noteItems, cardItems, withAttachments, extraUris, emptyUsernameAndPassword };
 }
 
 function csvField(value: string): string {

@@ -38,7 +38,9 @@ Writer rules (both impls, byte-identical output — vector-pinned):
   corrupt real secrets; Chrome/Bitwarden/KeePass behave the same). Warn instead.
 
 The export UI MUST enumerate, **by item name** (not by count): note-type items
-(skipped), items with attachments (attachments not representable), items with extra
+(skipped), card-type items (skipped — enumerated separately, pointing the user at a
+`.andvari` backup, which carries them), items with attachments (attachments not
+representable), items with extra
 URIs (tail dropped), items with empty username AND password (a reimport would skip
 them, spec 06 §1), and remind that reimporting collapses exact duplicates. Plus the
 spec 06 plaintext warning, and on Android: "your Downloads folder may auto-sync to

@@ -186,6 +186,37 @@ describe.skipIf(!BASE)("live server e2e", () => {
     expect(storeC2.list().some((i) => i.vaultId === share.vaultId), "removed member's shared items are purged").toBe(false);
     expect(accountC2.roleFor(share.vaultId), "removed member lost the vault key/role").toBeNull();
 
+    // Cards (0.7.0): a card seals at formatVersion 2 — the one plaintext signal the ZK
+    // server holds — and the server's monotonic-fv guard refuses a forged downgrade put
+    // (the 0.2.x card-strip rewrite pattern) with the card left intact.
+    await storeA.save(null, { type: "card", name: "e2e Visa", card: { number: "4242424242424242", expMonth: "12", expYear: "2030", brand: "visa" } });
+    const cardItem = storeA.list().find((i) => i.doc.name === "e2e Visa");
+    expect(cardItem, "card item saved + applied locally").toBeDefined();
+    const cardRow = (await clientA.sync(0)).items.find((i) => i.itemId === cardItem!.itemId);
+    expect(cardRow?.formatVersion, "server row stores the card at formatVersion 2").toBe(2);
+
+    // Forged downgrade: the SAME blob re-declared fv1 against the current rev. The server
+    // never opens blobs — the guard compares the integers — so this is exactly the write
+    // a card-stripping legacy client would emit.
+    const forged = await clientA.push([
+      {
+        mutationId: crypto.randomUUID(),
+        op: "put",
+        itemId: cardRow!.itemId,
+        vaultId: cardRow!.vaultId,
+        baseItemRev: cardRow!.rev,
+        item: { formatVersion: 1, attachmentIds: [], blob: cardRow!.blob! },
+      },
+    ]);
+    expect(forged.results[0]?.status, "the fv downgrade is refused, not applied/conflicted").toBe("denied");
+
+    await storeA.sync();
+    const cardAfter = storeA.get(cardItem!.itemId);
+    expect(cardAfter?.doc.card?.number, "the card still decrypts with its number intact").toBe("4242424242424242");
+    const rowAfter = (await clientA.sync(0)).items.find((i) => i.itemId === cardItem!.itemId);
+    expect(rowAfter?.formatVersion, "the row is still fv2 after the refused write").toBe(2);
+    expect(rowAfter?.rev, "the refused write did not bump the item rev").toBe(cardRow!.rev);
+
     const state: State = {
       email, password, userId: session.userId, personalVaultId: account.personalVaultId,
       tokens: { accessToken: session.accessToken, refreshToken: session.refreshToken },

@@ -398,6 +398,14 @@
     ],
     "padMonth": [
         {
+            "raw": "7\ufeff",
+            "expected": null
+        },
+        {
+            "raw": "7\u001c",
+            "expected": null
+        },
+        {
             "raw": "1",
             "expected": "01"
         },
@@ -448,6 +456,14 @@
     ],
     "yearTo4": [
         {
+            "raw": "27\ufeff",
+            "expected": null
+        },
+        {
+            "raw": "27\u001c",
+            "expected": null
+        },
+        {
             "raw": "27",
             "expected": "2027"
         },
@@ -489,6 +505,14 @@
         }
     ],
     "yearTo2": [
+        {
+            "raw": "\ufeff27",
+            "expected": null
+        },
+        {
+            "raw": "27\u001c",
+            "expected": null
+        },
         {
             "raw": "2027",
             "expected": "27"

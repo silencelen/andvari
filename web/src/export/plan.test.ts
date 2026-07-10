@@ -14,7 +14,7 @@ import {
 
 function item(itemId: string, vaultId: string, updatedAt: number, attachments: AttachmentRef[] = []): VaultItem {
   const doc = { type: "login", name: itemId, login: { username: "u", password: "p" }, attachments } as ItemDoc;
-  return { itemId, vaultId, rev: 1, updatedAt, doc };
+  return { itemId, vaultId, rev: 1, updatedAt, formatVersion: 1, doc };
 }
 
 const VAULTS: VaultInfo[] = [

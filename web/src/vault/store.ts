@@ -23,13 +23,17 @@ import {
   verifyProof,
 } from "../crypto/lifecycleproof";
 import { randomBytes, sha256 } from "../crypto/provider";
-import type { Account } from "./account";
+import { ITEM_FORMAT_VERSION, type Account } from "./account";
 
 export interface VaultItem {
   itemId: string;
   vaultId: string;
   rev: number;
   updatedAt: number;
+  /** The fv the live row is STORED at (wire fv at decrypt; the upload's fv at local apply)
+   *  — record/display only (backups enumerate it, spec 07 §3; Android parity: the stored
+   *  fv, not the doc floor). The seal-time authority is Account's monotonic per-item map. */
+  formatVersion: number;
   doc: ItemDoc;
 }
 
@@ -244,6 +248,18 @@ export class VaultStore {
     );
   }
 
+  /**
+   * Held-key items whose formatVersion is newer than ITEM_FORMAT_VERSION (fail-closed,
+   * spec 02 §3) — they exist but silently vanish from list(). Drives the "N items need
+   * an app update" banner (core SyncEngine.needsUpdateCount parity). A corrupt blob at
+   * a SUPPORTED fv is deliberately excluded: that is a data problem an update won't fix.
+   */
+  needsUpdateCount(): number {
+    let n = 0;
+    for (const u of this.undecryptableById.values()) if (u.formatVersion > ITEM_FORMAT_VERSION) n++;
+    return n;
+  }
+
   /** Vaults whose key we hold, personal first then shared by name. */
   vaults(): VaultInfo[] {
     const out: VaultInfo[] = [];
@@ -388,6 +404,7 @@ export class VaultStore {
           vaultId: item.vaultId,
           rev: item.rev,
           updatedAt: item.updatedAt,
+          formatVersion: item.formatVersion,
           doc,
         });
         this.undecryptableById.delete(item.itemId); // became decryptable (e.g. rewritten at v1)
@@ -428,6 +445,7 @@ export class VaultStore {
             vaultId,
             rev: wi.rev,
             updatedAt: wi.updatedAt,
+            formatVersion: wi.formatVersion,
             doc: this.account.decryptItem(wi),
           });
         } catch {
@@ -606,6 +624,10 @@ export class VaultStore {
     const items: WireItem[] = [];
     for (const it of this.itemsById.values()) {
       if (it.vaultId !== vaultId) continue;
+      // The snapshot's wire fv MUST be the fv the blob was just re-sealed at (the AD binds
+      // it) — any restatement here would make reinstate's rehydrate decryptItem throw and
+      // silently drop the item. encryptItem returns its fv for exactly this reason.
+      const upload = this.account.encryptItem(vaultId, it.itemId, it.doc);
       items.push({
         itemId: it.itemId,
         vaultId,
@@ -614,9 +636,9 @@ export class VaultStore {
         updatedAt: it.updatedAt,
         deleted: false,
         conflict: false,
-        formatVersion: 1,
+        formatVersion: upload.formatVersion,
         attachmentIds: it.doc.attachments?.map((a) => a.id) ?? [],
-        blob: this.account.encryptItem(vaultId, it.itemId, it.doc),
+        blob: upload.blob,
       });
     }
     // Fold in any edits that were denied while this vault was going in-grace (F21).
@@ -761,6 +783,9 @@ export class VaultStore {
   }
 
   putMutation(itemId: string, vaultId: string, doc: ItemDoc, baseItemRev: number): Mutation {
+    // The wire fv is read back from the upload — ONE encryptItem computes it (per-doc floor,
+    // monotonic reseal) and binds it into the AD, so the two can never diverge.
+    const upload = this.account.encryptItem(vaultId, itemId, doc);
     return {
       mutationId: crypto.randomUUID(),
       op: "put",
@@ -768,11 +793,9 @@ export class VaultStore {
       vaultId,
       baseItemRev,
       item: {
-        // Stays 1 until a coordinated format bump: the AD binding (account.encryptItem) and
-        // this wire field must move together, and decrypt fails closed on newer versions.
-        formatVersion: 1,
+        formatVersion: upload.formatVersion,
         attachmentIds: doc.attachments?.map((a) => a.id) ?? [],
-        blob: this.account.encryptItem(vaultId, itemId, doc),
+        blob: upload.blob,
       },
     };
   }
@@ -841,6 +864,7 @@ export class VaultStore {
       vaultId: targetVaultId,
       rev: pushResp.results[0]?.newItemRev ?? (existing?.rev ?? 0) + 1,
       updatedAt: Date.now(),
+      formatVersion: m.item!.formatVersion, // the fv this write actually sealed at
       doc,
     });
     this.undecryptableById.delete(id); // it decrypts by construction — we wrote it
@@ -903,10 +927,11 @@ export class VaultStore {
     // attachment refs; carrying them back would leave dangling/broken download links. The passwords,
     // notes, and other fields come back; attachments do not (design doc: undelete limitation).
     const restored: ItemDoc = { ...doc, attachments: undefined };
+    const upload = this.account.encryptItem(vaultId, itemId, restored);
     await this.api.restoreItem(itemId, {
-      formatVersion: 1,
+      formatVersion: upload.formatVersion,
       attachmentIds: [],
-      blob: this.account.encryptItem(vaultId, itemId, restored),
+      blob: upload.blob,
     });
     await this.sync();
   }
@@ -932,18 +957,21 @@ export class VaultStore {
     let done = 0;
     for (let start = 0; start < items.length; start += VaultStore.SERVER_BATCH_MAX) {
       const chunk = items.slice(start, start + VaultStore.SERVER_BATCH_MAX);
-      const mutations: Mutation[] = chunk.map(({ itemId, doc }) => ({
-        mutationId: itemId, // stable id → idempotent retry of the same plan
-        op: "put",
-        itemId,
-        vaultId,
-        baseItemRev: 0,
-        item: {
-          formatVersion: 1,
-          attachmentIds: doc.attachments?.map((a) => a.id) ?? [],
-          blob: this.account.encryptItem(vaultId, itemId, doc),
-        },
-      }));
+      const mutations: Mutation[] = chunk.map(({ itemId, doc }): Mutation => {
+        const upload = this.account.encryptItem(vaultId, itemId, doc);
+        return {
+          mutationId: itemId, // stable id → idempotent retry of the same plan
+          op: "put",
+          itemId,
+          vaultId,
+          baseItemRev: 0,
+          item: {
+            formatVersion: upload.formatVersion,
+            attachmentIds: doc.attachments?.map((a) => a.id) ?? [],
+            blob: upload.blob,
+          },
+        };
+      });
       await this.push(mutations);
       done += chunk.length;
       onProgress?.(done, total);
@@ -1206,6 +1234,7 @@ export class VaultStore {
       }
       newDoc.attachments = newRefs;
     }
+    const copyUpload = this.account.encryptItem(g.targetVaultId, g.newItemId, newDoc);
     const copyResp = await this.api.push([
       {
         mutationId: await this.gestureMutationId(g.gestureId, "copy"),
@@ -1214,9 +1243,9 @@ export class VaultStore {
         vaultId: g.targetVaultId,
         baseItemRev: 0,
         item: {
-          formatVersion: 1,
+          formatVersion: copyUpload.formatVersion,
           attachmentIds: newDoc.attachments?.map((a) => a.id) ?? [],
-          blob: this.account.encryptItem(g.targetVaultId, g.newItemId, newDoc),
+          blob: copyUpload.blob,
         },
       },
     ]);
@@ -1235,6 +1264,7 @@ export class VaultStore {
         vaultId: g.targetVaultId,
         rev: copyResult?.newItemRev ?? 1,
         updatedAt: Date.now(),
+        formatVersion: copyUpload.formatVersion,
         doc: newDoc,
       });
     }

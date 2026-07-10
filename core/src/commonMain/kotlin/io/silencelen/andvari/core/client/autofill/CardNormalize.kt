@@ -13,6 +13,13 @@ package io.silencelen.andvari.core.client.autofill
  */
 object CardNormalize {
     private fun isAsciiDigit(c: Char): Boolean = c in '0'..'9'
+
+    /** Cross-port determinism: the adapters trim ONLY this pinned ASCII whitespace set.
+     *  Platform trims disagree at the Unicode margins (JS strips U+FEFF, JVM strips
+     *  U+001C..U+001F) and the same string must parse identically on every client —
+     *  vector-pinned in card.json. */
+    private val TRIMMABLE = charArrayOf(' ', '\t', '\n', '\r', '\u000B', '\u000C')
+    private fun trimAscii(raw: String): String = raw.trim { it in TRIMMABLE }
     /** Canonical expiry: [expMonth] "01".."12" zero-padded, [expYear] 4-digit. */
     data class Expiry(val expMonth: String, val expYear: String)
 
@@ -82,7 +89,7 @@ object CardNormalize {
 
     /** Month adapter: "1"/"01".."12" → zero-padded canonical; null otherwise. */
     fun padMonth(raw: String): String? {
-        val t = raw.trim()
+        val t = trimAscii(raw)
         if (t.isEmpty() || t.length > 2 || t.any { !isAsciiDigit(it) }) return null
         val m = t.toInt()
         return if (m in 1..12) m.toString().padStart(2, '0') else null
@@ -90,14 +97,14 @@ object CardNormalize {
 
     /** Year adapter for 4-digit targets: "27" pivots to "2027", 4-digit passes through; null otherwise. */
     fun yearTo4(raw: String): String? {
-        val t = raw.trim()
+        val t = trimAscii(raw)
         if (t.any { !isAsciiDigit(it) }) return null
         return when (t.length) { 2 -> "20$t"; 4 -> t; else -> null }
     }
 
     /** Year adapter for 2-digit targets: "2027" → "27", 2-digit passes through; null otherwise. */
     fun yearTo2(raw: String): String? {
-        val t = raw.trim()
+        val t = trimAscii(raw)
         if (t.any { !isAsciiDigit(it) }) return null
         return when (t.length) { 2 -> t; 4 -> t.substring(2); else -> null }
     }
