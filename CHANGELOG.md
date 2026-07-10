@@ -1,6 +1,38 @@
 # andvari — changelog
 
-## Unreleased
+## 0.10.1 — import crash fix + import robustness (2026-07-10, cross-platform cut)
+
+Phone and desktop pick up everything below with this cut; the web app and server have been
+serving the shared parts since their per-cycle deploys and re-report 0.10.1. Separately, the
+web app gained **one-scan family onboarding** today (Admin → Invite a user → "Invite with QR"
+mints a 60-minute invite QR/link that lands a new member on a prefilled web enrollment) — a
+web/server feature with nothing for the natives to pick up. Card creation stays dark on every
+client (Option A) until the 0.2.x desktop MSI is retired.
+
+### the import "Choose file" crash is fixed (Android)
+
+- **Tapping "Choose file" to import no longer crashes the app.** The file picker launched
+  through a code path that a stale support-library version rejected on some devices
+  (`IllegalArgumentException: Can only use lower 16 bits for requestCode`, from the biometric
+  library dragging in a years-old `androidx.fragment`); the app now pins a current fragment
+  version aligned with the rest of AndroidX, so the picker opens normally. This affected the
+  release build specifically — thank you for the crash report.
+
+### import flow, from the same pass
+
+- **"My file is from somewhere else" now lives on the main import list** and opens the file
+  picker straight away for any CSV, instead of hiding inside each source's steps and only
+  bouncing you back to the list. Header detection is authoritative, so a file from an unlisted
+  source still imports as whatever it actually is. Choosing a specific source now shows a
+  plain "← Choose a different source" back option.
+- **A broken export can no longer freeze the app** (all clients). A file with thousands of
+  unreadable rows used to render every problem row at once in the confirm dialog — a
+  multi-second hang that looked like a crash. The dialog now shows the first few problem rows
+  plus an honest count, and every expandable list in that dialog gained the same ceiling.
+- **Oversized files get their honest message again**: a file over 10 MiB now says exactly
+  that, instead of a generic "could not read the selected file". And the import pre-check now
+  runs inside the same error net as the parse, closing a latent crash path if the vault locks
+  mid-import.
 
 ### choose where imports land (S2)
 

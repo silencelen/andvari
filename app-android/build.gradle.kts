@@ -25,7 +25,7 @@ android {
         minSdk = 29
         targetSdk = 35
         versionCode = (System.getenv("ANDVARI_VERSIONCODE") ?: "1").toInt()
-        versionName = "0.10.0"
+        versionName = "0.10.1"
         // lazysodium-android bundles native .so — limit to the phone's ABI.
         ndk { abiFilters += "arm64-v8a" }
     }
@@ -79,5 +79,9 @@ dependencies {
     // Quick unlock (design 2026-07-10 §2): BiometricPrompt + BiometricManager. Pulls in
     // androidx.fragment transitively, so the unlock/autofill activities host it via FragmentActivity.
     implementation(libs.androidx.biometric)
+    // Force fragment 1.8.5 over the 1.2.5 that biometric drags in: 1.2.5's FragmentActivity enforces
+    // the legacy 16-bit requestCode check and CRASHES every Activity-Result launch (the import
+    // "Choose file" picker, MainActivity.kt) under activity 1.9.3's registry. See libs.versions.toml.
+    implementation(libs.androidx.fragment)
     implementation(libs.kotlinx.coroutines.core)
 }
