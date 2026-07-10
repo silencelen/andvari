@@ -1,5 +1,45 @@
 # andvari — changelog
 
+## 0.9.0 — quick unlock + native robustness (2026-07-10, cross-platform release)
+
+Biometric unlock on Android, plus the two quick-win batches that make the daily-driver clients
+behave. Additive: no wire change, no schema change; the fielded 0.8.0 fleet keeps working, and
+the web client is unchanged except its version string. Card creation stays dark on every client
+(Option A) until the 0.2.x desktop MSI is retired.
+
+- **Quick unlock (F84).** Android can unlock the vault with a fingerprint instead of the master
+  password. The account's UVK — never the password, never a derived key — is wrapped under a
+  non-exportable, auth-per-use, strong-biometric-gated AES-256-GCM key in the Android Keystore
+  (StrongBox where available), bound to the account so a copied blob opens nothing. The server
+  learns nothing new; a quick unlock reaches exactly what a password unlock reaches, and runs the
+  same identity-key substitution check. Offered on the unlock screen, in the autofill overlay,
+  and in Settings.
+  Honest limits, by design: the **master password is required every 30 days** (so you don't lose
+  it — for a zero-knowledge vault, a forgotten master password is an availability incident) and
+  after a device reboot unless the app has since reached the server. A biometric lockout never
+  destroys the enrollment; changing your fingerprints invalidates it and asks for the password.
+  Windows/desktop quick unlock remains deferred.
+- **KDF upgrade (F61), finally implemented.** When the org raises the password-hashing policy, a
+  full-password unlock silently re-keys the account to the stronger parameters. Upgrade-only, with
+  a client-side floor and ceiling so a compromised server can neither weaken the KDF nor lock you
+  out by demanding an absurd cost. It never runs while a recovery temp password is live.
+- **Native robustness (QW-3).** A recovery temp password no longer stays silently live on
+  Android/desktop — both now show a persistent banner until it's changed. Background sync no
+  longer greys out the editor mid-typing (offline stalls used to lock the UI for tens of seconds).
+  Desktop gained Enter-to-submit / Escape-to-dismiss everywhere, note creation, and a shared-vault
+  badge; its two-factor status stopped spinning forever beside its own error. The autofill process
+  now locks on idle like the app does. A password is never offered into a one-time-code box.
+- **Web daily-UX (QW-2, already live on CT122).** Master-password strength floor at enrollment and
+  change; search covers notes, every website, and card names; Back steps through screens instead of
+  dumping you to the lock screen; masked editor password with a confirm before Generate overwrites;
+  session token lifetimes editable in Admin.
+- **Security fixes found by review, worth naming.** A device that had been *revoked* kept opening
+  its cached vault offline, forever, if it was only ever used through the autofill overlay — the
+  overlay process never processed the revocation. It does now. And the autofill save flow could
+  have its engine closed mid-save by the new idle-lock timer, failing the save and duplicating the
+  item on retry.
+
+
 ## 0.8.0 — guided importers (2026-07-09, cross-platform release)
 
 Queue item 5 (design: `docs/design/2026-07-09-guided-importers.md` — a 2-breaker design
