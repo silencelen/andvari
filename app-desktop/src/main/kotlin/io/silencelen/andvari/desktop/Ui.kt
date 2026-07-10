@@ -556,10 +556,22 @@ private fun ImportBucket(title: String, names: List<String>, error: Boolean = fa
     val tint = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
     Spacer(Modifier.height(6.dp))
     Text("$title (${names.size}):", style = MaterialTheme.typography.bodySmall, color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
-    val shown = if (expanded || names.size <= 6) names else names.take(5)
+    // "Show all" is capped: this Column is non-lazy, and a mass-mangled import can put
+    // thousands of rows in the error bucket — composing them all in one frame is a freeze.
+    val shown = when {
+        names.size <= 6 -> names
+        expanded -> names.take(BUCKET_EXPAND_CAP)
+        else -> names.take(5)
+    }
     shown.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = tint) }
     if (!expanded && names.size > 6) TextButton(onClick = { expanded = true }) { Text("Show all ${names.size}") }
+    if (expanded && names.size > BUCKET_EXPAND_CAP) {
+        Text("(showing the first $BUCKET_EXPAND_CAP of ${names.size})", style = MaterialTheme.typography.bodySmall, color = tint)
+    }
 }
+
+/** Non-lazy dialog enumerations stop here — past this, composition itself is the bottleneck. */
+private const val BUCKET_EXPAND_CAP = 100
 
 /**
  * Display names keyed on ImportFormat.name STRINGS — the three new core constants land in
