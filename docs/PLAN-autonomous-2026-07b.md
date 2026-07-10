@@ -20,16 +20,14 @@ owner: park under "Parked for owner", continue with the documented default, neve
 
 ## The queue
 
-- [ ] **S1. 0.10.0 native cut** — everything since 0.9.0 ships to phone + desktop:
-      eTLD+1/PSL matching (closes the spec 02 §3.1 conformance skew window), F18 vault
-      picker + desktop Move/Copy, F20 member transparency, F71 save integrity (incl. the
-      attachment-retry fix), F82 planner dedup, quick-unlock hardening riders. Versions
-      already read 0.10.0 ×4. Steps: CHANGELOG retitle → gates → release commit → APK →
-      devstore (`scripts/ship.sh release`), `:app-desktop:packageDeb` → CT122 `/downloads`
-      + manifest MERGE (linux → 0.10.0 + sha256, browserExtension 0.8.1 PRESERVED) → push
-      → statement. Web/server already serve this tree at 0.10.0 (cycle-7 deploy) — verify,
-      don't redeploy identical bytes. Owner steps (not gating): install the APK when
-      convenient; Windows MSI remains open (still the card-create Option-A trigger).
+- [x] **S1. 0.10.0 native cut** — **DONE 2026-07-10 [`31a9211`].** Gates green (all
+      clients report 0.10.0; web 308; ext 8/8; desktop compiles). Shipped: **APK vc
+      16483888 → devstore** (verified live in latest.json); **deb 0.10.0 → CT122
+      `/downloads`** (served sha == built sha `e1bcf1e8…`, HTTP 200); manifest MERGED
+      (linux → 0.10.0, browserExtension 0.8.1 preserved). Web/server verified already
+      serving this tree at 0.10.0 (`index.DURsfIDT.js` — no redundant redeploy). The
+      spec 02 §3.1 conformance window is CLOSED once the owner installs the new APK/deb.
+      Owner steps (not gating): install APK + deb when convenient; Windows MSI still open.
 - [ ] **S2. Import destination vault picker** (owner dev-note 2026-07-10) — the guided
       importers commit to Personal only. Add a writable-vault picker (F18 choice rule:
       personal + owner/writer shared; shown when >1 choice) to the import CONFIRM step on
