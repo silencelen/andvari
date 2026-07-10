@@ -17,6 +17,7 @@ import {
   type KdfParams,
 } from "./crypto";
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "./format";
+import { isNewerVersion } from "./version";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
 import type { CardItem, MatchItem, PendingSave, Req, Res, TabMsg } from "./messages";
 import { currentCode } from "./totp";
@@ -43,8 +44,13 @@ const SERVER_URL = "https://andvari.taila2dff2.ts.net";
 
 const SKEY = "session"; // storage.session: SessionSnapshot
 const TKEY = "tabs"; //    storage.session: Record<tabId, TabState>
+const UKEY = "updateInfo"; // storage.local (non-secret): UpdateInfo while a newer build is live
+const ULAST = "updateCheckedAt"; // storage.local: epoch ms of the last COMPLETED update fetch
 const DEFAULT_AUTOLOCK_SECONDS = 15 * 60; // policy fetch failed/absent — never "no lock at all"
 const RESYNC_PERIOD_MIN = 5;
+const UPDATE_ALARM = "updatecheck";
+const UPDATE_PERIOD_MIN = 1440; // ~daily; the SW also opportunistically checks on wake (throttled)
+const UPDATE_MIN_GAP_MS = 20 * 60 * 60 * 1000; // floor between real fetches — SWs wake constantly
 const GRANT_TTL_MS = 30_000; // popup fill grant: covers the content script's reveal round-trip
 const BADGE_BG = "#d0a94a"; //  aged gold on…
 const BADGE_INK = "#1a1509"; // …treasury charcoal (web --gold / --btn-ink)
@@ -157,7 +163,26 @@ chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "autolock") void doLock();
   else if (alarm.name === "resync") void resync();
+  else if (alarm.name === UPDATE_ALARM) void checkForUpdate();
 });
+
+// The self-update check runs on its OWN daily schedule, independent of lock state (it reads only
+// the public downloads manifest — no vault, no session). A reload/update fires onInstalled, which
+// re-checks against the NEW installed version and so clears a now-satisfied signal immediately.
+chrome.runtime.onInstalled.addListener(() => void checkForUpdate(true));
+chrome.runtime.onStartup.addListener(() => void checkForUpdate(true));
+void (async () => {
+  // Survive SW recycling without resetting the period on every wake (that would starve a
+  // 1440-min alarm): create it only when absent. The wake-path check is throttled by ULAST.
+  try {
+    if (!(await chrome.alarms.get(UPDATE_ALARM))) {
+      await chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: UPDATE_PERIOD_MIN });
+    }
+  } catch {
+    /* alarms.get unsupported here — the throttled wake check below still yields ~daily coverage */
+  }
+  void checkForUpdate();
+})();
 
 // Re-offer a pending save once the post-login navigation lands. Belt: the content script also
 // polls pendingSave on load; braces: this reaches SPAs that "complete" without a fresh script.
@@ -272,6 +297,66 @@ async function resync(): Promise<void> {
   }
 }
 
+// ---- self-update signal (tier 1: NOTIFY only) ----
+// Unpacked extensions cannot self-install, so the SW never rewrites itself — it only records
+// that a newer build sits at /downloads and lets the popup + web hub point the user to it.
+
+interface UpdateInfo {
+  latest: string;
+  chromeUrl: string | null;
+  firefoxUrl: string | null;
+}
+
+/** Absolute a downloads URL. The manifest stores relative paths ("/downloads/…"); the popup is a
+ *  chrome-extension:// page, so a relative href would resolve against the EXTENSION origin. Prefix
+ *  the server origin unless the manifest already gave an absolute URL. */
+function downloadUrl(u: unknown): string | null {
+  if (typeof u !== "string" || !u) return null;
+  return /^https?:\/\//i.test(u) ? u : SERVER_URL + u;
+}
+
+/**
+ * Fetch /downloads/manifest.json and, if it advertises a strictly-newer extension build, record
+ * an [UpdateInfo] in storage.local; if it advertises an equal-or-older build, clear any stale
+ * signal. NEVER throws, and a transient failure LEAVES an existing signal intact (one dropped
+ * fetch must not un-nag a real update) — only a clean read supersedes the stored verdict. Reads
+ * no vault state, so it is safe to run locked. [force] bypasses the wake throttle.
+ */
+async function checkForUpdate(force = false): Promise<void> {
+  try {
+    if (!force) {
+      const seen = (await chrome.storage.local.get(ULAST))[ULAST];
+      if (typeof seen === "number" && Date.now() - seen < UPDATE_MIN_GAP_MS) return;
+    }
+    const resp = await fetch(SERVER_URL + "/downloads/manifest.json", { cache: "no-store" });
+    if (!resp.ok) return; // transient (offline / 5xx) — keep any prior signal, don't stamp ULAST
+    const m = (await resp.json()) as { browserExtension?: { version?: unknown; chromeUrl?: unknown; firefoxUrl?: unknown } };
+    const ext = m?.browserExtension;
+    const latest = typeof ext?.version === "string" ? ext.version : null;
+    const current = chrome.runtime.getManifest().version;
+    if (latest && isNewerVersion(latest, current)) {
+      const info: UpdateInfo = { latest, chromeUrl: downloadUrl(ext?.chromeUrl), firefoxUrl: downloadUrl(ext?.firefoxUrl) };
+      await chrome.storage.local.set({ [UKEY]: info, [ULAST]: Date.now() });
+    } else {
+      await chrome.storage.local.remove(UKEY); // up to date (or unreadable version) → no signal
+      await chrome.storage.local.set({ [ULAST]: Date.now() });
+    }
+  } catch {
+    /* network/JSON error — any existing signal stands until a clean read supersedes it */
+  }
+}
+
+/** Popup query: the stored signal, RE-VALIDATED against the currently-installed version so a
+ *  signal recorded before an in-place reload can never linger as a false "update available". */
+async function updateStatus(): Promise<Res<"updateStatus">> {
+  const current = chrome.runtime.getManifest().version;
+  const info = (await chrome.storage.local.get(UKEY))[UKEY] as UpdateInfo | undefined;
+  if (info && typeof info.latest === "string" && isNewerVersion(info.latest, current)) {
+    return { current, latest: info.latest, chromeUrl: info.chromeUrl ?? null, firefoxUrl: info.firefoxUrl ?? null };
+  }
+  return { current, latest: null, chromeUrl: null, firefoxUrl: null };
+}
+
 // ---- message dispatch ----
 
 async function handle(msg: Req, sender: chrome.runtime.MessageSender): Promise<unknown> {
@@ -366,6 +451,8 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       }
       return { matchCount, locked } satisfies Res<"pageInfo">;
     }
+    case "updateStatus":
+      return updateStatus();
   }
 }
 

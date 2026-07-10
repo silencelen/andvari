@@ -95,7 +95,10 @@ export type Req =
   /** Popup: live TOTP code for an item's detail row. */
   | { type: "totp"; itemId: string }
   /** Content (each frame load): report host so the SW can badge the tab. */
-  | { type: "pageInfo"; host: string };
+  | { type: "pageInfo"; host: string }
+  /** Popup: is a newer extension version published to /downloads? Non-secret and vault-free —
+   *  the SW answers whether locked or not (the check reads only the public downloads manifest). */
+  | { type: "updateStatus" };
 
 export type Res<T extends Req["type"]> = T extends "status"
   ? { unlocked: boolean; count: number; email: string | null }
@@ -131,7 +134,15 @@ export type Res<T extends Req["type"]> = T extends "status"
                                 ? { locked: boolean; items: CardItem[] }
                                 : T extends "revealCardField"
                                   ? { ok: boolean; value?: string; error?: string }
-                                  : never;
+                                  : T extends "updateStatus"
+                                    ? {
+                                        current: string;
+                                        /** non-null ONLY when a strictly-newer build is published (SW-validated) */
+                                        latest: string | null;
+                                        chromeUrl: string | null;
+                                        firefoxUrl: string | null;
+                                      }
+                                    : never;
 
 /** SW → content (chrome.tabs.sendMessage): fill this item now (popup-granted). The
  *  content script performs its normal `reveal` round-trip with its own host — the SW

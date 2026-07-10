@@ -11,6 +11,13 @@
       <span id="conn" class="dot off" title="server"></span>
     </header>
 
+    <!-- Self-update signal (both views). Shown only when a strictly-newer build is published;
+         unpacked extensions can't self-install, so this points to the download + a reload. -->
+    <div id="update" class="update-banner" hidden>
+      <span id="update-text"></span>
+      <a id="update-link" class="update-link" target="_blank" rel="noopener noreferrer" hidden></a>
+    </div>
+
     <section id="locked" class="locked" hidden>
       <div class="hero">
         <div class="sigil">ᛅ</div>

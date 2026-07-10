@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### browser extension 0.8.0 — update-available signal
+
+- **The extension now tells you when a newer build is published.** An unpacked browser extension
+  can't update itself, so it checks the published `/downloads/manifest.json` about once a day (and
+  on browser start), and when a newer version is out it shows a calm banner in the popup —
+  "Update available — andvari X" with a "Download & reload" link to the right zip for your browser.
+  No silent reinstall (the browser forbids it for unpacked extensions), no toolbar-badge takeover
+  (that badge still shows how many logins match the current site). The check reads only the public
+  download manifest — never the vault, never your session, and it works whether locked or not. The
+  web app's Devices page now spells out the same self-update posture. *(Extension bumped 0.7.0 →
+  0.8.0; the version-compare fails closed on any malformed manifest so a garbled file can't nag.)*
+
 ### skipti loose ends (F18, F19 parity, F20, LC-1)
 
 - **Choose the vault when you create an item (F18).** Android and desktop new-item editors now
