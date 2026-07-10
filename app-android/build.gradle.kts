@@ -76,5 +76,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.autofill)
+    // Quick unlock (design 2026-07-10 §2): BiometricPrompt + BiometricManager. Pulls in
+    // androidx.fragment transitively, so the unlock/autofill activities host it via FragmentActivity.
+    implementation(libs.androidx.biometric)
     implementation(libs.kotlinx.coroutines.core)
 }

@@ -12,7 +12,6 @@ import android.provider.OpenableColumns
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -35,7 +34,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -64,7 +65,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private val vm: AndvariViewModel by viewModels {
         object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
@@ -72,7 +73,7 @@ class MainActivity : ComponentActivity() {
                 // Cache DBs live in no_backup/ — the platform keeps that dir out of Auto
                 // Backup AND device-to-device transfer on every API level (backup rules
                 // can't glob the per-user vault-<userId>.db names, so location does the job).
-                AndvariViewModel(SessionStore(applicationContext), applicationContext.noBackupFilesDir) as T
+                AndvariViewModel(SessionStore(applicationContext), applicationContext.noBackupFilesDir, applicationContext) as T
         }
     }
 
@@ -179,6 +180,8 @@ fun AndvariApp(vm: AndvariViewModel) {
             // F58: sits ABOVE the screen switch so it survives every in-app navigation —
             // no screen can compose it away while the flag is true.
             MustChangePasswordBanner(ui)
+            // One-time quick-unlock enrollment offer, only over the vault list (design §3/§8).
+            if (ui.quickUnlockOffer && ui.screen is Screen.Vault) QuickUnlockOfferCard(vm)
             Box(Modifier.weight(1f)) {
                 when (val screen = ui.screen) {
                     is Screen.Loading -> Centered { Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary) }
@@ -378,15 +381,42 @@ private fun ReSealCard(vm: AndvariViewModel, ui: UiState) {
 @Composable
 fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
     var password by remember { mutableStateOf("") }
+    // BiometricPrompt needs a FragmentActivity host (MainActivity is one).
+    val activity = LocalContext.current as? FragmentActivity
+    val canBiometric = activity != null && ui.quickUnlockEligible && ui.quickUnlockEnrolled && ui.quickUnlockFresh
+    // Auto-show the prompt once on entry (spec 01 §8 / design §3). Guarded so a cancel does NOT
+    // re-fire it in a loop (each prompt is one explicit gesture); the button below re-offers it.
+    var autoShown by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(canBiometric) {
+        if (canBiometric && !autoShown && !ui.busy) { autoShown = true; vm.unlockWithBiometric(activity!!) }
+    }
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Sigil()
         Spacer(Modifier.height(8.dp))
         Text(email, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(24.dp))
         ErrorBar(ui.error, vm::clearError)
+        // Runtime notice from a biometric attempt (temp lockout / cancel / biometrics-changed).
+        ui.quickUnlockMessage?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+        }
+        // Stale-window notice (design §3): enrolled but past 30 days → password re-stamps it.
+        if (ui.quickUnlockEnrolled && !ui.quickUnlockFresh) {
+            Text(
+                "It's been 30 days — enter your master password to keep quick unlock active.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+        }
         SecretField("Master password", password) { password = it }
         Spacer(Modifier.height(12.dp))
         PrimaryButton("Unlock", enabled = password.isNotBlank() && !ui.busy, busy = ui.busy) { vm.unlock(email, password) }
+        if (canBiometric) {
+            OutlinedButton(onClick = { vm.unlockWithBiometric(activity!!) }, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) {
+                Text("Use fingerprint / face")
+            }
+        }
         TextButton(onClick = vm::signOut) { Text("Sign out / use a different account") }
     }
 }
@@ -1227,6 +1257,8 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                 }
             }
             Spacer(Modifier.height(16.dp))
+            QuickUnlockSettingsCard(vm, ui)
+            Spacer(Modifier.height(16.dp))
             ErrorBar(ui.error, vm::clearError)
             NoticeBar(ui.notice, vm::clearNotice)
             ExportDialogs(vm, ui)
@@ -1585,6 +1617,68 @@ private fun SelectableCopyRow(label: String, value: String, ctx: Context) {
                 Text(value, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             }
             TextButton(onClick = { copyToClipboard(ctx, label, value, 0) }) { Text("Copy") }
+        }
+    }
+}
+
+// ---- quick unlock (spec 01 §8.1) ----
+
+/** Settings toggle: enroll (biometric consent) / disable quick unlock for this device. Disable is
+ *  never auth-gated (reducing standing secret material); enroll is A5/A1-gated inside the VM. */
+@Composable
+private fun QuickUnlockSettingsCard(vm: AndvariViewModel, ui: UiState) {
+    val activity = LocalContext.current as? FragmentActivity
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("Quick unlock", style = MaterialTheme.typography.titleLarge)
+            when {
+                ui.mustChangePassword -> Text(
+                    "Change your master password first, then you can turn on quick unlock.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                !ui.quickUnlockEligible && !ui.quickUnlockEnrolled -> Text(
+                    "Add a fingerprint or face in your device settings (and make sure your organization allows it) to unlock andvari with biometrics.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                else -> {
+                    Text(
+                        "Unlock this device with your fingerprint or face instead of your master password. You'll still enter the password at least every 30 days.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Fingerprint / face unlock", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                        Switch(
+                            checked = ui.quickUnlockEnrolled,
+                            enabled = activity != null && !ui.busy,
+                            onCheckedChange = { on -> if (on) activity?.let { vm.enrollQuickUnlock(it) } else vm.disableQuickUnlock() },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One-time post-unlock offer card (design §8 default). "Not now" dismisses for good; the Settings
+ *  toggle remains the durable control. */
+@Composable
+private fun QuickUnlockOfferCard(vm: AndvariViewModel) {
+    val activity = LocalContext.current as? FragmentActivity ?: return
+    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            Text("Unlock with fingerprint next time?", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Skip typing your master password on this device. You'll still enter it at least every 30 days.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row {
+                TextButton(onClick = { vm.dismissQuickUnlockOffer() }) { Text("Not now") }
+                Spacer(Modifier.weight(1f))
+                Button(onClick = { vm.enrollQuickUnlock(activity) }) { Text("Turn on") }
+            }
         }
     }
 }

@@ -24,9 +24,23 @@ import kotlinx.coroutines.sync.Mutex
  * superseded holder cannot later reuse a consumed refresh token and revoke the device.
  */
 object VaultSession {
+    /**
+     * A1 (quick unlock): how the CURRENT session was unlocked. [PASSWORD] means the master
+     * password was actually typed THIS unlock (so a real full-password stamp exists); [QUICK]
+     * means a biometric quick unlock (no password entered). Enrollment/re-enroll is gated on this
+     * so a QUICK session with no surviving password stamp cannot silently reset the 30-day clock.
+     */
+    enum class UnlockProvenance { PASSWORD, QUICK }
+
     /** [cache] is the SAME instance the engine owns — exposed read-only for surfaces the
      *  engine doesn't re-export (vault rows / envelopes, used by the spec 07 export). */
-    class Unlocked(val api: AndvariApi, val account: Account, val engine: SyncEngine, val cache: VaultCache)
+    class Unlocked(
+        val api: AndvariApi,
+        val account: Account,
+        val engine: SyncEngine,
+        val cache: VaultCache,
+        val provenance: UnlockProvenance = UnlockProvenance.PASSWORD,
+    )
 
     @Volatile
     private var state: Unlocked? = null
@@ -118,12 +132,20 @@ object VaultSession {
         return get()
     }
 
-    /** Bind a freshly-unlocked session, closing any previously-bound engine/api. */
+    /** Bind a freshly-unlocked session, closing any previously-bound engine/api. Provenance
+     *  defaults to PASSWORD (every existing caller is a full-password unlock); the two quick-unlock
+     *  callers pass QUICK explicitly (A1). */
     @Synchronized
-    fun bind(api: AndvariApi, account: Account, engine: SyncEngine, cache: VaultCache) {
+    fun bind(
+        api: AndvariApi,
+        account: Account,
+        engine: SyncEngine,
+        cache: VaultCache,
+        provenance: UnlockProvenance = UnlockProvenance.PASSWORD,
+    ) {
         touch() // spec 01 §8: the auto-lock timer resets on unlock
         val prev = state
-        state = Unlocked(api, account, engine, cache)
+        state = Unlocked(api, account, engine, cache, provenance)
         prev?.let {
             if (it.engine !== engine) runCatching { it.engine.close() }
             if (it.api !== api) runCatching { it.api.close() } // never close a reused token-holder

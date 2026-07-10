@@ -1,8 +1,10 @@
 package io.silencelen.andvari.app
 
+import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.ktor.client.HttpClient
@@ -41,8 +43,10 @@ import io.silencelen.andvari.core.model.VaultMemberSummary
 import java.io.File
 import java.io.IOException
 import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
+import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.TotpSetupResponse
@@ -142,6 +146,17 @@ data class UiState(
     val itemVersions: List<DecryptedItemVersion>? = null,
     // Item undelete (feature): the Trash screen's deleted items (null = not loaded / loading).
     val deletedItems: List<DeletedItemView>? = null,
+    // Quick unlock (spec 01 §8.1) — derived, recomputed on unlock / Settings / start:
+    //  eligible  = strong biometric present + org allows durable key material + policy < 7d old,
+    //  enrolled  = a wrapped-UVK blob exists for this user,
+    //  fresh     = enrolled AND within the 30-day periodic-full-password window,
+    //  offer     = eligible & not enrolled & offer not dismissed (post-unlock one-time card),
+    //  message   = Unlock-screen notice ("it's been 30 days…" / "biometrics changed…").
+    val quickUnlockEligible: Boolean = false,
+    val quickUnlockEnrolled: Boolean = false,
+    val quickUnlockFresh: Boolean = false,
+    val quickUnlockOffer: Boolean = false,
+    val quickUnlockMessage: String? = null,
 )
 
 /**
@@ -238,7 +253,14 @@ internal fun importFormatLabel(format: CsvImport.ImportFormat): String = when (f
     else -> "1Password"
 }
 
-class AndvariViewModel(private val store: SessionStore, private val cacheDir: File) : ViewModel() {
+class AndvariViewModel(
+    private val store: SessionStore,
+    private val cacheDir: File,
+    // Application context — used ONLY for the quick-unlock BiometricManager availability check
+    // (never held beyond method scope; the ViewModel outlives Activities, so this must be the
+    // application context, which MainActivity's factory passes).
+    private val appContext: Context,
+) : ViewModel() {
     private val _ui = MutableStateFlow(UiState(baseUrl = store.baseUrl, lastExportAt = store.lastExportAt, mustChangePassword = store.mustChangePassword))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
@@ -294,8 +316,139 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         if (cacheAllowed()) store.saveAccountKeys(keys) else store.clearAccountKeys()
     }
 
-    /** Enforce offlineCacheAllowed=false: drop BOTH the vault DB and the cached keys. */
-    private fun purgeOfflineData(userId: String) { deleteCache(userId); store.clearAccountKeys() }
+    /** Enforce offlineCacheAllowed=false (policy flip): drop the vault DB, cached keys AND the
+     *  quick-unlock blob (A3/A4 shared helper) — the session itself stays valid. */
+    private fun purgeOfflineData(userId: String) { OfflineData.purgeCacheForbidden(cacheDir, store, userId) }
+
+    /**
+     * Recompute the derived quick-unlock UI flags from disk + the live session. Cheap; called
+     * after any unlock, on the Unlock screen (start), and when Settings opens.
+     */
+    private fun refreshQuickUnlockState() {
+        val userId = store.load()?.userId
+        val eligible = QuickUnlock.isEligible(appContext, store)
+        val enrolled = userId != null && QuickUnlock.isEnrolled(cacheDir, userId)
+        val fresh = enrolled && userId != null && QuickUnlock.isFresh(store, userId)
+        _ui.value = _ui.value.copy(
+            quickUnlockEligible = eligible,
+            quickUnlockEnrolled = enrolled,
+            quickUnlockFresh = fresh,
+            // Post-unlock one-time offer card: only while an unlocked session exists.
+            quickUnlockOffer = eligible && !enrolled && !store.quickUnlockOfferDismissed && VaultSession.get() != null,
+        )
+    }
+
+    /** F61 (spec 01 §7): kick a silent KDF re-key when ONLINE and the org policy raised the cost.
+     *  Detached (two Argon2id derivations off the Main thread); best-effort. Never while
+     *  `mustChangePassword` (A5) or without a server-fetched policy this session (design §4). */
+    private fun runKdfUpgrade(userId: String, password: String, keys: AccountKeys) {
+        if (store.mustChangePassword) return
+        val policy = _ui.value.policy ?: return // set only from a live fetch — never a stale persisted value
+        val a = api ?: return
+        val acct = account ?: return
+        viewModelScope.launch(Dispatchers.Default) {
+            KdfReKey.maybeUpgrade(a, store, userId, password, keys, policy, acct)
+        }
+    }
+
+    // ---- quick unlock (spec 01 §8.1) ----
+
+    /** Enroll quick unlock for the current user (biometric consent prompt). A5: refused while a
+     *  recovery temp password is live. A1: refused from a QUICK session with no surviving
+     *  full-password stamp (would reset the 30-day clock with no password ever typed). */
+    fun enrollQuickUnlock(activity: FragmentActivity) {
+        val userId = store.load()?.userId ?: return
+        if (store.mustChangePassword) {
+            _ui.value = _ui.value.copy(error = "Change your master password first, then you can turn on quick unlock.")
+            return
+        }
+        if (!QuickUnlock.isEligible(appContext, store)) {
+            _ui.value = _ui.value.copy(error = "This device has no usable fingerprint or face, or your org doesn't allow it.")
+            return
+        }
+        val prov = VaultSession.get()?.provenance
+        val stamp = store.lastFullPasswordUnlockAt(userId)
+        if (prov != VaultSession.UnlockProvenance.PASSWORD && stamp <= 0L) {
+            _ui.value = _ui.value.copy(error = "Unlock with your master password first, then turn quick unlock on.")
+            return
+        }
+        val acct = account ?: return
+        viewModelScope.launch {
+            when (val r = QuickUnlock.enroll(activity, cacheDir, userId, acct)) {
+                is QuickUnlock.Enroll.Ok -> {
+                    store.quickUnlockOfferDismissed = true // the toggle is now the control surface
+                    refreshQuickUnlockState()
+                    _ui.value = _ui.value.copy(notice = "Quick unlock is on for this device.")
+                }
+                is QuickUnlock.Enroll.Cancelled -> refreshQuickUnlockState()
+                is QuickUnlock.Enroll.Failed -> _ui.value = _ui.value.copy(error = r.reason ?: "Couldn't turn on quick unlock.")
+            }
+        }
+    }
+
+    /** Disable quick unlock — wipe the blob + key. Never gated (reducing standing secret material
+     *  must not require auth, spec 01 §8.1). */
+    fun disableQuickUnlock() {
+        store.load()?.userId?.let { QuickUnlock.wipe(cacheDir, it) }
+        refreshQuickUnlockState()
+    }
+
+    /** Dismiss the one-time post-unlock enrollment offer card (Settings toggle still available). */
+    fun dismissQuickUnlockOffer() {
+        store.quickUnlockOfferDismissed = true
+        _ui.value = _ui.value.copy(quickUnlockOffer = false)
+    }
+
+    /**
+     * Quick unlock from the Unlock screen: recover the UVK behind BiometricPrompt, then unlock via
+     * the UVK path. Same token/mutex skeleton as [unlock] minus the KDF/stamp (a quick unlock is
+     * never a full-password unlock, A1/§7). identityPub verification still runs inside
+     * `Account.unlockWithUvk` — a mismatch hard-fails; a stale/foreign UVK wipes the blob (§5).
+     */
+    fun unlockWithBiometric(activity: FragmentActivity) = op {
+        val session = store.load() ?: throw IllegalStateException("no session")
+        val userId = session.userId
+        val uvk = when (val r = QuickUnlock.recoverUvk(activity, cacheDir, userId)) {
+            is QuickUnlock.Recover.Ok -> r.uvk
+            is QuickUnlock.Recover.Fallback -> { _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason); return@op }
+            is QuickUnlock.Recover.Wiped -> { refreshQuickUnlockState(); _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason); return@op }
+        }
+        VaultSession.unlockMutex.withLock {
+            VaultSession.get()?.let { toVault(); return@op } // adopt a winner instead of a 2nd holder
+            val a = newApi(session.tokens())
+            val keys = try {
+                a.accountKeys().also { persistAccountKeys(it) }
+            } catch (e: IOException) {
+                store.loadAccountKeys() ?: run { a.close(); throw e }
+            } catch (e: ApiException) {
+                a.close()
+                if (e.status == 401) { OfflineData.purgeRevoked(cacheDir, store, userId); _ui.value = _ui.value.copy(mustChangePassword = false) }
+                throw e
+            } catch (t: Throwable) { a.close(); throw t }
+            val acct = try {
+                withContext(Dispatchers.Default) { Account.unlockWithUvk(userId, uvk, keys) }
+            } catch (t: Throwable) {
+                a.close()
+                // §5: seed won't open under the recovered UVK → wipe (stale/foreign); an identityPub
+                // MISMATCH is a security fault — keep the blob (evidence) and hard-fail.
+                if (t is CryptoException && t.message?.contains("identity key mismatch") != true) QuickUnlock.wipe(cacheDir, userId)
+                throw t
+            }
+            try {
+                bind(a, acct, VaultSession.UnlockProvenance.QUICK)
+                _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowFingerprint = keys.escrowFingerprint)
+            } catch (t: Throwable) {
+                if (VaultSession.get()?.api !== a) a.close()
+                throw t
+            }
+        }
+        runCatching { syncNow(engine!!) }.onFailure {
+            if (it is IOException) _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
+            else throw it
+        }
+        refreshQuickUnlockState()
+        toVault()
+    }
 
     /**
      * Record a freshly-fetched policy everywhere it's enforced: UI state, the persisted
@@ -305,6 +458,8 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         _ui.value = _ui.value.copy(policy = p)
         store.cacheAllowed = p.offlineCacheAllowed
         store.autoLockSeconds = p.autoLockSeconds
+        store.policyFetchedAt = System.currentTimeMillis() // A4: quick-unlock eligibility freshness
+        store.bumpServerTimeFloor(p.serverTime) // A2 (review [2]): the one clock the holder cannot set
         VaultSession.setAutoLockSeconds(p.autoLockSeconds)
     }
 
@@ -395,6 +550,9 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
                     baseUrl = store.baseUrl,
                 )
             }
+            // Quick-unlock flags for the Unlock screen (biometric button / stale notice) and the
+            // post-unlock offer card. Runs after the policy fetch above so eligibility is current.
+            refreshQuickUnlockState()
         }
     }
 
@@ -534,6 +692,9 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             // (only a login/register response carries the flag) and raise the blocking banner.
             store.mustChangePassword = s.mustChangePassword
             _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint, mustChangePassword = s.mustChangePassword)
+            // A1: stamp the 30-day window on a real full-password unlock; A6/§7: F61 rides online.
+            store.stampFullPasswordUnlock(s.userId)
+            runKdfUpgrade(s.userId, password, s.accountKeys)
         } catch (t: Throwable) {
             // F74: no throw path (prelogin/KDF/login/Account.unlock) may leak the transient
             // client. Once bind() succeeded the api is VaultSession-OWNED — never close it
@@ -556,8 +717,9 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             val a = newApi(session.tokens())
             // Offline unlock (spec 02 §8): fall back to the cached accountKeys when the
             // network is unreachable; a definitive auth rejection wipes the cache instead.
+            var online = false
             val keys = try {
-                a.accountKeys().also { persistAccountKeys(it) }
+                a.accountKeys().also { online = true; persistAccountKeys(it) }
             } catch (e: IOException) {
                 store.loadAccountKeys() ?: run { a.close(); throw e }
             } catch (e: ApiException) {
@@ -581,6 +743,10 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             try {
                 bind(a, acct)
                 _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowFingerprint = keys.escrowFingerprint)
+                // A1: stamp on EVERY full-password unlock, including offline ones.
+                store.stampFullPasswordUnlock(session.userId)
+                // A6/§7: F61 re-key only when this unlock actually reached the server.
+                if (online) runKdfUpgrade(session.userId, password, keys)
             } catch (t: Throwable) {
                 if (VaultSession.get()?.api !== a) a.close()
                 throw t
@@ -622,6 +788,9 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             // for a fresh enrollment, but the wire says so, not us).
             store.mustChangePassword = s.mustChangePassword
             _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint, mustChangePassword = s.mustChangePassword)
+            // A1: a fresh enrollment typed the master password — stamp the window (already on the
+            // policy KDF params, so no F61 re-key is due).
+            store.stampFullPasswordUnlock(s.userId)
         } catch (t: Throwable) {
             // F74: same rule as signIn — close the transient client on ANY pre-bind throw,
             // never the VaultSession-owned success-path holder.
@@ -1427,10 +1596,16 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             moveGestures.clear()
             movePickerMode = null
             movePickerItemId = null
-            session?.userId?.let { deleteCache(it) }
+            session?.userId?.let {
+                deleteCache(it)
+                // Sign-out always clears the quick-unlock secret + freshness stamp (spec 01 §8.1).
+                QuickUnlock.wipe(cacheDir, it)
+                store.clearFullPasswordStamp(it)
+            }
             store.clear()
             _ui.value = _ui.value.copy(
                 screen = Screen.Welcome, items = emptyList(), needsUpdateCount = 0, busy = false,
+                quickUnlockEnrolled = false, quickUnlockFresh = false, quickUnlockOffer = false, quickUnlockMessage = null,
                 mustChangePassword = false, // store.clear() dropped the persisted F58 flag with the account
                 notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
                 lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
@@ -1447,6 +1622,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
             screen = Screen.Settings, totpStatus = null, totpSetup = null, totpMessage = null,
             backupPreflight = null, backupResult = null, csvPreflight = null, lastExportAt = store.lastExportAt,
         )
+        refreshQuickUnlockState() // the quick-unlock toggle reflects current enrollment/eligibility
         viewModelScope.launch {
             try {
                 _ui.value = _ui.value.copy(totpStatus = api!!.totpStatus())
@@ -1495,7 +1671,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     }
 
     // ---- helpers ----
-    private fun bind(a: AndvariApi, acct: Account) {
+    private fun bind(a: AndvariApi, acct: Account, provenance: VaultSession.UnlockProvenance = VaultSession.UnlockProvenance.PASSWORD) {
         // Durable cache unless policy forbids it (then delete any existing file). Hydrate
         // the working set from disk BEFORE the first sync so a cold/offline start shows data.
         // Prefer the live policy; fall back to the persisted last-known value when offline
@@ -1508,7 +1684,7 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         }
         val newEngine = SyncEngine(a, acct, cache).also { it.hydrate() }
         // VaultSession closes any previously-bound engine/api (defensive: never two conns).
-        VaultSession.bind(a, acct, newEngine, cache)
+        VaultSession.bind(a, acct, newEngine, cache, provenance)
     }
 
     /** Sync + record the wall-clock time of the last SUCCESS — the timestamp the spec 07
@@ -1524,8 +1700,9 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
     }
 
     private fun toVault() {
-        _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null, loginTotpRequired = false)
+        _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null, loginTotpRequired = false, quickUnlockMessage = null)
         refreshLifecycle()
+        refreshQuickUnlockState() // may surface the one-time enrollment offer card
     }
 
     private fun op(block: suspend () -> Unit) {
