@@ -91,6 +91,17 @@ data class UiState(
     val importProgress: Pair<Int, Int>? = null,
     val importBusy: Boolean = false,
     val importDone: Boolean = false,
+    // Guided importers (design 2026-07-09): source-picker open flag + the picked source.
+    // The source tailors the export instructions and the mismatch hint ONLY — header
+    // detection stays authoritative. The two nullable notes are the post-parse info lines
+    // (detected-format mismatch; A10 LastPass HTML-mangle heuristic).
+    val importSourceSheet: Boolean = false,
+    val importSource: ImportSource? = null,
+    val importFormatNote: String? = null,
+    val importMangleNote: String? = null,
+    /** A9: physical file line → 1-based data-row ordinal, so a row error reads "row N
+     *  (file line M)" even when a multi-line quoted note shifts the physical lines. */
+    val importRowOrdinals: Map<Int, Int> = emptyMap(),
     // Export & backup (spec 07) — preflight dialogs + post-backup summary.
     val backupPreflight: BackupPreflight? = null,
     val backupResult: BackupResult? = null,
@@ -122,6 +133,100 @@ data class UiState(
     // Item undelete (feature): the Trash screen's deleted items (null = not loaded / loading).
     val deletedItems: List<DeletedItemView>? = null,
 )
+
+/**
+ * Guided import sources (design 2026-07-09 §Guided UI): each is a short "how to export"
+ * instruction block plus a mismatch hint — NOTHING more. Header detection stays
+ * authoritative: a Bitwarden file picked under "Chrome" still imports as Bitwarden, with
+ * a calm note. Copy mirrors web's ImportPanel, shortened to fit a dialog. The Chromium
+ * four (Chrome/Edge/Brave/Opera) all emit the same CSV and expect the `chrome` format.
+ */
+enum class ImportSource(val label: String, val steps: List<String>, private val expectedFormats: Set<String>) {
+    CHROME(
+        "Chrome",
+        listOf(
+            "Open chrome://settings/passwords (Google Password Manager → Settings).",
+            "Export passwords, confirm, and save the CSV.",
+        ),
+        setOf("CHROME"),
+    ),
+    EDGE(
+        "Edge",
+        listOf(
+            "Open edge://wallet/passwords.",
+            "⋯ (More options) → Export passwords, and save the CSV.",
+        ),
+        setOf("CHROME"),
+    ),
+    BRAVE(
+        "Brave",
+        listOf(
+            "Open brave://settings/passwords.",
+            "⋯ next to “Saved passwords” → Export passwords, and save the CSV.",
+        ),
+        setOf("CHROME"),
+    ),
+    OPERA(
+        "Opera",
+        listOf(
+            "Open opera://settings/passwords.",
+            "⋯ next to “Saved passwords” → Export passwords, and save the CSV.",
+        ),
+        setOf("CHROME"),
+    ),
+    FIREFOX(
+        "Firefox",
+        listOf(
+            "Open about:logins (Passwords).",
+            "⋯ (menu, top right) → Export passwords, and save the CSV.",
+        ),
+        setOf("FIREFOX"),
+    ),
+    BITWARDEN(
+        "Bitwarden",
+        listOf(
+            "In the Bitwarden web vault: Tools → Export vault.",
+            "File format .csv → Export vault, and save the file.",
+        ),
+        setOf("BITWARDEN"),
+    ),
+    ONEPASSWORD(
+        "1Password",
+        listOf(
+            "In the 1Password 8 desktop app: File → Export → your account.",
+            "Choose the CSV format and save the file.",
+            "Older 1Password versions write a different CSV — use 1Password 8+, or export via Bitwarden as an intermediate.",
+        ),
+        // Matched by core enum NAME (see [expects]) — tolerate either spelling of the
+        // 1password constant until WS-CORE's naming is pinned in this tree.
+        setOf("ONEPASSWORD", "ONE_PASSWORD"),
+    ),
+    LASTPASS(
+        "LastPass",
+        listOf(
+            "In the LastPass vault: Advanced Options → Export.",
+            "Choose the CSV FILE download — not the in-page text (copying from the page mangles the file).",
+        ),
+        setOf("LASTPASS"),
+    ),
+    ;
+
+    /** Does the detected format match what this source usually produces? Decides ONLY
+     *  whether the mismatch info line shows — detection stays authoritative. Compared by
+     *  enum NAME string so this file compiles without referencing the new core constants. */
+    fun expects(format: CsvImport.ImportFormat): Boolean = format.name in expectedFormats
+}
+
+/** Human label for a detected format — the mismatch note + the preview's "From … export"
+ *  line. Keyed on the core enum's NAME with an else-fallback (the only remaining format
+ *  is 1Password, whatever WS-CORE spelled its constant). */
+internal fun importFormatLabel(format: CsvImport.ImportFormat): String = when (format.name) {
+    "CHROME" -> "Chrome/Chromium"
+    "FIREFOX" -> "Firefox"
+    "BITWARDEN" -> "Bitwarden"
+    "LASTPASS" -> "LastPass"
+    else -> "1Password"
+}
 
 class AndvariViewModel(private val store: SessionStore, private val cacheDir: File) : ViewModel() {
     private val _ui = MutableStateFlow(UiState(baseUrl = store.baseUrl, lastExportAt = store.lastExportAt))
@@ -733,16 +838,53 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         backgroundSync()
     }
 
-    // ---- CSV import (spec 06) ----
+    // ---- CSV import (spec 06 + guided importers, design 2026-07-09) ----
 
-    /** Parse + plan a browser CSV entirely on-device (no upload). [bytes] is read by the UI. */
+    /** Open the guided source picker (the step BEFORE the system file picker). */
+    fun importBegin() { _ui.value = _ui.value.copy(importSourceSheet = true, importSource = null) }
+
+    /** A source card tapped — show its export instructions. */
+    fun importSourcePick(source: ImportSource) { _ui.value = _ui.value.copy(importSource = source) }
+
+    /** "My file is from somewhere else" — back to the source list. */
+    fun importSourceBack() { _ui.value = _ui.value.copy(importSource = null) }
+
+    /** Instructions confirmed; the UI launches the system file picker. Close the sheet but
+     *  KEEP the picked source — the post-parse mismatch hint compares against it. */
+    fun importChooseFile() { _ui.value = _ui.value.copy(importSourceSheet = false) }
+
+    fun importSheetDismiss() { _ui.value = _ui.value.copy(importSourceSheet = false, importSource = null) }
+
+    /**
+     * Parse + plan a browser/manager CSV entirely on-device (no upload). [bytes] is read by
+     * the UI. The plan is VAULT-AWARE (F75): `existing` = the personal vault's light
+     * projections from the engine's working set, built by the core-owned builder (A8 —
+     * never raw item lists mapped at the call site). If the working set is locked or the
+     * personal vault isn't hydrated/synced yet, REFUSE with honest copy — never plan
+     * against an empty `existing` (that would silently disable the dedupe).
+     */
     fun importParse(bytes: ByteArray) {
-        val acct = account ?: return
+        val acct = account
+        val eng = engine
+        if (acct == null || eng == null || eng.vaultInfos().none { it.vaultId == acct.personalVaultId }) {
+            importReject("Couldn’t check your vault for items you already have — unlock and sync first, then try the import again.")
+            return
+        }
         try {
             val parsed = CsvImport.parse(bytes)
+            val detected = importFormatLabel(parsed.format)
+            val source = _ui.value.importSource
             _ui.value = _ui.value.copy(
                 importFormat = parsed.format,
-                importPlan = CsvImport.plan(parsed) { acct.newItemId() },
+                importPlan = CsvImport.plan(parsed, eng.importProjections()) { acct.newItemId() },
+                // Mismatch line (calm, informational): the picked source only ever tailored
+                // instructions — detection decided what the file IS.
+                importFormatNote = if (source != null && !source.expects(parsed.format))
+                    "This file looks like a $detected export — imported it as $detected." else null,
+                // A10 LastPass mangle heuristic: multiple HTML-entity hits across values.
+                importMangleNote = if (looksHtmlMangled(parsed))
+                    "This file looks HTML-mangled — re-export via Advanced → Export and choose the file download." else null,
+                importRowOrdinals = CsvImport.rowOrdinalsByLine(bytes), // A9, same reader as parse
                 importReport = null, importError = null, importProgress = null, importBusy = false, importDone = false,
             )
         } catch (e: CsvImport.ImportException) {
@@ -778,14 +920,36 @@ class AndvariViewModel(private val store: SessionStore, private val cacheDir: Fi
         _ui.value = _ui.value.copy(
             importPlan = null, importFormat = null, importReport = null, importError = null,
             importProgress = null, importBusy = false, importDone = false,
+            importSourceSheet = false, importSource = null, importFormatNote = null, importMangleNote = null,
         )
     }
 
     private fun friendlyImport(code: String): String = when (code) {
-        "too_large" -> "That file is larger than 10 MiB — far bigger than any real browser password export."
-        "too_many_rows" -> "That file has more than 10,000 logins. Split it into smaller files and import each."
-        "unrecognized_header" -> "This doesn’t look like a Chrome, Edge, or Firefox password export."
+        "too_large" -> "That file is larger than 10 MiB — far bigger than any real password export."
+        "too_many_rows" -> "That file has more than 10,000 rows. Split it into smaller files and import each."
+        // Per-source hint (design §Format adapters): older 1Password CSV shapes vary wildly.
+        "unrecognized_header" ->
+            if (_ui.value.importSource == ImportSource.ONEPASSWORD)
+                "This doesn’t look like a 1Password 8 CSV. Export from 1Password 8+ as CSV, or use Bitwarden/CSV as an intermediate."
+            else
+                "This doesn’t look like a password export we recognize — Chrome, Edge, Brave, Opera, Firefox, Bitwarden, 1Password (8+), or LastPass CSV."
         else -> "That file could not be read ($code)."
+    }
+
+    /** A10 heuristic: a LastPass export copied from the in-page text arrives HTML-escaped.
+     *  Fires when MULTIPLE values contain an HTML entity. Never auto-decoded — info only. */
+    private fun looksHtmlMangled(parsed: CsvImport.Parsed): Boolean {
+        var hits = 0
+        for (r in parsed.rows) {
+            for (v in listOf(r.name, r.url, r.username, r.password, r.notes, r.totp ?: "")) {
+                if (HTML_ENTITY.containsMatchIn(v) && ++hits >= 2) return true
+            }
+        }
+        return false
+    }
+
+    private companion object {
+        val HTML_ENTITY = Regex("""&(amp|lt|gt|quot|#\d+);""")
     }
 
     /** Seed-derived identity short code (spec 01 §5) — read out during sharing verification. */

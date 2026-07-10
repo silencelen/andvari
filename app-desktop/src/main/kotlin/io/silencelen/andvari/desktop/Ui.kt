@@ -18,13 +18,13 @@ import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
+import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.client.autofill.CardNormalize
-import io.silencelen.andvari.core.crypto.Base32
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.PasswordGenerator
@@ -241,6 +241,7 @@ private fun Vault(state: DesktopState) {
     var query by remember { mutableStateOf("") }
     var editing by remember { mutableStateOf<Pair<String?, ItemDoc>?>(null) }
     var detailId by remember { mutableStateOf<String?>(null) }
+    var importFlow by remember { mutableStateOf(false) } // the guided source-picker steps
     val filtered = state.items.filter {
         val q = query.trim().lowercase()
         q.isEmpty() || it.doc.name.lowercase().contains(q) || (it.doc.login?.username ?: "").lowercase().contains(q)
@@ -248,18 +249,19 @@ private fun Vault(state: DesktopState) {
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("andvari", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            IconButton(onClick = {
-                val dialog = FileDialog(null as Frame?, "Import passwords CSV", FileDialog.LOAD)
-                dialog.isVisible = true
-                val dir = dialog.directory; val picked = dialog.file
-                if (dir != null && picked != null) state.importFromFile(File(dir, picked))
-            }) { Icon(Icons.Default.FileUpload, "import CSV") }
+            IconButton(onClick = { importFlow = true }) { Icon(Icons.Default.FileUpload, "import passwords") }
             IconButton(onClick = { state.openTrash() }) { Icon(Icons.Default.Delete, "trash") }
             IconButton(onClick = { state.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
             IconButton(onClick = { state.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
             IconButton(onClick = { state.lock() }) { Icon(Icons.Default.Lock, "lock") }
         }
         Divider()
+        if (importFlow) {
+            ImportSourceFlow(onDismiss = { importFlow = false }) { file, src ->
+                importFlow = false
+                state.importFromFile(file, src)
+            }
+        }
         ImportDialogs(state)
         val current = detailId?.let { state.item(it) }
         when {
@@ -301,7 +303,71 @@ private fun Vault(state: DesktopState) {
     }
 }
 
-/** The three CSV-import dialogs (parse error → preview/confirm+progress+retry → done). */
+/**
+ * Guided import, steps 1–2 (design 2026-07-09): pick the source → 2–4 numbered export
+ * steps → the AWT file dialog (the house file-pick mechanism — same family as the
+ * attachment/backup pickers). The pick informs instructions and the preview's mismatch
+ * hint ONLY — header detection stays authoritative, so a Bitwarden file picked under
+ * "Chrome" still imports as Bitwarden (with a calm note). Keyboard-first: every entry is
+ * a focusable button, so Tab/Enter walks the whole flow.
+ */
+@Composable
+private fun ImportSourceFlow(onDismiss: () -> Unit, onFile: (File, ImportSource) -> Unit) {
+    var source by remember { mutableStateOf<ImportSource?>(null) }
+    val s = source
+    if (s == null) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+            title = { Text("Import passwords") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text("Where is your export from?", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(4.dp))
+                    ImportSource.entries.forEach { src ->
+                        TextButton(onClick = { source = src }, modifier = Modifier.fillMaxWidth()) {
+                            Text(src.label, Modifier.fillMaxWidth())
+                        }
+                    }
+                    Text(
+                        "Picked wrong? No harm — the file itself decides how it’s read.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+        )
+    } else {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            confirmButton = {
+                TextButton(onClick = {
+                    val dialog = FileDialog(null as Frame?, "Import passwords CSV", FileDialog.LOAD)
+                    dialog.isVisible = true
+                    val dir = dialog.directory; val picked = dialog.file
+                    // Cancelled picker → the instructions stay open for another go.
+                    if (dir != null && picked != null) onFile(File(dir, picked), s)
+                }) { Text("Choose file…") }
+            },
+            dismissButton = {
+                androidx.compose.foundation.layout.Row {
+                    TextButton(onClick = { source = null }) { Text("My file is from somewhere else") }
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                }
+            },
+            title = { Text("Export from ${s.label}") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    s.steps.forEachIndexed { i, step ->
+                        Text("${i + 1}. $step", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                    }
+                }
+            },
+        )
+    }
+}
+
+/** The three import dialogs (refusal/parse error → preview/confirm+progress+retry → done). */
 @Composable
 private fun ImportDialogs(state: DesktopState) {
     if (state.importError != null && state.importPlan == null && !state.importDone) {
@@ -327,18 +393,45 @@ private fun ImportDialogs(state: DesktopState) {
                 dismissButton = { TextButton(onClick = { state.importDismiss() }, enabled = !state.importBusy) { Text("Cancel") } },
                 title = { Text("Import passwords?") },
                 text = {
-                    Column {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
                         Text(
-                            "⚠ This file holds every password in plaintext. Nothing is uploaded — each login is encrypted on this device. Afterwards, delete the CSV and empty the trash. Re-importing the same file makes duplicates.",
+                            "⚠ This file holds every password in plaintext. Nothing is uploaded — each item is encrypted on this device. Afterwards, delete the CSV and empty the trash.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                         )
+                        val fmt = state.importFormat
+                        val src = state.importSource
+                        // Calm mismatch hint: the pick was only a guide — the header decided.
+                        if (fmt != null && src != null && fmt.name !in src.expectedFormats) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "This file looks like a ${formatLabel(fmt)} export, not ${src.label} — importing it as ${formatLabel(fmt)}.",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary,
+                            )
+                        }
+                        // A10: HTML-entity mangle hint (in-page LastPass exports) — never auto-decoded.
+                        if (state.importMangled) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Several values look HTML-mangled (things like &amp; instead of &) — re-export choosing the file download (LastPass: Advanced Options → Export). Importing as-is keeps the mangled text.",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary,
+                            )
+                        }
                         Spacer(Modifier.height(8.dp))
-                        Text("From ${state.importFormat?.name?.lowercase() ?: "browser"} export:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("From ${fmt?.let { formatLabel(it) } ?: "password"} export:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("• ${report.imported} to import", style = MaterialTheme.typography.bodySmall)
-                        if (report.collapsed > 0) Text("• ${report.collapsed} exact duplicates merged", style = MaterialTheme.typography.bodySmall)
-                        if (report.flagged.isNotEmpty()) Text("• ${report.flagged.size} renamed (same site, different password)", style = MaterialTheme.typography.bodySmall)
-                        if (report.skippedEmpty > 0) Text("• ${report.skippedEmpty} empty rows skipped", style = MaterialTheme.typography.bodySmall)
-                        if (report.errors.isNotEmpty()) Text("• ${report.errors.size} rows skipped (parse errors)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        if (report.collapsed > 0) Text("• ${report.collapsed} exact duplicates in the file merged", style = MaterialTheme.typography.bodySmall)
+                        // Kind-neutral (A1): skippedEmpty also counts empty NOTE rows, which never had credentials.
+                        if (report.skippedEmpty > 0) Text("• ${report.skippedEmpty} empty row${if (report.skippedEmpty == 1) "" else "s"} skipped", style = MaterialTheme.typography.bodySmall)
+                        ImportBucket("Imported as secure notes", report.noteItems)
+                        ImportBucket("Already in your vault — skipped", report.alreadyInVault)
+                        // A9: rule-2 copy splits password-differs from 2FA-differs.
+                        ImportBucket("Password differs from your vault — imported separately; review which is current", report.passwordDiffers)
+                        ImportBucket("2FA secret differs from your vault — imported separately", report.totpDiffers)
+                        ImportBucket("Renamed — the name was already taken", report.flagged)
+                        ImportBucket("Archived in the export — not imported", report.archivedSkipped)
+                        ImportBucket("Unsupported item type — skipped", report.unknownTypeSkipped)
+                        ImportBucket("2FA secret not usable — kept as text in the item’s notes", report.totpUnsupported)
+                        ImportBucket("Rows that couldn’t be read", report.errors.map { rowErrorLine(it, state.importRowOrdinals) }, error = true)
                         state.importProgress?.let { (done, total) ->
                             Spacer(Modifier.height(10.dp))
                             LinearProgressIndicator(progress = { if (total > 0) done.toFloat() / total else 0f }, modifier = Modifier.fillMaxWidth())
@@ -351,12 +444,61 @@ private fun ImportDialogs(state: DesktopState) {
         }
     }
     if (state.importDone) {
+        val report = state.importReport
+        val notes = report?.noteItems?.size ?: 0
         AlertDialog(
             onDismissRequest = { state.importDismiss() },
             confirmButton = { TextButton(onClick = { state.importDismiss() }) { Text("Done") } },
             title = { Text("Imported") },
-            text = { Text("Added ${state.importReport?.imported ?: 0} logins to your vault. Now delete the CSV file and empty your trash.") },
+            text = {
+                Text(
+                    "Added ${report?.imported ?: 0} item(s) to your vault" +
+                        (if (notes > 0) " ($notes as secure notes)" else "") +
+                        ". Now delete the CSV file and empty your trash.",
+                )
+            },
         )
+    }
+}
+
+/** One named report bucket: "$title (n):" + the names — enumerate BY NAME, never bare
+ *  counts (house rule) — collapsed past six with a keyboard-reachable "Show all". */
+@Composable
+private fun ImportBucket(title: String, names: List<String>, error: Boolean = false) {
+    if (names.isEmpty()) return
+    var expanded by remember(names) { mutableStateOf(false) }
+    val tint = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+    Spacer(Modifier.height(6.dp))
+    Text("$title (${names.size}):", style = MaterialTheme.typography.bodySmall, color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+    val shown = if (expanded || names.size <= 6) names else names.take(5)
+    shown.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = tint) }
+    if (!expanded && names.size > 6) TextButton(onClick = { expanded = true }) { Text("Show all ${names.size}") }
+}
+
+/**
+ * Display names keyed on ImportFormat.name STRINGS — the three new core constants land in
+ * a parallel workstream and "1password" can't be a Kotlin identifier, so this file doesn't
+ * hard-reference a guessed spelling (an unknown constant degrades to its lowercase name).
+ */
+private fun formatLabel(f: CsvImport.ImportFormat): String = when (f.name) {
+    "CHROME" -> "Chrome/Chromium"
+    "FIREFOX" -> "Firefox"
+    "BITWARDEN" -> "Bitwarden"
+    "ONEPASSWORD", "ONE_PASSWORD" -> "1Password"
+    "LASTPASS" -> "LastPass"
+    else -> f.name.lowercase()
+}
+
+/** A9: "row N (file line M)" — a multi-line quoted note makes the physical line unmatchable
+ *  to the row a spreadsheet shows, so lead with the data-row ordinal (core's
+ *  [CsvImport.rowOrdinalsByLine], the same reader parse uses). Falls back to the file line
+ *  alone if an error line somehow isn't in the map. */
+private fun rowErrorLine(e: CsvImport.RowError, ordinals: Map<Int, Int>): String {
+    val where = ordinals[e.line]?.let { "row $it (file line ${e.line})" } ?: "file line ${e.line}"
+    return "$where — " + when (e.code) {
+        "wrong_field_count" -> "wrong number of columns"
+        "bad_quote" -> "unclosed quote"
+        else -> e.code
     }
 }
 
@@ -700,7 +842,9 @@ private fun Editor(
             ) else initial.card,
             attachments = attachments)
         Primary("Save", name.isNotBlank() && !busy, busy) {
-            val normalizedTotp = if (isLogin) normalizeTotp(totp) else ""
+            // A5: ONE shared byte-exact TOTP normalize — core Totp.normalize (the private
+            // copy this file carried is deleted). Blank stays blank (stored null by builtDoc).
+            val normalizedTotp = if (isLogin && totp.isNotBlank()) Totp.normalize(totp) else ""
             if (isLogin && totp.isNotBlank() && runCatching { Totp.parseUri(normalizedTotp) }.isFailure) {
                 totpError = "TOTP secret isn't valid base32 or an otpauth:// link"
             } else {
@@ -1130,13 +1274,6 @@ private fun humanSize(bytes: Long): String {
     var i = -1
     while (v >= 1024 && i < units.lastIndex) { v /= 1024; i++ }
     return String.format(Locale.ROOT, "%.1f %s", v, units[i])
-}
-
-private fun normalizeTotp(input: String): String {
-    val t = input.trim()
-    if (t.isEmpty()) return ""
-    if (t.startsWith("otpauth://", ignoreCase = true)) return t
-    return runCatching { Base32.decode(t); "otpauth://totp/andvari?secret=${t.replace(" ", "")}" }.getOrDefault(t)
 }
 
 private fun needsUpdateLine(n: Int): String =

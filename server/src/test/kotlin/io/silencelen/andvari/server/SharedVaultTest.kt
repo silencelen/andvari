@@ -294,8 +294,9 @@ class SharedVaultTest : P4TestSupport() {
     @Test
     fun migration_v2ToV3_addsNullableSealedVk() {
         val dbFile = File(tmpDir, "v2fixture-${System.nanoTime()}.db")
-        // Hand-build a v2-shaped DB: meta(schemaVersion=2) + the v1 grants/vaults tables
-        // (no sealedVk; vaults included because the v4 lifecycle migration ALTERs it too).
+        // Hand-build a v2-shaped DB: meta(schemaVersion=2) + the v1 grants/vaults/items
+        // tables (no sealedVk; vaults included because the v4 lifecycle migration ALTERs
+        // it too, items because the v5 tombstone index is created on it).
         DriverManager.getConnection("jdbc:sqlite:${dbFile.absolutePath}").use { c ->
             c.createStatement().use { st ->
                 st.executeUpdate("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -304,24 +305,30 @@ class SharedVaultTest : P4TestSupport() {
                     """CREATE TABLE grants(vaultId TEXT NOT NULL, userId TEXT NOT NULL, role TEXT NOT NULL,
                        wrappedVk TEXT NOT NULL, rev INTEGER NOT NULL, revokedAt INTEGER, PRIMARY KEY(vaultId,userId))""",
                 )
+                st.executeUpdate(
+                    """CREATE TABLE items(itemId TEXT PRIMARY KEY, vaultId TEXT NOT NULL, rev INTEGER NOT NULL,
+                       createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
+                       conflict INTEGER NOT NULL DEFAULT 0, formatVersion INTEGER NOT NULL,
+                       attachmentIds TEXT NOT NULL DEFAULT '[]', blob TEXT, blobSize INTEGER NOT NULL DEFAULT 0)""",
+                )
                 st.executeUpdate("INSERT INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES('v','u','owner','wv',1)")
                 st.executeUpdate("INSERT INTO meta(key,value) VALUES('schemaVersion','2')")
             }
         }
 
-        // Opening through Db() runs the v3 (and then v4 lifecycle) migration chain.
+        // Opening through Db() runs the v3 (and then v4 lifecycle + v5 index) migration chain.
         Db(dbFile.absolutePath).use { db ->
             val (version, sealed) = db.read { c ->
                 val v = c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) }
                 val s = c.queryOne("SELECT sealedVk FROM grants WHERE userId='u'") { rs -> rs.getString(1) }
                 v to s
             }
-            assertEquals("4", version)
+            assertEquals("5", version)
             assertNull(sealed, "the pre-existing v2 grant reads back sealedVk=NULL")
         }
         // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("4", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("5", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

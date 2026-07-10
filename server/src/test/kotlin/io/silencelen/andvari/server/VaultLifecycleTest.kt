@@ -976,7 +976,8 @@ class VaultLifecycleTest : LifecycleTestSupport() {
     @Test
     fun migration_v3ToV4_additiveAndIdempotent() {
         val dbFile = File(tmpDir, "v3fixture-${System.nanoTime()}.db")
-        // Hand-build a v3-shaped DB: meta(schemaVersion=3), v1 vaults, v3 grants.
+        // Hand-build a v3-shaped DB: meta(schemaVersion=3), v1 vaults + items, v3 grants
+        // (items because the v5 tombstone index is created on it).
         DriverManager.getConnection("jdbc:sqlite:${dbFile.absolutePath}").use { c ->
             c.createStatement().use { st ->
                 st.executeUpdate("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -984,6 +985,12 @@ class VaultLifecycleTest : LifecycleTestSupport() {
                 st.executeUpdate(
                     """CREATE TABLE grants(vaultId TEXT NOT NULL, userId TEXT NOT NULL, role TEXT NOT NULL,
                        wrappedVk TEXT NOT NULL, rev INTEGER NOT NULL, revokedAt INTEGER, sealedVk TEXT, addedAt INTEGER, PRIMARY KEY(vaultId,userId))""",
+                )
+                st.executeUpdate(
+                    """CREATE TABLE items(itemId TEXT PRIMARY KEY, vaultId TEXT NOT NULL, rev INTEGER NOT NULL,
+                       createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
+                       conflict INTEGER NOT NULL DEFAULT 0, formatVersion INTEGER NOT NULL,
+                       attachmentIds TEXT NOT NULL DEFAULT '[]', blob TEXT, blobSize INTEGER NOT NULL DEFAULT 0)""",
                 )
                 st.executeUpdate("INSERT INTO vaults(vaultId,type,rev,metaBlob,createdAt) VALUES('v','shared',1,'m',1)")
                 st.executeUpdate("INSERT INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES('v','u','owner','wv',1)")
@@ -994,22 +1001,23 @@ class VaultLifecycleTest : LifecycleTestSupport() {
 
         Db(dbFile.absolutePath).use { db ->
             db.read { c ->
-                assertEquals("4", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
+                assertEquals("5", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
                 // Pre-v4 rows read back NULL lifecycle state, transferSeq=0.
                 val v = c.queryOne("SELECT deletedAt, purgeAt, purgedAt, deleteId, transferSeq, pendingOfferId FROM vaults WHERE vaultId='v'") { rs ->
                     listOf(rs.getObject(1), rs.getObject(2), rs.getObject(3), rs.getObject(4), rs.getLong(5), rs.getObject(6))
                 }!!
                 assertEquals(listOf(null, null, null, null, 0L, null), v)
                 assertNull(c.queryOne("SELECT revokedReason FROM grants WHERE userId='u'") { it.getString(1) })
-                // The partial purge index exists.
+                // The partial purge index exists; so does the v5 tombstone index (F56).
                 assertNotNull(c.queryOne("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_vaults_purge'") { it.getString(1) })
+                assertNotNull(c.queryOne("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_items_deleted_updated'") { it.getString(1) })
                 // 410 machinery untouched.
                 assertEquals("0", c.queryOne("SELECT value FROM meta WHERE key='oldestRetainedRev'") { it.getString(1) })
             }
         }
-        // Re-opening is idempotent (already v4 — the ALTERs do not re-run).
+        // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("4", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("5", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

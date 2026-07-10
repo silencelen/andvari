@@ -316,5 +316,20 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 5) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // F56 (guided-importers perf pack): tombstone partial index. The F49
+                    // janitor retention scan (`deleted=1 AND updatedAt<?`) was a full items
+                    // SCAN that grows with vault size forever, while tombstones stay bounded
+                    // at 30 days — measured 9 ms → 0.34 ms at 10k items / 200 tombstones
+                    // (perf addendum §4). Partial index = O(tombstones) storage, no write
+                    // cost on the hot put path (live rows are outside the predicate).
+                    // Additive O(n-scan-once) migration; no wire or behavior change.
+                    st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_items_deleted_updated ON items(updatedAt) WHERE deleted=1")
+                    st.executeUpdate("UPDATE meta SET value='5' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }

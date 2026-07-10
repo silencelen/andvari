@@ -169,6 +169,13 @@ Prioritized; each is additive and back-compatible.
   has an `ImportFormat` seam). Cross-platform (web + natives). Eases the switch away from a
   previous manager — the natural companion to the vault-lifecycle work (people arrive, people
   leave). Do the Chromium-family UI first as a quick win; add adapters incrementally.
+  **DONE 2026-07-09 — 0.8.0 release.** All 8 sources guided on web+Android+desktop (desktop
+  gained the whole import flow); Bitwarden/1Password/LastPass adapters on both impls,
+  vector-pinned (`import-foreign.json`); F75 vault-aware dedupe (personal-vault scope,
+  zero-destruction, refuse-not-degrade); F56 measured at 10k + three server fixes applied
+  (pull UNION-ALL rewrite, GC out of the DB lock, tombstone partial index — addendum doc).
+  Deferred, recorded in the design doc: LastPass template parsing, 1pux adapter, pull
+  paging (recommend-only), web list virtualization at >500 items.
 
 ## Horizons & cycle doctrine (2026-07-08 brainstorm — the spine behind the queues)
 

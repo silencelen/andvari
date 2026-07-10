@@ -416,7 +416,8 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
             TopAppBar(
                 title = { Text("andvari", style = MaterialTheme.typography.titleLarge) },
                 actions = {
-                    IconButton(onClick = { importPicker.launch(arrayOf("*/*")) }) { Icon(Icons.Default.FileUpload, "import CSV") }
+                    // Guided importers (design 2026-07-09): source picker first, THEN the file picker.
+                    IconButton(onClick = { vm.importBegin() }) { Icon(Icons.Default.FileUpload, "import CSV") }
                     IconButton(onClick = { vm.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
                     IconButton(onClick = { vm.openSharing() }) { Icon(Icons.Default.Group, "sharing") }
                     IconButton(onClick = { vm.openTrash() }) { Icon(Icons.Default.Delete, "trash") }
@@ -472,9 +473,54 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                     }
                 }
             }
+            ImportSourceDialog(vm, ui) { importPicker.launch(arrayOf("*/*")) }
             ImportDialogs(vm, ui)
         }
     }
+}
+
+/**
+ * Guided source picker (design 2026-07-09): the 8 named sources, each a short export
+ * instruction block + the file input, in this file's dialog idiom. Selection tailors the
+ * instructions and the post-parse mismatch hint ONLY — header detection stays
+ * authoritative, so any supported export imports fine under any source.
+ */
+@Composable
+private fun ImportSourceDialog(vm: AndvariViewModel, ui: UiState, onChooseFile: () -> Unit) {
+    if (!ui.importSourceSheet) return
+    val source = ui.importSource
+    AlertDialog(
+        onDismissRequest = vm::importSheetDismiss,
+        confirmButton = {
+            if (source != null) {
+                TextButton(onClick = { vm.importChooseFile(); onChooseFile() }) { Text("Choose file") }
+            }
+        },
+        dismissButton = { TextButton(onClick = vm::importSheetDismiss) { Text("Cancel") } },
+        title = { Text(if (source == null) "Import passwords from…" else "Import from ${source.label}") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (source == null) {
+                    Text(
+                        "Where is your export from? This only tailors the steps — the file itself decides how it's read.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    ImportSource.values().forEach { s ->
+                        TextButton(onClick = { vm.importSourcePick(s) }, modifier = Modifier.fillMaxWidth()) {
+                            Text(s.label, Modifier.fillMaxWidth())
+                        }
+                    }
+                } else {
+                    source.steps.forEachIndexed { i, step ->
+                        Text("${i + 1}. $step", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 3.dp))
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    TextButton(onClick = vm::importSourceBack) { Text("My file is from somewhere else") }
+                }
+            }
+        },
+    )
 }
 
 /** The three CSV-import dialogs (parse error → preview/confirm+progress+retry → done). */
@@ -503,18 +549,39 @@ private fun ImportDialogs(vm: AndvariViewModel, ui: UiState) {
                 dismissButton = { TextButton(onClick = vm::importDismiss, enabled = !ui.importBusy) { Text("Cancel") } },
                 title = { Text("Import passwords?") },
                 text = {
-                    Column {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
                         Text(
-                            "⚠ This file holds every password in plaintext. Nothing is uploaded — each login is encrypted on this device. Afterwards, delete the CSV and empty the trash. Re-importing the same file makes duplicates.",
+                            "⚠ This file holds every secret in plaintext. Nothing is uploaded — each item is encrypted on this device. Afterwards, delete the CSV and empty the trash.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                         )
                         Spacer(Modifier.height(8.dp))
-                        Text("From ${ui.importFormat?.name?.lowercase() ?: "browser"} export:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("From ${ui.importFormat?.let { importFormatLabel(it) } ?: "browser"} export:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        // Post-parse info lines (calm): source-vs-detected mismatch + A10 mangle.
+                        ui.importFormatNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 2.dp)) }
+                        ui.importMangleNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 2.dp)) }
                         Text("• ${report.imported} to import", style = MaterialTheme.typography.bodySmall)
-                        if (report.collapsed > 0) Text("• ${report.collapsed} exact duplicates merged", style = MaterialTheme.typography.bodySmall)
-                        if (report.flagged.isNotEmpty()) Text("• ${report.flagged.size} renamed (same site, different password)", style = MaterialTheme.typography.bodySmall)
+                        if (report.collapsed > 0) Text("• ${report.collapsed} exact duplicates in the file merged", style = MaterialTheme.typography.bodySmall)
                         if (report.skippedEmpty > 0) Text("• ${report.skippedEmpty} empty rows skipped", style = MaterialTheme.typography.bodySmall)
-                        if (report.errors.isNotEmpty()) Text("• ${report.errors.size} rows skipped (parse errors)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        // Every bucket enumerates BY NAME (house rule), collapsed when long.
+                        ImportBucket("imported as secure notes:", report.noteItems)
+                        ImportBucket("already in your vault — skipped:", report.alreadyInVault)
+                        ImportBucket("same site + username but a different password — imported separately; review which password is current:", report.passwordDiffers)
+                        ImportBucket("same site + username but a different 2FA secret — imported separately; review which is current:", report.totpDiffers)
+                        ImportBucket("renamed — the name was already taken:", report.flagged)
+                        ImportBucket("archived in the export — not imported:", report.archivedSkipped)
+                        ImportBucket("of a type this import doesn’t understand — skipped:", report.unknownTypeSkipped)
+                        ImportBucket("with an unsupported one-time-code secret — kept as text in the item’s notes:", report.totpUnsupported)
+                        if (report.errors.isNotEmpty()) {
+                            Spacer(Modifier.height(6.dp))
+                            Text("${report.errors.size} row(s) couldn’t be read:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            report.errors.forEach { err ->
+                                // A9: lead with the data-row ordinal — a multi-line quoted
+                                // note makes the physical line unmatchable to the row a
+                                // spreadsheet shows (core's rowOrdinalsByLine, same reader).
+                                val where = ui.importRowOrdinals[err.line]?.let { "row $it (file line ${err.line})" } ?: "file line ${err.line}"
+                                Text("• $where: ${importRowErrorLabel(err.code)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
                         ui.importProgress?.let { (done, total) ->
                             Spacer(Modifier.height(10.dp))
                             LinearProgressIndicator(progress = { if (total > 0) done.toFloat() / total else 0f }, modifier = Modifier.fillMaxWidth())
@@ -531,9 +598,31 @@ private fun ImportDialogs(vm: AndvariViewModel, ui: UiState) {
             onDismissRequest = vm::importDismiss,
             confirmButton = { TextButton(onClick = vm::importDismiss) { Text("Done") } },
             title = { Text("Imported") },
-            text = { Text("Added ${ui.importReport?.imported ?: 0} logins to your vault. Now delete the CSV file and empty your trash.") },
+            text = { Text("Added ${ui.importReport?.imported ?: 0} item(s) to your vault. Now delete the CSV file and empty your trash.") },
         )
     }
+}
+
+/** Import-report bucket: title (with count) + names, collapsed past [collapseAt] — the
+ *  house rule is enumerate-by-name, never a bare count, but a 500-name list must not
+ *  swallow the dialog. Empty → renders nothing. */
+@Composable
+private fun ImportBucket(title: String, names: List<String>, collapseAt: Int = 5) {
+    if (names.isEmpty()) return
+    var expanded by remember(names) { mutableStateOf(false) }
+    Spacer(Modifier.height(6.dp))
+    Text("${names.size} $title", style = MaterialTheme.typography.bodySmall)
+    val shown = if (expanded || names.size <= collapseAt) names else names.take(collapseAt)
+    shown.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    if (names.size > collapseAt) {
+        TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Show fewer" else "…and ${names.size - collapseAt} more") }
+    }
+}
+
+private fun importRowErrorLabel(code: String): String = when (code) {
+    "wrong_field_count" -> "wrong number of fields"
+    "bad_quote" -> "broken quoting"
+    else -> code
 }
 
 /**
@@ -916,7 +1005,9 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
             attachments = attachments,
         )
         PrimaryButton("Save", enabled = name.isNotBlank() && !ui.busy, busy = ui.busy) {
-            val normalizedTotp = if (isLogin) normalizeTotp(totp) else ""
+            // A5: ONE shared TOTP normalize — core Totp.normalize (the private copy this
+            // file carried is deleted). Blank stays blank: normalize is only for values.
+            val normalizedTotp = if (isLogin && totp.isNotBlank()) Totp.normalize(totp) else ""
             if (isLogin && totp.isNotBlank() && runCatching { Totp.parseUri(normalizedTotp) }.isFailure) {
                 totpError = "TOTP secret isn't valid base32 or an otpauth:// link"
             } else {
@@ -1575,13 +1666,6 @@ private fun displayName(ctx: Context, uri: Uri): String {
         }
     }
     return uri.lastPathSegment ?: "file"
-}
-
-private fun normalizeTotp(input: String): String {
-    val t = input.trim()
-    if (t.isEmpty()) return ""
-    if (t.startsWith("otpauth://", ignoreCase = true)) return t
-    return runCatching { io.silencelen.andvari.core.crypto.Base32.decode(t); "otpauth://totp/andvari?secret=${t.replace(" ", "")}" }.getOrDefault(t)
 }
 
 private fun copyToClipboard(ctx: Context, label: String, value: String, clearSeconds: Int) {

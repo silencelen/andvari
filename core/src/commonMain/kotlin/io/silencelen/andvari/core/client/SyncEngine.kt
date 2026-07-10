@@ -180,6 +180,17 @@ class SyncEngine(
     fun item(itemId: String): VaultItem? = cache.getItem(itemId)
 
     /**
+     * Guided importers (design 2026-07-09, amendment A8): the PERSONAL vault's light
+     * projections for the vault-aware import plan — the one engine-owned entry point all
+     * native clients use, so no call site ever maps raw item lists (the web twin is
+     * `store.importProjections()`). Callers gate on the personal vault being present/
+     * hydrated FIRST (refuse-not-degrade); an empty working set here plans as if the
+     * vault were empty, which is only correct once that gate has passed.
+     */
+    fun importProjections(): CsvImport.ImportProjections =
+        CsvImport.projections(items().filter { it.vaultId == account.personalVaultId }.map { it.doc })
+
+    /**
      * Item history (feature): fetch this item's archived versions (server keeps the last 10) and
      * decrypt each under the held VK, newest rev first. Versions that don't decrypt — e.g. sealed
      * under a superseded VK after a rotation — are dropped (bounded history, resets at VK rotation;
