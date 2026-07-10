@@ -121,10 +121,13 @@ describe("DevicesCard origin suppression", () => {
     expect(isExportOriginAllowed(PUBLIC)).toBe(isPrivateOrigin(PUBLIC));
   });
 
-  it("on a private origin advertises the devstore install + a QR", () => {
+  it("on a private origin advertises the devstore install; the QR is behind a default-off toggle", () => {
     const html = renderToStaticMarkup(createElement(DevicesCard, { origin: PRIVATE }));
     expect(html).toContain("devserv.taila2dff2.ts.net");
-    expect(html).toContain("<svg"); // the devstore install QR
+    // Owner dev-note 2026-07-10: the install QR is DEFAULT HIDDEN behind a toggle button —
+    // pin the default (no svg) and the affordance that reveals it.
+    expect(html).not.toContain("<svg");
+    expect(html).toContain("Show QR code");
     expect(html).toContain("Checking…"); // no effect under static markup → manifest null → loading
     expect(html).toContain(PRIVATE); // the "any browser" row shows the current address
   });
