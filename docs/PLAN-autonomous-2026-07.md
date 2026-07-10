@@ -120,13 +120,26 @@ per cycle boundary if still open.
       focus-past-overscan documented as the accepted react-window-parity tradeoff.
       Gates green (web 308, extension 8/8 inside verify.sh, desktop compiles). Web
       deploy checkpoint; F71/F82 ride the 0.10.0 native cut.
-- [ ] **8. Assess-only docs + exploration pass** — `docs/assess/2026-07-ios.md` (honest
-      feasibility: KMP core vs crypto/keystore/autofill surfaces) and
-      `docs/assess/2026-07-passkeys.md` (what passkey support would even mean for a
-      household ZK vault; store-vs-provide split). Plus ONE exploration-lane pass (persona
-      product walk or idea tournament grounded in the tree) → top-3 pitches with honest
-      costs, written to docs/, Telegram statement with the headline. No build without a
-      ratified follow-up plan.
+- [x] **8. Assess-only docs + exploration pass** — **DONE 2026-07-10.** Three grounded docs
+      in `docs/assess/` (claims spot-checked against the tree — e.g. the iOS "2 expect
+      seams" claim verified: `createCryptoProvider` + `openSqlBox` are the only ones):
+      **iOS** — cheap at the core, expensive at the edges (Mac + $99/yr + a 4th client for
+      2 features); recommend PWA polish now, Swift-shell+KMP-core only if a household
+      iPhone user actually demands autofill. **Passkeys** — store is a cards-shaped fv3
+      bump but useless alone; provide is sanctioned only on Android (CredentialProvider,
+      API 34+, L); passkey-UNLOCK of a ZK vault is a dead end (PRF-only, web-only);
+      recommend defer-with-trigger, store+Android-provider as the pre-agreed shape.
+      **Exploration (persona walk)** — day-30 loops are strong; the sharpest pains are
+      enrollment/recovery ceremony landing on the owner. Top-3 pitches: P1 one-scan
+      household onboarding (M, default pick), P2 warm owner-held member escrow (L, a
+      trust-model change), P3 escrow-free guest tier (M-L, public-origin decision).
+      No build — next session pitches a follow-up plan from these + the queued dev-notes.
+
+**PLAN COMPLETE 2026-07-10 — all 8 cycles.** Next session: ratify a successor plan from
+the §"Owner dev-notes queued" items (card/payment unhide + in-page fill + IBAN scope;
+import destination vault picker), the assess-doc pitches (P1 one-scan onboarding is the
+default), the 0.10.0 native cut (F71/F82 + eTLD+1 are sitting on main un-shipped to
+phone/desktop), and extension tier-2 distribution.
 
 ## Standing rules for this run
 
