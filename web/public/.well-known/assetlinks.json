@@ -1,0 +1,8 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.silencelen.andvari",
+    "sha256_cert_fingerprints": ["DB:89:12:87:8E:19:A5:46:80:76:47:FE:DE:95:E8:19:1B:95:DF:76:C2:F3:0D:3E:07:70:30:4C:BF:0E:A2:F6"]
+  }
+}]

@@ -451,8 +451,10 @@ export class ApiClient {
     return this.json<AdminUserSummary[]>("GET", "/api/v1/admin/users");
   }
 
-  adminInvite(email: string, isAdmin: boolean) {
-    return this.json<InviteResponse>("POST", "/api/v1/admin/users", { email, isAdmin });
+  adminInvite(email: string, isAdmin: boolean, ttlMinutes?: number) {
+    // ttlMinutes absent → the server keeps its 72h default; the QR flow passes ~60 min
+    // (the server clamps to [5, 4320]). It is the only containment for a photographed QR.
+    return this.json<InviteResponse>("POST", "/api/v1/admin/users", { email, isAdmin, ttlMinutes });
   }
 
   adminDisableUser(userId: string) {
