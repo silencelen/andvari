@@ -51,10 +51,6 @@ per cycle boundary if still open.
       16451100 → devstore; `.deb` 0.9.0 + manifest merge → CT122 `/downloads` (extension entry
       preserved at 0.7.0); server+web redeployed at 0.9.0 (DB snapshot `pre-090`, schema v5
       untouched, 296 items intact). Windows MSI remains the owner step.
-
-      APK → devstore (`scripts/ship.sh release`), deb → `/downloads` + manifest merge
-      (linux entry only unless the extension changed), full gates on the release commit
-      first. Ships quick-unlock + the QW-2/QW-3 native fixes together. Telegram statement.
 - [ ] **4. skipti-loose-ends** — F18 vault picker for NEW items on both natives (kills
       "silently lands in Personal"; core `saveWithUploads(vaultId)` exists) + vault-name
       tags on rows/detail + desktop Move/Copy (F19 parity); F20 member transparency; LC-1.
