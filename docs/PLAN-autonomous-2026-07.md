@@ -28,8 +28,14 @@ per cycle boundary if still open.
 
 ## The queue
 
-- [ ] **1. QW-3 landing** — adversarial review (wf_cbaf0019-a9e) → fix confirmed findings →
-      re-gate → commit + push. (Build is done and gated; natives ride the 0.9.0 cut.)
+- [x] **1. QW-3 landing** — **DONE 2026-07-10 [`666dba7`].** 3-lens review: 2 confirmed
+      (MEDIUM: the new F12 hard-lock timer made a latent race deterministic —
+      SaveConfirmActivity never mirrored its in-flight save into the process-wide
+      operationInProgress flag, so the timer could close the engine under a running save →
+      failed save + duplicate-on-retry; LOW: bind()/hydrate throw paths leaked the
+      token-holder). Both fixed; 0 refuted. Gates green. Also synced the web + extension
+      `urimatch.ts` NEGATIVE_HINTS mirrors for F11 (cross-module seam the vector caught).
+      Natives ride the 0.9.0 cut (cycle 3).
 - [ ] **2. Quick-unlock (F84 + F61)** — the owner-requested cycle. Order: spec pass FIRST
       (spec 01/05 additions: cacheAllowed gating, the at-rest wrapped-secret row in the
       threat model, the F61 KDF-upgrade-on-full-unlock rule + its quick-unlock interplay,
