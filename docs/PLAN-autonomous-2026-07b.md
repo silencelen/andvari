@@ -61,10 +61,28 @@ owner: park under "Parked for owner", continue with the documented default, neve
       the contract already named uris in the safe subset). The in-page focus dropdown
       remains the primary autofill path, so nothing is lost. Ext bumped 0.8.1→0.9.0.
       **Slotted ahead of S3** — a shipped-defect on the popup's primary action.
-- [ ] **BUG-0 (OPEN, blocked on owner — but the protocol got 10× cheaper): Android 0.10.0
-      import crash** — owner report 2026-07-10: "v0.10.0 for android crashes when trying
-      the import feature"; owner offered wireless debugging. Original triage: NOT R8; NOT
-      the import VM (catches Throwable); NOT the file read; core parse/plan passes tests.
+- [x] **BUG-0 CLOSED — root-caused live + FIXED + SHIPPED 0.10.1 (2026-07-10, `9937401`).**
+      Wireless adb to the owner's Z Fold 7 caught it in one logcat: tapping "Choose file"
+      threw `IllegalArgumentException: Can only use lower 16 bits for requestCode` from
+      `FragmentActivity.startActivityForResult` — androidx.biometric:1.2.0-alpha05 (0.9.0
+      quick-unlock) transitively pins androidx.fragment:1.2.5, whose legacy 16-bit
+      requestCode check collides with activity-compose 1.9.3's result registry.
+      Deterministic since 0.9.0 for every import file-pick; a framework-integration bug
+      the static hunt structurally could not see (the hunt's value: it exonerated
+      everything else and found the crash-screen + the errors-cap defect). Fix = explicit
+      androidx.fragment:1.8.5 pin. Owner dev-note in the same cut: "My file is from
+      somewhere else" moved to the MAIN source list → direct wildcard CSV pick; per-source
+      escape became "← Choose a different source". **Owner verified on-device before
+      ship** (import ran end-to-end; vault 296→297). 0.10.1 SHIPPED EVERYWHERE, all
+      served-bytes verified: devstore APK vc 16499696 (byte-identical to the tested
+      build), deb 0.10.1 → /downloads (manifest merged, ext 0.9.0 preserved), web/server
+      redeployed (snapshot `pre-0101` + vzdump first). MSI remains 0.2.x (owner step,
+      Windows-only). LESSON: device-only framework bugs need a device — the wireless-adb
+      loop (tailnet adb connect, ~5 min) is now the proven cheap path; crash-screen
+      remains the no-adb fallback.
+      ~~Original entry:~~ owner report 2026-07-10: "v0.10.0 for android crashes when trying
+      the import feature". Original triage: NOT R8; NOT the import VM (catches Throwable);
+      NOT the file read; core parse/plan passes tests.
       **ADDENDUM (2026-07-10, 10-agent static+dynamic hunt `wf_1ad64358`, 0 errors):**
       - **NEW OWNER PROTOCOL — no adb/logcat needed.** The shipped APK self-captures
         crashes: `AndvariApplication` writes any uncaught throw (any thread; no coroutine
