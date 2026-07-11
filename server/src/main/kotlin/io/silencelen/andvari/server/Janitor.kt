@@ -1,11 +1,17 @@
 package io.silencelen.andvari.server
 
 /**
- * Vault-lifecycle janitor (spec 02 §7 / spec 03 §11; design 2026-07-07 skipti §4 step 6).
- * v1 scope is deliberately narrow: (a) purge vaults past their grace window, (b) expire
- * transfer offers past expiresAt. NO item-tombstone GC, no `changes` pruning, no
- * mutation-dedup trim, no oldestRetainedRev advancement — the general retention machinery
- * stays dormant (its activation preconditions are normative in spec 02 §7).
+ * Vault-lifecycle + retention janitor (spec 02 §7 / spec 03 §11; designs 2026-07-07
+ * skipti §4 step 6 and 2026-07-10 n2 §5). The sweep set: (a) purge vaults past their
+ * grace window, (b) expire transfer offers past expiresAt, (c) purge item tombstones
+ * past [ITEM_TOMBSTONE_RETENTION_MS], (d) prune `changes` below the fence AND advance
+ * `oldestRetainedRev` in the same tx — floored at MAX(rev) so `currentRev` never
+ * regresses (spec 02 §7 invariants (a)+(b)), (e)–(i) prune dead sessions
+ * ([SESSION_RETENTION_MS]), the mutation-dedup journal ([MUTATION_RETENTION_MS]),
+ * audit rows ([AUDIT_RETENTION_MS]), dead invites ([INVITE_RETENTION_MS]), and stale
+ * hibp_cache rows ([HIBP_RETENTION_MS]). The changes fence REUSES the item-tombstone
+ * horizon by construction: any cursor old enough to have missed a purged tombstone is
+ * behind the fence too, so it gets 410 → full resync instead of resurrecting deletions.
  *
  * Purge is andvari's first data-destruction code (design §14.1), so every destructive
  * statement re-checks `deletedAt/purgeAt/purgedAt` INSIDE the per-vault tx (closes the
@@ -30,18 +36,36 @@ class Janitor(
         val purgedVaults: List<String>,
         val expiredOffers: List<String>,
         val purgedItemTombstones: List<String>,
+        // Per-table prune counts (design 2026-07-10 n2 §5): rows deleted, or — in dry-run —
+        // rows that WOULD have been deleted (nothing is deleted, the fence does not move).
+        val prunedChanges: Long,
+        val prunedSessions: Long,
+        val prunedMutations: Long,
+        val prunedAudit: Long,
+        val prunedInvites: Long,
+        val prunedHibp: Long,
         val dryRun: Boolean,
     )
 
-    suspend fun sweep(nowMs: Long = now()): SweepResult =
-        SweepResult(purgeDueVaults(nowMs), expireTransferOffers(nowMs), purgeOldItemTombstones(nowMs), config.janitorDryRun)
+    suspend fun sweep(nowMs: Long = now()): SweepResult = SweepResult(
+        purgedVaults = purgeDueVaults(nowMs),
+        expiredOffers = expireTransferOffers(nowMs),
+        purgedItemTombstones = purgeOldItemTombstones(nowMs),
+        prunedChanges = pruneChanges(nowMs),
+        prunedSessions = pruneOldSessions(nowMs),
+        prunedMutations = pruneOldMutations(nowMs),
+        prunedAudit = pruneOldAudit(nowMs),
+        prunedInvites = pruneOldInvites(nowMs),
+        prunedHibp = pruneStaleHibpCache(nowMs),
+        dryRun = config.janitorDryRun,
+    )
 
     // ---- (c) F49: item-tombstone retention (30 days) ----
 
     /** Hard-delete item tombstones deleted more than 30 days ago (+ their archived versions), so
      *  Trash is bounded. Dry-run aware; failures are logged, never thrown. Returns the purged ids. */
     fun purgeOldItemTombstones(nowMs: Long): List<String> {
-        val cutoff = nowMs - 30L * 24 * 3600 * 1000 // 30 days
+        val cutoff = nowMs - ITEM_TOMBSTONE_RETENTION_MS
         val due = repo.db.read { c ->
             c.queryAll("SELECT itemId FROM items WHERE deleted=1 AND updatedAt<?", cutoff) { it.getString(1) }
         }
@@ -54,6 +78,112 @@ class Janitor(
             .onFailure { System.err.println("[andvari] janitor: item-tombstone purge failed: $it") }
             .getOrDefault(emptyList())
     }
+
+    // ---- (d) F49: `changes` pruning + oldestRetainedRev fence advancement ----
+
+    /**
+     * Prune `changes` rows below the fence and advance `oldestRetainedRev` in the SAME tx
+     * (spec 02 §7 invariants (a)+(b); design 2026-07-10 n2 §5 + amendments B1/A-fence).
+     * The horizon IS [ITEM_TOMBSTONE_RETENTION_MS] — one constant, never split: a cursor
+     * that predates the fence also predates every purged item tombstone, so it 410s into
+     * a full resync (Service.pull → ResyncRequired) instead of silently keeping deleted
+     * items forever. H is floored at MAX(rev): on an idle server (every row stale) only
+     * the newest row is retained, so `currentRev` (= MAX(rev)) never regresses — a
+     * regression would wedge every up-to-date client in 409 rev_regression until the
+     * next write. Rows below the fence serve no reads (pulls only INSERT + MAX(rev) this
+     * table). Dry-run counts without deleting and does NOT move the fence.
+     */
+    fun pruneChanges(nowMs: Long): Long {
+        val cutoff = nowMs - ITEM_TOMBSTONE_RETENTION_MS
+        if (config.janitorDryRun) {
+            val n = repo.db.read { c ->
+                val maxRev = c.queryOne("SELECT MAX(rev) FROM changes") { rs ->
+                    rs.getLong(1).let { if (rs.wasNull()) null else it }
+                } ?: return@read 0L // empty table: nothing to fence
+                val h = c.queryOne("SELECT MIN(rev) FROM changes WHERE at>=?", cutoff) { rs ->
+                    rs.getLong(1).let { if (rs.wasNull()) null else it }
+                } ?: maxRev
+                if (h <= repo.oldestRetainedRev(c)) 0L
+                else c.queryOne("SELECT COUNT(*) FROM changes WHERE rev<?", h) { it.getLong(1) } ?: 0L
+            }
+            if (n > 0) System.err.println("[andvari] janitor DRY-RUN: would prune $n changes row(s) and advance oldestRetainedRev")
+            return n
+        }
+        return runCatching {
+            val (pruned, from, to) = repo.db.tx { c ->
+                val maxRev = c.queryOne("SELECT MAX(rev) FROM changes") { rs ->
+                    rs.getLong(1).let { if (rs.wasNull()) null else it }
+                } ?: return@tx Triple(0L, 0L, 0L) // empty table: skip the rule entirely
+                // H = oldest rev still inside the horizon; if NO row qualifies (idle
+                // server) H = MAX(rev), retaining exactly the newest row (B1).
+                val h = c.queryOne("SELECT MIN(rev) FROM changes WHERE at>=?", cutoff) { rs ->
+                    rs.getLong(1).let { if (rs.wasNull()) null else it }
+                } ?: maxRev
+                val fence = repo.oldestRetainedRev(c)
+                if (h <= fence) return@tx Triple(0L, fence, fence) // never move the fence backwards
+                val n = c.exec("DELETE FROM changes WHERE rev<?", h).toLong()
+                // Same-tx fence advance (invariant (b)). Raw upsert — NEVER repo.setMeta
+                // here: it opens its own tx and Db.tx is not reentrant (a nested tx
+                // commits the outer work mid-flight; see the auditOn/audit split in Repo).
+                c.exec(
+                    "INSERT INTO meta(key,value) VALUES('oldestRetainedRev',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    h.toString(),
+                )
+                Triple(n, fence, h)
+            }
+            if (to > from) System.err.println("[andvari] janitor: pruned $pruned changes row(s); oldestRetainedRev $from -> $to")
+            pruned
+        }.onFailure { System.err.println("[andvari] janitor: changes prune failed: $it") }
+            .getOrDefault(0L)
+    }
+
+    // ---- (e)–(i) F49: bounded-retention prunes (sessions/mutations/audit/invites/hibp) ----
+
+    /** Shared shape of the simple retention rules: one bounded DELETE, dry-run counts only. */
+    private fun prune(table: String, label: String, where: String, vararg args: Any?): Long {
+        if (config.janitorDryRun) {
+            val n = repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM $table WHERE $where", *args) { it.getLong(1) } ?: 0L }
+            if (n > 0) System.err.println("[andvari] janitor DRY-RUN: would delete $n $label")
+            return n
+        }
+        return runCatching {
+            repo.db.tx { c -> c.exec("DELETE FROM $table WHERE $where", *args).toLong() }
+                .also { if (it > 0) System.err.println("[andvari] janitor: deleted $it $label") }
+        }.onFailure { System.err.println("[andvari] janitor: $label prune failed: $it") }
+            .getOrDefault(0L)
+    }
+
+    /** (e) Dead sessions: revoked >90d ago, or refresh chain expired >90d ago. Rotation does
+     *  NOT set revokedAt (it stamps refreshConsumedAt + inserts a fresh row), so the expiry leg
+     *  is what ages out the ~24 consumed rows/day a healthy device accretes (amendment B2).
+     *  Accepted trade: a consumed token replayed >90d after expiry now yields invalid_refresh
+     *  instead of the refresh_reuse theft-signal + device revoke (unusable either way). */
+    fun pruneOldSessions(nowMs: Long): Long {
+        val cutoff = nowMs - SESSION_RETENTION_MS
+        return prune("sessions", "dead session row(s) past 90d", "(revokedAt IS NOT NULL AND revokedAt<?) OR refreshExpiresAt<?", cutoff, cutoff)
+    }
+
+    /** (f) Mutation-dedup journal >180d. Accepted residual: a >180d replay of a put whose item
+     *  tombstone was ALSO purged resurrects the item as a clean `applied` INSERT (Service.applyPut
+     *  existing==null) — same accepted class as the offline-re-add note on Repo.purgeItem. */
+    fun pruneOldMutations(nowMs: Long): Long =
+        prune("mutations", "mutation-journal row(s) past 180d", "createdAt<?", nowMs - MUTATION_RETENTION_MS)
+
+    /** (g) Audit rows >365d. The off-box copy ships via logback → journald → Loki (PROD-1),
+     *  so the local year is a floor, not the only record. */
+    fun pruneOldAudit(nowMs: Long): Long =
+        prune("audit", "audit row(s) past 365d", "at<?", nowMs - AUDIT_RETENTION_MS)
+
+    /** (h) Dead invites: used >30d ago, or expired >30d ago (the admin UI lists only live ones). */
+    fun pruneOldInvites(nowMs: Long): Long {
+        val cutoff = nowMs - INVITE_RETENTION_MS
+        return prune("invites", "dead invite row(s) past 30d", "(usedAt IS NOT NULL AND usedAt<?) OR expiresAt<?", cutoff, cutoff)
+    }
+
+    /** (i) hibp_cache rows not refreshed in 45d. Reads already ignore rows older than 7d
+     *  (HibpRelay.cacheMaxAgeMs / Repo.hibpCached) — this is space reclaim, not correctness. */
+    fun pruneStaleHibpCache(nowMs: Long): Long =
+        prune("hibp_cache", "stale hibp_cache row(s) past 45d", "fetchedAt<?", nowMs - HIBP_RETENTION_MS)
 
     // ---- (a) vault purge ----
 
@@ -161,5 +291,16 @@ class Janitor(
 
     companion object {
         private const val UNLINK_BATCH = 50
+
+        // Retention horizons (design 2026-07-10 n2 §5 + amendments; named here, no config sprawl).
+        /** Item-tombstone retention AND the `changes`/`oldestRetainedRev` fence horizon — ONE
+         *  constant BY CONSTRUCTION (amendment A-fence), so the two can never drift apart: a
+         *  cursor older than the fence is older than every purged tombstone and full-resyncs. */
+        internal const val ITEM_TOMBSTONE_RETENTION_MS = 30 * Service.DAY_MS
+        internal const val SESSION_RETENTION_MS = 90 * Service.DAY_MS
+        internal const val MUTATION_RETENTION_MS = 180 * Service.DAY_MS
+        internal const val AUDIT_RETENTION_MS = 365 * Service.DAY_MS
+        internal const val INVITE_RETENTION_MS = 30 * Service.DAY_MS
+        internal const val HIBP_RETENTION_MS = 45 * Service.DAY_MS
     }
 }

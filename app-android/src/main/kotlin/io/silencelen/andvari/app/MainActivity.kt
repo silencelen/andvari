@@ -418,11 +418,20 @@ fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
 
 @Composable
 private fun SignInForm(vm: AndvariViewModel, ui: UiState) {
-    // rememberSaveable: rotation / fold-posture change must not wipe a half-typed form.
+    // N2 §4 (design 2026-07-10): the master password must never enter rememberSaveable —
+    // savedInstanceState is a system-managed PLAINTEXT Bundle that can be persisted to disk
+    // for activity recreation. Email stays saveable (rotation / fold-posture change must not
+    // wipe it); re-typing the password after a rare mid-form recreation is the accepted trade.
     var email by rememberSaveable { mutableStateOf("") }
-    var password by rememberSaveable { mutableStateOf("") }
-    var totp by rememberSaveable { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var totp by rememberSaveable { mutableStateOf("") } // deliberately saveable: a 30-second-lived code
     Column(Modifier.fillMaxWidth()) {
+        // F26: session-end explanation (set by the 401-driven sign-out paths) — one quiet
+        // line, cleared on a successful sign-in.
+        ui.lockReason?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+        }
         Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
         SecretField("Master password", password) { password = it }
         if (ui.loginTotpRequired) {
@@ -436,13 +445,17 @@ private fun SignInForm(vm: AndvariViewModel, ui: UiState) {
 
 @Composable
 private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
-    // rememberSaveable: enrollment is the longest form in the app — losing it to a fold
-    // unfold (Activity recreation) was silent data loss.
+    // N2 §4 (design 2026-07-10): enrollment is the longest form in the app, so the NON-SECRET
+    // fields (invite/email/name/typed-fingerprint) stay rememberSaveable — losing them to a
+    // fold unfold (Activity recreation) was silent data loss. The password pair is plain
+    // `remember`: savedInstanceState is a system-managed plaintext Bundle that can be
+    // persisted to disk, and a master password must never land there — a rare mid-form
+    // recreation re-types it, but the rest of the long form survives.
     var invite by rememberSaveable { mutableStateOf("") }
     var email by rememberSaveable { mutableStateOf("") }
     var name by rememberSaveable { mutableStateOf("") }
-    var password by rememberSaveable { mutableStateOf("") }
-    var confirm by rememberSaveable { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
     var fpOk by rememberSaveable { mutableStateOf(false) }
     // spec 04 §2(3): the user TYPES the first 16 sheet chars; the short form is public
     // (first 16 of a served fingerprint), so rememberSaveable is fold-safe AND safe.
@@ -472,24 +485,47 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
         if (confirm.isNotEmpty() && confirm != password) {
             Text("passwords don't match", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
-        if (fp.isEmpty()) {
-            Text("This server has no recovery key configured yet — enrollment is disabled until the escrow ceremony is done.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
-        } else {
-            Spacer(Modifier.height(8.dp))
-            // Deliberately NOT displayed until typed — showing it above the input would
-            // reduce the check to transcription (spec 04 §2(3); web Enroll parity; the
-            // F57 re-seal card already works this way).
-            Text("Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true)
-            if (shortFp.isNotBlank() && !shortOk) {
-                Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        // N2 §3/B4 (design 2026-07-10): four honest states, in web's pinned order
+        // (Welcome.tsx) — fingerprint present wins over everything, then a FAILED probe
+        // (retryable), then probe-in-flight, and only a SUCCESSFUL fetch that returned an
+        // empty fingerprint may claim the ceremony isn't done.
+        when {
+            // (1) Fingerprint known → the enroll ceremony, exactly as before.
+            fp.isNotEmpty() -> {
+                Spacer(Modifier.height(8.dp))
+                // Deliberately NOT displayed until typed — showing it above the input would
+                // reduce the check to transcription (spec 04 §2(3); web Enroll parity; the
+                // F57 re-seal card already works this way).
+                Text("Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true)
+                if (shortFp.isNotBlank() && !shortOk) {
+                    Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                if (shortOk) {
+                    Text("matches — full fingerprint: ${groupHex(fp)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                }
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(fpOk, { fpOk = it }, enabled = shortOk)
+                    Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
+                }
             }
-            if (shortOk) {
-                Text("matches — full fingerprint: ${groupHex(fp)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+            // (2) The policy probe FAILED — don't claim the ceremony isn't done (it may well
+            // be). Web-parity copy (errors.ts POLICY_UNAVAILABLE) + a Retry that re-probes.
+            ui.policyFetchFailed -> {
+                Text("Couldn't load the server's settings — it may be briefly unavailable. Try again in a moment.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
+                OutlinedButton(onClick = vm::retryPolicy, enabled = !ui.busy) {
+                    Text(if (ui.busy) "Retrying…" else "Retry")
+                }
             }
-            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(fpOk, { fpOk = it }, enabled = shortOk)
-                Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
+            // (3) Probe in flight (setBaseUrl's re-probe is async under this shown form) —
+            // a neutral line, never the no-key text.
+            ui.policy == null -> {
+                Text("Checking the server…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+            }
+            // (4) Policy loaded and the fingerprint is genuinely empty → the recovery key
+            // really isn't configured on this server yet.
+            else -> {
+                Text("This server has no recovery key configured yet — enrollment is disabled until the escrow ceremony is done.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
             }
         }
         Spacer(Modifier.height(12.dp))
@@ -563,6 +599,12 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
         Sigil()
         Spacer(Modifier.height(8.dp))
         Text(email, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // F26: why it locked (manual / idle / session ended) — one quiet line, fresh per
+        // lock event, cleared on a successful unlock.
+        ui.lockReason?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Spacer(Modifier.height(24.dp))
         ErrorBar(ui.error, vm::clearError)
         // Runtime notice from a biometric attempt (temp lockout / cancel / biometrics-changed).

@@ -239,9 +239,12 @@ fun Application.andvariModule(services: Services) {
         }
     }
 
-    // Lifecycle janitor (spec 03 §11): vault purge + transfer-offer expiry ONLY.
-    // Daily at 04:30 local, plus one delayed on-boot pass (a server down over 04:30
-    // must not defer a due purge a whole day). ANDVARI_JANITOR_DRYRUN → log-only.
+    // Lifecycle + retention janitor (spec 03 §11, spec 02 §7): vault purge, transfer-offer
+    // expiry, item-tombstone GC, `changes` pruning + the oldestRetainedRev fence, and the
+    // bounded-retention prunes (sessions/mutations/audit/invites/hibp) — Janitor.kt's
+    // header has the full sweep set. Daily at 04:30 local, plus one delayed on-boot pass
+    // (a server down over 04:30 must not defer a due purge a whole day).
+    // ANDVARI_JANITOR_DRYRUN → log-only.
     launch(Dispatchers.IO) {
         delay(5.minutes)
         while (true) {

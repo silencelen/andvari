@@ -241,15 +241,16 @@ table or plaintext column requires updating it in the same change.
 
 ## 7. Tombstones, versions, conflicts
 
-> **Status note (v5):** two kinds of pruning must not be confused. **item_versions IS
-> capped live** — every overwrite keeps only the newest 10 versions per item and
-> hard-deletes the rest (`Repo.archiveVersion`), so an 11th-oldest version is already
-> unrecoverable. What is **dormant** is the *tombstone/oldestRetainedRev* GC and its
-> 410-resync trigger: nothing advances `oldestRetainedRev`, so 410 cannot fire in
-> production and deleted-item tombstones are retained indefinitely. The shared-vault
-> lifecycle design (docs/design/2026-07-07-shared-vault-lifecycle-skipti.md) relies on
-> that tombstone retention (rows carrying sync meaning are never hard-deleted) and records
-> the preconditions any future tombstone-GC activation must satisfy.
+> **Status note (v5; caution satisfied 2026-07-10):** two kinds of pruning must not be
+> confused. **item_versions IS capped live** — every overwrite keeps only the newest 10
+> versions per item and hard-deletes the rest (`Repo.archiveVersion`), so an 11th-oldest
+> version is already unrecoverable. The *tombstone/oldestRetainedRev* GC and its
+> 410-resync trigger — dormant when this note was written — are **now ACTIVE** (n2
+> residue hardening, design 2026-07-10 §5): item tombstones purge at 30 days and the
+> daily janitor advances `oldestRetainedRev` behind a fence keyed to that same horizon.
+> The shared-vault lifecycle design (docs/design/2026-07-07-shared-vault-lifecycle-skipti.md)
+> recorded the (a)–(d) preconditions any activation had to satisfy; the activation
+> record below states how each is met.
 
 **Vault deletion (spec 03 §11):** a soft-delete with a 7-day grace
 (`ANDVARI_VAULT_GRACE_DAYS`) — all rows stay intact and every grant is revoked
@@ -262,14 +263,28 @@ attachment rows/files are deleted, item rows are reduced to permanent ciphertext
 incl. the 0.2.x MSI), `metaBlob` is blanked, and **every** grant's key material is wiped
 (`wrappedVk=''` — the `NOT NULL` sentinel — and `sealedVk=NULL`, active and
 previously-revoked alike). Vault tombstone rows, all grant rows, and skeletal item rows are
-retained indefinitely; `vaultId` is never recycled. The janitor's v1 scope is **vault purge
-+ transfer-offer expiry ONLY** — the general retention machinery above stays dormant; when
-it eventually activates it MUST satisfy the (a)–(d) invariants of that note plus a
-quiet-server integration test (delete → 90d idle → full janitor cycle → all client
-generations converge without 409/410 loops).
+retained indefinitely; `vaultId` is never recycled. The janitor's v1 scope was **vault purge
++ transfer-offer expiry ONLY** — the general retention machinery had to stay dormant until
+it could satisfy the (a)–(d) invariants of that note plus a quiet-server integration test
+(delete → idle past retention → full janitor cycle → all client generations converge
+without 409/410 loops). **Activation record (2026-07-10, n2 residue hardening §5): that
+caution is satisfied, not repealed.** The daily janitor now prunes `changes` and advances
+`oldestRetainedRev` in the SAME transaction, with the fence **keyed to the 30-day
+item-tombstone horizon** — one shared constant (`Janitor.ITEM_TOMBSTONE_RETENTION_MS`), so
+any cursor old enough to have missed a purged tombstone 410s into a full resync (this
+closes the 30–89-day deletion-resurrection window a longer fence would have left).
+Invariant (a) is implemented as a **MAX(rev) floor**: the horizon rev is
+`min(oldest rev inside the window, MAX(rev))`, so on an idle server every stale row below
+the newest is pruned but the MAX(rev) row is always retained and `currentRev` never
+regresses; (b) holds by the same-transaction fence advance; (c) the mutation-dedup journal
+retains 180 days; and (d)'s quiet-server test exists —
+`JanitorTest.quietServer_convergence_afterFullSweep` (delete → idle past the fence → full
+sweep → up-to-date cursor no-ops, stale cursor 410s then converges via `since=0`,
+`currentRev` never regresses).
 
 - **Delete** = tombstone (`deleted=true`, blob dropped, attachments GC'd). Tombstones
-  are GC'd after **90 days**; a client whose cursor predates the oldest retained
+  are GC'd after **30 days** — the same horizon the `oldestRetainedRev` fence is keyed
+  to (above); a client whose cursor predates the oldest retained
   change receives `410 Gone` on sync and MUST full-resync (prevents deletion
   resurrection by stale caches).
 - **item_versions**: on every overwrite (and before every delete) the server archives

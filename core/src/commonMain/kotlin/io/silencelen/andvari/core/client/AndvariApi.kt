@@ -78,7 +78,7 @@ data class Tokens(val accessToken: String, val refreshToken: String)
  * (android versionName, desktop packageVersion) stay equal to it, so a release bump can't
  * skew across artifacts again (0.4.0 shipped with two modules still claiming 0.3.0).
  */
-const val ANDVARI_CLIENT_VERSION = "0.13.0"
+const val ANDVARI_CLIENT_VERSION = "0.13.1"
 
 /**
  * Kotlin API client (sibling of web/src/api/client.ts). Auto-refreshes the access
@@ -177,9 +177,14 @@ class AndvariApi(
         } catch (e: Exception) {
             ApiError("http_${resp.status.value}", resp.status.description)
         }
-        // 426 upgrade_required is the min-version pin firing (spec 03 §1) — surface it
-        // typed so callers can distinguish "this build is banned" from transient errors.
-        if (resp.status.value == 426 || err.error == "upgrade_required") {
+        // upgrade_required is the min-version pin firing (spec 03 §1) — surface it typed
+        // so callers can distinguish "this build is banned" from transient errors. The
+        // BODY code is the contract (the server's pin always sends
+        // ApiError("upgrade_required", …) alongside its 426 — App.kt StatusPages), NOT the
+        // status: a bare 426 from an intermediary/captive portal with a non-JSON body must
+        // fall through to a plain ApiException, never brick the client behind the blocking
+        // upgrade screen.
+        if (err.error == "upgrade_required") {
             return UpgradeRequiredException(err.error, err.message)
         }
         return ApiException(resp.status.value, err.error, err.message)

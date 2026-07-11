@@ -31,13 +31,24 @@ describe("enrolllink.json — parse rows", () => {
   });
 
   it("is TOTAL on truncated links (never throws)", () => {
-    const link = composeEnrollLink("https://vault.example", "tok123", "a@example.com");
+    const link = composeEnrollLink("https://vault.example", "tok123", "a@example.com")!;
     for (let len = 0; len <= link.length; len++) parseEnrollLink(link.slice(0, len));
   });
 });
 
+describe("enrolllink.json — composeRejects (ill-formed UTF-16)", () => {
+  it("returns null for every lone-surrogate row", () => {
+    // The rows carry lone surrogates as \udXXX escapes (raw ones aren't valid UTF-8);
+    // JSON.parse passes them through unpaired. Without the rejection, JSON.stringify
+    // would escape them (\udXXX) while the Kotlin twin U+FFFD-replaces — different links.
+    for (const c of v.composeRejects) {
+      expect(composeEnrollLink(c.o, c.t, c.e), `compose '${c.name}' must reject`).toBeNull();
+    }
+  });
+});
+
 describe("captureEnrollFromLocation + peekPendingEnroll (module-singleton semantics)", () => {
-  const LINK = composeEnrollLink("https://vault.example", "tok123", "a@example.com");
+  const LINK = composeEnrollLink("https://vault.example", "tok123", "a@example.com")!;
   const HASH = "#" + LINK.split("#")[1]!;
   const PAYLOAD: EnrollPayload = { v: 1, o: "https://vault.example", t: "tok123", e: "a@example.com" };
 

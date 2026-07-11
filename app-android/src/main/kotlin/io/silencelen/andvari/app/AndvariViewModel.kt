@@ -76,6 +76,14 @@ import kotlinx.coroutines.withTimeoutOrNull
 private const val UPGRADE_REQUIRED_MSG =
     "This andvari server needs a newer version of the app. Update from the devstore, then reopen andvari."
 
+// F26 (N2 design 2026-07-10 §6/B6): the pinned lock/session-end reason strings — web's exact
+// copy ("Locked after inactivity." is native-only). EXACTLY these three: the "device revoked"
+// string is unreachable on Android (no server-events client — a dead token surfaces as a plain
+// 401), so no revoked variant exists here; do not invent one.
+private const val REASON_LOCKED = "Locked."
+private const val REASON_IDLE = "Locked after inactivity."
+private const val REASON_SESSION_ENDED = "Your session ended — sign in again."
+
 sealed interface Screen {
     data object Loading : Screen
     data object Welcome : Screen
@@ -94,6 +102,22 @@ data class UiState(
     // shows them as a one-line "N items need an app update" banner instead of nothing.
     val needsUpdateCount: Int = 0,
     val policy: ClientPolicy? = null,
+    // N2 §3 (design 2026-07-10): the last ENROLL-FEEDING policy probe (start / setBaseUrl /
+    // retryPolicy) failed — Welcome/Enroll shows the web-parity "couldn't load settings"
+    // message + Retry instead of the "no recovery key configured" lie. Deliberately NEVER set
+    // by the 5-min background poll: unlike web (which nulls policy on failure), natives keep
+    // the last-known policy for the offline gates (cacheAllowed, clipboard windows), so a
+    // transient poll failure must not repaint Welcome. Cleared on every fetch success
+    // (applyPolicy) and at change time by a deliberate server-URL change (setBaseUrl, which
+    // also nulls the old policy → the neutral probe-in-flight state). The lock()/signOut()
+    // reset blocks clear it ONLY when a policy is loaded — a null-policy failure is current,
+    // not stale, and must keep its Retry affordance on Welcome.
+    val policyFetchFailed: Boolean = false,
+    // F26 (N2 §6/B6): why the vault locked / the session ended — one quiet secondary line on
+    // the Unlock screen (and the sign-in surface for the session-end case). Set fresh by each
+    // lock()/session-end path (never carried across events); cleared on successful unlock and
+    // sign-in (toVault) and left null by a deliberate, user-initiated sign-out.
+    val lockReason: String? = null,
     val busy: Boolean = false,
     // F74: quiet background/periodic sync runs under THIS flag, never `busy` — enable-state
     // of every user affordance (Save, buttons, dialogs) keys off `busy` ONLY, so an offline
@@ -466,7 +490,9 @@ class AndvariViewModel(
                 store.loadAccountKeys() ?: run { a.close(); throw e }
             } catch (e: ApiException) {
                 a.close()
-                if (e.status == 401) { OfflineData.purgeRevoked(cacheDir, store, userId); _ui.value = _ui.value.copy(mustChangePassword = false) }
+                // F26: a definitive rejection is a session-end — explain it on the Unlock
+                // surface (B6: a dead token is a plain 401 here; there is no revoked variant).
+                if (e.status == 401) { OfflineData.purgeRevoked(cacheDir, store, userId); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
                 throw e
             } catch (t: Throwable) { a.close(); throw t }
             val acct = try {
@@ -499,7 +525,7 @@ class AndvariViewModel(
      * offline fallbacks, and the process-wide auto-lock gate (shared with autofill).
      */
     private fun applyPolicy(p: ClientPolicy) {
-        _ui.value = _ui.value.copy(policy = p)
+        _ui.value = _ui.value.copy(policy = p, policyFetchFailed = false) // N2 §3: any fetch success clears the failure flag
         store.cacheAllowed = p.offlineCacheAllowed
         store.autoLockSeconds = p.autoLockSeconds
         store.policyFetchedAt = System.currentTimeMillis() // A4: quick-unlock eligibility freshness
@@ -578,13 +604,17 @@ class AndvariViewModel(
             val session = store.load()
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { probe.clientPolicy() }.onSuccess { p ->
-                    applyPolicy(p) // UI state + persisted fallbacks + auto-lock gate
-                    // Policy may forbid the durable cache; honor it the moment we learn it,
-                    // deleting any existing file (spec 02 §8) — but only when no live engine holds
-                    // it (when bound, a later lock/rebind enforces the purge safely).
-                    if (!p.offlineCacheAllowed && session != null && !bound) purgeOfflineData(session.userId)
-                }
+                runCatching { probe.clientPolicy() }
+                    .onSuccess { p ->
+                        applyPolicy(p) // UI state + persisted fallbacks + auto-lock gate
+                        // Policy may forbid the durable cache; honor it the moment we learn it,
+                        // deleting any existing file (spec 02 §8) — but only when no live engine holds
+                        // it (when bound, a later lock/rebind enforces the purge safely).
+                        if (!p.offlineCacheAllowed && session != null && !bound) purgeOfflineData(session.userId)
+                    }
+                    // N2 §3: this probe feeds the Welcome/Enroll gate — record the failure
+                    // honestly (the policy itself stays last-known for the offline gates).
+                    .onFailure { _ui.value = _ui.value.copy(policyFetchFailed = true) }
             } finally {
                 probe.close()
             }
@@ -602,7 +632,12 @@ class AndvariViewModel(
 
     fun setBaseUrl(url: String) {
         store.baseUrl = url.trim().removeSuffix("/")
-        _ui.value = _ui.value.copy(baseUrl = store.baseUrl)
+        // §3/B4(4) (review MED, desktop-twin parity): a deliberate URL change nulls the OLD
+        // server's policy and clears the flag AT CHANGE TIME, so Welcome renders the neutral
+        // "Checking the server…" state during the probe — never the old server's ceremony
+        // (whose stale fingerprint would die in Account.enroll's cross-check) and never a
+        // stale failure whose enabled Retry could race this probe and clobber its result.
+        _ui.value = _ui.value.copy(baseUrl = store.baseUrl, policy = null, policyFetchFailed = false)
         // Re-fetch policy against the new server so the recovery fingerprint / pins update
         // immediately (no app restart needed).
         viewModelScope.launch {
@@ -614,9 +649,35 @@ class AndvariViewModel(
                         // Same policy enforcement as start(): a forbidding server purges the cache.
                         if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
                     }
-                    .onFailure { _ui.value = _ui.value.copy(policy = null) }
+                    // A deliberate URL change invalidates the old server's policy (null stays
+                    // right) — and the probe against the NEW one failed, so say so (N2 §3);
+                    // Welcome must never claim the new server has no recovery key.
+                    .onFailure { _ui.value = _ui.value.copy(policy = null, policyFetchFailed = true) }
             } finally {
                 probe.close()
+            }
+        }
+    }
+
+    /** N2 §3 (design 2026-07-10): Welcome/Enroll's Retry for a failed policy probe — the same
+     *  fetch + enforcement as [setBaseUrl]'s; sets [UiState.policyFetchFailed] on failure and
+     *  clears it on success (via [applyPolicy]). Runs under `busy` so the Retry button can
+     *  disable and show "Retrying…" like every other affordance on the screen. */
+    fun retryPolicy() {
+        if (_ui.value.busy) return
+        _ui.value = _ui.value.copy(busy = true)
+        viewModelScope.launch {
+            val probe = newApi()
+            try { // F74: close() in finally — no throw path may leak the transient probe
+                runCatching { probe.clientPolicy() }
+                    .onSuccess { p ->
+                        applyPolicy(p)
+                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
+                    }
+                    .onFailure { _ui.value = _ui.value.copy(policyFetchFailed = true) }
+            } finally {
+                probe.close()
+                _ui.value = _ui.value.copy(busy = false)
             }
         }
     }
@@ -770,8 +831,9 @@ class AndvariViewModel(
                 a.close()
                 // Definitive rejection: this device's session is dead (e.g. the web password
                 // change revoked every other session, spec 03 §3) — wipe it, including the
-                // persisted F58 flag (store.clear()); mirror the clear into UI state.
-                if (e.status == 401) { purgeOfflineData(session.userId); store.clear(); _ui.value = _ui.value.copy(mustChangePassword = false) }
+                // persisted F58 flag (store.clear()); mirror the clear into UI state, and say
+                // WHY on the Unlock/sign-in surface (F26 session-end reason).
+                if (e.status == 401) { purgeOfflineData(session.userId); store.clear(); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
                 throw e
             } catch (t: Throwable) {
                 a.close(); throw t // F74: a generic throw must never leak the transient client
@@ -1134,12 +1196,13 @@ class AndvariViewModel(
         if (VaultSession.get() == null) {
             // Locked underneath us (autofill gate) — reflect it in the UI. Trash was missing
             // from this list (IA audit): a Trash screen left open must kick to lock like
-            // every other unlocked view.
-            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus || s.screen is Screen.Trash) lock()
+            // every other unlocked view. Idle-class reason (F26): the autofill gate only
+            // drops a session because its idle window expired.
+            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus || s.screen is Screen.Trash) lock(REASON_IDLE)
             return
         }
         if (s.busy || s.importBusy) return
-        if (VaultSession.idleExpired()) lock()
+        if (VaultSession.idleExpired()) lock(REASON_IDLE)
     }
 
     /**
@@ -1160,6 +1223,9 @@ class AndvariViewModel(
         if (_ui.value.busy || _ui.value.importBusy || _ui.value.syncing) return
         _ui.value = _ui.value.copy(syncing = true)
         viewModelScope.launch {
+            // N2 §3/B4: deliberately NO onFailure — the poll must never flip policyFetchFailed
+            // (that flag belongs to the enroll-feeding fetches; the last-known policy stays
+            // live here for the offline gates). Success still clears it via applyPolicy.
             runCatching { current.api.clientPolicy() }.onSuccess { applyPolicy(it) }
             try {
                 syncNow(current.engine)
@@ -1726,7 +1792,9 @@ class AndvariViewModel(
         return "Offline — this exports the vault as of last sync $stamp."
     }
 
-    fun lock() {
+    /** F26: [reason] names WHY for the Unlock screen — [REASON_LOCKED] (manual, the default)
+     *  or [REASON_IDLE] from the idle paths. Set fresh per lock event, never carried. */
+    fun lock(reason: String = REASON_LOCKED) {
         // Close the engine (and its cache DB handle) but KEEP the file — the ciphertext
         // cache is retained on lock (spec 05 T3); a relaunch hydrates it.
         VaultSession.lock()
@@ -1751,10 +1819,22 @@ class AndvariViewModel(
             // so escrowStale MUST clear on lock — else a "Later"-deferred re-seal card shows on
             // the lock screen with a dead action (engine torn down). Fresh unlock re-reads it.
             escrowStale = false, escrowFingerprint = "",
+            // N2 §3/§6 (review MED): clear the probe-failure flag only when a policy is
+            // LOADED — then it's stale noise. With policy == null the failure is CURRENT
+            // (nothing re-probes on the way to Welcome), and clearing it would strand the
+            // enroll tab in the probe-in-flight "Checking the server…" text with no Retry
+            // and no probe. Web parity: signOut never clears policyError either. The lock
+            // reason is THIS event's — fresh, never carried.
+            policyFetchFailed = _ui.value.policy == null && _ui.value.policyFetchFailed,
+            lockReason = reason,
         )
     }
 
-    fun signOut() {
+    /** F26: [reason] is non-null only when a dead session FORCES a sign-out (no such caller
+     *  exists today — the unlock-time 401 paths set [REASON_SESSION_ENDED] directly instead);
+     *  both live call sites are USER-initiated (Unlock screen, upgrade-screen escape) and take
+     *  the default — a deliberate sign-out needs no explanation line on Welcome. */
+    fun signOut(reason: String? = null) {
         if (_ui.value.busy) return
         val session = store.load()
         val current = VaultSession.get()
@@ -1803,6 +1883,13 @@ class AndvariViewModel(
                 undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
                 copyProgress = null, copiedNote = null, copyVaultId = null, moveProgress = null,
                 escrowStale = false, escrowFingerprint = "", // P4: global ReSealCard must not linger on Welcome
+                // N2 §3/§6 (review MED): a probe failure with NO policy loaded is current,
+                // not stale — keep it so Welcome shows the failure + Retry instead of the
+                // dead-end "Checking the server…" (nothing re-probes on this path). With a
+                // policy loaded, clear as before. The reason line shows only for a
+                // session-end sign-out (user-initiated passes null).
+                policyFetchFailed = _ui.value.policy == null && _ui.value.policyFetchFailed,
+                lockReason = reason,
             )
         }
     }
@@ -1892,7 +1979,9 @@ class AndvariViewModel(
     }
 
     private fun toVault() {
-        _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null, loginTotpRequired = false, quickUnlockMessage = null)
+        // lockReason clears HERE — the one success landing shared by unlock, sign-in, quick
+        // unlock, and enroll (F26: the explanation must not outlive the event it explains).
+        _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null, loginTotpRequired = false, quickUnlockMessage = null, lockReason = null)
         refreshLifecycle()
         refreshQuickUnlockState() // may surface the one-time enrollment offer card
     }
