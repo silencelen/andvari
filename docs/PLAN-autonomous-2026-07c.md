@@ -103,8 +103,28 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
       skipped.undecryptable; spec02-1 metaV regression check unimplemented on all clients;
       spec03-01 no global request-body limit; spec01-f61 KDF-upgrade re-key is
       Android-only).
-- [ ] **E1. (RATIFIED 2026-07-11 — owner: "E1 now, A1 next session") Extension hardening —
-      cut ext 0.10.0.** ~10 S items, one module, security-adjacent (ledger §E1): X-Andvari-Client
+- [x] **E1. DONE — SHIPPED extension 0.10.0 (2026-07-11, `fd8d4a8`, pushed).** Extension
+      hardening (was: cut ext 0.10.0).
+      All 10 items landed (13 findings; 3 merge pairs): E1-1 identityPub derive-and-compare
+      (spec 01 §5 tripwire, hard-fault before decrypt) · E1-2 X-Andvari-Client `extension`
+      token + minimal 426 surface (min-version net can now reach the extension, zero server
+      change) · E1-3 error taxonomy (codes cross the seam, copy in new chrome-free errors.ts,
+      verbatim web ladder) · E1-4 clipboard auto-clear (layered local timers + SW alarm
+      backstop; Chrome offscreen, Firefox event-page) · E1-5 locked-save copy + post-unlock
+      re-offer · E1-6 rescue-password nudge · E1-7 F26 lock-reason line · E1-8 TOTP
+      determinism backport + native totp.json execution · E1-9 refresh transient-keep +
+      consume-persist-guard (no spent-token resurrection → refresh_reuse) · E1-10 -scripting.
+      Doctrine ran full: design (`docs/design/2026-07-11-extension-hardening.md`) → breaker
+      (1 BLOCKER — offscreen empty-string execCommand silently no-ops; + 8 binding
+      amendments, all folded pre-build) → 2 Opus builders, disjoint files + pinned seam
+      (first Fable pair died on a credit limit mid-build; B's partial finished not
+      discarded) → gates (tsc clean, node --test 30/30, build+package emit offscreen) →
+      find→refute review (6 dims → refuter each; the security dim re-run after a misfire) =
+      **0 confirmed defects** → snapshot-first ship (manifest backed up `manifest.json.bak-
+      pre-ext-0100`; NO vzdump — zero server/jar/schema touch) → byte-verified served zip
+      shas (chrome 9f7cf3d3…, firefox e651f8d7…) + manifest 0.10.0 with `linux` 0.14.2
+      preserved + healthz 200 → pushed. Telegram statement sent. **Owner step unchanged:
+      load-unpacked the 0.10.0 build (was 0.9.0).** ~10 S items, one module, security-adjacent (ledger §E1): X-Andvari-Client
       header + a minimal 426 surface (today a min-version pin can NEVER gate the extension);
       clipboard auto-clear (spec 01 §8 says every client); TOTP determinism backport + run
       spec/test-vectors/totp.json; identityPub mismatch check on unlock (spec 01 §5 MUST);
