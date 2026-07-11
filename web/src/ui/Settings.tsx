@@ -16,31 +16,49 @@ interface Props {
   account: Account;
   policy: ClientPolicy | null;
   onPasswordChanged: () => void;
+  // IA P3: backups are actionable from here now (the card used to only point at the toolbar).
+  // Undefined on the public break-glass origin (export is suppressed there), which also hides
+  // the buttons — so the card degrades to describe-only, exactly as before, on that origin.
+  onBackup?: () => void;
+  onCsv?: () => void;
 }
 
-export function Settings({ client, account, policy, onPasswordChanged }: Props) {
+export function Settings({ client, account, policy, onPasswordChanged, onBackup, onCsv }: Props) {
+  // IA P2: the install hub (a whole feature) was Settings' last card and dominated it — its own
+  // sub-page now, reached from a link, symmetric with how the natives reach Autofill status.
+  const [sub, setSub] = useState<"main" | "devices">("main");
+  if (sub === "devices") {
+    return (
+      <div>
+        <ViewHeader title="Your devices" actions={<button type="button" className="link" onClick={() => setSub("main")}>‹ Back to settings</button>} />
+        <DevicesCard />
+      </div>
+    );
+  }
   return (
     <div>
       <ViewHeader title="Settings" />
       <IdentityCard account={account} />
-      <BackupCard account={account} />
+      <BackupCard account={account} onBackup={onBackup} onCsv={onCsv} />
       <TotpCard client={client} />
       <PasswordCard client={client} account={account} policy={policy} onPasswordChanged={onPasswordChanged} />
-      <DevicesCard />
+      <div className="sheet">
+        <button type="button" className="link" onClick={() => setSub("devices")}>Get andvari on your other devices →</button>
+      </div>
     </div>
   );
 }
 
 // ---- backups (spec 07 §2.6 — lastExportAt is recorded LOCALLY, never server-side) ----
 
-function BackupCard({ account }: { account: Account }) {
+function BackupCard({ account, onBackup, onCsv }: { account: Account; onBackup?: () => void; onCsv?: () => void }) {
   const last = readLastExportAt(account.userId);
   const nudge = backupNudge(last);
   return (
     <div className="sheet">
       <h2>Backups</h2>
       <p className="muted" style={{ marginTop: 0 }}>
-        Encrypted backups are made from the Vault view — “Back up vault…”. This device only
+        An encrypted backup is one file only your backup passphrase can open. This device only
         remembers when it last made one; the server is never told.
       </p>
       <div className="field">
@@ -48,6 +66,12 @@ function BackupCard({ account }: { account: Account }) {
         <div>{last !== null ? fmtDate(last) : "never (on this device)"}</div>
       </div>
       {nudge && <p className="muted">{nudge}</p>}
+      {(onBackup || onCsv) && (
+        <div className="actions">
+          {onBackup && <button type="button" className="ghost" onClick={onBackup}>Back up vault…</button>}
+          {onCsv && <button type="button" className="ghost" onClick={onCsv}>Export for another password manager…</button>}
+        </div>
+      )}
     </div>
   );
 }
@@ -129,19 +153,19 @@ function TotpCard({ client }: { client: ApiClient }) {
       setStatus(await client.totpConfirm(code.replace(/\s/g, "")));
       setSetup(null);
       setCode("");
-      setMsg("Server TOTP enrolled. Public (break-glass) sign-ins now require a one-time code.");
+      setMsg("Two-factor sign-in enrolled. Public (break-glass) sign-ins now require a one-time code.");
     });
 
   const disable = () =>
     run(async () => {
       setStatus(await client.totpDisable(code.replace(/\s/g, "")));
       setCode("");
-      setMsg("Server TOTP disabled. This account can no longer sign in from the public address.");
+      setMsg("Two-factor sign-in disabled. This account can no longer sign in from the public address.");
     });
 
   return (
     <div className="sheet">
-      <h2>Two-factor (server TOTP)</h2>
+      <h2>Two-factor sign-in (server)</h2>
       <p className="muted" style={{ marginTop: 0 }}>
         A second factor checked by the server on break-glass sign-ins from the public internet.
         It is separate from your vault crypto — your master password alone still unseals the hoard.

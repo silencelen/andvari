@@ -1106,7 +1106,8 @@ export class VaultStore {
     return [...this.undecryptableGrants].sort();
   }
 
-  /** Vaults soft-hidden in the holding area (no web surface lists these yet — Tier-2 item). */
+  /** Vaults soft-hidden in the holding area (surfaced on Sharing under the trash icon,
+   *  "Recently removed" — read-only; recovery is automatic on restore/re-add). */
   heldVaults(): { vaultId: string; name: string; reason: RemovedReason; verified: boolean; purgeAt?: number; expungeAt: number }[] {
     return [...this.holding.entries()].map(([vaultId, h]) => ({
       vaultId,
