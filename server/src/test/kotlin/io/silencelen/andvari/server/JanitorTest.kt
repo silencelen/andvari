@@ -14,11 +14,12 @@ import kotlin.test.assertTrue
  * per-table horizon prunes for all six tables, the `changes`+`oldestRetainedRev` fence
  * with its MAX(rev) floor (the B1 blocker pin — `currentRev` must never regress), the
  * 410 boundary (cursor at H−1 vs H), the spec 02 §7 invariant-(d) quiet-server
- * convergence, the accepted mutation-replay resurrection class, and dry-run inertness.
- * Rows are aged by writing old timestamps directly (or by sweeping with a future clock,
- * the VaultLifecycleTest idiom) — never by sleeping.
+ * convergence, the accepted mutation-replay resurrection class, dry-run inertness, and
+ * the skeletal-tombstone lifecycle (full horizon from purge, deliberate ageout, and the
+ * fence→re-add handoff — spec 02 §7). Rows are aged by writing old timestamps directly
+ * (or by sweeping with a future clock, the VaultLifecycleTest idiom) — never by sleeping.
  */
-class JanitorTest : P4TestSupport() {
+class JanitorTest : LifecycleTestSupport() {
 
     private fun Services.count(table: String): Long =
         repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM $table") { it.getLong(1) } ?: 0L }
@@ -237,6 +238,84 @@ class JanitorTest : P4TestSupport() {
         assertEquals("applied", replay.results.single().status)
         val resurrected = client.sync(owner, 0).items.single { it.itemId == item }
         assertFalse(resurrected.deleted)
+    }
+
+    // ---- skeletal tombstones (vault purge): full horizon FROM PURGE, then deliberate ageout ----
+
+    @Test
+    fun skeletalTombstones_liveFullHorizonFromPurge_thenAgeOut() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val owner = VirtualClient("owner@x.com", "janitor skel password syv", fast = true)
+        client.register(owner, bootstrapToken)
+        val (createReq, handle) = owner.buildCreateSharedVault()
+        client.createVault(owner, createReq)
+        val itemId = owner.newItemId()
+        client.push(owner, Mutation(uuid(), "put", itemId, handle.vaultId, 0, owner.encItemIn(handle.vaultId, handle.vk, itemId, """{"name":"s"}""")))
+        client.deleteWithProof(owner, handle)
+
+        val purgeClock = now() + 8 * Service.DAY_MS
+        assertEquals(listOf(handle.vaultId), services.janitor.sweep(purgeClock).purgedVaults)
+        // purgeVault restamps updatedAt to the purge instant: the skeletal row's 30d clock
+        // starts at PURGE, not at the item's last real edit (an idle item's stale mtime
+        // would otherwise age its fence out on the very next sweep).
+        assertEquals(
+            purgeClock,
+            services.repo.db.read { c -> c.queryOne("SELECT updatedAt FROM items WHERE itemId=?", itemId) { it.getLong(1) } },
+        )
+        // 29d after purge (37d after the last real edit): rule (c) keeps it — purge-based clock.
+        assertTrue(services.janitor.sweep(purgeClock + 29 * Service.DAY_MS).purgedItemTombstones.isEmpty())
+        assertEquals(1L, services.repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM items WHERE itemId=?", itemId) { it.getLong(1) } })
+        // 31d after purge: the skeletal tombstone ages out like every other tombstone —
+        // rule (c) deliberately has NO vault filter (spec 02 §7: NOT retained indefinitely).
+        assertTrue(services.janitor.sweep(purgeClock + 31 * Service.DAY_MS).purgedItemTombstones.contains(itemId))
+        assertEquals(0L, services.repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM items WHERE itemId=?", itemId) { it.getLong(1) } })
+    }
+
+    // ---- skeletal-fence handoff: denied inside the horizon, accepted re-add class after ----
+
+    @Test
+    fun skeletalFence_teleportDeniedInsideHorizon_thenAcceptedReAdd_sameVaultDeniedForever() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val owner = VirtualClient("owner@x.com", "janitor skel password otte", fast = true)
+        client.register(owner, bootstrapToken)
+        val (createReq, handle) = owner.buildCreateSharedVault()
+        client.createVault(owner, createReq)
+        val itemId = owner.newItemId()
+        client.push(owner, Mutation(uuid(), "put", itemId, handle.vaultId, 0, owner.encItemIn(handle.vaultId, handle.vk, itemId, """{"name":"shared"}""")))
+        client.deleteWithProof(owner, handle)
+        val purgeClock = now() + 8 * Service.DAY_MS
+        assertEquals(listOf(handle.vaultId), services.janitor.sweep(purgeClock).purgedVaults)
+
+        // Inside the horizon the skeletal row keeps the teleport fence alive: an MSI-shaped
+        // re-encrypt under the personal vault is per-mutation denied (vault_mismatch).
+        val denied = client.push(owner, Mutation(uuid(), "put", itemId, owner.personalVaultId, 0, owner.encItem(itemId, """{"name":"teleport"}""")))
+        assertEquals("denied", denied.results.single().status)
+
+        // Past the horizon the skeletal row is GC'd...
+        assertTrue(services.janitor.sweep(purgeClock + 31 * Service.DAY_MS).purgedItemTombstones.contains(itemId))
+        // ...and the same teleport becomes a clean `applied` INSERT into the pusher's OWN
+        // personal vault — the ACCEPTED re-add class (spec 02 §7; same class as the >180d
+        // mutation replay above): client-re-encrypted content, delivered to nobody else.
+        // Sync-honest clients cannot get here by either leg: pre-DELETE cursors sat behind
+        // oldestRetainedRev for the whole grace window (410 → resync → vault absent), and
+        // grace-window cursors were minted by a pull that already delivered the revoked
+        // grant (removedGrantsInfo) — vault-absent by delivery, no 410 needed.
+        // Pinned so a behavior change is loud.
+        val reAdd = client.push(owner, Mutation(uuid(), "put", itemId, owner.personalVaultId, 0, owner.encItem(itemId, """{"name":"re-added"}""")))
+        assertEquals("applied", reAdd.results.single().status)
+        val row = client.sync(owner).items.single { it.itemId == itemId }
+        assertEquals(owner.personalVaultId, row.vaultId)
+        assertFalse(row.deleted)
+
+        // The purged vault ITSELF stays fenced forever — carried by the revoked grants and
+        // the everlasting vault tombstone row, NOT by the skeletal item row.
+        val direct = client.push(owner, Mutation(uuid(), "put", itemId, handle.vaultId, 0, owner.encItemIn(handle.vaultId, handle.vk, itemId, """{"name":"back?"}""")))
+        assertEquals("denied", direct.results.single().status)
+        assertTrue(client.auditRows(owner, "push_denied").any { it.meta == "deleted:${handle.vaultId}:$itemId" })
     }
 
     // ---- dry-run: counts populated, nothing deleted, fence untouched ----

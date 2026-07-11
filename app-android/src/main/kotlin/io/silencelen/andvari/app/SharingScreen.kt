@@ -469,7 +469,10 @@ private fun DeleteVaultControl(vm: AndvariViewModel, ui: UiState, v: VaultInfo) 
         )
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { vm.copyItemsToPersonal(v.vaultId) }, enabled = !ui.busy) {
+            // copyOpVaultId term (review MED): a mid-copy op elsewhere can clear busy while
+            // the rescue still runs — without this term the button re-enables and invites a
+            // second concurrent copy, whose interleaved finish would disarm the A-copyGate.
+            OutlinedButton(onClick = { vm.copyItemsToPersonal(v.vaultId) }, enabled = !ui.busy && ui.copyOpVaultId == null) {
                 // A4: the inline copy display is gated to ITS vault — another vault's
                 // in-flight copy must not relabel this button.
                 Text(ui.copyProgress?.takeIf { ui.copyVaultId == v.vaultId }?.let { (d, t) -> "Copying… $d/$t" } ?: "Copy items to my Personal vault first…")
@@ -504,8 +507,11 @@ private fun DeleteVaultControl(vm: AndvariViewModel, ui: UiState, v: VaultInfo) 
             TextButton(onClick = { open = false; typed = ""; vm.clearCopiedNote() }, enabled = !ui.busy) { Text("Cancel") }
             Spacer(Modifier.width(8.dp))
             TextButton(
+                // A-copyGate: copyOpVaultId is the NON-DISPLAY in-flight marker — busy alone
+                // is not a delete-during-rescue gate (another op finishing re-enables buttons
+                // while the rescue copy still runs).
                 onClick = { open = false; typed = ""; vm.clearCopiedNote(); vm.deleteVault(v.vaultId, v.name) },
-                enabled = !ui.busy && typed == v.name,
+                enabled = !ui.busy && typed == v.name && ui.copyOpVaultId == null,
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             ) { Text("Delete vault") }
         }

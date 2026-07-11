@@ -20,11 +20,24 @@ package io.silencelen.andvari.server
  * sweep is the crash backstop), and ANDVARI_JANITOR_DRYRUN turns the whole sweep into
  * log-only for the first armed week.
  *
- * Retained forever: the vault tombstone row (metaBlob blanked), ALL grant rows (key
- * material blanked: wrappedVk='' — the NOT NULL sentinel — and sealedVk=NULL, active and
- * previously-revoked alike), and item rows as ciphertext-free skeletal tombstones
- * (deleted=1, blob=NULL, NO rev bump — revoked members receive nothing; the rows keep the
- * vault_mismatch / edit-over-tombstone fences alive for every stale client forever).
+ * Retained forever: the vault tombstone row (metaBlob blanked, vaultId never recycled) and
+ * ALL grant rows (key material blanked: wrappedVk='' — the NOT NULL sentinel — and
+ * sealedVk=NULL, active and previously-revoked alike) — those two are what deny a push
+ * against the purged vault itself for every stale client forever (role==null; the item row
+ * is never read on that path, so the edit-over-tombstone fence never applies post-purge).
+ * Item rows become ciphertext-free skeletal tombstones (deleted=1, blob=NULL, NO rev bump —
+ * revoked members receive nothing; updatedAt restamped to the purge instant) and then age
+ * out through rule (c) like every other tombstone — deliberately NO vault filter there.
+ * Their one post-purge reader is the vault_mismatch teleport fence (applyMutation's global
+ * itemById), and one horizon is enough by a TWO-legged argument: (1) a cursor predating
+ * the DELETE has sat behind `oldestRetainedRev` for at least the full grace window by
+ * skeletal ageout (410 → full resync → vault absent); (2) a cursor minted DURING grace
+ * was minted by a pull that already delivered the revoked grant (removedGrantsInfo), so
+ * vault-absent holds by delivery — that cursor may never 410 at all on an idle server
+ * (MAX(rev) fence floor + strict since<fence). Either leg ends vault-absent, so a
+ * post-horizon teleport re-push degrades into the accepted re-add class (see (f) and
+ * Repo.purgeItem): a clean INSERT of the pusher's OWN re-encrypted copy into their OWN
+ * vault, delivered to nobody else. Pinned in JanitorTest.
  */
 class Janitor(
     private val repo: Repo,
@@ -63,7 +76,9 @@ class Janitor(
     // ---- (c) F49: item-tombstone retention (30 days) ----
 
     /** Hard-delete item tombstones deleted more than 30 days ago (+ their archived versions), so
-     *  Trash is bounded. Dry-run aware; failures are logged, never thrown. Returns the purged ids. */
+     *  Trash is bounded. Deliberately NO vault filter: purged vaults' skeletal tombstones ride the
+     *  same horizon (purgeVault restamps their updatedAt, so they get the full window from purge —
+     *  see the header). Dry-run aware; failures are logged, never thrown. Returns the purged ids. */
     fun purgeOldItemTombstones(nowMs: Long): List<String> {
         val cutoff = nowMs - ITEM_TOMBSTONE_RETENTION_MS
         val due = repo.db.read { c ->
@@ -226,10 +241,13 @@ class Janitor(
                 vaultId, vaultId, nowMs,
             )
             c.exec("DELETE FROM attachments WHERE vaultId=? AND EXISTS($guard)", vaultId, vaultId, nowMs)
-            // Skeletal tombstones: ciphertext gone, rows retained forever, NO rev bump.
+            // Skeletal tombstones: ciphertext gone, NO rev bump. updatedAt is restamped to the
+            // purge instant so rule (c) gives every skeletal row the FULL tombstone horizon from
+            // PURGE (an idle item's stale mtime would otherwise age it out on the next sweep) —
+            // then they age out like any tombstone; retention story in the class header.
             c.exec(
-                "UPDATE items SET deleted=1, conflict=0, blob=NULL, blobSize=0, attachmentIds='[]' WHERE vaultId=? AND EXISTS($guard)",
-                vaultId, vaultId, nowMs,
+                "UPDATE items SET deleted=1, conflict=0, blob=NULL, blobSize=0, attachmentIds='[]', updatedAt=? WHERE vaultId=? AND EXISTS($guard)",
+                nowMs, vaultId, vaultId, nowMs,
             )
             // Blanket wipe of ALL grants' key material — active AND previously-revoked
             // (a removed member's sealedVk must not survive the purge).

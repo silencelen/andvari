@@ -37,7 +37,7 @@ import type {
   WsTicketResponse,
 } from "./types";
 
-export const CLIENT_VERSION = "0.14.1";
+export const CLIENT_VERSION = "0.14.2";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
 
 export class ApiError extends Error {
@@ -81,8 +81,11 @@ function timeoutSignal(ms: number): AbortSignal | undefined {
 
 /**
  * REST client for the andvari server. Holds the token pair, refreshes the access
- * token on 401 and retries, and surfaces 426 (upgrade) / 410 (resync) as typed
- * errors the store handles.
+ * token on 401 and retries. Every refused response throws a typed ApiError: the
+ * store handles 410 (resync from 0), and a 426 `upgrade_required` (min-version pin,
+ * spec 03 §1) additionally fires `onUpgradeRequired` so the app shell can show its
+ * persistent "reload to update" bar — the server serves this very bundle, so only a
+ * stale long-lived tab can sit behind the pin, and a plain reload IS the update.
  *
  * `readPersistedTokens` (optional) reads the pair another TAB may have persisted
  * (ui/session.ts wires it to localStorage) — see tryRefresh: the refresh token is
@@ -105,6 +108,16 @@ export class ApiClient {
   getTokens(): Tokens | null {
     return this.tokens;
   }
+
+  /**
+   * Registered by the app shell (App.tsx), fired by throwApiError when the server
+   * refuses a request with `upgrade_required` (HTTP 426: this bundle is older than
+   * the org's min-version pin, spec 03 §1). Assigned post-construction because the
+   * client is built by ui/session.ts's makeClient, which has no UI concerns. The
+   * refused call still throws its ApiError unchanged — this is a side-channel nudge,
+   * not a replacement error path.
+   */
+  onUpgradeRequired?: () => void;
 
   private async raw(method: string, path: string, body?: unknown, auth = true, attempt = 0): Promise<Response> {
     const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
@@ -236,6 +249,7 @@ export class ApiClient {
     } catch {
       /* non-JSON error body */
     }
+    if (code === "upgrade_required") this.onUpgradeRequired?.();
     throw new ApiError(resp.status, code, message);
   }
 

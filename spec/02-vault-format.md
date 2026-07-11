@@ -257,13 +257,25 @@ table or plaintext column requires updating it in the same change.
 (`revokedReason='vault_delete'`); RESTORE within grace un-revokes exactly those grants and
 re-opens the vault. After the grace the daily **janitor** purges (per-vault tx that
 re-checks `deletedAt/purgeAt` inside every destructive statement): `item_versions` and
-attachment rows/files are deleted, item rows are reduced to permanent ciphertext-free
-**skeletal tombstones** (`deleted=1, blob=NULL`, no rev bump — retained so the
-`vault_mismatch`/edit-over-tombstone fences outlive the ciphertext for every stale client,
-incl. the 0.2.x MSI), `metaBlob` is blanked, and **every** grant's key material is wiped
+attachment rows/files are deleted, item rows are reduced to ciphertext-free
+**skeletal tombstones** (`deleted=1, blob=NULL`, no rev bump, `updatedAt` restamped to the
+purge instant — they keep the `vault_mismatch` teleport fence alive, 0.2.x MSI included,
+for the full 30-day tombstone horizon from purge, then age out with the ordinary tombstone
+GC below; the edit-over-tombstone fence is grant-gated and never reads them post-purge),
+`metaBlob` is blanked, and **every** grant's key material is wiped
 (`wrappedVk=''` — the `NOT NULL` sentinel — and `sealedVk=NULL`, active and
-previously-revoked alike). Vault tombstone rows, all grant rows, and skeletal item rows are
-retained indefinitely; `vaultId` is never recycled. The janitor's v1 scope was **vault purge
+previously-revoked alike). Vault tombstone rows and all grant rows are retained
+indefinitely and `vaultId` is never recycled — that pair is what keeps a push against the
+purged vault itself denied forever. Skeletal item rows are **not** retained indefinitely:
+by the time one ages out, every cursor is vault-absent by one of two legs — (1) a cursor
+predating the DELETE has sat behind the `oldestRetainedRev` fence for at least the full
+grace window (410 → full resync → vault absent); (2) a cursor minted DURING the grace
+window was minted by a pull that already delivered the revoked grant (`removedGrantsInfo`,
+the `g.rev > since` arm), so the vault is absent locally by delivery — such a cursor may
+never 410 at all on an idle server (the MAX(rev) fence floor + strict `since < fence`).
+Either way a post-horizon teleport re-push degrades into the accepted re-add class (a clean INSERT
+of the pusher's own re-encrypted copy into their own vault; pinned in `JanitorTest`, same
+class as the >180d mutation replay). The janitor's v1 scope was **vault purge
 + transfer-offer expiry ONLY** — the general retention machinery had to stay dormant until
 it could satisfy the (a)–(d) invariants of that note plus a quiet-server integration test
 (delete → idle past retention → full janitor cycle → all client generations converge

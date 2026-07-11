@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.app.autofill.ApprovedBrowsers
 import io.silencelen.andvari.app.autofill.AutofillDebugLog
+import io.silencelen.andvari.core.client.autofill.BrowserCertPins
 import io.silencelen.andvari.core.client.autofill.SavedUri
 import io.silencelen.andvari.core.client.autofill.UriMatch
 
@@ -231,6 +232,25 @@ fun AutofillStatusScreen(vm: AndvariViewModel, ui: UiState) {
                 Spacer(Modifier.height(16.dp))
             }
 
+            // ---- section 2c: per-browser reach (2026-07-11 Fold triage: only Brave dispatched natively) ----
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Browser support", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "How login forms in each browser reach andvari. Every browser andvari recognizes is listed, installed or not — if “Last fill request” stays empty after a fill attempt, the fix for that browser is here.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    browserSupportRows().forEach { (name, how) ->
+                        Column(Modifier.padding(vertical = 4.dp)) {
+                            Text(name, style = MaterialTheme.typography.bodyMedium)
+                            Text(how, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+
             // ---- section 3: debug ring buffer ----
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
@@ -304,6 +324,32 @@ private fun uriCensus(docs: List<io.silencelen.andvari.core.client.ItemDoc>): Ur
     return UriCensus(docs.size, logins, web, androidApp, noUri)
 }
 
+/**
+ * "Browser support" card rows: display-name → how a fill request reaches andvari there
+ * (2026-07-11 Fold triage: of the installed browsers only Brave dispatched to us natively).
+ * Derived from [BrowserCertPins.TABLE] so this card can never drift from the trust table;
+ * channel packages (Chrome beta/dev/canary, Firefox flavors, Samsung beta) collapse into one
+ * row via [browserLabel]. Samsung Internet + Edge must stay in lockstep with the
+ * `<compatibility-package>` entries in res/xml/autofill_service.xml.
+ */
+private fun browserSupportRows(): List<Pair<String, String>> {
+    val rows = LinkedHashMap<String, String>()
+    for (pkg in BrowserCertPins.TABLE.keys) {
+        val name = browserLabel(pkg)
+        if (name in rows) continue
+        rows[name] = when (name) {
+            "Brave" -> "Works out of the box — tap “Trust” the first time you fill there."
+            "Chrome" -> "Needs a one-time Chrome setting: Chrome → Settings → Autofill services → “Autofill using another service”, then restart Chrome."
+            "Samsung Internet", "Edge" -> "Supported via compatibility mode: suggestions appear as a dropdown under the field, not above the keyboard. Tap “Trust” the first time you fill there."
+            else -> "Delegates to Android autofill; tap “Trust” on first use."
+        }
+    }
+    // Lead with the browsers that have a specific state/instruction; the sort is stable, so
+    // the generic rows keep their trust-table order.
+    val rank = mapOf("Brave" to 0, "Chrome" to 1, "Samsung Internet" to 2, "Edge" to 3)
+    return rows.entries.sortedBy { rank[it.key] ?: 4 }.map { it.key to it.value }
+}
+
 /** One-line plain-English translation of the terminal reason, for the screenshot. */
 /** Friendly name for a browser package id (the raw id is the fallback). `internal` so the autofill
  *  dropdown's "Trust this browser" row + activity show the same label. */
@@ -315,6 +361,7 @@ internal fun browserLabel(pkg: String): String = when {
     pkg == "com.vivaldi.browser" -> "Vivaldi"
     pkg == "com.duckduckgo.mobile.android" -> "DuckDuckGo"
     pkg == "com.kiwibrowser.browser" -> "Kiwi"
+    pkg == "org.torproject.torbrowser" -> "Tor Browser"
     pkg.startsWith("com.android.chrome") || pkg == "com.google.android.apps.chrome" || pkg.startsWith("com.chrome") -> "Chrome"
     pkg.startsWith("org.mozilla") -> "Firefox"
     else -> pkg

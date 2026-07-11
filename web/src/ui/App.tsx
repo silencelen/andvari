@@ -40,6 +40,10 @@ export function App() {
   // recovery key). Without this, a transient fetch failure shows the scary — and now false —
   // "escrow ceremony isn't done" message during enrollment.
   const [policyError, setPolicyError] = useState(false);
+  // 426 min-version pin tripped (api/client.ts onUpgradeRequired): this tab's bundle
+  // is older than the server's pin, and every gated API call keeps failing until the
+  // tab reloads — sticky once set; only the reload itself clears it.
+  const [upgradeStale, setUpgradeStale] = useState(false);
   const [baseUrl] = useState(defaultBaseUrl());
   const clientRef = useRef<ApiClient | null>(null);
 
@@ -58,6 +62,10 @@ export function App() {
       await initSodium();
       const session = loadSession();
       const client = makeClient(session, baseUrl);
+      // The one client lives for the whole tab (sign-in/lock reuse it), so registering
+      // here covers every phase. Never auto-reload on 426 — an open editor may hold
+      // unsaved work; the bar below leaves the reload to the user.
+      client.onUpgradeRequired = () => setUpgradeStale(true);
       clientRef.current = client;
       await loadPolicy();
       // One-scan onboarding: a captured enroll link is consumed on the signed-OUT Welcome
@@ -200,8 +208,25 @@ export function App() {
       : resolveAutoLockSeconds(fetchedAutoLock, readPersistedAutoLockSeconds(vaultUserId)).seconds;
   useAutoLock(autoLockSeconds, () => lock(inactivityNotice(autoLockSeconds)));
 
+  // 426 nudge: a persistent, non-dismissable slim bar (the Vault mustChange-banner
+  // idiom) above whichever phase shell is showing. App itself never unmounts, so the
+  // bar survives lock/unlock/sign-out and every in-vault navigation; it blocks
+  // nothing — the server serves the web bundle, so the one Reload click IS the update.
+  const withUpgradeBar = (content: JSX.Element): JSX.Element =>
+    upgradeStale ? (
+      <>
+        <div className="banner">
+          <span>This tab is running an older version — reload to update.</span>
+          <button className="link" onClick={() => window.location.reload()}>Reload</button>
+        </div>
+        {content}
+      </>
+    ) : (
+      content
+    );
+
   if (phase.kind === "loading") {
-    return (
+    return withUpgradeBar(
       <div className="auth-shell">
         <div className="card">
           <div className="card-hero" style={{ marginBottom: 0 }}>
@@ -214,7 +239,7 @@ export function App() {
   }
 
   if (phase.kind === "vault") {
-    return (
+    return withUpgradeBar(
       <Vault
         account={phase.account}
         store={phase.store}
@@ -231,7 +256,7 @@ export function App() {
     );
   }
 
-  return (
+  return withUpgradeBar(
     <Welcome
       client={clientRef.current!}
       policy={policy}

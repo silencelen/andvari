@@ -7,4 +7,19 @@
      only ever gets the dropdown. -->
 <autofill-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:supportsInlineSuggestions="true"
-    android:settingsActivity="io.silencelen.andvari.app.MainActivity" />
+    android:settingsActivity="io.silencelen.andvari.app.MainActivity">
+    <!-- 2026-07-11 triage (owner's Fold: only Brave showed suggestions): Samsung Internet
+         and Edge never dispatch fill requests to third-party autofill services natively,
+         so we opt them into the platform's autofill compatibility mode here. Compat mode
+         synthesizes the fill structure from the accessibility tree, and its suggestions
+         surface ONLY as a dropdown anchored to the field, never as the keyboard inline
+         chip (platform limitation of compat mode, not a bug in DatasetBuilder).
+         android:maxLongVersionCode is deliberately omitted (defaults to no upper bound).
+         Chrome is deliberately NOT listed: Google deprecated and removed Chrome's
+         accessibility compat path; the supported route is the in-Chrome user setting
+         "Autofill using another service" (Chrome settings, Autofill services), and our
+         Chrome cert pin is already static so trust works the moment that is enabled. -->
+    <compatibility-package android:name="com.sec.android.app.sbrowser" />
+    <compatibility-package android:name="com.sec.android.app.sbrowser.beta" />
+    <compatibility-package android:name="com.microsoft.emmx" />
+</autofill-service>

@@ -196,10 +196,18 @@ data class UiState(
      *  [copyVaultId] scopes both to the SOURCE vault — set alongside copyProgress in
      *  copyItemsToPersonal, kept while the note is live (the screen-level status line
      *  names the vault through it), cleared wherever copiedNote/copyProgress both clear.
-     *  The in-panel display gates on it, so another vault's panel never claims the copy. */
+     *  The in-panel display gates on it, so another vault's panel never claims the copy.
+     *  The in-flight OP is guarded by [copyOpVaultId], never by these. */
     val copyProgress: Pair<Int, Int>? = null,
     val copiedNote: String? = null,
     val copyVaultId: String? = null,
+    /** A-copyGate: the rescue copy's NON-display OP guard — the vault whose bulk copy is IN
+     *  FLIGHT. Set at copy start, cleared ONLY in the copy's finally; navigation NEVER
+     *  touches it (unlike the display [copyVaultId]). While non-null: checkIdleLock (and the
+     *  autofill idle gate, via the init collector) defers, deleteVault refuses, and the
+     *  Delete/rescue-copy buttons disable — `busy` alone is not a gate (any other op
+     *  finishing mid-copy clears it). */
+    val copyOpVaultId: String? = null,
     /** F19 move/copy attachment re-encryption progress (Detail screen). */
     val moveProgress: Pair<Int, Int>? = null,
     // F57: the account's escrow is sealed to a superseded org recovery key (re-ceremony) — the
@@ -263,18 +271,21 @@ class AndvariViewModel(
                 checkIdleLock()
             }
         }
-        // Mirror the in-flight-op signal (busy || importBusy) into the process-wide
-        // VaultSession so the AUTOFILL entry point's idle-expiry check (getIfFresh)
-        // defers the hard lock exactly like checkIdleLock() does here — an
+        // Mirror the in-flight-op signal (busy || importBusy || the A-copyGate) into the
+        // process-wide VaultSession so the AUTOFILL entry point's idle-expiry check
+        // (getIfFresh) defers the hard lock exactly like checkIdleLock() does here — an
         // onFillRequest must never close the engine under a running import/export.
         // Single choke point: every op helper flips busy/importBusy through _ui, so
         // collecting _ui catches them all (no unpaired begin/end calls to leak).
+        // A-copyGate: copyOpVaultId rides along for the same reason it defers
+        // checkIdleLock — another op finishing mid-copy clears busy, and NEITHER idle
+        // observer may yank the engine mid-rescue.
         // `syncing` (F74) is deliberately EXCLUDED: a quiet background sync — which can
         // stall for tens of seconds offline — must not hold the auto-lock open past the
         // policy window. A lock landing mid-sync is safe: the durable queue survives it,
         // and backgroundSync swallows the resulting teardown error instead of surfacing it.
         viewModelScope.launch {
-            _ui.collect { VaultSession.setOperationInProgress(it.busy || it.importBusy) }
+            _ui.collect { VaultSession.setOperationInProgress(it.busy || it.importBusy || it.copyOpVaultId != null) }
         }
     }
 
@@ -889,7 +900,8 @@ class AndvariViewModel(
     }
 
     /** Mirror the engine's lifecycle read-surfaces into UI state (cheap in-memory reads),
-     *  and lazily resolve the owner display name behind any verified incoming offer. */
+     *  and lazily resolve the owner display name behind any verified incoming offer (a
+     *  SEPARATE launch under the B1 epoch guard). */
     private fun refreshLifecycle() {
         val e = engine ?: return
         val incoming = e.incomingTransfers()
@@ -913,6 +925,9 @@ class AndvariViewModel(
                     runCatching { a.vaultMembers(t.vaultId).find { it.role == "owner" } }.getOrNull()
                         ?.let { names[t.vaultId] = it.displayName }
                 }
+                // B1: identity, not null — after a sign-out→sign-in a null check would
+                // pass against the NEW engine and leak the old session's owner names.
+                if (engine !== e) return@launch // locked/rebound while fetching — publish nothing stale
                 _ui.value = _ui.value.copy(transferOwnerNames = names)
             }
         }
@@ -943,17 +958,25 @@ class AndvariViewModel(
     }
 
     /** Fetch the Sharing screen's server-side lists: members per owned shared vault (the
-     *  transfer target picker) and the caller's restorable Recently-deleted vaults. */
+     *  transfer target picker) and the caller's restorable Recently-deleted vaults. Runs
+     *  WITHOUT busy (a slow members fetch must not grey the screen out). B1: `e`/`a` are
+     *  the launch-time epoch — every enumeration step is runCatching-wrapped (a mid-flight
+     *  lock closes the sqlite cache under `e`) and the state write is identity-gated, so a
+     *  continuation resuming after a sign-out→sign-in can neither crash the app nor leak
+     *  account A's member emails / deleted vaults into account B's session. */
     fun reloadSharing() {
         val e = engine ?: return
         refreshLifecycle()
         val a = api ?: return
         viewModelScope.launch {
             val members = mutableMapOf<String, List<VaultMemberSummary>>()
-            for (v in e.vaultInfos().filter { it.type == "shared" && it.role == "owner" }) {
+            val owned = runCatching { e.vaultInfos().filter { it.type == "shared" && it.role == "owner" } }
+                .getOrDefault(emptyList())
+            for (v in owned) {
                 runCatching { members[v.vaultId] = a.vaultMembers(v.vaultId) }
             }
             val deleted = runCatching { e.listDeleted() }.getOrDefault(emptyList())
+            if (engine !== e) return@launch // B1: locked/rebound while fetching — publish nothing stale
             _ui.value = _ui.value.copy(sharingMembers = members, deletedVaults = deleted)
         }
     }
@@ -964,19 +987,35 @@ class AndvariViewModel(
         refreshItems(); reloadSharing()
     }
 
-    /** DELETE (soft, 7d grace). The §11 owner toast lands in [UiState.notice]. */
-    fun deleteVault(vaultId: String, vaultName: String) = op {
-        val purgeAt = engine!!.deleteSharedVault(vaultId)
-        refreshItems(); reloadSharing()
-        _ui.value = _ui.value.copy(
-            notice = "“$vaultName” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Sharing → the trash icon).",
-        )
+    /** DELETE (soft, 7d grace). The §11 owner toast lands in [UiState.notice]. A-copyGate:
+     *  REFUSED while the rescue copy runs — `busy` alone is not a gate (any other op
+     *  finishing mid-copy clears it), and deleting the source out from under its own
+     *  rescue is the one irreversible interleaving. */
+    fun deleteVault(vaultId: String, vaultName: String) {
+        if (_ui.value.copyOpVaultId != null) return
+        op {
+            val purgeAt = engine!!.deleteSharedVault(vaultId)
+            refreshItems(); reloadSharing()
+            _ui.value = _ui.value.copy(
+                notice = "“$vaultName” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Sharing → the trash icon).",
+            )
+        }
     }
 
-    /** Bulk "Copy items to my Personal vault first…" (F19 rider — copy legs ONLY). */
+    /** Bulk "Copy items to my Personal vault first…" (F19 rider — copy legs ONLY). NOT op{}:
+     *  busy is set manually and HELD for the whole copy, and the A-copyGate op guard
+     *  [UiState.copyOpVaultId] — set here, cleared ONLY in this finally, never by
+     *  navigation — is what fences deleteVault + the idle lock for the duration.
+     *  Deliberately NO epoch guard here (design: manual Lock mid-copy stays unguarded —
+     *  cross-platform parity; it degrades to an error). */
     fun copyItemsToPersonal(vaultId: String) {
+        // Single-flight (review MED): copyOpVaultId is a single slot and the finally below
+        // clears it unconditionally — an overlapping second copy would let the FIRST one's
+        // finish disarm the gate (delete + idle lock re-enabled) while the second still
+        // runs. One rescue at a time; the button mirrors this in its enabled gate.
+        if (_ui.value.copyOpVaultId != null) return
         val e = engine ?: return
-        _ui.value = _ui.value.copy(busy = true, error = null, copiedNote = null, copyProgress = 0 to 0, copyVaultId = vaultId)
+        _ui.value = _ui.value.copy(busy = true, error = null, copiedNote = null, copyProgress = 0 to 0, copyVaultId = vaultId, copyOpVaultId = vaultId)
         viewModelScope.launch {
             try {
                 val copied = e.copyAllToPersonal(vaultId) { done, total ->
@@ -990,6 +1029,10 @@ class AndvariViewModel(
             } catch (t: Throwable) {
                 _ui.value = _ui.value.copy(copyProgress = null, copyVaultId = null)
                 fail(t)
+            } finally {
+                // Ownership check (belt on the single-flight guard): only this call's own
+                // marker may be cleared — a future re-entry path can never disarm a live copy.
+                if (_ui.value.copyOpVaultId == vaultId) _ui.value = _ui.value.copy(copyOpVaultId = null)
             }
         }
     }
@@ -1117,7 +1160,10 @@ class AndvariViewModel(
             if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus || s.screen is Screen.Trash) lock(REASON_IDLE)
             return
         }
-        if (s.busy || s.importBusy) return
+        // A-copyGate: the rescue copy holds `busy`, but any OTHER op finishing mid-copy
+        // clears it — the op guard is what actually keeps the idle lock off the engine
+        // for the whole copy (never yank the engine mid-rescue).
+        if (s.busy || s.importBusy || s.copyOpVaultId != null) return
         if (VaultSession.idleExpired()) lock(REASON_IDLE)
     }
 
@@ -1715,7 +1761,7 @@ class AndvariViewModel(
             lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
             sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
             undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
-            copyProgress = null, copiedNote = null, copyVaultId = null, moveProgress = null,
+            copyProgress = null, copiedNote = null, copyVaultId = null, copyOpVaultId = null, moveProgress = null,
             // Trash holds DECRYPTED tombstone docs (incl. passwords) + item versions; now that
             // checkIdleLock routinely locks from the Trash screen, they must not outlive the lock.
             deletedItems = null, itemVersions = null,
@@ -1785,7 +1831,7 @@ class AndvariViewModel(
                 lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
                 sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
                 undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
-                copyProgress = null, copiedNote = null, copyVaultId = null, moveProgress = null,
+                copyProgress = null, copiedNote = null, copyVaultId = null, copyOpVaultId = null, moveProgress = null,
                 escrowStale = false, escrowFingerprint = "", // P4: global ReSealCard must not linger on Welcome
                 // N2 §3/§6 (review MED): a probe failure with NO policy loaded is current,
                 // not stale — keep it so Welcome shows the failure + Retry instead of the

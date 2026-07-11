@@ -1,5 +1,28 @@
 # andvari — changelog
 
+## 0.14.2 — hardening backports + autofill in more browsers (2026-07-11, cross-platform cut)
+
+The approved hardening batch: the safety fixes the desktop port earned come back to the phone,
+and autofill reaches more browsers.
+
+- **Autofill now works in Samsung Internet and Edge** (their suggestions appear as a dropdown
+  at the field rather than above the keyboard — a platform limitation of the compatibility
+  mode those browsers require). Chrome still needs its one-time setting — and the app now
+  tells you: a new **"Browser support" card in Autofill status** lists every recognized
+  browser with exactly what it needs ("works out of the box" / the Chrome setting / the
+  trust tap).
+- **Phone hardening (from the desktop port's review):** background vault-management fetches
+  can no longer write a previous account's data into a freshly signed-in session, and the
+  "copy items to my Personal vault first" rescue is now properly single-flight — deleting a
+  vault mid-rescue (or the idle lock cutting the engine under it) is structurally blocked,
+  including from the autofill path.
+- **A long-lived web tab now tells you to reload** if the server ever starts requiring a newer
+  app version, instead of failing with cryptic errors until someone thinks to refresh.
+- **Server truth fix:** purged-vault item remnants were documented as "kept forever" but
+  actually aged out in a random 0–30-day window; they now live a full, deliberate 30 days
+  from the purge (with the security argument for why that's enough written down and pinned
+  by tests). No visible behavior change for any correctly-syncing app.
+
 ## 0.14.1 — one universal importer (2026-07-11, cross-platform cut)
 
 Importing passwords no longer starts with "which browser?" — there is now ONE import screen on
