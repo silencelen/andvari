@@ -74,13 +74,22 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
       (syncing/busy split) deliberately cut — re-filed to the residue ledger. Fold
       verification steps: toggle andvari off/on as the autofill service after installing
       0.14.2, then test Samsung/Edge (dropdown, not keyboard chip) + flip Chrome's setting.
-- [ ] **R1. Migration rehearsal (approved 2026-07-11)** — the real-secrets runbook executed
-      end-to-end on a LOCAL throwaway server (scratch escrow; no live-CT mutation, no auth
-      manufacturing); output = runbook amendments + re-runnable harness + "rehearsed ✅" in the
-      go/no-go. Docs+tooling, no cut unless bugs surface.
-- [ ] **O1. Ops rider (approved)** — apply the ready-to-apply purge-stall Grafana alert
-      (metric live since the 0.8.0-era deploy) + andvari monitor sanity pass; verify the rule
-      attaches to a live series.
+- [x] **R1. Migration rehearsal — DONE 2026-07-11.** `scripts/migration-rehearsal.sh` (NEW,
+      re-runnable, trap-cleaned): the runbook's 13 machine-verifiable legs green on a local
+      throwaway server — scratch genesis + canary proof, bootstrap admin w/ real typed-sheet
+      gate, server-TOTP 0→1 (gate-1 probe), bootstrap stripped, invite→member enroll + reuse
+      refusal, pre-import VACUUM snapshot, 25-row Chrome CSV through the REAL client code
+      (23 imported + TOTP/note/dedupe spot-checks), re-import = 0/24 alreadyInVault
+      (§Rollback proven), full break-glass recovery w/ an imported canary, public-origin
+      TOTP refusal/acceptance. REHEARSAL_PASSED in 81s. **Real finding:** the same-IP login
+      rate-limiter (5/min public) can block a break-glass login for ~60s after normal
+      sign-ins — runbook item 2 now warns (wait 60s, mint the code fresh). Report:
+      `docs/drills/migration-rehearsal-2026-07-11.md` (script-covered vs owner-only table).
+      No cut — docs+tooling only, CT122 untouched.
+- [x] **O1. Ops rider — DONE 2026-07-11.** `andvari-purge-stalled` rule created (provisioning
+      API — the grafana MCP token still 401s; the netplan service-account token works) and
+      verified evaluating `health=ok` against the live series alongside the other three
+      Andvari rules (all ok = the monitor sanity pass). Spec doc status updated in place.
 - [ ] **N4. (TRIGGER: owner retires the 0.2.x MSI) Card-create Option-A flip + S3 (M).**
       The flip ceremony from the cards design §build-order (flip `CARD_CREATE_ENABLED` ×2 +
       unhide, windows manifest entry, verify old-MSI absence), THEN S3 extension in-page card
