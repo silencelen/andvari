@@ -1,5 +1,13 @@
 # Guided importers — design (2026-07-09)
 
+> **SUPERSEDED (2026-07-11)** by [`2026-07-11-universal-importer.md`](2026-07-11-universal-importer.md):
+> the per-source picker/steps screens this design specified are replaced by ONE universal
+> import screen (the file decides — header detection was always authoritative). The guided
+> export steps live on inside that screen's collapsible "How do I export from…?" help block
+> (single-sourced in core `ImportHelp.kt` + the web twin). Everything else here — the format
+> adapters, detection order, F75 dedupe, A9/A10, the report buckets — remains shipped and
+> current; only the source-pick UI layer is gone.
+
 Queue item 5 (ROADMAP "Guided per-source importers"). Inherits **F75's vault-aware dedupe**
 half and **F56's measure-first perf pack**. Target release: 0.8.0. Everything client-side
 and ZK-clean: files never leave the device; the server sees only ordinary encrypted puts.

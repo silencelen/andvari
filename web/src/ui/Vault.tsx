@@ -1647,118 +1647,89 @@ function isValidTotp(normalized: string): boolean {
   }
 }
 
-// ---- CSV import (spec 06 + design 2026-07-09 guided importers) ----
+// ---- CSV import (spec 06 + design 2026-07-11 universal importer) ----
 
-/** A guided source card: export instructions + which detected format(s) the pick predicts.
- *  Header DETECTION stays authoritative — the pick informs instructions and the calm
- *  mismatch hint only (a Bitwarden file picked under "Chrome" imports fine). */
+/** The per-source "How do I export from…?" help table — the ONE surviving per-source
+ *  surface of the universal importer (design 2026-07-11). Content-aligned twin of core
+ *  ImportHelp (the usual non-KMP mirror — keep the two in lockstep). Steps are best-effort
+ *  export navigation docs (current as of 2026-07), NOT contracts — parsing never consults
+ *  them; header detection is authoritative (csv.ts). */
 interface ImportSource {
-  id: string;
   label: string;
-  /** Formats this source is expected to emit; [] = anything (the "somewhere else" escape). */
-  expects: ImportFormat[];
   steps: string[];
   note?: string;
 }
 
 const IMPORT_SOURCES: ImportSource[] = [
   {
-    id: "chrome",
     label: "Chrome",
-    expects: ["chrome"],
     steps: [
-      "Open the ⋮ menu → Passwords and autofill → Google Password Manager.",
-      "Choose Settings in the left rail, then “Export passwords” → Download file.",
-      "Confirm with your computer's sign-in and save the CSV.",
+      "Open chrome://password-manager/settings (Menu ⋮ → Passwords and autofill → Google Password Manager → Settings).",
+      "Under “Export passwords”, choose Download file.",
+      "Confirm with your device sign-in and save the CSV.",
     ],
   },
   {
-    id: "edge",
     label: "Edge",
-    expects: ["chrome"],
     steps: [
-      "Open the … menu → Settings → Profiles → Passwords.",
-      "Click the ⋯ next to “Add password” → “Export passwords”.",
-      "Confirm with your computer's sign-in and save the CSV.",
+      "Open edge://wallet/passwords.",
+      "Click ⋯ (More options) → Export passwords.",
+      "Confirm with your device sign-in and save the CSV.",
     ],
   },
   {
-    id: "brave",
     label: "Brave",
-    expects: ["chrome"],
     steps: [
-      "Open the ☰ menu → Settings → Autofill and passwords → Password Manager.",
-      "Choose Settings in the left rail → “Export passwords”.",
-      "Confirm with your computer's sign-in and save the CSV.",
+      "Open brave://password-manager/settings.",
+      "Under “Export passwords”, choose Download file.",
+      "Confirm with your device sign-in and save the CSV.",
     ],
   },
   {
-    id: "opera",
     label: "Opera",
-    expects: ["chrome"],
     steps: [
-      "Open Settings → Autofill and passwords → Password Manager.",
-      "Choose Settings in the left rail → “Export passwords”.",
-      "Confirm with your computer's sign-in and save the CSV.",
+      "Open opera://settings/passwords.",
+      "Next to “Saved Passwords”, click ⋮ → Export passwords.",
+      "Confirm with your device sign-in and save the CSV.",
     ],
   },
   {
-    id: "firefox",
     label: "Firefox",
-    expects: ["firefox"],
     steps: [
-      "Open the ☰ menu → Passwords.",
-      "Click the ⋯ menu (top right) → “Export passwords…”.",
-      "Confirm with your computer's sign-in and save the CSV.",
+      "Open about:logins (Menu ☰ → Passwords).",
+      "Click ⋯ (top right) → Export passwords…",
+      "Confirm with your device sign-in and save the CSV.",
     ],
   },
   {
-    id: "bitwarden",
     label: "Bitwarden",
-    expects: ["bitwarden"],
     steps: [
-      "Sign in to the Bitwarden web vault (or desktop app) → Tools → “Export vault”.",
-      "Pick the .csv file format (not .json).",
+      "In the Bitwarden web vault or desktop app: Tools → Export vault.",
+      "File format: .csv (not .json).",
       "Confirm with your master password and save the file.",
     ],
   },
   {
-    id: "1password",
     label: "1Password",
-    expects: ["1password"],
     steps: [
-      "In the 1Password desktop app (version 8 or newer), open File → Export → your account.",
-      "Choose the CSV format.",
-      "Confirm with your account password and save the file.",
+      "In the 1Password desktop app (version 8 or newer): File → Export → your account.",
+      "Choose the CSV format, confirm with your account password, and save the file.",
     ],
-    note: "1Password 7 and older export a different CSV shape — update to 1Password 8+, or route through Bitwarden/another CSV as an intermediate.",
+    note: "1Password 7 and older export a different CSV shape — update to 1Password 8 or newer, or route through Bitwarden/another CSV export as an intermediate.",
   },
   {
     // A10: pin the FILE-DOWNLOAD export path — the in-browser-tab route HTML-mangles values.
-    id: "lastpass",
     label: "LastPass",
-    expects: ["lastpass"],
     steps: [
       "Sign in to your vault at lastpass.com.",
-      "Open Advanced Options in the left menu → “Export”.",
+      "Open Advanced Options in the left menu → Export.",
       "Confirm with your master password — LastPass downloads a lastpass_export.csv file.",
     ],
-    note: "Use that downloaded file directly. Don't copy CSV text out of a browser tab into a file — that route mangles characters like “&”.",
+    note: "Use that downloaded file directly. Don’t copy CSV text out of a browser tab into a file — that route mangles characters like “&”.",
   },
 ];
 
-/** The escape hatch: no expectations, detection does all the work. */
-const OTHER_SOURCE: ImportSource = {
-  id: "other",
-  label: "somewhere else",
-  expects: [],
-  steps: [
-    "Export your passwords as a CSV file from wherever they live today.",
-    "Pick that file below — the format is detected from the file itself (Chromium browsers, Firefox, Bitwarden, 1Password 8+, LastPass, and Apple/Safari exports are recognized).",
-  ],
-};
-
-function friendlyParseError(e: unknown, source: ImportSource | null): string {
+function friendlyParseError(e: unknown): string {
   if (e instanceof ImportError) {
     switch (e.code) {
       case "too_large":
@@ -1766,11 +1737,9 @@ function friendlyParseError(e: unknown, source: ImportSource | null): string {
       case "too_many_rows":
         return "That file has more than 10,000 rows. Split it into smaller files and import them one at a time.";
       case "unrecognized_header":
-        // Older 1Password CSV shapes vary wildly — the one source that earns a bespoke hint.
-        if (source?.id === "1password") {
-          return "This doesn't look like a 1Password 8 CSV export — older 1Password versions write a different file. Export from 1Password 8 or newer as CSV, or use Bitwarden/another CSV export as an intermediate.";
-        }
-        return "This doesn't look like a password export andvari recognizes (Chromium browsers, Firefox, Bitwarden, 1Password 8+, or LastPass). Follow the export steps shown here, then pick the file it saves.";
+        // Universal copy (design 2026-07-11): no pick exists to key a bespoke hint on,
+        // so the old 1Password-specific hint folds into the one message.
+        return "This file isn't a recognized password export. Make sure you exported a CSV (not JSON or a zip) — and if it came from 1Password, that you're on 1Password 8 or newer.";
       default:
         return `That file could not be read (${e.code}).`;
     }
@@ -1872,8 +1841,9 @@ function ReportTiles({ report, done }: { report: ImportReport; done: boolean }) 
 }
 
 /**
- * Guided import (design 2026-07-09): source grid → per-source export steps → file input →
- * vault-aware plan preview → encrypt-and-push. Everything happens on this device; the file
+ * Universal import (design 2026-07-11): one screen — "Choose file…" straight to the picker
+ * (header detection decides the format; no source pick exists) → vault-aware plan preview →
+ * encrypt-and-push. Everything happens on this device; the file
  * never leaves the browser. The plan's itemIds are minted once, so a mid-import failure is
  * fixed with Retry (idempotent replay of the SAME plan — each itemId doubles as the push
  * mutationId) rather than re-parsing; re-parsing mints new ids and would duplicate.
@@ -1888,7 +1858,8 @@ function ReportTiles({ report, done }: { report: ImportReport; done: boolean }) 
  */
 function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: () => void; onDone: () => void }) {
   const fileInput = useRef<HTMLInputElement | null>(null);
-  const [source, setSource] = useState<ImportSource | null>(null);
+  /** The "How do I export from…?" help block — collapsed by default (design 2026-07-11). */
+  const [helpOpen, setHelpOpen] = useState(false);
   const [fileName, setFileName] = useState("");
   const [format, setFormat] = useState<ImportFormat | null>(null);
   const [planned, setPlanned] = useState<{ plan: ImportPlan; vault: VaultInfo } | null>(null);
@@ -1924,12 +1895,6 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
     setProgress(null);
   };
 
-  const pickSource = (s: ImportSource) => {
-    reset();
-    setFileName("");
-    setSource(s);
-  };
-
   const onFile = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     const file = files[0]!;
@@ -1957,7 +1922,7 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
       // the DEFAULT destination — personal (S2 picker contract).
       setPlanned({ plan: planImport(p, store.importProjections(personal.vaultId), () => crypto.randomUUID()), vault: personal });
     } catch (e) {
-      setParseErr(friendlyParseError(e, source));
+      setParseErr(friendlyParseError(e));
     } finally {
       if (fileInput.current) fileInput.current.value = "";
     }
@@ -2014,7 +1979,7 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
   return (
     <div className="sheet">
       <button type="button" className="link" onClick={onClose}>← back to vault</button>
-      <h2 style={{ marginTop: 12 }}>Import passwords</h2>
+      <h2 style={{ marginTop: 12 }}>Import passwords (CSV)</h2>
       <div className="muted" style={{ marginBottom: 18 }}>from a browser or another password manager · everything stays on this device</div>
 
       {/* Always-visible plaintext caution. */}
@@ -2064,14 +2029,6 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
                   </option>
                 ))}
               </select>
-            </div>
-          )}
-
-          {/* Detection is authoritative; a pick/detect mismatch is information, not an error. */}
-          {source && format && source.expects.length > 0 && !source.expects.includes(format) && (
-            <div className="msg info" style={{ display: "block" }}>
-              This file looks like a {FORMAT_LABEL[format]} export rather than one from {source.label} —
-              no problem, it's imported as {FORMAT_LABEL[format]}.
             </div>
           )}
 
@@ -2140,40 +2097,37 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
             <button type="button" className="ghost" disabled={busy || importErr !== ""} onClick={() => { reset(); setFileName(""); }}>Choose a different file</button>
           </div>
         </>
-      ) : source ? (
-        <>
-          <div className="field">
-            <label>Export from {source.label}</label>
-            <ol className="steps">
-              {source.steps.map((step, i) => (
-                <li key={i}>{step}</li>
-              ))}
-            </ol>
-            {source.note && <div className="muted">{source.note}</div>}
-          </div>
-          {parseErr && <div className="msg err">{parseErr}</div>}
-          <div className="actions">
-            <button type="button" className="primary" onClick={() => fileInput.current?.click()}>Choose the exported CSV…</button>
-            <div className="spacer" />
-            <button type="button" className="ghost" onClick={() => { reset(); setFileName(""); setSource(null); }}>
-              {source.id === "other" ? "← pick a source" : "My file is from somewhere else"}
-            </button>
-          </div>
-        </>
       ) : (
         <>
-          <div className="field" style={{ marginBottom: 0 }}>
-            <label>Where is your file from?</label>
+          {/* The universal screen (design 2026-07-11): no source pick — the file decides. */}
+          <div className="muted" style={{ marginBottom: 12 }}>
+            Works with password exports from Chrome, Edge, Brave, Opera, Firefox, Bitwarden,
+            1Password 8 or newer, LastPass, and Safari — the file itself decides how it's read.
           </div>
-          <div className="source-grid">
-            {IMPORT_SOURCES.map((s) => (
-              <button key={s.id} type="button" className="source-card" onClick={() => pickSource(s)}>{s.label}</button>
-            ))}
-          </div>
+          {/* A-webError: this branch is parseErr's ONLY render site — a bad file must
+              visibly fail right here, next to the picker button. */}
+          {parseErr && <div className="msg err">{parseErr}</div>}
           <div className="actions">
-            <button type="button" className="ghost" onClick={() => pickSource(OTHER_SOURCE)}>My file is from somewhere else</button>
+            <button type="button" className="primary" onClick={() => fileInput.current?.click()}>Choose file…</button>
             <div className="spacer" />
             <button type="button" className="ghost" onClick={onClose}>Cancel</button>
+          </div>
+          <div className="field" style={{ marginTop: 18 }}>
+            <button type="button" className="link" aria-expanded={helpOpen} onClick={() => setHelpOpen((o) => !o)}>
+              How do I export from…? {helpOpen ? "▴" : "▾"}
+            </button>
+            {helpOpen &&
+              IMPORT_SOURCES.map((s) => (
+                <div key={s.label} style={{ marginTop: 12 }}>
+                  <label>{s.label}</label>
+                  <ol className="steps">
+                    {s.steps.map((step, i) => (
+                      <li key={i}>{step}</li>
+                    ))}
+                  </ol>
+                  {s.note && <div className="muted">{s.note}</div>}
+                </div>
+              ))}
           </div>
         </>
       )}

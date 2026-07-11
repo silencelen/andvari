@@ -53,6 +53,7 @@ import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
 import io.silencelen.andvari.core.crypto.Escrow
+import io.silencelen.andvari.core.client.ImportHelp
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
@@ -706,7 +707,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
             TopAppBar(
                 title = { Text("andvari", style = MaterialTheme.typography.titleLarge) },
                 actions = {
-                    // Guided importers (design 2026-07-09): source picker first, THEN the file picker.
+                    // Universal importer (design 2026-07-11): the one import sheet first, THEN the file picker.
                     IconButton(onClick = { vm.importBegin() }) { Icon(Icons.Default.FileUpload, "import CSV") }
                     IconButton(onClick = { vm.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
                     IconButton(onClick = { vm.openSharing() }) { Icon(Icons.Default.Group, "sharing") }
@@ -759,57 +760,61 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                     }
                 }
             }
-            ImportSourceDialog(vm, ui) { importPicker.launch(arrayOf("*/*")) }
+            ImportSheet(vm, ui) { importPicker.launch(arrayOf("*/*")) }
             ImportDialogs(vm, ui)
         }
     }
 }
 
 /**
- * Guided source picker (design 2026-07-09): the 8 named sources, each a short export
- * instruction block + the file input, in this file's dialog idiom. Selection tailors the
- * instructions and the post-parse mismatch hint ONLY — header detection stays
- * authoritative, so any supported export imports fine under any source.
+ * Universal import sheet (design 2026-07-11): ONE screen for every source — the honest
+ * line, the plaintext warning (the same string the preview shows; across Android's
+ * sequential dialogs that is how it stays in view before AND after the pick, like web's
+ * single panel), and a collapsed-by-default per-source "how to export" help block read
+ * from core [ImportHelp] (single-sourced with desktop). "Choose file…" goes STRAIGHT to
+ * the SAF picker — the 0.10.1 wildcard path, now the only path (pin 3). No source pick
+ * exists: header detection alone decides how the file is read, so the per-source steps
+ * screens and the mismatch hint are gone, and the parse-error copy carries its own
+ * recognized-source list (A-androidError — this sheet is already closed by error time).
  */
 @Composable
-private fun ImportSourceDialog(vm: AndvariViewModel, ui: UiState, onChooseFile: () -> Unit) {
+private fun ImportSheet(vm: AndvariViewModel, ui: UiState, onChooseFile: () -> Unit) {
     if (!ui.importSourceSheet) return
-    val source = ui.importSource
     AlertDialog(
         onDismissRequest = vm::importSheetDismiss,
         confirmButton = {
-            if (source != null) {
-                TextButton(onClick = { vm.importChooseFile(); onChooseFile() }) { Text("Choose file") }
-            }
+            TextButton(onClick = { vm.importChooseFile(); onChooseFile() }) { Text("Choose file…") }
         },
         dismissButton = { TextButton(onClick = vm::importSheetDismiss) { Text("Cancel") } },
-        title = { Text(if (source == null) "Import passwords from…" else "Import from ${source.label}") },
+        title = { Text("Import passwords (CSV)") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                if (source == null) {
-                    Text(
-                        "Where is your export from? This only tailors the steps — the file itself decides how it's read.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    ImportSource.values().forEach { s ->
-                        TextButton(onClick = { vm.importSourcePick(s) }, modifier = Modifier.fillMaxWidth()) {
-                            Text(s.label, Modifier.fillMaxWidth())
+                Text(
+                    "Works with password exports from Chrome, Edge, Brave, Opera, Firefox, Bitwarden, 1Password 8 or newer, LastPass, and Safari — the file itself decides how it's read.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "⚠ This file holds every secret in plaintext. Nothing is uploaded — each item is encrypted on this device. Afterwards, delete the CSV and empty the trash.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                )
+                // In-dialog disclosure idiom (ImportBucket's): plain `remember`, so every
+                // reopening of the sheet lands collapsed again.
+                var helpOpen by remember { mutableStateOf(false) }
+                TextButton(onClick = { helpOpen = !helpOpen }) {
+                    Text(if (helpOpen) "Hide export steps" else "How do I export from…?")
+                }
+                if (helpOpen) {
+                    ImportHelp.SOURCES.forEach { s ->
+                        Text(s.label, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 6.dp))
+                        s.steps.forEachIndexed { i, step ->
+                            Text("${i + 1}. $step", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                        }
+                        // The 1Password-8 / LastPass safety notes ride inside their entries.
+                        s.note?.let {
+                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 2.dp))
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
-                    // Skip the guided steps and pick any CSV straight away — detection is
-                    // authoritative, so a file from an unlisted source still imports under
-                    // whatever format it actually is. (Source stays null → no mismatch hint.)
-                    TextButton(onClick = { vm.importChooseFile(); onChooseFile() }, modifier = Modifier.fillMaxWidth()) {
-                        Text("My file is from somewhere else", Modifier.fillMaxWidth())
-                    }
-                } else {
-                    source.steps.forEachIndexed { i, step ->
-                        Text("${i + 1}. $step", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 3.dp))
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    TextButton(onClick = vm::importSourceBack) { Text("← Choose a different source") }
                 }
             }
         },
@@ -855,8 +860,8 @@ private fun ImportDialogs(vm: AndvariViewModel, ui: UiState) {
                         )
                         Spacer(Modifier.height(8.dp))
                         Text("From ${ui.importFormat?.let { importFormatLabel(it) } ?: "browser"} export:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        // Post-parse info lines (calm): source-vs-detected mismatch + A10 mangle.
-                        ui.importFormatNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 2.dp)) }
+                        // Post-parse info line (calm): the A10 mangle heuristic — content-based,
+                        // so it survives the universal importer (the mismatch note did not).
                         ui.importMangleNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 2.dp)) }
                         // S2: shown only when there's a choice to make (F18 rule, like the
                         // editor's picker). Selecting RE-PLANS against that vault — every

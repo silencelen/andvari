@@ -349,14 +349,7 @@ input.token { font-size: 15px; color: var(--gold-bright); }
 }
 .qr-card svg { display: block; width: 100%; height: auto; }
 
-/* ---- guided import: source picker + export steps ---- */
-.source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin: 12px 0 18px; }
-.source-card {
-  font: inherit; font-weight: 600; color: var(--ink); background: var(--bg-raised);
-  border: 1px solid var(--edge); border-radius: var(--radius); padding: 16px 12px;
-  cursor: pointer; text-align: center;
-}
-.source-card:hover { border-color: var(--edge-strong); color: var(--gold-bright); }
+/* ---- universal import: the "How do I export from…?" help block's step lists ---- */
 .steps { margin: 10px 0 12px; padding-left: 22px; }
 .steps li { margin-bottom: 6px; }
 

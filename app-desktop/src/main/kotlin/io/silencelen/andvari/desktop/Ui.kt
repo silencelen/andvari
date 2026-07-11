@@ -30,6 +30,7 @@ import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
 import io.silencelen.andvari.core.client.HeldVaultInfo
+import io.silencelen.andvari.core.client.ImportHelp
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LifecycleNotice
 import io.silencelen.andvari.core.client.LoginData
@@ -348,7 +349,7 @@ private fun Vault(state: DesktopState) {
     var query by remember { mutableStateOf("") }
     var editing by remember { mutableStateOf<Pair<String?, ItemDoc>?>(null) }
     var detailId by remember { mutableStateOf<String?>(null) }
-    var importFlow by remember { mutableStateOf(false) } // the guided source-picker steps
+    var importFlow by remember { mutableStateOf(false) } // the universal import screen
     val filtered = state.items.filter {
         val q = query.trim().lowercase()
         // F79: name + username + EVERY uri + notes + a card's brand/••last4 (never secrets),
@@ -382,9 +383,9 @@ private fun Vault(state: DesktopState) {
         }
         Divider()
         if (importFlow) {
-            ImportSourceFlow(onDismiss = { importFlow = false }) { file, src ->
+            ImportSourceFlow(onDismiss = { importFlow = false }) { file ->
                 importFlow = false
-                state.importFromFile(file, src)
+                state.importFromFile(file)
             }
         }
         ImportDialogs(state)
@@ -458,67 +459,65 @@ private fun Vault(state: DesktopState) {
 }
 
 /**
- * Guided import, steps 1–2 (design 2026-07-09): pick the source → 2–4 numbered export
- * steps → the AWT file dialog (the house file-pick mechanism — same family as the
- * attachment/backup pickers). The pick informs instructions and the preview's mismatch
- * hint ONLY — header detection stays authoritative, so a Bitwarden file picked under
- * "Chrome" still imports as Bitwarden (with a calm note). Keyboard-first: every entry is
- * a focusable button, so Tab/Enter walks the whole flow.
+ * Universal import screen (design 2026-07-11): ONE dialog for every source — the parser
+ * is header-sniffing, so the file itself decides how it's read, and no source pick is
+ * asked for (the old 8-source flow forced a pick it then ignored). The per-source export
+ * steps survive as the collapsed "How do I export from…?" disclosure, rendered from
+ * core's shared [ImportHelp] table (single-sourced with Android; steps are best-effort
+ * docs, not contracts). Keyboard-first: the toggle and both buttons are focusable, so
+ * Tab/Enter walks the whole flow.
  */
 @Composable
-private fun ImportSourceFlow(onDismiss: () -> Unit, onFile: (File, ImportSource) -> Unit) {
-    var source by remember { mutableStateOf<ImportSource?>(null) }
-    val s = source
-    if (s == null) {
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-            title = { Text("Import passwords") },
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState())) {
-                    Text("Where is your export from?", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(4.dp))
-                    ImportSource.entries.forEach { src ->
-                        TextButton(onClick = { source = src }, modifier = Modifier.fillMaxWidth()) {
-                            Text(src.label, Modifier.fillMaxWidth())
+private fun ImportSourceFlow(onDismiss: () -> Unit, onFile: (File) -> Unit) {
+    var helpOpen by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = {
+                val dialog = FileDialog(null as Frame?, "Import passwords CSV", FileDialog.LOAD)
+                dialog.isVisible = true
+                val dir = dialog.directory; val picked = dialog.file
+                // Cancelled picker → the screen stays open for another go.
+                if (dir != null && picked != null) onFile(File(dir, picked))
+            }) { Text("Choose file…") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        title = { Text("Import passwords (CSV)") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "Works with password exports from Chrome, Edge, Brave, Opera, Firefox, Bitwarden, 1Password 8 or newer, LastPass, and Safari — the file itself decides how it's read.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                // Review (N3b): the plaintext warning is a design-mandated element of THE
+                // universal screen — the help block below walks the user into CREATING the
+                // plaintext file, so the caution shows before any pick (Android sheet + web
+                // panel parity; same string the preview shows post-parse).
+                Text(
+                    "⚠ This file holds every password in plaintext. Nothing is uploaded — each item is encrypted on this device. Afterwards, delete the CSV and empty the trash.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                )
+                // The ONE surviving per-source surface: export-navigation steps (the
+                // 1Password-8 and LastPass safety notes ride inside their entries),
+                // collapsed by default.
+                TextButton(onClick = { helpOpen = !helpOpen }) {
+                    Text(if (helpOpen) "Hide export steps" else "How do I export from…?")
+                }
+                if (helpOpen) {
+                    ImportHelp.SOURCES.forEach { src ->
+                        Text(src.label, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 6.dp))
+                        src.steps.forEachIndexed { i, step ->
+                            Text("${i + 1}. $step", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                        }
+                        src.note?.let {
+                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary, modifier = Modifier.padding(vertical = 2.dp))
                         }
                     }
-                    Text(
-                        "Picked wrong? No harm — the file itself decides how it’s read.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                 }
-            },
-        )
-    } else {
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            confirmButton = {
-                TextButton(onClick = {
-                    val dialog = FileDialog(null as Frame?, "Import passwords CSV", FileDialog.LOAD)
-                    dialog.isVisible = true
-                    val dir = dialog.directory; val picked = dialog.file
-                    // Cancelled picker → the instructions stay open for another go.
-                    if (dir != null && picked != null) onFile(File(dir, picked), s)
-                }) { Text("Choose file…") }
-            },
-            dismissButton = {
-                androidx.compose.foundation.layout.Row {
-                    TextButton(onClick = { source = null }) { Text("My file is from somewhere else") }
-                    TextButton(onClick = onDismiss) { Text("Cancel") }
-                }
-            },
-            title = { Text("Export from ${s.label}") },
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState())) {
-                    s.steps.forEachIndexed { i, step ->
-                        Text("${i + 1}. $step", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
-                    }
-                }
-            },
-        )
-    }
+            }
+        },
+    )
 }
 
 /** The three import dialogs (refusal/parse error → preview/confirm+progress+retry → done). */
@@ -553,15 +552,6 @@ private fun ImportDialogs(state: DesktopState) {
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                         )
                         val fmt = state.importFormat
-                        val src = state.importSource
-                        // Calm mismatch hint: the pick was only a guide — the header decided.
-                        if (fmt != null && src != null && fmt.name !in src.expectedFormats) {
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                "This file looks like a ${formatLabel(fmt)} export, not ${src.label} — importing it as ${formatLabel(fmt)}.",
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary,
-                            )
-                        }
                         // A10: HTML-entity mangle hint (in-page LastPass exports) — never auto-decoded.
                         if (state.importMangled) {
                             Spacer(Modifier.height(8.dp))
