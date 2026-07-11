@@ -138,10 +138,20 @@ owner: park under "Parked for owner", continue with the documented default, neve
       design doc). Deploy verified: served sha == built (`index.DaB3NJnP.js`), assetlinks
       application/json, 296 items intact, clean boot; snapshot
       `andvari.db.pre-s4-onboarding-2026-07-10` + vzdump pbs-local taken first.
-      **DEFERRED (next security-focused native cut, NOT smuggled into a feature cut):
-      the native typed-sheet fingerprint gate (spec-04-§2(3) — natives still show
-      display+checkbox) + the F60 master-password floor on natives + the native
-      `andvari://` consumer (consume-semantics spec ready in the design doc).**
+      ~~DEFERRED: native typed-gate + F60 floor~~ → **DONE + SHIPPED 0.10.2, owner-directed
+      (2026-07-10, `67e3c60`).** Both natives: typed-sheet gate (fp absent from the UI tree
+      until the sheet's first 16 are typed; STOP-on-mismatch copy; checkbox gated) + F60
+      floor with strength label + non-ASCII advisory; ONE shared jvm-tested submit
+      predicate (core `EnrollCeremony.ready`, mutation-checked). Focused review (12
+      agents): 2 MED confirmed — the frame-stale-gate submit race on BOTH platforms —
+      fixed with both belts (live re-check in the submit lambda + state-layer busy/floor
+      re-assert before op()). Shipped fleet-wide same day: devstore vc 16502629, deb
+      0.10.2 (manifest merged, ext 0.9.0 kept), web/server redeployed
+      (`index.MsgKAIID.js` served==built; snapshot pre-0102 + vzdump first). Still
+      deferred: the native `andvari://` consumer (spec in the design doc). Backlog from
+      review (pre-existing, endorsed defer): natives conflate policy-fetch-failure with
+      "no recovery key" (web distinguishes + Retry); master password rides
+      rememberSaveable into the saved-instance Bundle (needs a deliberate call).
 - [ ] **S3. Extension in-page card fill** (owner dev-note: "support storing autofill
       creditcard and payment details" — the buildable half) — design pass FIRST
       (frame-origin egress contract per the cards design's deferral: card data may only
