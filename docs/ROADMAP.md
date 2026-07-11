@@ -71,9 +71,10 @@ importing any real password:
 2. ~~**Enroll the first admin**~~ **DONE** (bootstrap token consumed + stripped; owner admin
    enrolled against the real key). **Still open: enroll server-TOTP** (web → Settings) —
    break-glass public login is impossible without it, and CT122 shows it not yet enrolled.
-3. **Windows MSI rebuild** on the owner box (desktop **0.4.0** — the tailnet-default URL +
-   version bump are in the tree; only the owner can run jpackage/WiX). See
-   `ops/windows-build.md`. (Batch B4 makes the update banner + 426 path honest first.)
+3. **Windows MSI rebuild** on the owner box (desktop **0.13.0** in-tree; fielded MSI still
+   0.2.x — the tailnet-default URL + version bump are in the tree; only the owner can run
+   jpackage/WiX). See `ops/windows-build.md`. (Batch B4 makes the update banner + 426 path
+   honest first.)
 4. **On-device smoke tests** — attachments + TOTP on the Fold + desktop; the autofill Fold-7
    checklist (design §6.4); a CSV dry-run with a synthetic export; a shared-vault invite
    round-trip web↔Fold with the printed-sheet fingerprint check.
@@ -83,8 +84,9 @@ importing any real password:
    (`andvari-kuma-push.{sh,service,timer}` on heimdall, mirrored in netplan
    `scripts/active/monitoring/`; token in `/etc/andvari-kuma-token`). Also dead-mans if
    heimdall itself dies (pushes stop → missed-heartbeat alert → Telegram).
-6. **Drills:** PBS restore of CT122's DB + blobDir; **escrow-recovery drill** with the
-   air-gapped key (recover a throwaway account end-to-end); **min-version-pin exercise**
+6. **Drills:** PBS restore of CT122's DB + blobDir; ~~**escrow-recovery drill** with the
+   air-gapped key (recover a throwaway account end-to-end)~~ **DONE** (0.6.0-era;
+   `docs/drills/account-recovery-drill.md` + a passed drill); **min-version-pin exercise**
    (bump `minVersion`, confirm all three clients block writes and show the upgrade path);
    **backup-verify drill** (export a `.andvari` → `backup-cli` verify/dump/extract —
    `docs/drills/backup-restore-drill.md`, then quarterly).
@@ -97,8 +99,10 @@ Prioritized; each is additive and back-compatible.
 
 - **Quick-unlock** (spec 01 §8) — Android Keystore-wrapped UVK + biometric; Windows Hello /
   DPAPI + PIN on desktop. The single integration point on Android is `AutofillUnlockActivity`
-  (hook already noted). `androidx-biometric` is already catalogued.
-- **Autofill save-flow ("Save to andvari?")** — *owner-requested 2026-07-07.* v1 is
+  (hook already noted). `androidx-biometric` is already catalogued. **Android side DONE
+  0.9.0 (F84); Windows/desktop DPAPI still deferred.**
+- ~~**Autofill save-flow ("Save to andvari?")**~~ **DONE 0.7.0** (onSaveRequest +
+  SaveConfirmActivity; web via extension) — *owner-requested 2026-07-07.* v1 is
   fill-only; add `SaveInfo` on the FillResponse + `onSaveRequest` so that when the user
   types credentials (or a card, below) andvari has no record for, it offers **"Save to
   andvari?"** and creates the item. Android first (SaveInfo/SaveCallback + a confirm
@@ -145,7 +149,8 @@ Prioritized; each is additive and back-compatible.
   signed Firefox `.xpi` with an `update_url` + `updates.json` on CT122 auto-updates natively;
   Chrome needs the Web Store or an enterprise `update_url` + CRX (owner call whether store
   distribution is wanted). Start with (1); it's ~a version-check + popup surface reusing the
-  manifest the Devices hub already reads.
+  manifest the Devices hub already reads. **Tier 1 DONE (extension 0.8.0, `201428b`);
+  tier 2 stays parked.**
 - **Owner-signed grants** (Ed25519 signing identity) — closes F16 fully: grants and lifecycle
   ops carry a sender signature under a per-account signing key, so a malicious server can no
   longer inject vaults/credentials or forge a transfer even to a client that holds no VK. The
@@ -160,11 +165,17 @@ Prioritized; each is additive and back-compatible.
 - ~~**ItemDoc unknown-field round-trip**~~ **DONE in 0.4.0** (ExtrasOverlaySerializer + the
   `itemdoc.json` vector) — a future additive field now survives a mixed-fleet edit, so new
   optional ItemDoc fields are safe to add.
-- **eTLD+1 / PSL matching** for autofill (v1's label-boundary rule is strictly safer but
-  misses sibling-subdomain matches); **Digital Asset Links** for the native-app-with-web-creds
-  case (v1 uses `androidapp://` exact + a browser allowlist).
-- **iOS client** (KMP `:core` already targets it in principle; not wired) — assess.
-- **Passkeys / WebAuthn** — evaluate as a credential type; large.
+- ~~**eTLD+1 / PSL matching** for autofill (v1's label-boundary rule is strictly safer but
+  misses sibling-subdomain matches)~~ **DONE 0.10.0 (`5587d8c`)**; **Digital Asset Links**
+  for the native-app-with-web-creds case (v1 uses `androidapp://` exact + a browser
+  allowlist) — still open.
+- **iOS client** (KMP `:core` already targets it in principle; not wired) — assessed
+  2026-07-10 (`docs/assess/2026-07-ios.md`: defer native; PWA-polish default; trigger = a
+  daily iPhone user hurting from no system autofill).
+- **Passkeys / WebAuthn** — evaluate as a credential type; large — assessed 2026-07-10
+  (`docs/assess/2026-07-passkeys.md`: defer-with-trigger; store-as-fv3 + Android
+  CredentialProvider is the pre-agreed shape; trigger = a household site pushing
+  passkey-first).
 
 ## Onboarding & reach (owner-requested 2026-07-07 — near-term product polish, mostly UI)
 
@@ -199,7 +210,8 @@ Prioritized; each is additive and back-compatible.
   commit to the Personal vault only; the user should choose the destination vault
   (writable vaults, F18 picker semantics) at the confirm step, web + natives, per-import
   for v1. F75 dedupe scoping must follow the chosen vault. Tracked in
-  `docs/PLAN-autonomous-2026-07.md` §"Owner dev-notes queued".
+  `docs/PLAN-autonomous-2026-07.md` §"Owner dev-notes queued". **DONE (S2, 0.10.1,
+  `c9a0d4d`).**
 
 ## Horizons & cycle doctrine (2026-07-08 brainstorm — the spine behind the queues)
 
