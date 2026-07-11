@@ -14,6 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -143,60 +144,139 @@ internal fun IncomingTransferCards(vm: AndvariViewModel, ui: UiState) {
 /** Sharing screen (spec 03 §10/§11): vaults + the full lifecycle — delete, restore, leave,
  *  transfer, rename — plus Recently deleted (restore) and Recently removed (holding area).
  *  Member management (add/role/remove) stays a web surface for now; this screen carries the
- *  lifecycle slice the natives need for 0.5.0 parity. */
+ *  lifecycle slice the natives need for 0.5.0 parity.
+ *
+ *  DN-1 (per-vault Settings reveal): the lifecycle panels no longer stack under the vault
+ *  list — each SHARED vault's row carries a Settings affordance that opens that one vault's
+ *  settings view in place of the list ([UiState.sharingSettingsVaultId], rotation-safe VM
+ *  state). Banners (error/notice, lifecycle notices, incoming offers) and the A4 copy
+ *  status line compose ABOVE the branch — always visible from either side (A6/A7). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SharingScreen(vm: AndvariViewModel, ui: UiState) {
     BackHandler(onBack = vm::closeSharing)
+    val vaults = vm.vaultInfos()
+    // DN-1: resolve the open settings id against the CURRENT vaults every composition — a
+    // vault vanishing mid-view (deleted/revoked on another device) degrades to the list,
+    // never a crash. A2 actively clears the stale id in the VM's refresh path; this
+    // null-safe lookup covers the same-frame gap.
+    val settingsVault = ui.sharingSettingsVaultId?.let { id -> vaults.find { it.vaultId == id } }
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Sharing", style = MaterialTheme.typography.titleLarge) },
-                navigationIcon = { IconButton(onClick = vm::closeSharing) { Icon(Icons.Default.ArrowBack, "back") } },
+                title = { Text(settingsVault?.name ?: "Sharing", style = MaterialTheme.typography.titleLarge) },
+                navigationIcon = {
+                    IconButton(onClick = if (settingsVault != null) vm::closeVaultSettings else vm::closeSharing) {
+                        Icon(Icons.Default.ArrowBack, "back")
+                    }
+                },
             )
         },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+            // A6/A7 branch boundary: bars, lifecycle notices, incoming ownership offers and
+            // the copy status line stay ABOVE the list/settings branch — an op failure
+            // inside settings is never silent, and an arriving offer shows immediately.
             ErrorBar(ui.error, vm::clearError)
             NoticeBar(ui.notice, vm::clearNotice)
             LifecycleNoticesBanner(ui.lifecycleNotices, vm::dismissNotice)
             IncomingTransferCards(vm, ui)
+            CopyStatusLine(ui, vaults)
 
-            val vaults = vm.vaultInfos()
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Vaults", style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        "Every item lives in exactly one vault. Shared vaults are visible to everyone you add; only the vault owner manages members.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    vaults.forEach { v ->
-                        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text((v.name.firstOrNull() ?: '?').uppercase(), color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Serif)
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(v.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
-                                Text(
-                                    if (v.type == "personal") "personal vault" else "shared vault · ${v.role ?: "member"}",
-                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            if (v.type == "shared" && v.role != "owner") LeaveControl(vm, ui, v)
+            if (settingsVault != null) {
+                // A11: this BackHandler composes INSIDE the settings branch — last-composed
+                // wins, so system Back closes the settings layer before the screen (the
+                // panels' AlertDialog confirms keep their own window back-dispatch).
+                BackHandler(onBack = vm::closeVaultSettings)
+                if (settingsVault.type == "shared" && settingsVault.role == "owner") {
+                    OwnerVaultPanel(vm, ui, settingsVault)
+                } else {
+                    MemberVaultPanel(vm, ui, settingsVault)
+                }
+            } else {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("Vaults", style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            "Every item lives in exactly one vault. Shared vaults are visible to everyone you add; only the vault owner manages members.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        vaults.forEach { v ->
+                            VaultListRow(v, onOpenSettings = if (v.type == "shared") ({ vm.openVaultSettings(v.vaultId) }) else null)
                         }
                     }
                 }
-            }
 
-            vaults.filter { it.type == "shared" && it.role == "owner" }.forEach { v ->
-                Spacer(Modifier.height(16.dp))
-                OwnerVaultPanel(vm, ui, v)
+                RecentlyDeletedSection(vm, ui)
+                RecentlyRemovedSection(ui.heldVaults)
             }
-
-            RecentlyDeletedSection(vm, ui)
-            RecentlyRemovedSection(ui.heldVaults)
             Spacer(Modifier.height(24.dp))
             ExportDialogs(vm, ui) // "Back up first…" opens the spec 07 backup preflight here
+        }
+    }
+}
+
+/** One Vaults-card row — the pure extraction of the old inline row (DN-1). SHARED vaults
+ *  (owner or member alike) get the Settings affordance; personal vaults get none (no
+ *  lifecycle ops — rename/delete/leave/transfer are all shared-vault verbs, and an empty
+ *  settings page is worse than no button). Leave moved into the settings view; the row
+ *  keeps its role tag. */
+@Composable
+private fun VaultListRow(v: VaultInfo, onOpenSettings: (() -> Unit)?) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text((v.name.firstOrNull() ?: '?').uppercase(), color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Serif)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(v.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+            Text(
+                if (v.type == "personal") "personal vault" else "shared vault · ${v.role ?: "member"}",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (onOpenSettings != null) {
+            IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "vault settings") }
+        }
+    }
+}
+
+/** DN-1 settings view for a shared vault this account is a MEMBER of: a role line + the
+ *  relocated [LeaveControl] (Leave moved off the list row into settings). */
+@Composable
+private fun MemberVaultPanel(vm: AndvariViewModel, ui: UiState, v: VaultInfo) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text(
+                "shared vault · ${v.role ?: "member"}",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            LeaveControl(vm, ui, v)
+        }
+    }
+}
+
+/** A4 (DN-1): the ONE authoritative bulk-copy progress/note line — screen-level, visible
+ *  from either branch, naming the SOURCE vault via [UiState.copyVaultId]. A mid-copy
+ *  navigation clears the id (openVaultSettings/closeVaultSettings convention) while the
+ *  op's next tick republishes the progress — fall back to "a vault" honestly rather than
+ *  hide a live op. */
+@Composable
+private fun CopyStatusLine(ui: UiState, vaults: List<VaultInfo>) {
+    if (ui.copyProgress == null && ui.copiedNote == null) return
+    val label = ui.copyVaultId?.let { id -> vaults.find { it.vaultId == id }?.name }?.let { "“$it”" } ?: "a vault"
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            val progress = ui.copyProgress
+            if (progress != null) {
+                val (done, total) = progress
+                Text("Copying items from $label to your Personal vault… $done/$total", style = MaterialTheme.typography.bodySmall)
+                if (total > 0) LinearProgressIndicator(progress = { done.toFloat() / total }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+            } else {
+                ui.copiedNote?.let {
+                    Text("From $label: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                }
+            }
         }
     }
 }
@@ -368,16 +448,20 @@ private fun DeleteVaultControl(vm: AndvariViewModel, ui: UiState, v: VaultInfo) 
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { vm.copyItemsToPersonal(v.vaultId) }, enabled = !ui.busy) {
-                Text(ui.copyProgress?.let { (d, t) -> "Copying… $d/$t" } ?: "Copy items to my Personal vault first…")
+                // A4: the inline copy display is gated to ITS vault — another vault's
+                // in-flight copy must not relabel this button.
+                Text(ui.copyProgress?.takeIf { ui.copyVaultId == v.vaultId }?.let { (d, t) -> "Copying… $d/$t" } ?: "Copy items to my Personal vault first…")
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = vm::backupBegin, enabled = !ui.busy) { Text("Back up first…") }
         }
-        ui.copyProgress?.let { (done, total) ->
+        // A4: progress bar + note kept in-panel but gated to ITS vault (copyVaultId) —
+        // the screen-level CopyStatusLine is the cross-branch authoritative display.
+        if (ui.copyVaultId == v.vaultId) ui.copyProgress?.let { (done, total) ->
             if (total > 0) LinearProgressIndicator(progress = { done.toFloat() / total }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
         }
-        ui.copiedNote?.let {
+        if (ui.copyVaultId == v.vaultId) ui.copiedNote?.let {
             Spacer(Modifier.height(4.dp))
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
         }

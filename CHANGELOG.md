@@ -1,5 +1,26 @@
 # andvari — changelog
 
+## 0.11.0 — vault settings get their own place (2026-07-10, cross-platform cut)
+
+Your dev-note, delivered: vault management no longer stacks every vault's controls under the
+vault list. On the **web app** and on **Android**, each shared vault row now has a **Settings**
+button that opens that vault's own settings view — rename, members (web), ownership transfer,
+leave, and the delete flow all live there, with a "‹ Back to vaults" header and the platform's
+Back button closing the settings first. The list itself stays clean: create-vault, recently
+deleted, and incoming ownership offers remain on the list (offers stay visible even while a
+settings view is open). Personal vaults have no settings button — they have no vault-level
+operations.
+
+Nothing about the flows themselves changed: the type-the-vault-name delete confirm, the
+copy-items-to-Personal-first rescue, ownership-transfer consent, and member verification are
+the same screens, relocated. Two genuine improvements rode along: a rescue copy now keeps
+reporting its progress even if you leave and reopen the settings view mid-copy (and the
+delete button stays locked until that copy finishes), and on Android a copy's progress note
+now names which vault it belongs to.
+
+Desktop is unchanged in this cut — it has no vault-management screens yet (that's a separate,
+larger item on the roadmap), and it simply re-reports the new version.
+
 ## 0.10.2 — the enrollment ceremony gets real on phone and desktop (2026-07-10, cross-platform cut)
 
 Security hardening of first-time enrollment, bringing both native apps up to the web app's

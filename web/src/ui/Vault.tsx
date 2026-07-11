@@ -121,6 +121,11 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   const [editing, setEditing] = useState<ItemDoc | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [exportMode, setExportMode] = useState<ExportMode | null>(null);
+  // DN-1 (A1): the Sharing view's per-vault settings layer. The id lives HERE — not in
+  // Sharing — so the ONE back guard below can close it as the topmost layer (a second
+  // useBackGuard anywhere under Vault is forbidden: double-popstate would make one Back
+  // close two layers). null = Sharing shows the vaults list.
+  const [sharingSettingsVaultId, setSharingSettingsVaultId] = useState<string | null>(null);
   const [mustChange, setMustChange] = useState(mustChangePassword);
   // Connectivity, split in two so F29's fallback poll has an honest gate:
   //  - wsUp: the dirty-bell socket state (onOpen/onDown from ApiClient.events);
@@ -159,8 +164,12 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     if (importOpen) return setImportOpen(false);
     if (exportMode) return setExportMode(null);
     if (selected) return setSelected(null);
+    // DN-1 (A1): the sharing settings layer closes before the view falls back — one Back
+    // steps settings → vaults list, the next leaves Sharing. `deep` needs no change
+    // (view !== "vault" already holds while Sharing is open).
+    if (view === "sharing" && sharingSettingsVaultId) return setSharingSettingsVaultId(null);
     if (view !== "vault") return setView("vault");
-  }, [editing, importOpen, exportMode, selected, view]);
+  }, [editing, importOpen, exportMode, selected, view, sharingSettingsVaultId]);
   useBackGuard(deep, closeTop);
 
   const refresh = () => {
@@ -322,7 +331,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   };
 
   const navBtn = (v: View, label: string) => (
-    <button className={`navbtn ${view === v ? "active" : ""}`} onClick={() => { setView(v); setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); }}>{label}</button>
+    <button className={`navbtn ${view === v ? "active" : ""}`} onClick={() => { setView(v); setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); }}>{label}</button>
   );
 
   const current = selected ? store.get(selected) : null;
@@ -417,7 +426,12 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             store={store}
             client={client}
             onSynced={refresh}
-            onBackup={() => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setExportMode("backup"); }}
+            /* A8: "Back up first" leaves Sharing — the settings id clears with the other
+               layer state, so the round-trip lands back on the vaults LIST. */
+            onBackup={() => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setSharingSettingsVaultId(null); setExportMode("backup"); }}
+            settingsVaultId={sharingSettingsVaultId}
+            onOpenSettings={setSharingSettingsVaultId}
+            onCloseSettings={() => setSharingSettingsVaultId(null)}
           />
         ) : view === "settings" ? (
           <Settings client={client} account={account} policy={policy} onPasswordChanged={() => setMustChange(false)} />
