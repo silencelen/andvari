@@ -50,11 +50,34 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
       (b) web/extension have NO 426 gate at all (dormant until a pin is armed; small "reload
       to update" nudge when touched next); (c) item-editor secret fields in `rememberSaveable`
       (password/totp/cardNumber/CVV) — parked for owner below.
-- [ ] **N3. Desktop vault management (L) — the biggest parity gap.**
-      Desktop has NO Sharing surface (no lifecycle, no members view, no per-vault settings,
-      no recently-deleted/removed) — flagged in DN-1 and deliberately not smuggled in. Port the
-      Android screens over the shared engine (the engine already carries everything; this is
-      UI + DesktopState wiring). Design-lite (mirror the reviewed Android shapes) + full review.
+- [x] **N3. Desktop vault management — DONE, SHIPPED 0.14.0 (2026-07-11, `32ae161`).**
+      Full Android-parity Sharing surface on desktop (list + per-vault settings: rename/
+      transfer/delete w/ typed-confirm + rescue; leave; trash disclosure) + the global
+      AttentionArea desktop was MISSING (notices/transfers/F20 were silently dropped —
+      offers to a desktop-only member were invisible) + friendlyError map on all desktop ops.
+      Breaker: 1 BLOCKER (async writes epoch-guarded — cross-account PII leak) + 8 AMENDs, all
+      landed. Review 5→5 confirmed → 2 real defects fixed pre-ship (rescue-copy single-flight;
+      editor composes the global ErrorBar). Snapshot pre-0140 + vzdump; all bytes verified
+      (web sha, deb sha, APK vc 16534588). **Android backports filed → H1.**
+- [x] **N3b. Universal importer — RATIFIED 2026-07-11** ("go ahead with the universal importer
+      after N3"). Design + breaker DONE (`docs/design/2026-07-11-universal-importer.md`, no
+      blockers, 3 AMENDs folded); BUILD IN FLIGHT as this line lands — one universal import
+      screen ×3 clients, per-source export help demoted to a collapsible block (core-shared for
+      natives), mismatch machinery deleted, desktop wildcard fixed. Cut 0.14.1.
+- [ ] **H1. Hardening backports batch (approved 2026-07-11)** — Android epoch-guards +
+      copy-gate backports (the N3 breaker/review holes exist on Android too); skeletal-
+      tombstone truth fix; web "reload to update" nudge; **autofill browser reach** (Z Fold
+      report 2026-07-11: only Brave dispatches by default — Chrome needs its "Autofill using
+      another service" setting [user step, pin already static]; Samsung/Edge need
+      compatibility-package XML from us + one-tap trust; add a "Browser support" card to
+      Autofill status). Stretch: desktop syncing/busy split. Cut 0.14.2.
+- [ ] **R1. Migration rehearsal (approved 2026-07-11)** — the real-secrets runbook executed
+      end-to-end on a LOCAL throwaway server (scratch escrow; no live-CT mutation, no auth
+      manufacturing); output = runbook amendments + re-runnable harness + "rehearsed ✅" in the
+      go/no-go. Docs+tooling, no cut unless bugs surface.
+- [ ] **O1. Ops rider (approved)** — apply the ready-to-apply purge-stall Grafana alert
+      (metric live since the 0.8.0-era deploy) + andvari monitor sanity pass; verify the rule
+      attaches to a live series.
 - [ ] **N4. (TRIGGER: owner retires the 0.2.x MSI) Card-create Option-A flip + S3 (M).**
       The flip ceremony from the cards design §build-order (flip `CARD_CREATE_ENABLED` ×2 +
       unhide, windows manifest entry, verify old-MSI absence), THEN S3 extension in-page card
