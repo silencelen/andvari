@@ -34,6 +34,7 @@ import io.silencelen.andvari.core.client.sqliteVaultCache
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.PlannedAttachment
+import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultItem
@@ -318,7 +319,19 @@ class DesktopState(private val scope: CoroutineScope) {
         toVault()
     }
 
-    fun enroll(invite: String, email: String, name: String, password: String) = op {
+    fun enroll(invite: String, email: String, name: String, password: String) {
+        // State-layer re-assert (mirrors Android; the S2-review race class: a composition-
+        // stale submit lambda can fire with live-read fields). Busy first — op() sets busy
+        // but never checks it — then the F60 floor (the irreversible leg of this screen).
+        if (busy) return
+        if (!Strength.meetsMasterPasswordFloor(password)) {
+            error = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols."
+            return
+        }
+        enrollOp(invite, email, name, password)
+    }
+
+    private fun enrollOp(invite: String, email: String, name: String, password: String) = op {
         val pol = policy ?: newApi().clientPolicy().also { policy = it }
         val a = newApi()
         val recoveryPub = Bytes.fromB64(a.recoveryPubkey())

@@ -12,6 +12,16 @@ object Strength {
     /** spec 07 §2.3: backup passphrases must score at least this. */
     const val BACKUP_FLOOR = 3
 
+    /** F60: the master password wraps the whole vault — same floor web enforces
+     *  (web/src/ui/strength.ts MASTER_PW_MIN_SCORE). */
+    const val MASTER_PW_MIN_SCORE = 3
+
+    fun meetsMasterPasswordFloor(pw: String): Boolean = estimateStrength(pw) >= MASTER_PW_MIN_SCORE
+
+    /** Advisory (never blocks): non-ASCII in a master password may not round-trip across
+     *  IMEs/keyboards on other devices. Exact mirror of web strength.ts ([^\x20-\x7e]). */
+    fun masterPasswordHasNonAscii(pw: String): Boolean = pw.any { it.code < 0x20 || it.code > 0x7e }
+
     /** Score → label, index-aligned with web's STRENGTH_LABELS. */
     val LABELS: List<String> = listOf("very weak", "weak", "fair", "good", "strong")
 

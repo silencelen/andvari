@@ -50,6 +50,7 @@ import io.silencelen.andvari.core.client.CsvPreflight
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.CsvImport
+import io.silencelen.andvari.core.client.EnrollCeremony
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
@@ -351,27 +352,65 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
     var password by rememberSaveable { mutableStateOf("") }
     var confirm by rememberSaveable { mutableStateOf("") }
     var fpOk by rememberSaveable { mutableStateOf(false) }
+    // spec 04 §2(3): the user TYPES the first 16 sheet chars; the short form is public
+    // (first 16 of a served fingerprint), so rememberSaveable is fold-safe AND safe.
+    var shortFp by rememberSaveable { mutableStateOf("") }
     val fp = ui.policy?.recoveryFingerprint ?: ""
-    val ready = invite.isNotBlank() && email.isNotBlank() && password.length >= 8 && password == confirm && fpOk && fp.isNotEmpty()
+    val shortOk = Escrow.shortFormMatches(shortFp, fp)
+    // One shared gate (core EnrollCeremony, jvm-tested): F60 floor + typed ceremony —
+    // the two legs this form historically under-enforced (length>=8, display+checkbox).
+    val ready = EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, fp)
     Column(Modifier.fillMaxWidth()) {
         Field("Invite token", invite, { invite = it }, mono = true)
         Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
         Field("Name (optional)", name, { name = it })
         SecretField("Master password", password) { password = it }
+        if (password.isNotEmpty()) {
+            val score = Strength.estimateStrength(password)
+            if (Strength.meetsMasterPasswordFloor(password)) {
+                Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            if (Strength.masterPasswordHasNonAscii(password)) {
+                Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+            }
+        }
         SecretField("Confirm password", confirm) { confirm = it }
+        if (confirm.isNotEmpty() && confirm != password) {
+            Text("passwords don't match", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
         if (fp.isEmpty()) {
             Text("This server has no recovery key configured yet — enrollment is disabled until the escrow ceremony is done.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
         } else {
             Spacer(Modifier.height(8.dp))
-            Text("Recovery fingerprint", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(groupHex(fp), fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall)
+            // Deliberately NOT displayed until typed — showing it above the input would
+            // reduce the check to transcription (spec 04 §2(3); web Enroll parity; the
+            // F57 re-seal card already works this way).
+            Text("Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true)
+            if (shortFp.isNotBlank() && !shortOk) {
+                Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            if (shortOk) {
+                Text("matches — full fingerprint: ${groupHex(fp)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+            }
             Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(fpOk, { fpOk = it })
-                Text("Matches my printed recovery sheet. My master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
+                Checkbox(fpOk, { fpOk = it }, enabled = shortOk)
+                Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
             }
         }
         Spacer(Modifier.height(12.dp))
-        PrimaryButton("Create vault", enabled = ready && !ui.busy, busy = ui.busy) { vm.enroll(invite.trim(), email.trim(), name.trim(), password) }
+        // The onClick RE-EVALUATES the gate from the same live reads it submits: the
+        // button's enabled flag reflects the last composition, so a same-frame edit +
+        // tap could otherwise submit values `ready` never approved (S2-review race
+        // class; web enforces at submit for the same reason). Busy is re-checked in
+        // the ViewModel, where the read is live.
+        PrimaryButton("Create vault", enabled = ready && !ui.busy, busy = ui.busy) {
+            if (EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, fp)) {
+                vm.enroll(invite.trim(), email.trim(), name.trim(), password)
+            }
+        }
     }
 }
 
@@ -1818,7 +1857,10 @@ private fun QuickUnlockOfferCard(vm: AndvariViewModel) {
 @Composable
 private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true, keyboard: KeyboardType = KeyboardType.Text) {
     OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp), label = { Text(label) }, singleLine = singleLine,
-        keyboardOptions = KeyboardOptions(keyboardType = keyboard),
+        // mono fields hold verbatim strings (invite token, typed fingerprint) — an IME
+        // "correcting" a hex chunk to a dictionary word can only ever FAIL the check,
+        // but the user gets a scary mismatch for keyboard noise. Kill autocorrect there.
+        keyboardOptions = KeyboardOptions(keyboardType = keyboard, autoCorrectEnabled = if (mono) false else null),
         textStyle = if (mono) MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace) else MaterialTheme.typography.bodyMedium)
 }
 
