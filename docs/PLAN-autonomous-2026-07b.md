@@ -205,9 +205,19 @@ owner: park under "Parked for owner", continue with the documented default, neve
   Settings sub-page, P3 actionable backup card, P6 native read-only server URL in Settings,
   P7 2FA card retitle (all 3), P8 web "Recently removed" holding-area surface. Review SHIP
   (0 defects). Devstore vc 16512160, deb 0.12.0, web `index.B-UseSx8.js` served==built,
-  snapshot pre-0120 + vzdump first, 297 items. **CUT 2 IN FLIGHT: P4 notice/banner-system
-  unification (opinionated — own design+breaker pass) + P5 Android update-available/426
-  parity (feature-shaped).**
+  snapshot pre-0120 + vzdump first, 297 items. **CUT 2 DONE + SHIPPED 0.13.0 [`03c027c`]:** P4 = Android-only (web/desktop already tidy —
+  scope note in the cut-2 design doc): break-glass banners hoisted to ONE global AttentionArea
+  (de-dup: vault-list + Sharing copies removed), critical-direct never collapsed (escrowStale
+  A1, transfers, anomalies, needsUpdate-when-vault-empty A2), only the 2 genuinely-FYI items
+  collapse (both-present gate). P5 = Android 426 blocking screen w/ BOTH catch sites (op +
+  backgroundSync, A8) + sign-out escape (A9). Breaker reclassified the design (escrowStale/
+  needsUpdate NOT safe to collapse); owner chose "tidy + tiny collapse"; safety review
+  FIX-FIRST → 2 fixed (lock/signOut now clear escrowStale — the global hoist would have shown
+  a dead-action re-seal card on Unlock; attention area capped+scrollable). Burial invariant
+  CONFIRMED HELD. Devstore vc 16515515, deb 0.13.0, web `index.Dhe28-76.js` served==built,
+  snapshot pre-0130 + vzdump, 297 items. Android update-available nudge DEFERRED (no android
+  manifest key — filed); core errorFrom bare-426 tightening filed as follow-up.
+  **IA TIER-2 COMPLETE — all 8 ratified proposals shipped or explicitly filed.**
 - [ ] **IA Tier 2 — PITCHED, awaiting owner ratification** (`docs/design/2026-07-10-ia-regroup.md`
   §Tier 2). 8 proposals from the layout audit, each with a size + default-if-silent: P1 nav
   consolidation (Health→icon), P2 Devices hub out of Settings, P3 actionable backup card, P4
