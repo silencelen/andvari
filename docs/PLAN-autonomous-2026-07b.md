@@ -200,7 +200,7 @@ owner: park under "Parked for owner", continue with the documented default, neve
   + monochrome. Review FIX-FIRST (1 MED + 3 LOW, all fixed). Shipped: devstore vc 16510009,
   deb 0.11.1, web `index.CBI8CjHH.js` served==built, snapshot pre-0111 + vzdump first, 297
   items. Design `docs/design/2026-07-10-ia-regroup.md`.
-- [~] **IA Tier 2 — RATIFIED 2026-07-10 ("the design doc looked good to me"). CUT 1 DONE +
+- [x] **IA Tier 2 — RATIFIED 2026-07-10 ("the design doc looked good to me"). CUT 1 DONE +
   SHIPPED 0.12.0 [`f432704`]:** P1 web nav→toolbar icons (Health+Trash), P2 Devices hub → a
   Settings sub-page, P3 actionable backup card, P6 native read-only server URL in Settings,
   P7 2FA card retitle (all 3), P8 web "Recently removed" holding-area surface. Review SHIP
@@ -218,12 +218,6 @@ owner: park under "Parked for owner", continue with the documented default, neve
   snapshot pre-0130 + vzdump, 297 items. Android update-available nudge DEFERRED (no android
   manifest key — filed); core errorFrom bare-426 tightening filed as follow-up.
   **IA TIER-2 COMPLETE — all 8 ratified proposals shipped or explicitly filed.**
-- [ ] **IA Tier 2 — PITCHED, awaiting owner ratification** (`docs/design/2026-07-10-ia-regroup.md`
-  §Tier 2). 8 proposals from the layout audit, each with a size + default-if-silent: P1 nav
-  consolidation (Health→icon), P2 Devices hub out of Settings, P3 actionable backup card, P4
-  notice/banner system unification (M, opinionated), P5 Android update/426 parity (feature
-  gap), P6 server-URL visibility in Settings, P7 TOTP naming, P8 header/toolbar unification +
-  the missing web holding-area surface. Owner picks; none ship without a "go".
 
 ## Parked for owner (carried + new)
 
@@ -231,4 +225,4 @@ owner: park under "Parked for owner", continue with the documented default, neve
 - Extension tier-2 auto-update distribution (signed .xpi / store) — distribution decision.
 - Real-secrets migration date — after owner TOTP + drills + 30-day soak.
 - IBAN/bank-account item type — ratify from S3's scope addendum.
-- Fold biometric/autofill feel-check; extension load-unpacked upgrade to 0.8.1.
+- Fold biometric/autofill feel-check; extension load-unpacked upgrade to 0.9.0.
