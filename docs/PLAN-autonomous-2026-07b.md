@@ -174,13 +174,21 @@ owner: park under "Parked for owner", continue with the documented default, neve
 
 ## Owner dev-notes queued (build next, in order, standard design→build→review treatment)
 
-- **DN-1 (2026-07-10): per-vault Settings flyout.** Owner: "instead of having the setting and
-  config for each vault under the vault list, lets have the vaults have a 'settings' option on
-  each that brings up a popup/flyout/reveals settings." Scope at design time: which surfaces
-  hold per-vault settings today (web Sharing view stacks lifecycle/members/rename under the
-  list; natives have their own arrangement), what moves into the flyout (rename, members,
-  transfer, delete/restore, leave), parity across clients vs web-first. Slot AFTER the native
-  security cycle (in flight) and BEFORE S3 unless the owner reorders.
+- [x] **DN-1: per-vault Settings flyout — DONE + SHIPPED 0.11.0 fleet-wide (2026-07-10,
+  `44599f6`).** Web + Android: shared-vault rows gain Settings → the vault's own settings
+  view (rename/members[web]/transfer/leave/delete), Back closes the layer first (web:
+  Vault.tsx back-guard wiring per the breaker's F-1; Android: VM-held id + in-branch
+  BackHandler); personal vaults get no button; banners/offers stay visible above the branch.
+  RE-PARENT held mechanically (bodies byte-identical except sanctioned A3/A4 edits). Design
+  `docs/design/2026-07-10-vault-settings-flyout.md` (1 FATAL + 5 SERIOUS breaker amendments
+  A1-A12 + post-review A3b). Review (10 agents): 1 HIGH — A3's display-lift left the busy
+  gate local → close/reopen mid-rescue-copy re-enabled Copy + type-name Delete
+  (delete-during-rescue) — fixed via `inFlight = busy || copying !== null` gating
+  (Cancel deliberately busy-only) + collapsed-branch progress/note. **DESKTOP EXPLICITLY OUT:
+  it has NO vault-management surface at all (no Sharing screen, no lifecycle methods) —
+  "vault management on desktop" is its own future roadmap item, not smuggled in.** Shipped:
+  devstore vc 16507382, deb 0.11.0 (manifest merged, ext 0.9.0 kept), web/server redeployed
+  (`index.C6qNUuzq.js` served==built; snapshot pre-0110 + vzdump first; 297 items).
 
 ## Parked for owner (carried + new)
 
