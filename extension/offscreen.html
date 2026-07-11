@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>andvari clipboard</title>
+  </head>
+  <body>
+    <!-- Chrome clipboard-clear backstop (E1-4). The MV3 CSP (extension_pages: script-src 'self')
+         forbids inline script, so the clear logic is the bundled dist/offscreen.js. -->
+    <textarea id="sink" aria-hidden="true"></textarea>
+    <script src="offscreen.js" type="module"></script>
+  </body>
+</html>

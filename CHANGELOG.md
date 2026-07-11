@@ -23,6 +23,26 @@ and autofill reaches more browsers.
   from the purge (with the security argument for why that's enough written down and pinned
   by tests). No visible behavior change for any correctly-syncing app.
 
+### browser extension 0.10.0 — hardening round: the fleet's safety canon reaches the extension
+
+- **Copied secrets now clear themselves.** Passwords, one-time codes, and card fields
+  copied from the extension wipe from the clipboard after the same org-policy window the
+  other apps honor (30 s default) — even after the popup closes.
+- **Errors speak human now.** A mistyped master password says "Wrong email or master
+  password." instead of raw server JSON; can't-reach-the-server uses the same sentence as
+  the web vault; a save attempted while locked explains itself — and after you unlock, the
+  save offer comes back on its own instead of silently dying with the page.
+- **The extension now identifies itself to the server** (`extension/0.10.0`), so the
+  server-side minimum-version safety net can actually reach it, and it tells you when your
+  server requires a newer build. It also verifies the server-sent identity key against the
+  one your own sealed seed derives — the same tampering tripwire web and the apps run.
+- Two-factor codes now compute identically to every other client on edge-case setups
+  (the 2026-07-09 determinism fixes, backported); a recovery sign-in now nags you to set a
+  new master password; the popup says why it locked ("Locked after 15 minutes of
+  inactivity."); a transient server blip no longer signs the extension out; and the unused
+  "scripting" permission is gone (the clear-timer adds narrow clipboard permissions in its
+  place).
+
 ## 0.14.1 — one universal importer (2026-07-11, cross-platform cut)
 
 Importing passwords no longer starts with "which browser?" — there is now ONE import screen on

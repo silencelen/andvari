@@ -153,6 +153,13 @@ form, origin shown in the popup row) is the documented hard precondition for tha
 suppresses the save/update prompt (so a checkout CVV can't overwrite a stored merchant password via the
 update path).
 
+> **Correction (2026-07-11, cycle E1):** "via the existing secret-clipboard path with clear-timer"
+> above was aspirational — the shipped 0.7.0–0.9.0 extension copy path had **no clipboard
+> clear-timer at all** (`clipboardClearSeconds` was typed but never read). Clipboard auto-clear
+> (a local per-copy timer plus a service-worker alarm backstop that survives the popup closing,
+> per spec 01 §8) actually lands in **extension 0.10.0** — see
+> `docs/design/2026-07-11-extension-hardening.md` (E1-4).
+
 ## UI ×3
 
 - **Web:** "New card" beside New login/note; editor = name, cardholder, grouped-of-4 number (digits-only

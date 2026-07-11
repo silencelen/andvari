@@ -14,11 +14,18 @@ const hmacSha1 = (key: Uint8Array, data: Uint8Array): Uint8Array => hmac(sha1, k
 const hmacSha256 = (key: Uint8Array, data: Uint8Array): Uint8Array => hmac(sha256, key, data);
 const hmacSha512 = (key: Uint8Array, data: Uint8Array): Uint8Array => hmac(sha512, key, data);
 
-/** RFC 4648 base32 (case-insensitive, padding/whitespace ignored); mirrors core Base32. */
+/** RFC 4648 base32 (case-insensitive, padding/ASCII whitespace ignored); mirrors core Base32. */
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
+// Cross-port determinism (2026-07-09 review): ignore ONLY '=' padding + this pinned ASCII
+// whitespace set — never `\s`/isWhitespace, which disagree at the Unicode margins (JS `\s` strips
+// U+FEFF where the JVM keeps it; JVM isWhitespace strips U+001C..U+001F and Unicode spaces where JS
+// differs). Any other char (U+FEFF, NBSP, …) fails decode on EVERY client, so a secret one twin
+// could never parse back is never stored. Mirrors web totp.ts / core Base32.IGNORED.
+const BASE32_IGNORED = /[= \t\n\v\f\r]/g;
+
 export function base32Decode(text: string): Uint8Array {
-  const clean = text.toUpperCase().replace(/[=\s]/g, "");
+  const clean = text.toUpperCase().replace(BASE32_IGNORED, "");
   const out: number[] = [];
   let buffer = 0;
   let bits = 0;
@@ -94,6 +101,22 @@ export function totpSecondsRemaining(config: TotpConfig, unixSeconds: number): n
   return config.periodSeconds - (unixSeconds % config.periodSeconds);
 }
 
+/** Mirror of Kotlin String.toIntOrNull (radix 10): optional sign, decimal digits only
+ *  (full-string — never Number.parseInt's partial parse, "8x" → null not 8), 32-bit range.
+ *  Shared-parse twin determinism (2026-07-09 review); mirrors web totp.ts. */
+function toIntOrNull(s: string): number | null {
+  if (!/^[+-]?[0-9]+$/.test(s)) return null;
+  const v = Number.parseInt(s, 10);
+  return v >= -2147483648 && v <= 2147483647 ? v : null;
+}
+
+/** Mirror of Kotlin "xx".toIntOrNull(16): full-string hex (optional sign, like Kotlin),
+ *  never parseInt's prefix parse ("1G" → null, not 0x01). */
+function hexOrNull(s: string): number | null {
+  if (!/^[+-]?[0-9a-fA-F]+$/.test(s)) return null;
+  return Number.parseInt(s, 16);
+}
+
 // Byte-accurate so multi-byte UTF-8 escapes decode correctly; '+' stays literal.
 function percentDecode(s: string): string {
   const out: number[] = [];
@@ -103,8 +126,8 @@ function percentDecode(s: string): string {
     const c = s[i]!;
     if (c === "%") {
       if (i + 3 > s.length) throw new CryptoError("bad percent-encoding");
-      const v = Number.parseInt(s.slice(i + 1, i + 3), 16);
-      if (Number.isNaN(v)) throw new CryptoError("bad percent-encoding");
+      const v = hexOrNull(s.slice(i + 1, i + 3)); // strict, mirrors core toIntOrNull(16)
+      if (v === null) throw new CryptoError("bad percent-encoding");
       out.push(v);
       i += 3;
     } else {
@@ -112,7 +135,10 @@ function percentDecode(s: string): string {
       i++;
     }
   }
-  return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(out));
+  // LENIENT decode (malformed → U+FFFD), byte-exact with core percentDecode's decodeToString(): a
+  // Latin-1-encoded label (%E9) must ACCEPT on both twins, not route the same CSV row to login.totp
+  // on one client and notes on the other (2026-07-09 review — was fatal:true, a twin divergence).
+  return new TextDecoder("utf-8").decode(Uint8Array.from(out));
 }
 
 /** Parse an otpauth://totp/… URI; mirrors core Totp.parseUri. */
@@ -131,18 +157,30 @@ export function parseOtpauthUri(uri: string): TotpConfig {
       else params.set(pair.slice(0, eq).toLowerCase(), percentDecode(pair.slice(eq + 1)));
     }
   }
+  // A5 reject-don't-corrupt (2026-07-09 review): this parse is the ONE validity gate for editors
+  // and import adapters, so it must reject what totpCode cannot evaluate — an empty/blank secret
+  // (empty HMAC key) and digits/period outside totpCode's own checks — instead of storing a config
+  // whose 2FA display throws later. Byte-exact with web totp.ts / core Totp.parseUri.
   const secret = params.get("secret");
   if (!secret) throw new CryptoError("otpauth URI missing secret");
   const algRaw = (params.get("algorithm") ?? "SHA1").toUpperCase();
   if (algRaw !== "SHA1" && algRaw !== "SHA256" && algRaw !== "SHA512") {
     throw new CryptoError("unsupported otpauth algorithm");
   }
+  const secretBytes = base32Decode(secret);
+  if (secretBytes.length === 0) throw new CryptoError("otpauth secret decodes to empty key");
+  // Kotlin `toIntOrNull() ?: default` semantics, pinned: junk ("8x", "") → the default; an explicit
+  // out-of-range value ("0") → parsed, then range-rejected below.
+  const digits = toIntOrNull(params.get("digits") ?? "") ?? 6;
+  if (digits < 6 || digits > 10) throw new CryptoError("otpauth digits out of range");
+  const periodSeconds = toIntOrNull(params.get("period") ?? "") ?? 30;
+  if (periodSeconds <= 0) throw new CryptoError("otpauth period out of range");
   const colon = label.indexOf(":");
   return {
-    secret: base32Decode(secret),
+    secret: secretBytes,
     algorithm: algRaw,
-    digits: Number.parseInt(params.get("digits") ?? "6", 10) || 6,
-    periodSeconds: Number.parseInt(params.get("period") ?? "30", 10) || 30,
+    digits,
+    periodSeconds,
     label,
     issuer: params.get("issuer") ?? (colon >= 0 ? label.slice(0, colon) : ""),
   };

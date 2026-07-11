@@ -1,4 +1,4 @@
-import { AndvariApi, type MutationResult, type SyncResponse } from "./api";
+import { AndvariApi, ApiError, type MutationResult, type SyncResponse } from "./api";
 import { cardSubtitle, composeShortExpiry, digitsOnly } from "./card";
 import {
   adIdkey,
@@ -19,7 +19,7 @@ import {
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "./format";
 import { isNewerVersion } from "./version";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
-import type { CardItem, MatchItem, PendingSave, Req, Res, TabMsg } from "./messages";
+import type { CardItem, MatchItem, PendingSave, Req, Res, SaveErrorCode, TabMsg, UnlockCode } from "./messages";
 import { currentCode } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
@@ -45,9 +45,12 @@ const SERVER_URL = "https://andvari.taila2dff2.ts.net";
 
 const SKEY = "session"; // storage.session: SessionSnapshot
 const TKEY = "tabs"; //    storage.session: Record<tabId, TabState>
+const NKEY = "lockNotice"; // storage.session: { kind:"idle"; seconds } — F26 reason line (E1-7)
 const UKEY = "updateInfo"; // storage.local (non-secret): UpdateInfo while a newer build is live
 const ULAST = "updateCheckedAt"; // storage.local: epoch ms of the last COMPLETED update fetch
 const DEFAULT_AUTOLOCK_SECONDS = 15 * 60; // policy fetch failed/absent — never "no lock at all"
+const DEFAULT_CLIPBOARD_CLEAR_SECONDS = 30; // spec 01 §8 policy default; clearing is safety-positive
+const CLIPBOARD_CLEAR_ALARM = "clipboardclear"; // SW backstop clear (E1-4); survives idle doLock
 const RESYNC_PERIOD_MIN = 5;
 const UPDATE_ALARM = "updatecheck";
 const UPDATE_PERIOD_MIN = 1440; // ~daily; the SW also opportunistically checks on wake (throttled)
@@ -62,6 +65,17 @@ const BADGE_INK = "#1a1509"; // …treasury charcoal (web --gold / --btn-ink)
 // away. `status` is here too: merely leaving the popup open (it polls status every second for
 // liveness) is not activity; real interaction (matches/reveal/search/save/…) still re-arms.
 const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status"]);
+
+/** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
+ *  account.ts:40 parity). The unlock mapper carries it to the popup as code "identity_mismatch" —
+ *  a distinct class so it can NEVER be softened into "wrong password". The message is debug-only
+ *  detail; the popup renders the canonical sentence from errors.ts. */
+class IdentityMismatchError extends Error {
+  constructor() {
+    super("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.");
+    this.name = "IdentityMismatchError";
+  }
+}
 
 interface LoginData {
   username?: string;
@@ -105,6 +119,8 @@ interface Session {
   items: DecryptedItem[];
   vaultKeys: Map<string, Uint8Array>;
   personalVaultId: string;
+  /** Rescue-issued temporary password in effect (E1-6) — surfaced in `status` for the popup nudge. */
+  mustChangePassword: boolean;
 }
 
 /** What survives SW death (JSON-safe: keys as b64 — Uint8Array doesn't cross chrome.storage). */
@@ -115,6 +131,8 @@ interface SessionSnapshot {
   email: string;
   personalVaultId: string;
   autoLockSeconds: number;
+  clipboardClearSeconds: number;
+  mustChangePassword: boolean;
   vaultKeys: Record<string, string>;
   items: DecryptedItem[];
 }
@@ -130,6 +148,7 @@ interface TabState {
 
 let session: Session | null = null;
 let autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
+let clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
 let tabs = new Map<number, TabState>();
 /** One-shot popup fill grants, tabId → item+expiry. In-memory only: minted and consumed within
  *  one message exchange, so a SW death in between simply voids the grant (fill re-clicks). The
@@ -140,8 +159,15 @@ const grants = new Map<number, { itemId: string; expiresMs: number }>();
 let writesInFlight = 0;
 let loadPromise: Promise<void> | null = null;
 
-const api = new AndvariApi(SERVER_URL);
-api.onTokensRotated = () => persistSession(); // single-use refresh: a stale persisted pair = revoked device
+const api = new AndvariApi(SERVER_URL, chrome.runtime.getManifest().version);
+// Awaited on every pair mutation — the consumed refresh token must reach the snapshot BEFORE the
+// refresh POST (a stale persisted pair resurrected on SW wake = revoked device). persistSession
+// returns its storage.set promise so doRefresh can await it.
+api.onTokensChanged = () => persistSession();
+// A 426 min-version pin (spec 03 §1) surfaces via checkForUpdate → the existing update banner is
+// the download surface. checkForUpdate hits the static /downloads route (not api.ts), so it can
+// never itself 426 — no re-entry loop (AM4).
+api.onUpgradeRequired = () => void checkForUpdate(true);
 
 // ---- one-time per SW life; listeners MUST register synchronously (MV3 wake requirement) ----
 
@@ -162,9 +188,10 @@ chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "autolock") void doLock();
+  if (alarm.name === "autolock") void doLock("idle");
   else if (alarm.name === "resync") void resync();
   else if (alarm.name === UPDATE_ALARM) void checkForUpdate();
+  else if (alarm.name === CLIPBOARD_CLEAR_ALARM) void clearClipboardBackstop();
 });
 
 // The self-update check runs on its OWN daily schedule, independent of lock state (it reads only
@@ -223,12 +250,16 @@ function ensureLoaded(): Promise<void> {
         userId: snap.userId,
         email: snap.email,
         personalVaultId: snap.personalVaultId,
+        // mustChangePassword joined the snapshot in 0.10.0 — a ≤0.9.0 snapshot lacks it; false is
+        // the safe default (a real rescue re-nudges on the next fresh login anyway).
+        mustChangePassword: snap.mustChangePassword ?? false,
         vaultKeys: new Map(Object.entries(snap.vaultKeys).map(([id, b]) => [id, fromB64(b)])),
         // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
         items: snap.items.map((i) => ({ ...i, formatVersion: i.formatVersion ?? 1 })),
       };
       autoLockSeconds = snap.autoLockSeconds;
+      clipboardClearSeconds = snap.clipboardClearSeconds ?? DEFAULT_CLIPBOARD_CLEAR_SECONDS;
     }
     const t = got[TKEY] as Record<string, TabState> | undefined;
     if (t) tabs = new Map(Object.entries(t).map(([id, st]) => [Number(id), st]));
@@ -236,8 +267,14 @@ function ensureLoaded(): Promise<void> {
   return loadPromise;
 }
 
-function persistSession(): void {
-  if (!session) return;
+/** Persist the live session to storage.session. RETURNS the storage.set promise so
+ *  api.onTokensChanged can AWAIT the snapshot write before spending a refresh token (a consumed
+ *  pair must be persisted before the POST — see AndvariApi.doRefresh). The `!session` guard is
+ *  safe for that path: unlock sets tokens before session exists (setTokens vs the session
+ *  assignment), but no refresh can run mid-login, so onTokensChanged never fires session-less
+ *  there — the guard must NOT be "fixed" by reordering unlock. Fire-and-forget callers ignore it. */
+function persistSession(): Promise<void> {
+  if (!session) return Promise.resolve();
   const t = api.getTokens();
   const snap: SessionSnapshot = {
     access: t.access ?? "",
@@ -246,24 +283,38 @@ function persistSession(): void {
     email: session.email,
     personalVaultId: session.personalVaultId,
     autoLockSeconds,
+    clipboardClearSeconds,
+    mustChangePassword: session.mustChangePassword,
     vaultKeys: Object.fromEntries([...session.vaultKeys].map(([id, vk]) => [id, toB64(vk)])),
     items: session.items,
   };
-  void chrome.storage.session.set({ [SKEY]: snap });
+  return chrome.storage.session.set({ [SKEY]: snap });
 }
 
 function persistTabs(): void {
   void chrome.storage.session.set({ [TKEY]: Object.fromEntries([...tabs].map(([id, st]) => [String(id), st])) });
 }
 
-/** Full lock: memory + storage.session (pending saves hold plaintext passwords — they lock too). */
-async function doLock(): Promise<void> {
+/** Full lock: memory + storage.session (pending saves hold plaintext passwords — they lock too).
+ *  `reason` records WHY for the F26 unlock-form line (E1-7): idle → write a notice; manual → clear
+ *  any stale one. The "clipboardclear" backstop alarm deliberately SURVIVES (a secret copied just
+ *  before an idle lock still clears on schedule, E1-4). */
+async function doLock(reason: "idle" | "manual" = "manual"): Promise<void> {
+  const secondsAtLock = autoLockSeconds; // capture before the reset below (web App.tsx:209 parity)
   session = null;
   autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
+  clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
   tabs.clear();
   grants.clear();
   api.setTokens(null, null);
   await chrome.storage.session.remove([SKEY, TKEY]);
+  // Write the reason AFTER the [SKEY,TKEY] remove so it survives it (a notice only from the idle
+  // path — web parity); manual lock renders no reason line. storage.session clears on browser exit.
+  if (reason === "idle") {
+    await chrome.storage.session.set({ [NKEY]: { kind: "idle", seconds: secondsAtLock } });
+  } else {
+    await chrome.storage.session.remove(NKEY);
+  }
   void chrome.alarms.clear("autolock");
   void chrome.alarms.clear("resync");
   try {
@@ -375,18 +426,25 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       const p = await api.clientPolicy(); // host_permissions + reachability
       return { ok: true, serverTime: p.serverTime } satisfies Res<"ping">;
     }
-    case "status":
+    case "status": {
+      // The F26 reason line only matters while locked (it sits above the unlock form).
+      const lockNotice = session ? null : await readLockNotice();
       return {
         unlocked: session !== null,
         count: loginItems().length,
         email: session?.email ?? null,
+        mustChangePassword: session?.mustChangePassword ?? false,
+        lockNotice,
       } satisfies Res<"status">;
+    }
     case "lock": {
-      await doLock();
+      await doLock("manual");
       return { ok: true } satisfies Res<"lock">;
     }
     case "unlock":
-      return unlock(msg.email, msg.password);
+      return unlockWithMapping(msg.email, msg.password);
+    case "scheduleClipboardClear":
+      return scheduleClipboardClear();
     case "matches": {
       if (!session) return { locked: true, matches: [] } satisfies Res<"matches">;
       return { locked: false, matches: matchesFor(msg.host).map((i) => toMatchItem(i, true)) } satisfies Res<"matches">;
@@ -502,6 +560,27 @@ async function unlock(email: string, password: string): Promise<Res<"unlock">> {
   const uvk = open(wrapKey(mk), fromB64(s.accountKeys.wrappedUvk), adUvk(s.userId));
   // Identity keypair — for member (shared-vault) grants sealed to us.
   const identity = boxKeypairFromSeed(open(uvk, fromB64(s.accountKeys.encryptedIdentitySeed), adIdkey(s.userId)));
+
+  // spec 01 §5 (web account.ts:157-174 / core parity): the seed-derived identity key is the one the
+  // server cannot forge — a server-sent identityPub that doesn't equal it is a substitution attempt.
+  // Hard-fail with a DISTINCT sentinel BEFORE any vault material is synced/decrypted/persisted,
+  // including when the field is malformed (garbage where the identity key belongs IS the tampering
+  // this names). No ctEquals in extension crypto.ts; a length + byte loop is fine (the comparand is
+  // server-supplied, so timing is not load-bearing).
+  let serverIdentityPub: Uint8Array | null = null;
+  try {
+    serverIdentityPub = fromB64(s.accountKeys.identityPub);
+  } catch {
+    /* undecodable → treated as a mismatch below */
+  }
+  if (
+    serverIdentityPub === null ||
+    serverIdentityPub.length !== identity.publicKey.length ||
+    !identity.publicKey.every((b, i) => b === serverIdentityPub![i])
+  ) {
+    throw new IdentityMismatchError();
+  }
+
   const sync = await api.sync(0);
 
   const vaultKeys = new Map<string, Uint8Array>();
@@ -529,24 +608,146 @@ async function unlock(email: string, password: string): Promise<Res<"unlock">> {
   const items = decryptItems(sync, vaultKeys);
   // The personal vault (save target) = the type="personal" vault we hold a key for (web store.ts parity).
   const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
-  session = { userId: s.userId, email, items, vaultKeys, personalVaultId };
+  session = { userId: s.userId, email, items, vaultKeys, personalVaultId, mustChangePassword: s.mustChangePassword ?? false };
 
-  // Policy idle lock — a failed fetch must never mean "no lock at all" (web resolveAutoLockSeconds
-  // falls back to a persisted value; here the conservative default stands in).
+  // Policy fetch — a failed fetch must never mean "no idle lock at all" (web resolveAutoLockSeconds
+  // falls back to a persisted value; here the conservative defaults stand in). Also captures the
+  // clipboard-clear window (E1-4): finite ≥ 0 else default 30.
   try {
     const p = await api.clientPolicy();
     autoLockSeconds =
       typeof p.autoLockSeconds === "number" && Number.isFinite(p.autoLockSeconds)
         ? Math.max(0, p.autoLockSeconds)
         : DEFAULT_AUTOLOCK_SECONDS;
+    clipboardClearSeconds =
+      typeof p.clipboardClearSeconds === "number" && Number.isFinite(p.clipboardClearSeconds) && p.clipboardClearSeconds >= 0
+        ? p.clipboardClearSeconds
+        : DEFAULT_CLIPBOARD_CLEAR_SECONDS;
   } catch {
     autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
+    clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
   }
 
-  persistSession();
+  await persistSession();
+  void chrome.storage.session.remove(NKEY); // a fresh unlock clears the F26 idle-lock notice (E1-7)
   void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
   armAutoLock();
+
+  // E1-5: re-offer any save captured while locked the moment we unlock — otherwise the pending
+  // stays invisible until a navigation (its only other re-offer paths). Same uninjected-tab
+  // try/catch as the tabs.onUpdated listener.
+  for (const [tabId, st] of tabs) {
+    if (!st.pending) continue;
+    const m: TabMsg = { type: "offerPendingSave", pending: publicPending(st.pending) };
+    chrome.tabs.sendMessage(tabId, m).catch(() => {
+      /* content not injected in that tab — its own pendingSave poll covers it */
+    });
+  }
   return { ok: true };
+}
+
+/** Wrap unlock() so its throws cross the seam as a coded Res<"unlock"> (design decision 4): the SW
+ *  never ships user-facing sentences — the popup renders copy from errors.ts keyed on `code`. The
+ *  raw String(e) rides `error` as debug detail the surfaces never render. */
+async function unlockWithMapping(email: string, password: string): Promise<Res<"unlock">> {
+  try {
+    return await unlock(email, password);
+  } catch (e) {
+    return { ok: false, code: mapUnlockError(e), error: String(e) };
+  }
+}
+
+function mapUnlockError(e: unknown): UnlockCode {
+  if (e instanceof IdentityMismatchError) return "identity_mismatch";
+  if (e instanceof ApiError) {
+    if (e.code === "upgrade_required") return "upgrade_required"; // 426 min-version pin (any status)
+    if (e.status === 401) return e.code === "totp_required" ? "totp_required" : "bad_credentials";
+    return "server_error"; // 429/500/… fold here (strict Welcome-ladder parity, decision 5)
+  }
+  if (e instanceof TypeError) return "network"; // fetch rejection (web errors.ts:26-33 convention)
+  return "unknown";
+}
+
+/** The F26 idle-lock reason, read from its own storage.session key (E1-7). Not part of the session
+ *  snapshot — it must outlive the [SKEY,TKEY] removal doLock does. */
+async function readLockNotice(): Promise<{ kind: "idle"; seconds: number } | null> {
+  try {
+    const n = (await chrome.storage.session.get(NKEY))[NKEY] as { kind?: unknown; seconds?: unknown } | undefined;
+    if (n && n.kind === "idle" && typeof n.seconds === "number") return { kind: "idle", seconds: n.seconds };
+  } catch {
+    /* storage.session unavailable — no notice */
+  }
+  return null;
+}
+
+// ---- clipboard auto-clear backstop (spec 01 §8 / E1-4) ----
+// The surface schedules a precise local timer at each copy (web-parity), but Chrome closes the
+// popup on focus loss so that timer nearly never survives the dominant copy-in-popup flow. This SW
+// alarm is the backstop that outlives the popup. The SW has no document, so the actual clipboard
+// write is delegated to a context that does: an offscreen document on Chrome, the event page's own
+// navigator on Firefox.
+
+/** Arm the single backstop clear alarm. chrome.alarms floors at 0.5 min, so a sub-30 s policy
+ *  clears at ~30 s once the copying document is gone (AM7 — honest + deterministic on packed
+ *  builds; layer-1 covers sub-30 s while that document survives). Same-name create REPLACES, so the
+ *  last copy through us wins (AM2). Answers the effective seconds; locked/absent → default 30. */
+async function scheduleClipboardClear(): Promise<Res<"scheduleClipboardClear">> {
+  const s = clipboardClearSeconds;
+  try {
+    await chrome.alarms.create(CLIPBOARD_CLEAR_ALARM, { delayInMinutes: Math.max(s / 60, 0.5) });
+  } catch {
+    /* alarms unavailable here — the surface's own local timer is the only clear */
+  }
+  return { ok: true, clearSeconds: s };
+}
+
+/** Fire the backstop clear. B1: the write is a SINGLE SPACE (an empty-selection execCommand copy is
+ *  a silent no-op) and runs on EVERY alarm fire. Best-effort — every failure is swallowed. */
+async function clearClipboardBackstop(): Promise<void> {
+  if (typeof chrome.offscreen === "undefined") {
+    // Firefox: background.js runs as an EVENT PAGE (a real document) and the clipboardWrite
+    // permission lifts the gesture/focus gate — clear directly, execCommand-of-a-space as fallback.
+    try {
+      await navigator.clipboard.writeText("");
+      return;
+    } catch {
+      /* fall through to the execCommand fallback */
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = " ";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    } catch {
+      /* nothing more this context can do */
+    }
+    return;
+  }
+  // Chrome: the async Clipboard API refuses unfocused documents (offscreen docs are never focused),
+  // so offscreen.ts does a textarea + execCommand copy at top level. Close-then-recreate guarantees
+  // the clear runs on EVERY fire (never clear-on-load behind a create-if-absent guard — B1).
+  try {
+    await closeOffscreenIfPresent();
+    await chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: [chrome.offscreen.Reason.CLIPBOARD],
+      justification: "clear a copied secret from the clipboard",
+    });
+    await closeOffscreenIfPresent(); // the clear ran at document load — tear it back down
+  } catch {
+    /* offscreen unavailable — the surface's local timer was the only best-effort clear */
+  }
+}
+
+async function closeOffscreenIfPresent(): Promise<void> {
+  try {
+    const has = typeof chrome.offscreen.hasDocument === "function" ? await chrome.offscreen.hasDocument() : true;
+    if (has) await chrome.offscreen.closeDocument();
+  } catch {
+    /* none open, or a close race — nothing to do */
+  }
 }
 
 function decryptItems(sync: SyncResponse, vaultKeys: Map<string, Uint8Array>): DecryptedItem[] {
@@ -803,8 +1004,9 @@ async function resolvePendingSave(
     return { ok: true };
   }
 
-  // Pending survives a locked failure so unlock → save can still land it.
-  if (!session || !session.personalVaultId) return { ok: false, error: "locked" };
+  // Pending survives a locked failure so unlock → save can still land it. The surface maps the
+  // CODE to copy — the SW's raw "locked" string must never reach the banner (extux-03).
+  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
 
   // Re-decide save-vs-update NOW: the capture-time decision is stale if the vault was LOCKED then
   // (matchesFor was empty ⇒ updatesItemId null ⇒ this would duplicate an existing login). Prefer
@@ -866,14 +1068,22 @@ async function putItem(
   }
 }
 
-async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; error?: string }> {
+/** Map a non-applied push status to the seam SaveErrorCode (E1-5): `conflict` is the one distinct
+ *  case; denied/duplicate/no-vault-key/undefined all fold to "failed". The `error` string is
+ *  debug-only detail the surface never renders (it maps the CODE to copy). */
+function saveFailure(status: MutationResult["status"] | undefined): { ok: false; code: SaveErrorCode; error: string } {
+  const code: SaveErrorCode = status === "conflict" ? "conflict" : "failed";
+  return { ok: false, code, error: `save failed (${status ?? "no vault key"})` };
+}
+
+async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
   // Monotonic re-seal: never below the fv the item arrived at (web Account.itemFv parity —
   // the server refuses fv downgrades). The extension's per-doc floor is constant
   // LOGIN_FORMAT_VERSION: every putExisting caller filters type==="login", and the extension
   // never writes card docs (a card's floor would be 2).
   const fv = Math.max(LOGIN_FORMAT_VERSION, target.formatVersion);
   const r = await putItem(target.itemId, target.vaultId, doc, target.rev, fv);
-  if (r?.status !== "applied") return { ok: false, error: `save failed (${r?.status ?? "no vault key"})` };
+  if (r?.status !== "applied") return saveFailure(r?.status);
   target.doc = doc;
   target.rev = r.newItemRev ?? target.rev + 1;
   target.formatVersion = fv; // what this write actually sealed at (web store.ts parity)
@@ -881,13 +1091,13 @@ async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: b
   return { ok: true };
 }
 
-async function putNewLogin(host: string, username: string, password: string): Promise<{ ok: boolean; error?: string }> {
-  if (!session || !session.personalVaultId) return { ok: false, error: "locked or no personal vault" };
+async function putNewLogin(host: string, username: string, password: string): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
+  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked or no personal vault" };
   const itemId = crypto.randomUUID();
   const doc: ItemDoc = { type: "login", name: host, login: { username, password, uris: [`https://${host}`] } };
   // NEW items seal at the login doc floor — the extension only ever creates logins (format.ts).
   const r = await putItem(itemId, session.personalVaultId, doc, 0, LOGIN_FORMAT_VERSION);
-  if (r?.status !== "applied") return { ok: false, error: `save failed (${r?.status ?? "no vault key"})` };
+  if (r?.status !== "applied") return saveFailure(r?.status);
   const rev = r.newItemRev ?? 1; // matchable immediately:
   session.items.push({ itemId, vaultId: session.personalVaultId, rev, formatVersion: LOGIN_FORMAT_VERSION, doc });
   persistSession();

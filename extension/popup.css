@@ -139,6 +139,19 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .update-link { color: var(--gold-bright); font-weight: 600; text-decoration: underline; white-space: nowrap; }
 .update-link:hover { color: var(--gold); }
 
+/* Recovery-password nudge (E1-6) — a CRITICAL-DIRECT strip: a rescued member is on the
+   admin-known temporary password. More urgent than the gold update note, so it borrows the
+   danger palette (matching the #msg.err strip); the whole element is a full-width button to the
+   web vault. Fully self-styled to override the UA button chrome (font/border/background/padding). */
+.must-change-strip {
+  display: block; width: calc(100% - 32px); text-align: left;
+  margin: 10px 16px 0; padding: 8px 10px; border-radius: var(--radius);
+  font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; transition: 0.15s;
+  color: var(--danger);
+  background: rgba(207, 107, 90, 0.12); border: 1px solid rgba(207, 107, 90, 0.3);
+}
+.must-change-strip:hover { background: rgba(207, 107, 90, 0.18); border-color: var(--danger); }
+
 /* ---- "Unsealing…" — honest KDF progress (the ~6 s Argon2id), indeterminate gold sweep ---- */
 .kdf { margin-top: 12px; }
 .kdf .bar {

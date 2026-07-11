@@ -16,6 +16,7 @@ await esbuild.build({
     background: "src/background.ts",
     content: "src/content.ts",
     popup: "src/popup.ts",
+    offscreen: "src/offscreen.ts", // Chrome clipboard-clear backstop document (E1-4); inert on Firefox
     "kdf-worker": "src/kdf-worker.ts",
   },
   bundle: true,
@@ -32,6 +33,7 @@ const firefox = process.env.TARGET === "firefox";
 cpSync(firefox ? "manifest.firefox.json" : "manifest.json", "dist/manifest.json");
 cpSync("popup.html", "dist/popup.html");
 cpSync("popup.css", "dist/popup.css"); // the ported treasury theme; popup.html <link>s it
+cpSync("offscreen.html", "dist/offscreen.html"); // Chrome clipboard-clear backstop (E1-4); loads dist/offscreen.js
 cpSync("icons", "dist/icons", { recursive: true }); // both manifests reference icons/icon{16,32,48,128}.png
 cpSync("INSTALL.txt", "dist/INSTALL.txt"); // tester-facing steps travel inside the zip
 console.log(`built → dist/ (${firefox ? "Firefox" : "Chrome"}${release ? ", release" : ""}; Load unpacked: extension/dist)`);

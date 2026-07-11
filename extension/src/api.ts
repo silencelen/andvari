@@ -3,8 +3,12 @@ import type { KdfParams } from "./crypto";
 /**
  * andvari API client for the extension. Same wire as web/src/api/client.ts (Bearer JSON). Cross-
  * origin fetch to the tailnet server works WITHOUT CORS via the manifest host_permissions (spike doc
- * Unknown 2). Surface: prelogin → login → sync → push (+ client-policy). A 401 rotates the token
- * pair once and retries transparently; `onTokensRotated` lets a session custodian re-persist it.
+ * Unknown 2). Surface: prelogin → login → sync → push (+ client-policy). Every request carries
+ * `X-Andvari-Client: extension/<version>` (spec 03 §1) so a server min-version pin can reach it.
+ * A 401 rotates the token pair once and retries transparently; `onTokensChanged` (awaited) lets a
+ * session custodian re-persist the pair on EVERY mutation — including the pre-POST consume, so an
+ * SW death mid-refresh can never resurrect a spent token (exttech-3). Chrome-free by design: the
+ * manifest version is injected via the constructor, so the client is plain-node testable.
  */
 
 export interface PreloginResponse {
@@ -24,6 +28,9 @@ export interface SessionResponse {
   accessToken: string;
   refreshToken: string;
   accountKeys: AccountKeys;
+  /** Set by a rescue (admin-issued temporary password), cleared by a password change (Service.kt).
+   *  The extension can't change the password itself, so it just nudges the user to the web vault. */
+  mustChangePassword?: boolean;
 }
 export interface WireGrant {
   vaultId: string;
@@ -86,16 +93,28 @@ export interface ClientPolicyResponse {
 }
 
 export class AndvariApi {
-  constructor(
-    private baseUrl: string,
-    private accessToken: string | null = null,
-    private refreshToken: string | null = null,
-  ) {}
+  private baseUrl: string;
+  private accessToken: string | null = null;
+  private refreshToken: string | null = null;
+  /** `extension/<version>` — the spec 03 §1 client id. Built from the manifest version passed in
+   *  by background.ts, so api.ts itself stays chrome-free (and node-testable). */
+  private readonly clientHeader: string;
 
-  /** Fires after a 401→refresh rotation. Refresh tokens are SINGLE-USE: a custodian that
-   *  persists the session must re-persist on rotation — restoring a consumed pair reads as
-   *  token reuse server-side and revokes the whole device. */
-  onTokensRotated: ((access: string, refresh: string) => void) | null = null;
+  constructor(baseUrl: string, clientVersion?: string) {
+    this.baseUrl = baseUrl;
+    this.clientHeader = `extension/${clientVersion ?? "0.0.0"}`;
+  }
+
+  /** Fires on EVERY token-pair mutation (consume, restore, definitive clear, success). Awaited, so
+   *  a session custodian can persist the snapshot BEFORE the refresh POST — a consumed single-use
+   *  refresh token that resurrects from a stale snapshot reads as reuse server-side and revokes the
+   *  whole device (exttech-3). Replaces the old success-only onTokensRotated. */
+  onTokensChanged: (() => void | Promise<void>) | null = null;
+
+  /** Fired when the server refuses a call with body code `upgrade_required` (HTTP 426 min-version
+   *  pin, spec 03 §1). The refused call still throws its ApiError — this is a side-channel nudge,
+   *  not a replacement error path (web client.ts:120 parity). */
+  onUpgradeRequired: (() => void) | null = null;
 
   setTokens(access: string | null, refresh: string | null): void {
     this.accessToken = access;
@@ -107,7 +126,10 @@ export class AndvariApi {
   }
 
   private async json<T>(method: string, path: string, body?: unknown, retrying = false): Promise<T> {
-    const headers: Record<string, string> = { "content-type": "application/json" };
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "X-Andvari-Client": this.clientHeader,
+    };
     if (this.accessToken) headers["authorization"] = `Bearer ${this.accessToken}`;
     const resp = await fetch(this.baseUrl + path, {
       method,
@@ -118,14 +140,33 @@ export class AndvariApi {
     if (resp.status === 401 && !retrying && (await this.tryRefresh())) {
       return this.json<T>(method, path, body, true);
     }
-    if (!resp.ok) throw new ApiError(resp.status, await resp.text().catch(() => ""));
+    if (!resp.ok) await this.throwApiError(resp);
     return (await resp.json()) as T;
+  }
+
+  /** Parse the server's `{error, message}` body into a typed ApiError (web throwApiError parity):
+   *  clients key on the BODY code, never the bare status. Non-JSON bodies fall back to
+   *  `http_<status>` + statusText. A body code of `upgrade_required` additionally fires
+   *  onUpgradeRequired before the throw. */
+  private async throwApiError(resp: Response): Promise<never> {
+    let code = `http_${resp.status}`;
+    let message = resp.statusText;
+    try {
+      const err = (await resp.json()) as { error?: string; message?: string };
+      code = err.error ?? code;
+      message = err.message ?? message;
+    } catch {
+      /* non-JSON error body — keep the http_<status>/statusText fallback */
+    }
+    if (code === "upgrade_required") this.onUpgradeRequired?.();
+    throw new ApiError(resp.status, code, message);
   }
 
   /** Coalesce concurrent 401s onto ONE rotation. Two API calls can be in flight in the SW at once
    *  (e.g. the resync alarm's sync + a user save); if both 401, the first consumes the single-use
    *  refresh token and the second would read the now-null token and fail spuriously. Sharing the
-   *  in-flight promise makes the second await the same rotation and retry with the fresh access. */
+   *  in-flight promise makes the second await the same rotation and retry with the fresh access
+   *  (AM6 — this single-flight is what prevents self-inflicted `refresh_reuse` device revocation). */
   private refreshInFlight: Promise<boolean> | null = null;
   private tryRefresh(): Promise<boolean> {
     this.refreshInFlight ??= this.doRefresh().finally(() => {
@@ -134,25 +175,56 @@ export class AndvariApi {
     return this.refreshInFlight;
   }
 
-  /** Rotate the token pair (single-use refresh — consume it before the request so a reuse can't
-   *  leak; reuse would revoke the whole device). Returns whether a fresh access token is now held. */
+  /**
+   * Rotate the token pair, adapted to the SW snapshot reality (AM1). The single-use refresh token
+   * is consumed and PERSISTED (refresh:null) BEFORE the POST — a woken SW that finds `{access,
+   * refresh:null}` runs on the access token until a 401 and never replays a spent token. On a
+   * transient failure (5xx / network) the pair is RESTORED so one blip doesn't dead-end the SW
+   * life; only a definitive 401/403 kills it. Returns whether a fresh access token is now held.
+   */
   private async doRefresh(): Promise<boolean> {
     const rt = this.refreshToken;
     if (!rt) return false;
+    // 1. Consume + persist the consumed state before the POST (onTokensChanged is awaited).
     this.refreshToken = null;
+    const atConsume = this.accessToken;
+    await this.onTokensChanged?.();
+    // 3. Outcome guard (AM1): apply the outcome ONLY if the pair is untouched since consume — a
+    //    concurrent setTokens (doLock/unlock, spanning a lock→unlock) now owns it, so discard this
+    //    refresh entirely (no set, no clear, no restore, no notify) rather than clobber the new pair.
+    const owns = (): boolean => this.refreshToken === null && this.accessToken === atConsume;
     try {
       const resp = await fetch(this.baseUrl + "/api/v1/auth/refresh", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "X-Andvari-Client": this.clientHeader },
         body: JSON.stringify({ refreshToken: rt }),
       });
-      if (!resp.ok) return false;
+      if (!resp.ok) {
+        if (!owns()) return false;
+        if (resp.status === 401 || resp.status === 403) {
+          // Definitive refusal → the pair is dead (web client.ts:220 parity).
+          this.accessToken = null;
+          this.refreshToken = null;
+          await this.onTokensChanged?.();
+        } else {
+          // 5xx / 429 / proxy error page — transient: restore so the session isn't dead-ended.
+          this.refreshToken = rt;
+          await this.onTokensChanged?.();
+        }
+        return false;
+      }
       const s = (await resp.json()) as { accessToken: string; refreshToken: string };
+      if (!owns()) return false;
       this.accessToken = s.accessToken;
       this.refreshToken = s.refreshToken;
-      this.onTokensRotated?.(s.accessToken, s.refreshToken);
+      await this.onTokensChanged?.();
       return true;
     } catch {
+      // Thrown fetch (transport failure) — same transient-keep as a 5xx.
+      if (owns()) {
+        this.refreshToken = rt;
+        await this.onTokensChanged?.();
+      }
       return false;
     }
   }
@@ -188,11 +260,16 @@ export class AndvariApi {
   }
 }
 
+/** A refused server response, carrying the parsed BODY code (spec 03 §8) — surfaces map the code
+ *  to copy; `message` is human/debug detail only. `status` + `code` are explicit fields (not
+ *  parameter properties) so this file type-strips under plain `node --test`. */
 export class ApiError extends Error {
-  constructor(
-    public status: number,
-    body: string,
-  ) {
-    super(`andvari api ${status}: ${body.slice(0, 200)}`);
+  status: number;
+  code: string;
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+    this.name = "ApiError";
   }
 }

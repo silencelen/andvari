@@ -6,6 +6,7 @@
  * TOTP chips re-polled each second. The SW holds all key material — this page only messages it.
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
+import { lockNoticeCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
 import { displaySite, safeSiteUrl } from "./siteurl";
 
@@ -32,6 +33,10 @@ let tabHost: string | null = null;
 let totpTimer: number | undefined;
 let searchTimer: number | undefined;
 let searchSeq = 0;
+/** The ONE pending clipboard-clear timer (AM2): every copy funnels through toClipboard(),
+ *  and a newer copy replaces the pending clear — so an earlier timer can never wipe a
+ *  later secret mid-window. */
+let clipClearTimer: number | undefined;
 
 function showMsg(kind: "err" | "info", text: string): void {
   const m = el("msg");
@@ -63,6 +68,7 @@ function showView(unlocked: boolean): void {
   el("count").hidden = !unlocked;
   if (!unlocked) {
     stopTotp();
+    el("must-change").hidden = true; // unlocked-session chrome — refresh() re-derives it
     // Drop rendered vault rows/codes on lock — nothing lingers in the DOM.
     el("site-list").replaceChildren();
     el("all-list").replaceChildren();
@@ -82,10 +88,16 @@ async function refresh(): Promise<void> {
     return;
   }
   showView(s.unlocked);
+  // E1-6: rescue-issued temporary password — a persistent, non-dismissable strip for the
+  // whole unlocked session; it clears only via a fresh unlock whose response drops the flag.
+  el("must-change").hidden = !(s.unlocked && s.mustChangePassword);
   if (s.unlocked) {
     await loadUnlocked();
     return;
   }
+  // F26 (E1-7): say WHY the vault is locked — recorded for idle autolock only (manual lock
+  // renders no reason line, web useAutoLock parity); verbatim web copy via lockNoticeCopy.
+  if (s.lockNotice) showMsg("info", lockNoticeCopy(s.lockNotice.seconds));
   const email = el<HTMLInputElement>("email");
   if (!email.value) {
     const remembered = s.email ?? (await rememberedEmail());
@@ -399,11 +411,25 @@ function flash(btn: HTMLElement): void {
 async function toClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
-    return true;
   } catch (e) {
     showMsg("err", `Clipboard: ${String(e)}`);
     return false;
   }
+  await scheduleClipboardClear();
+  return true;
+}
+
+/** E1-4 clipboard auto-clear, popup half — runs after every successful copy. Layer 2 first:
+ *  arm the SW's alarm backstop (it outlives this popup — Chrome closes us on focus loss);
+ *  its reply carries the effective policy seconds, so no separate plumbing. Layer 1: one
+ *  precise local timer, web useCopy parity — blind clear, `Math.max(1, s)` clamp (policy 0
+ *  still clears). SW unreachable → default 30 s (clearing is safety-positive regardless).
+ *  Never a user-facing error: every failure path is a silent no-op. */
+async function scheduleClipboardClear(): Promise<void> {
+  const r = await ask({ type: "scheduleClipboardClear" });
+  const s = r?.clearSeconds ?? 30;
+  window.clearTimeout(clipClearTimer); // AM2: single slot — the newest copy owns the clear
+  clipClearTimer = window.setTimeout(() => void navigator.clipboard.writeText("").catch(() => {}), Math.max(1, s) * 1000);
 }
 
 async function fillItem(itemId: string): Promise<void> {
@@ -619,12 +645,6 @@ function setUnsealing(busy: boolean): void {
   el("kdf").hidden = !busy;
 }
 
-function unlockError(raw: string | undefined): string {
-  if (!raw) return "Couldn't unlock: no response from the extension";
-  if (/fetch|network/i.test(raw)) return `Can't reach the server — is Tailscale connected? (${raw})`;
-  return `Couldn't unlock: ${raw}`;
-}
-
 async function unlock(): Promise<void> {
   if (el<HTMLButtonElement>("unlock").disabled) return; // Enter while a KDF is already running
   const email = el<HTMLInputElement>("email").value.trim();
@@ -643,7 +663,16 @@ async function unlock(): Promise<void> {
       }
       await refresh();
     } else {
-      showMsg("err", unlockError(r?.error));
+      // E1-3: render the coded ladder (errors.ts), never the SW's raw `error` debug detail.
+      showMsg("err", unlockErrorCopy(r?.code));
+      // AM5: on a 426, the copy points at the update banner — but renderUpdate() ran at popup
+      // open BEFORE the SW's 426-triggered checkForUpdate(true) could land its verdict. Re-render
+      // now and once more after the SW round-trip (single retry, no loop) so the banner is present
+      // when it exists (it only does if a strictly-newer build is actually published).
+      if (r?.code === "upgrade_required") {
+        void renderUpdate();
+        window.setTimeout(() => void renderUpdate(), 2000);
+      }
       pw.select();
     }
   } finally {
@@ -672,12 +701,22 @@ el("open-vault").addEventListener("click", () => {
   window.close();
 });
 
+// E1-6: the rescue-nudge strip IS the affordance — the extension can't change the master
+// password itself, so clicking anywhere on it opens the web vault (same action as open-vault).
+el("must-change").addEventListener("click", () => {
+  void chrome.tabs.create({ url: SERVER_URL });
+  window.close();
+});
+
 el("ping").addEventListener("click", async () => {
   showMsg("info", "…");
   const r = await ask({ type: "ping" });
   setConn(r?.ok === true);
   if (r?.ok) showMsg("info", `server reachable (t=${r.serverTime})`);
-  else showMsg("err", `server: ${r?.error ?? "no response"}`);
+  // E1-3/extux-05: the one canonical unreachable sentence — never the raw exception text. (A
+  // mid-restart SW → undefined shares this copy, mildly conflating SW death with the network;
+  // accepted per design.)
+  else showMsg("err", UNREACHABLE);
 });
 
 el("detail-back").addEventListener("click", closeDetail);
