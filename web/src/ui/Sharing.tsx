@@ -160,7 +160,14 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
             <NewVaultForm account={account} store={store} client={client} onCreated={refresh} />
           </div>
 
-          {trashOpen && <RecentlyDeleted store={store} refreshKey={tick} onChanged={refresh} />}
+          {trashOpen && (
+            <>
+              <RecentlyDeleted store={store} refreshKey={tick} onChanged={refresh} />
+              {/* IA P8: web finally has the holding-area surface Android has ("Recently
+                  removed") — a read-only mirror; recovery is automatic on restore/re-add. */}
+              <RecentlyRemoved store={store} />
+            </>
+          )}
         </>
       )}
     </div>
@@ -743,6 +750,36 @@ function IncomingTransferCard({ offer, account, store, client, onChanged }: { of
 }
 
 // ---- recently deleted (restore, spec 03 §11) ----
+
+/** IA P8: the holding area — vaults this account lost access to, a sealed local copy kept for
+ *  a while. Read-only (recovery is automatic on restore/re-add); mirrors Android's "Recently
+ *  removed". Derived from store.heldVaults() each render — no fetch, no action. */
+function RecentlyRemoved({ store }: { store: VaultStore }) {
+  const held = store.heldVaults();
+  if (held.length === 0) return null;
+  const line = (h: { reason: string; verified: boolean; purgeAt?: number; expungeAt: number }): string => {
+    if (h.reason === "deleted" && h.verified) return `deleted by its owner · kept sealed until ${fmtDay(h.purgeAt ?? h.expungeAt)}`;
+    if (h.reason === "left") return `you left · kept until ${fmtDay(h.expungeAt)}`;
+    if (h.verified) return `access removed · kept until ${fmtDay(h.expungeAt)}`;
+    return `unverified removal · kept until ${fmtDay(h.expungeAt)}`;
+  };
+  return (
+    <div className="sheet">
+      <h2>Recently removed</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Vaults this account lost access to. A sealed copy is kept on this device for a while in
+        case of a mistake — if the vault is restored or you're re-added, everything (including
+        unsynced edits) comes back on its own.
+      </p>
+      {held.map((h) => (
+        <div key={h.vaultId} className="field" style={{ marginBottom: 8 }}>
+          <div>“{h.name}”</div>
+          <div className="muted" style={{ color: h.verified || h.reason === "left" ? undefined : "var(--danger)" }}>{line(h)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function RecentlyDeleted({ store, refreshKey, onChanged }: { store: VaultStore; refreshKey: number; onChanged: () => void }) {
   const [deleted, setDeleted] = useState<DeletedVaultInfo[] | null>(null);

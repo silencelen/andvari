@@ -360,8 +360,8 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           <nav className="nav">
             {navBtn("vault", "Vault")}
             {navBtn("sharing", "Sharing")}
-            {navBtn("health", "Health")}
-            {/* DN-2: Trash left the nav — it lives as the toolbar trash icon on the vault view. */}
+            {/* IA P1/DN-2: Health and Trash left the nav — they're toolbar icons on the vault
+                view (occasional tools, not top-level places). Nav is now the 3-4 real places. */}
             {navBtn("settings", "Settings")}
             {isAdmin && navBtn("admin", "Admin")}
           </nav>
@@ -434,7 +434,17 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             onCloseSettings={() => setSharingSettingsVaultId(null)}
           />
         ) : view === "settings" ? (
-          <Settings client={client} account={account} policy={policy} onPasswordChanged={() => setMustChange(false)} />
+          <Settings
+            client={client}
+            account={account}
+            policy={policy}
+            onPasswordChanged={() => setMustChange(false)}
+            /* IA P3: backing up from Settings flips to the vault view first so the ExportPanel
+               layer renders (the view axis wins over exportMode in this switch), mirroring
+               Sharing's "Back up first". Undefined on the public origin → the buttons hide. */
+            onBackup={exportAllowed ? () => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setSharingSettingsVaultId(null); setExportMode("backup"); } : undefined}
+            onCsv={exportAllowed ? () => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setSharingSettingsVaultId(null); setExportMode("csv"); } : undefined}
+          />
         ) : view === "admin" && isAdmin ? (
           <Admin client={client} />
         ) : exportMode ? (
@@ -491,6 +501,20 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                   onCsv={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("csv"); }}
                 />
               )}
+              {/* IA P1: Health — an occasional tool, moved off the nav to a toolbar icon.
+                  (The toolbar only shows on the vault view, so these icons only ever navigate
+                  AWAY — there's no active state to reflect.) */}
+              <button
+                type="button"
+                className="ghost"
+                aria-label="Vault health"
+                title="Vault health"
+                onClick={() => { setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); setView("health"); }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px" }}>
+                  <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                </svg>
+              </button>
               {/* DN-2: the Trash entry point — a small icon here instead of a main-nav item.
                   Mirrors navBtn's layer-clearing so it behaves like navigation, not a layer. */}
               <button

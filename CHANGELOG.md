@@ -1,5 +1,28 @@
 # andvari — changelog
 
+## 0.12.0 — layout regroup, part 1 (2026-07-10, cross-platform cut)
+
+The first batch of the layout review you ratified (docs/design/2026-07-10-ia-regroup.md) —
+the structural tidy-ups; the two bigger, more opinionated pieces (a unified notice system and
+Android update screens) come next.
+
+- **Web navigation is down to the real places.** Health and Trash left the top menu for small
+  icons on the vault toolbar (they're occasional tools, not destinations); the menu is now
+  Vault · Sharing · Settings (· Admin).
+- **"Get andvari on your devices" is its own page.** The install hub — which had grown to
+  dominate the bottom of Settings — is now a page you open from a Settings link, so Settings
+  reads cleanly again.
+- **You can back up from Settings.** The Backups card used to only tell you to go elsewhere;
+  it now has the "Back up vault…" and "Export…" buttons right there (still one backup action,
+  just reachable where you'd look for it).
+- **The server address is visible in Settings** on phone and desktop — it used to disappear
+  after sign-in. Read-only, with a note that you sign out to switch servers.
+- **Clearer 2FA label:** the sign-in two-factor card is now "Two-factor sign-in (server)", so
+  it isn't confused with the one-time codes stored inside items.
+- **Web can see removed vaults too:** the "Recently removed" holding area (a sealed local copy
+  of vaults you lost access to, auto-recovered if you're re-added) now appears on Sharing under
+  the trash icon, matching the phone.
+
 ## 0.11.1 — trash tucks behind icons + layout tidy-up (2026-07-10, cross-platform cut)
 
 Your dev-note pair: trash re-surfacing now, and a full layout review whose bigger proposals

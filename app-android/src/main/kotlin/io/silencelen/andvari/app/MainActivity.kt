@@ -1392,6 +1392,18 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
             }
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
+                    Text("Server", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.height(8.dp))
+                    SelectionContainer {
+                        Text(ui.baseUrl, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text("Sign out to connect to a different server.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
                     Text("Vault backup", style = MaterialTheme.typography.titleLarge)
                     Text(lastBackupLine(ui.lastExportAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (backupNudge(ui.lastExportAt)) {
@@ -1431,7 +1443,7 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
             ExportDialogs(vm, ui)
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
-                    Text("Server TOTP", style = MaterialTheme.typography.titleLarge)
+                    Text("Two-factor sign-in (server)", style = MaterialTheme.typography.titleLarge)
                     Text("A second factor the server checks — protects break-glass/public logins.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(12.dp))
                     val status = ui.totpStatus
