@@ -313,8 +313,12 @@ Owner gripe 1: a created shared vault was immortal. Full design + adversarial br
 `docs/design/2026-07-07-shared-vault-lifecycle-skipti.md`. Target: server schema v4 (spec
 02 §4) + client 0.5.0. **All wire changes are additive; fielded 0.4.0 and 0.2.x clients
 require zero changes and cannot 404 mid-sync** (sync is grant-driven; the only vault-scoped
-calls — members GET, attachments — already 403-handle non-fatally; 410 stays dormant; no
-minVersion pin is armed).
+calls — members GET, attachments — already 403-handle non-fatally; no minVersion pin is
+armed). *Update 2026-07-10 (N2 §5):* the sync-cursor 410 (`resync_required`) is **live** —
+the janitor now advances `oldestRetainedRev` on its 30-day fence (spec 02 §7) — and the
+fielded-client guarantee still holds for the reason it always did: every client since 0.2.0
+auto-resyncs on 410 (cache clear + `sync(0)`, offline queue preserved), so an aged-out
+cursor is one clean full pull, never a wedge.
 
 **Common rules.** All lifecycle routes are authenticated + `enforceVersion` + **refused on
 the public break-glass origin** + audited ids-only. **Guard order: resolve the caller's

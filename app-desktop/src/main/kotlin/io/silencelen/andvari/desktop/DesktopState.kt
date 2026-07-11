@@ -108,6 +108,19 @@ class DesktopState(private val scope: CoroutineScope) {
         private set
     var policy by mutableStateOf<ClientPolicy?>(null)
         private set
+    // §3 honesty flag: the last ENROLL-FEEDING policy probe (start / updateServer / Retry)
+    // failed — the enroll screen says so + offers Retry instead of claiming "no recovery
+    // key configured". ONLY those fetches touch it (B4): the unlocked 5-min background
+    // refresh keeps last-known policy for the offline gates (auto-lock) and never writes it.
+    var policyFetchFailed by mutableStateOf(false)
+        private set
+    // §6 (F26): why the vault locked — one quiet line on the Unlock screen. Set FRESH per
+    // lock event (manual / idle), cleared on successful unlock + sign-in and by signOut
+    // (user-initiated — owes no explanation). Desktop has NO 401-driven sign-out path (a
+    // 401 during unlock wipes the store but stays on the Unlock screen), so the web
+    // "session ended" reason is deliberately unwired here.
+    var lockReason by mutableStateOf<String?>(null)
+        private set
     var busy by mutableStateOf(false)
         private set
     var error by mutableStateOf<String?>(null)
@@ -243,11 +256,12 @@ class DesktopState(private val scope: CoroutineScope) {
         scope.launch {
             val probe = newApi()
             runCatching { probe.clientPolicy() }.onSuccess { p ->
+                policyFetchFailed = false
                 applyPolicy(p) // UI state + persisted offline fallbacks (auto-lock included)
                 // Policy may forbid the durable cache; purge any existing file the moment
                 // we learn it (spec 02 §8), even before unlock — mirrors the Android client.
                 if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
-            }
+            }.onFailure { policyFetchFailed = true } // §3: never render the no-key lie off a failed probe
             probe.close()
             runCatching { checkForUpdate(store.baseUrl) }.onSuccess { updateAvailable = it }
             val session = store.load()
@@ -259,6 +273,50 @@ class DesktopState(private val scope: CoroutineScope) {
     fun updateServer(url: String) {
         store.baseUrl = url.trim().removeSuffix("/")
         baseUrl = store.baseUrl
+        // B5: a deliberate URL change must re-probe — the OLD server's policy (recovery
+        // fingerprint, pins) must not drive the enroll gate until restart. Null the stale
+        // policy first (renders the neutral probe-in-flight state, never the no-key text),
+        // then mirror Android setBaseUrl: apply + purge-on-forbid on success, flag on failure.
+        policy = null
+        policyFetchFailed = false
+        scope.launch {
+            val probe = newApi()
+            try { // F74: close() in finally — no throw path may leak the transient probe
+                runCatching { probe.clientPolicy() }
+                    .onSuccess { p ->
+                        policyFetchFailed = false
+                        applyPolicy(p)
+                        // Same policy enforcement as start(): a forbidding server purges the cache.
+                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
+                    }
+                    .onFailure { policyFetchFailed = true }
+            } finally {
+                probe.close()
+            }
+        }
+    }
+
+    /** §3 Retry: re-run the enroll-feeding policy probe by hand — the enroll screen's
+     *  Retry button after a failed fetch. Runs under [busy] (the existing button idiom). */
+    fun retryPolicy() {
+        if (busy) return
+        busy = true
+        scope.launch {
+            val probe = newApi()
+            try { // F74: close() in finally — no throw path may leak the transient probe
+                runCatching { probe.clientPolicy() }
+                    .onSuccess { p ->
+                        policyFetchFailed = false
+                        applyPolicy(p)
+                        // Same policy enforcement as start(): a forbidding server purges the cache.
+                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
+                    }
+                    .onFailure { policyFetchFailed = true }
+            } finally {
+                busy = false
+                probe.close()
+            }
+        }
     }
 
     fun clearError() { error = null }
@@ -319,7 +377,7 @@ class DesktopState(private val scope: CoroutineScope) {
         toVault()
     }
 
-    fun enroll(invite: String, email: String, name: String, password: String) {
+    fun enroll(invite: String, email: String, name: String, password: String, typedShortFp: String) {
         // State-layer re-assert (mirrors Android; the S2-review race class: a composition-
         // stale submit lambda can fire with live-read fields). Busy first — op() sets busy
         // but never checks it — then the F60 floor (the irreversible leg of this screen).
@@ -328,11 +386,26 @@ class DesktopState(private val scope: CoroutineScope) {
             error = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols."
             return
         }
-        enrollOp(invite, email, name, password)
+        enrollOp(invite, email, name, password, typedShortFp)
     }
 
-    private fun enrollOp(invite: String, email: String, name: String, password: String) = op {
-        val pol = policy ?: newApi().clientPolicy().also { policy = it }
+    private fun enrollOp(invite: String, email: String, name: String, password: String, typedShortFp: String) = op {
+        // §3 flag audit: this fallback fetch feeds THIS enroll directly (normally dead —
+        // the submit gate needs the fingerprint, so policy is already loaded). Success
+        // clears the honesty flag like every enroll-feeding fetch; failure sets it and
+        // still throws, so op() surfaces the error as before.
+        val pol = policy ?: runCatching { newApi().clientPolicy() }
+            .onSuccess { policy = it; policyFetchFailed = false }
+            .onFailure { policyFetchFailed = true }
+            .getOrThrow()
+        // Typed-sheet ceremony re-assert at the STATE layer against the policy this enroll
+        // actually seals to (review LOW, 4th sighting of the frame-stale class): updateServer
+        // can swap the policy mid-screen, and a one-frame-stale submit would otherwise pass
+        // the UI gate against the OLD server's fingerprint — spec 04 §2(3)'s attestation
+        // must bind to the org being enrolled into (the resealEscrow pattern below).
+        check(Escrow.shortFormMatches(typedShortFp, pol.recoveryFingerprint)) {
+            "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 16 characters."
+        }
         val a = newApi()
         val recoveryPub = Bytes.fromB64(a.recoveryPubkey())
         // Key generation + KDF are CPU-bound (argon2id) — off the UI thread.
@@ -522,7 +595,7 @@ class DesktopState(private val scope: CoroutineScope) {
         val window = policy?.autoLockSeconds ?: store.autoLockSeconds
         if (window <= 0) return
         if (busy || importBusy) return
-        if (System.currentTimeMillis() - lastInteractionMs >= window * 1000L) lock()
+        if (System.currentTimeMillis() - lastInteractionMs >= window * 1000L) lock("Locked after inactivity.")
     }
 
     /**
@@ -1109,11 +1182,19 @@ class DesktopState(private val scope: CoroutineScope) {
         return "Offline — this exports the vault as of last sync $stamp."
     }
 
-    fun lock() {
+    fun lock(reason: String = "Locked.") {
         // Retain the ciphertext cache on lock (spec 05 T3); close its handle.
         engine?.close(); api?.close(); api = null; account = null; engine = null
         clearVaultClipboard() // a copied secret must not outlive the unlocked session
         clearSecondary()
+        // §6: set FRESH per event — the default serves the manual Lock button; the idle
+        // watcher passes "Locked after inactivity.". Never carried stale (B6).
+        lockReason = reason
+        // §3 reset block (review MED, Android parity): clear the probe-failure flag only when
+        // a policy is LOADED — a null-policy failure is CURRENT (nothing re-probes on the way
+        // to Welcome), and clearing it would strand enroll in "Checking the server…" with no
+        // Retry and no probe.
+        if (policy != null) policyFetchFailed = false
         screen = DesktopScreen.Unlock(store.load()?.email ?: ""); items = emptyList(); needsUpdateCount = 0
     }
 
@@ -1144,6 +1225,11 @@ class DesktopState(private val scope: CoroutineScope) {
             store.clear()
             clearSecondary(); signInTotpRequired = false
             mustChangePassword = false // F58: sign-out drops the account; the flag re-arrives at the next sign-in
+            lockReason = null // §6: user-initiated sign-out — the Welcome screen owes no explanation
+            // §3 reset block (review MED, Android parity): a null-policy probe failure is
+            // current, not stale — keep it so Welcome shows the failure + Retry instead of
+            // the dead-end "Checking the server…".
+            if (policy != null) policyFetchFailed = false
             busy = false
             screen = DesktopScreen.Welcome; items = emptyList(); needsUpdateCount = 0
         }
@@ -1223,6 +1309,7 @@ class DesktopState(private val scope: CoroutineScope) {
         screen = DesktopScreen.Vault
         items = engine?.items() ?: emptyList()
         needsUpdateCount = engine?.needsUpdateCount() ?: 0
+        lockReason = null // §6: successful unlock / sign-in — the line must never carry stale
         busy = false; error = null
     }
 

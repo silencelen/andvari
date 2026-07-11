@@ -302,7 +302,20 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
     try {
       const r = await client.adminInvite(email.trim(), isAdmin, withQr ? QR_INVITE_TTL_MINUTES : undefined);
       setResult(r);
-      setResultLink(withQr ? composeEnrollLink(window.location.origin, r.inviteToken, r.email) : null);
+      if (withQr) {
+        // composeEnrollLink refuses ill-formed UTF-16 (null) — a lone surrogate can
+        // round-trip JSON as \udXXX, so "the server validated the email" is no guarantee.
+        // Clear the just-set token panel too or it renders right next to the error
+        // (same never-let-the-encoder-white-screen stance as tryQrModules below).
+        const link = composeEnrollLink(window.location.origin, r.inviteToken, r.email);
+        if (link === null) {
+          setResult(null);
+          setErr("This invite couldn't be encoded as a QR link — mint again with the plain Invite button instead.");
+          onInvited(); // the invite itself WAS minted server-side; keep the list honest
+          return;
+        }
+        setResultLink(link);
+      }
       setEmail("");
       setIsAdmin(false);
       onInvited();

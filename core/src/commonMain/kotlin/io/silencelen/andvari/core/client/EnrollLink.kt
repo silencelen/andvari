@@ -21,6 +21,11 @@ data class EnrollPayload(val v: Int, val o: String, val t: String, val e: String
  *  - Link shape: `<origin>/enroll#a1.<b64url-nopad(compact {"v":1,"o","t","e"})>`.
  *  - [parse] is TOTAL: null on ANY malformed input, never throws — it runs in UI layers
  *    on three platforms and a throwing parser is a crash primitive (the BUG-0 lesson).
+ *  - [compose] rejects (null) ill-formed UTF-16 input: on a lone surrogate the twins'
+ *    JSON encoders genuinely diverge (plain Kotlin encoding U+FFFD-replaces; ES2019+
+ *    JSON.stringify escapes as \udXXX) — identical input, different links — so reject
+ *    is the only pinnable agreement (composeRejects vectors). Well-formed astral pairs
+ *    (emoji) pass through as raw 4-byte UTF-8 on both twins (roundTrips vectors).
  *  - Normalize before decode: strip ASCII whitespace (chat apps hard-wrap b64), then
  *    trailing '=' padding (core's decoder tolerates padding, web's does not — the strip
  *    makes them agree), then require the b64url alphabet and that the decoded bytes
@@ -62,13 +67,24 @@ object EnrollLink {
     private data class WireIn(val v: JsonPrimitive, val o: String, val t: String, val e: String)
 
     /**
-     * Build `<origin>/enroll#a1.<b64url(payload)>`. No validation: [origin] is the
+     * Build `<origin>/enroll#a1.<b64url(payload)>`, or null when any input carries
+     * ill-formed UTF-16 (a lone/unpaired surrogate) — see the header: a lone surrogate
+     * would mint DIFFERENT links on the two twins, so rejection is the pinned agreement,
+     * and null mirrors [parse]'s failure convention. No other validation: [origin] is the
      * minting client's `location.origin` equivalent (a non-canonical origin simply
      * produces a link [parse] refuses).
      */
-    fun compose(origin: String, token: String, email: String): String {
+    fun compose(origin: String, token: String, email: String): String? {
         val payload = json.encodeToString(WireOut.serializer(), WireOut(1, origin, token, email))
-        return "$origin/enroll#a1." + Bytes.toB64(payload.encodeToByteArray())
+        // kotlinx writes surrogates through raw, so a lone one in ANY input survives into
+        // [payload] and trips the strict encoder here (the sibling decode in parseInner
+        // uses the same flag).
+        val bytes = try {
+            payload.encodeToByteArray(throwOnInvalidSequence = true)
+        } catch (_: Exception) {
+            return null
+        }
+        return "$origin/enroll#a1." + Bytes.toB64(bytes)
     }
 
     /** Parse any string containing an enroll fragment. Null on any malformed input; never throws. */

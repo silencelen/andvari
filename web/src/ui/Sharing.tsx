@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { UserLookupResponse, VaultMemberSummary } from "../api/types";
 import { fromB64 } from "../crypto/bytes";
@@ -44,6 +44,11 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
   // panel unmounts.)
   const [copyingByVault, setCopyingByVault] = useState<Record<string, { done: number; total: number } | null>>({});
   const [copiedNoteByVault, setCopiedNoteByVault] = useState<Record<string, string>>({});
+  // N2 §7: the post-delete note lives HERE too — deleteSharedVault drops the vault before
+  // returning, so the very commit that could show a panel-local toast also nulls
+  // vaults.find(…) and unmounts the settings layer. Only parent state survives that commit;
+  // the list branch below renders it.
+  const [deletedNote, setDeletedNote] = useState<{ vaultId: string; name: string; purgeAt: number } | null>(null);
   const refresh = () => {
     setTick((t) => t + 1);
     onSynced();
@@ -66,6 +71,22 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
   useEffect(() => {
     if (settingsVaultId && settingsContent === null) onCloseSettings();
   }, [settingsVaultId, settingsContent, onCloseSettings]);
+
+  // N2 §7 clearing rule (the escape-hatch lesson): if the note's vault comes BACK — restored
+  // from the trash section below, or by another device via a background sync — a lingering
+  // "deleted until…" line would sit over a live vault. Clear on the TRANSITION absent→present,
+  // not on presence itself (review MED): deleteSharedVault's reconcile can join an in-flight
+  // STALE pull (the store's single-flight sync), so the vault can still read as present in the
+  // very commit that sets the note — presence-based clearing would kill it instantly. Present
+  // while never-yet-absent = that stale window; the note stands until a real sync drops the
+  // row, and only a genuine reappearance after that clears it.
+  const noteVaultPresent = deletedNote !== null && vaults.some((v) => v.vaultId === deletedNote.vaultId);
+  const noteVaultWasAbsent = useRef(false);
+  useEffect(() => {
+    if (deletedNote === null) { noteVaultWasAbsent.current = false; return; }
+    if (!noteVaultPresent) { noteVaultWasAbsent.current = true; return; }
+    if (noteVaultWasAbsent.current) { noteVaultWasAbsent.current = false; setDeletedNote(null); }
+  }, [deletedNote, noteVaultPresent]);
 
   return (
     <div>
@@ -119,6 +140,7 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
               setCopying={(c) => setCopyingByVault((m) => ({ ...m, [settingsVault.vaultId]: c }))}
               copiedNote={copiedNoteByVault[settingsVault.vaultId] ?? ""}
               setCopiedNote={(note) => setCopiedNoteByVault((m) => ({ ...m, [settingsVault.vaultId]: note }))}
+              onDeletedNote={setDeletedNote}
             />
           ) : (
             <>
@@ -133,6 +155,16 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
         </>
       ) : (
         <>
+          {/* N2 §7: the post-delete note, rendered by the branch that survives the delete
+              commit (the layer above unmounts in it). Same idiom as the panel toast it
+              replaces; "the trash icon above" = the DN-2 disclosure in the header. */}
+          {deletedNote && (
+            <div className="msg info" style={{ marginTop: 16 }}>
+              “{deletedNote.name}” is deleted. Members lost access immediately. You can restore it
+              until {fmtDay(deletedNote.purgeAt)} (the trash icon above).{" "}
+              <button type="button" className="link" onClick={() => setDeletedNote(null)}>OK</button>
+            </div>
+          )}
           <div className="sheet">
             <h2>Vaults</h2>
             <p className="muted" style={{ marginTop: 0 }}>
@@ -292,7 +324,7 @@ function LeaveControl({ vault, store, onChanged }: { vault: VaultInfo; store: Va
 
 // ---- member management (owner-only panel per shared vault) ----
 
-function MemberPanel({ vault, account, store, client, onChanged, onBackup, copying, setCopying, copiedNote, setCopiedNote }: { vault: VaultInfo; account: Account; store: VaultStore; client: ApiClient; onChanged: () => void; onBackup: () => void; copying: { done: number; total: number } | null; setCopying: (c: { done: number; total: number } | null) => void; copiedNote: string; setCopiedNote: (note: string) => void }) {
+function MemberPanel({ vault, account, store, client, onChanged, onBackup, copying, setCopying, copiedNote, setCopiedNote, onDeletedNote }: { vault: VaultInfo; account: Account; store: VaultStore; client: ApiClient; onChanged: () => void; onBackup: () => void; copying: { done: number; total: number } | null; setCopying: (c: { done: number; total: number } | null) => void; copiedNote: string; setCopiedNote: (note: string) => void; onDeletedNote: (note: { vaultId: string; name: string; purgeAt: number }) => void }) {
   const [members, setMembers] = useState<VaultMemberSummary[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -411,7 +443,7 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
         }}
       />
 
-      <DeleteVaultControl vault={vault} store={store} onDeleted={onChanged} onBackup={onBackup} copying={copying} setCopying={setCopying} copiedNote={copiedNote} setCopiedNote={setCopiedNote} />
+      <DeleteVaultControl vault={vault} store={store} onDeleted={onChanged} onDeletedNote={onDeletedNote} onBackup={onBackup} copying={copying} setCopying={setCopying} copiedNote={copiedNote} setCopiedNote={setCopiedNote} />
     </div>
   );
 }
@@ -599,12 +631,14 @@ function TransferOfferControl({ vault, store, targets, onOffered }: { vault: Vau
 // A3: {copying, copiedNote} are LIFTED to Sharing-level state keyed by vaultId (threaded via
 // MemberPanel) — this panel unmounts when the settings layer closes, and the rescue-copy
 // progress / completion note must survive a close/reopen mid-copy instead of being orphaned.
-function DeleteVaultControl({ vault, store, onDeleted, onBackup, copying, setCopying, copiedNote, setCopiedNote }: { vault: VaultInfo; store: VaultStore; onDeleted: () => void; onBackup: () => void; copying: { done: number; total: number } | null; setCopying: (c: { done: number; total: number } | null) => void; copiedNote: string; setCopiedNote: (note: string) => void }) {
+// N2 §7: the post-delete note is lifted the same way (onDeletedNote) — deleteSharedVault drops
+// the vault before returning, so the delete's own commit unmounts this panel; a local toast
+// here could never paint. Sharing's list branch renders it.
+function DeleteVaultControl({ vault, store, onDeleted, onDeletedNote, onBackup, copying, setCopying, copiedNote, setCopiedNote }: { vault: VaultInfo; store: VaultStore; onDeleted: () => void; onDeletedNote: (note: { vaultId: string; name: string; purgeAt: number }) => void; onBackup: () => void; copying: { done: number; total: number } | null; setCopying: (c: { done: number; total: number } | null) => void; copiedNote: string; setCopiedNote: (note: string) => void }) {
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [toast, setToast] = useState("");
   // A3b (review HIGH): `busy` is LOCAL and dies when the settings layer unmounts this panel —
   // but the rescue copy keeps running via the lifted setters. A reopened panel must not offer
   // a second copy, and above all must not let Delete fire mid-rescue-copy (the exact ordering
@@ -635,7 +669,7 @@ function DeleteVaultControl({ vault, store, onDeleted, onBackup, copying, setCop
     setErr("");
     try {
       const { purgeAt } = await store.deleteSharedVault(vault.vaultId);
-      setToast(`“${vault.name}” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Sharing → the trash icon).`);
+      onDeletedNote({ vaultId: vault.vaultId, name: vault.name, purgeAt });
       setOpen(false);
       setTyped("");
       onDeleted();
@@ -644,10 +678,6 @@ function DeleteVaultControl({ vault, store, onDeleted, onBackup, copying, setCop
       setBusy(false);
     }
   };
-
-  if (toast) {
-    return <div className="msg info" style={{ marginTop: 16 }}>{toast} <button type="button" className="link" onClick={() => setToast("")}>OK</button></div>;
-  }
 
   if (!open) {
     return (
@@ -796,7 +826,7 @@ function RecentlyDeleted({ store, refreshKey, onChanged }: { store: VaultStore; 
   useEffect(() => {
     load();
     // Re-keyed on the parent's action tick — a vault deleted while Sharing is open must
-    // appear here (the post-delete toast points at this section).
+    // appear here (the post-delete note points at this section).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store, refreshKey]);
 

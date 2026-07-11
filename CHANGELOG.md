@@ -1,5 +1,42 @@
 # andvari — changelog
 
+## 0.13.1 — residue hardening (2026-07-10, cross-platform cut)
+
+A hardening batch: seven long-filed small defects closed in one reviewed pass. Nothing new to
+learn — the app just lies less and cleans up after itself.
+
+- **Phone and desktop now tell the truth when the server can't be reached.** If the app can't
+  load the server's settings, it says so and offers **Retry** — it no longer claims "this server
+  has no recovery key configured" (which used to silently disable enrollment with a wrong
+  explanation). Changing the server address now also shows a neutral "Checking the server…"
+  while the new server is probed, instead of briefly showing the OLD server's recovery ceremony.
+- **The lock screen says why it locked.** A quiet line — "Locked." / "Locked after inactivity." /
+  "Your session ended — sign in again." — on phone and desktop, matching the web app.
+- **Your master password no longer touches Android's saved-state system.** The sign-in and
+  enrollment password fields kept their text in the system Bundle (plaintext, and Android may
+  persist it to disk around app recreation). They're now memory-only: a mid-form fold/rotation
+  re-asks for the password, while the rest of the long enroll form still survives. (The other
+  form fields are unchanged.)
+- **A proxy or captive portal can no longer brick the app into the "Update required" screen.**
+  The update-required signal now requires the server's actual message, not just the HTTP status
+  code an intermediary might fabricate.
+- **The server now cleans up after itself.** Old session rows, sync journal entries, dedup
+  records, year-old audit rows, dead invites, and stale breach-check cache entries are pruned on
+  the nightly sweep with conservative retention windows (90/180/365 days) — the database no
+  longer grows without bound. A device offline more than 30 days now does one clean full
+  re-sync on return (its offline edits are preserved), which also closes a subtle window where
+  such a device could keep showing items that had been deleted while it was away.
+- **Deleting a shared vault now actually shows the confirmation note** ("…you can restore it
+  until <date>") — it was being dismissed by the same screen change it announced. It also
+  clears itself if the vault is restored.
+- **Invite links reject malformed text instead of silently mangling it** (a parity hardening of
+  the QR-invite encoder across web and the apps, pinned by shared test vectors), and the QR
+  invite panel in Admin now shows a clear message if a link can't be encoded.
+- Under the hood: the enrollment ceremony re-verifies the printed-sheet check against the exact
+  server it enrolls into at the moment of submission (closing a one-frame race if the server
+  address changes mid-screen), and the wire spec now records that the long-dormant re-sync
+  fence is live.
+
 ## 0.13.0 — layout regroup, part 2: notices + an Android update screen (2026-07-10, cross-platform cut)
 
 The second, more careful batch of the ratified layout review — Android-focused, because that's

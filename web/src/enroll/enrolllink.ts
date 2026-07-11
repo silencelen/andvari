@@ -7,6 +7,11 @@
  *  - Link shape: `<origin>/enroll#a1.<b64url-nopad(compact {"v":1,"o","t","e"})>`.
  *  - parseEnrollLink is TOTAL: null on ANY malformed input, never throws — it runs in UI
  *    layers on three platforms and a throwing parser is a crash primitive.
+ *  - composeEnrollLink rejects (null) ill-formed UTF-16 input: on a lone surrogate the
+ *    twins' JSON encoders genuinely diverge (ES2019+ JSON.stringify escapes as \udXXX;
+ *    plain Kotlin encoding U+FFFD-replaces) — identical input, different links — so
+ *    reject is the only pinnable agreement (composeRejects vectors). Well-formed astral
+ *    pairs (emoji) pass through as raw 4-byte UTF-8 on both twins (roundTrips vectors).
  *  - Normalize before decode: strip ASCII whitespace (chat apps hard-wrap b64), then
  *    trailing '=' padding (core's decoder tolerates padding, a URLSAFE_NO_PADDING decoder
  *    does not — the strip makes them agree), then require the b64url alphabet and that
@@ -41,6 +46,10 @@ const WS_RE = /[ \t\n\r\v\f]/g; // \v\f mirror the Kotlin twin's U+000B/U+000C
 const PAD_RE = /=+$/;
 const B64URL_RE = /^[A-Za-z0-9_-]*$/;
 const ORIGIN_RE = /^https?:\/\/(\[[0-9a-f:.]+\]|[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*)(:[0-9]{1,5})?$/;
+// Well-formed UTF-16 = a sequence of (non-surrogate | high+low pair) code units. Anchored
+// alternation with disjoint first-chars: linear, no lookbehind (pre-16.4 Safari), and no
+// reliance on String.isWellFormed (ES2024).
+const WELL_FORMED_UTF16_RE = /^(?:[\u0000-\uD7FF\uE000-\uFFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
 
 function b64urlEncode(bytes: Uint8Array): string {
   let bin = "";
@@ -62,11 +71,18 @@ function b64urlDecode(body: string): Uint8Array | null {
 }
 
 /**
- * Build `<origin>/enroll#a1.<b64url(payload)>`. No validation: origin is the minting
- * client's location.origin (a non-canonical origin simply produces a link
- * parseEnrollLink refuses). JSON.stringify emits the pinned compact key order v,o,t,e.
+ * Build `<origin>/enroll#a1.<b64url(payload)>`, or null when any input carries ill-formed
+ * UTF-16 (a lone/unpaired surrogate) — see the header: a lone surrogate would mint
+ * DIFFERENT links on the two twins, so rejection is the pinned agreement, and null
+ * mirrors parseEnrollLink's failure convention. The scan runs on each RAW input (never
+ * their concatenation — that could pair surrogates across a boundary; and by
+ * JSON.stringify time a lone surrogate is already escaped to ASCII and undetectable).
+ * No other validation: origin is the minting client's location.origin (a non-canonical
+ * origin simply produces a link parseEnrollLink refuses). JSON.stringify emits the
+ * pinned compact key order v,o,t,e.
  */
-export function composeEnrollLink(origin: string, token: string, email: string): string {
+export function composeEnrollLink(origin: string, token: string, email: string): string | null {
+  for (const s of [origin, token, email]) if (!WELL_FORMED_UTF16_RE.test(s)) return null;
   const payload = JSON.stringify({ v: 1, o: origin, t: token, e: email });
   return `${origin}/enroll#${PREFIX}${b64urlEncode(new TextEncoder().encode(payload))}`;
 }
