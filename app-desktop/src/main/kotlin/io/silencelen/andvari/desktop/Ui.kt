@@ -29,7 +29,9 @@ import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
+import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.ItemDoc
+import io.silencelen.andvari.core.client.LifecycleNotice
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Strength
@@ -91,12 +93,24 @@ fun DesktopApp(state: DesktopState) {
                 )
             }
         }
+        // N3 (design 2026-07-11): the ONE home for global break-glass attention — Android P4
+        // parity. Escrow re-seal (moved off the Vault list), incoming ownership offers,
+        // lifecycle notices, and the F20 unopenable-grant warning render above the screen
+        // switch, so an offer/notice is visible from EVERY signed-in screen. The gate is an
+        // EXHAUSTIVE when — deliberately no else — so adding a DesktopScreen forces a
+        // decision here (Loading/Welcome/Unlock render nothing; lock() clears every source
+        // anyway, so a lock-screen dead-action card is structurally impossible).
+        when (state.screen) {
+            is DesktopScreen.Vault, is DesktopScreen.Settings, is DesktopScreen.Trash, is DesktopScreen.Sharing -> AttentionArea(state)
+            is DesktopScreen.Loading, is DesktopScreen.Welcome, is DesktopScreen.Unlock -> {}
+        }
         Box(Modifier.weight(1f)) {
             when (val s = state.screen) {
                 is DesktopScreen.Loading -> Center { Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary) }
                 is DesktopScreen.Welcome -> Welcome(state)
                 is DesktopScreen.Unlock -> Unlock(state, s.email)
                 is DesktopScreen.Vault -> Vault(state)
+                is DesktopScreen.Sharing -> SharingScreen(state)
                 is DesktopScreen.Settings -> SettingsScreen(state)
                 is DesktopScreen.Trash -> TrashScreen(state)
             }
@@ -360,6 +374,7 @@ private fun Vault(state: DesktopState) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("andvari", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
             IconButton(onClick = { importFlow = true }) { Icon(Icons.Default.FileUpload, "import passwords") }
+            IconButton(onClick = { state.openSharing() }) { Icon(Icons.Default.Group, "sharing") }
             IconButton(onClick = { state.openTrash() }) { Icon(Icons.Default.Delete, "trash") }
             IconButton(onClick = { state.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
             IconButton(onClick = { state.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
@@ -375,7 +390,14 @@ private fun Vault(state: DesktopState) {
         ImportDialogs(state)
         val current = detailId?.let { state.item(it) }
         when {
-            editing != null -> Editor(
+            editing != null -> Column(Modifier.fillMaxSize()) {
+                // Review (N3): AttentionArea actions (accept/decline a transfer, re-seal)
+                // render ABOVE an open editor and their op() failures land in the GLOBAL
+                // error — which no editor surface composed (the editor's own bar is
+                // saveError, F71-inline beside Save). Android's editor composes the global
+                // bar; without this a failed "Become the owner" mid-edit is silent.
+                ErrorBar(state.error, state::clearError)
+                Editor(
                 itemId = editing!!.first, initial = editing!!.second, busy = state.busy,
                 // F71: the editor renders the save error INLINE and shows upload progress —
                 // it must stay open (typed fields + picked attachments intact) until the
@@ -397,7 +419,8 @@ private fun Vault(state: DesktopState) {
                 // and a failed save/upload discarded everything typed.
                 onSave = { doc, uploads, vaultId -> state.saveItem(editing!!.first, doc, uploads, vaultId) { state.endEditorSession(); editing = null } },
                 onCancel = { state.endEditorSession(); editing = null },
-            )
+                )
+            }
             current != null -> Detail(state, current, vaultBadges[current.vaultId], { editing = current.itemId to current.doc }, { state.deleteItem(current.itemId); detailId = null }, { detailId = null })
             else -> Column(Modifier.fillMaxSize().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -419,7 +442,7 @@ private fun Vault(state: DesktopState) {
                 }
                 ErrorBar(state.error, state::clearError)
                 NoticeBar(state.notice, state::clearNotice)
-                if (state.escrowStale && state.escrowFingerprint.isNotEmpty()) ReSealCard(state)
+                // (F57 escrow re-seal moved to the global AttentionArea, above the screen switch)
                 if (state.needsUpdateCount > 0) {
                     Text(needsUpdateLine(state.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 4.dp))
                 }
@@ -746,6 +769,606 @@ private fun TrashScreen(state: DesktopState) {
             confirmButton = { TextButton(onClick = { state.purgeDeleted(id); confirmPurgeId = null }) { Text("Delete forever", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { confirmPurgeId = null }) { Text("Keep") } },
         )
+    }
+}
+
+// ---- sharing / vault management (N3, design 2026-07-11 — Android SharingScreen parity) ----
+
+/** "July 14"-style day (spec 03 §11 copy). Falls back gracefully for a missing time.
+ *  Android's implementation is already pure JVM (java.text.SimpleDateFormat, no android.text),
+ *  so it ports byte-identical. */
+private fun fmtDay(ms: Long?): String {
+    if (ms == null || ms <= 0) return "soon"
+    return java.text.SimpleDateFormat("MMMM d", java.util.Locale.getDefault()).format(java.util.Date(ms))
+}
+
+/** §11 notice copy — attribution ("by its owner") is EARNED by a verified proof; the
+ *  anomaly wordings render in the danger tone. Mirrors Android/web noticeBody — strings
+ *  verbatim, curly quotes and apostrophes included. */
+private fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
+    val name = n.vaultName.ifBlank { "a vault" }
+    return when (n.kind) {
+        "deleted" -> Pair(
+            "“$name” was deleted by its owner. Its items were moved off this device" +
+                (n.purgeAt?.let { " (kept sealed until ${fmtDay(it)}, then removed)." } ?: ".") +
+                (n.parkedCount?.let { " $it of your edits hadn’t synced — they’ll be recovered if the vault is restored this week." } ?: ""),
+            false,
+        )
+        "removed" -> Pair("Your access to “$name” was removed.", false)
+        "left" -> Pair("You left “$name”.", false)
+        "restored" -> Pair("“$name” was restored.", false)
+        "transfer-complete" -> Pair(
+            if (n.becameMine) "You are now the owner of “$name”." else "“$name” now has a new owner.",
+            false,
+        )
+        "transfer-anomaly" -> Pair(
+            "The server says “$name” changed owners, but this couldn’t be verified with the vault’s own key. " +
+                "If nobody in your household did this, tell your admin — the server may be misbehaving.",
+            true,
+        )
+        "replay-denied" -> {
+            val c = n.parkedCount ?: 0
+            Pair(
+                "$c recovered ${if (c == 1) "edit" else "edits"} couldn't be applied to “$name” — your role may have changed.",
+                false,
+            )
+        }
+        else -> Pair( // "anomaly"
+            "The server says you lost access to “$name”, but this couldn’t be verified as a real owner action. " +
+                "A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). " +
+                "If nobody in your household did this, tell your admin — the server may be misbehaving.",
+            true,
+        )
+    }
+}
+
+/** The lifecycle notices banner (spec 03 §11) — each notice individually dismissable
+ *  (dismissNotice is deliberately not busy-gated, matching the state contract). */
+@Composable
+private fun LifecycleNoticesBanner(notices: List<LifecycleNotice>, onDismiss: (String) -> Unit) {
+    notices.forEach { n ->
+        val (body, warn) = noticeBody(n)
+        Card(
+            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            colors = if (warn) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer) else CardDefaults.cardColors(),
+        ) {
+            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    body, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                    color = if (warn) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary,
+                )
+                TextButton(onClick = { onDismiss(n.id) }) { Text("Dismiss") }
+            }
+        }
+    }
+}
+
+/** Incoming ownership offers (spec 03 §11): renders ONLY entries the engine already
+ *  verified under the held VK. The in-person confirm is an ADVISORY, not proof. */
+@Composable
+private fun IncomingTransferCards(state: DesktopState) {
+    state.incomingTransfers.forEach { t ->
+        val owner = state.transferOwnerNames[t.vaultId] ?: "the current owner"
+        Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Become the owner of “${t.vaultName}”?", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(4.dp))
+                Text("$owner wants to make you the owner of “${t.vaultName}”.", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "✓ This offer was verified with the vault's own key. To be sure it really came from $owner — " +
+                        "and not a compromised server — confirm with them in person or by phone. As owner you'd manage " +
+                        "members and be the only one who can rename, transfer, or delete it.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { state.acceptTransfer(t.vaultId) }, enabled = !state.busy, modifier = Modifier.weight(1f)) {
+                        Text("Become the owner")
+                    }
+                    OutlinedButton(onClick = { state.cancelTransfer(t.vaultId) }, enabled = !state.busy) { Text("Decline") }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * F20: a persistent, NON-dismissable warning that a shared vault granted to this account can't be
+ * opened on THIS device — its grant was sealed to a device key we don't hold, or it needs a newer
+ * app (a newer grant format). Such a grant is silently swallowed on hydrate/pull (runCatching over
+ * addGrant), so the vault vanishes from the list; this row makes the absence legible. Self-clearing
+ * once a later sync opens the grant (or it's revoked). No vault name is shown — with no key,
+ * nothing about the vault decrypts. Mirrors Android/web's F20 warning.
+ */
+@Composable
+private fun UnopenableVaultWarning(count: Int) {
+    Card(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+    ) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text(
+                    if (count == 1) "Can't open this shared vault on this device" else "Can't open $count shared vaults on this device",
+                    style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    "Someone shared a vault with you, but this device can't unlock it — its key was sealed to a different device, or it needs a newer version of andvari. Open andvari on the device you first set up (or update this app); it'll appear here on its own once it can be opened.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The global break-glass surface (Android MainActivity's AttentionArea, minus the needsUpdate
+ * legs — desktop keeps its needsUpdate line on the Vault list, and the Android FYI-collapse is
+ * deliberately not ported; F20 renders plainly). Capped + scrollable so a pile-up (many
+ * lifecycle rows + several simultaneous incoming transfers) can't clip its own lower items or
+ * squeeze the weight(1f) screen area below to ~0. Priority order keeps the top-severity items
+ * (re-seal, transfers) visible; overflow scrolls instead of clipping.
+ */
+@Composable
+private fun AttentionArea(state: DesktopState) {
+    val hasAnything = (state.escrowStale && state.escrowFingerprint.isNotEmpty()) ||
+        state.incomingTransfers.isNotEmpty() || state.lifecycleNotices.isNotEmpty() ||
+        state.undecryptableSharedVaultCount > 0
+    if (!hasAnything) return
+    Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
+        if (state.escrowStale && state.escrowFingerprint.isNotEmpty()) ReSealCard(state)
+        IncomingTransferCards(state)
+        LifecycleNoticesBanner(state.lifecycleNotices, state::dismissNotice)
+        if (state.undecryptableSharedVaultCount > 0) UnopenableVaultWarning(state.undecryptableSharedVaultCount)
+    }
+}
+
+/** Sharing screen (spec 03 §10/§11): vaults + the full lifecycle — delete, restore, leave,
+ *  transfer, rename — plus Recently deleted (restore) and Recently removed (holding area).
+ *  Member management (add/role/remove) stays a web surface for now; this screen carries the
+ *  lifecycle slice the natives need.
+ *
+ *  DN-1 (per-vault Settings reveal): each SHARED vault's row carries a Settings affordance
+ *  that opens that one vault's settings view in place of the list
+ *  ([DesktopState.sharingSettingsVaultId]). Bars (error/notice) and the A4 copy status line
+ *  compose ABOVE the branch — always visible from either side (A6/A7); lifecycle notices and
+ *  incoming offers live in the global [AttentionArea]. Back goes list-first (Android A11
+ *  expressed imperatively: closeVaultSettings while a settings id is set, else closeSharing —
+ *  keyed on the RAW id, so a stale-but-set id is cleared rather than exiting the screen). */
+@Composable
+private fun SharingScreen(state: DesktopState) {
+    // A-tick: vaultInfos() decrypts vault metaBlobs and derives from vault/grant rows, which
+    // items-only keys miss (a new empty grant, a remote delete of an empty vault) — memo under
+    // (items, lifecycleTick), never a raw per-recomposition call.
+    val vaults = remember(state.items, state.lifecycleTick) { state.vaultInfos() }
+    // A-resolve: resolve the open settings id against the CURRENT vaults every composition — a
+    // vault vanishing mid-view (deleted/revoked on another device) degrades to the list, never
+    // a crash. The state layer's refresh path nulls the stale id; this null-safe lookup covers
+    // the same-frame gap (title falls back to "Sharing").
+    val settingsVault = state.sharingSettingsVaultId?.let { id -> vaults.find { it.vaultId == id } }
+    // DN-2: recently-deleted + recently-removed vaults live behind the trash icon instead of
+    // always rendering under the list. Presentation-only disclosure — closing loses nothing,
+    // these are read-and-act lists.
+    var showTrash by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { if (state.sharingSettingsVaultId != null) state.closeVaultSettings() else state.closeSharing() }) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
+            Spacer(Modifier.weight(1f))
+            // A-trashIcon: list mode only — the settings reveal keeps DN-1's title+back
+            // contract. Tint when open so an explicit click gives feedback even when the
+            // disclosed sections are empty (the common case). Two verbatim notice strings
+            // ("Sharing → the trash icon") depend on this icon existing.
+            if (settingsVault == null) {
+                IconButton(onClick = { showTrash = !showTrash }) {
+                    Icon(
+                        Icons.Default.Delete,
+                        "recently deleted and removed vaults",
+                        tint = if (showTrash) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Unspecified,
+                    )
+                }
+            }
+        }
+        Text(settingsVault?.name ?: "Sharing", style = MaterialTheme.typography.headlineMedium)
+        // A6/A7 branch boundary: bars and the copy status line stay ABOVE the list/settings
+        // branch — an op failure inside settings is never silent, and the post-delete purgeAt
+        // notice shows wherever the user lands.
+        ErrorBar(state.error, state::clearError)
+        NoticeBar(state.notice, state::clearNotice)
+        CopyStatusLine(state, vaults)
+
+        if (settingsVault != null) {
+            if (settingsVault.type == "shared" && settingsVault.role == "owner") {
+                OwnerVaultPanel(state, settingsVault)
+            } else {
+                MemberVaultPanel(state, settingsVault)
+            }
+        } else {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Vaults", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "Every item lives in exactly one vault. Shared vaults are visible to everyone you add; only the vault owner manages members.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    vaults.forEach { v ->
+                        VaultListRow(v, onOpenSettings = if (v.type == "shared") ({ state.openVaultSettings(v.vaultId) }) else null)
+                    }
+                }
+            }
+
+            if (showTrash) {
+                RecentlyDeletedSection(state)
+                RecentlyRemovedSection(state.heldVaults)
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+        ExportDialogs(state) // "Back up first…" opens the spec 07 backup preflight here
+    }
+}
+
+/** One Vaults-card row. SHARED vaults (owner or member alike) get the Settings affordance;
+ *  personal vaults get none (no lifecycle ops — rename/delete/leave/transfer are all
+ *  shared-vault verbs, and an empty settings page is worse than no button). */
+@Composable
+private fun VaultListRow(v: VaultInfo, onOpenSettings: (() -> Unit)?) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text((v.name.firstOrNull() ?: '?').uppercase(), color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Serif)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(v.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+            Text(
+                if (v.type == "personal") "personal vault" else "shared vault · ${v.role ?: "member"}",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (onOpenSettings != null) {
+            IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "vault settings") }
+        }
+    }
+}
+
+/** DN-1 settings view for a shared vault this account is a MEMBER of: a role line + the
+ *  [LeaveControl]. */
+@Composable
+private fun MemberVaultPanel(state: DesktopState, v: VaultInfo) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text(
+                "shared vault · ${v.role ?: "member"}",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            LeaveControl(state, v)
+        }
+    }
+}
+
+/** A4 (DN-1): the ONE authoritative bulk-copy progress/note line — screen-level, visible
+ *  from either branch, naming the SOURCE vault via [DesktopState.copyVaultId]. A mid-copy
+ *  navigation clears the id (openVaultSettings/closeVaultSettings convention) while the
+ *  op's next tick republishes the progress — fall back to "a vault" honestly rather than
+ *  hide a live op. */
+@Composable
+private fun CopyStatusLine(state: DesktopState, vaults: List<VaultInfo>) {
+    if (state.copyProgress == null && state.copiedNote == null) return
+    val label = state.copyVaultId?.let { id -> vaults.find { it.vaultId == id }?.name }?.let { "“$it”" } ?: "a vault"
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            val progress = state.copyProgress
+            if (progress != null) {
+                val (done, total) = progress
+                Text("Copying items from $label to your Personal vault… $done/$total", style = MaterialTheme.typography.bodySmall)
+                if (total > 0) LinearProgressIndicator(progress = { done.toFloat() / total }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+            } else {
+                state.copiedNote?.let {
+                    Text("From $label: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                }
+            }
+        }
+    }
+}
+
+// ---- leave (self-removal, spec 03 §11) ----
+
+@Composable
+private fun LeaveControl(state: DesktopState, v: VaultInfo) {
+    var confirming by remember(v.vaultId) { mutableStateOf(false) }
+    TextButton(
+        onClick = { confirming = true },
+        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+    ) { Text("Leave") }
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text("Leave “${v.name}”?") },
+            text = {
+                Text(
+                    "You'll lose access on all your devices, and any edits you haven't synced will be discarded. " +
+                        "The items stay with the owner and other members; only the owner can add you back. " +
+                        "(Leaving doesn't erase what this device already knew.)",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { confirming = false; state.leaveVault(v.vaultId) }, enabled = !state.busy) {
+                    Text("Leave vault", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+// ---- owner panel: rename / transfer / delete (spec 03 §11) ----
+
+@Composable
+private fun OwnerVaultPanel(state: DesktopState, v: VaultInfo) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            RenameHeader(state, v)
+            Text(
+                "You own this vault. Writers can add and edit items; readers can only view.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            TransferControl(state, v)
+            Spacer(Modifier.height(10.dp))
+            DeleteVaultControl(state, v)
+        }
+    }
+}
+
+@Composable
+private fun RenameHeader(state: DesktopState, v: VaultInfo) {
+    var editing by remember(v.vaultId) { mutableStateOf(false) }
+    var name by remember(v.vaultId) { mutableStateOf(v.name) }
+    if (!editing) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("“${v.name}”", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            TextButton(onClick = { name = v.name; editing = true }) { Text("Rename") }
+        }
+    } else {
+        Column {
+            OutlinedTextField(
+                name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Rename vault") },
+                singleLine = true, enabled = !state.busy,
+            )
+            Text(
+                "Encrypted — readable only with this vault's key. Syncs to every member.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    onClick = {
+                        val next = name.trim()
+                        if (next.isNotEmpty() && next != v.name) state.renameVault(v.vaultId, next)
+                        editing = false
+                    },
+                    enabled = !state.busy && name.trim().isNotEmpty(),
+                ) { Text("Save") }
+                TextButton(onClick = { editing = false }, enabled = !state.busy) { Text("Cancel") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransferControl(state: DesktopState, v: VaultInfo) {
+    // A-tick: pendingTransferFor reads the engine's vault row — memo like the other engine
+    // reads (the vaultId key keeps a settings-vault swap from serving the previous vault's
+    // offer for a frame).
+    val pending = remember(state.items, state.lifecycleTick, v.vaultId) { state.pendingTransferFor(v.vaultId) }
+    val members = state.sharingMembers[v.vaultId]
+    if (pending != null) {
+        val pendingName = members?.find { it.userId == pending.toUserId }?.displayName ?: "a member"
+        Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Ownership offer to $pendingName — expires ${fmtDay(pending.expiresAt)}",
+                    Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { state.cancelTransfer(v.vaultId) }, enabled = !state.busy) { Text("Cancel offer") }
+            }
+        }
+        return
+    }
+    // Transfer targets: active members who are not the owner and not disabled (F22 badge).
+    val targets = (members ?: emptyList()).filter { it.role != "owner" && (it.status ?: "active") == "active" }
+    if (targets.isEmpty()) return
+    var confirming by remember(v.vaultId) { mutableStateOf<String?>(null) } // userId pending confirm
+    Column {
+        Text("Make someone else the owner", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        targets.forEach { m ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("${m.displayName} (${m.email})", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                TextButton(onClick = { confirming = m.userId }, enabled = !state.busy) { Text("Transfer ownership…") }
+            }
+        }
+    }
+    confirming?.let { userId ->
+        val m = targets.find { it.userId == userId } ?: return
+        AlertDialog(
+            onDismissRequest = { confirming = null },
+            title = { Text("Make ${m.displayName} the owner of “${v.name}”?") },
+            text = {
+                Text(
+                    "Nothing changes until they accept in their app (they have 14 days; you can cancel anytime). " +
+                        "Afterwards they manage members and only they can rename, transfer, or delete it — " +
+                        "you'll stay in it as a writer.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { confirming = null; state.offerTransfer(v.vaultId, m.userId) }, enabled = !state.busy) {
+                    Text("Ask ${m.displayName} to take over")
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirming = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+// ---- delete vault (owner side, spec 03 §11 + F19 rescue) ----
+
+@Composable
+private fun DeleteVaultControl(state: DesktopState, v: VaultInfo) {
+    var open by remember(v.vaultId) { mutableStateOf(false) }
+    var typed by remember(v.vaultId) { mutableStateOf("") }
+    if (!open) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(
+                onClick = { open = true; typed = "" },
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text("Delete vault…") }
+        }
+        return
+    }
+    val items = state.items.filter { it.vaultId == v.vaultId }
+    val attachmentCount = items.sumOf { it.doc.attachments.size }
+    val eraseDay = fmtDay(System.currentTimeMillis() + 7L * 86_400_000)
+    Column {
+        Text("Delete “${v.name}”?", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "This removes the vault from everyone's andvari now. The server keeps its ${items.size} " +
+                (if (items.size == 1) "item" else "items") +
+                (if (attachmentCount > 0) " and $attachmentCount ${if (attachmentCount == 1) "attachment" else "attachments"}" else "") +
+                " for 7 days (until $eraseDay) in case you change your mind — then erases them for good. " +
+                "Want to keep some of these?",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // copyOpVaultId term (review MED): a mid-copy op elsewhere can clear busy while
+            // the rescue still runs — without this term the button re-enables and invites a
+            // second concurrent copy, whose interleaved finish would disarm the A-copyGate.
+            OutlinedButton(onClick = { state.copyItemsToPersonal(v.vaultId) }, enabled = !state.busy && state.copyOpVaultId == null) {
+                // A4: the inline copy display is gated to ITS vault — another vault's
+                // in-flight copy must not relabel this button.
+                Text(state.copyProgress?.takeIf { state.copyVaultId == v.vaultId }?.let { (d, t) -> "Copying… $d/$t" } ?: "Copy items to my Personal vault first…")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = state::backupBegin, enabled = !state.busy) { Text("Back up first…") }
+        }
+        // A4: progress bar + note kept in-panel but gated to ITS vault (copyVaultId) —
+        // the screen-level CopyStatusLine is the cross-branch authoritative display.
+        if (state.copyVaultId == v.vaultId) state.copyProgress?.let { (done, total) ->
+            if (total > 0) LinearProgressIndicator(progress = { done.toFloat() / total }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+        }
+        if (state.copyVaultId == v.vaultId) state.copiedNote?.let {
+            Spacer(Modifier.height(4.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Deleting can't take back what people already saw: anyone who had access may have kept copies of items " +
+                "or the vault key, and encrypted server backups age out on their own schedule (about a month). " +
+                "If a password really matters, change it at the website too.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            typed, { typed = it }, Modifier.fillMaxWidth(),
+            label = { Text("Type the vault's name to delete it") }, placeholder = { Text(v.name) },
+            singleLine = true, enabled = !state.busy,
+        )
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { open = false; typed = ""; state.clearCopiedNote() }, enabled = !state.busy) { Text("Cancel") }
+            Spacer(Modifier.width(8.dp))
+            TextButton(
+                // A-copyGate: copyOpVaultId is the NON-DISPLAY in-flight marker — busy alone
+                // is not a delete-during-rescue gate (another op finishing re-enables buttons
+                // while the rescue copy still runs).
+                onClick = { open = false; typed = ""; state.clearCopiedNote(); state.deleteVault(v.vaultId, v.name) },
+                enabled = !state.busy && typed == v.name && state.copyOpVaultId == null,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text("Delete vault") }
+        }
+    }
+}
+
+// ---- recently deleted (restore, spec 03 §11) ----
+
+@Composable
+private fun RecentlyDeletedSection(state: DesktopState) {
+    if (state.deletedVaults.isEmpty()) return
+    var restoring by remember { mutableStateOf<String?>(null) } // vaultId pending confirm
+    Spacer(Modifier.height(16.dp))
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("Recently deleted vaults", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Deleted vaults you can still restore. Restoring brings a vault back for every member with everything that was in it.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            state.deletedVaults.forEach { d ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("“${d.name}”", style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                        Text(
+                            "deleted ${fmtDay(d.deletedAt)} · erased for good ${fmtDay(d.purgeAt)}",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = { restoring = d.vaultId }, enabled = !state.busy) { Text("Restore") }
+                }
+            }
+        }
+    }
+    restoring?.let { vaultId ->
+        val d = state.deletedVaults.find { it.vaultId == vaultId } ?: return
+        AlertDialog(
+            onDismissRequest = { restoring = null },
+            title = { Text("Restore “${d.name}”?") },
+            text = {
+                Text(
+                    "It comes back for every member with everything that was in it. Devices running the latest app " +
+                        "also recover edits members hadn't synced; older devices may have discarded theirs.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { restoring = null; state.restoreVault(d.vaultId, d.deleteId) }, enabled = !state.busy) { Text("Restore vault") }
+            },
+            dismissButton = { TextButton(onClick = { restoring = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+// ---- recently removed (the holding area, spec 03 §11 / design §6) ----
+
+@Composable
+private fun RecentlyRemovedSection(held: List<HeldVaultInfo>) {
+    if (held.isEmpty()) return
+    Spacer(Modifier.height(16.dp))
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("Recently removed", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Vaults this account lost access to. A sealed copy is kept on this device for a while in case of a mistake — if the vault is restored or you're re-added, everything (including unsynced edits) comes back.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            held.forEach { h ->
+                Column(Modifier.padding(vertical = 4.dp)) {
+                    Text("“${h.name}”", style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                    val line = when {
+                        h.reason == "deleted" && h.verified -> "deleted by its owner · kept sealed until ${fmtDay(h.purgeAt ?: h.expungeAt)}"
+                        h.reason == "left" -> "you left · kept until ${fmtDay(h.expungeAt)}"
+                        h.verified -> "access removed · kept until ${fmtDay(h.expungeAt)}"
+                        else -> "unverified removal · kept until ${fmtDay(h.expungeAt)}"
+                    }
+                    Text(
+                        line, style = MaterialTheme.typography.bodySmall,
+                        color = if (h.verified || h.reason == "left") MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
     }
 }
 
