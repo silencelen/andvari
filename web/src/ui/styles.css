@@ -265,6 +265,9 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 }
 .navbtn:hover { color: var(--ink); background: var(--bg-input); }
 .navbtn.active { color: var(--gold-bright); background: var(--bg-input); }
+/* DN-2: a ghost button used as a toggle (Sharing's trash-icon disclosure) shows a pressed
+   state, so an explicit tap gives feedback even when the disclosed section is empty. */
+.ghost.active { color: var(--gold-bright); background: var(--bg-input); }
 
 /* ---- persistent notice (recovery sign-in) ---- */
 .banner {

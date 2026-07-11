@@ -977,7 +977,7 @@ class AndvariViewModel(
         val purgeAt = engine!!.deleteSharedVault(vaultId)
         refreshItems(); reloadSharing()
         _ui.value = _ui.value.copy(
-            notice = "“$vaultName” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Sharing → Recently deleted).",
+            notice = "“$vaultName” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Sharing → the trash icon).",
         )
     }
 
@@ -1118,8 +1118,10 @@ class AndvariViewModel(
     fun checkIdleLock() {
         val s = _ui.value
         if (VaultSession.get() == null) {
-            // Locked underneath us (autofill gate) — reflect it in the UI.
-            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus) lock()
+            // Locked underneath us (autofill gate) — reflect it in the UI. Trash was missing
+            // from this list (IA audit): a Trash screen left open must kick to lock like
+            // every other unlocked view.
+            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus || s.screen is Screen.Trash) lock()
             return
         }
         if (s.busy || s.importBusy) return
@@ -1720,6 +1722,9 @@ class AndvariViewModel(
             sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
             undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
             copyProgress = null, copiedNote = null, copyVaultId = null, moveProgress = null,
+            // Trash holds DECRYPTED tombstone docs (incl. passwords) + item versions; now that
+            // checkIdleLock routinely locks from the Trash screen, they must not outlive the lock.
+            deletedItems = null, itemVersions = null,
         )
     }
 

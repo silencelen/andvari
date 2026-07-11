@@ -14,6 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
@@ -84,7 +85,7 @@ private fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
         }
         else -> Pair( // "anomaly"
             "The server says you lost access to “$name”, but this couldn’t be verified as a real owner action. " +
-                "A sealed copy of its data is kept on this device for 30 days (Sharing → Recently removed). " +
+                "A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). " +
                 "If nobody in your household did this, tell your admin — the server may be misbehaving.",
             true,
         )
@@ -161,6 +162,10 @@ fun SharingScreen(vm: AndvariViewModel, ui: UiState) {
     // never a crash. A2 actively clears the stale id in the VM's refresh path; this
     // null-safe lookup covers the same-frame gap.
     val settingsVault = ui.sharingSettingsVaultId?.let { id -> vaults.find { it.vaultId == id } }
+    // DN-2: recently-deleted + recently-removed vaults live behind the trash icon instead of
+    // always rendering under the list. Presentation-only disclosure (rotation-safe; no VM state
+    // — closing loses nothing, these are read-and-act lists).
+    var showTrash by rememberSaveable { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -168,6 +173,20 @@ fun SharingScreen(vm: AndvariViewModel, ui: UiState) {
                 navigationIcon = {
                     IconButton(onClick = if (settingsVault != null) vm::closeVaultSettings else vm::closeSharing) {
                         Icon(Icons.Default.ArrowBack, "back")
+                    }
+                },
+                actions = {
+                    // List mode only — the settings reveal keeps DN-1's title+back contract.
+                    if (settingsVault == null) {
+                        // Tint when open so an explicit tap gives feedback even when the
+                        // disclosed sections are empty (the common case).
+                        IconButton(onClick = { showTrash = !showTrash }) {
+                            Icon(
+                                Icons.Default.Delete,
+                                "recently deleted and removed vaults",
+                                tint = if (showTrash) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Unspecified,
+                            )
+                        }
                     }
                 },
             )
@@ -208,8 +227,10 @@ fun SharingScreen(vm: AndvariViewModel, ui: UiState) {
                     }
                 }
 
-                RecentlyDeletedSection(vm, ui)
-                RecentlyRemovedSection(ui.heldVaults)
+                if (showTrash) {
+                    RecentlyDeletedSection(vm, ui)
+                    RecentlyRemovedSection(ui.heldVaults)
+                }
             }
             Spacer(Modifier.height(24.dp))
             ExportDialogs(vm, ui) // "Back up first…" opens the spec 07 backup preflight here
@@ -499,7 +520,7 @@ private fun RecentlyDeletedSection(vm: AndvariViewModel, ui: UiState) {
     Spacer(Modifier.height(16.dp))
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
-            Text("Recently deleted", style = MaterialTheme.typography.titleLarge)
+            Text("Recently deleted vaults", style = MaterialTheme.typography.titleLarge)
             Text(
                 "Deleted vaults you can still restore. Restoring brings a vault back for every member with everything that was in it.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,

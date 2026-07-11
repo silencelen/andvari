@@ -48,6 +48,8 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
     setTick((t) => t + 1);
     onSynced();
   };
+  // DN-2: presentation-only disclosure for the recently-deleted-vaults section.
+  const [trashOpen, setTrashOpen] = useState(false);
   // Derived each render (cheap) so a background WS sync that re-renders the parent is reflected.
   void tick;
   const vaults = store.vaults();
@@ -67,7 +69,27 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
 
   return (
     <div>
-      <ViewHeader title="Sharing" />
+      <ViewHeader
+        title="Sharing"
+        actions={
+          !settingsVault && (
+            /* DN-2: recently-deleted vaults live behind this icon instead of always rendering
+               under the list — a disclosure toggle, deliberately NOT a back-guard layer. */
+            <button
+              type="button"
+              className={`ghost ${trashOpen ? "active" : ""}`}
+              aria-label="Recently deleted vaults"
+              title="Recently deleted vaults"
+              aria-expanded={trashOpen}
+              onClick={() => setTrashOpen((o) => !o)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px" }}>
+                <path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" />
+              </svg>
+            </button>
+          )
+        }
+      />
 
       {incoming.map((t) => (
         <IncomingTransferCard key={t.vaultId} offer={t} account={account} store={store} client={client} onChanged={refresh} />
@@ -138,7 +160,7 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
             <NewVaultForm account={account} store={store} client={client} onCreated={refresh} />
           </div>
 
-          <RecentlyDeleted store={store} refreshKey={tick} onChanged={refresh} />
+          {trashOpen && <RecentlyDeleted store={store} refreshKey={tick} onChanged={refresh} />}
         </>
       )}
     </div>
@@ -606,7 +628,7 @@ function DeleteVaultControl({ vault, store, onDeleted, onBackup, copying, setCop
     setErr("");
     try {
       const { purgeAt } = await store.deleteSharedVault(vault.vaultId);
-      setToast(`“${vault.name}” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Recently deleted below).`);
+      setToast(`“${vault.name}” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Sharing → the trash icon).`);
       setOpen(false);
       setTyped("");
       onDeleted();
@@ -760,7 +782,7 @@ function RecentlyDeleted({ store, refreshKey, onChanged }: { store: VaultStore; 
 
   return (
     <div className="sheet">
-      <h2>Recently deleted</h2>
+      <h2>Recently deleted vaults</h2>
       <p className="muted" style={{ marginTop: 0 }}>
         Deleted vaults you can still restore. Restoring brings a vault back for every member with
         everything that was in it.

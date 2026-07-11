@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DN-3: the brand rune ᛅ (long-branch ár) as the launcher glyph, the EXACT geometry the
+     web wordmark ships (web/src/ui/Sigil.tsx BrandSigil: stave M12 3v18 + falling stroke
+     M5.5 8.5l13 6, round caps), in the house gold (web CSS var "gold", #d0a94a). The group
+     scales the 24-unit path into the adaptive-icon safe zone (108dp canvas), keeping the
+     web stroke-to-height ratio (1.8/18) so the mark reads identically at both sizes. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="2.4"
+        android:scaleY="2.4"
+        android:translateX="25.2"
+        android:translateY="25.2">
+        <path
+            android:pathData="M12,3 L12,21"
+            android:strokeColor="#D0A94A"
+            android:strokeWidth="1.8"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M5.5,8.5 L18.5,14.5"
+            android:strokeColor="#D0A94A"
+            android:strokeWidth="1.8"
+            android:strokeLineCap="round" />
+    </group>
+</vector>

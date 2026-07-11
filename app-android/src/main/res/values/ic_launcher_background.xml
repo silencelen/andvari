@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DN-3: launcher background, the app's own dark brown-black (web CSS var "bg", #14120e). -->
+<resources>
+    <color name="ic_launcher_background">#14120E</color>
+</resources>

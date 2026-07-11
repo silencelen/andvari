@@ -361,7 +361,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             {navBtn("vault", "Vault")}
             {navBtn("sharing", "Sharing")}
             {navBtn("health", "Health")}
-            {navBtn("trash", "Trash")}
+            {/* DN-2: Trash left the nav — it lives as the toolbar trash icon on the vault view. */}
             {navBtn("settings", "Settings")}
             {isAdmin && navBtn("admin", "Admin")}
           </nav>
@@ -491,6 +491,19 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                   onCsv={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("csv"); }}
                 />
               )}
+              {/* DN-2: the Trash entry point — a small icon here instead of a main-nav item.
+                  Mirrors navBtn's layer-clearing so it behaves like navigation, not a layer. */}
+              <button
+                type="button"
+                className="ghost"
+                aria-label="Trash"
+                title="Trash"
+                onClick={() => { setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); setView("trash"); }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px" }}>
+                  <path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" />
+                </svg>
+              </button>
             </div>
             {filtered.length === 0 ? (
               <div className="empty">
@@ -612,7 +625,7 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
         warn: true,
         body:
           `The server says you lost access to “${name}”, but this couldn’t be verified as a real owner action. ` +
-          `A sealed copy of its data is kept on this device for 30 days (Settings → Recently removed). ` +
+          `A sealed copy of its data is kept on this device for 30 days. ` +
           `If nobody in your household did this, tell your admin — the server may be misbehaving.`,
       };
   }
@@ -1001,7 +1014,7 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
 
   return (
     <div className="sheet">
-      <h2>Recently deleted</h2>
+      <h2>Trash</h2>
       <div className="muted" style={{ marginBottom: 18 }}>
         Deleted items you can still restore — kept for 30 days, then removed automatically. Restoring
         brings an item back to its vault on every device; “Delete forever” removes it now.
