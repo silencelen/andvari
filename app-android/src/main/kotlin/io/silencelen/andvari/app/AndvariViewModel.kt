@@ -40,6 +40,7 @@ import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LifecycleNotice
 import io.silencelen.andvari.core.client.MoveGesture
 import io.silencelen.andvari.core.client.PendingUpload
+import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultInfo
@@ -778,7 +779,21 @@ class AndvariViewModel(
         toVault()
     }
 
-    fun enroll(invite: String, email: String, name: String, password: String) = op {
+    fun enroll(invite: String, email: String, name: String, password: String) {
+        // State-layer re-assert (the S2-review race class: a Compose enabled flag lags a
+        // frame while onClick reads live fields). Busy first — op() sets busy but never
+        // checks it, so a same-frame double-tap would run two registers (second dies
+        // invite_used and clobbers the error). Then the F60 floor: a sub-floor master
+        // password is the one irreversible outcome of this screen.
+        if (_ui.value.busy) return
+        if (!Strength.meetsMasterPasswordFloor(password)) {
+            _ui.value = _ui.value.copy(error = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols.")
+            return
+        }
+        enrollOp(invite, email, name, password)
+    }
+
+    private fun enrollOp(invite: String, email: String, name: String, password: String) = op {
         // F74: the old fallback built a client, closed it UNUSED, then leaked the second one
         // it actually called (`newApi().also { it.close() }.let { newApi().clientPolicy() }`).
         // One probe, closed in finally (AndvariApi has close() but isn't Closeable — no .use).

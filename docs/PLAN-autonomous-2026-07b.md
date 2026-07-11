@@ -162,6 +162,16 @@ owner: park under "Parked for owner", continue with the documented default, neve
       store+Android-provider when triggered, extension tier-2 distribution decision,
       real-secrets migration once the owner's gate clears). Statement with headlines.
 
+## Owner dev-notes queued (build next, in order, standard design→build→review treatment)
+
+- **DN-1 (2026-07-10): per-vault Settings flyout.** Owner: "instead of having the setting and
+  config for each vault under the vault list, lets have the vaults have a 'settings' option on
+  each that brings up a popup/flyout/reveals settings." Scope at design time: which surfaces
+  hold per-vault settings today (web Sharing view stacks lifecycle/members/rename under the
+  list; natives have their own arrangement), what moves into the flyout (rename, members,
+  transfer, delete/restore, leave), parity across clients vs web-first. Slot AFTER the native
+  security cycle (in flight) and BEFORE S3 unless the owner reorders.
+
 ## Parked for owner (carried + new)
 
 - 0.2.x MSI retirement (= card-create Option-A flip + windows manifest entry).

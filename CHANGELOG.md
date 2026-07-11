@@ -1,5 +1,23 @@
 # andvari — changelog
 
+## 0.10.2 — the enrollment ceremony gets real on phone and desktop (2026-07-10, cross-platform cut)
+
+Security hardening of first-time enrollment, bringing both native apps up to the web app's
+ceremony ahead of family onboarding. Existing accounts are untouched — this only changes the
+"Create vault" screen.
+
+- **You now TYPE the recovery fingerprint instead of ticking a box.** Phone and desktop
+  enrollment used to display the fingerprint next to a checkbox — nothing forced an actual
+  comparison with the printed sheet, which is the one check a compromised server can't fake.
+  Both now ask you to type the sheet's first 16 characters before the fingerprint is shown or
+  the confirmation can be ticked — exactly how the web app (and the re-seal prompt) already
+  work. Separators and case don't matter; a mismatch says STOP in plain words.
+- **The master-password bar on natives now matches the web app.** Phone and desktop accepted
+  any 8+ characters ("password1"); all clients now require the same strength floor, with a
+  live strength label and honest too-weak message while you type.
+- Under the hood, the enroll submit rule is now ONE shared, tested core function across both
+  native apps, so the platforms can never quietly drift apart on these checks again.
+
 ## 0.10.1 — import crash fix + import robustness (2026-07-10, cross-platform cut)
 
 Phone and desktop pick up everything below with this cut; the web app and server have been

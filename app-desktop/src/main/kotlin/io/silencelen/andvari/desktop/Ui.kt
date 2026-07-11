@@ -28,6 +28,7 @@ import io.silencelen.andvari.core.client.CsvPreflight
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.CsvImport
+import io.silencelen.andvari.core.client.EnrollCeremony
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
@@ -224,25 +225,61 @@ private fun Enroll(state: DesktopState) {
     var password by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
     var fpOk by remember { mutableStateOf(false) }
+    // spec 04 §2(3): the user TYPES the first 16 sheet chars — never shown until matched.
+    var shortFp by remember { mutableStateOf("") }
     val fp = state.policy?.recoveryFingerprint ?: ""
-    val ready = invite.isNotBlank() && email.isNotBlank() && password.length >= 8 && password == confirm && fpOk && fp.isNotEmpty()
-    // F72: single gated submit — Enter can't create a vault before the fingerprint box is ticked.
-    val submit = { if (ready && !state.busy) state.enroll(invite.trim(), email.trim(), name.trim(), password) }
+    val shortOk = Escrow.shortFormMatches(shortFp, fp)
+    // One shared gate (core EnrollCeremony, jvm-tested): F60 floor + typed ceremony —
+    // the two legs this form historically under-enforced (length>=8, display+checkbox).
+    val ready = EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, fp)
+    // F72: single gated submit — Enter can't create a vault before the ceremony is complete.
+    // The gate is RE-EVALUATED inside the lambda from the same live reads it submits: the
+    // composition-captured `ready` Boolean can be a frame stale while `password` et al are
+    // live MutableState reads — a paste+Enter in one frame would otherwise submit values
+    // `ready` never approved (S2-review race class). `ready` stays for the button visual.
+    val submit = {
+        if (EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, fp) && !state.busy) {
+            state.enroll(invite.trim(), email.trim(), name.trim(), password)
+        }
+    }
     Column(Modifier.fillMaxWidth()) {
         Field("Invite token", invite, { invite = it }, mono = true, onEnter = submit)
         Field("Email", email, { email = it }, onEnter = submit)
         Field("Name (optional)", name, { name = it }, onEnter = submit)
         Secret("Master password", password, onEnter = submit) { password = it }
+        if (password.isNotEmpty()) {
+            val score = Strength.estimateStrength(password)
+            if (Strength.meetsMasterPasswordFloor(password)) {
+                Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            if (Strength.masterPasswordHasNonAscii(password)) {
+                Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+            }
+        }
         Secret("Confirm password", confirm, onEnter = submit) { confirm = it }
+        if (confirm.isNotEmpty() && confirm != password) {
+            Text("passwords don't match", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
         if (fp.isEmpty()) {
             Text("This server has no recovery key configured yet — enrollment is disabled until the escrow ceremony is done.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
         } else {
             Spacer(Modifier.height(8.dp))
-            Text("Recovery fingerprint", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(fp.chunked(4).joinToString(" "), fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall)
+            // Deliberately NOT displayed until typed — showing it above the input would
+            // reduce the check to transcription (spec 04 §2(3); web Enroll parity; the
+            // F57 re-seal card already works this way).
+            Text("Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true, onEnter = submit)
+            if (shortFp.isNotBlank() && !shortOk) {
+                Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            if (shortOk) {
+                Text("matches — full fingerprint: ${fp.chunked(4).joinToString(" ")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+            }
             Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(fpOk, { fpOk = it })
-                Text("Matches my printed recovery sheet.", style = MaterialTheme.typography.bodySmall)
+                Checkbox(fpOk, { fpOk = it }, enabled = shortOk)
+                Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
             }
         }
         Spacer(Modifier.height(12.dp))
