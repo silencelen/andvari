@@ -18,6 +18,16 @@
       <a id="update-link" class="update-link" target="_blank" rel="noopener noreferrer" hidden></a>
     </div>
 
+    <!-- E1-6 recovery-password nudge: a rescued member re-logged in with the admin-known
+         temporary password. Persistent + non-dismissable for the whole unlocked session (the
+         mustChange banner idiom, not the dismissable-notice one); shown only when unlocked AND
+         the login response carried mustChangePassword. The extension can't change the password
+         itself, so the whole strip is a button to the web vault. Cleared only by a fresh unlock
+         whose response no longer carries the flag. -->
+    <button id="must-change" class="must-change-strip" type="button" hidden>
+      Recovery sign-in — set a new master password in the web vault.
+    </button>
+
     <section id="locked" class="locked" hidden>
       <div class="hero">
         <div class="sigil">ᛅ</div>

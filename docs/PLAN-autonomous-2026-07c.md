@@ -103,8 +103,8 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
       skipped.undecryptable; spec02-1 metaV regression check unimplemented on all clients;
       spec03-01 no global request-body limit; spec01-f61 KDF-upgrade re-key is
       Android-only).
-- [ ] **E1. (PROPOSED 2026-07-11, pending ratification) Extension hardening — cut ext
-      0.10.0.** ~10 S items, one module, security-adjacent (ledger §E1): X-Andvari-Client
+- [ ] **E1. (RATIFIED 2026-07-11 — owner: "E1 now, A1 next session") Extension hardening —
+      cut ext 0.10.0.** ~10 S items, one module, security-adjacent (ledger §E1): X-Andvari-Client
       header + a minimal 426 surface (today a min-version pin can NEVER gate the extension);
       clipboard auto-clear (spec 01 §8 says every client); TOTP determinism backport + run
       spec/test-vectors/totp.json; identityPub mismatch check on unlock (spec 01 §5 MUST);
@@ -112,8 +112,8 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
       re-offer; mustChangePassword surface; refresh killed only on definitive 401/403 (web-B7
       mirror); drop the unused "scripting" permission; F26 lock-reason parity. Recommended
       FIRST of the two proposed batches.
-- [ ] **A1. (PROPOSED 2026-07-11, pending ratification) Accessibility batch ×3 clients (+
-      extension fold-in) (M–L).** 23 confirmed findings incl. the sweep's only P1 — web has
+- [ ] **A1. (RATIFIED 2026-07-11 for the NEXT session — owner: "E1 now, A1 next session")
+      Accessibility batch ×3 clients (+ extension fold-in) (M–L).** 23 confirmed findings incl. the sweep's only P1 — web has
       zero programmatic label association; zero live regions on web AND Android; contrast
       failures in both themes; desktop has no focus management at all (ledger §A1). Wants its
       own design pass (per-client semantics patterns) + breaker before build; fold in the

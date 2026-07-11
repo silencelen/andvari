@@ -59,6 +59,22 @@ export interface PendingSave {
   updatesItemName: string | null;
 }
 
+/** Unlock outcome code — set by background.ts's unlock mapper, rendered as canonical copy by the
+ *  popup (extension/src/errors.ts). Codes cross the seam; user-facing sentences live only in the
+ *  surface (design decision 4). `network` is a fetch rejection; `unknown` is the catch-all. */
+export type UnlockCode =
+  | "bad_credentials"
+  | "totp_required"
+  | "upgrade_required"
+  | "identity_mismatch"
+  | "server_error"
+  | "network"
+  | "unknown";
+
+/** Save-failure code for a resolved pending save — mapped to copy by the surface (never the raw
+ *  SW error string, which used to leak "locked"/"save failed (conflict)" into the banner). */
+export type SaveErrorCode = "locked" | "conflict" | "failed";
+
 export type Req =
   | { type: "status" }
   | { type: "unlock"; email: string; password: string }
@@ -99,14 +115,27 @@ export type Req =
   | { type: "totp"; itemId: string }
   /** Content (each frame load): report host so the SW can badge the tab. */
   | { type: "pageInfo"; host: string }
+  /** Surface → SW: a secret was just copied — arm the SW backstop clipboard-clear alarm (E1-4).
+   *  The surface's own local timer covers the popup-open / in-page cases; this backstop survives
+   *  the popup closing on focus loss (the dominant flow). Answers the effective policy seconds. */
+  | { type: "scheduleClipboardClear" }
   /** Popup: is a newer extension version published to /downloads? Non-secret and vault-free —
    *  the SW answers whether locked or not (the check reads only the public downloads manifest). */
   | { type: "updateStatus" };
 
 export type Res<T extends Req["type"]> = T extends "status"
-  ? { unlocked: boolean; count: number; email: string | null }
+  ? {
+      unlocked: boolean;
+      count: number;
+      email: string | null;
+      /** Rescue-issued temporary password in effect — the popup shows a persistent nudge (E1-6). */
+      mustChangePassword: boolean;
+      /** Why the last lock happened, for the F26 reason line above the unlock form (E1-7);
+       *  null unless the most recent lock was an idle autolock. */
+      lockNotice: { kind: "idle"; seconds: number } | null;
+    }
   : T extends "unlock"
-    ? { ok: boolean; error?: string }
+    ? { ok: boolean; code?: UnlockCode; error?: string }
     : T extends "lock"
       ? { ok: true }
       : T extends "ping"
@@ -124,7 +153,7 @@ export type Res<T extends Req["type"]> = T extends "status"
                   : T extends "pendingSave"
                     ? { pending: PendingSave | null }
                     : T extends "resolvePendingSave"
-                      ? { ok: boolean; error?: string }
+                      ? { ok: boolean; code?: SaveErrorCode; error?: string }
                       : T extends "linkUri"
                         ? { ok: boolean; error?: string }
                         : T extends "generate"
@@ -145,7 +174,9 @@ export type Res<T extends Req["type"]> = T extends "status"
                                         chromeUrl: string | null;
                                         firefoxUrl: string | null;
                                       }
-                                    : never;
+                                    : T extends "scheduleClipboardClear"
+                                      ? { ok: boolean; clearSeconds: number }
+                                      : never;
 
 /** SW → content (chrome.tabs.sendMessage): fill this item now (popup-granted). The
  *  content script performs its normal `reveal` round-trip with its own host — the SW

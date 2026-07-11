@@ -2,6 +2,8 @@
 // Excluded from tsc (tsconfig `exclude`) because it imports node:test, which the extension's
 // chrome-only lib set does not type. `npm test` in extension/ runs this.
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { isNewerVersion } from "./version.ts";
 
@@ -33,4 +35,17 @@ test("malformed input never nags", () => {
   assert.equal(isNewerVersion("9.9.9", "not-a-version"), false); // unreadable current fails closed
   assert.equal(isNewerVersion("1.2.3.4.5", "0.7.0"), false); // too many parts
   assert.equal(isNewerVersion("  ", "0.7.0"), false);
+});
+
+// The version lives in THREE hand-edited files (manifest.json, manifest.firefox.json, package.json)
+// and is also the runtime X-Andvari-Client version now — a forgotten bump would ship a firefox zip
+// named with the chrome version but containing the stale one, or send a mislabelled client header.
+// package.mjs :8-17 refuses the drift at package time; this catches it at test time too.
+test("manifest.json, manifest.firefox.json and package.json versions are in lockstep", () => {
+  const versionOf = (rel: string): string => JSON.parse(readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf-8")).version;
+  const chrome = versionOf("../manifest.json");
+  const firefox = versionOf("../manifest.firefox.json");
+  const pkg = versionOf("../package.json");
+  assert.equal(firefox, chrome, "manifest.firefox.json version must match manifest.json");
+  assert.equal(pkg, chrome, "package.json version must match manifest.json");
 });

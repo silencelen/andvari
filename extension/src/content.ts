@@ -5,7 +5,6 @@
  * entirely. The SW holds the decrypted vault and enforces the reveal rules — a secret reaches
  * this frame only host-bound, popup-granted, or via an explicit search-all pick (ZK).
  */
-import { findLoginForms, isSubmitLike, type LoginForm } from "./detect";
 import {
   closeDropdown,
   openDropdown,
@@ -14,6 +13,8 @@ import {
   showToast,
   type DropdownState,
 } from "./content-ui";
+import { findLoginForms, isSubmitLike, type LoginForm } from "./detect";
+import { saveErrorCopy } from "./errors";
 import { send, type MatchItem, type PendingSave, type Req, type RevealedSecret, type Res, type TabMsg } from "./messages";
 
 const isTop = window.self === window.top;
@@ -89,9 +90,26 @@ async function copyTotp(code: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(code);
     showToast("2FA code copied — paste when asked");
+    await scheduleClipboardClear(); // E1-4: clear this post-fill 2FA copy on the policy window
   } catch {
     showToast(`2FA code: ${code}`); // clipboard needs document focus — surface the code instead
   }
+}
+
+/** The ONE pending clipboard-clear timer for this frame (AM2, content half): copyTotp is the
+ *  only in-page copy site, so a single slot suffices — a newer copy clearTimeout's the previous,
+ *  mirroring the popup slot and the SW alarm's "last copy through us wins". */
+let clipClearTimer = 0;
+
+/** E1-4 clipboard auto-clear, content half — mirrors popup's scheduleClipboardClear: arm the SW
+ *  alarm backstop (it outlives this frame) whose reply carries the effective policy seconds, plus
+ *  a local precise timer (web useCopy parity — blind clear, `Math.max(1, s)` clamp, policy 0 still
+ *  clears). SW unreachable → 30 s default. Never a user-facing error: every path is a silent no-op. */
+async function scheduleClipboardClear(): Promise<void> {
+  const r = await safeSend({ type: "scheduleClipboardClear" });
+  const s = r?.clearSeconds ?? 30;
+  window.clearTimeout(clipClearTimer); // AM2: single slot — the newest copy owns the clear
+  clipClearTimer = window.setTimeout(() => void navigator.clipboard.writeText("").catch(() => {}), Math.max(1, s) * 1000);
 }
 
 // ---- dropdown ----
@@ -226,7 +244,11 @@ function offerBanner(pending: PendingSave): void {
     async () => {
       const r = await safeSend({ type: "resolvePendingSave", action: "save" });
       if (r?.ok) return { ok: true, text: "Saved to the hoard." };
-      return { ok: false, text: r?.error ?? "Could not save — unlock andvari and try again." };
+      // E1-5: map the SW's code to human copy — NEVER render r.error (the old `?? fallback` only
+      // fired on undefined, so the SW's internal "locked"/"save failed (conflict)" strings leaked
+      // straight into the red result line). saveErrorCopy: locked → unlock-and-retry, conflict →
+      // open-in-web-vault, failed/undefined → generic retry.
+      return { ok: false, text: saveErrorCopy(r?.code) };
     },
     () => void safeSend({ type: "resolvePendingSave", action: "dismiss" }),
   );
