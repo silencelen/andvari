@@ -144,15 +144,26 @@ data class UiState(
     val sharingMembers: Map<String, List<VaultMemberSummary>> = emptyMap(),
     val deletedVaults: List<DeletedVaultInfo> = emptyList(),
     val heldVaults: List<HeldVaultInfo> = emptyList(),
+    /** DN-1: the vault whose per-vault Settings view the Sharing screen shows (null = the
+     *  vault list). VM state, not composition state, per the movePicker precedent —
+     *  rotation-safe. Nulled by openSharing (A5: a fresh visit lands on the list), by
+     *  lock/sign-out, and ACTIVELY in refreshLifecycle when the id stops resolving (A2 —
+     *  a later restore must not resurrect the layer). */
+    val sharingSettingsVaultId: String? = null,
     /** F20: count of shared vaults granted to this account whose grant can't be OPENED on THIS
      *  device (sealed to a device key we don't hold, or a newer grant format). Such a grant is
      *  swallowed by hydrate/pull (runCatching over addGrant), so the vault is absent from
      *  [items]/vaultInfos(); this drives a persistent, non-dismissable warning on the vault list.
      *  Recomputed every refreshLifecycle; 0 clears the warning (a later sync opened/revoked it). */
     val undecryptableSharedVaultCount: Int = 0,
-    /** Bulk "copy items to Personal first" progress + its post-copy note (delete dialog). */
+    /** Bulk "copy items to Personal first" progress + its post-copy note. A4 (DN-1):
+     *  [copyVaultId] scopes both to the SOURCE vault — set alongside copyProgress in
+     *  copyItemsToPersonal, kept while the note is live (the screen-level status line
+     *  names the vault through it), cleared wherever copiedNote/copyProgress both clear.
+     *  The in-panel display gates on it, so another vault's panel never claims the copy. */
     val copyProgress: Pair<Int, Int>? = null,
     val copiedNote: String? = null,
+    val copyVaultId: String? = null,
     /** F19 move/copy attachment re-encryption progress (Detail screen). */
     val moveProgress: Pair<Int, Int>? = null,
     // F57: the account's escrow is sealed to a superseded org recovery key (re-ceremony) — the
@@ -895,6 +906,11 @@ class AndvariViewModel(
             incomingTransfers = incoming,
             heldVaults = e.heldVaultInfos(),
             undecryptableSharedVaultCount = undecryptableSharedCount(),
+            // A2 (DN-1): every sync/refresh funnels through here (reloadSharing after ops,
+            // backgroundSync pulls) — a settings id whose vault vanished (deleted/revoked
+            // elsewhere) is ACTIVELY cleared, so a later restore/re-grant can't resurrect
+            // the settings layer. The screen's null-safe lookup covers the same-frame gap.
+            sharingSettingsVaultId = _ui.value.sharingSettingsVaultId?.takeIf { id -> e.vaultInfos().any { it.vaultId == id } },
         )
         val missing = incoming.filter { it.vaultId !in _ui.value.transferOwnerNames }
         if (missing.isNotEmpty()) {
@@ -911,12 +927,27 @@ class AndvariViewModel(
     }
 
     fun openSharing() {
-        _ui.value = _ui.value.copy(screen = Screen.Sharing, copiedNote = null, copyProgress = null)
+        // A5 (DN-1): a fresh Sharing visit always lands on the LIST — never inside a
+        // stale settings layer left over from the previous visit.
+        _ui.value = _ui.value.copy(screen = Screen.Sharing, sharingSettingsVaultId = null, copiedNote = null, copyProgress = null, copyVaultId = null)
         reloadSharing()
     }
 
     fun closeSharing() {
-        _ui.value = _ui.value.copy(screen = Screen.Vault, copiedNote = null, copyProgress = null)
+        _ui.value = _ui.value.copy(screen = Screen.Vault, copiedNote = null, copyProgress = null, copyVaultId = null)
+    }
+
+    /** DN-1: open one vault's Settings view inside the Sharing screen. VM state, not
+     *  composition state (the movePicker precedent) — rotation-safe. Clears the copy
+     *  progress/note per the openSharing convention (A4); an in-flight copy itself is
+     *  untouched — its next progress tick republishes, and the screen-level status line
+     *  keeps it visible from either branch. */
+    fun openVaultSettings(vaultId: String) {
+        _ui.value = _ui.value.copy(sharingSettingsVaultId = vaultId, copiedNote = null, copyProgress = null, copyVaultId = null)
+    }
+
+    fun closeVaultSettings() {
+        _ui.value = _ui.value.copy(sharingSettingsVaultId = null, copiedNote = null, copyProgress = null, copyVaultId = null)
     }
 
     /** Fetch the Sharing screen's server-side lists: members per owned shared vault (the
@@ -953,18 +984,19 @@ class AndvariViewModel(
     /** Bulk "Copy items to my Personal vault first…" (F19 rider — copy legs ONLY). */
     fun copyItemsToPersonal(vaultId: String) {
         val e = engine ?: return
-        _ui.value = _ui.value.copy(busy = true, error = null, copiedNote = null, copyProgress = 0 to 0)
+        _ui.value = _ui.value.copy(busy = true, error = null, copiedNote = null, copyProgress = 0 to 0, copyVaultId = vaultId)
         viewModelScope.launch {
             try {
                 val copied = e.copyAllToPersonal(vaultId) { done, total ->
                     _ui.value = _ui.value.copy(copyProgress = done to total)
                 }
+                // A4: copyVaultId stays — the surviving note is named through it.
                 _ui.value = _ui.value.copy(
                     busy = false, copyProgress = null, items = e.items(),
                     copiedNote = "Copied $copied ${if (copied == 1) "item" else "items"} to your Personal vault. You can still change your mind — deleting won't remove those copies.",
                 )
             } catch (t: Throwable) {
-                _ui.value = _ui.value.copy(copyProgress = null)
+                _ui.value = _ui.value.copy(copyProgress = null, copyVaultId = null)
                 fail(t)
             }
         }
@@ -997,7 +1029,7 @@ class AndvariViewModel(
         refreshItems(); reloadSharing()
     }
 
-    fun clearCopiedNote() { _ui.value = _ui.value.copy(copiedNote = null) }
+    fun clearCopiedNote() { _ui.value = _ui.value.copy(copiedNote = null, copyVaultId = null) }
 
     // F19 gestures memoized per (item|target|mode): a RETRY of a transiently-failed
     // move/copy reuses the SAME gesture (fresh ids were minted ONCE) so the server's
@@ -1686,8 +1718,8 @@ class AndvariViewModel(
             backupPreflight = null, backupResult = null, csvPreflight = null,
             lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
             sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
-            undecryptableSharedVaultCount = 0,
-            copyProgress = null, copiedNote = null, moveProgress = null,
+            undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
+            copyProgress = null, copiedNote = null, copyVaultId = null, moveProgress = null,
         )
     }
 
@@ -1735,8 +1767,8 @@ class AndvariViewModel(
                 notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
                 lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
                 sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
-                undecryptableSharedVaultCount = 0,
-                copyProgress = null, copiedNote = null, moveProgress = null,
+                undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
+                copyProgress = null, copiedNote = null, copyVaultId = null, moveProgress = null,
             )
         }
     }

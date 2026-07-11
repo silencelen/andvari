@@ -6,6 +6,7 @@ import { shortIdentityFingerprint } from "../crypto/sharedgrant";
 import type { Account } from "../vault/account";
 import type { DeletedVaultInfo, IncomingTransfer, VaultInfo, VaultStore } from "../vault/store";
 import { UNREACHABLE } from "./errors";
+import { settingsContentFor, showSettingsButton } from "./sharing-settings";
 import { ViewHeader } from "./ViewHeader";
 
 interface Props {
@@ -14,6 +15,11 @@ interface Props {
   client: ApiClient;
   onSynced: () => void; // parent refresh — items may gain/lose vault badges, notices update
   onBackup: () => void; // open the full-vault backup panel (delete dialog "Back up first…")
+  /** DN-1 (A1): the open per-vault settings layer, owned by Vault so its single back
+   *  guard closes it as the topmost layer. null = the vaults list. */
+  settingsVaultId: string | null;
+  onOpenSettings: (vaultId: string) => void;
+  onCloseSettings: () => void;
 }
 
 /** "July 14"-style day (spec 03 §11 copy). */
@@ -22,12 +28,22 @@ function fmtDay(ms?: number): string {
   return new Date(ms).toLocaleDateString(undefined, { month: "long", day: "numeric" });
 }
 
-/** Sharing view (spec 03 §10/§11): vaults, members, and the full lifecycle — delete, restore,
- *  leave, transfer, rename. Destructive actions live in the owner-only member panel per the
- *  capabilities table; leave lives on the member's vault row; incoming ownership offers surface
- *  at the top; a Recently-deleted section restores in-grace vaults. */
-export function Sharing({ account, store, client, onSynced, onBackup }: Props) {
+/** Sharing view (spec 03 §10/§11 + DN-1): vaults, members, and the full lifecycle — delete,
+ *  restore, leave, transfer, rename. Each SHARED vault row carries a Settings button opening
+ *  that vault's settings layer (the F76 revealed-layer idiom) in place of the list: owners get
+ *  the member panel, members get the read-only roster + Leave (re-homed off the row). Incoming
+ *  ownership offers and the undecryptable-grants warning stay ABOVE the branch (A7), so they
+ *  surface even with settings open; the Vaults sheet, NewVaultForm, and Recently-deleted are
+ *  list-branch-only. */
+export function Sharing({ account, store, client, onSynced, onBackup, settingsVaultId, onOpenSettings, onCloseSettings }: Props) {
   const [tick, setTick] = useState(0);
+  // A3: every vault's DeleteVaultControl {copying, copiedNote} lives HERE, keyed by vaultId —
+  // Sharing stays mounted across settings-layer cycles, so closing the layer mid-copy doesn't
+  // orphan the rescue-copy progress, and a reopened panel shows honest state. (No store.ts
+  // change: the in-flight copyAllToPersonal keeps reporting into these setters after the
+  // panel unmounts.)
+  const [copyingByVault, setCopyingByVault] = useState<Record<string, { done: number; total: number } | null>>({});
+  const [copiedNoteByVault, setCopiedNoteByVault] = useState<Record<string, string>>({});
   const refresh = () => {
     setTick((t) => t + 1);
     onSynced();
@@ -36,8 +52,18 @@ export function Sharing({ account, store, client, onSynced, onBackup }: Props) {
   void tick;
   const vaults = store.vaults();
   const incoming = store.incomingTransfers();
-  const ownedShared = vaults.filter((v) => v.type === "shared" && v.role === "owner");
-  const memberShared = vaults.filter((v) => v.type === "shared" && v.role !== "owner");
+
+  // DN-1: resolve the settings id against the CURRENT vaults each render (invariant 4) — a
+  // vault revoked/deleted by another device degrades to the list, never a crash.
+  const settingsContent = settingsContentFor(settingsVaultId, vaults);
+  const settingsVault = settingsVaultId ? vaults.find((v) => v.vaultId === settingsVaultId) : undefined;
+
+  // A2: a derive-only lookup would RESURRECT the layer (delete X in settings → restore X in
+  // Recently deleted → settings X pops back open). Actively clear the id the moment it stops
+  // resolving; the render below keeps its own null-guard for the same-frame gap.
+  useEffect(() => {
+    if (settingsVaultId && settingsContent === null) onCloseSettings();
+  }, [settingsVaultId, settingsContent, onCloseSettings]);
 
   return (
     <div>
@@ -49,41 +75,72 @@ export function Sharing({ account, store, client, onSynced, onBackup }: Props) {
 
       <UndecryptableGrantsWarning store={store} />
 
-      <div className="sheet">
-        <h2>Vaults</h2>
-        <p className="muted" style={{ marginTop: 0 }}>
-          Every item lives in exactly one vault. Shared vaults are visible to everyone
-          you add; only the vault owner manages members.
-        </p>
-        <div className="list">
-          {vaults.map((v) => (
-            <div className="item static" key={v.vaultId}>
-              <span className="glyph">{v.name.charAt(0).toUpperCase()}</span>
-              <span className="body">
-                <div className="name">{v.name}</div>
-                <div className="sub">{v.type === "personal" ? "personal vault" : "shared vault"}</div>
-              </span>
-              {v.type === "shared" && v.role !== "owner" ? (
-                <LeaveControl vault={v} store={store} onChanged={refresh} />
-              ) : (
-                <span className="tag">{v.role ?? "member"}</span>
-              )}
+      {settingsVault && settingsContent !== null ? (
+        <>
+          {/* DN-1 header: the layer's in-app back affordance; hardware/gesture Back closes it
+              too, via Vault's closeTop (A1). The doubled vault name (this header + the panel's
+              own H2) is the one accepted cosmetic drift (A10). */}
+          <div className="sheet">
+            <button type="button" className="link" onClick={onCloseSettings}>‹ Back to vaults</button>
+            <h2 style={{ marginTop: 12, marginBottom: 0 }}>{settingsVault.name}</h2>
+          </div>
+          {settingsContent === "owner" ? (
+            <MemberPanel
+              key={settingsVault.vaultId}
+              vault={settingsVault}
+              account={account}
+              store={store}
+              client={client}
+              onChanged={refresh}
+              onBackup={onBackup}
+              copying={copyingByVault[settingsVault.vaultId] ?? null}
+              setCopying={(c) => setCopyingByVault((m) => ({ ...m, [settingsVault.vaultId]: c }))}
+              copiedNote={copiedNoteByVault[settingsVault.vaultId] ?? ""}
+              setCopiedNote={(note) => setCopiedNoteByVault((m) => ({ ...m, [settingsVault.vaultId]: note }))}
+            />
+          ) : (
+            <>
+              {/* F20: non-owners see WHO ELSE is in a shared vault they belong to (read-only). */}
+              <MemberRosterPanel key={settingsVault.vaultId} vault={settingsVault} client={client} />
+              {/* DN-1: Leave, re-homed off the vault row into the member vault's settings. */}
+              <div className="sheet">
+                <LeaveControl vault={settingsVault} store={store} onChanged={refresh} />
+              </div>
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="sheet">
+            <h2>Vaults</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Every item lives in exactly one vault. Shared vaults are visible to everyone
+              you add; only the vault owner manages members.
+            </p>
+            <div className="list">
+              {vaults.map((v) => (
+                <div className="item static" key={v.vaultId}>
+                  <span className="glyph">{v.name.charAt(0).toUpperCase()}</span>
+                  <span className="body">
+                    <div className="name">{v.name}</div>
+                    <div className="sub">{v.type === "personal" ? "personal vault" : "shared vault"}</div>
+                  </span>
+                  <span className="tag">{v.role ?? "member"}</span>
+                  {/* DN-1: shared vaults (owner and member alike) manage their lifecycle in the
+                      settings layer; personal vaults have no lifecycle ops, so no button. Leave
+                      moved off the row into settings — the row keeps its role tag. */}
+                  {showSettingsButton(v) && (
+                    <button type="button" className="ghost" onClick={() => onOpenSettings(v.vaultId)}>Settings</button>
+                  )}
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-        <NewVaultForm account={account} store={store} client={client} onCreated={refresh} />
-      </div>
+            <NewVaultForm account={account} store={store} client={client} onCreated={refresh} />
+          </div>
 
-      {ownedShared.map((v) => (
-        <MemberPanel key={v.vaultId} vault={v} account={account} store={store} client={client} onChanged={refresh} onBackup={onBackup} />
-      ))}
-
-      {/* F20: non-owners see WHO ELSE is in a shared vault they belong to (read-only). */}
-      {memberShared.map((v) => (
-        <MemberRosterPanel key={v.vaultId} vault={v} client={client} />
-      ))}
-
-      <RecentlyDeleted store={store} refreshKey={tick} onChanged={refresh} />
+          <RecentlyDeleted store={store} refreshKey={tick} onChanged={refresh} />
+        </>
+      )}
     </div>
   );
 }
@@ -206,7 +263,7 @@ function LeaveControl({ vault, store, onChanged }: { vault: VaultInfo; store: Va
 
 // ---- member management (owner-only panel per shared vault) ----
 
-function MemberPanel({ vault, account, store, client, onChanged, onBackup }: { vault: VaultInfo; account: Account; store: VaultStore; client: ApiClient; onChanged: () => void; onBackup: () => void }) {
+function MemberPanel({ vault, account, store, client, onChanged, onBackup, copying, setCopying, copiedNote, setCopiedNote }: { vault: VaultInfo; account: Account; store: VaultStore; client: ApiClient; onChanged: () => void; onBackup: () => void; copying: { done: number; total: number } | null; setCopying: (c: { done: number; total: number } | null) => void; copiedNote: string; setCopiedNote: (note: string) => void }) {
   const [members, setMembers] = useState<VaultMemberSummary[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -325,7 +382,7 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup }: { v
         }}
       />
 
-      <DeleteVaultControl vault={vault} store={store} onDeleted={onChanged} onBackup={onBackup} />
+      <DeleteVaultControl vault={vault} store={store} onDeleted={onChanged} onBackup={onBackup} copying={copying} setCopying={setCopying} copiedNote={copiedNote} setCopiedNote={setCopiedNote} />
     </div>
   );
 }
@@ -510,14 +567,20 @@ function TransferOfferControl({ vault, store, targets, onOffered }: { vault: Vau
 
 // ---- delete vault (owner side, spec 03 §11) ----
 
-function DeleteVaultControl({ vault, store, onDeleted, onBackup }: { vault: VaultInfo; store: VaultStore; onDeleted: () => void; onBackup: () => void }) {
+// A3: {copying, copiedNote} are LIFTED to Sharing-level state keyed by vaultId (threaded via
+// MemberPanel) — this panel unmounts when the settings layer closes, and the rescue-copy
+// progress / completion note must survive a close/reopen mid-copy instead of being orphaned.
+function DeleteVaultControl({ vault, store, onDeleted, onBackup, copying, setCopying, copiedNote, setCopiedNote }: { vault: VaultInfo; store: VaultStore; onDeleted: () => void; onBackup: () => void; copying: { done: number; total: number } | null; setCopying: (c: { done: number; total: number } | null) => void; copiedNote: string; setCopiedNote: (note: string) => void }) {
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [copying, setCopying] = useState<{ done: number; total: number } | null>(null);
-  const [copiedNote, setCopiedNote] = useState("");
   const [toast, setToast] = useState("");
+  // A3b (review HIGH): `busy` is LOCAL and dies when the settings layer unmounts this panel —
+  // but the rescue copy keeps running via the lifted setters. A reopened panel must not offer
+  // a second copy, and above all must not let Delete fire mid-rescue-copy (the exact ordering
+  // this panel protects). The lifted `copying` is the surviving truth — gate on both.
+  const inFlight = busy || copying !== null;
 
   const items = store.list().filter((it) => it.vaultId === vault.vaultId);
   const attachmentCount = items.reduce((n, it) => n + (it.doc.attachments?.length ?? 0), 0);
@@ -560,6 +623,11 @@ function DeleteVaultControl({ vault, store, onDeleted, onBackup }: { vault: Vaul
   if (!open) {
     return (
       <div className="actions" style={{ marginTop: 18 }}>
+        {/* Review LOW: a copy that completed while the layer was closed must be visible from
+            the collapsed state — the opener below clears the note, so this is the one place
+            the user can learn the rescue copy landed. */}
+        {copiedNote && <div className="msg info" style={{ display: "block", flexBasis: "100%" }}>{copiedNote}</div>}
+        {copying && <div className="msg info" style={{ display: "block", flexBasis: "100%" }}>Copying items to your Personal vault… {copying.done}/{copying.total}</div>}
         <div className="spacer" />
         <button type="button" className="ghost" style={{ color: "var(--danger)" }} onClick={() => { setOpen(true); setErr(""); setCopiedNote(""); }}>
           Delete vault…
@@ -577,10 +645,10 @@ function DeleteVaultControl({ vault, store, onDeleted, onBackup }: { vault: Vaul
         (until {eraseDay}) in case you change your mind — then erases them for good. Want to keep some of these?
       </p>
       <div className="actions" style={{ marginBottom: 8 }}>
-        <button type="button" className="ghost" disabled={busy} onClick={copyFirst}>
+        <button type="button" className="ghost" disabled={inFlight} onClick={copyFirst}>
           {copying ? `Copying… ${copying.done}/${copying.total}` : "Copy items to my Personal vault first…"}
         </button>
-        <button type="button" className="ghost" disabled={busy} onClick={onBackup}>Back up first…</button>
+        <button type="button" className="ghost" disabled={inFlight} onClick={onBackup}>Back up first…</button>
       </div>
       {copiedNote && <div className="msg info" style={{ display: "block" }}>{copiedNote}</div>}
 
@@ -592,10 +660,10 @@ function DeleteVaultControl({ vault, store, onDeleted, onBackup }: { vault: Vaul
 
       {err && <div className="msg err">{err}</div>}
       <label style={{ marginTop: 10 }}>Type the vault's name to delete it:</label>
-      <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={vault.name} disabled={busy} />
+      <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={vault.name} disabled={inFlight} />
       <div className="actions" style={{ marginTop: 10 }}>
         <button type="button" className="ghost" disabled={busy} onClick={() => { setOpen(false); setTyped(""); setErr(""); }}>Cancel</button>
-        <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy || typed !== vault.name} onClick={del}>
+        <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={inFlight || typed !== vault.name} onClick={del}>
           {busy ? "Deleting…" : "Delete vault"}
         </button>
       </div>
