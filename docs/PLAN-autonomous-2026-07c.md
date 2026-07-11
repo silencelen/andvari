@@ -63,13 +63,17 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
       blockers, 3 AMENDs folded); BUILD IN FLIGHT as this line lands — one universal import
       screen ×3 clients, per-source export help demoted to a collapsible block (core-shared for
       natives), mismatch machinery deleted, desktop wildcard fixed. Cut 0.14.1.
-- [ ] **H1. Hardening backports batch (approved 2026-07-11)** — Android epoch-guards +
-      copy-gate backports (the N3 breaker/review holes exist on Android too); skeletal-
-      tombstone truth fix; web "reload to update" nudge; **autofill browser reach** (Z Fold
-      report 2026-07-11: only Brave dispatches by default — Chrome needs its "Autofill using
-      another service" setting [user step, pin already static]; Samsung/Edge need
-      compatibility-package XML from us + one-tap trust; add a "Browser support" card to
-      Autofill status). Stretch: desktop syncing/busy split. Cut 0.14.2.
+- [x] **H1. Hardening backports — DONE, SHIPPED 0.14.2 (2026-07-11, `fb875b4`).**
+      Android B1 epoch guards + full copyOpVaultId gate (incl. the Android-only discovery:
+      the gate must publish into VaultSession.setOperationInProgress — TWO idle observers);
+      autofill compat XML for Samsung/Edge + "Browser support" card (Chrome = user setting,
+      documented in-app); web reload-to-update banner; tombstone truth fix via resolution (B)
+      with the updatedAt restamp (the "30d" was a random 0-30d before) + the two-legged fence
+      argument written honestly in all three prose sites (review's one confirmed LOW). Review
+      4 dimensions → 1 LOW confirmed (docs) → fixed; 3 dimensions clean. Stretch
+      (syncing/busy split) deliberately cut — re-filed to the residue ledger. Fold
+      verification steps: toggle andvari off/on as the autofill service after installing
+      0.14.2, then test Samsung/Edge (dropdown, not keyboard chip) + flip Chrome's setting.
 - [ ] **R1. Migration rehearsal (approved 2026-07-11)** — the real-secrets runbook executed
       end-to-end on a LOCAL throwaway server (scratch escrow; no live-CT mutation, no auth
       manufacturing); output = runbook amendments + re-runnable harness + "rehearsed ✅" in the
