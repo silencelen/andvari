@@ -72,6 +72,14 @@ persistent, prominent signpost that shows its severity and count. Specifically:
   ReSeal/needsUpdate into the same disclosure idiom for parity, but desktop's stack is already
   small (no lifecycle list, no Sharing), so desktop is mostly unchanged.
 
+> **Accepted deviation (recorded 2026-07-11, quad-sweep desia-2):** the Android
+> one-`AttentionCard` idiom leg was dropped at build time — no `AttentionCard` composable
+> exists; the shipped 0.13.0 `AttentionArea` (MainActivity.kt) keeps the reviewed per-item
+> idioms (IncomingTransferCards = default Card, needsUpdate = bare Text, FYI disclosure =
+> TextButton). The hoist/de-dup/collapse legs shipped as specified; the a11y leg's
+> count-carrying accessible name rides the toggle's text (no explicit contentDescription
+> was added). If idiom unification is still wanted, it needs a fresh residue entry.
+
 ### Re-parent rule (as before)
 The BODIES + ACTIONS of every moved banner (ReSealBanner/Card, UnopenableVaultWarning,
 IncomingTransferCard, the needsUpdate copy, mustChange) are byte-identical; only their wrapper

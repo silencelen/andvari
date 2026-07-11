@@ -8,8 +8,11 @@ Server rejects requests > 1 MiB except attachment uploads (streamed, quota-check
 
 Every request carries `X-Andvari-Client: <platform>/<semver>` with platform ∈
 `android|windows|web|cli`. If policy pins `minVersion[platform]` above the caller,
-the server answers **426** `{ "error": "upgrade_required", "minVersion": "…" }`;
-clients block writes and show the upgrade path (devstore / /downloads / reload).
+the server answers **426** with the standard error shape (§8):
+`{ "error": "upgrade_required", "message": "min <platform> <minVersion>" }` — clients
+key on the BODY code, never the bare status (`message` is human-only; the actual pin
+comes from `/client-policy`); they block writes and show the upgrade path
+(devstore / /downloads / reload).
 `GET /api/v1/client-policy` (unauthenticated) returns current pins + `serverTime`.
 
 ## 2. Auth & sessions
@@ -21,11 +24,13 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
   params-divergence oracle after a policy bump is recorded in spec 05 R4 and heals
   when the account re-keys.
 - `POST /auth/login { email, authKey, device: { platform, name } , totp? }` →
-  `201 { userId, deviceId, accessToken, refreshToken, accountKeys }` where
+  `200 { userId, deviceId, accessToken, refreshToken, accountKeys }` where
   `accountKeys = { wrappedUvk, kdfParams, encryptedIdentitySeed, identityPub,
   escrowFingerprint }`. Failures are uniform `401 invalid_credentials` (no
-  user/password distinction). If the account has server-TOTP enrolled and the request
-  arrives via the public origin, `totp` is REQUIRED (spec: break-glass hardening).
+  user/password distinction). Via the public origin, server-TOTP is mandatory
+  (break-glass hardening): an account without it enrolled is refused outright
+  (`403 public_login_requires_totp`); enrolled accounts must supply `totp`
+  (missing → `401 totp_required`).
 - Tokens are opaque 256-bit random, transported as base64url, stored server-side as
   `sha256(token)`. Access: 1 h. Refresh: 30 d, **rotating** — `POST /auth/refresh
   { refreshToken }` → new pair, old refresh token single-use; reuse of a consumed
@@ -46,7 +51,7 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
   newWrappedUvk }` — atomic; server verifies currentAuthKey, swaps verifier + salt +
   params + wrappedUvk, revokes all sessions except the calling one, audits. Used for
   both password change and KDF upgrade (spec 01 §7).
-- `PUT /escrow/self { sealed, recoveryKeyFingerprint }` — client (re)uploads its
+- `PUT /escrow/self { sealed, fingerprint }` — client (re)uploads its
   sealed UVK; server validates fingerprint equals the pinned org fingerprint.
 
 ## 4. Sync — pull
@@ -79,8 +84,10 @@ clients block writes and show the upgrade path (devstore / /downloads / reload).
   offline edits to the vault are lost — the push would be `denied` regardless).
 - **`removedGrantsInfo`** (additive, spec 03 §11) is the companion detail for `removedGrants`
   (which remains the SOLE purge trigger for old clients): `{vaultId, reason:
-  'removed'|'left'|'deleted'|'transferred', deletedAt?, purgeAt?, deleteId?, deleteProof?,
-  restoreProof?, removeProof?, removeNonce?}`. `reason` derives from the caller's OWN grant's
+  'removed'|'left'|'deleted', deletedAt?, purgeAt?, deleteId?, deleteProof?,
+  restoreProof?, removeProof?, removeNonce?}` (no `transferred` reason: ownership
+  transfer demotes the old owner to writer without revoking any grant, so it never
+  produces a row here). `reason` derives from the caller's OWN grant's
   `revokedReason` (a member removed *before* a later vault delete sees `removed`, not
   `deleted`). 0.5.0+ client duties: verify the proof under the still-held `lifecycleKey`
   BEFORE any destructive local action; tri-state — *valid* → act with an attributed notice;
@@ -230,14 +237,18 @@ proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — veri
   upstream (`SUFFIX:COUNT` lines). Client computes SHA-1 locally and compares
   suffixes locally; full hashes never leave the device.
 - `GET /downloads` — web UI + manifest `{ windows: { version, url, sha256 } }`.
-- `GET /healthz` (200 when DB writable) — Kuma target. `GET /metrics` — Prometheus,
-  bound to localhost for Alloy only.
+- `GET /healthz` (200 when the DB is readable — the probe is a read-only rev
+  SELECT, so an unwritable-but-readable DB still answers 200) — Kuma target.
+  `GET /metrics` — Prometheus, bound to localhost for Alloy only.
 - Rate limits: prelogin/login are **per IP** 10/min (fixed window; per-account keys
-  exist only on vault-create and user-lookup today — per-account login keys are a
+  exist on vault-create, user-lookup and the §11 lifecycle buckets
+  (`vault_destructive`/`vault_recovery`) — per-account login keys are a
   deferred hardening item);
   on the public origin (CF-Connecting-IP present + configured public hostname)
   **login** drops to 5/min (prelogin stays 10/min), TOTP is required, and
-  register/refresh are disabled unless policy explicitly enables them.
+  register/refresh are hard-disabled (`403 register_public_disabled` /
+  `public_refresh_disabled` — no policy flag enables them; break-glass sessions
+  re-login with TOTP instead of refreshing).
 - Client IP (rate keys + audit rows): derived from `CF-Connecting-IP`, else the
   **rightmost** `X-Forwarded-For` entry, **only when the direct TCP peer is
   loopback** (both front-ends terminate there). Any other peer uses the socket

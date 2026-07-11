@@ -22,9 +22,9 @@ account — the household accepts this because the holder is the admin/owner
 ## 2. Pinning (defense against pubkey substitution)
 
 The recovery **public key + fingerprint** are pinned in THREE places that must agree:
-1. Server config (`/etc/andvari/config.*` — `recoveryPublicKey`,
-   `recoveryFingerprint`); server refuses registration/escrow uploads whose
-   fingerprint differs.
+1. Server env (`/etc/andvari/andvari.env`, systemd EnvironmentFile —
+   `ANDVARI_RECOVERY_PUBKEY`, `ANDVARI_RECOVERY_FINGERPRINT`); server refuses
+   registration/escrow uploads whose fingerprint differs.
 2. Client builds/policy (`client-policy` carries the fingerprint; native clients read
    it from policy — they MAY additionally bake it at build time, not done as of 0.4.0).
 3. The printed sheet — at enrollment the user confirms the recovery key against the
@@ -65,18 +65,18 @@ on the recovered account's next sync like any offline device.
 1. Offline machine → `recovery-cli keygen` → sheet ×2 + USB; verify both printouts
    scan back to the same seed.
 2. Pin pubkey + fingerprint into server config; deploy.
-3. **Canary check:** `recovery-cli canary --make` seals the FIXED canary payload
+3. **Canary check:** `recovery-cli canary make <pubkeyB64>` seals the FIXED canary payload
    `{"v":1,"userId":"00000000-0000-0000-0000-000000000000","keyType":"canary","key":"<base64url of 32×0x5A>","sha256":"<of that>"}`
    to the pinned pubkey; store the sealed canary server-side. Then, from the printed
    sheet ONLY (re-typed/scanned, not from the generating session), `recovery-cli
-   canary --verify` must open it. Proves print → restore → unseal end-to-end before
-   anything real depends on it.
+   canary verify <sealedB64>` must open it. Proves print → restore → unseal
+   end-to-end before anything real depends on it.
 4. First (admin) enrollment proceeds only after 3 passes.
 
 **Account recovery (forgot master password):**
 1. Admin fetches the user's sealed blob (`/admin/users/{id}` → escrow).
 2. Offline: `recovery-cli recover <sealedBlobB64>` (positional arg — matches the CLI) — prompts for sheet seed, opens
-   blob, validates internal sha256 + userId, then generates a one-time temp
+   blob, validates internal sha256 + keyType, then generates a one-time temp
    password, derives temp salt/params/authKey/wrapKey, re-wraps UVK, and prints an
    upload bundle `{tempAuthKey, tempWrappedUvk, tempKdfSalt, tempKdfParams}`.
    The UVK itself never touches the online machine.
@@ -85,15 +85,19 @@ on the recovered account's next sync like any offline device.
 4. User logs in with temp password → forced password change (normal spec 01 §7
    flow) → all devices re-auth. Escrow blob unchanged (UVK unchanged).
 
-**Annual drill (n8n reminder, July):** canary --verify from the printed sheet + a
-full recovery of a dedicated drill account. Failures are a P1 incident: re-ceremony
-+ re-escrow of ALL accounts (client-side re-seal on next unlock, server prompts via
-policy flag).
+**Annual drill (n8n reminder, July):** `canary verify` from the printed sheet, a
+fleet `verify <seedFile> <escrowDumpJson>` pass over every escrowed account
+(`docs/drills/escrow-canary-drill.md`), + a full recovery of a dedicated drill
+account. Failures are a P1 incident: re-ceremony + re-escrow of ALL accounts
+(client-side re-seal on next unlock — the server flags each affected account
+`escrowStale` in `AccountKeys` at login/unlock, with policy/`AccountKeys` carrying
+the new fingerprint as the re-seal target).
 
 ## 5. recovery-cli requirements
 
 Offline-first fat jar (`tools/recovery-cli`): no network I/O ever (compile-time —
 no HTTP client on the classpath); refuses to run if it detects an andvari server URL
-argument. Input/output via files + stdin/QR. Ships with `keygen`, `canary --make/
---verify`, `recover`, `fingerprint <pubkey>`. Uses the same `:core` crypto as
+argument. Input/output via files + stdin/QR. Ships with `keygen`,
+`canary make`/`canary verify`, the fleet `verify <seedFile> <escrowDumpJson>`,
+`recover`, `fingerprint <pubkey>`. Uses the same `:core` crypto as
 everything else, so vectors pin its behavior too.

@@ -12,9 +12,11 @@ matching in autofill (design: `docs/design/2026-07-10-etld1-psl-matching.md`, sp
    (`core/.../autofill/PslData.kt`, `web/src/vault/pslData.ts`, `extension/src/pslData.ts`)
    and prints the new snapshot hash.
 3. Update `snapshotHash` in `spec/test-vectors/urimatch-etld1.json` to the printed hash.
-   (The vector *cases* only reference rules that never leave the list — `com`, `co.uk`,
-   `github.io`, `*.kawasaki.jp`/`!city.kawasaki.jp` — so a refresh should never change case
-   outcomes; if one does, STOP and treat it as a semantic review, not a refresh.)
+   (The vector *cases* stick to long-stable rules — `com`, `co.uk`, `github.io`,
+   `*.kawasaki.jp`/`!city.kawasaki.jp` — plus one private-section wildcard,
+   `*.compute.amazonaws.com`, the one plausible churn candidate; a refresh should not
+   change case outcomes — if one does, STOP and treat it as a semantic review, not a
+   refresh.)
 4. Run the gates (core jvmTest + web vitest + `extension npm test` — the hash assertion in
    each catches a half-refreshed tree).
 

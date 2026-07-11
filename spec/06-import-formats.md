@@ -38,8 +38,10 @@ only). `guid` is NOT preserved as itemId (always mint fresh UUIDs).
   "<name> (2)", "<name> (3)"…, and the import report flags them for manual cleanup.
 - Import report (shown, not stored): imported / skipped-empty / collapsed /
   flagged-duplicate counts + per-row parse errors with line numbers.
-- Everything lands in the user's personal vault; moving to shared vaults is a
-  post-import manual action.
+- Imports land in a user-chosen **destination** vault (amended 2026-07-10 — the S2
+  destination picker; design `docs/design/2026-07-11-universal-importer.md`): default
+  the personal vault, switchable to any vault the user can write to (personal, or
+  shared with owner/writer role). Before S2 everything landed personal-only.
 - Vector coverage: `test-vectors/import.json` carries sample Chrome and Firefox
   files (quoting edge cases: embedded commas, quotes, newlines, BOM) with expected
   parsed rows. Both implementations must parse identically.
@@ -61,10 +63,11 @@ Both impls MUST follow this exactly (checked order), so they agree byte-for-byte
    skipped, import continues); **EOF while inside a quoted field** (unterminated quote)
    → per-row error `bad_quote` at the row's opening line (row skipped, prior rows still
    import).
-4. **Header detection** (row 1, names trimmed + lowercased): contains
+4. **Header detection** (row 1, names trimmed + lowercased; checked in the §9.1
+   specificity order — Firefox before Chrome): contains `url,username,password` plus
+   any of `guid|httprealm|formactionorigin` → Firefox; else contains
    `name,url,username,password` → Chrome/Edge (a `note` **or** `notes` column is
-   optional; Chrome emits `note`); else contains `url,username,password` plus any of
-   `guid|httprealm|formactionorigin` → Firefox; else reject `unrecognized_header`.
+   optional; Chrome emits `note`); else reject `unrecognized_header`.
    Columns are mapped **by header name, not position**.
 5. **Row errors:** field count ≠ header count → `wrong_field_count`. Errors report the
    **1-based physical line number of the row's first character** (embedded newlines
@@ -93,17 +96,20 @@ UI MUST warn of this. There is no dedupe against items already in the vault (v1)
 ### §4 addendum (0.8.0) — vault-aware plan (F75)
 
 Supersedes the "(v1) no vault dedupe" sentence above. `plan(parsed, existing, newId)`
-takes light projections of the TARGET **personal** vault (imports land there; a copy in
-a shared vault is a different item), decrypted client-side and built ONLY by the ONE
-core-owned builder (`CsvImport.projections` / web `buildImportProjections`) — never
+takes light projections of the chosen **destination** vault (S2, amended 2026-07-10 —
+imports land there; projections + dedupe run against that vault only, and a copy in a
+different vault is a different item; plan + commit MUST read the SAME vault: the plan is
+paired with the vault whose projections produced it, and the confirm step never re-reads
+the picker), decrypted client-side and built ONLY by the ONE
+core-owned builder (`CsvImport.projections` / web `store.importProjections`) — never
 ad-hoc mapping at call sites. When the vault is locked/unsynced the UI REFUSES the plan
 step with honest copy; it never silently plans against empty projections. The existing
 vault is NEVER mutated by an import — zero-destruction. The 2-arg `plan(parsed, newId)`
 still exists and equals empty projections (the frozen `import.json` behavior).
 
 Projections: logins `{name, uris[], username, password, totp?}`, notes `{name, notes}`,
-plus `names[]` = ALL personal item display names (every type). Absent → `""`; `uris []`
-and `[""]` are equivalent.
+plus `names[]` = ALL destination-vault item display names (every type). Absent → `""`;
+`uris []` and `[""]` are equivalent.
 
 Per file row, in checked order, **kind-scoped**:
 
@@ -133,10 +139,13 @@ Per file row, in checked order, **kind-scoped**:
 - **Url equality** = the spec 02 §3.1 saved-uri normalizer's equivalence classes
   (`parseSavedUri`/`normalizeHost`): scheme/case/`www.`/port/path/userinfo-insensitive
   host classes, `androidapp://` ids their own class. The row's url is compared against
-  EVERY saved uri of an existing item, not just `uris[0]`. Unparseable/empty uris on
-  the vault side are dropped; an item with none left occupies a no-uri sentinel class
-  which an empty/unparseable row url also maps to. Username/password compare as exact
-  strings.
+  EVERY saved uri of an existing item, not just `uris[0]`. EMPTY uris on the vault side
+  are dropped; an item with no non-empty uris occupies a no-uri sentinel class which an
+  EMPTY row url also maps to. A NON-EMPTY uri that fails spec 02 §3.1 parsing keys its
+  own verbatim junk class (the trimmed, lowercased string), shared by the row and vault
+  sides (amended 2026-07-10 — dropping junk uris collapsed junk-uri-only items into the
+  sentinel, where a re-import could false-merge rows differing only by that junk uri).
+  Username/password compare as exact strings.
 - **TOTP compares by PARSED parameters** — secret bytes + algorithm + digits + period
   (label/issuer ignored) — never as raw strings; both sides pass through the shared
   normalize (§9.2) first. Absent (null/`""`) equals absent; a value the parser rejects
@@ -147,12 +156,20 @@ Per file row, in checked order, **kind-scoped**:
   rule 1 keys on (name, password[, totp]) against existing items that are themselves
   url-less AND username-less; rule 2 never fires and the vault seeds no group — the
   row falls through to import + in-file rules (unrenamed if first).
+- **Rename-aware rule 1 (2026-07-09 review):** where a display NAME is part of a rule-1
+  key — the note key and the empty-discriminator guard key — a vault item stored as
+  `"base (k)"` (the shape an earlier import's rename minted) ALSO registers under its
+  stripped base name, so re-importing the same file resolves to `alreadyInVault` instead
+  of duplicating. Content equality (notes body / password[, totp]) is still required.
 - All composite keys (in-file and the vault maps) are tuple/NUL-joined, never
   space-joined.
 
 **Rename rule (A9):** when a rename fires (group k ≥ 2), the "(k)" suffix bumps k until
-the display name is absent from BOTH `existing.names` and the names already planned in
-this run; the group counter continues from the k actually used. First occurrences
+the display name is absent from `existing.names`, the names already planned in this run,
+AND the file's literal row names (2026-07-09 review: k = 1 rows keep their names
+unconditionally, so a mint firing before a later row literally named `"base (k)"` must
+skip past it; rows that later skip still block — the resulting gap in the (k) sequence
+is tolerated); the group counter continues from the k actually used. First occurrences
 (k = 1) keep their name even if the vault already shows it.
 
 **Report (final shape):** `imported`, `skippedEmpty`, `collapsed` counters; name lists

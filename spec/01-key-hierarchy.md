@@ -2,7 +2,11 @@
 
 All primitives are libsodium constructions except HKDF-SHA-256, HMAC-SHA-1/SHA-256,
 and SHA-1/SHA-256, which use platform crypto (javax.crypto on JVM/Android, WebCrypto
-on web). No hand-rolled primitives anywhere.
+on web). The one whole-stack exception is the MV3 extension: its service-worker CSP
+rules out WASM, so it implements the entire hierarchy (Argon2id, HKDF,
+XChaCha20-Poly1305, X25519 sealed boxes, BLAKE2b) in pure-JS @noble + tweetnacl —
+byte-parity with libsodium proven against the shared test vectors
+(web/src/crypto/noble-extension-poc.test.ts). No hand-rolled primitives anywhere.
 
 ## 1. Master key derivation
 
@@ -222,8 +226,11 @@ UTF-8("andvari/v1|quick-unlock|{userId}"), plaintext = UVK)`. The AAD binds the
 blob to the account so a blob copied between profiles/users cannot open (and a
 tampered file fails the tag). The blob lives in a versioned JSON file
 `quick-unlock-<userId>.json` under **`noBackupFilesDir`** (same posture as the
-offline cache DB): `{ "v": 1, "alias", "iv", "ct", "createdAt",
-"lastFullPasswordUnlockAt" }` — all base64url where binary. The app already sets
+offline cache DB): `{ "v": 1, "alias", "iv", "ct", "createdAt" }` — all base64url
+where binary. The `lastFullPasswordUnlockAt` stamp (plus its monotonic
+elapsed/boot-ref companions) lives OUTSIDE the blob, in app SharedPreferences
+(`qu_stampWall_<userId>` etc.), so it survives blob wipes and cannot be edited via
+the blob; it is cleared on sign-out/revocation. The app already sets
 `android:allowBackup="false"`; `noBackupFilesDir` is belt-and-suspenders so no
 future backup-config change can exfiltrate the blob via `adb backup`/cloud backup.
 
