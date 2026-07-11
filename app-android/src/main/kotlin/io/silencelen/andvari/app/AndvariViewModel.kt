@@ -43,6 +43,7 @@ import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
+import io.silencelen.andvari.core.client.UpgradeRequiredException
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.client.sqliteVaultCache
@@ -67,6 +68,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+
+// P5 (design 2026-07-10): copy for the blocking 426 "Update required" screen. Android updates
+// come from the DEVSTORE (not /downloads, which is the desktop/web/extension channel), so the
+// wording differs from desktop's. Set into UiState.upgradeRequired from op() and backgroundSync()
+// when the server pins minVersion above this build; kept here so both catch sites stay identical.
+private const val UPGRADE_REQUIRED_MSG =
+    "This andvari server needs a newer version of the app. Update from the devstore, then reopen andvari."
 
 sealed interface Screen {
     data object Loading : Screen
@@ -97,6 +105,12 @@ data class UiState(
     // directing the user to change it in the WEB app; persists across nav/lock (backed by
     // SessionStore.mustChangePassword) until a fresh login returns false.
     val mustChangePassword: Boolean = false,
+    // P5/A9 (design 2026-07-10): a 426/upgrade_required from ANY server contact (a user op or
+    // the 5-min backgroundSync poll) pins this build out. Non-null → AndvariApp swaps the whole
+    // app for a blocking "Update required" screen that carries a sign-out escape (A9). Cleared
+    // ONLY by signOut() (the escape); never on op/sync success — updating from the devstore +
+    // relaunch is the intended exit, so nothing in-session silently dismisses it.
+    val upgradeRequired: String? = null,
     val error: String? = null,
     val notice: String? = null,
     val baseUrl: String = SessionStore.DEFAULT_BASE_URL,
@@ -1156,6 +1170,14 @@ class AndvariViewModel(
                 _ui.value = _ui.value.copy(items = current.engine.items(), needsUpdateCount = current.engine.needsUpdateCount(), syncing = false)
                 refreshLifecycle() // a background pull may have delivered notices/offers
             } catch (t: Throwable) {
+                // A8: the 5-min foreground poll is the MOST FREQUENT server contact, so a
+                // minVersion pin is most likely to surface here first — a 426 must raise the
+                // blocking upgrade screen, never get swallowed into the silent background slot
+                // below (its whole point is that transient poll failures stay quiet).
+                if (t is UpgradeRequiredException) {
+                    _ui.value = _ui.value.copy(syncing = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
+                    return@launch
+                }
                 // Locked/rebound mid-sync (auto-lock is NOT deferred for `syncing`): the
                 // engine was closed under us — expected teardown, swallow it.
                 val torn = VaultSession.get() !== current
@@ -1725,6 +1747,10 @@ class AndvariViewModel(
             // Trash holds DECRYPTED tombstone docs (incl. passwords) + item versions; now that
             // checkIdleLock routinely locks from the Trash screen, they must not outlive the lock.
             deletedItems = null, itemVersions = null,
+            // P4: the ReSealCard now lives in the GLOBAL AttentionArea (renders on Unlock too),
+            // so escrowStale MUST clear on lock — else a "Later"-deferred re-seal card shows on
+            // the lock screen with a dead action (engine torn down). Fresh unlock re-reads it.
+            escrowStale = false, escrowFingerprint = "",
         )
     }
 
@@ -1769,11 +1795,14 @@ class AndvariViewModel(
                 screen = Screen.Welcome, items = emptyList(), needsUpdateCount = 0, busy = false,
                 quickUnlockEnrolled = false, quickUnlockFresh = false, quickUnlockOffer = false, quickUnlockMessage = null,
                 mustChangePassword = false, // store.clear() dropped the persisted F58 flag with the account
+                upgradeRequired = null, // A9 escape: sign-out must LIFT the 426 block — copy() would otherwise carry it forward and re-brick over Welcome
+
                 notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
                 lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
                 sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
                 undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
                 copyProgress = null, copiedNote = null, copyVaultId = null, moveProgress = null,
+                escrowStale = false, escrowFingerprint = "", // P4: global ReSealCard must not linger on Welcome
             )
         }
     }
@@ -1873,6 +1902,10 @@ class AndvariViewModel(
         viewModelScope.launch {
             try {
                 block()
+            } catch (e: UpgradeRequiredException) {
+                // A8: a 426 is not a per-action error — this build is too old for the server's
+                // minVersion pin. Raise the blocking upgrade screen (A9), not a dismissable toast.
+                _ui.value = _ui.value.copy(busy = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
             } catch (t: Throwable) {
                 fail(t)
             }

@@ -1,5 +1,25 @@
 # andvari — changelog
 
+## 0.13.0 — layout regroup, part 2: notices + an Android update screen (2026-07-10, cross-platform cut)
+
+The second, more careful batch of the ratified layout review — Android-focused, because that's
+where the notices had actually piled up (a safety pass showed most of the daily warnings genuinely
+must stay visible, so this "collapses" far less than it de-clutters).
+
+- **Phone notices no longer double up or bury the vault.** Break-glass notices (a pending
+  ownership transfer, an escrow-recovery warning, a "some items need a newer app" note, a
+  can't-open-a-shared-vault note, lifecycle messages) used to render on *both* the vault list and
+  the Sharing screen; they now render once, in one place, above everything — so a just-arrived
+  transfer is visible from any screen and nothing is shown twice. The genuinely-optional two
+  ("some items need an update" when it's a minority, and can't-open-a-vault) tuck behind a small
+  "N notices — tap to review" toggle; everything consequential (escrow recovery, a transfer
+  decision, a security anomaly, and the "your vault looks empty because these need a newer app"
+  explanation) stays always-visible. (Web's notices were already tidy and are unchanged.)
+- **Android now shows an "Update required" screen** when a server is set to require a newer app —
+  instead of today's silent, confusing generic error. It explains the situation and, unlike the
+  desktop version, gives you a "Sign out / change server" escape so you can never get stuck (e.g.
+  if you use more than one server). Updating from the devstore + reopening is the normal path.
+
 ## 0.12.0 — layout regroup, part 1 (2026-07-10, cross-platform cut)
 
 The first batch of the layout review you ratified (docs/design/2026-07-10-ia-regroup.md) —
