@@ -190,6 +190,23 @@ owner: park under "Parked for owner", continue with the documented default, neve
   devstore vc 16507382, deb 0.11.0 (manifest merged, ext 0.9.0 kept), web/server redeployed
   (`index.C6qNUuzq.js` served==built; snapshot pre-0110 + vzdump first; 297 items).
 
+- [x] **DN-2 trash re-surfacing + DN-3 Android launcher icon — DONE + SHIPPED 0.11.1
+  (2026-07-10, `3644feb`).** Web Trash → toolbar icon (nav 6→5); recently-deleted vaults →
+  trash-icon disclosure on Sharing (web + Android; Android folds "recently removed" in too);
+  "Trash"/"Recently deleted vaults" naming untangled; 2 IA-audit bugs fixed (phantom
+  "Settings/Sharing → Recently removed/deleted" pointers ×3 sites incl. one the review caught;
+  Android checkIdleLock omitted Screen.Trash + lock() now clears decrypted trash docs). DN-3
+  launcher = brand rune ᛅ in house gold #d0a94a on #14120e, exact web Sigil geometry, adaptive
+  + monochrome. Review FIX-FIRST (1 MED + 3 LOW, all fixed). Shipped: devstore vc 16510009,
+  deb 0.11.1, web `index.CBI8CjHH.js` served==built, snapshot pre-0111 + vzdump first, 297
+  items. Design `docs/design/2026-07-10-ia-regroup.md`.
+- [ ] **IA Tier 2 — PITCHED, awaiting owner ratification** (`docs/design/2026-07-10-ia-regroup.md`
+  §Tier 2). 8 proposals from the layout audit, each with a size + default-if-silent: P1 nav
+  consolidation (Health→icon), P2 Devices hub out of Settings, P3 actionable backup card, P4
+  notice/banner system unification (M, opinionated), P5 Android update/426 parity (feature
+  gap), P6 server-URL visibility in Settings, P7 TOTP naming, P8 header/toolbar unification +
+  the missing web holding-area surface. Owner picks; none ship without a "go".
+
 ## Parked for owner (carried + new)
 
 - 0.2.x MSI retirement (= card-create Option-A flip + windows manifest entry).
