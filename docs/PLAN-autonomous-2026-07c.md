@@ -31,14 +31,25 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
       old manager to read-only for 60 days → deletion ceremony), including the rollback story;
       finish with a **go/no-go checklist where every remaining line is an owner action with its
       command/screen named.** Ship = docs + any small verification tooling; no product change.
-- [ ] **N2. Residue hardening batch (S-M) — one cycle, one review.**
-      The filed items that are ours: core `errorFrom` bare-426 tightening (require
-      `upgrade_required`; touches desktop — regression-test both); the `EnrollLink.compose`
-      UTF-16 surrogate twin-pin; native policy-fetch-failure vs "no recovery key" honesty +
-      Retry (web parity); master-password OUT of `rememberSaveable` (decide fold-loss vs
-      Bundle-exposure and implement); F49 janitor pruning for sessions/changes/mutations/audit/
-      hibp_cache/invites; the F22/F26 tiny residues; the web dead post-delete toast. Cut as
-      0.13.x/0.14.0 by content.
+- [x] **N2. Residue hardening batch — DONE, SHIPPED 0.13.1 (2026-07-10, `b68ed1d`).**
+      All seven items closed in one cycle: bare-426 body-code-only (+ new AndvariApiErrorTest);
+      EnrollLink twins reject lone surrogates + astral/`composeRejects` shared vectors; native
+      policy-fetch honesty + Retry ×2 (desktop `updateServer` now re-probes — B5); master-pw
+      + confirm out of the Bundle (TOTP deliberately saveable); F49 janitor prunes 6 tables
+      (30d changes-fence keyed to the tombstone constant, MAX(rev) floor — breaker-caught
+      BLOCKER — atomic advance, 410 contract now LIVE, closes the 30-89d deletion-resurrection
+      window; 6 new JanitorTests; spec 02 §7 + 03 §11 updated); F26 lock reasons ×2 (F22
+      dropped-with-reason — no native roster; re-surfaces inside N3); web post-delete note
+      lifted + transition-based clear. Review: 6 findings → 5 confirmed → all fixed (incl. the
+      Android setBaseUrl change-time clear + the null-policy reset-block dead-end + the 4th
+      frame-stale sighting on desktop enroll). Gates verify/desktop/e2e all EXIT=0; snapshot
+      `pre-0131` + vzdump before deploy; served bytes hash-verified (web bundle, deb sha,
+      manifest merge). **Newly filed from this cycle:** (a) skeletal-tombstone rows vs
+      `purgeOldItemTombstones` collision — purgeVault's "retained indefinitely" skeletons are
+      in fact GC'd at 30d (pre-existing, WS-D find; needs a vault-filter or a spec truth fix);
+      (b) web/extension have NO 426 gate at all (dormant until a pin is armed; small "reload
+      to update" nudge when touched next); (c) item-editor secret fields in `rememberSaveable`
+      (password/totp/cardNumber/CVV) — parked for owner below.
 - [ ] **N3. Desktop vault management (L) — the biggest parity gap.**
       Desktop has NO Sharing surface (no lifecycle, no members view, no per-vault settings,
       no recently-deleted/removed) — flagged in DN-1 and deliberately not smuggled in. Port the
@@ -73,7 +84,13 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
   (signed .xpi + update_url vs a store listing).
 - IBAN/bank-account item type: ratify or drop (scope addendum pending from S3's cycle).
 - Feel-checks on the Fold: enrollment ceremony (0.10.2), settings flyout (0.11.0), trash
-  icons + launcher icon (0.11.1), notices/AttentionArea (0.13.0).
+  icons + launcher icon (0.11.1), notices/AttentionArea (0.13.0), lock-reason line +
+  policy-Retry (0.13.1).
+- Item-editor secrets in Android's saved state (N2 follow-on): the editor keeps item
+  password/TOTP/card number/CVV in `rememberSaveable` — same Bundle-exposure class the
+  0.13.1 master-password fix closed, but flipping it means a fold/rotation loses a
+  half-typed item (the longest-typing surface; the in-code comment calls it deliberate).
+  Owner call: accept the exposure or accept the data-loss trade.
 
 ## Residue ledger
 
