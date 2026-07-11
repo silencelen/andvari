@@ -1106,7 +1106,7 @@ export class VaultStore {
     return [...this.undecryptableGrants].sort();
   }
 
-  /** Vaults soft-hidden in the holding area (Settings → Recently removed). */
+  /** Vaults soft-hidden in the holding area (no web surface lists these yet — Tier-2 item). */
   heldVaults(): { vaultId: string; name: string; reason: RemovedReason; verified: boolean; purgeAt?: number; expungeAt: number }[] {
     return [...this.holding.entries()].map(([vaultId, h]) => ({
       vaultId,
@@ -1132,7 +1132,7 @@ export class VaultStore {
 
   /** DELETE (soft, 7d grace). Mints a fresh deleteId + delete proof under the held VK.
    *  This device initiated it, so the reconcile pull drops the vault cleanly (no banner);
-   *  the owner restores it from Recently deleted. Returns the server-erase deadline. */
+   *  the owner restores it from the Sharing trash icon. Returns the server-erase deadline. */
   async deleteSharedVault(vaultId: string): Promise<{ purgeAt: number }> {
     const deleteId = crypto.randomUUID();
     const key = await this.account.lifecycleKeyFor(vaultId);

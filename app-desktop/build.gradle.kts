@@ -26,7 +26,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Deb)
             packageName = "andvari"
-            packageVersion = "0.11.0"
+            packageVersion = "0.11.1"
             description = "andvari password manager"
             vendor = "silencelen"
             windows {

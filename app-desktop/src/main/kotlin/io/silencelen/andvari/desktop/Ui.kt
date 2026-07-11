@@ -677,7 +677,7 @@ private fun TrashScreen(state: DesktopState) {
     var confirmPurgeId by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = { state.closeTrash() }) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
-        Text("Recently deleted", style = MaterialTheme.typography.headlineMedium)
+        Text("Trash", style = MaterialTheme.typography.headlineMedium)
         Text(
             "Deleted items are kept for 30 days, then removed automatically. Restore brings one back to its vault on every device; \"Delete forever\" removes it now.",
             style = MaterialTheme.typography.bodySmall,

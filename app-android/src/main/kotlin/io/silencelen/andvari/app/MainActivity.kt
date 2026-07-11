@@ -1300,7 +1300,7 @@ fun TrashScreen(vm: AndvariViewModel, ui: UiState) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Recently deleted", style = MaterialTheme.typography.titleLarge) },
+                title = { Text("Trash", style = MaterialTheme.typography.titleLarge) },
                 navigationIcon = { IconButton(onClick = vm::closeTrash) { Icon(Icons.Default.ArrowBack, "back") } },
             )
         },

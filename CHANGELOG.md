@@ -1,5 +1,26 @@
 # andvari — changelog
 
+## 0.11.1 — trash tucks behind icons + layout tidy-up (2026-07-10, cross-platform cut)
+
+Your dev-note pair: trash re-surfacing now, and a full layout review whose bigger proposals
+are written up for you to pick from (docs/design/2026-07-10-ia-regroup.md, Tier 2).
+
+- **Web: Trash left the main menu.** It's now a small trash icon on the vault toolbar, next
+  to Import/Export — one less top-level nav item. The Trash view itself is unchanged.
+- **Web + Android: recently-deleted vaults live behind a trash icon on Sharing** instead of
+  always rendering under the vault list (on Android the rarely-needed "recently removed"
+  holding area tucks behind the same icon — one icon, both vault-recovery lists).
+- **Names untangled:** the deleted-items view is now titled "Trash" everywhere (it shared
+  the name "Recently deleted" with the vaults section on Sharing — two different things,
+  one label); the Sharing section is now "Recently deleted vaults".
+- **Two real bugs from the layout audit:** a notice pointed web users to "Settings →
+  Recently removed", a section that doesn't exist (copy fixed); and on Android, a Trash
+  screen left open when the autofill gate locked the session underneath didn't kick to the
+  lock screen like every other view (it does now).
+- **Android finally has an app icon:** the brand rune in the house gold on the app's own
+  dark brown-black — the exact wordmark geometry and colors the web app uses, as an
+  adaptive icon (with a themed/monochrome variant for Android 13+ icon theming).
+
 ## 0.11.0 — vault settings get their own place (2026-07-10, cross-platform cut)
 
 Your dev-note, delivered: vault management no longer stacks every vault's controls under the
