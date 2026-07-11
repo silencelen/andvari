@@ -34,6 +34,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
@@ -181,11 +182,24 @@ class MainActivity : FragmentActivity() {
 @Composable
 fun AndvariApp(vm: AndvariViewModel) {
     val ui by vm.ui.collectAsStateWithLifecycle()
+    // P5/A9 (design 2026-07-10): a 426 (server minVersion pin) blocks EVERYTHING — this build is
+    // too old, so every server contact throws. Mirror desktop's blocking screen (Ui.kt:57-66),
+    // but WITH an escape (A9): unlike desktop's dead-end, the user can sign out and re-point at a
+    // different server (signOut does NOT depend on being past the block). No in-app clear — the
+    // exit is updating from the devstore + relaunch, or this sign-out escape.
+    ui.upgradeRequired?.let { msg ->
+        UpgradeRequiredScreen(msg, onSignOut = vm::signOut)
+        return
+    }
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             // F58: sits ABOVE the screen switch so it survives every in-app navigation —
             // no screen can compose it away while the flag is true.
             MustChangePasswordBanner(ui)
+            // P4/A7 (design 2026-07-10): break-glass notices live HERE, above the screen switch,
+            // so they render ONCE on every screen — no longer duplicated on both the Vault list
+            // AND Sharing. Critical items stay direct; only two genuinely-FYI items collapse.
+            AttentionArea(vm, ui)
             // One-time quick-unlock enrollment offer, only over the vault list (design §3/§8).
             if (ui.quickUnlockOffer && ui.screen is Screen.Vault) QuickUnlockOfferCard(vm)
             Box(Modifier.weight(1f)) {
@@ -235,6 +249,55 @@ private fun MustChangePasswordBanner(ui: UiState) {
 }
 
 /**
+ * P4 (design 2026-07-10 §P4): the ONE home for break-glass notices, rendered above the screen
+ * switch so each shows once on every screen — the Vault-list and Sharing copies were removed
+ * (they duplicated, A7). Critical items render directly, always visible: escrow re-seal
+ * (recovery is broken until re-sealed, A1), an incoming ownership transfer (a decision only the
+ * user can make), lifecycle notices (anomaly kinds render in the danger tone; benign are
+ * dismissable), and needsUpdate WHEN it empties the vault (A2 — then it's the only explanation
+ * for an apparently-empty list). Only the two genuinely-FYI items — needsUpdate as a minority,
+ * and unopenable-vault — collapse, and only when BOTH are present (a 1-item collapse is
+ * pointless). Locked/signed-out: every source is cleared by lock(), so this renders nothing.
+ */
+@Composable
+private fun AttentionArea(vm: AndvariViewModel, ui: UiState) {
+    val fyiNeedsUpdate = ui.needsUpdateCount > 0 && ui.items.isNotEmpty()
+    val fyiUnopenable = ui.undecryptableSharedVaultCount > 0
+    val hasAnything = (ui.escrowStale && ui.escrowFingerprint.isNotEmpty()) ||
+        ui.incomingTransfers.isNotEmpty() || ui.lifecycleNotices.isNotEmpty() ||
+        ui.needsUpdateCount > 0 || fyiUnopenable
+    if (!hasAnything) return
+    // Capped + scrollable so a pile-up (many lifecycle rows + several simultaneous incoming
+    // transfers) can't clip its own lower items or squeeze the vault list below to ~0 — it's a
+    // fixed Column above the weight(1f) screen area. Priority order keeps the top-severity items
+    // (re-seal, transfers) visible; overflow scrolls instead of clipping.
+    Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
+        // Critical-direct — never collapsed.
+        if (ui.escrowStale && ui.escrowFingerprint.isNotEmpty()) ReSealCard(vm, ui)
+        IncomingTransferCards(vm, ui)
+        LifecycleNoticesBanner(ui.lifecycleNotices, vm::dismissNotice)
+        if (ui.needsUpdateCount > 0 && ui.items.isEmpty()) { // A2: the "vault looks empty" explanation
+            Text(needsUpdateLine(ui.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 6.dp))
+        }
+        // FYI — collapse the two optional items behind one toggle, only when BOTH are present.
+        val fyiCount = (if (fyiNeedsUpdate) 1 else 0) + (if (fyiUnopenable) 1 else 0)
+        if (fyiCount >= 2) {
+            var open by rememberSaveable { mutableStateOf(false) }
+            TextButton(onClick = { open = !open }) {
+                Text(if (open) "Hide $fyiCount notices" else "$fyiCount notices — tap to review")
+            }
+            if (open) {
+                if (fyiNeedsUpdate) Text(needsUpdateLine(ui.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 6.dp))
+                if (fyiUnopenable) UnopenableVaultWarning(ui.undecryptableSharedVaultCount)
+            }
+        } else {
+            if (fyiNeedsUpdate) Text(needsUpdateLine(ui.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 6.dp))
+            if (fyiUnopenable) UnopenableVaultWarning(ui.undecryptableSharedVaultCount)
+        }
+    }
+}
+
+/**
  * F20: a persistent, NON-dismissable warning that a shared vault granted to this account can't be
  * opened on THIS device — its grant was sealed to a device key we don't hold, or it needs a newer
  * app (a newer grant format). Such a grant is silently swallowed on hydrate/pull (runCatching over
@@ -277,6 +340,35 @@ private fun Sigil() {
     Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
     Text("andvari", style = MaterialTheme.typography.titleLarge)
     Text("the keeper of the hoard", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+/**
+ * P5/A9 (design 2026-07-10): the Android port of desktop's 426 blocking screen (Ui.kt:57-66).
+ * A server minVersion pin (426/upgrade_required) makes this build unusable — every server
+ * contact throws UpgradeRequiredException — so this replaces the whole app. Unlike desktop's
+ * dead-end, it carries a "Sign out / change server" escape (A9): a user pinned out of server A
+ * can sign out (which does NOT depend on being past the block) and re-point at another server.
+ * Android updates ship via the DEVSTORE, so the copy points there, not /downloads. There is no
+ * in-app clear — update + relaunch (or the sign-out escape) is the only exit.
+ */
+@Composable
+private fun UpgradeRequiredScreen(message: String, onSignOut: () -> Unit) {
+    Surface(Modifier.fillMaxSize()) {
+        Centered {
+            Sigil()
+            Spacer(Modifier.height(24.dp))
+            Text("Update required", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error)
+            Text(
+                message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.widthIn(max = 380.dp).padding(top = 8.dp),
+            )
+            Spacer(Modifier.height(24.dp))
+            OutlinedButton(onClick = onSignOut) { Text("Sign out / change server") }
+        }
+    }
 }
 
 @Composable
@@ -613,19 +705,10 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                     OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
                     ErrorBar(ui.error, vm::clearError)
                     NoticeBar(ui.notice, vm::clearNotice)
-                    // Lifecycle notices + verified ownership offers (spec 03 §11) land where the
-                    // user actually looks — the main list — not only on the Sharing screen.
-                    LifecycleNoticesBanner(ui.lifecycleNotices, vm::dismissNotice)
-                    IncomingTransferCards(vm, ui)
-                    if (ui.escrowStale && ui.escrowFingerprint.isNotEmpty()) ReSealCard(vm, ui)
-                    if (ui.needsUpdateCount > 0) {
-                        Text(needsUpdateLine(ui.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 4.dp))
-                    }
-                    // F20: persistent, non-dismissable warning — a shared vault was granted to this
-                    // account but its grant can't be opened on THIS device, so it's absent from the
-                    // list above. Sibling of the needsUpdate banner; clears itself once a sync opens
-                    // the grant. (See AndvariViewModel.undecryptableSharedCount.)
-                    if (ui.undecryptableSharedVaultCount > 0) UnopenableVaultWarning(ui.undecryptableSharedVaultCount)
+                    // P4/A7: the break-glass banners that used to render here (lifecycle notices,
+                    // incoming transfers, re-seal, needsUpdate, unopenable-vault) moved to the
+                    // global AttentionArea above the screen switch — rendered once, not duplicated
+                    // on the Vault list AND Sharing. ErrorBar/NoticeBar stay (screen-local op feedback).
                     Spacer(Modifier.height(8.dp))
                     if (filtered.isEmpty()) {
                         Centered { Spacer(Modifier.height(60.dp)); Text("ᛝ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary); Text(if (ui.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }

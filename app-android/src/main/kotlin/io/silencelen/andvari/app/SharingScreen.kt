@@ -198,8 +198,9 @@ fun SharingScreen(vm: AndvariViewModel, ui: UiState) {
             // inside settings is never silent, and an arriving offer shows immediately.
             ErrorBar(ui.error, vm::clearError)
             NoticeBar(ui.notice, vm::clearNotice)
-            LifecycleNoticesBanner(ui.lifecycleNotices, vm::dismissNotice)
-            IncomingTransferCards(vm, ui)
+            // P4/A7: lifecycle notices + incoming transfers moved to the GLOBAL AttentionArea
+            // (MainActivity, above the screen switch) — they render there on every screen incl.
+            // this one, so rendering them a second time here would duplicate them. Removed.
             CopyStatusLine(ui, vaults)
 
             if (settingsVault != null) {
