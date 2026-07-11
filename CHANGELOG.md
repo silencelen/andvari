@@ -1,5 +1,28 @@
 # andvari — changelog
 
+## 0.14.0 — the desktop app learns to manage vaults (2026-07-11, cross-platform cut)
+
+The desktop app now has the full vault-management surface the phone has had — until now it
+could only USE shared vaults, not manage them, and ownership offers sent to a desktop-only
+member were invisible.
+
+- **A Sharing screen on desktop** (the people icon in the header): your vaults with their
+  roles, per-vault settings for shared vaults — rename, transfer ownership, and delete (with
+  the same type-the-name confirmation, the "copy items to my Personal vault first" rescue,
+  and the same 7-day restore window), leave for vaults you don't own, and the trash icon with
+  recently-deleted (restorable) and recently-removed vaults.
+- **Desktop now shows what the server has been telling it all along:** ownership-transfer
+  offers (accept or decline them right on desktop now), vault lifecycle notices (deleted /
+  restored / access-removed and the security-anomaly warnings), and the "some shared vaults
+  can't be opened" warning — all in one attention area at the top, on every signed-in screen,
+  exactly like the phone. Previously these were silently dropped on desktop.
+- **Friendlier errors everywhere on desktop:** operations that fail now explain themselves in
+  plain language ("Only the vault's owner can do that", "This vault was deleted — the owner
+  can restore it for a few more days") instead of raw error codes.
+- Everything runs over the same engine and safety machinery as the phone: verified-only
+  transfer offers, typed-name delete confirmation, the rescue copy blocking deletion while it
+  runs, and offline edits preserved across restores.
+
 ## 0.13.1 — residue hardening (2026-07-10, cross-platform cut)
 
 A hardening batch: seven long-filed small defects closed in one reviewed pass. Nothing new to

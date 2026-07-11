@@ -18,6 +18,10 @@ import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
+import io.silencelen.andvari.core.client.DeletedVaultInfo
+import io.silencelen.andvari.core.client.HeldVaultInfo
+import io.silencelen.andvari.core.client.IncomingTransfer
+import io.silencelen.andvari.core.client.LifecycleNotice
 import io.silencelen.andvari.core.client.Backup
 import io.silencelen.andvari.core.client.BackupAttachmentEntry
 import io.silencelen.andvari.core.client.BackupItem
@@ -43,8 +47,10 @@ import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
+import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
+import io.silencelen.andvari.core.model.VaultMemberSummary
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -61,6 +67,7 @@ sealed interface DesktopScreen {
     data object Welcome : DesktopScreen
     data class Unlock(val email: String) : DesktopScreen
     data object Vault : DesktopScreen
+    data object Sharing : DesktopScreen
     data object Settings : DesktopScreen
     data object Trash : DesktopScreen
 }
@@ -235,6 +242,60 @@ class DesktopState(private val scope: CoroutineScope) {
     var csvPreflight by mutableStateOf<CsvPreflight?>(null)
         private set
     var lastExportAt by mutableStateOf(store.lastExportAt)
+        private set
+    // Vault lifecycle (spec 03 §11 / N3 design 2026-07-11) — notices banner, verified
+    // incoming ownership offers, the Sharing screen's members/deleted/held lists, and
+    // rescue-copy progress. Field names mirror Android's UiState 1:1.
+    var lifecycleNotices by mutableStateOf<List<LifecycleNotice>>(emptyList())
+        private set
+    var incomingTransfers by mutableStateOf<List<IncomingTransfer>>(emptyList())
+        private set
+    /** vaultId → current owner displayName (for the consent card), fetched lazily. */
+    var transferOwnerNames by mutableStateOf<Map<String, String>>(emptyMap())
+        private set
+    /** Owned shared vaultId → members (drives the transfer target picker). */
+    var sharingMembers by mutableStateOf<Map<String, List<VaultMemberSummary>>>(emptyMap())
+        private set
+    var deletedVaults by mutableStateOf<List<DeletedVaultInfo>>(emptyList())
+        private set
+    var heldVaults by mutableStateOf<List<HeldVaultInfo>>(emptyList())
+        private set
+    /** DN-1: the vault whose per-vault Settings view the Sharing screen shows (null = the
+     *  vault list). Nulled by openSharing (A5: a fresh visit lands on the list), by
+     *  lock/sign-out, and ACTIVELY in refreshLifecycle when the id stops resolving (A2 —
+     *  a later restore must not resurrect the layer). */
+    var sharingSettingsVaultId by mutableStateOf<String?>(null)
+        private set
+    /** F20: count of shared vaults granted to this account whose grant can't be OPENED on
+     *  THIS device (sealed to a key we don't hold, or a newer grant format). Such a grant
+     *  is swallowed by hydrate/pull, so the vault is silently absent from [items]/
+     *  vaultInfos(); this drives a persistent, non-dismissable warning. Recomputed every
+     *  refreshLifecycle; 0 clears it (a later sync opened/revoked the grant). */
+    var undecryptableSharedVaultCount by mutableStateOf(0)
+        private set
+    /** Bulk "copy items to Personal first" progress + its post-copy note. A4: [copyVaultId]
+     *  scopes both to the SOURCE vault — DISPLAY state (openSharing/closeSharing/
+     *  open-/closeVaultSettings clear it; the in-panel display gates on it, so another
+     *  vault's panel never claims the copy). The in-flight OP is guarded by
+     *  [copyOpVaultId], never by these. */
+    var copyProgress by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+    var copiedNote by mutableStateOf<String?>(null)
+        private set
+    var copyVaultId by mutableStateOf<String?>(null)
+        private set
+    /** A-tick: bumped at the END of every refreshLifecycle — the UI's memo key for
+     *  vault/grant-derived lists (`remember(items, lifecycleTick)`); vaultInfos() shifts on
+     *  vault-set-only changes (a new empty grant, a remote delete of an empty vault) that
+     *  [items] never reflects. Monotonic — deliberately NOT reset on lock/sign-out. */
+    var lifecycleTick by mutableStateOf(0)
+        private set
+    /** A-copyGate: the rescue copy's NON-display OP guard — the vault whose bulk copy is IN
+     *  FLIGHT. Set at copy start, cleared ONLY in the copy's finally; navigation NEVER
+     *  touches it (unlike the display [copyVaultId]). While non-null: maybeIdleLock defers,
+     *  deleteVault refuses, and the Delete button disables — `busy` alone is not a gate
+     *  (any other op finishing mid-copy clears it). */
+    var copyOpVaultId by mutableStateOf<String?>(null)
         private set
 
     private var api: AndvariApi? = null
@@ -568,6 +629,219 @@ class DesktopState(private val scope: CoroutineScope) {
         }
     }
 
+    // ---- vault lifecycle (spec 03 §11 / N3 design 2026-07-11): sharing + notices ----
+
+    /** Vaults whose key we hold (personal first) — pickers, badges, the Sharing screen. */
+    fun vaultInfos(): List<VaultInfo> = engine?.vaultInfos() ?: emptyList()
+
+    /** The pending offer on a vault (owner's "Ownership offer to …" chip), or null. */
+    fun pendingTransferFor(vaultId: String): PendingTransfer? = engine?.pendingTransferFor(vaultId)
+
+    /** Not busy-gated: dismissing a notice is a pure engine-side write + re-read. */
+    fun dismissNotice(id: String) {
+        engine?.dismissNotice(id)
+        refreshLifecycle()
+    }
+
+    /**
+     * F20: count of shared vaults whose grant this device can't OPEN — a grant blob WAS
+     * delivered (it's in the engine's grant rows) but addGrant() failed (sealed to an
+     * identity we don't hold, or a newer grant format), so [Account.hasVault] is false and
+     * the vault is silently absent from vaultInfos()/[items]. Computed app-side from the
+     * engine's read surface (F82). Removed/held/deleted vaults are dropVault()'d out of the
+     * vault rows, so they never count here; a grant that later opens flips hasVault true
+     * and drops out. Mirrors Android's undecryptableSharedCount / web's undecryptableGrants.
+     */
+    private fun undecryptableSharedCount(): Int {
+        val e = engine ?: return 0
+        val acct = account ?: return 0
+        val grantedIds = e.grants().mapTo(HashSet()) { it.vaultId }
+        return e.vaultRows().count {
+            it.type == "shared" && it.vaultId in grantedIds && !acct.hasVault(it.vaultId)
+        }
+    }
+
+    /**
+     * Mirror the engine's lifecycle read-surfaces into UI state (cheap in-memory reads),
+     * and lazily resolve the owner display name behind any verified incoming offer.
+     * A-resolve: ALL slice writes — notices, offers, held list, F20 count, the A2
+     * settings-id null, and the lifecycleTick bump — happen in THIS one synchronous,
+     * non-suspending block (one recomposition, no torn frame); the owner-name fetch is a
+     * SEPARATE launch under the B1 epoch guard.
+     */
+    private fun refreshLifecycle() {
+        val e = engine ?: return
+        val incoming = e.incomingTransfers()
+        lifecycleNotices = e.notices()
+        incomingTransfers = incoming
+        heldVaults = e.heldVaultInfos()
+        undecryptableSharedVaultCount = undecryptableSharedCount()
+        // A2 (DN-1): every sync/refresh funnels through here (reloadSharing after ops, the
+        // backgroundSync poll) — a settings id whose vault vanished (deleted/revoked
+        // elsewhere) is ACTIVELY cleared, so a later restore/re-grant can't resurrect the
+        // settings layer. The screen's null-safe lookup covers the same-frame gap.
+        sharingSettingsVaultId = sharingSettingsVaultId?.takeIf { id -> e.vaultInfos().any { it.vaultId == id } }
+        lifecycleTick++ // A-tick: LAST slice write — the memo key ticks once per refresh
+        val missing = incoming.filter { it.vaultId !in transferOwnerNames }
+        if (missing.isNotEmpty()) {
+            val a = api ?: return
+            scope.launch {
+                val names = transferOwnerNames.toMutableMap()
+                for (t in missing) {
+                    runCatching { a.vaultMembers(t.vaultId).find { it.role == "owner" } }.getOrNull()
+                        ?.let { names[t.vaultId] = it.displayName }
+                }
+                // B1: identity, not null — after a sign-out→sign-in the null check would
+                // pass against the NEW engine and leak the old session's owner names.
+                if (engine !== e) return@launch
+                transferOwnerNames = names
+            }
+        }
+    }
+
+    fun openSharing() {
+        // A5 (DN-1): a fresh Sharing visit always lands on the LIST — never inside a
+        // stale settings layer left over from the previous visit.
+        screen = DesktopScreen.Sharing
+        sharingSettingsVaultId = null
+        copiedNote = null; copyProgress = null; copyVaultId = null
+        reloadSharing()
+    }
+
+    fun closeSharing() {
+        screen = DesktopScreen.Vault
+        copiedNote = null; copyProgress = null; copyVaultId = null
+    }
+
+    /** DN-1: open one vault's Settings view inside the Sharing screen. Clears the copy
+     *  DISPLAY state per the openSharing convention (A4); an in-flight copy itself
+     *  ([copyOpVaultId]) is untouched — its next progress tick republishes, and the
+     *  screen-level status line keeps it visible from either branch. */
+    fun openVaultSettings(vaultId: String) {
+        sharingSettingsVaultId = vaultId
+        copiedNote = null; copyProgress = null; copyVaultId = null
+    }
+
+    fun closeVaultSettings() {
+        sharingSettingsVaultId = null
+        copiedNote = null; copyProgress = null; copyVaultId = null
+    }
+
+    /**
+     * Fetch the Sharing screen's server-side lists: members per owned shared vault (the
+     * transfer target picker) and the caller's restorable Recently-deleted vaults. Runs
+     * WITHOUT busy (a slow members fetch must not freeze the window). B1: `e`/`a` are the
+     * launch-time epoch — every enumeration step is runCatching-wrapped (a mid-flight lock
+     * closes the sqlite cache under `e`) and the state writes are identity-gated, so a
+     * continuation resuming after a sign-out→sign-in can neither kill the window nor leak
+     * account A's member emails / deleted vaults into account B's session.
+     */
+    fun reloadSharing() {
+        val e = engine ?: return
+        refreshLifecycle()
+        val a = api ?: return
+        scope.launch {
+            val members = mutableMapOf<String, List<VaultMemberSummary>>()
+            val owned = runCatching { e.vaultInfos().filter { it.type == "shared" && it.role == "owner" } }
+                .getOrDefault(emptyList())
+            for (v in owned) {
+                runCatching { members[v.vaultId] = a.vaultMembers(v.vaultId) }
+            }
+            val deleted = runCatching { e.listDeleted() }.getOrDefault(emptyList())
+            if (engine !== e) return@launch // B1: locked/rebound while fetching — publish nothing
+            sharingMembers = members
+            deletedVaults = deleted
+        }
+    }
+
+    /** RENAME (owner). stale_meta auto-retries once inside the engine. */
+    fun renameVault(vaultId: String, newName: String) = op {
+        engine!!.renameVault(vaultId, newName)
+        refreshItems(); reloadSharing()
+    }
+
+    /** DELETE (soft, 7d grace). The §11 owner toast lands in [notice]. A-copyGate: REFUSED
+     *  while the rescue copy runs — `busy` alone is not a gate (any other op finishing
+     *  mid-copy clears it), and deleting the source out from under its own rescue is the
+     *  one irreversible interleaving. */
+    fun deleteVault(vaultId: String, vaultName: String) {
+        if (copyOpVaultId != null) return
+        op {
+            val purgeAt = engine!!.deleteSharedVault(vaultId)
+            refreshItems(); reloadSharing()
+            notice = "“$vaultName” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Sharing → the trash icon)."
+        }
+    }
+
+    /**
+     * Bulk "Copy items to my Personal vault first…" (F19 rider — copy legs ONLY). NOT op{}:
+     * busy is set manually and HELD for the whole copy, and the A-copyGate op guard
+     * [copyOpVaultId] — set here, cleared ONLY in this finally, never by navigation — is
+     * what fences deleteVault + the idle lock for the duration. The engine invokes
+     * onProgress inline on this scope's context, so the per-tick write is a plain direct
+     * field write. Success keeps [copyVaultId] (A4: the surviving note is named through
+     * it); per A-note a completion while the user is off-Sharing also mirrors the note
+     * into the global [notice] so it isn't lost. Deliberately NO epoch guard here (design:
+     * manual Lock mid-copy stays unguarded — parity; degrades to an error, same as Android).
+     */
+    fun copyItemsToPersonal(vaultId: String) {
+        // Single-flight (review MED): copyOpVaultId is a single slot and the finally below
+        // clears it unconditionally — an overlapping second copy would let the FIRST one's
+        // finish disarm the gate (delete + idle lock re-enabled) while the second still
+        // runs. One rescue at a time; the button mirrors this in its enabled gate.
+        if (copyOpVaultId != null) return
+        val e = engine ?: return
+        busy = true; error = null; copiedNote = null
+        copyProgress = 0 to 0; copyVaultId = vaultId; copyOpVaultId = vaultId
+        scope.launch {
+            try {
+                val copied = e.copyAllToPersonal(vaultId) { done, total -> copyProgress = done to total }
+                // A4: copyVaultId stays — the surviving note is named through it.
+                copyProgress = null
+                items = e.items()
+                copiedNote = "Copied $copied ${if (copied == 1) "item" else "items"} to your Personal vault. You can still change your mind — deleting won't remove those copies."
+                if (screen !is DesktopScreen.Sharing) notice = copiedNote // A-note
+            } catch (t: Throwable) {
+                copyProgress = null; copyVaultId = null
+                error = friendlyError(t)
+            } finally {
+                // Ownership check (belt on the single-flight guard): only this call's own
+                // marker may be cleared — a future re-entry path can never disarm a live copy.
+                if (copyOpVaultId == vaultId) copyOpVaultId = null
+                busy = false
+            }
+        }
+    }
+
+    fun clearCopiedNote() { copiedNote = null; copyVaultId = null }
+
+    fun offerTransfer(vaultId: String, toUserId: String) = op {
+        engine!!.offerTransfer(vaultId, toUserId)
+        refreshItems(); reloadSharing()
+    }
+
+    /** Owner cancel or target decline. */
+    fun cancelTransfer(vaultId: String) = op {
+        engine!!.cancelTransfer(vaultId)
+        refreshItems(); reloadSharing()
+    }
+
+    /** Accept an ownership offer — the engine re-verifies the proof before acting. */
+    fun acceptTransfer(vaultId: String) = op {
+        engine!!.acceptTransfer(vaultId)
+        refreshItems(); reloadSharing()
+    }
+
+    fun leaveVault(vaultId: String) = op {
+        engine!!.leaveSharedVault(vaultId)
+        refreshItems(); reloadSharing()
+    }
+
+    fun restoreVault(vaultId: String, deleteId: String) = op {
+        engine!!.restoreSharedVault(vaultId, deleteId)
+        refreshItems(); reloadSharing()
+    }
+
     // ---- inactivity auto-lock + poll cadence (spec 01 §8 / spec 03 §6) ----
 
     // Clock choice: wall clock (System.currentTimeMillis). System.nanoTime is monotonic but
@@ -594,7 +868,10 @@ class DesktopState(private val scope: CoroutineScope) {
         if (engine == null) return
         val window = policy?.autoLockSeconds ?: store.autoLockSeconds
         if (window <= 0) return
-        if (busy || importBusy) return
+        // A-copyGate: the rescue copy holds `busy`, but any OTHER op finishing mid-copy
+        // clears it — the op guard is what actually keeps the idle lock off the engine
+        // for the whole copy (never yank the engine mid-rescue).
+        if (busy || importBusy || copyOpVaultId != null) return
         if (System.currentTimeMillis() - lastInteractionMs >= window * 1000L) lock("Locked after inactivity.")
     }
 
@@ -613,12 +890,19 @@ class DesktopState(private val scope: CoroutineScope) {
             runCatching { api?.clientPolicy() }.getOrNull()?.let { applyPolicy(it) }
             try {
                 syncNow(e)
+                // B1: `busy` alone is no teardown guard — a manual lock (or sign-out→sign-in)
+                // mid-sync leaves this continuation holding the OLD engine; identity-gate every
+                // post-suspension state write so nothing stale lands in the new session.
+                if (engine !== e) { busy = false; return@launch }
                 items = e.items()
                 needsUpdateCount = e.needsUpdateCount()
                 busy = false
+                refreshLifecycle() // A-funnel: a background pull may have delivered notices/offers
             } catch (t: Throwable) {
                 busy = false
-                if (t !is java.io.IOException) error = t.message ?: "sync failed"
+                val torn = engine !== e // locked/rebound mid-sync — an expected teardown, not an error
+                if (t !is java.io.IOException && !torn) error = t.message ?: "sync failed"
+                if (!torn) refreshLifecycle() // A-funnel: even a denied/park cycle leaves notices to show
             }
         }
     }
@@ -1173,6 +1457,14 @@ class DesktopState(private val scope: CoroutineScope) {
         return ExportPlanner.orderedItems(e, order).map { it.doc }
     }
 
+    /** "July 14"-style day (spec 03 §11 copy — the deleteVault notice). Falls back
+     *  gracefully for a missing time. Private MEMBER by design: it must never collide
+     *  with a top-level fmtDay the Sharing UI may declare for its own §11 strings. */
+    private fun fmtDay(ms: Long?): String {
+        if (ms == null || ms <= 0) return "soon"
+        return java.text.SimpleDateFormat("MMMM d", java.util.Locale.getDefault()).format(java.util.Date(ms))
+    }
+
     private fun offlineNote(offline: Boolean): String? {
         if (!offline) return null
         val at = store.lastSyncAt
@@ -1241,6 +1533,18 @@ class DesktopState(private val scope: CoroutineScope) {
         backupPreflight = null; backupResult = null; csvPreflight = null
         // F19: drop any in-flight move state + memoized gesture ids/fileKeys on lock/sign-out.
         moveError = null; moveProgress = null; moveGestures.clear()
+        // §7 teardown (N3): the ENTIRE lifecycle/sharing slice dies with the session — the
+        // engine's notice memory does not survive lock, and stale members/deleted lists must
+        // not leak across accounts. Only [lifecycleTick] survives (monotonic memo key — a
+        // reset to 0 could collide with a remembered key from the previous session).
+        lifecycleNotices = emptyList(); incomingTransfers = emptyList(); transferOwnerNames = emptyMap()
+        sharingMembers = emptyMap(); deletedVaults = emptyList(); heldVaults = emptyList()
+        sharingSettingsVaultId = null; undecryptableSharedVaultCount = 0
+        copyProgress = null; copiedNote = null; copyVaultId = null; copyOpVaultId = null
+        // A-escrow (P4 parity): the ReSealCard moves to the global AttentionArea — a
+        // "Later"-deferred stale flag must not linger past the session (the screen gate is
+        // belt; this is the braces). A fresh unlock/sign-in re-reads it from accountKeys.
+        escrowStale = false; escrowFingerprint = ""
     }
 
     private fun cacheFile(userId: String) = File(store.cacheDir, "vault-$userId.db")
@@ -1303,6 +1607,7 @@ class DesktopState(private val scope: CoroutineScope) {
         items = engine?.items() ?: emptyList()
         needsUpdateCount = engine?.needsUpdateCount() ?: 0
         busy = false; error = null
+        refreshLifecycle() // A-funnel: every item refresh re-reads the cheap lifecycle surfaces
     }
 
     private fun toVault() {
@@ -1311,6 +1616,29 @@ class DesktopState(private val scope: CoroutineScope) {
         needsUpdateCount = engine?.needsUpdateCount() ?: 0
         lockReason = null // §6: successful unlock / sign-in — the line must never carry stale
         busy = false; error = null
+        refreshLifecycle() // A-funnel: offers/notices delivered by the unlock sync show at once
+    }
+
+    /** §11 friendlyError mappings (mirrors Android/web Sharing) — lifecycle codes get honest,
+     *  human copy; everything else keeps the raw message the app always showed. Wired into
+     *  [op]'s generic catch, deliberately upgrading ALL desktop ops (design §5). */
+    private fun friendlyError(t: Throwable): String {
+        if (t is ApiException) {
+            when (t.code) {
+                "owner_must_transfer_or_delete" -> return "You own this vault, so you can't just leave it — make someone else the owner first, or delete it."
+                "vault_deleted" -> return "This vault was deleted. The owner can restore it for a few more days."
+                "vault_gone" -> return "The restore window has passed — this vault's data has been erased."
+                "vault_state_changed" -> return "This vault changed since you tried that — reload and try again."
+                "transfer_not_pending" -> return "This ownership offer is no longer active."
+                "not_transfer_target" -> return "This ownership offer isn't for you, or it couldn't be verified."
+                "stale_meta" -> return "This vault changed somewhere else — reload and try the rename again."
+                "not_a_member" -> return "They have to be a member of this vault first."
+                "user_inactive" -> return "That account has been disabled — ask your admin to re-enable it first."
+                "not_vault_owner" -> return "Only the vault's owner can do that."
+            }
+            if (t.status == 429) return "Too many requests — please wait a bit and try again."
+        }
+        return t.message ?: "something went wrong"
     }
 
     private fun op(block: suspend () -> Unit) {
@@ -1324,7 +1652,7 @@ class DesktopState(private val scope: CoroutineScope) {
                 busy = false
                 upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${store.baseUrl}/downloads."
             } catch (t: Throwable) {
-                busy = false; error = t.message ?: "something went wrong"
+                busy = false; error = friendlyError(t)
             }
         }
     }
