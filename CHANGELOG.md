@@ -1,5 +1,25 @@
 # andvari — changelog
 
+## 0.14.1 — one universal importer (2026-07-11, cross-platform cut)
+
+Importing passwords no longer starts with "which browser?" — there is now ONE import screen on
+phone, desktop, and web, because the importer was always universal under the hood (the file's
+own headers decide how it's read; picking a browser never changed anything).
+
+- **"Import passwords (CSV)" → Choose file. Done.** The screen says exactly what it accepts —
+  exports from Chrome, Edge, Brave, Opera, Firefox, Bitwarden, 1Password 8 or newer, LastPass,
+  and Safari — and the per-browser "where is the export button?" instructions now live in a
+  small "How do I export from…?" section on that same screen (with the 1Password version note
+  and the LastPass download-don't-copy caution kept).
+- **Desktop finally gets the "my file is from somewhere else" path** it never had — it used to
+  force a browser pick it then ignored.
+- The plaintext-CSV caution now shows BEFORE you pick a file on every platform, and the
+  after-import advice ("delete the CSV, empty the trash") is unchanged.
+- The export instructions were reconciled into one accurate, maintained-once set (they had
+  drifted apart across the three apps — different menu paths for the same browser).
+- Everything after the pick is identical to before: same detection, same preview with the
+  destination-vault choice, same duplicate handling. The parser itself is untouched.
+
 ## 0.14.0 — the desktop app learns to manage vaults (2026-07-11, cross-platform cut)
 
 The desktop app now has the full vault-management surface the phone has had — until now it

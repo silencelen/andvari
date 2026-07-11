@@ -23,14 +23,13 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
 
 ## Proposed queue
 
-- [ ] **N1. Real-secrets readiness cycle (M) — the milestone unblock.**
-      Live-verify every gate item against CT122 (server-TOTP enrolled? drill artifacts current?
-      backup freshness? escrow canary?); seed the synthetic soak accounts if absent; write
-      `docs/runbooks/real-secrets-migration-day.md` — the step-by-step for migration day
-      (old-manager export → guided import per member → spot-verify counts/TOTP/attachments →
-      old manager to read-only for 60 days → deletion ceremony), including the rollback story;
-      finish with a **go/no-go checklist where every remaining line is an owner action with its
-      command/screen named.** Ship = docs + any small verification tooling; no product change.
+- [x] **N1. Real-secrets readiness — DONE 2026-07-10 (`bd798b9`; checkbox recorded late).**
+      `docs/runbooks/real-secrets-migration-day.md` shipped with the live CT122 gate probe:
+      escrow genesis + backups + admin account verify READY; **the ONE hard blocker before
+      real secrets = server-TOTP enrollment (totp_enrolled=0)**; soak-account seeding
+      deliberately owner-clock (needs the printed sheet). Migration steps updated to the
+      universal importer in the 0.14.1 cut. Every remaining go/no-go line is a named owner
+      action.
 - [x] **N2. Residue hardening batch — DONE, SHIPPED 0.13.1 (2026-07-10, `b68ed1d`).**
       All seven items closed in one cycle: bare-426 body-code-only (+ new AndvariApiErrorTest);
       EnrollLink twins reject lone surrogates + astral/`composeRejects` shared vectors; native
