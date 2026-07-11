@@ -1,10 +1,12 @@
 # andvari spec 00 — overview
 
 This directory is **normative**. The Kotlin implementation (`core/`), the TypeScript
-implementation (`web/src/crypto` + sync), and the server (`server/`) follow these
-documents; when code and spec disagree, the code is wrong. Changes land here first,
-then in `tools/vector-gen` (regenerating `test-vectors/`), then in both
-implementations, and `scripts/verify.sh` must green both suites off the same vectors.
+implementation (`web/src/crypto` + sync), the extension's pure-JS implementation
+(`extension/src/crypto.ts`, @noble — the MV3 service-worker CSP forbids WASM), and the
+server (`server/`) follow these documents; when code and spec disagree, the code is
+wrong. Changes land here first, then in `tools/vector-gen` (regenerating
+`test-vectors/`), then in every implementation, and `scripts/verify.sh` must green all
+three suites off the same vectors.
 
 ## Documents
 
@@ -15,13 +17,14 @@ implementations, and `scripts/verify.sh` must green both suites off the same vec
 | 03-wire-protocol | Endpoints, sessions, sync state machine, idempotency, WS notify, version pinning |
 | 04-escrow-recovery | Org recovery key ceremony, sealed-blob format, canary, recovery + drills |
 | 05-threat-model | Assets, adversaries, guarantees, accepted risks, non-goals |
-| 06-import-formats | Browser CSV import column maps |
+| 06-import-formats | Browser + password-manager CSV import column maps |
 | 07-export | CSV export dialect + encrypted `.andvari` backup container, restore rules |
 
 ## System shape (informative)
 
-Zero-knowledge, hub-and-spoke, offline-first. Clients (Android, Windows desktop, web)
-derive all encryption keys from the user's master password on-device and sync opaque
+Zero-knowledge, hub-and-spoke, offline-first. Clients (Android, Windows desktop, web,
+MV3 browser extension) derive all encryption keys from the user's master password
+on-device and sync opaque
 ciphertext through one ktor server (CT 122 `andvari`, Tailscale-primary, break-glass
 public via Cloudflare tunnel + Access). The server orders writes (global revision
 counter), stores ciphertext + minimal metadata, authenticates users without ever
@@ -31,7 +34,10 @@ can open. Recovery, not the server, is the answer to "forgot my master password.
 ## Conventions (normative)
 
 - **Encoding of binary in JSON/transport:** base64url (RFC 4648 §5), **no padding**,
-  everywhere, with no exceptions. Hex appears only in printed fingerprints.
+  everywhere — exceptions: TOTP shared secrets are RFC 4648 base32 (otpauth ecosystem
+  requirement, spec 03 §2), and opaque digest fields ride as lowercase hex (attachment
+  `sha256`, transfer `wrapHash`, HIBP range lines — spec 03 §8/§9/§11). Hex otherwise
+  appears only in printed fingerprints.
 - **Strings:** UTF-8. **IDs:** UUIDv4 in lowercase canonical text form; wherever an
   ID participates in cryptographic input (AEAD associated data, HKDF info), its
   canonical UTF-8 string bytes are used, never raw 16-byte form.

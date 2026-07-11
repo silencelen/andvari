@@ -18,12 +18,12 @@ vault without the master password.
 | T3 | **Stolen/lost device, locked** | At-rest cache is ciphertext (the native offline cache persists only §5-table ciphertext + metadata in SQLite, spec 02 §8; keys only in memory or hardware-wrapped quick-unlock per spec 01 §8). Offline unlock accepts the master password current at last online contact; **remote device revocation / password change take effect only at next connectivity** (then the client wipes the cache + cached accountKeys). Local data remains ciphertext without the master password; a stolen locked device with a known-old master password can read the last-synced cached vault until it reconnects — an accepted narrowing in exchange for offline availability. |
 | T4 | **Stolen device, UNLOCKED with vault open** | Out of scope: an open vault is an open vault. The window is bounded by the inactivity auto-lock (`autoLockSeconds`, enforced by all three clients incl. the Android autofill path — spec 01 §8 "Auto-lock") + policy clipboard clearing (min 1 s clamp). |
 | T5 | **Malware on a client device** | Out of scope (keylogger gets the master password). This is the boundary every password manager shares. |
-| T6 | **Malicious/compromised web origin** (server serving hostile JS) | Accepted gap of the web client: page-load-time trust. Mitigations: CSP `default-src 'self'`, SRI, immutable versioned bundles, no third-party origins, no CDN; native apps are the trust anchor; break-glass public mode additionally forces CF Access + server-TOTP. High-value operations (escrow ceremony) never run in the web client. |
+| T6 | **Malicious/compromised web origin** (server serving hostile JS) | Accepted gap of the web client: page-load-time trust. Mitigations: CSP `default-src 'self'`, immutable versioned bundles, no third-party origins, no CDN; native apps are the trust anchor; break-glass public mode additionally forces CF Access + server-TOTP. High-value operations (escrow ceremony) never run in the web client. |
 | T7 | **B2 / PBS / backup theft** | Backups contain only what T1 sees (ciphertext + metadata). Neutralized by design. |
 | T8 | **DB leak → offline cracking** | authKey verifier is argon2id-hashed server-side; vault security rests on Argon2id(master password) at ≥64 MiB — weak master passwords remain the user's risk (policy enforces minimum strength at enrollment). |
 | T9 | **Recovery-sheet thief** | Holds A4 ⇒ can decrypt every escrowed UVK **given the sealed blobs** (needs server data too). Physical security of the two sheets + USB is the control; annual drill verifies presence. Compromise response: re-ceremony + full re-escrow + item re-key (manual runbook). |
 | T10 | **Malicious server during enrollment** (pubkey substitution) | Blocked by triple pinning + human fingerprint check (spec 04 §2). |
-| T11 | **User enumeration / credential stuffing** | Deterministic fake prelogin salts, uniform 401s, per-IP+per-account rate limits, public-origin lockdown (TOTP + tighter limits + registration disabled). |
+| T11 | **User enumeration / credential stuffing** | Deterministic fake prelogin salts, uniform 401s, per-IP rate limits (no per-account keys on any auth endpoint — per-account login limiting is a deferred hardening item; the per-account buckets that do exist are listed in spec 03 §8), public-origin lockdown (TOTP + tighter limits + registration disabled). |
 
 ## Accepted risks (signed off by owner at hardening gate)
 R1 JVM/JS cannot guarantee secret zeroization (GC copies) — industry-standard gap.
@@ -81,10 +81,16 @@ The autofill service honors a fill request's web domain only from a browser it v
 absent browser's package id). A package that is not pinned, not installed, or whose cert
 does not match its pin **fails closed**: no web-domain trust → only `androidapp://<pkg>`
 URIs match it, never web items. Residual: a browser whose release cert we have not pinned
-won't offer autofill until its digest is added (safe, functionality-only); and the match
-rule is label-boundary suffix, not eTLD+1/PSL (strictly safer, misses sibling subdomains).
-Digital Asset Links verification + PSL are the P6 loosening. The service never reads field
-values and never logs field content, item names, or URIs.
+won't offer autofill until its digest is added (safe, functionality-only). The match rule
+(2026-07-10 amendment — spec 02 §3.1, `docs/design/2026-07-10-etld1-psl-matching.md`) is
+registrable-domain (eTLD+1) equality against the vendored PSL snapshot (explicit rules
+only): sibling subdomains of the same registrable domain fill each other, bare-public-suffix
+and cross-registrable fills are refused, and hosts the snapshot cannot positively resolve
+(`.lan`/`.local`/unknown TLDs) degrade fail-safe to the pre-amendment label-boundary suffix
+rule. Digital Asset Links verification is the P6 loosening. The service never reads field
+values and never logs field content, item names, or full URIs; local fill diagnostics
+persist host-only frame domains + the calling package in app-private storage (last-event
+summary always; a ring buffer only while the 24 h debug toggle is armed, purged on disarm).
 
 ## Non-goals
 Nation-state adversaries; side-channel resistance beyond libsodium's own; protection

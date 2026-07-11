@@ -17,7 +17,8 @@ integrity** (single-flight refresh — the device-revoking `refresh_reuse` race 
 semantics, cross-tab lock, WS-down polling, tamper/rollback guards on web); **native
 data-safety** (fold-proof editing, argon2 off the UI thread, FLAG_SECURE, clipboard
 hygiene, locked-screen sign-out revocation, hand-typeable TOTP, reader-role gating, the
-"N items need an app update" banner). Full narrative: CHANGELOG "Unreleased" section.
+"N items need an app update" banner). Full narrative: CHANGELOG ~~"Unreleased"~~
+"0.5.0-era refinement batches" section (the heading it now lives under).
 
 **Cycle wrap (2026-07-08):** the **Skipti** shared-vault lifecycle **SHIPPED in 0.5.0**
 (design `docs/design/2026-07-07-shared-vault-lifecycle-skipti.md`; schema v4 live on CT122
@@ -71,7 +72,7 @@ importing any real password:
 2. ~~**Enroll the first admin**~~ **DONE** (bootstrap token consumed + stripped; owner admin
    enrolled against the real key). **Still open: enroll server-TOTP** (web → Settings) —
    break-glass public login is impossible without it, and CT122 shows it not yet enrolled.
-3. **Windows MSI rebuild** on the owner box (desktop **0.13.0** in-tree; fielded MSI still
+3. **Windows MSI rebuild** on the owner box (desktop ~~0.13.0~~ **0.14.2** in-tree as of 2026-07-11; fielded MSI still
    0.2.x — the tailnet-default URL + version bump are in the tree; only the owner can run
    jpackage/WiX). See `ops/windows-build.md`. (Batch B4 makes the update banner + 426 path
    honest first.)
@@ -212,6 +213,10 @@ Prioritized; each is additive and back-compatible.
   for v1. F75 dedupe scoping must follow the chosen vault. Tracked in
   `docs/PLAN-autonomous-2026-07.md` §"Owner dev-notes queued". **DONE (S2, 0.10.1,
   `c9a0d4d`).**
+  **Superseded 0.14.1 (2026-07-11):** the per-source picker described above was folded into
+  ONE universal import screen (`docs/design/2026-07-11-universal-importer.md`) — the parser
+  always keyed off file headers, never the pick; only the per-source "how do I export?"
+  help survives (core `ImportHelp` + its web twin). The adapters/dedupe/perf work stands.
 
 ## Horizons & cycle doctrine (2026-07-08 brainstorm — the spine behind the queues)
 

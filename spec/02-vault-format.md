@@ -14,7 +14,7 @@ Item {
   updatedAt     int64         # server clock, unix millis
   deleted       bool          # tombstone
   conflict      bool          # set by server on conflicting write; cleared by client push
-  formatVersion int           # plaintext schema version, = 1
+  formatVersion int           # plaintext schema version, = 1–2 (§3)
   attachmentIds string[]      # plaintext by necessity (blob GC + quotas), ids+sizes only
   blob          base64url     # AEAD envelope (§2) over the plaintext document (§3)
 }
@@ -210,20 +210,20 @@ spec violation.
 | devices | deviceId, userId, platform, **name (user-chosen device label, plaintext)**, clientVersion, createdAt, lastSeenAt, revokedAt |
 | sessions | sessionId, userId, deviceId, hashed access+refresh tokens, access/refresh expiries, refreshConsumedAt, createdAt, revokedAt |
 | vaults | vaultId, type, rev, createdAt (names/icons are ciphertext); **lifecycle** — deletedAt/purgeAt/purgedAt/deletedBy/deleteId, transferSeq, pendingOwnerId/pendingOfferId/pendingOfferExpiresAt/pendingOfferSetAt/lastTransferOfferId (ids + epoch times), and opaque VK-derived MACs deleteProof/restoreProof/pendingOfferProof/lastTransferAcceptProof (PRF outputs — reveal nothing about VK) |
-| grants | vaultId, userId, role, wrapped/sealed VK ciphertext, rev, revokedAt, revokedReason (revoked rows are retained — the server sees WHEN and WHY a member lost access: remove / leave / vault-delete), and removeProof/removeNonce (opaque VK-derived MAC + nonce, stored on a removal for durable relay to the victim — reveal nothing about VK) |
+| grants | vaultId, userId, role, addedAt (join time, epoch ms; NULL on pre-v3 rows, COALESCEd to 0 in summaries), wrapped/sealed VK ciphertext, rev, revokedAt, revokedReason (revoked rows are retained — the server sees WHEN and WHY a member lost access: remove / leave / vault-delete), and removeProof/removeNonce (opaque VK-derived MAC + nonce, stored on a removal for durable relay to the victim — reveal nothing about VK) |
 | items | the Item row of §1 — ids, rev, server timestamps, flags, formatVersion, attachmentIds, ciphertext blob, ciphertext byte size |
 | item_versions | itemId, rev, blob, formatVersion, archivedAt (bounded to the newest 10 per item, §7) |
 | changes | rev, kind, entityId, vaultId, at — the global sync feed (pure metadata; reveals per-vault write timing/volume) |
 | mutations | (deviceId, mutationId) → resultJson, createdAt — idempotency replay cache; resultJson holds per-mutation status/rev, no vault content |
 | attachments | attachmentId, itemId, vaultId, ciphertext size, sha256(ciphertext), header, createdAt (filenames + file keys are inside item ciphertext) |
-| escrow | userId, sealed blob, recoveryKeyFingerprint, updatedAt |
+| escrow | userId, sealed blob, fingerprint (of the recovery key), updatedAt |
 | audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, emails of existing users, or any decrypted content) |
 | policies | org policy JSON (min versions, KDF policy, lock timeouts…) |
 | hibp_cache | sha1-prefix → upstream HIBP range body + fetchedAt (public breach data, no user linkage stored) |
 | meta | key/value operational markers (schemaVersion, lastPublicRequestAt…) |
 
 Traffic analysis (who syncs when, item counts, sizes) is visible to the server by
-nature and accepted (spec 05). This table describes **schema v3 exactly** — adding any
+nature and accepted (spec 05). This table describes **schema v5 exactly** — adding any
 table or plaintext column requires updating it in the same change.
 
 ## 6. Attachments
@@ -235,7 +235,7 @@ table or plaintext column requires updating it in the same change.
   the server persists header and chunks and never sees content or filename.
 - Decrypters MUST fail hard on: any chunk MAC failure, FINAL before last chunk,
   missing FINAL at end (truncation), or extra data after FINAL.
-- Upload: blob first (`POST /attachments`), then the item update referencing it;
+- Upload: blob first (`POST /attachments/{id}`), then the item update referencing it;
   orphaned blobs are GC'd after 24 h. Server enforces per-item and per-user quota
   from policy (v1 defaults: 25 MiB/attachment, 100 MiB/item, 1 GiB/user).
 
@@ -309,7 +309,8 @@ sweep → up-to-date cursor no-ops, stale cursor 410s then converges via `since=
   an ordinary put. Two bounds the UI MUST state honestly: (1) at most the last **10**
   versions ("up to the last 10", never "nothing is ever lost"); (2) **history resets at VK
   rotation** — the archive is ciphertext under the *current* VK, so the queued lazy VK
-  rotation (ROADMAP:126) either prunes item_versions for the rotated vault or re-seals it
+  rotation (ROADMAP — "VK lazy rotation on member removal") either prunes
+  item_versions for the rotated vault or re-seals it
   (design decision handed to the rotation work; see docs/design/2026-07-08-item-history-and-restore.md).
 - **Conflict flow** (authoritative rules in spec 03 §5): the server never merges and
   never re-encrypts; it applies the newest write, archives the loser, and sets

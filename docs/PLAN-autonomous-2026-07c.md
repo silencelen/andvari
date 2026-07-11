@@ -90,6 +90,34 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
       API — the grafana MCP token still 401s; the netplan service-account token works) and
       verified evaluating `health=ok` against the live series alongside the other three
       Andvari rules (all ok = the monitor sanity pass). Spec doc status updated in place.
+- [x] **X1. Exploration quad-sweep — DONE 2026-07-11.** Queue was empty; probes showed
+      nothing moved; owner picked ALL FOUR standing exploration candidates ("all 4"). One
+      find→refute→critic Workflow pass @ `e6f3ccb` (70 agents, 0 errors): **85 confirmed /
+      3 refuted**. Full ledger: `docs/assess/2026-07-11-quad-sweep.md`. Same session: all
+      **39 doc-only truth fixes applied** (spec 00–06 + spec/psl/README + README + ROADMAP +
+      a dated ia-cut2-banners-update deviation note). **Scale @ 10k = clean bill** (import 9.1 s, cold
+      sync 532 ms / 5.2 MB, search p50 ≤ 12 ms, janitor < 4 ms, server VmHWM 601 MB under
+      load — no action). The 0.14.0/0.14.1 design docs + N2/H1 shipped-claims checks came
+      back clean. 10 standalone code items filed in the ledger (sharpest: spec07-1 web
+      export silently drops VK-less vaults instead of enumerating them in
+      skipped.undecryptable; spec02-1 metaV regression check unimplemented on all clients;
+      spec03-01 no global request-body limit; spec01-f61 KDF-upgrade re-key is
+      Android-only).
+- [ ] **E1. (PROPOSED 2026-07-11, pending ratification) Extension hardening — cut ext
+      0.10.0.** ~10 S items, one module, security-adjacent (ledger §E1): X-Andvari-Client
+      header + a minimal 426 surface (today a min-version pin can NEVER gate the extension);
+      clipboard auto-clear (spec 01 §8 says every client); TOTP determinism backport + run
+      spec/test-vectors/totp.json; identityPub mismatch check on unlock (spec 01 §5 MUST);
+      error taxonomy ({error,message} parse + canonical unreachable-server copy); locked-save
+      re-offer; mustChangePassword surface; refresh killed only on definitive 401/403 (web-B7
+      mirror); drop the unused "scripting" permission; F26 lock-reason parity. Recommended
+      FIRST of the two proposed batches.
+- [ ] **A1. (PROPOSED 2026-07-11, pending ratification) Accessibility batch ×3 clients (+
+      extension fold-in) (M–L).** 23 confirmed findings incl. the sweep's only P1 — web has
+      zero programmatic label association; zero live regions on web AND Android; contrast
+      failures in both themes; desktop has no focus management at all (ledger §A1). Wants its
+      own design pass (per-client semantics patterns) + breaker before build; fold in the
+      extension-a11y gap (ledger critic #5/6).
 - [ ] **N4. (TRIGGER: owner retires the 0.2.x MSI) Card-create Option-A flip + S3 (M).**
       The flip ceremony from the cards design §build-order (flip `CARD_CREATE_ENABLED` ×2 +
       unhide, windows manifest entry, verify old-MSI absence), THEN S3 extension in-page card
@@ -112,8 +140,9 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
 ## Parked for owner (the complete current list)
 
 - Server-TOTP enrollment on CT122 (blocks break-glass sign-in; N1 will verify live state).
-- Windows MSI rebuild (`ops/windows-build.md`; desktop 0.13.0 in-tree, fielded MSI 0.2.x —
-  now 7+ releases behind; retiring it is ALSO the N4 trigger).
+- Windows MSI rebuild (`ops/windows-build.md`; desktop 0.14.2 in-tree, fielded MSI 0.2.x —
+  now ~12 releases behind; retiring it is ALSO the N4 trigger). *(Version corrected
+  2026-07-11 by the quad-sweep — chg-1.)*
 - PBS-restore / min-version-pin / backup-verify drills; the 30-day soak; the migration date.
 - Extension: load the 0.9.0 build (load-unpacked); the tier-2 distribution decision
   (signed .xpi + update_url vs a store listing).
