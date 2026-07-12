@@ -14,10 +14,16 @@
   --edge-strong: #4a3f28;
   --ink: #ede4d0;
   --ink-dim: #a79c85;
-  --ink-faint: #6f6752;
+  /* a11yweb-03: bumped from #6f6752 (3.3:1, failed AA) — computed 5.00:1 on --bg,
+     4.59:1 on --bg-raised. Keep in lockstep with the extension's popup.css twin. */
+  --ink-faint: #8d8370;
   --gold: #d0a94a;
   --gold-bright: #e8c66a;
   --gold-deep: #8a6d28;
+  /* a11yweb-03 / AM-1: a SEPARATE link colour so darkening links for AA never touches
+     --gold (which would flatten button.primary's gold gradient in light mode). In dark
+     it equals --gold (already 7.7:1); light darkens it (5.26:1 on --bg). */
+  --link: #d0a94a;
   --danger: #cf6b5a;
   --ok: #7fa86a;
   /* Primary-button ink + the item-monogram coin, tokenized so both stay legible
@@ -38,10 +44,15 @@
     --edge-strong: #c9bfa2;
     --ink: #2c2517;
     --ink-dim: #6b6047;
-    --ink-faint: #9a8f74;
+    /* a11yweb-03: bumped from #9a8f74 (2.8:1) — 4.51:1 on --bg, 4.88:1 on --bg-raised. */
+    --ink-faint: #786c50;
     --gold: #9a7420;
     --gold-bright: #7d5e14;
     --gold-deep: #c9a94a;
+    /* a11yweb-03 / AM-1: darker link that clears AA (5.26:1 on --bg) without touching
+       --gold — matches --gold-bright's value but is a distinct token so the button
+       gradient (--gold-bright → --gold) stays a real two-stop gradient. */
+    --link: #7d5e14;
     --danger: #b3402c;
     --ok: #4f7a3a;
     /* Light theme: the golds darken, so primary buttons need light ink and the coin
@@ -54,6 +65,17 @@
 }
 
 * { box-sizing: border-box; }
+
+/* AM-2: single a11y utility — off-screen but present in the accessibility tree. Used by
+   the persistent role="status" announcers (BL-1) and the connectivity-dot text twin
+   (AM-3), which need real, mutating text nodes AT (not sighted users) can read. */
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+  white-space: nowrap;
+}
 
 html, body, #root { height: 100%; }
 
@@ -254,7 +276,7 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .actions { display: flex; gap: 10px; margin-top: 22px; }
 .actions .primary { width: auto; flex: 1; }
 .spacer { flex: 1; }
-.link { color: var(--gold); cursor: pointer; background: none; border: 0; font: inherit; padding: 0; }
+.link { color: var(--link); cursor: pointer; background: none; border: 0; font: inherit; padding: 0; }
 .link:hover { color: var(--gold-bright); text-decoration: underline; }
 
 /* ---- appbar view navigation ---- */

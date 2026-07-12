@@ -7,6 +7,8 @@ import { clearPendingEnroll, enrollPrefillFor, peekPendingEnroll, type EnrollPay
 import { Account, IdentityMismatchError, deviceName } from "../vault/account";
 import { VaultStore } from "../vault/store";
 import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
+import { Field } from "./Field";
+import { Msg } from "./Msg";
 import { installId, saveSession, type Session } from "./session";
 import { BrandSigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength, masterPasswordHasNonAscii, meetsMasterPasswordFloor } from "./strength";
@@ -92,13 +94,13 @@ function Unlock({ client, session, notice, onReady, onForget }: { client: ApiCli
           <h1>Welcome back</h1>
           <p>{session.email}</p>
         </div>
-        {/* F26: why the user is here ("Locked after N minutes of inactivity.", …). */}
-        {notice && !err && <div className="msg info">{notice}</div>}
-        {err && <div className="msg err">{err}</div>}
-        <div className="field">
-          <label>Master password</label>
+        {/* F26: why the user is here ("Locked after N minutes of inactivity.", …). The
+            SPOKEN announce rides App's persistent Announcer (this box is silent-but-visible). */}
+        {notice && !err && <Msg kind="info">{notice}</Msg>}
+        {err && <Msg kind="err">{err}</Msg>}
+        <Field label="Master password">
           <input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
-        </div>
+        </Field>
         <button className="primary" disabled={busy || !password}>{busy ? "Unsealing…" : "Unlock"}</button>
         <div style={{ textAlign: "center", marginTop: 16 }}>
           <button type="button" className="link" onClick={onForget}>Sign out / use a different account</button>
@@ -152,16 +154,17 @@ function FreshStart({ client, policy, policyError, onRetryPolicy, notice, onRead
           <h1 className="brand"><span className="a-mark">and</span>vari</h1>
           <p>the keeper of the hoard</p>
         </div>
-        {/* F26: why a full sign-in is required ("This device's access was revoked."). */}
-        {notice && <div className="msg info">{notice}</div>}
+        {/* F26: why a full sign-in is required ("This device's access was revoked."). App's
+            persistent Announcer speaks it; this box is the sighted-user copy. */}
+        {notice && <Msg kind="info">{notice}</Msg>}
         {pending && !validPrefill && (
-          <div className="msg err" style={{ display: "block" }}>
+          <div className="msg err" style={{ display: "block" }} role="alert">
             This invite link is for a different address ({pending.o}) — open the exact link you were given, or sign in / enroll by hand.
           </div>
         )}
         <div className="tabs">
-          <button className={tab === "signin" ? "active" : ""} onClick={() => setTab("signin")}>Sign in</button>
-          <button className={tab === "enroll" ? "active" : ""} onClick={() => setTab("enroll")}>Enroll</button>
+          <button className={tab === "signin" ? "active" : ""} aria-pressed={tab === "signin"} onClick={() => setTab("signin")}>Sign in</button>
+          <button className={tab === "enroll" ? "active" : ""} aria-pressed={tab === "enroll"} onClick={() => setTab("enroll")}>Enroll</button>
         </div>
         {tab === "signin" ? <SignIn client={client} onReady={onReady} /> : <Enroll client={client} policy={policy} policyError={policyError} onRetryPolicy={onRetryPolicy} onReady={onReady} prefill={consented ? validPrefill : null} />}
       </div>
@@ -232,18 +235,18 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
 
   return (
     <form onSubmit={submit}>
-      {err && <div className="msg err">{err}</div>}
-      <div className="field">
-        <label>Email</label>
+      {err && <Msg kind="err">{err}</Msg>}
+      <Field label="Email">
         <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} />
-      </div>
-      <div className="field">
-        <label>Master password</label>
+      </Field>
+      <Field label="Master password">
         <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
-      </div>
+      </Field>
       {totpNeeded && (
-        <div className="field">
-          <label>One-time code</label>
+        <Field
+          label="One-time code"
+          hint={<span className="muted">You are connecting via the public address — enter the code from your authenticator app.</span>}
+        >
           <input
             className="mono"
             autoFocus
@@ -253,8 +256,7 @@ function SignIn({ client, onReady }: { client: ApiClient; onReady: (a: Account, 
             value={totp}
             onChange={(e) => setTotp(e.target.value)}
           />
-          <span className="muted">You are connecting via the public address — enter the code from your authenticator app.</span>
-        </div>
+        </Field>
       )}
       <button className="primary" disabled={busy || !email || !password || (totpNeeded && !totp.trim())}>{busy ? "Unsealing…" : "Sign in"}</button>
     </form>
@@ -344,56 +346,60 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady, prefill }
 
   return (
     <form onSubmit={submit}>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       {linkValid && (
         <div className="msg info" style={{ display: "block" }}>
           Setting up a <strong>new account</strong> at <strong>{window.location.origin}</strong>. Your admin should hand you the <strong>printed recovery sheet</strong> in person — you'll confirm its first 16 characters below.
         </div>
       )}
-      <div className="field">
-        <label>Invite token</label>
+      <Field label="Invite token">
         <input className="mono" value={invite} onChange={(e) => setInvite(e.target.value)} placeholder="from your administrator" />
-      </div>
+      </Field>
       <div className="row">
-        <div className="field" style={{ flex: 1 }}>
-          <label>Email</label>
+        <Field
+          label="Email"
+          style={{ flex: 1 }}
+          hint={linkValid ? <span className="muted">from your invite — wrong address? ask your admin for a new one</span> : undefined}
+        >
           <input type="email" value={email} readOnly={linkValid} onChange={(e) => setEmail(e.target.value)} />
-          {linkValid && <span className="muted">from your invite — wrong address? ask your admin for a new one</span>}
-        </div>
-        <div className="field" style={{ flex: 1 }}>
-          <label>Name</label>
+        </Field>
+        <Field label="Name" style={{ flex: 1 }}>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="optional" />
-        </div>
+        </Field>
       </div>
-      <div className="field">
-        <label>Master password</label>
+      <Field label="Master password" hint={<MasterPasswordHint password={password} />}>
         <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
-        <MasterPasswordHint password={password} />
-      </div>
-      <div className="field">
-        <label>Confirm master password</label>
+      </Field>
+      <Field
+        label="Confirm master password"
+        hint={confirm && confirm !== password ? <span className="muted" style={{ color: "var(--danger)" }}>passwords don't match</span> : undefined}
+      >
         <input type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-        {confirm && confirm !== password && <span className="muted" style={{ color: "var(--danger)" }}>passwords don't match</span>}
-      </div>
+      </Field>
       {fp ? (
         <>
           {/* spec 04 §2(3): the fingerprint is deliberately NOT displayed until it has been
               typed — showing it above the input would reduce the check to transcription. */}
-          <div className="field">
-            <label>Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet</label>
+          <Field
+            label="Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet"
+            hint={
+              <>
+                {shortFp.trim() && !shortOk && (
+                  <span className="muted" style={{ color: "var(--danger)" }}>
+                    doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin
+                  </span>
+                )}
+                {shortOk && <span className="muted">matches — full fingerprint: {groupHex(fp)}</span>}
+              </>
+            }
+          >
             <input
               className="mono"
               placeholder="from the sheet, not this screen"
               value={shortFp}
               onChange={(e) => setShortFp(e.target.value)}
             />
-            {shortFp.trim() && !shortOk && (
-              <span className="muted" style={{ color: "var(--danger)" }}>
-                doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin
-              </span>
-            )}
-            {shortOk && <span className="muted">matches — full fingerprint: {groupHex(fp)}</span>}
-          </div>
+          </Field>
           <label className="check">
             <input type="checkbox" checked={fpConfirmed} onChange={(e) => setFpConfirmed(e.target.checked)} disabled={!shortOk} />
             <span>This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.</span>
@@ -402,14 +408,14 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady, prefill }
       ) : policyError ? (
         // The policy fetch FAILED — don't claim the ceremony isn't done (it may well be),
         // and don't blame the network (the server may have answered with an error).
-        <div className="msg err" style={{ display: "block" }}>
+        <div className="msg err" style={{ display: "block" }} role="alert">
           {POLICY_UNAVAILABLE}{" "}
           <button type="button" className="link" disabled={retrying} onClick={retryPolicy}>{retrying ? "Retrying…" : "Retry"}</button>
         </div>
       ) : (
         // Policy loaded and the fingerprint is genuinely empty → the recovery key really
         // isn't configured on this server.
-        <div className="msg err">Server has no recovery key configured; enrollment is disabled until the escrow ceremony is done.</div>
+        <Msg kind="err">Server has no recovery key configured; enrollment is disabled until the escrow ceremony is done.</Msg>
       )}
       <button className="primary" disabled={busy || !canSubmit}>{busy ? "Forging your vault…" : "Create vault"}</button>
     </form>

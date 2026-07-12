@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -43,6 +44,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.app.autofill.ApprovedBrowsers
@@ -262,16 +266,21 @@ fun AutofillStatusScreen(vm: AndvariViewModel, ui: UiState) {
                     Spacer(Modifier.height(8.dp))
                     val now = System.currentTimeMillis()
                     val armed = debugUntil > now
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Debug autofill (24h)", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                        Switch(checked = armed, onCheckedChange = { on ->
+                    // AM-4: the whole side-effecting onCheckedChange lambda moves onto the
+                    // toggleable row (no enabled guard exists to move); the Switch is inert.
+                    Row(
+                        Modifier.toggleable(value = armed, role = Role.Switch, onValueChange = { on ->
                             val v = if (on) System.currentTimeMillis() + AutofillDebugLog.DEBUG_WINDOW_MS else 0L
                             // Through the log module, not raw prefs: it refreshes the
                             // fill path's cached armed-check AND purges the ring file
                             // the moment the toggle is disarmed (off = deleted, not kept).
                             AutofillDebugLog.setDebugUntil(ctx, v)
                             debugUntil = v
-                        })
+                        }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Debug autofill (24h)", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                        Switch(checked = armed, onCheckedChange = null)
                     }
                     if (armed) {
                         Text(
@@ -391,11 +400,14 @@ private fun remainingLabel(ms: Long): String {
 
 @Composable
 private fun StatusRow(label: String, ok: Boolean) {
-    Row(Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+    // a11yand-06: merge the row into one TalkBack stop ("label: yes/no") and drop the
+    // decorative colored bullet from the a11y tree (yes/no text keeps it non-color-only).
+    Row(Modifier.padding(vertical = 2.dp).semantics(mergeDescendants = true) {}, verticalAlignment = Alignment.CenterVertically) {
         Text(
             "●",
             color = if (ok) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.clearAndSetSemantics {},
         )
         Spacer(Modifier.width(8.dp))
         Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
@@ -405,7 +417,8 @@ private fun StatusRow(label: String, ok: Boolean) {
 
 @Composable
 private fun KeyValue(label: String, value: String) {
-    Row(Modifier.padding(vertical = 2.dp)) {
+    // a11yand-06: one merged TalkBack stop per "label: value" line.
+    Row(Modifier.padding(vertical = 2.dp).semantics(mergeDescendants = true) {}) {
         Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(value, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
     }

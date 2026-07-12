@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { ApiClient } from "../api/client";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import type { VaultStore } from "../vault/store";
+import { Msg } from "./Msg";
 import { EmptySigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength } from "./strength";
 import { ViewHeader } from "./ViewHeader";
@@ -103,7 +104,7 @@ export function Health({ store, client, onOpenItem }: Props) {
           </button>
         }
       />
-      {scanErr && <div className="msg err">{scanErr}</div>}
+      {scanErr && <Msg kind="err">{scanErr}</Msg>}
 
       <div className="tiles">
         <Tile label="Logins" value={String(rows.length)} />
@@ -138,6 +139,10 @@ export function Health({ store, client, onOpenItem }: Props) {
                     className="rowlink"
                     // F80: the row is a click target, so the keyboard gets the same
                     // affordance (Space is prevented — it must not page-scroll).
+                    // a11yweb-07: role+name so a screen reader announces it as an
+                    // openable control, not a bare table row.
+                    role="button"
+                    aria-label={`Open ${r.name}`}
                     tabIndex={0}
                     onClick={() => onOpenItem(r.itemId)}
                     onKeyDown={(e) => {

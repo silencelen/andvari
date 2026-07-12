@@ -23,7 +23,9 @@ import { ImportError, type ImportFormat, type ImportPlan, type ImportReport, typ
 import { isExportOriginAllowed } from "../export/plan";
 import { Admin } from "./Admin";
 import { ExportPanel, type ExportMode } from "./ExportPanel";
+import { Field } from "./Field";
 import { humanSize } from "./format";
+import { Announcer, Msg } from "./Msg";
 import { Health } from "./Health";
 import { Settings } from "./Settings";
 import { Sharing } from "./Sharing";
@@ -137,6 +139,13 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   const [syncOk, setSyncOk] = useState(true);
   const online = wsUp && syncOk;
   const degraded = !wsUp || !syncOk;
+  // a11yweb-04/AM-3: one connectivity string — the tooltip AND the visually-hidden text
+  // twin in the appbar read from it, so a screen reader hears the state flip.
+  const connStatus = online
+    ? "Connected"
+    : wsUp
+      ? "Last sync failed — will retry"
+      : "Live updates down — checking for changes every 60 s";
   // Manual "Sync now" (F29): disabled while a click-driven sync is in flight.
   const [syncBusy, setSyncBusy] = useState(false);
   // Type-to-search on unlock is a desktop convenience; autofocusing on touch pops the
@@ -331,7 +340,8 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   };
 
   const navBtn = (v: View, label: string) => (
-    <button className={`navbtn ${view === v ? "active" : ""}`} onClick={() => { setView(v); setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); }}>{label}</button>
+    // a11yweb-05: aria-current marks the active view for AT (the .active class is visual only).
+    <button className={`navbtn ${view === v ? "active" : ""}`} aria-current={view === v ? "page" : undefined} onClick={() => { setView(v); setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); }}>{label}</button>
   );
 
   const current = selected ? store.get(selected) : null;
@@ -367,18 +377,13 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           </nav>
         </div>
         <div className="row">
-          <span
-            className="muted who"
-            title={
-              online
-                ? "Connected"
-                : wsUp
-                  ? "Last sync failed — will retry"
-                  : "Live updates down — checking for changes every 60 s"
-            }
-          >
-            <span className={`dot ${online ? "on" : "off"}`} />
+          <span className="muted who" title={connStatus}>
+            <span className={`dot ${online ? "on" : "off"}`} aria-hidden="true" />
             <span className="userid">{email || account.userId.slice(0, 8)}</span>
+            {/* AM-3: a visually-hidden role=status TWIN inside .who. Its textContent mutates
+                on the connectivity flip → announced; the email in .userid stays intact (an
+                aria-label on .who would clobber it AND, as an attribute change, never announce). */}
+            <span className="visually-hidden" role="status">{connStatus}</span>
           </span>
           {/* F29: while degraded, let the user pull over plain HTTP right now instead
               of waiting out the poll window. */}
@@ -486,7 +491,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         ) : (
           <>
             <div className="toolbar">
-              <input placeholder="Search vault…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus={finePointer} />
+              <input aria-label="Search vault" placeholder="Search vault…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus={finePointer} />
               <button className="ghost" onClick={() => startNew("login")}>+ Login</button>
               <button className="ghost" onClick={() => startNew("note")}>+ Note</button>
               {/* Dark until the Option A gate clears (0.2.x MSI retired) — see CARD_CREATE_ENABLED.
@@ -737,7 +742,7 @@ function NoticesBanner({ notices, onDismiss }: { notices: LifecycleNotice[]; onD
       {notices.map((n) => {
         const { body, warn } = noticeBody(n);
         return (
-          <div key={n.id} className={`msg ${warn ? "err" : "info"}`} style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+          <div key={n.id} className={`msg ${warn ? "err" : "info"}`} role={warn ? "alert" : undefined} style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
             <span style={{ flex: 1 }}>{body}</span>
             <button type="button" className="link" onClick={() => onDismiss(n.id)}>Dismiss</button>
           </div>
@@ -800,6 +805,9 @@ function ExportMenu({ onBackup, onCsv }: { onBackup: () => void; onCsv: () => vo
     if (e.key === "Escape") { e.preventDefault(); close(true); }
     else if (e.key === "ArrowDown") { e.preventDefault(); items[(idx + 1 + items.length) % items.length]?.focus(); }
     else if (e.key === "ArrowUp") { e.preventDefault(); items[(idx - 1 + items.length) % items.length]?.focus(); }
+    // a11yweb-08: Tab closes the menu (no preventDefault, no focus return) so focus proceeds
+    // out per the WAI-ARIA menu-button pattern instead of stranding an open menu behind it.
+    else if (e.key === "Tab") setOpen(false);
   };
 
   const choose = (fn: () => void) => { close(false); fn(); };
@@ -862,6 +870,10 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
   };
   return (
     <div className="sheet">
+      {/* BL-1: copy confirmation is polite async info — the visible .copy-flash span mounts
+          already-populated (silent), so announce it off this persistent region, named by
+          which field was copied ("password copied", "code copied", …). */}
+      <Announcer text={flash ? `${flash} copied` : ""} />
       <button className="link" onClick={onBack}>← back to vault</button>
       <h2 style={{ marginTop: 12 }}>{doc.name}</h2>
       <div className="muted" style={{ marginBottom: 18 }}>
@@ -894,10 +906,9 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           )}
           {doc.login.totp && <TotpView uri={doc.login.totp} onCopy={(code) => copy("code", code)} />}
           {doc.login.uris?.[0] && (
-            <div className="field">
-              <label>Website</label>
+            <Field label="Website">
               <input readOnly value={doc.login.uris[0]} />
-            </div>
+            </Field>
           )}
           {doc.login.password && <HealthLine password={doc.login.password} client={client} />}
         </>
@@ -946,10 +957,9 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
       )}
 
       {doc.notes && (
-        <div className="field">
-          <label>Notes</label>
+        <Field label="Notes">
           <textarea readOnly rows={5} value={doc.notes} />
-        </div>
+        </Field>
       )}
 
       {(doc.attachments?.length ?? 0) > 0 && <AttachmentList item={item} store={store} />}
@@ -959,7 +969,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
       {/* A reader-role member cannot edit/delete/attach — the push would be denied. */}
       {!readOnly && (
         <>
-          {delErr && <div className="msg err" style={{ marginTop: 18 }}>{delErr}</div>}
+          {delErr && <div className="msg err" role="alert" style={{ marginTop: 18 }}>{delErr}</div>}
           <div className="actions">
             {deleting ? (
               <>
@@ -1043,7 +1053,7 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
         Deleted items you can still restore — kept for 30 days, then removed automatically. Restoring
         brings an item back to its vault on every device; “Delete forever” removes it now.
       </div>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       {items === null ? (
         <div className="muted">Loading…</div>
       ) : items.length === 0 ? (
@@ -1126,7 +1136,7 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
     <div className="field" style={{ marginTop: 18 }}>
       <label>Version history <span className="muted">· up to the last 10 saves</span></label>
       {loading && <div className="muted">Loading…</div>}
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       {versions?.length === 0 && <div className="muted">No earlier versions yet — history starts from the next change.</div>}
       {versions?.map((v) => (
         <div key={v.rev} className="secret-row" style={{ alignItems: "center", marginTop: 6 }}>
@@ -1206,14 +1216,14 @@ function MoveCopyControl({ item, store, targets, onMoved }: { item: VaultItem; s
   return (
     <div className="field" style={{ marginTop: 12 }}>
       <label>{mode === "move" ? "Move to another vault" : "Copy to another vault"}</label>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       {mode === "move" && (
         <p className="muted" style={{ marginTop: 0 }}>
           Members of “{store.vaults().find((v) => v.vaultId === item.vaultId)?.name ?? "this vault"}” may still have copies from before the move.
         </p>
       )}
       <div className="secret-row">
-        <select value={target} onChange={(e) => { setTarget(e.target.value); resetGesture(); }} disabled={busy} style={{ width: "auto" }}>
+        <select value={target} aria-label={mode === "move" ? "Move to another vault" : "Copy to another vault"} onChange={(e) => { setTarget(e.target.value); resetGesture(); }} disabled={busy} style={{ width: "auto" }}>
           {targets.map((v) => (
             <option key={v.vaultId} value={v.vaultId}>{v.name}{v.type === "personal" ? "" : " (shared)"}</option>
           ))}
@@ -1255,7 +1265,7 @@ function AttachmentList({ item, store }: { item: VaultItem; store: VaultStore })
   return (
     <div className="field">
       <label>Attachments</label>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <div className="attach-list">
         {item.doc.attachments!.map((ref) => (
           <div className="attach-row" key={ref.id}>
@@ -1284,12 +1294,13 @@ function PasswordField({ value }: { value: string }) {
 /** Editable sibling of PasswordField — masked by default with a reveal toggle. The editor
  *  CVV renders through this (design: SecretField); login passwords keep the plain editor
  *  idiom (generate-and-glance), a deliberate difference, not an oversight. */
-function SecretInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function SecretInput({ value, onChange, ariaLabel }: { value: string; onChange: (v: string) => void; ariaLabel?: string }) {
   const [show, setShow] = useState(false);
   return (
     <div className="secret-row">
-      <input className="mono" type={show ? "text" : "password"} inputMode="numeric" autoComplete="off" value={value} onChange={(e) => onChange(e.target.value)} />
-      <button type="button" className="ghost" onClick={() => setShow((s) => !s)}>{show ? "Hide" : "Show"}</button>
+      {/* BL-2: this custom input never gets Field's injected id, so name it here. */}
+      <input className="mono" type={show ? "text" : "password"} inputMode="numeric" autoComplete="off" aria-label={ariaLabel} value={value} onChange={(e) => onChange(e.target.value)} />
+      <button type="button" className="ghost" aria-label={show ? "Hide value" : "Show value"} onClick={() => setShow((s) => !s)}>{show ? "Hide" : "Show"}</button>
     </div>
   );
 }
@@ -1320,8 +1331,11 @@ function TotpView({ uri, onCopy }: { uri: string; onCopy: (code: string) => void
     <div className="field">
       <label>One-time code</label>
       <div className="totp-wrap">
-        <button className="totp link" onClick={() => onCopy(code.replace(/\s/g, ""))} title="copy">{code.replace(/(\d{3})(\d{3})/, "$1 $2")}</button>
-        <div className="ring" style={{ ["--p" as string]: String((remaining / period) * 100) }} title={`${remaining}s`} />
+        {/* a11yweb-09: name the copy affordance + speak the code (the visible digits are the
+            control's text but "123456, button" gives no hint it copies). */}
+        <button className="totp link" aria-label={`One-time code ${code.replace(/\s/g, "")} — copy`} onClick={() => onCopy(code.replace(/\s/g, ""))} title="copy">{code.replace(/(\d{3})(\d{3})/, "$1 $2")}</button>
+        {/* aria-hidden: the ring updates every second — it must NOT be a live region. */}
+        <div className="ring" aria-hidden="true" style={{ ["--p" as string]: String((remaining / period) * 100) }} title={`${remaining}s`} />
       </div>
     </div>
   );
@@ -1499,8 +1513,7 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
       <button type="button" className="link" onClick={onCancel}>← cancel</button>
       <h2 style={{ marginTop: 12 }}>{initial.name ? "Edit" : isLogin ? "New login" : isCard ? "New card" : "New note"}</h2>
       {vaultChoices && vaultChoices.length > 1 && (
-        <div className="field">
-          <label>Vault</label>
+        <Field label="Vault">
           <select value={vaultId} onChange={(e) => setVaultId(e.target.value)}>
             {vaultChoices.map((v) => (
               <option key={v.vaultId} value={v.vaultId}>
@@ -1508,72 +1521,73 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
               </option>
             ))}
           </select>
-        </div>
+        </Field>
       )}
-      <div className="field">
-        <label>Name</label>
+      <Field label="Name">
         <input autoFocus value={doc.name} onChange={(e) => setDoc({ ...doc, name: e.target.value })} />
-      </div>
+      </Field>
       {isLogin && (
         <>
-          <div className="field">
-            <label>Username</label>
+          <Field label="Username">
             <input className="mono" value={login.username ?? ""} onChange={(e) => setLogin({ username: e.target.value })} />
-          </div>
+          </Field>
           <div className="field">
+            {/* BL-2: multi-child block (secret-row + confirm + StrengthBar) — Field can't wrap
+                it, so name the inner <input> directly. */}
             <label>Password</label>
             <div className="secret-row">
               {/* Masked by default (F78); typing stays possible — a password field the user
                   can't read is the login-editor's one blind spot the reveal toggle fixes. */}
-              <input className="mono" type={showPw ? "text" : "password"} value={login.password ?? ""} onChange={(e) => { setLogin({ password: e.target.value }); setConfirmGen(false); }} />
-              <button type="button" className="ghost" onClick={() => setShowPw((s) => !s)}>{showPw ? "Hide" : "Show"}</button>
+              <input className="mono" aria-label="Password" type={showPw ? "text" : "password"} value={login.password ?? ""} onChange={(e) => { setLogin({ password: e.target.value }); setConfirmGen(false); }} />
+              <button type="button" className="ghost" aria-label={showPw ? "Hide password" : "Show password"} onClick={() => setShowPw((s) => !s)}>{showPw ? "Hide" : "Show"}</button>
               <button type="button" className="ghost" onClick={gen}>{confirmGen ? "Replace?" : "Generate"}</button>
             </div>
             {confirmGen && <span className="muted" style={{ color: "var(--gold)" }}>this replaces the current password — tap “Replace?” to confirm, or edit the field to cancel</span>}
             {login.password && <StrengthBar password={login.password} />}
           </div>
-          <div className="field">
-            <label>Website</label>
+          <Field label="Website">
             {/* Edits uris[0] only; the tail (extra URIs written by other clients) is preserved. */}
             <input value={login.uris?.[0] ?? ""} onChange={(e) => setLogin({ uris: e.target.value ? [e.target.value, ...(login.uris ?? []).slice(1)] : (login.uris ?? []).slice(1) })} placeholder="https://" />
-          </div>
-          <div className="field">
-            <label>TOTP secret (otpauth:// URI or base32)</label>
+          </Field>
+          <Field label="TOTP secret (otpauth:// URI or base32)">
             {/* RAW text while typing — normalizing per keystroke rewrote the field to an
                 otpauth:// URI on the first character. Normalized once, in submit. */}
             <input className="mono" value={login.totp ?? ""} onChange={(e) => setLogin({ totp: e.target.value })} placeholder="optional" />
-          </div>
+          </Field>
         </>
       )}
       {isCard && (
         <>
-          <div className="field">
-            <label>Cardholder name</label>
+          <Field label="Cardholder name">
             <input value={card.cardholderName ?? ""} onChange={(e) => setCard({ cardholderName: e.target.value })} />
-          </div>
-          <div className="field">
-            <label>Card number {cardBrand && <span className="tag brand">{cardBrand}</span>}</label>
+          </Field>
+          <Field
+            label={<>Card number {cardBrand && <span className="tag brand">{cardBrand}</span>}</>}
+            hint={
+              luhnWarn ? (
+                <div className="muted" style={{ marginTop: 6, color: "var(--gold)" }}>
+                  this number doesn’t pass the usual check — you can still save it
+                </div>
+              ) : undefined
+            }
+          >
             {/* RAW text while typing (separators and all) — digits-only ONCE, in submit (the
                 TOTP idiom). The badge + Luhn line read the live digits; warn, never block. */}
             <input className="mono" inputMode="numeric" autoComplete="off" value={card.number ?? ""} onChange={(e) => setCard({ number: e.target.value })} />
-            {luhnWarn && (
-              <div className="muted" style={{ marginTop: 6, color: "var(--gold)" }}>
-                this number doesn’t pass the usual check — you can still save it
-              </div>
-            )}
-          </div>
+          </Field>
           <div className="field">
             <label>Expiry</label>
             {/* Both selects offer an empty choice — every card field is optional. The month
-                VALUE renders through padMonth so a foreign-written "1" displays as "01". */}
+                VALUE renders through padMonth so a foreign-written "1" displays as "01".
+                BL-2: two selects under one label — name each directly. */}
             <div className="row">
-              <select value={padMonth(card.expMonth ?? "") ?? ""} onChange={(e) => setCard({ expMonth: e.target.value })} style={{ width: "auto" }}>
+              <select value={padMonth(card.expMonth ?? "") ?? ""} aria-label="Expiry month" onChange={(e) => setCard({ expMonth: e.target.value })} style={{ width: "auto" }}>
                 <option value="">month</option>
                 {MONTH_CHOICES.map((m) => (
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
-              <select value={card.expYear ?? ""} onChange={(e) => setCard({ expYear: e.target.value })} style={{ width: "auto" }}>
+              <select value={card.expYear ?? ""} aria-label="Expiry year" onChange={(e) => setCard({ expYear: e.target.value })} style={{ width: "auto" }}>
                 <option value="">year</option>
                 {yearChoices.map((y) => (
                   <option key={y} value={y}>{y}</option>
@@ -1586,18 +1600,17 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
             {/* Masked-with-reveal (unlike the login password's plain editor field): a CVV is
                 glanceable-short and worth shielding from shoulders by default. Digits-only
                 is applied once, at submit, beside the other card normalizations. */}
-            <SecretInput value={card.securityCode ?? ""} onChange={(v) => setCard({ securityCode: v })} />
+            <SecretInput ariaLabel="Security code" value={card.securityCode ?? ""} onChange={(v) => setCard({ securityCode: v })} />
           </div>
         </>
       )}
-      <div className="field">
-        <label>Notes</label>
+      <Field label="Notes">
         <textarea rows={isLogin || isCard ? 3 : 6} value={doc.notes ?? ""} onChange={(e) => setDoc({ ...doc, notes: e.target.value })} />
-      </div>
+      </Field>
 
       <div className="field">
         <label>Attachments</label>
-        {fileErr && <div className="msg err">{fileErr}</div>}
+        {fileErr && <Msg kind="err">{fileErr}</Msg>}
         {attachments.length > 0 && (
           <div className="attach-list">
             {attachments.map((ref) => (
@@ -1614,7 +1627,7 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
         <span className="muted" style={{ marginLeft: 10 }}>encrypted on this device · up to {humanSize(maxBytes)} each</span>
       </div>
 
-      {saveErr && <div className="msg err">{saveErr}</div>}
+      {saveErr && <Msg kind="err">{saveErr}</Msg>}
       <div className="actions">
         <button className="primary" disabled={busy || !doc.name}>
           {busy ? (progress && progress.total > 0 ? `Sealing… ${Math.min(progress.done + 1, progress.total)}/${progress.total}` : "Sealing…") : "Save"}
@@ -1978,6 +1991,18 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
 
   return (
     <div className="sheet">
+      {/* a11yweb-02/BL-1: announce the import lifecycle START + COMPLETE only (never the
+          per-row progress label — that would be screen-reader spam). Persistent region so
+          the completion, which swaps in the report branch, is not silently mounted. */}
+      <Announcer
+        text={
+          finished && report
+            ? `Import complete. Added ${report.imported} ${report.imported === 1 ? "item" : "items"} to ${destLabel}.`
+            : busy && planned
+              ? `Importing ${planned.plan.items.length} ${planned.plan.items.length === 1 ? "item" : "items"}…`
+              : ""
+        }
+      />
       <button type="button" className="link" onClick={onClose}>← back to vault</button>
       <h2 style={{ marginTop: 12 }}>Import passwords (CSV)</h2>
       <div className="muted" style={{ marginBottom: 18 }}>from a browser or another password manager · everything stays on this device</div>
@@ -2020,8 +2045,7 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
           {/* S2: destination picker (F18 idiom — rendered only when there is a real choice).
               Changing it re-plans against that vault's projections (changeDestination). */}
           {vaultChoices.length > 1 && (
-            <div className="field">
-              <label>Import into</label>
+            <Field label="Import into">
               <select value={planned.vault.vaultId} disabled={importLocked} onChange={(e) => changeDestination(e.target.value)}>
                 {vaultChoices.map((v) => (
                   <option key={v.vaultId} value={v.vaultId}>
@@ -2029,7 +2053,7 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
                   </option>
                 ))}
               </select>
-            </div>
+            </Field>
           )}
 
           {/* A10: the copy-paste-from-a-browser-tab trap (classic LastPass). Hint only. */}
@@ -2070,7 +2094,7 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
           )}
 
           {nothingToImport && <div className="msg info" style={{ display: "block" }}>Nothing new to import from this file.</div>}
-          {importErr && <div className="msg err">{importErr}</div>}
+          {importErr && <Msg kind="err">{importErr}</Msg>}
 
           {busy && progress && (
             <div className="field" style={{ marginTop: 16 }}>
@@ -2106,7 +2130,7 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
           </div>
           {/* A-webError: this branch is parseErr's ONLY render site — a bad file must
               visibly fail right here, next to the picker button. */}
-          {parseErr && <div className="msg err">{parseErr}</div>}
+          {parseErr && <Msg kind="err">{parseErr}</Msg>}
           <div className="actions">
             <button type="button" className="primary" onClick={() => fileInput.current?.click()}>Choose file…</button>
             <div className="spacer" />

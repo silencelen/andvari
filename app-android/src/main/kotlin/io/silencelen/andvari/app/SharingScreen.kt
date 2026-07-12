@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -40,6 +41,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.core.client.HeldVaultInfo
@@ -630,8 +632,11 @@ internal fun MoveCopyControl(vm: AndvariViewModel, ui: UiState, item: VaultItem,
             )
         }
         targets.forEach { t ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                RadioButton(selected = target == t.vaultId, onClick = { target = t.vaultId }, enabled = !ui.busy)
+            Row(
+                Modifier.selectable(selected = target == t.vaultId, enabled = !ui.busy, role = Role.RadioButton, onClick = { target = t.vaultId }),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = target == t.vaultId, onClick = null, enabled = !ui.busy)
                 Text(t.name + if (t.type == "personal") "" else " (shared)", style = MaterialTheme.typography.bodyMedium)
             }
         }

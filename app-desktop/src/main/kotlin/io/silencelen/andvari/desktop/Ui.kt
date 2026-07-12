@@ -1,7 +1,9 @@
 package io.silencelen.andvari.desktop
 
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -10,11 +12,17 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -89,7 +97,7 @@ fun DesktopApp(state: DesktopState) {
                 Text(
                     "Recovery sign-in — set a new master password now. This app can't change it yet: open ${state.baseUrl} in your browser and use Settings → Change master password.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
+                    color = MaterialTheme.colorScheme.onErrorContainer, // a11ydesk-01: AA on errorContainer (see ErrorBar)
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                 )
             }
@@ -132,10 +140,15 @@ private fun Sigil() {
 
 @Composable
 private fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
+    // a11ydesk-01 (P6 contrast): on `errorContainer`, paint text/controls with `onErrorContainer`,
+    // never `error`. Computed WCAG ratios (M3 default pairs, scratchpad/contrast-check.js):
+    // error-on-errorContainer ~2.56:1 dark / 4.48:1 light (fail/borderline); onErrorContainer-on-
+    // errorContainer ~7.17:1 dark / 12.77:1 light — both pass WCAG AA. Same fix at :92, :828 (warn
+    // branch only, per AM-8) and the UnopenableVaultWarning icon/title.
     if (msg != null) Card(Modifier.fillMaxWidth().padding(vertical = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = onDismiss) { Text("dismiss") }
+            Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onDismiss, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onErrorContainer)) { Text("dismiss") }
         }
     }
 }
@@ -220,7 +233,7 @@ private fun SignIn(state: DesktopState) {
     // held/double Enter (or Enter while incomplete) a no-op.
     val submit = { if (ready && !state.busy) state.signIn(email.trim(), password, code.trim().ifBlank { null }) }
     Column(Modifier.fillMaxWidth()) {
-        Field("Email", email, { email = it }, onEnter = submit)
+        Field("Email", email, { email = it }, onEnter = submit, autoFocus = true) // a11ydesk-06: focus first field on open
         Secret("Master password", password, onEnter = submit) { password = it }
         if (state.signInTotpRequired) {
             Field("One-time code", code, { code = it }, mono = true, onEnter = submit)
@@ -263,7 +276,7 @@ private fun Enroll(state: DesktopState) {
         }
     }
     Column(Modifier.fillMaxWidth()) {
-        Field("Invite token", invite, { invite = it }, mono = true, onEnter = submit)
+        Field("Invite token", invite, { invite = it }, mono = true, onEnter = submit, autoFocus = true) // a11ydesk-06: focus first field on open
         Field("Email", email, { email = it }, onEnter = submit)
         Field("Name (optional)", name, { name = it }, onEnter = submit)
         Secret("Master password", password, onEnter = submit) { password = it }
@@ -299,8 +312,11 @@ private fun Enroll(state: DesktopState) {
                 if (shortOk) {
                     Text("matches — full fingerprint: ${fp.chunked(4).joinToString(" ")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
                 }
-                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(fpOk, { fpOk = it }, enabled = shortOk)
+                // a11ydesk-03: the whole row is one toggle target and the label becomes the
+                // control's accessible name. `enabled` moves onto the toggleable so the gate holds
+                // (the Checkbox keeps it only for the disabled tint; onCheckedChange = null).
+                Row(Modifier.padding(top = 8.dp).toggleable(value = fpOk, enabled = shortOk, role = Role.Checkbox, onValueChange = { fpOk = it }), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(fpOk, onCheckedChange = null, enabled = shortOk)
                     Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
                 }
             }
@@ -337,7 +353,7 @@ private fun Unlock(state: DesktopState, email: String) {
         }
         Spacer(Modifier.height(20.dp))
         ErrorBar(state.error, state::clearError)
-        Secret("Master password", password, onEnter = submit) { password = it }
+        Secret("Master password", password, onEnter = submit, autoFocus = true) { password = it } // a11ydesk-06: focus password on unlock (the most-repeated interaction)
         Spacer(Modifier.height(12.dp))
         Primary("Unlock", password.isNotBlank() && !state.busy, state.busy, submit)
         TextButton(onClick = state::signOut) { Text("Sign out / use a different account") }
@@ -425,7 +441,7 @@ private fun Vault(state: DesktopState) {
             current != null -> Detail(state, current, vaultBadges[current.vaultId], { editing = current.itemId to current.doc }, { state.deleteItem(current.itemId); detailId = null }, { detailId = null })
             else -> Column(Modifier.fillMaxSize().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(query, { query = it }, Modifier.weight(1f), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
+                    OutlinedTextField(query, { query = it }, Modifier.weight(1f), label = { Text("Search vault") }, placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) }) // a11ydesk-07: programmatic name
                     Spacer(Modifier.width(8.dp))
                     Button(onClick = { editing = null to ItemDoc(type = "login", name = "", login = LoginData(uris = listOf(""))) }) { Text("Add") }
                     // F81: notes are mintable on desktop too — the same blank ItemDoc mint as
@@ -506,7 +522,7 @@ private fun ImportSourceFlow(onDismiss: () -> Unit, onFile: (File) -> Unit) {
                 }
                 if (helpOpen) {
                     ImportHelp.SOURCES.forEach { src ->
-                        Text(src.label, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 6.dp))
+                        Text(src.label, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 6.dp).focusable()) // a11ydesk-05: Tab stop → bringIntoView scrolls the help past the dialog height
                         src.steps.forEachIndexed { i, step ->
                             Text("${i + 1}. $step", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
                         }
@@ -629,7 +645,8 @@ private fun ImportBucket(title: String, names: List<String>, error: Boolean = fa
     var expanded by remember(names) { mutableStateOf(false) }
     val tint = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
     Spacer(Modifier.height(6.dp))
-    Text("$title (${names.size}):", style = MaterialTheme.typography.bodySmall, color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+    // a11ydesk-05: focusable bucket header → Tab traverses the preview past the dialog height (bringIntoView scrolls).
+    Text("$title (${names.size}):", style = MaterialTheme.typography.bodySmall, color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface, modifier = Modifier.focusable())
     // "Show all" is capped: this Column is non-lazy, and a mass-mangled import can put
     // thousands of rows in the error bucket — composing them all in one frame is a freeze.
     val shown = when {
@@ -825,9 +842,17 @@ private fun LifecycleNoticesBanner(notices: List<LifecycleNotice>, onDismiss: (S
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     body, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                    color = if (warn) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary,
+                    // a11ydesk-01/AM-8: warn is on errorContainer → onErrorContainer (AA); the else
+                    // branch sits on a default surface, so `secondary` stays.
+                    color = if (warn) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.secondary,
                 )
-                TextButton(onClick = { onDismiss(n.id) }) { Text("Dismiss") }
+                TextButton(
+                    onClick = { onDismiss(n.id) },
+                    // a11ydesk-01: the warn card is errorContainer → the dismiss label needs
+                    // onErrorContainer too (default primary gold is ~4.1:1 there, below AA);
+                    // twin of the ErrorBar dismiss fix.
+                    colors = if (warn) ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onErrorContainer) else ButtonDefaults.textButtonColors(),
+                ) { Text("Dismiss") }
             }
         }
     }
@@ -878,12 +903,12 @@ private fun UnopenableVaultWarning(count: Int) {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error)
+            Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.onErrorContainer) // a11ydesk-01: AA on errorContainer
             Spacer(Modifier.width(10.dp))
             Column {
                 Text(
                     if (count == 1) "Can't open this shared vault on this device" else "Can't open $count shared vaults on this device",
-                    style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onErrorContainer, // a11ydesk-01
                 )
                 Text(
                     "Someone shared a vault with you, but this device can't unlock it — its key was sealed to a different device, or it needs a newer version of andvari. Open andvari on the device you first set up (or update this app); it'll appear here on its own once it can be opened.",
@@ -1122,9 +1147,20 @@ private fun RenameHeader(state: DesktopState, v: VaultInfo) {
             TextButton(onClick = { name = v.name; editing = true }) { Text("Rename") }
         }
     } else {
-        Column {
+        // a11ydesk-04 (F72): Enter in the field saves (same !busy && non-empty gate as the Save
+        // button), Escape on the editor cancels — reusing the file's submitOnEnter/dismissOnEscape
+        // helpers, matching MoveCopyControl.
+        val save = {
+            if (!state.busy && name.trim().isNotEmpty()) {
+                val next = name.trim()
+                if (next != v.name) state.renameVault(v.vaultId, next)
+                editing = false
+            }
+        }
+        val cancel = { editing = false }
+        Column(Modifier.dismissOnEscape(cancel)) {
             OutlinedTextField(
-                name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Rename vault") },
+                name, { name = it }, Modifier.fillMaxWidth().submitOnEnter(save), label = { Text("Rename vault") },
                 singleLine = true, enabled = !state.busy,
             )
             Text(
@@ -1132,15 +1168,8 @@ private fun RenameHeader(state: DesktopState, v: VaultInfo) {
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(
-                    onClick = {
-                        val next = name.trim()
-                        if (next.isNotEmpty() && next != v.name) state.renameVault(v.vaultId, next)
-                        editing = false
-                    },
-                    enabled = !state.busy && name.trim().isNotEmpty(),
-                ) { Text("Save") }
-                TextButton(onClick = { editing = false }, enabled = !state.busy) { Text("Cancel") }
+                TextButton(onClick = save, enabled = !state.busy && name.trim().isNotEmpty()) { Text("Save") }
+                TextButton(onClick = cancel, enabled = !state.busy) { Text("Cancel") }
             }
         }
     }
@@ -1219,7 +1248,13 @@ private fun DeleteVaultControl(state: DesktopState, v: VaultInfo) {
     val items = state.items.filter { it.vaultId == v.vaultId }
     val attachmentCount = items.sumOf { it.doc.attachments.size }
     val eraseDay = fmtDay(System.currentTimeMillis() + 7L * 86_400_000)
-    Column {
+    // a11ydesk-04 (F72): Escape cancels the whole delete editor, matching MoveCopyControl.
+    val cancel: () -> Unit = { open = false; typed = ""; state.clearCopiedNote() }
+    // a11ydesk-06 (AM-9): focus the name-confirm field when the editor opens; runCatching guards
+    // the placement race — desktop has no test harness, so a crash would reach the user.
+    val delFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { delFocus.requestFocus() } }
+    Column(Modifier.dismissOnEscape(cancel)) {
         Text("Delete “${v.name}”?", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -1262,12 +1297,12 @@ private fun DeleteVaultControl(state: DesktopState, v: VaultInfo) {
         )
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
-            typed, { typed = it }, Modifier.fillMaxWidth(),
+            typed, { typed = it }, Modifier.fillMaxWidth().focusRequester(delFocus), // a11ydesk-06
             label = { Text("Type the vault's name to delete it") }, placeholder = { Text(v.name) },
             singleLine = true, enabled = !state.busy,
         )
         Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.End) {
-            TextButton(onClick = { open = false; typed = ""; state.clearCopiedNote() }, enabled = !state.busy) { Text("Cancel") }
+            TextButton(onClick = cancel, enabled = !state.busy) { Text("Cancel") }
             Spacer(Modifier.width(8.dp))
             TextButton(
                 // A-copyGate: copyOpVaultId is the NON-DISPLAY in-flight marker — busy alone
@@ -2001,15 +2036,15 @@ private fun BackupPreflightDialog(
                     if (v.type == "personal") {
                         Text("• ${v.name} — ${v.itemCount} item(s), personal", style = MaterialTheme.typography.bodySmall)
                     } else {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(v.vaultId in selected, { on -> selected = if (on) selected + v.vaultId else selected - v.vaultId })
+                        Row(Modifier.toggleable(value = v.vaultId in selected, role = Role.Checkbox, onValueChange = { on -> selected = if (on) selected + v.vaultId else selected - v.vaultId }), verticalAlignment = Alignment.CenterVertically) { // a11ydesk-03
+                            Checkbox(v.vaultId in selected, onCheckedChange = null)
                             Text("${v.name} — ${v.itemCount} item(s), shared (${v.role})", style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(includeAttachments, { includeAttachments = it })
+                Row(Modifier.toggleable(value = includeAttachments, role = Role.Checkbox, onValueChange = { includeAttachments = it }), verticalAlignment = Alignment.CenterVertically) { // a11ydesk-03
+                    Checkbox(includeAttachments, onCheckedChange = null)
                     Text("Include attachments (${humanSize(plan.totalBytes)})", style = MaterialTheme.typography.bodySmall)
                 }
                 if (includeAttachments && plan.overCap.isNotEmpty()) {
@@ -2017,7 +2052,7 @@ private fun BackupPreflightDialog(
                     plan.overCap.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
                 }
                 Spacer(Modifier.height(8.dp))
-                Secret("Backup passphrase", passphrase, onEnter = submit) { passphrase = it }
+                Secret("Backup passphrase", passphrase, onEnter = submit, autoFocus = true) { passphrase = it } // a11ydesk-06
                 Secret("Confirm passphrase", confirm, onEnter = submit) { confirm = it }
                 if (passphrase.isNotEmpty()) {
                     val ok = score >= Strength.BACKUP_FLOOR
@@ -2146,7 +2181,7 @@ private fun TotpSetupBlock(state: DesktopState, setup: TotpSetupResponse) {
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         CopyPlainRow("otpauth URI", setup.otpauthUri)
         CopyPlainRow("Secret (base32)", setup.secretBase32)
-        Field("One-time code", code, { code = it }, mono = true, onEnter = submit)
+        Field("One-time code", code, { code = it }, mono = true, onEnter = submit, autoFocus = true) // a11ydesk-06
         state.totpError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         Spacer(Modifier.height(8.dp))
         Primary("Confirm", code.isNotBlank() && !state.busy, state.busy, submit)
@@ -2213,19 +2248,30 @@ private fun Modifier.dismissOnEscape(dismiss: () -> Unit): Modifier =
     }
 
 @Composable
-private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true, onEnter: (() -> Unit)? = null) {
+private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true, onEnter: (() -> Unit)? = null, autoFocus: Boolean = false) {
     // F72 multi-line guard: onEnter is dropped (not just unused) when singleLine=false.
-    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).submitOnEnter(onEnter.takeIf { singleLine }), label = { Text(label) }, singleLine = singleLine,
+    // a11ydesk-06 (AM-9): optional initial focus — desktop had zero FocusRequester, so auth screens
+    // opened focused on nothing. runCatching guards the composition race (requestFocus throws
+    // "FocusRequester is not initialized" if it fires before the node is placed, and desktop has no
+    // test harness so a crash would reach the user on Unlock). Use autoFocus = true on EXACTLY ONE
+    // field per screen — multiple requesters race, last wins.
+    val fr = remember { FocusRequester() }
+    LaunchedEffect(autoFocus) { if (autoFocus) runCatching { fr.requestFocus() } }
+    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).then(if (autoFocus) Modifier.focusRequester(fr) else Modifier).submitOnEnter(onEnter.takeIf { singleLine }), label = { Text(label) }, singleLine = singleLine,
         textStyle = if (mono) MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace) else MaterialTheme.typography.bodyMedium)
 }
 
 @Composable
-private fun Secret(label: String, value: String, onEnter: (() -> Unit)? = null, onChange: (String) -> Unit) {
+private fun Secret(label: String, value: String, onEnter: (() -> Unit)? = null, autoFocus: Boolean = false, onChange: (String) -> Unit) {
     var show by remember { mutableStateOf(false) }
-    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).submitOnEnter(onEnter), label = { Text(label) }, singleLine = true,
+    // a11ydesk-06 (AM-9): see Field — optional initial focus, runCatching-guarded, one per screen.
+    val fr = remember { FocusRequester() }
+    LaunchedEffect(autoFocus) { if (autoFocus) runCatching { fr.requestFocus() } }
+    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).then(if (autoFocus) Modifier.focusRequester(fr) else Modifier).submitOnEnter(onEnter), label = { Text(label) }, singleLine = true,
         visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-        trailingIcon = { IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) } })
+        // a11ydesk-02: name the reveal toggle; the description doubles as the shown/hidden state.
+        trailingIcon = { IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "hide value" else "show value") } })
 }
 
 /** [display] is what a reveal shows (e.g. a grouped card number); Copy always hands over the raw [value]. */
@@ -2236,7 +2282,7 @@ private fun CopyRow(label: String, value: String, secret: Boolean, clearSeconds:
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (show) display else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
-            if (secret) IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) }
+            if (secret) IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "hide value" else "show value") } // a11ydesk-02
             TextButton(onClick = { copyWithAutoClear(value, clearSeconds) }) { Text("Copy") }
         }
     }
@@ -2261,7 +2307,9 @@ private fun ServerField(baseUrl: String, onSet: (String) -> Unit) {
 @Composable
 private fun Primary(text: String, enabled: Boolean, busy: Boolean, onClick: () -> Unit) {
     Button(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-        if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary) else Text(text)
+        // a11ydesk-08: while busy the label is replaced by a bare spinner — name the spinner with the
+        // button's text (+ "working" state) so a screen reader still announces the action.
+        if (busy) CircularProgressIndicator(Modifier.size(18.dp).semantics { contentDescription = text; stateDescription = "working" }, strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary) else Text(text)
     }
 }
 

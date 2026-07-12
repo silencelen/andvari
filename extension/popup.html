@@ -8,12 +8,15 @@
   <body>
     <header class="pop-head">
       <span class="brand"><span class="sigil-sm">ᛅ</span><span class="a-mark">and</span>vari</span>
-      <span id="conn" class="dot off" title="server"></span>
+      <!-- a11y 5a: the coloured dot is decorative; the visually-hidden twin carries the state
+           to AT (a title on a non-interactive span is unreliable + unfocusable). -->
+      <span id="conn" class="dot off" title="server" aria-hidden="true"></span>
+      <span id="conn-status" class="visually-hidden">Server status unknown</span>
     </header>
 
     <!-- Self-update signal (both views). Shown only when a strictly-newer build is published;
          unpacked extensions can't self-install, so this points to the download + a reload. -->
-    <div id="update" class="update-banner" hidden>
+    <div id="update" class="update-banner" role="status" hidden>
       <span id="update-text"></span>
       <a id="update-link" class="update-link" target="_blank" rel="noopener noreferrer" hidden></a>
     </div>
@@ -51,13 +54,20 @@
 
     <section id="unlocked" class="unlocked" hidden>
       <div class="toolbar">
+        <!-- a11y 1a: placeholder is not a programmatic name — a real (off-screen) label is. -->
+        <label for="search" class="visually-hidden">Search the hoard</label>
         <input id="search" type="search" placeholder="Search the hoard…" autocomplete="off" spellcheck="false" />
-        <button id="gen-toggle" class="ghost gen-toggle" title="Password generator">⚄</button>
+        <!-- a11y 3c/5c: name comes from aria-label (the ⚄ glyph is decorative); the die is
+             hidden from AT, and aria-expanded/aria-controls expose the generator's open state. -->
+        <button id="gen-toggle" class="ghost gen-toggle" title="Password generator"
+                aria-label="Password generator" aria-controls="generator" aria-expanded="false">
+          <span aria-hidden="true">⚄</span>
+        </button>
       </div>
       <section id="generator" class="gen" hidden>
         <div class="section-label">New password</div>
         <div class="secret-row">
-          <button id="gen-pass" class="gen-pass" title="Click to copy"></button>
+          <button id="gen-pass" class="gen-pass" title="Click to copy" aria-label="Copy generated password"></button>
           <button id="gen-again" class="ghost">Regenerate</button>
         </div>
         <span id="gen-flash" class="copy-flash" hidden>copied ✓</span>
@@ -80,6 +90,11 @@
 
     <!-- Shared message strip: unlock errors, ping results, copy failures — both views. -->
     <div id="msg" class="msg" hidden></div>
+
+    <!-- a11y 2d: one persistent polite announcer for copy confirmations (button ✓, TOTP
+         "copied", generator flash) — these are visual-only, and the buttons keep a stable
+         aria-label, so the "copied" feedback must be spoken from here. -->
+    <span id="copy-live" class="visually-hidden" aria-live="polite"></span>
 
     <footer class="pop-foot">
       <div class="foot-row">
