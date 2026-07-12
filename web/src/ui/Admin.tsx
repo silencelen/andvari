@@ -258,10 +258,24 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
   );
 }
 
-/** QR-minted invites get a short TTL — a photographed QR cannot be revoked (no invite
- *  list/revoke surface exists), so expiry is the only containment. 60 min fits a real
- *  install-app + join-network + scan + set-password + type-sheet flow. */
-const QR_INVITE_TTL_MINUTES = 60;
+/** Every invite is a bearer credential; per AdminService.kt the invite TTL is the SOLE containment
+ *  for a photographed/leaked QR (the org recovery fingerprint the enrollee types is PUBLIC — it
+ *  does NOT bind a token holder). So the admin picks the lifetime, defaulting SHORT; 1 day / 3 days
+ *  are conscious hand-delivery opt-ins. Values stay inside the server's [5, 4320]-minute clamp.
+ *  Pure + exported so a refactor that adds an out-of-range or wrong default trips a unit test. */
+export type InviteTtl = "1h" | "1d" | "3d";
+export const INVITE_TTL_DEFAULT: InviteTtl = "1h";
+export function inviteTtlMinutes(choice: InviteTtl): number {
+  switch (choice) {
+    case "1h": return 60;
+    case "1d": return 24 * 60;
+    case "3d": return 72 * 60;
+    // Fail SAFE to the SHORT window: a future <option> added without its own case mints at 60 min,
+    // NEVER silently at the server's 72h default (which is what returning `undefined` →
+    // adminInvite(undefined) would do). Keeps "secure-by-default-short" robust against a careless edit.
+    default: return 60;
+  }
+}
 
 /** v1 containment (design §Server work 2): the QR path is offered only on a private origin.
  *  The link embeds that origin, and public register is server-refused anyway — a public QR
@@ -281,45 +295,52 @@ export function tryQrModules(link: string): boolean[][] | null {
   }
 }
 
+/** The invite result view is a pure function of (can this origin show a QR, did the link encode,
+ *  did the QR matrix build). Pinned so a refactor can't resurface a dead/misleading QR affordance
+ *  on the public break-glass origin — qrAvailable=false is ALWAYS "token-only" (breaker BLOCKER 2:
+ *  gating a QR/compose note on bare !resultLink would paint a false "couldn't encode a QR" on every
+ *  public invite, since resultLink is null there too). */
+export type InviteResultView = "token-only" | "qr" | "overflow-link" | "compose-note";
+export function inviteResultView(qrAvailable: boolean, linkComposed: boolean, modulesOk: boolean): InviteResultView {
+  if (!qrAvailable) return "token-only";
+  if (!linkComposed) return "compose-note";
+  return modulesOk ? "qr" : "overflow-link";
+}
+
 function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () => void }) {
   const [email, setEmail] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
+  const [ttl, setTtl] = useState<InviteTtl>(INVITE_TTL_DEFAULT);
   const [result, setResult] = useState<InviteResponse | null>(null);
   const [resultLink, setResultLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  // The enroll link embeds location.origin verbatim. On the public break-glass origin that
-  // link would sail through the whole ceremony and then die at register (public-register is
-  // server-refused) — so the QR path simply doesn't exist there. The plain token stays: a
-  // token minted anywhere is redeemed wherever the member actually enrolls.
+  // The enroll link embeds location.origin verbatim. On the public break-glass origin that link
+  // would sail through the whole ceremony and then die at register (public-register is
+  // server-refused) — so the QR path simply doesn't exist there; the plain token stays, redeemed
+  // wherever the member actually enrolls. shouldOfferQr gates every QR-bearing surface below.
   const qrAvailable = shouldOfferQr(window.location.origin);
 
-  const mint = async (withQr: boolean) => {
+  const mint = async () => {
     setBusy(true);
     setErr("");
     setResult(null);
     setResultLink(null);
     try {
-      const r = await client.adminInvite(email.trim(), isAdmin, withQr ? QR_INVITE_TTL_MINUTES : undefined);
+      const r = await client.adminInvite(email.trim(), isAdmin, inviteTtlMinutes(ttl));
       setResult(r);
-      if (withQr) {
-        // composeEnrollLink refuses ill-formed UTF-16 (null) — a lone surrogate can
-        // round-trip JSON as \udXXX, so "the server validated the email" is no guarantee.
-        // Clear the just-set token panel too or it renders right next to the error
-        // (same never-let-the-encoder-white-screen stance as tryQrModules below).
-        const link = composeEnrollLink(window.location.origin, r.inviteToken, r.email);
-        if (link === null) {
-          setResult(null);
-          setErr("This invite couldn't be encoded as a QR link — mint again with the plain Invite button instead.");
-          onInvited(); // the invite itself WAS minted server-side; keep the list honest
-          return;
-        }
-        setResultLink(link);
+      if (qrAvailable) {
+        // composeEnrollLink refuses ill-formed UTF-16 (null) — a lone surrogate can round-trip
+        // JSON as \udXXX, so "the server validated the email" is no guarantee. On null we KEEP the
+        // token (the invite WAS minted) and fall to the "compose-note" view — there is no plain
+        // Invite button to retry with anymore, so NEVER clear the result.
+        setResultLink(composeEnrollLink(window.location.origin, r.inviteToken, r.email));
       }
       setEmail("");
       setIsAdmin(false);
+      // keep `ttl` — an admin minting several invites is likely using one delivery method
       onInvited();
     } catch (e) {
       setErr(errText(e));
@@ -330,7 +351,7 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await mint(false);
+    await mint();
   };
 
   const copy = async (value: string, link: boolean) => {
@@ -342,25 +363,32 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
   // The vendored encoder THROWS (a bare string) on capacity overflow — never let a long
   // origin+email white-screen Admin; fall back to the copyable link.
   const modules = useMemo(() => (resultLink ? tryQrModules(resultLink) : null), [resultLink]);
+  const view: InviteResultView | null = result ? inviteResultView(qrAvailable, resultLink !== null, modules !== null) : null;
+  const showLink = view === "qr" || view === "overflow-link";
 
   return (
     <form className="sheet" style={{ marginBottom: 20 }} onSubmit={submit}>
       <h2>Invite a user</h2>
       {err && <Msg kind="err">{err}</Msg>}
+      {/* AM-2 / BL-1: "Invite created" is async status → a PERSISTENT (unconditionally mounted)
+          visually-hidden region, driven by result?.email so it re-announces on a same-email repeat. */}
+      <Announcer text={result ? `Invite created for ${result.email}` : ""} />
       <div className="row" style={{ alignItems: "flex-end" }}>
         <Field label="Email" style={{ flex: 1, marginBottom: 0 }}>
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="new@user" />
+        </Field>
+        <Field label="Invite expires in" style={{ marginBottom: 0 }}>
+          <select value={ttl} onChange={(e) => setTtl(e.target.value as InviteTtl)}>
+            <option value="1h">1 hour</option>
+            <option value="1d">1 day</option>
+            <option value="3d">3 days</option>
+          </select>
         </Field>
         <label className="check" style={{ margin: "0 0 10px" }}>
           <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} />
           <span>admin</span>
         </label>
         <button className="ghost" disabled={busy || !email.trim()}>{busy ? "Inviting…" : "Invite"}</button>
-        {qrAvailable && (
-          <button type="button" className="ghost" disabled={busy || !email.trim()} onClick={() => void mint(true)}>
-            {busy ? "Inviting…" : "Invite with QR"}
-          </button>
-        )}
       </div>
       {result && (
         <div className="token-box">
@@ -371,9 +399,14 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
             <input readOnly className="mono token" value={result.inviteToken} onFocus={(e) => e.target.select()} />
             <button type="button" className="ghost" onClick={() => void copy(result.inviteToken, false)}>{copied ? "Copied ✓" : "Copy"}</button>
           </div>
-          {resultLink && (
+          {view === "compose-note" && (
+            <div className="muted" style={{ marginTop: 8 }}>
+              Couldn't encode a QR link for this address — hand over the token above instead.
+            </div>
+          )}
+          {showLink && resultLink && (
             <div style={{ marginTop: 12 }}>
-              {modules ? (
+              {view === "qr" && modules ? (
                 <QrSvg modules={modules} ariaLabel={`Enrollment QR code for ${result.email}`} />
               ) : (
                 <div className="msg info" style={{ display: "block" }}>QR too dense to render — use the link below instead.</div>
@@ -383,7 +416,7 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
                 <button type="button" className="ghost" onClick={() => void copy(resultLink, true)}>{copiedLink ? "Copied ✓" : "Copy link"}</button>
               </div>
               <div className="muted" style={{ marginTop: 8 }}>
-                Valid for about {QR_INVITE_TTL_MINUTES} minutes (expires {fmtDate(result.expiresAt)}). They scan this with their phone camera (or open the link) <strong>while on the same network as this page's address</strong> — for a phone that isn't on the tailnet yet, mint from the LAN address instead. Hand them the <strong>printed recovery sheet in person</strong>: enrollment asks them to type its first 16 characters, and that step is the real security check — the QR only saves typing.
+                Expires {fmtDate(result.expiresAt)}. They scan this with their phone camera (or open the link) <strong>while on the same network as this page's address</strong> — for a phone that isn't on the tailnet yet, mint from the LAN address instead. <strong>Anyone who photographs this can use it until it expires — it can't be revoked</strong>, so keep the window short and hand them the <strong>printed recovery sheet in person</strong>.
               </div>
             </div>
           )}
