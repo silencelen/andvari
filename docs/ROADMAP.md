@@ -235,6 +235,20 @@ Prioritized; each is additive and back-compatible.
   short invite TTL for emailed invites (the QR-invite precedent, `QR_INVITE_TTL_MINUTES`).
   Cross-check whether emailed invites should be limited to the private origin. Pitch-until-ratified
   (exploration/N7 lane); no build without the owner signing the mail-surface tradeoff.
+  **STATUS 2026-07-12: RATIFIED (owner chose "email the token, hardened") + DESIGNED + BREAKER-VETTED
+  — build-ready, gated on OWNER OPS.** Full design + the binding breaker findings (2 BLOCKERs + 8
+  amendments) in `docs/design/2026-07-12-email-invite.md`. Relay = the household **M365 tenant**
+  (`smtp.office365.com:587`, from a no-reply `@monahanhosting.com`). The breaker's threat-model
+  correction: the printed-sheet fingerprint is PUBLIC and does NOT bind a token holder (per cut 2),
+  so the emailed token is a bearer credential contained only by a forced ≤60 min TTL + private-origin
+  + public-register-refused. Owner chose to **land the vetted design now + build as a focused next
+  pass** (the code is inert until the ops below). **OWNER OPS (the long pole):** (1) a no-reply M365
+  mailbox with SMTP AUTH enabled (or a Graph app-registration); (2) a VLAN-2 outbound firewall rule
+  CT122 → `smtp.office365.com:587`; (3) `ANDVARI_SMTP_*` + `ANDVARI_INVITE_BASE_URL` (a CANONICAL
+  origin — no trailing slash/`:443`/uppercase, or every emailed link is DOA) in `andvari.env`.
+  Next-session build: EmailSender(SMTP, TLS-required) + `createInvite(sendEmail)` reusing
+  `core.EnrollLink.compose` + address-validation (B1) + boot base-URL self-test (B2) + off-thread
+  send + rate-limit + spec/05 R8 + tests → find→refute → ship flag-OFF.
 
 - **Owner dev-note 2026-07-12 — collapse "Invite" + "Invite with QR" into ONE "Invite" button
   that shows the QR by default (with the token).** Today `InviteForm`
