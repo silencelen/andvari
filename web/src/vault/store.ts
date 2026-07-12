@@ -193,8 +193,12 @@ export class VaultStore {
   private itemsById = new Map<string, VaultItem>();
   private vaultsById = new Map<string, WireVault>();
   /** spec 07 §2.4: HELD-key decrypt failures retained at sync time (see [undecryptable]).
-   *  Mutually exclusive with itemsById — an itemId lives in exactly one of the two. */
+   *  Mutually exclusive with itemsById AND missingVkById — an itemId lives in exactly one of the three. */
   private undecryptableById = new Map<string, UndecryptableItem>();
+  /** spec 07 §2.4: items whose vault VK we CANNOT open (a missing/undecryptable grant) — skipped
+   *  from list() but ENUMERATED into a backup (mirrors the Kotlin ExportPlanner), never silently
+   *  omitted. Kept separate from undecryptableById (held-but-failed); merged in [undecryptable]. */
+  private missingVkById = new Map<string, UndecryptableItem>();
   private _lastSyncAt: number | null = null;
 
   // ---- vault lifecycle state (spec 03 §11) ----
@@ -243,16 +247,16 @@ export class VaultStore {
   }
 
   /**
-   * Items whose vault key IS held but whose blob failed decryptItem at sync time — a
-   * newer formatVersion (spec 02 §3 fail-closed) or a corrupt/mismatched blob. The
-   * export flow enumerates these into `skipped.undecryptable` (spec 07 §2.4) instead
-   * of silently omitting credentials from a backup; they stay OUT of the visible
-   * list()/get() surface. Items of vaults with no key are deliberately absent — those
-   * aren't ours to enumerate (the Kotlin clients derive the same held-key set from
-   * their retained envelopes). Sorted for deterministic backup bytes.
+   * The backup's `skipped.undecryptable` (spec 07 §2.4): every item that exists but can't be
+   * decrypted right now — HELD-key decrypt failures (a newer formatVersion, spec 02 §3 fail-closed,
+   * or a corrupt/mismatched blob) AND items whose vault VK we cannot open (a missing / undecryptable
+   * grant). Both are skipped from the visible list()/get() surface but ENUMERATED here instead of
+   * silently omitted from a backup — matching the Kotlin ExportPlanner (which enumerates missing-VK
+   * items too; the earlier "not ours to enumerate" claim here was wrong). Sorted for deterministic
+   * backup bytes.
    */
   undecryptable(): UndecryptableItem[] {
-    return [...this.undecryptableById.values()].sort(
+    return [...this.undecryptableById.values(), ...this.missingVkById.values()].sort(
       (a, b) => a.vaultId.localeCompare(b.vaultId) || a.itemId.localeCompare(b.itemId),
     );
   }
@@ -356,6 +360,7 @@ export class VaultStore {
       this.itemsById.clear();
       this.vaultsById.clear();
       this.undecryptableById.clear();
+      this.missingVkById.clear(); // A1: a 410 resync-from-0 re-enumerates missing-VK items from scratch
       // F20: a resync re-delivers every current grant — drop the warning set so a vault no longer
       // granted (revoked while offline) doesn't leave a stale "can't open" row; still-bad grants
       // below re-populate it. (addedNoticed is left intact: since=0 never fires an added notice.)
@@ -432,7 +437,21 @@ export class VaultStore {
 
     const conflictsToMaterialize: WireItem[] = [];
     for (const item of resp.items) {
-      if (!this.account.hasVault(item.vaultId)) continue;
+      if (!this.account.hasVault(item.vaultId)) {
+        // spec 07 §2.4: an item whose vault VK we cannot open is SKIPPED but ENUMERATED into
+        // skipped.undecryptable (mirroring the Kotlin ExportPlanner), never silently omitted from a
+        // backup. A tombstone ends the enumeration. (A grant that OPENS mid-session does not
+        // re-deliver these unchanged items, so they stay enumerated-as-skipped until the next full
+        // sync reloads + clears them below — over-reporting, which for a BACKUP is safe: an item
+        // named as "skipped" beats a silent omission, which is spec 07 §2.4's whole point.)
+        if (item.deleted) this.missingVkById.delete(item.itemId);
+        else this.missingVkById.set(item.itemId, { itemId: item.itemId, vaultId: item.vaultId, formatVersion: item.formatVersion });
+        continue;
+      }
+      // The vault VK is held now — clear any prior missing-VK enumeration for this item. This one
+      // line covers became-decryptable (below), held-but-newer-fv (the catch), and held-tombstone,
+      // and prevents a missing-VK→held-newer-fv item being counted in BOTH maps (double-count).
+      this.missingVkById.delete(item.itemId);
       if (item.deleted) {
         this.itemsById.delete(item.itemId);
         this.undecryptableById.delete(item.itemId); // a tombstone ends the enumeration too
@@ -708,6 +727,7 @@ export class VaultStore {
   private hardDropLocal(vaultId: string): void {
     for (const it of [...this.itemsById.values()]) if (it.vaultId === vaultId) this.itemsById.delete(it.itemId);
     for (const it of [...this.undecryptableById.values()]) if (it.vaultId === vaultId) this.undecryptableById.delete(it.itemId);
+    for (const it of [...this.missingVkById.values()]) if (it.vaultId === vaultId) this.missingVkById.delete(it.itemId);
     this.vaultsById.delete(vaultId);
     this.grantWireByVault.delete(vaultId);
     this.incomingByVault.delete(vaultId);

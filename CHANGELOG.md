@@ -17,6 +17,18 @@
   filling already uses, so a malicious app can't claim to be a website (e.g. "github.com") to make
   andvari update the wrong saved login — an untrusted app is matched only to itself.
 
+### Backups now list what they couldn't include (web)
+
+- An encrypted `.andvari` backup made in the browser now **lists every item it couldn't decrypt and
+  include** — including items in a shared vault whose key your account can't currently open — in its
+  `skipped.undecryptable` section, instead of silently leaving them out. Silent omission is the one
+  thing a backup must never do; the phone and desktop backups already enumerated these, and web now
+  matches. (No credential is exposed — only the item's id, its vault id, and its format version, all
+  of which the server already sees.)
+- Small copy fixes: the Sharing trash-icon now says "Recently deleted **& removed** vaults" (it opens
+  both), and the "you lost access to a vault" notice now points you to where the sealed copy lives
+  (Sharing → the trash icon), matching the Android wording.
+
 ### One "Invite" button, and you choose how long an invite lasts
 
 - The admin invite form's two buttons ("Invite" and "Invite with QR") are now a **single Invite

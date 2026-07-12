@@ -105,8 +105,8 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
             <button
               type="button"
               className={`ghost ${trashOpen ? "active" : ""}`}
-              aria-label="Recently deleted vaults"
-              title="Recently deleted vaults"
+              aria-label="Recently deleted & removed vaults"
+              title="Recently deleted & removed vaults"
               aria-expanded={trashOpen}
               onClick={() => setTrashOpen((o) => !o)}
             >
