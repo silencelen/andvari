@@ -15,7 +15,9 @@
   --edge-strong: #4a3f28;
   --ink: #ede4d0;
   --ink-dim: #a79c85;
-  --ink-faint: #6f6752;
+  /* a11y 7a: raised from #6f6752 (≈3.3:1) to meet WCAG AA on faint text — 5.00:1 on --bg,
+     4.59:1 on --bg-raised. Kept identical to web/src/ui/styles.css --ink-faint (in sync). */
+  --ink-faint: #8d8370;
   --gold: #d0a94a;
   --gold-bright: #e8c66a;
   --gold-deep: #8a6d28;
@@ -38,7 +40,8 @@
     --edge-strong: #c9bfa2;
     --ink: #2c2517;
     --ink-dim: #6b6047;
-    --ink-faint: #9a8f74;
+    /* a11y 7a: raised from #9a8f74 (≈2.8:1) — 4.51:1 on --bg, 4.88:1 on --bg-raised. In sync with web. */
+    --ink-faint: #786c50;
     --gold: #9a7420;
     --gold-bright: #7d5e14;
     --gold-deep: #c9a94a;
@@ -57,6 +60,19 @@
 /* The views toggle via the hidden attribute; without this, any rule that sets
    display (.unlocked { display:flex }) would out-cascade the UA's [hidden]. */
 [hidden] { display: none !important; }
+
+/* a11y AM-2: off-screen-but-accessible utility. Present in the a11y tree (unlike [hidden]),
+   so labels, the conn-status twin, the copy announcer, and the TOTP seconds-left description
+   are read by screen readers while invisible. 1px clip-rect — the house/web idiom. */
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 
 html { width: 360px; }
 body {
@@ -105,7 +121,9 @@ input {
   padding: 9px 11px; transition: border-color 0.15s, box-shadow 0.15s;
 }
 input:focus { outline: none; border-color: var(--gold-deep); box-shadow: 0 0 0 3px rgba(208, 169, 74, 0.14); }
-input::placeholder { color: var(--ink-faint); }
+/* a11y 7b: placeholders carried faint (≈2.8:1); bump to --ink-dim (≈6.3:1 dark, higher light).
+   The real label fix is 1a (visually-hidden <label for=search>) — this covers the visible hint. */
+input::placeholder { color: var(--ink-dim); }
 input.mono { font-family: var(--mono); font-size: 12.5px; }
 
 button.primary {

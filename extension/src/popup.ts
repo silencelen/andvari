@@ -37,12 +37,18 @@ let searchSeq = 0;
  *  and a newer copy replaces the pending clear — so an earlier timer can never wipe a
  *  later secret mid-window. */
 let clipClearTimer: number | undefined;
+/** Monotonic id source for per-chip TOTP "seconds left" descriptions (a11y 5b). */
+let totpSeq = 0;
 
 function showMsg(kind: "err" | "info", text: string): void {
   const m = el("msg");
   m.className = `msg ${kind}`;
-  m.textContent = text;
+  // a11y 2a — ORDER MATTERS (the static-read caveat): the region must be in the a11y tree
+  // (unhidden) with its live role set BEFORE its text mutates, or the first message is dropped.
+  // unhide → role → text. Errors are assertive (role=alert), info is polite (role=status).
   m.hidden = false;
+  m.setAttribute("role", kind === "err" ? "alert" : "status");
+  m.textContent = text;
 }
 
 function clearMsg(): void {
@@ -55,6 +61,18 @@ function setConn(ok: boolean): void {
   const dot = el("conn");
   dot.className = `dot ${ok ? "on" : "off"}`;
   dot.title = ok ? "server reachable" : "server unreachable";
+  el("conn-status").textContent = ok ? "Server reachable" : "Server unreachable"; // a11y 5a twin
+}
+
+/** a11y 2d — one polite announcer for copy confirmations. The visible feedback (button ✓, TOTP
+ *  "copied", generator flash) never becomes an accessible name (the buttons keep a stable
+ *  aria-label), so the confirmation is spoken from here. Clear-then-set so repeats re-announce. */
+function announce(text: string): void {
+  const live = el("copy-live");
+  live.textContent = "";
+  window.setTimeout(() => {
+    live.textContent = text;
+  }, 50);
 }
 
 function showView(unlocked: boolean): void {
@@ -77,6 +95,7 @@ function showView(unlocked: boolean): void {
     el("gen-pass").textContent = "";
     el("generator").hidden = true;
     el("gen-toggle").classList.remove("on");
+    el("gen-toggle").setAttribute("aria-expanded", "false"); // a11y 5c: collapsed on lock
   }
 }
 
@@ -93,6 +112,11 @@ async function refresh(): Promise<void> {
   el("must-change").hidden = !(s.unlocked && s.mustChangePassword);
   if (s.unlocked) {
     await loadUnlocked();
+    // a11y 2c: on a recovery-password session, move focus onto the critical notice so a screen
+    // reader announces it (loadUnlocked otherwise leaves focus on #search). It IS a button — the
+    // last focus wins, so this beats the focus race rather than relying on an appears-populated
+    // role=alert. No-op if the strip is hidden (e.g. a mid-load relock).
+    if (s.mustChangePassword) el("must-change").focus();
     return;
   }
   // F26 (E1-7): say WHY the vault is locked — recorded for idle autolock only (manual lock
@@ -146,6 +170,10 @@ async function rememberedEmail(): Promise<string | null> {
 
 function relocked(): void {
   showView(false);
+  // a11y 4a: a mid-session relock hid the unlocked view under focus — move focus to a real
+  // element (#email) instead of letting it fall to <body>. showMsg is a live region (2a) so
+  // the reason is announced.
+  el("email").focus();
   showMsg("info", "Session locked — unlock to continue.");
 }
 
@@ -391,7 +419,8 @@ function actBtn(label: string, title: string, onClick: (btn: HTMLButtonElement) 
   b.className = "fill-btn";
   b.textContent = label;
   b.title = title;
-  b.dataset["label"] = label;
+  b.setAttribute("aria-label", title); // a11y 3a: the terse glyph text ("user"/"pass"/"num"…)
+  b.dataset["label"] = label; //          is not a usable name — the title is the real one.
   b.addEventListener("click", (e) => {
     e.stopPropagation(); // the row itself fills
     onClick(b);
@@ -400,6 +429,7 @@ function actBtn(label: string, title: string, onClick: (btn: HTMLButtonElement) 
 }
 
 function flash(btn: HTMLElement): void {
+  announce("Copied"); // a11y 2d: the ✓ is visual-only + the button keeps its aria-label
   btn.textContent = "✓";
   btn.classList.add("did");
   window.setTimeout(() => {
@@ -463,12 +493,22 @@ function totpChip(itemId: string): HTMLElement {
   chip.className = "totp-chip";
   chip.dataset["item"] = itemId;
   chip.title = "Copy one-time code";
+  // a11y 3b: a STABLE name (the live 6-digit code as the name would re-announce every second).
+  chip.setAttribute("aria-label", "Copy one-time code");
   const ring = document.createElement("span");
   ring.className = "ring";
+  ring.setAttribute("aria-hidden", "true"); // decorative countdown visual (5b conveys it as text)
   const code = document.createElement("span");
   code.className = "code";
   code.textContent = "······";
-  chip.append(ring, code);
+  code.setAttribute("aria-hidden", "true"); // a11y 3b: digits out of the accessible name
+  // a11y 5b: seconds-left as a described-by description (read on focus, not per-tick) so the
+  // countdown is available to AT without re-announcing and without polluting the button name.
+  const secs = document.createElement("span");
+  secs.className = "visually-hidden";
+  secs.id = `totp-secs-${++totpSeq}`;
+  chip.setAttribute("aria-describedby", secs.id);
+  chip.append(ring, code, secs);
   chip.addEventListener("click", (e) => {
     e.stopPropagation();
     void copyTotp(itemId, code);
@@ -480,6 +520,7 @@ async function copyTotp(itemId: string, codeEl: HTMLElement): Promise<void> {
   const r = await ask({ type: "totp", itemId });
   if (!r?.ok || !r.code) return;
   if (await toClipboard(r.code)) {
+    announce("One-time code copied"); // a11y 2d (the chip's "copied" text is aria-hidden)
     codeEl.textContent = "copied";
     codeEl.dataset["hold"] = String(Date.now() + FLASH_MS); // ticker restores the live code after
   }
@@ -520,6 +561,9 @@ async function tickTotp(): Promise<void> {
         code.textContent = r.code.replace(/^(\d{3})(\d{3})$/, "$1 $2");
       }
       ring.style.setProperty("--p", String(((r.secondsLeft ?? 0) / TOTP_PERIOD_S) * 100));
+      const secsId = chip.getAttribute("aria-describedby"); // a11y 5b: refresh seconds-left desc
+      const secs = secsId ? document.getElementById(secsId) : null;
+      if (secs) secs.textContent = `${r.secondsLeft ?? 0} seconds left`;
     } else {
       chip.hidden = true; // locked mid-poll / item no longer carries a code
     }
@@ -620,6 +664,7 @@ el("gen-toggle").addEventListener("click", () => {
   const g = el("generator");
   g.hidden = !g.hidden;
   el("gen-toggle").classList.toggle("on", !g.hidden);
+  el("gen-toggle").setAttribute("aria-expanded", String(!g.hidden)); // a11y 5c
   if (!g.hidden && !el("gen-pass").textContent) void regenerate();
 });
 
@@ -628,6 +673,7 @@ el("gen-again").addEventListener("click", () => void regenerate());
 el("gen-pass").addEventListener("click", async () => {
   const pw = el("gen-pass").textContent;
   if (pw && (await toClipboard(pw))) {
+    announce("Password copied"); // a11y 2d
     const f = el("gen-flash");
     f.hidden = false;
     window.setTimeout(() => {

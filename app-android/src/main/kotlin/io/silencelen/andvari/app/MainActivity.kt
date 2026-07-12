@@ -19,6 +19,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -30,6 +32,13 @@ import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -375,7 +384,7 @@ private fun UpgradeRequiredScreen(message: String, onSignOut: () -> Unit) {
 @Composable
 internal fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
     if (msg != null) {
-        Card(Modifier.fillMaxWidth().padding(vertical = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Card(Modifier.fillMaxWidth().padding(vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Assertive }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = onDismiss) { Text("dismiss") }
@@ -387,7 +396,7 @@ internal fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
 @Composable
 internal fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
     if (msg != null) {
-        Card(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Card(Modifier.fillMaxWidth().padding(vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Polite }) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = onDismiss) { Text("dismiss") }
@@ -483,9 +492,8 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
             }
         }
         SecretField("Confirm password", confirm) { confirm = it }
-        if (confirm.isNotEmpty() && confirm != password) {
-            Text("passwords don't match", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-        }
+        // Routed through InlineError so its Polite liveRegion announces the mismatch (a11yand-01).
+        InlineError(if (confirm.isNotEmpty() && confirm != password) "passwords don't match" else null)
         // N2 §3/B4 (design 2026-07-10): four honest states, in web's pinned order
         // (Welcome.tsx) — fingerprint present wins over everything, then a FAILED probe
         // (retryable), then probe-in-flight, and only a SUCCESSFUL fetch that returned an
@@ -500,13 +508,18 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                 Text("Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true)
                 if (shortFp.isNotBlank() && !shortOk) {
-                    Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                 }
                 if (shortOk) {
-                    Text("matches — full fingerprint: ${groupHex(fp)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                    Text("matches — full fingerprint: ${groupHex(fp)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                 }
-                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(fpOk, { fpOk = it }, enabled = shortOk)
+                Row(
+                    Modifier.padding(top = 8.dp)
+                        .toggleable(value = fpOk, enabled = shortOk, role = Role.Checkbox, onValueChange = { fpOk = it })
+                        .semantics { if (!shortOk) stateDescription = "Type the 16 sheet characters above first" },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(fpOk, onCheckedChange = null, enabled = shortOk)
                     Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
                 }
             }
@@ -576,7 +589,13 @@ private fun ReSealCard(vm: AndvariViewModel, ui: UiState) {
                 )
                 Field("First 16 characters from your printed recovery sheet", entry, { entry = it }, mono = true)
                 Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    PrimaryButton("Re-protect account", enabled = ok && !ui.busy, busy = ui.busy) { vm.resealEscrow(entry) }
+                    // a11yand-04 (AM-5): the ReSealCard has no verdict Text/checkbox — the only
+                    // gate is this disabled button, so the "why disabled" hint rides its
+                    // stateDescription (keeps the visible "Re-protect account" label intact).
+                    PrimaryButton(
+                        "Re-protect account", enabled = ok && !ui.busy, busy = ui.busy,
+                        modifier = Modifier.semantics { if (!ok) stateDescription = "Enter the 16 characters from your recovery sheet first" },
+                    ) { vm.resealEscrow(entry) }
                     TextButton(onClick = { open = false }) { Text("Later") }
                 }
             }
@@ -1380,8 +1399,11 @@ private fun VaultPickerField(choices: List<VaultInfo>, selectedId: String?, onSe
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text("Vault", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         choices.forEach { v ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                RadioButton(selected = v.vaultId == selectedId, onClick = { onSelect(v.vaultId) })
+            Row(
+                Modifier.selectable(selected = v.vaultId == selectedId, role = Role.RadioButton, onClick = { onSelect(v.vaultId) }),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = v.vaultId == selectedId, onClick = null)
                 Text(v.name + if (v.type == "personal") "" else " (shared)", style = MaterialTheme.typography.bodyMedium)
             }
         }
@@ -1407,10 +1429,14 @@ private fun TotpRow(uri: String, ctx: Context, clearSeconds: Int) {
     Column(Modifier.padding(vertical = 8.dp)) {
         Text("One-time code", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { copyToClipboard(ctx, "code", code, clearSeconds) }) {
+            TextButton(
+                onClick = { copyToClipboard(ctx, "code", code, clearSeconds) },
+                modifier = Modifier.semantics { contentDescription = "One-time code, double-tap to copy" },
+            ) {
                 Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary)
             }
-            Text("${remaining}s", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Re-computed every second; clearAndSetSemantics stops TalkBack re-announcing it on every tick (a11yand-05).
+            Text("${remaining}s", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.clearAndSetSemantics {})
         }
     }
 }
@@ -1776,15 +1802,21 @@ private fun BackupPreflightDialog(
                     if (v.type == "personal") {
                         Text("• ${v.name} — ${v.itemCount} item(s), personal", style = MaterialTheme.typography.bodySmall)
                     } else {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(v.vaultId in selected, { on -> selected = if (on) selected + v.vaultId else selected - v.vaultId })
+                        Row(
+                            Modifier.toggleable(value = v.vaultId in selected, role = Role.Checkbox, onValueChange = { on -> selected = if (on) selected + v.vaultId else selected - v.vaultId }),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(v.vaultId in selected, onCheckedChange = null)
                             Text("${v.name} — ${v.itemCount} item(s), shared (${v.role})", style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(includeAttachments, { includeAttachments = it })
+                Row(
+                    Modifier.toggleable(value = includeAttachments, role = Role.Checkbox, onValueChange = { includeAttachments = it }),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(includeAttachments, onCheckedChange = null)
                     Text("Include attachments (${humanSize(plan.totalBytes)})", style = MaterialTheme.typography.bodySmall)
                 }
                 if (includeAttachments && plan.overCap.isNotEmpty()) {
@@ -1913,7 +1945,10 @@ private fun backupNudge(lastExportAt: Long): Boolean =
 
 @Composable
 private fun InlineError(msg: String?) {
-    if (msg != null) Text(msg, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+    // Polite liveRegion so TalkBack speaks validation/error text on change (a11yand-01). NOTE
+    // (AM-6): this node is conditionally composed (null→text is first appearance) — the §4
+    // TalkBack smoke must confirm the null→text case is spoken, not only text-to-text.
+    if (msg != null) Text(msg, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite })
 }
 
 /** Copy row for setup material (not vault secrets): selectable text, copy WITHOUT auto-clear. */
@@ -1955,12 +1990,23 @@ private fun QuickUnlockSettingsCard(vm: AndvariViewModel, ui: UiState) {
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    // AM-4: the toggle carries a real side effect (enroll/disable quick unlock),
+                    // so the ENTIRE onCheckedChange lambda AND the enabled guard move onto the
+                    // toggleable row; the Switch keeps enabled only for its greyed-out visual.
+                    Row(
+                        Modifier.toggleable(
+                            value = ui.quickUnlockEnrolled,
+                            enabled = activity != null && !ui.busy,
+                            role = Role.Switch,
+                            onValueChange = { on -> if (on) activity?.let { vm.enrollQuickUnlock(it) } else vm.disableQuickUnlock() },
+                        ),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Text("Fingerprint / face unlock", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                         Switch(
                             checked = ui.quickUnlockEnrolled,
                             enabled = activity != null && !ui.busy,
-                            onCheckedChange = { on -> if (on) activity?.let { vm.enrollQuickUnlock(it) } else vm.disableQuickUnlock() },
+                            onCheckedChange = null,
                         )
                     }
                 }
@@ -2012,7 +2058,7 @@ private fun SecretField(label: String, value: String, onChange: (String) -> Unit
     OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp), label = { Text(label) }, singleLine = true,
         visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-        trailingIcon = { IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) } })
+        trailingIcon = { IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "Hide $label" else "Show $label") } })
 }
 
 @Composable
@@ -2035,7 +2081,7 @@ private fun SecretCopyRow(label: String, value: String, ctx: Context, clearSecon
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (show) display else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
-            IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) }
+            IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "Hide $label" else "Show $label") }
             TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds) }) { Text("Copy") }
         }
     }
@@ -2076,8 +2122,8 @@ private fun ServerField(baseUrl: String, onSet: (String) -> Unit) {
 }
 
 @Composable
-private fun PrimaryButton(text: String, enabled: Boolean, busy: Boolean, onClick: () -> Unit) {
-    Button(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+private fun PrimaryButton(text: String, enabled: Boolean, busy: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Button(onClick = onClick, enabled = enabled, modifier = modifier.fillMaxWidth()) {
         if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary) else Text(text)
     }
 }

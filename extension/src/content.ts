@@ -92,7 +92,8 @@ async function copyTotp(code: string): Promise<void> {
     showToast("2FA code copied — paste when asked");
     await scheduleClipboardClear(); // E1-4: clear this post-fill 2FA copy on the policy window
   } catch {
-    showToast(`2FA code: ${code}`); // clipboard needs document focus — surface the code instead
+    // a11y 6d (AM-7): assertive — the code is shown ONLY in this 5 s toast (safety-critical path).
+    showToast(`2FA code: ${code}`, true); // clipboard needs document focus — surface the code instead
   }
 }
 

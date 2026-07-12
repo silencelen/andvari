@@ -1,5 +1,38 @@
 # andvari — changelog
 
+## 0.15.0 — andvari for everyone: screen readers, keyboards, and bigger, clearer text (2026-07-11, cross-platform cut)
+
+This release makes andvari usable by family members who navigate with a screen reader, use only a
+keyboard, or need larger, higher-contrast text — including our older members.
+
+- **Every field now says its name.** A screen reader used to read the sign-in, item-editor,
+  sharing, and settings boxes as blank "edit boxes"; now each speaks its label, and the search
+  boxes and the member-role picker are named too.
+- **The app speaks up when something happens.** Wrong-password and error messages, "copied ✓",
+  import progress, and lock notices are now announced instead of appearing in silence.
+- **Buttons that were just icons now have names** — show/hide-password, copy, one-time-code, and
+  the password generator — and a one-time code no longer reads out its digits over and over.
+- **Tapping a label works** (a checkbox/switch and its text are now one target, and a
+  comfortable size for larger fingertips), the active screen and tabs are announced, and
+  connectivity is no longer a colour-only dot.
+- **Faint helper text and links now meet contrast standards** in both light and dark themes.
+- **Desktop:** unlocking now starts with your cursor already in the password box, rename saves on
+  Enter and dialogs close on Escape, and the error banners are readable.
+
+Under the hood: zero server, wire, or storage changes — every fix is UI markup, a semantics
+hint, a focus cue, or a colour token. Keyboard navigation of a couple of the deepest flows (the
+web inline-confirm focus return, the extension's in-page autofill dropdown and its "Save this
+login?" prompt) and a dedicated high-contrast mode land in a follow-up.
+
+### browser extension 0.11.0 — the same accessibility pass reaches the popup
+
+- The popup's fields are named, its status/error line and "copied" confirmations are announced,
+  its icon buttons (copy, reveal, the generator die) have real names, and its faint text meets
+  contrast in both themes. Locking after idle now returns your cursor to the email box, and a
+  two-factor code shown after a clipboard hiccup is now announced. (Keyboard navigation of the
+  in-page autofill dropdown, and the in-page "Save this login?" prompt, land in a follow-up — the
+  popup already covers those flows for keyboard and screen-reader users.)
+
 ## 0.14.2 — hardening backports + autofill in more browsers (2026-07-11, cross-platform cut)
 
 The approved hardening batch: the safety fixes the desktop port earned come back to the phone,

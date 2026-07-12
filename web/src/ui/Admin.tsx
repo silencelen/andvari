@@ -9,7 +9,9 @@ import type {
   InviteResponse,
 } from "../api/types";
 import { composeEnrollLink } from "../enroll/enrolllink";
+import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
+import { Announcer, Msg } from "./Msg";
 import { isPrivateOrigin } from "./origin";
 import { QrSvg } from "./QrSvg";
 import { ViewHeader } from "./ViewHeader";
@@ -24,7 +26,7 @@ export function Admin({ client }: { client: ApiClient }) {
       <ViewHeader title="Administration" />
       <div className="tabs">
         {(["users", "audit", "policy", "status"] as Tab[]).map((t) => (
-          <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
+          <button key={t} className={tab === t ? "active" : ""} aria-pressed={tab === t} onClick={() => setTab(t)}>
             {t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
         ))}
@@ -112,7 +114,7 @@ function UsersTab({ client }: { client: ApiClient }) {
 
   return (
     <div>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <InviteForm client={client} onInvited={load} />
       {!users ? (
         <p className="muted">loading…</p>
@@ -344,12 +346,11 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
   return (
     <form className="sheet" style={{ marginBottom: 20 }} onSubmit={submit}>
       <h2>Invite a user</h2>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <div className="row" style={{ alignItems: "flex-end" }}>
-        <div className="field" style={{ flex: 1, marginBottom: 0 }}>
-          <label>Email</label>
+        <Field label="Email" style={{ flex: 1, marginBottom: 0 }}>
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="new@user" />
-        </div>
+        </Field>
         <label className="check" style={{ margin: "0 0 10px" }}>
           <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} />
           <span>admin</span>
@@ -438,9 +439,9 @@ function AuditTab({ client }: { client: ApiClient }) {
 
   return (
     <div>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <form className="toolbar" onSubmit={applyFilter}>
-        <input placeholder="Filter by event type (exact, e.g. login_fail)…" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} />
+        <input aria-label="Filter by event type" placeholder="Filter by event type (exact, e.g. login_fail)…" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} />
         <button className="ghost" disabled={busy}>Filter</button>
       </form>
       {!events ? (
@@ -503,7 +504,7 @@ function PolicyTab({ client }: { client: ApiClient }) {
     client.adminPolicy().then(setPolicy).catch((e) => setErr(errText(e)));
   }, [client]);
 
-  if (!policy) return err ? <div className="msg err">{err}</div> : <p className="muted">loading…</p>;
+  if (!policy) return err ? <Msg kind="err">{err}</Msg> : <p className="muted">loading…</p>;
 
   const patch = (p: Partial<ClientPolicy>) => setPolicy({ ...policy, ...p });
   const patchMin = (platform: string, v: string) => patch({ minVersion: { ...policy.minVersion, [platform]: v } });
@@ -524,25 +525,25 @@ function PolicyTab({ client }: { client: ApiClient }) {
   };
 
   const numField = (label: string, value: number, onChange: (n: number) => void, suffix?: string) => (
-    <div className="field" style={{ flex: 1 }}>
-      <label>{label}{suffix ? ` (${suffix})` : ""}</label>
+    <Field label={`${label}${suffix ? ` (${suffix})` : ""}`} style={{ flex: 1 }}>
       <input type="number" min={0} value={value} onChange={(e) => onChange(Number(e.target.value) || 0)} />
-    </div>
+    </Field>
   );
 
   return (
     <form className="sheet" onSubmit={save}>
       <h2>Client policy</h2>
-      {err && <div className="msg err">{err}</div>}
-      {msg && <div className="msg info">{msg}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
+      {msg && <Msg kind="info">{msg}</Msg>}
+      {/* BL-1: "Policy saved" is async info → persistent region. */}
+      <Announcer text={msg} />
 
       <label style={{ marginBottom: 8 }}>Minimum client versions</label>
       <div className="row">
         {(["android", "windows", "web"] as const).map((p) => (
-          <div className="field" style={{ flex: 1 }} key={p}>
-            <label>{p}</label>
+          <Field label={p} style={{ flex: 1 }} key={p}>
             <input className="mono" value={policy.minVersion[p] ?? ""} onChange={(e) => patchMin(p, e.target.value)} placeholder="0.1.0" />
-          </div>
+          </Field>
         ))}
       </div>
 
@@ -570,10 +571,9 @@ function PolicyTab({ client }: { client: ApiClient }) {
         {numField("Per user", Math.round(policy.userAttachmentsMaxBytes / MIB), (n) => patch({ userAttachmentsMaxBytes: n * MIB }), "MiB")}
       </div>
 
-      <div className="field">
-        <label>KDF (read-only — changing it requires a coordinated re-enrollment)</label>
+      <Field label="KDF (read-only — changing it requires a coordinated re-enrollment)">
         <input readOnly className="mono" value={`${policy.kdfParams.alg} · ops ${policy.kdfParams.ops} · mem ${humanSize(policy.kdfParams.memBytes)}`} />
-      </div>
+      </Field>
 
       <div className="actions">
         <button className="primary" disabled={busy}>{busy ? "Saving…" : "Save policy"}</button>
@@ -592,7 +592,7 @@ function StatusTab({ client }: { client: ApiClient }) {
     client.adminStatus().then(setStatus).catch((e) => setErr(errText(e)));
   }, [client]);
 
-  if (err) return <div className="msg err">{err}</div>;
+  if (err) return <Msg kind="err">{err}</Msg>;
   if (!status) return <p className="muted">loading…</p>;
 
   const yes = (b: boolean) => (b ? <span className="tone-good">yes</span> : <span className="tone-bad">no</span>);

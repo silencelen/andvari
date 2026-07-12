@@ -61,6 +61,10 @@ const UI_CSS = `
 @keyframes anv-in { from { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .dropdown, .banner, .toast { animation: none; } }
 
+/* a11y 6d: off-screen live-region carrier — visually hidden but in the AT tree (a closed
+   shadow root still reaches AT). Toast text is mirrored here so it is spoken. */
+.anv-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+
 .dropdown {
   position: fixed; z-index: 2147483647;
   display: block; box-sizing: border-box;
@@ -120,7 +124,7 @@ const UI_CSS = `
   user-select: text;
 }
 .search-input:focus { border-color: var(--anv-gold); }
-.search-input::placeholder { color: var(--anv-ink-faint); }
+.search-input::placeholder { color: var(--anv-ink-dim); }
 
 .banner {
   position: fixed; top: 16px; right: 16px; z-index: 2147483647;
@@ -204,6 +208,11 @@ let anchorEl: HTMLElement | null = null;
 let bannerEl: HTMLElement | null = null;
 let toastEl: HTMLElement | null = null;
 let toastTimer = 0;
+/** a11y 6d (AM-7): persistent live regions on the ui() root — a role/aria-live on the FRESH
+ *  per-toast node is populated-on-mount (polite is unreliable). Two static regions so the
+ *  safety-critical 2FA-clipboard fallback is assertive and routine toasts stay polite. */
+let politeLive: HTMLElement | null = null;
+let assertiveLive: HTMLElement | null = null;
 
 function ui(): ShadowRoot {
   if (shadow) return shadow;
@@ -214,6 +223,15 @@ function ui(): ShadowRoot {
   sheet.replaceSync(UI_CSS);
   root.adoptedStyleSheets = [sheet];
   shadow = root;
+
+  // a11y 6d (AM-7): persistent live regions, present in the AT tree before any toast text lands.
+  politeLive = document.createElement("div");
+  politeLive.className = "anv-sr";
+  politeLive.setAttribute("aria-live", "polite");
+  assertiveLive = document.createElement("div");
+  assertiveLive.className = "anv-sr";
+  assertiveLive.setAttribute("aria-live", "assertive");
+  root.append(politeLive, assertiveLive);
 
   // Outside-close: composedPath() at document level is truncated at the CLOSED shadow
   // boundary, so inner nodes never appear in it — test for the HOST element (which is in
@@ -328,6 +346,7 @@ function renderSearch(body: HTMLElement, h: DropdownHandlers): void {
   inp.className = "search-input";
   inp.type = "text";
   inp.placeholder = "Search all logins…";
+  inp.setAttribute("aria-label", "Search all logins"); // a11y 1b: placeholder is not a name
   wrap.appendChild(inp);
   const results = document.createElement("div");
   body.append(wrap, results);
@@ -475,7 +494,7 @@ export function showLinkOffer(itemName: string, host: string, onLink: () => Prom
   });
 }
 
-export function showToast(text: string): void {
+export function showToast(text: string, assertive = false): void {
   const root = ui();
   toastEl?.remove();
   const t = document.createElement("div");
@@ -483,6 +502,18 @@ export function showToast(text: string): void {
   t.append(span("sigil", "ᛅ"), document.createTextNode(text));
   root.appendChild(t);
   toastEl = t;
+  // a11y 6d (AM-7): mirror the text into the PERSISTENT region so it is spoken (the fresh toast
+  // node above is populated-on-mount → polite is unreliable). `assertive` is the safety-critical
+  // 2FA-clipboard fallback, where the code is shown only in this 5 s toast. Clear-then-set so a
+  // repeated toast re-announces.
+  const live = assertive ? assertiveLive : politeLive;
+  if (live) {
+    live.textContent = "";
+    const region = live;
+    window.setTimeout(() => {
+      region.textContent = text;
+    }, 50);
+  }
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => {
     t.remove();

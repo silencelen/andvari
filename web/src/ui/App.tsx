@@ -8,6 +8,7 @@ import { Welcome, type LoginMeta } from "./Welcome";
 import { peekPendingEnroll } from "../enroll/enrolllink";
 import { BrandSigil } from "./Sigil";
 import { Vault } from "./Vault";
+import { Announcer } from "./Msg";
 import { inactivityNotice } from "./format";
 import {
   readPersistedAutoLockSeconds,
@@ -31,6 +32,8 @@ type Phase =
   | { kind: "welcome"; notice?: string }
   | { kind: "unlock"; session: Session; notice?: string }
   | { kind: "vault"; account: Account; store: VaultStore; meta: LoginMeta };
+
+const UPGRADE_NOTICE = "This tab is running an older version — reload to update.";
 
 export function App() {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
@@ -212,18 +215,27 @@ export function App() {
   // idiom) above whichever phase shell is showing. App itself never unmounts, so the
   // bar survives lock/unlock/sign-out and every in-vault navigation; it blocks
   // nothing — the server serves the web bundle, so the one Reload click IS the update.
-  const withUpgradeBar = (content: JSX.Element): JSX.Element =>
-    upgradeStale ? (
-      <>
+  // BL-1: the current lock/sign-out/enroll reason line (welcome + unlock phases carry it).
+  const phaseNotice = phase.kind === "welcome" || phase.kind === "unlock" ? phase.notice : undefined;
+  const withUpgradeBar = (content: JSX.Element): JSX.Element => (
+    <>
+      {/* BL-1: PERSISTENT polite announcers — always mounted (present + empty at first
+          paint), so the 426 pin and the lock/sign-out reason are SPOKEN when their text
+          mutates in. The visible .banner below (and Welcome's .msg info notice) stay
+          conditional for sighted users; the announcement never rides a conditionally-
+          mounted node, which for a polite region would enter the tree already-populated
+          and go silent. App itself never unmounts, so these survive every phase change. */}
+      <Announcer text={upgradeStale ? UPGRADE_NOTICE : ""} />
+      <Announcer text={phaseNotice ?? ""} />
+      {upgradeStale && (
         <div className="banner">
-          <span>This tab is running an older version — reload to update.</span>
+          <span>{UPGRADE_NOTICE}</span>
           <button className="link" onClick={() => window.location.reload()}>Reload</button>
         </div>
-        {content}
-      </>
-    ) : (
-      content
-    );
+      )}
+      {content}
+    </>
+  );
 
   if (phase.kind === "loading") {
     return withUpgradeBar(

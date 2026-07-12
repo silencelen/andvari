@@ -5,7 +5,9 @@ import { backupNudge, readLastExportAt } from "../export/plan";
 import { qrModules } from "../vendor/qrcode-generator";
 import { Account } from "../vault/account";
 import { DevicesCard } from "./Devices";
+import { Field } from "./Field";
 import { fmtDate } from "./format";
+import { Announcer, Msg } from "./Msg";
 import { QrSvg } from "./QrSvg";
 import { MasterPasswordHint } from "./Welcome";
 import { meetsMasterPasswordFloor } from "./strength";
@@ -91,9 +93,11 @@ function IdentityCard({ account }: { account: Account }) {
         Someone sharing a vault with you will ask you to read this out.
       </p>
       <div className="field">
+        {/* BL-2: secret-row (input + copy) is multi-child, so the label can't associate via
+            Field — name the inner input directly. */}
         <label>My identity code</label>
         <div className="secret-row">
-          <input readOnly className="mono" value={code || "…"} />
+          <input readOnly className="mono" aria-label="My identity code" value={code || "…"} />
           <CopyButton value={code} />
         </div>
       </div>
@@ -170,8 +174,12 @@ function TotpCard({ client }: { client: ApiClient }) {
         A second factor checked by the server on break-glass sign-ins from the public internet.
         It is separate from your vault crypto — your master password alone still unseals the hoard.
       </p>
-      {err && <div className="msg err">{err}</div>}
-      {msg && <div className="msg info">{msg}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
+      {msg && <Msg kind="info">{msg}</Msg>}
+      {/* BL-1: the enroll/disable result ("enrolled"/"disabled") is async info — a polite
+          region mounted with it already inside is silent, so drive the announce off this
+          persistent (always-mounted) region instead. */}
+      <Announcer text={msg} />
 
       {!status ? (
         <p className="muted">loading…</p>
@@ -181,7 +189,7 @@ function TotpCard({ client }: { client: ApiClient }) {
           <div className="field">
             <label>One-time code (required to disable)</label>
             <div className="secret-row">
-              <input className="mono" inputMode="numeric" placeholder="123 456" value={code} onChange={(e) => setCode(e.target.value)} />
+              <input className="mono" inputMode="numeric" aria-label="One-time code (required to disable)" placeholder="123 456" value={code} onChange={(e) => setCode(e.target.value)} />
               <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy || !code.trim()} onClick={disable}>
                 {busy ? "Working…" : "Disable"}
               </button>
@@ -206,21 +214,21 @@ function TotpCard({ client }: { client: ApiClient }) {
           <div className="field">
             <label>otpauth URI</label>
             <div className="secret-row">
-              <input readOnly className="mono" value={setup.otpauthUri} />
+              <input readOnly className="mono" aria-label="otpauth URI" value={setup.otpauthUri} />
               <CopyButton value={setup.otpauthUri} />
             </div>
           </div>
           <div className="field">
             <label>Secret (base32)</label>
             <div className="secret-row">
-              <input readOnly className="mono" value={setup.secretBase32} />
+              <input readOnly className="mono" aria-label="Secret (base32)" value={setup.secretBase32} />
               <CopyButton value={setup.secretBase32} />
             </div>
           </div>
           <div className="field">
             <label>Code from your app</label>
             <div className="secret-row">
-              <input className="mono" inputMode="numeric" placeholder="123 456" value={code} onChange={(e) => setCode(e.target.value)} />
+              <input className="mono" inputMode="numeric" aria-label="Code from your app" placeholder="123 456" value={code} onChange={(e) => setCode(e.target.value)} />
               <button type="button" className="ghost" disabled={busy || !code.trim()} onClick={confirm}>{busy ? "Working…" : "Confirm"}</button>
             </div>
           </div>
@@ -278,22 +286,22 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Props) {
         Your vault keys stay the same — only the password that wraps them changes.
         All other devices are signed out and will need the new password.
       </p>
-      {err && <div className="msg err">{err}</div>}
-      {msg && <div className="msg info">{msg}</div>}
-      <div className="field">
-        <label>Current master password</label>
+      {err && <Msg kind="err">{err}</Msg>}
+      {msg && <Msg kind="info">{msg}</Msg>}
+      {/* BL-1: "password changed — other devices signed out" is async info → persistent region. */}
+      <Announcer text={msg} />
+      <Field label="Current master password">
         <input type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} />
-      </div>
-      <div className="field">
-        <label>New master password</label>
+      </Field>
+      <Field label="New master password" hint={<MasterPasswordHint password={next} />}>
         <input type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} />
-        <MasterPasswordHint password={next} />
-      </div>
-      <div className="field">
-        <label>Confirm new master password</label>
+      </Field>
+      <Field
+        label="Confirm new master password"
+        hint={confirm && confirm !== next ? <span className="muted" style={{ color: "var(--danger)" }}>passwords don't match</span> : undefined}
+      >
         <input type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-        {confirm && confirm !== next && <span className="muted" style={{ color: "var(--danger)" }}>passwords don't match</span>}
-      </div>
+      </Field>
       <div className="actions">
         <button className="primary" disabled={busy || !canSubmit}>{busy ? "Re-forging…" : "Change password"}</button>
       </div>

@@ -6,6 +6,8 @@ import { shortIdentityFingerprint } from "../crypto/sharedgrant";
 import type { Account } from "../vault/account";
 import type { DeletedVaultInfo, IncomingTransfer, VaultInfo, VaultStore } from "../vault/store";
 import { UNREACHABLE } from "./errors";
+import { Field } from "./Field";
+import { Announcer, Msg } from "./Msg";
 import { settingsContentFor, showSettingsButton } from "./sharing-settings";
 import { ViewHeader } from "./ViewHeader";
 
@@ -90,6 +92,10 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
 
   return (
     <div>
+      {/* BL-1: the post-delete note (rendered below in the list branch) mounts already-
+          populated after the delete commit — announce it from this persistent region,
+          which survives the settings-layer unmount that the delete triggers. */}
+      <Announcer text={deletedNote ? `“${deletedNote.name}” is deleted. Members lost access immediately.` : ""} />
       <ViewHeader
         title="Sharing"
         actions={
@@ -268,11 +274,11 @@ function NewVaultForm({ account, store, client, onCreated }: { account: Account;
 
   return (
     <form onSubmit={create} style={{ marginTop: 18 }}>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <div className="field">
         <label>New shared vault</label>
         <div className="secret-row">
-          <input placeholder="e.g. Family" value={name} onChange={(e) => setName(e.target.value)} />
+          <input aria-label="New shared vault" placeholder="e.g. Family" value={name} onChange={(e) => setName(e.target.value)} />
           <button className="ghost" disabled={busy || !name.trim()}>{busy ? "Creating…" : "Create"}</button>
         </div>
       </div>
@@ -308,7 +314,7 @@ function LeaveControl({ vault, store, onChanged }: { vault: VaultInfo; store: Va
   }
   return (
     <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flex: 2, minWidth: 0 }}>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <span className="muted" style={{ textAlign: "right" }}>
         Leave “{vault.name}”? You'll lose access on all your devices, and any edits you haven't
         synced will be discarded. The items stay with the owner and other members; only the owner
@@ -379,7 +385,7 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
     <div className="sheet">
       <RenameHeader vault={vault} store={store} onRenamed={onChanged} />
       <p className="muted" style={{ marginTop: 0 }}>You own this vault. Writers can add and edit items; readers can only view.</p>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
 
       {!members ? (
         <p className="muted">loading…</p>
@@ -405,7 +411,7 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
                 </>
               ) : (
                 <>
-                  <select value={m.role} disabled={busy} onChange={(e) => changeRole(m.userId, e.target.value)} style={{ width: "auto" }}>
+                  <select value={m.role} disabled={busy} aria-label={`Role for ${m.email}`} onChange={(e) => changeRole(m.userId, e.target.value)} style={{ width: "auto" }}>
                     <option value="writer">writer</option>
                     <option value="reader">reader</option>
                   </select>
@@ -476,7 +482,7 @@ function MemberRosterPanel({ vault, client }: { vault: VaultInfo; client: ApiCli
         You're a {vault.role ?? "member"} of this shared vault. Only its owner can add, remove, or
         change who has access.
       </p>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       {!members ? (
         <p className="muted">loading…</p>
       ) : (
@@ -558,9 +564,9 @@ function RenameHeader({ vault, store, onRenamed }: { vault: VaultInfo; store: Va
   return (
     <div className="field">
       <label>Rename vault</label>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <div className="secret-row">
-        <input autoFocus value={name} onChange={(e) => setName(e.target.value)} disabled={busy} />
+        <input autoFocus aria-label="Rename vault" value={name} onChange={(e) => setName(e.target.value)} disabled={busy} />
         <button type="button" className="primary" disabled={busy || !name.trim()} onClick={save}>{busy ? "Saving…" : "Save"}</button>
         <button type="button" className="ghost" disabled={busy} onClick={() => { setEditing(false); setErr(""); }}>Cancel</button>
       </div>
@@ -598,7 +604,7 @@ function TransferOfferControl({ vault, store, targets, onOffered }: { vault: Vau
   return (
     <div className="field" style={{ marginTop: 14 }}>
       <label>Make someone else the owner</label>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       {confirming && targetMember ? (
         <>
           <p className="muted" style={{ marginTop: 0 }}>
@@ -613,7 +619,7 @@ function TransferOfferControl({ vault, store, targets, onOffered }: { vault: Vau
         </>
       ) : (
         <div className="secret-row">
-          <select value={target} onChange={(e) => setTarget(e.target.value)} style={{ width: "auto" }}>
+          <select value={target} aria-label="Make someone else the owner" onChange={(e) => setTarget(e.target.value)} style={{ width: "auto" }}>
             <option value="">choose a member…</option>
             {targets.map((m) => (
               <option key={m.userId} value={m.userId}>{m.displayName} ({m.email})</option>
@@ -717,9 +723,9 @@ function DeleteVaultControl({ vault, store, onDeleted, onDeletedNote, onBackup, 
         (about a month). If a password really matters, change it at the website too.
       </div>
 
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <label style={{ marginTop: 10 }}>Type the vault's name to delete it:</label>
-      <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={vault.name} disabled={inFlight} />
+      <input aria-label="Type the vault's name to delete it" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={vault.name} disabled={inFlight} />
       <div className="actions" style={{ marginTop: 10 }}>
         <button type="button" className="ghost" disabled={busy} onClick={() => { setOpen(false); setTyped(""); setErr(""); }}>Cancel</button>
         <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={inFlight || typed !== vault.name} onClick={del}>
@@ -770,7 +776,7 @@ function IncomingTransferCard({ offer, account, store, client, onChanged }: { of
         and not a compromised server — confirm with them in person or by phone. As owner you'd manage
         members and be the only one who can rename, transfer, or delete it.
       </p>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <div className="actions">
         <button type="button" className="primary" disabled={busy} onClick={() => act(() => store.acceptTransfer(offer.vaultId))}>{busy ? "Taking over…" : "Become the owner"}</button>
         <button type="button" className="ghost" disabled={busy} onClick={() => act(() => store.cancelTransfer(offer.vaultId))}>Decline</button>
@@ -854,7 +860,7 @@ function RecentlyDeleted({ store, refreshKey, onChanged }: { store: VaultStore; 
         Deleted vaults you can still restore. Restoring brings a vault back for every member with
         everything that was in it.
       </p>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <div className="attach-list">
         {deleted.map((d) => (
           <div className="attach-row" key={d.vaultId}>
@@ -939,13 +945,14 @@ function AddMember({ vaultId, account, client, onAdded }: { vaultId: string; acc
 
   return (
     <div style={{ marginTop: 18 }}>
-      {err && <div className="msg err">{err}</div>}
+      {err && <Msg kind="err">{err}</Msg>}
       <form onSubmit={lookup}>
         <div className="field">
           <label>Add a member</label>
           <div className="secret-row">
             <input
               type="email"
+              aria-label="Add a member (their email)"
               placeholder="their email"
               value={email}
               onChange={(e) => {
@@ -972,13 +979,12 @@ function AddMember({ vaultId, account, client, onAdded }: { vaultId: string; acc
             <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
             <span>I confirmed this code with {found.displayName} in person or by phone</span>
           </label>
-          <div className="field">
-            <label>Role</label>
+          <Field label="Role">
             <select value={role} onChange={(e) => setRole(e.target.value)} style={{ width: "auto" }}>
               <option value="writer">writer — can add and edit items</option>
               <option value="reader">reader — can only view</option>
             </select>
-          </div>
+          </Field>
           <div className="actions">
             <button type="button" className="primary" disabled={busy || !confirmed} onClick={add}>
               {busy ? "Sealing…" : "Add to vault"}

@@ -23,7 +23,9 @@ import {
 } from "../export/plan";
 import type { Account } from "../vault/account";
 import type { VaultStore } from "../vault/store";
+import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
+import { Announcer, Msg } from "./Msg";
 import { estimateStrength } from "./strength";
 
 export type ExportMode = "backup" | "csv";
@@ -259,6 +261,9 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
 
   return (
     <div className="sheet">
+      {/* BL-1: the export result replaces the whole form, so its "saved" info would mount
+          already-populated (silent) — announce it from this persistent region instead. */}
+      <Announcer text={done ? (mode === "backup" ? `Backup saved as ${done.filename}.` : `Exported ${done.filename}.`) : ""} />
       <button type="button" className="link" onClick={onClose} disabled={busy}>← back to vault</button>
       <h2 style={{ marginTop: 12 }}>{title}</h2>
       <div className="muted" style={{ marginBottom: 18 }}>
@@ -292,7 +297,7 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
             </div>
           )}
           {done.fetchFailed.length > 0 && (
-            <div className="msg err" style={{ display: "block" }}>
+            <div className="msg err" style={{ display: "block" }} role="alert">
               Could not fetch (skipped after a retry): {done.fetchFailed.join(", ")}. The items
               themselves are in the backup; only these attachment files are missing.
             </div>
@@ -347,29 +352,35 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
                 )}
               </div>
 
-              <div className="field">
-                <label>Backup passphrase</label>
+              <Field
+                label="Backup passphrase"
+                hint={
+                  <>
+                    {pw && <StrengthBar password={pw} />}
+                    {pw && strength < 3 && <span className="muted" style={{ color: "var(--danger)" }}>too weak — this passphrase is all that protects the file</span>}
+                    {nonAscii && (
+                      <span className="muted">
+                        Contains non-ASCII characters — they are taken exactly as typed, so make sure you
+                        can retype them on a future keyboard.
+                      </span>
+                    )}
+                  </>
+                }
+              >
                 <input type="password" className="mono" autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} disabled={busy} />
-                {pw && <StrengthBar password={pw} />}
-                {pw && strength < 3 && <span className="muted" style={{ color: "var(--danger)" }}>too weak — this passphrase is all that protects the file</span>}
-                {nonAscii && (
-                  <span className="muted">
-                    Contains non-ASCII characters — they are taken exactly as typed, so make sure you
-                    can retype them on a future keyboard.
-                  </span>
-                )}
-              </div>
-              <div className="field">
-                <label>Confirm passphrase</label>
+              </Field>
+              <Field
+                label="Confirm passphrase"
+                hint={confirm && confirm !== pw ? <span className="muted" style={{ color: "var(--danger)" }}>passphrases don't match</span> : undefined}
+              >
                 <input type="password" className="mono" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} disabled={busy} />
-                {confirm && confirm !== pw && <span className="muted" style={{ color: "var(--danger)" }}>passphrases don't match</span>}
-              </div>
+              </Field>
               <p className="muted">
                 Tip: your master password is a fine choice — the backup is then exactly as protected
                 as your vault. A different passphrase belongs on your printed recovery sheet.
               </p>
 
-              {err && <div className="msg err">{err}</div>}
+              {err && <Msg kind="err">{err}</Msg>}
               {busy && progress && <p className="muted">{progress}</p>}
               <div className="actions">
                 <button type="button" className="primary" disabled={busy || !passOk} onClick={runBackup}>
@@ -426,7 +437,7 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
                 </label>
               </div>
 
-              {err && <div className="msg err">{err}</div>}
+              {err && <Msg kind="err">{err}</Msg>}
               <div className="actions">
                 <button type="button" className="primary" disabled={!plaintextAck || loginCount === 0} onClick={runCsv}>
                   Download {loginCount} {loginCount === 1 ? "login" : "logins"} as CSV

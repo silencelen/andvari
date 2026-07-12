@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "109",
   "name": "andvari",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Zero-knowledge password manager — fill and save logins. Requires the andvari server on your Tailscale network.",
   "permissions": ["storage", "activeTab", "alarms", "offscreen"],
   "host_permissions": ["https://andvari.taila2dff2.ts.net/*"],
