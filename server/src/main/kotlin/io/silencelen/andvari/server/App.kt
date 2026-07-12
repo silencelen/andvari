@@ -29,6 +29,7 @@ import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.model.ApiError
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.DeletedItemsResponse
+import io.silencelen.andvari.core.client.EnrollLink
 import io.silencelen.andvari.core.model.InviteRequest
 import io.silencelen.andvari.core.model.ItemRestoreResponse
 import io.silencelen.andvari.core.model.ItemUpload
@@ -111,6 +112,7 @@ class Services(
     val config: Config,
     val metrics: PrometheusMeterRegistry,
     val janitor: Janitor,
+    val email: EmailSender? = null, // cut 4: the SMTP sender when config.emailConfigured, else null (feature off)
     val wsTickets: WsTicketStore = WsTicketStore(),
 ) {
     fun metricsScrape(): String = metrics.scrape()
@@ -125,7 +127,15 @@ fun buildServices(config: Config, notifier: Notifier): Services {
     val metrics = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
     registerPurgeGauges(metrics, db)
     val janitor = Janitor(repo, service.attachments, config) { userIds, rev -> notifier.notifyRev(userIds, rev) }
-    return Services(repo, service, AdminService(repo), HibpRelay(repo, http), notifier, config, metrics, janitor)
+    // cut 4: the SMTP sender only when fully configured (breaker fail-safe); if partially configured,
+    // a boot line states why email-invite stays OFF (never the credential).
+    val email = if (config.emailConfigured) {
+        SmtpEmailSender(config.smtpHost!!, config.smtpPort, config.smtpUser!!, config.smtpPass!!, config.smtpFrom!!)
+    } else null
+    if (!config.smtpHost.isNullOrBlank() && email == null) {
+        System.err.println("[andvari] email-invite is OFF — ${config.inviteBaseUrlIssue() ?: "SMTP config incomplete (need HOST, USER, PASS, FROM)"}")
+    }
+    return Services(repo, service, AdminService(repo), HibpRelay(repo, http), notifier, config, metrics, janitor, email)
 }
 
 /** A purge stalled this long past its due time means the janitor is dead — alert-worthy. */
@@ -579,8 +589,34 @@ fun Application.andvariModule(services: Services) {
         }
         post("/api/v1/admin/users") {
             val p = requireAdmin(call, service)
+            if (!limiter.allow("invite:${p.userId}", 20, 3_600_000)) throw RateLimited() // A6: cap invite mints (mail-abuse)
             val req = call.receive<InviteRequest>()
-            call.respond(services.admin.createInvite(req.email, req.isAdmin, p.userId, req.ttlMinutes).first)
+            val (resp, token) = services.admin.createInvite(req.email, req.isAdmin, p.userId, req.ttlMinutes, req.sendEmail)
+            // A3: send the enroll link AFTER the tx committed (createInvite returned), off the request
+            // path, best-effort, in the APPLICATION scope so it survives the response — a slow/failed
+            // relay never stalls the SQLite writer or the HTTP reply. The link is composed from the
+            // server-owned base URL (never a client-supplied URL); a null (ill-formed) skips the email.
+            val emailSender = services.email
+            val base = config.inviteBaseUrl
+            // A6: a PER-RECIPIENT email cap on top of the per-admin invite cap above — so a
+            // compromised admin can't email-bomb one address under the household mail domain. The
+            // invite still MINTS (and responds); only the email is skipped past the cap.
+            if (req.sendEmail && emailSender != null && base != null &&
+                limiter.allow("invite_email:${resp.email}", 5, 3_600_000)
+            ) {
+                val link = EnrollLink.compose(base, token, resp.email)
+                if (link != null) {
+                    val to = resp.email
+                    call.application.launch(Dispatchers.IO) {
+                        try {
+                            emailSender.sendInvite(to, link)
+                        } catch (e: Exception) {
+                            call.application.environment.log.warn("invite email failed (${e.javaClass.simpleName})") // A4: no PII
+                        }
+                    }
+                }
+            }
+            call.respond(resp)
         }
         post("/api/v1/admin/users/{id}/disable") {
             val p = requireAdmin(call, service)

@@ -383,7 +383,7 @@ data class AdminUserSummary(
 )
 
 @Serializable
-data class InviteRequest(val email: String, val isAdmin: Boolean = false, val ttlMinutes: Int? = null)
+data class InviteRequest(val email: String, val isAdmin: Boolean = false, val ttlMinutes: Int? = null, val sendEmail: Boolean = false)
 
 @Serializable
 data class InviteResponse(val inviteToken: String, val email: String, val expiresAt: Long)
@@ -423,6 +423,10 @@ data class AdminStatus(
     val dbBytes: Long,
     val totpEnrolledCount: Int,
     val downloadsManifest: Boolean,
+    // cut 4: whether email-invite is fully configured (SMTP + a canonical private base URL that
+    // round-trips the enroll-link codec). Drives the Admin "email this invite" checkbox (disabled
+    // when false). Default false so older clients/servers deserialize cleanly.
+    val emailConfigured: Boolean = false,
 )
 
 @Serializable

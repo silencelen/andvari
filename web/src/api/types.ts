@@ -394,6 +394,7 @@ export interface AdminStatus {
   dbBytes: number;
   totpEnrolledCount: number;
   downloadsManifest: boolean;
+  emailConfigured: boolean;
 }
 
 export interface AuditEvent {

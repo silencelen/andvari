@@ -1,5 +1,6 @@
 package io.silencelen.andvari.server
 
+import io.silencelen.andvari.core.client.EnrollLink
 import io.silencelen.andvari.core.crypto.Bytes
 
 /**
@@ -47,8 +48,46 @@ class Config(
     // Log-only janitor mode for the first armed week (design §14.1): sweeps run and log
     // what they WOULD purge/expire but destroy nothing.
     val janitorDryRun: Boolean = false,
+    // cut 4 email-invite (all absent by default → the feature is inert). SMTP submission via a relay
+    // (the household M365 tenant: smtp.office365.com:587). inviteBaseUrl = the CANONICAL private
+    // origin the emailed enroll link embeds; it MUST equal the browser's location.origin (no trailing
+    // slash / :443 / uppercase), validated by inviteBaseUrlIssue().
+    val smtpHost: String? = null,
+    val smtpPort: Int = 587,
+    val smtpUser: String? = null,
+    val smtpPass: String? = null,
+    val smtpFrom: String? = null,
+    val inviteBaseUrl: String? = null,
 ) {
     val escrowConfigured: Boolean get() = recoveryPublicKey.size == 32 && recoveryFingerprint.isNotEmpty()
+
+    /** cut 4: email-invite is enabled ONLY when all SMTP config + a usable canonical private base URL
+     *  are present. Any gap ⇒ the Admin "email this invite" checkbox is disabled and a sendEmail
+     *  request is a no-op — fail-safe, never a hard error that loses the invite (breaker NIT). */
+    val emailConfigured: Boolean
+        get() = !smtpHost.isNullOrBlank() && !smtpUser.isNullOrBlank() && !smtpPass.isNullOrBlank() &&
+            !smtpFrom.isNullOrBlank() && inviteBaseUrlIssue() == null
+
+    /** null = ANDVARI_INVITE_BASE_URL is a usable canonical private origin; else a human reason (logged
+     *  at boot). Catches breaker B2 (a config typo → every emailed invite dead-on-arrival) + A5 (never
+     *  email a bearer-token link pointing at the internet-facing public origin). */
+    fun inviteBaseUrlIssue(): String? {
+        val base = inviteBaseUrl?.takeIf { it.isNotBlank() } ?: return "ANDVARI_INVITE_BASE_URL is unset"
+        // A default port a browser STRIPS from location.origin → the emailed link would never match.
+        if (base.startsWith("https://") && base.endsWith(":443")) return "drop the default :443 (browsers strip it → dead-on-arrival)"
+        if (base.startsWith("http://") && base.endsWith(":80")) return "drop the default :80 (browsers strip it → dead-on-arrival)"
+        // A5: never email a link pointing at the internet-facing public origin.
+        val host = base.substringAfter("://", "").substringBefore("/").substringBefore(":")
+        if (!publicHostname.isNullOrBlank() && host.equals(publicHostname, ignoreCase = true))
+            return "ANDVARI_INVITE_BASE_URL host matches the public origin ($publicHostname) — emailed invites must stay private-origin"
+        // B2: the emitted link must round-trip so the web enrollPrefillFor (payload.o === origin)
+        // matches; parse also enforces the canonical-origin rule (lowercase, no trailing slash/path).
+        val link = EnrollLink.compose(base, "selftest", "selftest@example.com") ?: return "the base URL couldn't be encoded as an enroll link"
+        val parsed = EnrollLink.parse(link)
+        if (parsed == null || parsed.o != base)
+            return "ANDVARI_INVITE_BASE_URL must be a canonical origin — lowercase scheme+host[:non-default-port], no trailing slash or path (got '$base')"
+        return null
+    }
 
     companion object {
         val DEFAULT_TRUSTED_IP_HEADERS = listOf("CF-Connecting-IP", "X-Forwarded-For")
@@ -88,6 +127,12 @@ class Config(
                 vaultGraceDays = env("ANDVARI_VAULT_GRACE_DAYS")?.toInt() ?: 7,
                 transferTtlDays = env("ANDVARI_TRANSFER_TTL_DAYS")?.toInt() ?: 14,
                 janitorDryRun = env("ANDVARI_JANITOR_DRYRUN")?.let { it == "1" || it.equals("true", ignoreCase = true) } ?: false,
+                smtpHost = env("ANDVARI_SMTP_HOST"),
+                smtpPort = env("ANDVARI_SMTP_PORT")?.toInt() ?: 587,
+                smtpUser = env("ANDVARI_SMTP_USER"),
+                smtpPass = env("ANDVARI_SMTP_PASS"),
+                smtpFrom = env("ANDVARI_SMTP_FROM"),
+                inviteBaseUrl = env("ANDVARI_INVITE_BASE_URL"),
             )
         }
     }

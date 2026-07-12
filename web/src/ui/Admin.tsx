@@ -317,11 +317,22 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
   const [copiedLink, setCopiedLink] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [sendEmail, setSendEmail] = useState(false);
+  const [emailAvailable, setEmailAvailable] = useState(false);
   // The enroll link embeds location.origin verbatim. On the public break-glass origin that link
   // would sail through the whole ceremony and then die at register (public-register is
   // server-refused) — so the QR path simply doesn't exist there; the plain token stays, redeemed
   // wherever the member actually enrolls. shouldOfferQr gates every QR-bearing surface below.
   const qrAvailable = shouldOfferQr(window.location.origin);
+
+  // cut 4: the "email this invite" checkbox appears only when the server has email fully configured
+  // (SMTP + a valid private base URL) AND we're on a private origin (an emailed public-origin link
+  // dies at register). One status fetch drives availability.
+  useEffect(() => {
+    let live = true;
+    if (qrAvailable) client.adminStatus().then((s) => { if (live) setEmailAvailable(s.emailConfigured); }).catch(() => {});
+    return () => { live = false; };
+  }, [client, qrAvailable]);
 
   const mint = async () => {
     setBusy(true);
@@ -329,7 +340,7 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
     setResult(null);
     setResultLink(null);
     try {
-      const r = await client.adminInvite(email.trim(), isAdmin, inviteTtlMinutes(ttl));
+      const r = await client.adminInvite(email.trim(), isAdmin, inviteTtlMinutes(ttl), sendEmail && emailAvailable);
       setResult(r);
       if (qrAvailable) {
         // composeEnrollLink refuses ill-formed UTF-16 (null) — a lone surrogate can round-trip
@@ -340,6 +351,7 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
       }
       setEmail("");
       setIsAdmin(false);
+      setSendEmail(false);
       // keep `ttl` — an admin minting several invites is likely using one delivery method
       onInvited();
     } catch (e) {
@@ -378,7 +390,7 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="new@user" />
         </Field>
         <Field label="Invite expires in" style={{ marginBottom: 0 }}>
-          <select value={ttl} onChange={(e) => setTtl(e.target.value as InviteTtl)}>
+          <select value={ttl} disabled={sendEmail} onChange={(e) => setTtl(e.target.value as InviteTtl)}>
             <option value="1h">1 hour</option>
             <option value="1d">1 day</option>
             <option value="3d">3 days</option>
@@ -388,8 +400,20 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
           <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} />
           <span>admin</span>
         </label>
+        {qrAvailable && emailAvailable && (
+          <label className="check" style={{ margin: "0 0 10px" }}>
+            <input type="checkbox" checked={sendEmail} onChange={(e) => { setSendEmail(e.target.checked); if (e.target.checked) setTtl("1h"); }} />
+            <span>email it</span>
+          </label>
+        )}
         <button className="ghost" disabled={busy || !email.trim()}>{busy ? "Inviting…" : "Invite"}</button>
       </div>
+      {qrAvailable && emailAvailable && sendEmail && (
+        <div className="muted" style={{ marginTop: 8 }}>
+          andvari will also email the enroll link to this address — a one-time key that expires within
+          the hour. Still hand over the printed recovery sheet in person.
+        </div>
+      )}
       {result && (
         <div className="token-box">
           <div className="muted" style={{ marginBottom: 6 }}>

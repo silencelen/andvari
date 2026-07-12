@@ -29,14 +29,21 @@ class AdminService(private val repo: Repo) {
     }
 
     /** Create an invite; returns the plaintext token ONCE (only its hash is stored). */
-    fun createInvite(email: String, isAdmin: Boolean, byUserId: String, ttlMinutes: Int? = null): Pair<InviteResponse, String> = repo.db.tx { c ->
+    fun createInvite(email: String, isAdmin: Boolean, byUserId: String, ttlMinutes: Int? = null, sendEmail: Boolean = false): Pair<InviteResponse, String> = repo.db.tx { c ->
+        // B1: validate the address BEFORE it is stored — it's admin-typed free text that can reach
+        // SMTP, and a CR/LF/comma is a header-injection primitive. Applies to ALL invites (the
+        // bootstrap "*" invite is a raw insert in App.kt, not this path, so it is unaffected).
+        if (!EmailAddress.isValid(email)) throw BadRequest("invalid_email")
         if (repo.userByEmail(email) != null) throw BadRequest("email_taken")
         val token = ServerCrypto.newToken()
         val tokenHash = ServerCrypto.hashToken(token)
         // Optional short TTL (S4 QR invites), clamped to [5 min, 72 h]; absent → 72 h unchanged.
         // There is NO invite list/revoke surface, so this clamp is the SOLE containment for a
         // photographed/leaked QR — never honor a client-requested TTL outside these bounds.
-        val ttlMs = ttlMinutes?.let { it.coerceIn(5, 72 * 60) * 60_000L } ?: inviteTtlMs
+        var ttlMs = ttlMinutes?.let { it.coerceIn(5, 72 * 60) * 60_000L } ?: inviteTtlMs
+        // A2: an emailed invite is a bearer token that rests in an inbox → clamp the FINAL ttl to
+        // ≤60 min (AFTER the null→72h default resolves, so no client can email a 72h token).
+        if (sendEmail) ttlMs = minOf(ttlMs, 60L * 60_000L)
         val expiresAt = now() + ttlMs
         c.exec(
             "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES(?,?,?,?,?)",
@@ -135,6 +142,7 @@ class AdminService(private val repo: Repo) {
             dbBytes = File(config.dbPath).length(),
             totpEnrolledCount = c.queryOne("SELECT COUNT(*) FROM users WHERE totpSecret IS NOT NULL") { it.getInt(1) } ?: 0,
             downloadsManifest = config.downloadsDir?.let { File(it, "manifest.json").isFile } ?: false,
+            emailConfigured = config.emailConfigured,
         )
     }
 }
