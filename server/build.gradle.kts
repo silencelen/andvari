@@ -28,6 +28,7 @@ dependencies {
 
     implementation(libs.sqlite.jdbc)
     implementation(libs.logback.classic)
+    implementation(libs.angus.mail) // cut 4 email-invite: SMTP submission (jakarta.mail impl)
     implementation(libs.micrometer.prometheus)
 
     testImplementation(libs.kotlin.test)

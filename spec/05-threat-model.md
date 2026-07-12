@@ -43,7 +43,15 @@ removes the server's copies after a 7-day grace and triggers fleet-wide client p
 NOT cryptographic erasure toward ex-members — anyone granted while the vault lived may retain
 ciphertext + the VK they already held, and encrypted server backups (PBS/B2) keep copies
 until their own retention expires (~30 d); the ex-owner after a transfer retains VK likewise.
-True erasure needs P6 VK rotation. **Lifecycle threat posture (T1):** lifecycle ops on
+True erasure needs P6 VK rotation. **R8 (cut 4 email-invite — INERT unless the owner configures
+it):** with `ANDVARI_SMTP_*` + `ANDVARI_INVITE_BASE_URL` set, a **bearer invite token transits the
+(M365) mail relay and rests in the invitee's inbox** — bounded by a forced ≤60-min TTL,
+private-origin-only links (an emailed public-origin link dies at `register`), and `register` still
+needing reach to the private enroll origin; a real widening of R3-adjacent out-of-band delivery.
+**T1 widens with it:** a CT 122 compromise reading `andvari.env` now also gains the stored
+`ANDVARI_SMTP_PASS` = send-as the household `monahanhosting.com` domain (phishing) + a new outbound
+internet egress — capabilities the T1 row above ("sees only spec 02 §5 plaintext + traffic
+patterns") otherwise excludes. **Lifecycle threat posture (T1):** lifecycle ops on
 existing vaults are member-verifiable — the server never holds VK and cannot mint proofs; it
 can still WITHHOLD, delay, or serve stale state (availability-class, accepted). Replay is
 bounded by expiry+seq binding and by soft-hide-until-purgeAt; residuals: a device offline

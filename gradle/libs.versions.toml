@@ -10,6 +10,7 @@ jna = "5.14.0"
 ktor = "3.0.3"
 sqlite-jdbc = "3.47.1.0"
 logback = "1.5.12"
+angus-mail = "2.0.3"
 micrometer = "1.14.2"
 zxing = "3.5.3"
 shadow = "8.3.5"
@@ -50,6 +51,7 @@ ktor-client-mock = { group = "io.ktor", name = "ktor-client-mock", version.ref =
 ktor-client-websockets = { group = "io.ktor", name = "ktor-client-websockets", version.ref = "ktor" }
 sqlite-jdbc = { group = "org.xerial", name = "sqlite-jdbc", version.ref = "sqlite-jdbc" }
 logback-classic = { group = "ch.qos.logback", name = "logback-classic", version.ref = "logback" }
+angus-mail = { group = "org.eclipse.angus", name = "angus-mail", version.ref = "angus-mail" }
 micrometer-prometheus = { group = "io.micrometer", name = "micrometer-registry-prometheus", version.ref = "micrometer" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }

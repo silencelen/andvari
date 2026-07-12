@@ -465,10 +465,12 @@ export class ApiClient {
     return this.json<AdminUserSummary[]>("GET", "/api/v1/admin/users");
   }
 
-  adminInvite(email: string, isAdmin: boolean, ttlMinutes?: number) {
+  adminInvite(email: string, isAdmin: boolean, ttlMinutes?: number, sendEmail?: boolean) {
     // ttlMinutes absent → the server keeps its 72h default; the QR flow passes ~60 min
     // (the server clamps to [5, 4320]). It is the only containment for a photographed QR.
-    return this.json<InviteResponse>("POST", "/api/v1/admin/users", { email, isAdmin, ttlMinutes });
+    // sendEmail (cut 4) → the server ALSO emails the enroll link and forces the ttl to ≤60 min;
+    // it's a no-op unless the server is email-configured (AdminStatus.emailConfigured).
+    return this.json<InviteResponse>("POST", "/api/v1/admin/users", { email, isAdmin, ttlMinutes, sendEmail });
   }
 
   adminDisableUser(userId: string) {

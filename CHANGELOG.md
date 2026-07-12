@@ -1,6 +1,20 @@
 # andvari — changelog
 
-## Unreleased (2026-07-12 — additive; web + Android stay 0.15.0, browser extension → 0.12.0)
+## Unreleased (2026-07-12 — additive; web / server / Android stay 0.15.0, browser extension → 0.12.0)
+
+### Email an invite (OFF by default — you turn it on)
+
+- New opt-in **"email it"** checkbox on the admin invite form: andvari can email the invitee their
+  enroll link, instead of you handing the token over by hand. **It stays hidden and does nothing
+  until you configure email** on the server — set `ANDVARI_SMTP_*` (host / user / pass / from — e.g.
+  your Microsoft 365 mailbox) plus `ANDVARI_INVITE_BASE_URL` (the tailnet/LAN address the link opens
+  on) in `andvari.env`, and open an outbound rule to your mail relay. Until then the checkbox is
+  absent and nothing changes.
+- An emailed invite is treated as a **one-time key that lands in an inbox**, so it's hardened
+  accordingly: its window is forced to **≤ 1 hour** (no matter the "expires in" you picked), it's
+  only offered on your private address (never the public break-glass one), the address is strictly
+  validated before anything is sent, and the link — not the token in a log — is all that's emailed.
+  You still hand over the printed recovery sheet in person; that's unchanged.
 
 ### Re-logging in no longer creates a duplicate (browser extension + Android autofill)
 
