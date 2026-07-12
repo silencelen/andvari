@@ -132,8 +132,28 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
       re-offer; mustChangePassword surface; refresh killed only on definitive 401/403 (web-B7
       mirror); drop the unused "scripting" permission; F26 lock-reason parity. Recommended
       FIRST of the two proposed batches.
-- [ ] **A1. (RATIFIED 2026-07-11 for the NEXT session — owner: "E1 now, A1 next session")
-      Accessibility batch ×3 clients (+ extension fold-in) (M–L).** 23 confirmed findings incl. the sweep's only P1 — web has
+- [x] **A1. DONE — SHIPPED web/android/desktop 0.15.0 + extension 0.11.0 (2026-07-11, `5963a17`,
+      pushed). Accessibility batch ×4 clients.**
+      45 adversarially-confirmed findings (the quad-sweep's 23 web/android/desktop + a new
+      22-finding extension a11y sweep), 6 cross-client principles (label association, live
+      regions, icon names, focus, no-colour-alone, contrast), ZERO server/core/wire/storage
+      change. Design `docs/design/2026-07-11-accessibility-a1.md`. Doctrine ran full: design →
+      breaker (2 BLOCKERS — the silent-polite-region trap [BL-1] + the Field div-mis-association
+      [BL-2] — + 11 binding amendments, all folded pre-build) → 4 fully-disjoint Opus builders
+      (no shared seam; one misfired→relaunched) → per-client gates → find→refute review (5 dims:
+      1 confirmed P3 [desktop dismiss-button contrast twin] fixed + 1 refuted) → verify.sh GREEN
+      (lockstep 0.15.0 ×4, Kotlin/android/web 352/extension 35) + desktop compileKotlin green →
+      shipped: web via ops/deploy.sh (served index sha == build, healthz 200) + extension zips +
+      manifest MERGE (0.11.0, linux 0.14.2 preserved, served shas verified). **Owner call: 7c
+      UI-boundary contrast → high-contrast mode (A2).** **Deferred → A1b (named follow-up):**
+      web focus-return on inline-confirm/layer-transition (a11yweb-06); extension in-page
+      autofill dropdown keyboard-nav + save-prompt alertdialog (6a/6b/6c); the login-row
+      nested-button restructure (3e); desktop focus-RETURN remainder. **Owner steps:** APK
+      (assembleRelease + keystore) + desktop deb/MSI builds; the manual screen-reader smoke
+      (NVDA web/ext, TalkBack android, Access-Bridge desktop) — the ONLY proof of actual
+      announcement (static gates prove markup, not spoken output). GOTCHA logged: NEVER wrap
+      `scripts/verify.sh` in an outer `flock` — it flocks the gradle lock internally →
+      self-deadlock (cost ~1h this run). 23 confirmed findings incl. the sweep's only P1 — web has
       zero programmatic label association; zero live regions on web AND Android; contrast
       failures in both themes; desktop has no focus management at all (ledger §A1). Wants its
       own design pass (per-client semantics patterns) + breaker before build; fold in the
