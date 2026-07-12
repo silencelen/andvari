@@ -176,6 +176,13 @@ and keeps feature work in trigger-gated lanes so the soak window stays quiet.
       soak) and **P3 escrow-free guest tier** (M-L — public-origin threat-model expansion the
       owner must sign); plus the Steward ops panel horizon. A fresh persona walk after the
       family is ACTUALLY enrolled would re-rank these on real usage.
+      **Owner dev-notes queued 2026-07-12 (in `docs/ROADMAP.md` §"Onboarding & reach"):**
+      (a) an opt-in "email this invite" checkbox on the Admin invite form — M–L, needs net-new
+      server SMTP capability + a mail-surface threat-model sign-off (invites are hand-delivered
+      out-of-band today); (b) collapse "Invite" + "Invite with QR" into ONE Invite button that
+      shows the QR + token by default — S, but decide the invite-TTL policy first (QR invites
+      get a short TTL today because a photographed QR can't be revoked; if every invite shows a
+      QR, every invite is photographable). Both are the same Admin form — do together.
 
 ## Parked for owner (the complete current list)
 
