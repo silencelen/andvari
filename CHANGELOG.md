@@ -1,6 +1,22 @@
 # andvari — changelog
 
-## 0.15.0 — andvari for everyone: screen readers, keyboards, and bigger, clearer text (2026-07-11, cross-platform cut)
+## Unreleased (2026-07-12, web — additive; the fleet stays 0.15.0)
+
+### One "Invite" button, and you choose how long an invite lasts
+
+- The admin invite form's two buttons ("Invite" and "Invite with QR") are now a **single Invite
+  action** that shows the enrollment QR *and* the copyable token/link together — hand over whichever
+  is convenient.
+- New **"Invite expires in"** choice — **1 hour / 1 day / 3 days**, defaulting to **1 hour**. An
+  invite is a one-time key: anyone who has it (or photographs its QR) can use it until it expires,
+  and it can't be revoked — so the form now says that plainly and keeps the default window short.
+  Pick **3 days** when you're handing someone the printed recovery sheet to set up later. (The
+  printed-sheet fingerprint they type during enrollment is public server data — it guards against
+  the wrong server, not against someone holding the invite — so the expiry is the real containment.)
+- On the public family address the invite still shows the token only (a QR there wouldn't work),
+  exactly as before.
+
+
 
 This release makes andvari usable by family members who navigate with a screen reader, use only a
 keyboard, or need larger, higher-contrast text — including our older members.
