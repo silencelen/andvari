@@ -510,18 +510,41 @@ describe("VaultStore undecryptable retention (spec 07 §2.4)", () => {
     ]);
   });
 
-  it("retains a corrupt blob under a held key; items of no-key vaults are NOT ours to enumerate", async () => {
+  it("enumerates BOTH a corrupt held-key blob AND items of a no-key vault (spec 07 §2.4 — never silently omitted)", async () => {
     const s = await scenario();
     const api = new FakeApi();
     const store = new VaultStore(api.asClient(), s.member);
     // AD mismatch: a blob sealed for a DIFFERENT itemId fails decrypt under the held VK.
     const corrupt: WireItem = { ...s.item, blob: s.owner.encryptItem(s.vaultId, s.owner.newItemId(), DOC).blob };
-    // A vault we hold no key for is skipped WITHOUT being enumerated (not "undecryptable" — not ours).
-    const foreign: WireItem = { ...s.item, itemId: s.owner.newItemId(), vaultId: "vault-with-no-key", formatVersion: 3 };
+    // A vault we hold no key for: spec 07 §2.4 requires it be SKIPPED but ENUMERATED (missing VK),
+    // never silently omitted from a backup (the Kotlin ExportPlanner enumerates it too).
+    const foreignId = s.owner.newItemId();
+    const foreign: WireItem = { ...s.item, itemId: foreignId, vaultId: "vault-with-no-key", formatVersion: 3 };
     api.queue.push({ rev: 9, full: true, vaults: [s.vault], grants: [s.grant], items: [corrupt, foreign], removedGrants: [] });
     await store.sync();
 
-    expect(store.undecryptable()).toEqual([{ itemId: s.itemId, vaultId: s.vaultId, formatVersion: 1 }]);
+    const expected = [
+      { itemId: s.itemId, vaultId: s.vaultId, formatVersion: 1 },
+      { itemId: foreignId, vaultId: "vault-with-no-key", formatVersion: 3 },
+    ].sort((a, b) => a.vaultId.localeCompare(b.vaultId) || a.itemId.localeCompare(b.itemId));
+    expect(store.undecryptable()).toEqual(expected);
+  });
+
+  it("clears a missing-VK enumeration when the no-VK item is tombstoned (spec 07 §2.4 lifecycle, A3)", async () => {
+    const s = await scenario();
+    const api = new FakeApi();
+    const store = new VaultStore(api.asClient(), s.member);
+    const foreignId = s.owner.newItemId();
+    const foreign: WireItem = { ...s.item, itemId: foreignId, vaultId: "vault-with-no-key", formatVersion: 3 };
+    api.queue.push({ rev: 9, full: true, vaults: [s.vault], grants: [s.grant], items: [foreign], removedGrants: [] });
+    await store.sync();
+    expect(store.undecryptable().map((u) => u.itemId)).toContain(foreignId);
+
+    // A tombstone for the no-VK item ends its enumeration. A no-key item's tombstone has !hasVault
+    // and never reaches the held-path tombstone clear, so the new !hasVault branch must handle it.
+    api.queue.push({ rev: 10, full: false, vaults: [], grants: [], items: [{ ...foreign, deleted: true }], removedGrants: [] });
+    await store.sync();
+    expect(store.undecryptable()).toEqual([]);
   });
 
   it("clears the entry when the item becomes decryptable, is tombstoned, or its grant is revoked", async () => {

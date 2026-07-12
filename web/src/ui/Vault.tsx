@@ -654,7 +654,7 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
         warn: true,
         body:
           `The server says you lost access to “${name}”, but this couldn’t be verified as a real owner action. ` +
-          `A sealed copy of its data is kept on this device for 30 days. ` +
+          `A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). ` +
           `If nobody in your household did this, tell your admin — the server may be misbehaving.`,
       };
   }
