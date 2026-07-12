@@ -20,6 +20,9 @@ fun main() {
             // ANDVARI_REQUEST_READ_TIMEOUT_S only after verifying idle-WS survival on the
             // deployment (30 s ping keepalive must reset the reaper).
             requestReadTimeoutSeconds = config.requestReadTimeoutSeconds
+            // 0 = off (override Netty's 10 s default, which truncates slow large-file
+            // downloads mid-body). See Config.responseWriteTimeoutSeconds.
+            responseWriteTimeoutSeconds = config.responseWriteTimeoutSeconds
         },
     ) {
         andvariModule(services)

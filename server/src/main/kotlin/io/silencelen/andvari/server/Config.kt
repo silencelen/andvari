@@ -34,6 +34,12 @@ class Config(
     // Netty request-read timeout, seconds (0 = off). Stays OFF until idle-WS survival
     // under the timeout is verified on the deployment (ping keepalive vs Netty reaper).
     val requestReadTimeoutSeconds: Int = 0,
+    // Netty response-WRITE timeout, seconds (0 = off). Netty's built-in default is 10 s,
+    // which severs any response that takes >10 s to flush to a SLOW client — truncating
+    // large installer downloads (the .msi/.deb) proxied to DERP-relayed clients mid-body
+    // ("ReverseProxy read error during body copy: unexpected EOF"). Default OFF so a slow
+    // drain can't sever a legitimate large download; set the env to re-arm a finite reaper.
+    val responseWriteTimeoutSeconds: Int = 0,
     // Vault lifecycle (spec 03 §11): soft-delete grace before the janitor purges, and
     // the ownership-transfer offer TTL. Env-tunable, not schema.
     val vaultGraceDays: Int = 7,
@@ -78,6 +84,7 @@ class Config(
                     ?: DEFAULT_TRUSTED_IP_HEADERS,
                 uploadMaxConcurrentPerUser = env("ANDVARI_UPLOAD_MAX_CONCURRENT")?.toInt() ?: 4,
                 requestReadTimeoutSeconds = env("ANDVARI_REQUEST_READ_TIMEOUT_S")?.toInt() ?: 0,
+                responseWriteTimeoutSeconds = env("ANDVARI_RESPONSE_WRITE_TIMEOUT_S")?.toInt() ?: 0,
                 vaultGraceDays = env("ANDVARI_VAULT_GRACE_DAYS")?.toInt() ?: 7,
                 transferTtlDays = env("ANDVARI_TRANSFER_TTL_DAYS")?.toInt() ?: 14,
                 janitorDryRun = env("ANDVARI_JANITOR_DRYRUN")?.let { it == "1" || it.equals("true", ignoreCase = true) } ?: false,
