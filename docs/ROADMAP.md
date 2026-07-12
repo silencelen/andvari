@@ -218,6 +218,38 @@ Prioritized; each is additive and back-compatible.
   always keyed off file headers, never the pick; only the per-source "how do I export?"
   help survives (core `ImportHelp` + its web twin). The adapters/dedupe/perf work stands.
 
+- **Owner dev-note 2026-07-12 — "email this invite" checkbox on the invite-user flow.**
+  Add an opt-in checkbox to the Admin invite form (`InviteForm`, `web/src/ui/Admin.tsx:284`,
+  beside the existing `isAdmin` + QR options) that, when checked, ALSO emails the invitee their
+  enroll link (`composeEnrollLink` — the same link the QR encodes) instead of the admin only
+  handing the token over by hand. **Not a UI-only tweak — the real cost is net-new server email
+  capability:** andvari has ZERO mail infra today (grep-confirmed; invites are deliberately
+  hand-delivered out-of-band), so this needs an SMTP client + config + a credential in
+  `andvari.env` + an email template on CT 122, plus a client→server flag on `createInvite`
+  (`server/.../AdminService.kt:32`). Size **M–L** (server capability), not S.
+  **Threat-model note (must be weighed before build):** emailing the enroll link widens the
+  invite-delivery surface — the token lands in an inbox + the mail provider's hands, weakening
+  today's out-of-band delivery (R3-adjacent). Mitigating facts: enrollment still requires typing
+  the printed-sheet recovery fingerprint (spec 04 §2(3)), so an emailed link alone cannot
+  complete enrollment; keep the checkbox **default-OFF** (secure-by-default), and consider a
+  short invite TTL for emailed invites (the QR-invite precedent, `QR_INVITE_TTL_MINUTES`).
+  Cross-check whether emailed invites should be limited to the private origin. Pitch-until-ratified
+  (exploration/N7 lane); no build without the owner signing the mail-surface tradeoff.
+
+- **Owner dev-note 2026-07-12 — collapse "Invite" + "Invite with QR" into ONE "Invite" button
+  that shows the QR by default (with the token).** Today `InviteForm`
+  (`web/src/ui/Admin.tsx:284,305`) has a `withQr` fork: a plain invite (72 h TTL) vs a QR invite;
+  the result view shows the token, and the QR only when that path was chosen. Target: a single
+  Invite action whose result always renders the enroll QR **and** the token/link together, so the
+  admin can hand over whichever is convenient. Size **S** (mostly UI — merge the two buttons,
+  always compose+render the QR in the result). **The one real decision — invite TTL:** QR invites
+  currently get a SHORT TTL on purpose (`QR_INVITE_TTL_MINUTES`, `Admin.tsx:261`) because a
+  photographed QR can't be revoked. If EVERY invite now shows a QR, every invite is photographable
+  → the safe default is to give **all** invites the short TTL (or make TTL an explicit field), and
+  the QR-can't-be-revoked warning copy should show on every invite. Decide the TTL policy before
+  building. Pairs naturally with the "email this invite" note above (same form; if both land, the
+  result offers token + QR + optional email in one flow).
+
 ## Horizons & cycle doctrine (2026-07-08 brainstorm — the spine behind the queues)
 
 **The organizing gate is the real-secrets migration.** Features are cheap before it and
