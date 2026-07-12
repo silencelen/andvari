@@ -58,15 +58,25 @@ class Config(
     val smtpPass: String? = null,
     val smtpFrom: String? = null,
     val inviteBaseUrl: String? = null,
+    // cut 4 alt transport: Microsoft Graph app-only sendMail (client-credentials) — PREFERRED over
+    // SMTP when set (no SMTP AUTH / no stored mailbox password). graphSender = the from-mailbox UPN.
+    val graphTenantId: String? = null,
+    val graphClientId: String? = null,
+    val graphClientSecret: String? = null,
+    val graphSender: String? = null,
 ) {
     val escrowConfigured: Boolean get() = recoveryPublicKey.size == 32 && recoveryFingerprint.isNotEmpty()
 
-    /** cut 4: email-invite is enabled ONLY when all SMTP config + a usable canonical private base URL
-     *  are present. Any gap ⇒ the Admin "email this invite" checkbox is disabled and a sendEmail
-     *  request is a no-op — fail-safe, never a hard error that loses the invite (breaker NIT). */
+    val smtpConfigured: Boolean
+        get() = !smtpHost.isNullOrBlank() && !smtpUser.isNullOrBlank() && !smtpPass.isNullOrBlank() && !smtpFrom.isNullOrBlank()
+    val graphConfigured: Boolean
+        get() = !graphTenantId.isNullOrBlank() && !graphClientId.isNullOrBlank() && !graphClientSecret.isNullOrBlank() && !graphSender.isNullOrBlank()
+
+    /** cut 4: email-invite is enabled ONLY when a transport (SMTP or Graph) is fully configured AND a
+     *  usable canonical private base URL is present. Any gap ⇒ the Admin "email this invite" checkbox
+     *  is disabled and a sendEmail request is a no-op — fail-safe, never a hard error (breaker NIT). */
     val emailConfigured: Boolean
-        get() = !smtpHost.isNullOrBlank() && !smtpUser.isNullOrBlank() && !smtpPass.isNullOrBlank() &&
-            !smtpFrom.isNullOrBlank() && inviteBaseUrlIssue() == null
+        get() = (smtpConfigured || graphConfigured) && inviteBaseUrlIssue() == null
 
     /** null = ANDVARI_INVITE_BASE_URL is a usable canonical private origin; else a human reason (logged
      *  at boot). Catches breaker B2 (a config typo → every emailed invite dead-on-arrival) + A5 (never
@@ -133,6 +143,10 @@ class Config(
                 smtpPass = env("ANDVARI_SMTP_PASS"),
                 smtpFrom = env("ANDVARI_SMTP_FROM"),
                 inviteBaseUrl = env("ANDVARI_INVITE_BASE_URL"),
+                graphTenantId = env("ANDVARI_GRAPH_TENANT"),
+                graphClientId = env("ANDVARI_GRAPH_CLIENT_ID"),
+                graphClientSecret = env("ANDVARI_GRAPH_CLIENT_SECRET"),
+                graphSender = env("ANDVARI_GRAPH_SENDER"),
             )
         }
     }

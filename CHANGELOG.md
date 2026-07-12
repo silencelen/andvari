@@ -6,10 +6,10 @@
 
 - New opt-in **"email it"** checkbox on the admin invite form: andvari can email the invitee their
   enroll link, instead of you handing the token over by hand. **It stays hidden and does nothing
-  until you configure email** on the server — set `ANDVARI_SMTP_*` (host / user / pass / from — e.g.
-  your Microsoft 365 mailbox) plus `ANDVARI_INVITE_BASE_URL` (the tailnet/LAN address the link opens
-  on) in `andvari.env`, and open an outbound rule to your mail relay. Until then the checkbox is
-  absent and nothing changes.
+  until you configure email** on the server — a transport (either **Microsoft Graph** app-only
+  sendMail via `ANDVARI_GRAPH_*`, the durable path with no mailbox password; or SMTP via
+  `ANDVARI_SMTP_*`) plus `ANDVARI_INVITE_BASE_URL` (the private tailnet/LAN origin the link opens on)
+  in `andvari.env`. Until then the checkbox is absent and nothing changes.
 - An emailed invite is treated as a **one-time key that lands in an inbox**, so it's hardened
   accordingly: its window is forced to **≤ 1 hour** (no matter the "expires in" you picked), it's
   only offered on your private address (never the public break-glass one), the address is strictly
