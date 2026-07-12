@@ -29,6 +29,12 @@ compose.desktop {
             packageVersion = "0.15.0"
             description = "andvari password manager"
             vendor = "silencelen"
+            // JDK modules the jlink runtime image must include — Compose's default set is
+            // minimal and omits these, so without this the bundled runtime crashes at
+            // startup: java.net.http (ktor Java HTTP engine), java.sql (sqlite-jdbc),
+            // jdk.unsupported (JNA/lazysodium sun.misc.Unsafe). List from
+            // `gradlew :app-desktop:suggestRuntimeModules`. Applies to BOTH .msi and .deb.
+            modules("java.instrument", "java.management", "java.net.http", "java.sql", "jdk.unsupported")
             windows {
                 // STABLE across releases → re-running a newer installer upgrades in
                 // place instead of installing a second copy. NEVER change this.
