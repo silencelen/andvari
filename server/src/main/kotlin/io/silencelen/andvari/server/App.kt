@@ -127,13 +127,17 @@ fun buildServices(config: Config, notifier: Notifier): Services {
     val metrics = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
     registerPurgeGauges(metrics, db)
     val janitor = Janitor(repo, service.attachments, config) { userIds, rev -> notifier.notifyRev(userIds, rev) }
-    // cut 4: the SMTP sender only when fully configured (breaker fail-safe); if partially configured,
-    // a boot line states why email-invite stays OFF (never the credential).
-    val email = if (config.emailConfigured) {
-        SmtpEmailSender(config.smtpHost!!, config.smtpPort, config.smtpUser!!, config.smtpPass!!, config.smtpFrom!!)
-    } else null
-    if (!config.smtpHost.isNullOrBlank() && email == null) {
-        System.err.println("[andvari] email-invite is OFF — ${config.inviteBaseUrlIssue() ?: "SMTP config incomplete (need HOST, USER, PASS, FROM)"}")
+    // cut 4: pick the transport — Graph (preferred, durable) when configured, else SMTP; null = OFF.
+    // Constructed only when emailConfigured (a full transport + a valid canonical base URL), so a
+    // partial/typo'd config stays OFF rather than half-armed. GraphEmailSender reuses `http` (no new dep).
+    val email: EmailSender? = when {
+        !config.emailConfigured -> null
+        config.graphConfigured -> GraphEmailSender(http, config.graphTenantId!!, config.graphClientId!!, config.graphClientSecret!!, config.graphSender!!)
+        else -> SmtpEmailSender(config.smtpHost!!, config.smtpPort, config.smtpUser!!, config.smtpPass!!, config.smtpFrom!!)
+    }
+    val anyEmailEnv = !config.smtpHost.isNullOrBlank() || !config.graphClientId.isNullOrBlank() || !config.graphTenantId.isNullOrBlank()
+    if (email == null && anyEmailEnv) {
+        System.err.println("[andvari] email-invite is OFF — ${config.inviteBaseUrlIssue() ?: "email transport config incomplete (a full SMTP or Graph set)"}")
     }
     return Services(repo, service, AdminService(repo), HibpRelay(repo, http), notifier, config, metrics, janitor, email)
 }
