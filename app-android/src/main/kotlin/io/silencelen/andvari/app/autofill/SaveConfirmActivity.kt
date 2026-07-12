@@ -44,6 +44,8 @@ import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.autofill.CardNormalize
+import io.silencelen.andvari.core.client.autofill.FillTarget
+import io.silencelen.andvari.core.client.autofill.UriMatch
 import io.silencelen.andvari.core.crypto.CryptoException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -60,6 +62,19 @@ private sealed interface CardPlan {
 
     data class Update(override val display: String, val itemId: String) : CardPlan
     data class New(override val display: String) : CardPlan
+}
+
+/**
+ * Login confirm variant, resolved POST-unlock (dedupe needs the decrypted working set). Update
+ * carries only (itemId, name, username) — NO doc — which FORCES doSave to re-read the item and
+ * .copy()-materialize it (swap only the password), never a field-by-field rebuild (the 0.2.x
+ * data-loss class, see :77). `username` is the EXISTING item's username, shown in the confirm so a
+ * user can tell a password change from a wrong-account merge (auto-saved logins are named by host).
+ * Twin of the extension's saveTargetFor (savetarget.test.ts pins the shared 2a/2b/2c rule).
+ */
+private sealed interface LoginPlan {
+    data class Update(val itemId: String, val name: String, val username: String?) : LoginPlan
+    object New : LoginPlan
 }
 
 /**
@@ -87,6 +102,7 @@ class SaveConfirmActivity : ComponentActivity() {
     private var unlocked by mutableStateOf(false)
     private var cardPlan by mutableStateOf<CardPlan?>(null)
     private var cardStageDone by mutableStateOf(false)
+    private var loginPlan by mutableStateOf<LoginPlan?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -122,8 +138,8 @@ class SaveConfirmActivity : ComponentActivity() {
                         plan = plan, busy = busy, error = errorText,
                         onConfirm = { doSaveCard(plan, creds) }, onSkip = { advancePastCard(creds) },
                     )
-                    creds.savable -> SaveCard(
-                        site = creds.title(), username = creds.username, busy = busy, error = errorText,
+                    loginPlan != null -> SaveCard(
+                        plan = loginPlan!!, site = creds.title(), username = creds.username, busy = busy, error = errorText,
                         onSave = { doSave(creds) }, onCancel = { finish() },
                     )
                     else -> {} // both stages consumed — a finish() is already in flight
@@ -150,7 +166,11 @@ class SaveConfirmActivity : ComponentActivity() {
      */
     private fun resolveStages(creds: SavedCredentials): Boolean {
         cardPlan = creds.card?.let { runCatching { cardPlanFor(it) }.getOrNull() }
-        return cardPlan != null || creds.savable
+        // loginPlan null = nothing to save (an unchanged re-login — the dup-registration suppress),
+        // not savable, or a lookup error; the login stage renders only when it is non-null. The
+        // return gates the whole activity: both null with no card ⇒ finish() (no blank screen).
+        loginPlan = if (creds.savable) runCatching { loginPlanFor(creds) }.getOrNull() else null
+        return cardPlan != null || loginPlan != null
     }
 
     private fun cardPlanFor(card: SavedCard): CardPlan? {
@@ -178,10 +198,46 @@ class SaveConfirmActivity : ComponentActivity() {
         return if (CardDisplay.CREATE_ENABLED) CardPlan.New(display) else null
     }
 
+    /**
+     * Save-vs-update for a captured login (mirrors cardPlanFor). Dedupe against the decrypted
+     * working set's login items by canonical urimatch. With a username → the exact (host∧username)
+     * match; a password-only submit → a password-equal item (2a — a re-login) or a LONE host login
+     * (2b — a password change), else New (2c: ambiguous, never overwrite the wrong account). Returns
+     * NULL when there is nothing to save (an unchanged re-login) so the login stage is skipped.
+     * Twin of the extension's saveTargetFor (savetarget.test.ts pins the shared 2a/2b/2c rule).
+     */
+    private fun loginPlanFor(creds: SavedCredentials): LoginPlan? {
+        val engine = VaultSession.getIfFresh()?.engine ?: return null
+        // webDomain is ATTACKER-CONTROLLED (any app populates its own AssistStructure), so gate it on
+        // the cert-pin check EXACTLY like the fill side (DatasetBuilder.targetFor:296-297 →
+        // TrustedBrowsers.isTrusted): an untrusted package matches only androidapp://<pkg>, never a
+        // spoofed web host. Without this, a malicious non-browser app could set webDomain="github.com"
+        // and drive an Update that CLOBBERS the user's real github login. Benign native apps already
+        // carry webDomain=null, so this is a no-op for them (fill/save symmetry restored).
+        val webHost = if (TrustedBrowsers.isTrusted(this, creds.appPackage)) creds.webDomain else null
+        val target = FillTarget(webHost = webHost, packageName = creds.appPackage)
+        val matches = engine.items().filter {
+            it.doc.type == "login" && UriMatch.matchLogins(it.doc.login?.uris ?: emptyList(), target)
+        }
+        val username = creds.username
+        if (!username.isNullOrEmpty()) {
+            val exact = matches.firstOrNull { (it.doc.login?.username ?: "") == username } ?: return LoginPlan.New
+            // Unchanged username+password re-login → nothing to save (extension :967 parity, amend C).
+            return if ((exact.doc.login?.password ?: "") == creds.password) null
+            else LoginPlan.Update(exact.itemId, exact.doc.name, exact.doc.login?.username)
+        }
+        // Password-only: a password-equal item is the SAME login being re-entered → nothing to save (2a).
+        if (matches.any { (it.doc.login?.password ?: "") == creds.password }) return null
+        val lone = matches.singleOrNull() ?: return LoginPlan.New // 2c: ambiguous multi-login → New (recoverable)
+        return LoginPlan.Update(lone.itemId, lone.doc.name, lone.doc.login?.username) // 2b: a password change
+    }
+
     /** "Not now" on the card stage: fall through to the login stage, or exit if there is none. */
     private fun advancePastCard(creds: SavedCredentials) {
         errorText = null
-        if (creds.savable) cardStageDone = true else finish()
+        // BLOCKER 2: gate on loginPlan, not creds.savable — savable can be true while loginPlan is
+        // null (an unchanged re-login), and advancing then would strand a blank login stage.
+        if (loginPlan != null) cardStageDone = true else finish()
     }
 
     private fun doUnlock(store: SessionStore, session: Session, password: String, creds: SavedCredentials) {
@@ -255,7 +311,7 @@ class SaveConfirmActivity : ComponentActivity() {
                 withContext(Dispatchers.IO) { engine.save(itemId, doc) }
             }.onSuccess {
                 setResult(RESULT_OK) // something was saved, whatever the login stage decides
-                if (creds.savable) { busy = false; cardStageDone = true } // login stage next — never lost
+                if (loginPlan != null) { busy = false; cardStageDone = true } // login stage next — never lost (BLOCKER 2)
                 else finish()
             }.onFailure { busy = false; errorText = friendly(it) }
             } finally {
@@ -269,6 +325,7 @@ class SaveConfirmActivity : ComponentActivity() {
         // Re-check freshness: an idle auto-lock between unlock and confirm drops us back to the
         // password prompt rather than saving against a stale/closed engine.
         val engine = VaultSession.getIfFresh()?.engine ?: run { unlocked = false; return }
+        val plan = loginPlan ?: run { finish(); return } // the render gates this on loginPlan != null
         busy = true; errorText = null
         // Review 2026-07-10 [0]: mirror the in-flight save process-wide (see doSaveCard) —
         // the ViewModel's collector doesn't exist in the autofill-only process.
@@ -277,12 +334,26 @@ class SaveConfirmActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
             runCatching {
-                val doc = ItemDoc(
-                    type = "login",
-                    name = creds.title(),
-                    login = LoginData(username = creds.username, password = creds.password, uris = listOf(creds.uri())),
-                )
-                withContext(Dispatchers.IO) { engine.save(null, doc) } // new item in the personal vault
+                when (plan) {
+                    is LoginPlan.New -> {
+                        val doc = ItemDoc(
+                            type = "login",
+                            name = creds.title(),
+                            login = LoginData(username = creds.username, password = creds.password, uris = listOf(creds.uri())),
+                        )
+                        withContext(Dispatchers.IO) { engine.save(null, doc) } // new item in the personal vault
+                    }
+                    is LoginPlan.Update -> {
+                        // Re-read at save time (a sync may have advanced it), then .copy() on the
+                        // EXISTING doc + login — swap ONLY the password; username/uris/totp/
+                        // passwordHistory/notes/favorite/extras/attachments all ride the copy. Never
+                        // a field-by-field rebuild (the 0.2.x data-loss class, :77). Amendment D.
+                        val existing = engine.items().firstOrNull { it.itemId == plan.itemId }
+                            ?: throw IllegalStateException("That login is no longer in your vault.")
+                        val doc = existing.doc.copy(login = (existing.doc.login ?: LoginData()).copy(password = creds.password))
+                        withContext(Dispatchers.IO) { engine.save(plan.itemId, doc) }
+                    }
+                }
             }.onSuccess {
                 setResult(RESULT_OK)
                 finish()
@@ -311,6 +382,7 @@ class SaveConfirmActivity : ComponentActivity() {
 
 @Composable
 private fun SaveCard(
+    plan: LoginPlan,
     site: String,
     username: String?,
     busy: Boolean,
@@ -318,15 +390,26 @@ private fun SaveCard(
     onSave: () -> Unit,
     onCancel: () -> Unit,
 ) {
+    val update = plan as? LoginPlan.Update
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(20.dp)) {
-                Text("Save to andvari?", style = MaterialTheme.typography.titleLarge)
+                Text(if (update != null) "Update login?" else "Save to andvari?", style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(4.dp))
-                Text("A new login will be saved to your personal vault.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    if (update != null) "The password for this saved login will be updated. Its username and other details stay."
+                    else "A new login will be saved to your personal vault.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Spacer(Modifier.height(16.dp))
-                LabeledValue("Site", site)
-                if (!username.isNullOrEmpty()) { Spacer(Modifier.height(8.dp)); LabeledValue("Username", username) }
+                if (update != null) {
+                    // Show the EXISTING item's name + username so a wrong-account merge is visible (amend A).
+                    LabeledValue("Login", update.name)
+                    if (!update.username.isNullOrEmpty()) { Spacer(Modifier.height(8.dp)); LabeledValue("Username", update.username) }
+                } else {
+                    LabeledValue("Site", site)
+                    if (!username.isNullOrEmpty()) { Spacer(Modifier.height(8.dp)); LabeledValue("Username", username) }
+                }
                 Spacer(Modifier.height(8.dp))
                 LabeledValue("Password", "•••••••• (will be saved)")
                 if (error != null) {
@@ -336,7 +419,7 @@ private fun SaveCard(
                 Spacer(Modifier.height(20.dp))
                 Button(onClick = onSave, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
                     if (busy) CircularProgressIndicator(Modifier.height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-                    else Text("Save to andvari")
+                    else Text(if (update != null) "Update login" else "Save to andvari")
                 }
                 TextButton(onClick = onCancel, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Not now") }
             }

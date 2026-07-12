@@ -57,6 +57,9 @@ export interface PendingSave {
   /** set → this is an UPDATE of an existing item's password, not a new login */
   updatesItemId: string | null;
   updatesItemName: string | null;
+  /** the existing item's username, shown in the Update banner so a user can tell a password
+   *  change from a wrong-account merge (auto-saved items are named after the host). */
+  updatesItemUsername: string | null;
 }
 
 /** Unlock outcome code — set by background.ts's unlock mapper, rendered as canonical copy by the

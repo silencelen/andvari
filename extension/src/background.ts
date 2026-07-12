@@ -23,6 +23,7 @@ import type { CardItem, MatchItem, PendingSave, Req, Res, SaveErrorCode, TabMsg,
 import { currentCode } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
+import { resolveSaveAction, saveTargetFor } from "./savetarget";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -923,7 +924,7 @@ function hostOfUrl(url: string): string | null {
 
 /** The password (and the owning frameId) NEVER ride a pending-save answer — metadata only. */
 function publicPending(p: PendingSave & { password: string }): PendingSave {
-  return { host: p.host, username: p.username, updatesItemId: p.updatesItemId, updatesItemName: p.updatesItemName };
+  return { host: p.host, username: p.username, updatesItemId: p.updatesItemId, updatesItemName: p.updatesItemName, updatesItemUsername: p.updatesItemUsername };
 }
 
 /** Content senders carry their tab; the popup asks about the active tab. */
@@ -961,11 +962,13 @@ async function capturedCredential(
   }
 
   const username = msg.username || st.lastUsername || "";
-  // Save-vs-update: an existing login on this host with this exact username is an UPDATE target.
-  // Locked ⇒ matchesFor() is empty ⇒ pending records as save-new; resolve re-checks post-unlock.
-  const existing = matchesFor(host).find((i) => (i.doc.login?.username ?? "") === username);
+  // Save-vs-update target (capture-time). A username picks the exact (host ∧ username) match; a
+  // password-only submit (username "") falls back to a password-equal item (2a — a re-login) or a
+  // lone host login (2b — a password change), else a new item (2c). Locked ⇒ matchesFor() is empty
+  // ⇒ records save-new; resolve re-checks post-unlock with a STRICTER rule (no silent 2b clobber).
+  const existing = saveTargetFor(matchesFor(host), username, msg.password);
   if (existing && (existing.doc.login?.password ?? "") === msg.password) {
-    // Unchanged password — every successful re-login would banner otherwise.
+    // Unchanged password (a re-login of a known item — 2a) — every successful re-login would banner otherwise.
     if (st.pending) {
       st.pending = undefined;
       tabs.set(tabId, st);
@@ -979,6 +982,7 @@ async function capturedCredential(
     username,
     updatesItemId: existing?.itemId ?? null,
     updatesItemName: existing?.doc.name ?? null,
+    updatesItemUsername: existing?.doc.login?.username ?? null,
     password: msg.password,
     frameId,
   };
@@ -1008,21 +1012,34 @@ async function resolvePendingSave(
   // CODE to copy — the SW's raw "locked" string must never reach the banner (extux-03).
   if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
 
-  // Re-decide save-vs-update NOW: the capture-time decision is stale if the vault was LOCKED then
-  // (matchesFor was empty ⇒ updatesItemId null ⇒ this would duplicate an existing login). Prefer
-  // the frozen target, but fall back to a fresh host+username match before creating a new item.
-  let target = pending.updatesItemId ? session.items.find((i) => i.itemId === pending.updatesItemId) : undefined;
-  if (!target) {
-    target = matchesFor(pending.host).find((i) => (i.doc.login?.username ?? "") === pending.username);
+  // Re-decide save-vs-update NOW (the capture-time decision is stale if the vault was LOCKED then —
+  // matchesFor was empty ⇒ updatesItemId null). resolveSaveAction only auto-updates on UNAMBIGUOUS
+  // same-account signals: it NEVER runs the ambiguous "lone host login" (2b) fallback here (a
+  // locked-at-capture password-only submit for a DIFFERENT account would otherwise clobber the
+  // host's single login — data loss), and it suppresses ONLY a password-only re-login (never drops
+  // a username-present new account that reuses a password).
+  const decision = resolveSaveAction(
+    pending.updatesItemId ? session.items.find((i) => i.itemId === pending.updatesItemId) : undefined,
+    matchesFor(pending.host),
+    pending.username,
+    pending.password,
+  );
+  if (decision.kind === "suppress") {
+    // 2a re-login of a known item (reachable via the locked-at-capture path, where the :967
+    // unchanged-password suppress couldn't run) — nothing to save; don't mint a duplicate.
+    st.pending = undefined;
+    tabs.set(tabId, st);
+    persistTabs();
+    return { ok: true };
   }
   let result: Res<"resolvePendingSave">;
-  if (target) {
+  if (decision.kind === "update") {
     // Update = the same doc with ONLY the password swapped — uris tail, totp, notes, favorite,
     // attachments all ride the spread — put against the rev we decrypted (server 409s a racer).
-    const doc: ItemDoc = { ...target.doc, login: { ...target.doc.login, password: pending.password } };
-    result = await putExisting(target, doc);
+    const doc: ItemDoc = { ...decision.target.doc, login: { ...decision.target.doc.login, password: pending.password } };
+    result = await putExisting(decision.target, doc);
   } else {
-    // New login — also the fallback when an update target vanished between capture and resolve.
+    // New login — the frozen/username target vanished, or a locked-2b / 2c ambiguity (recoverable New).
     result = await putNewLogin(pending.host, pending.username, pending.password);
   }
   if (result.ok) {
