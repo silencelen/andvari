@@ -250,6 +250,36 @@ Prioritized; each is additive and back-compatible.
   building. Pairs naturally with the "email this invite" note above (same form; if both land, the
   result offers token + QR + optional email in one flow).
 
+- **Owner dev-note (BUG) 2026-07-12 — password-only re-auth autofill creates a DUPLICATE item.**
+  Symptom (owner, live): on a site whose re-login form shows ONLY a password field, the owner
+  autofills the password from an andvari suggestion and submits; andvari's save-offer then asks
+  to "save this login?" as if it's new, and accepting creates a SECOND item (password-only)
+  alongside the original (username+password) — two registrations for the same site. **Root-cause
+  hypothesis:** the save-offer doesn't recognize the submitted password came FROM / matches an
+  existing item for that origin, so a password-only submit (no username to match on) is
+  classified as a new credential. **Fix direction:** before offering "save as new," dedup the
+  submitted creds against existing items for the site — if the password matches an existing
+  item's password (and/or the fill originated from an andvari autofill of that item), SUPPRESS
+  the save-offer or offer **update** instead of create; treat username-absent password-only
+  submits as an update to the matching item, never a new one. **Likely areas:** extension save
+  detection (`content.ts` / `content-ui.ts showSaveBanner` + the background save path) AND Android
+  autofill `SaveConfirmActivity` / save-offer logic — check both; the owner hit it via a browser
+  fill. **Size S–M, P2 (data hygiene — silently clutters the vault with dupes).** Verify against
+  the shipped save-flow before designing.
+
+- **Owner dev-note (enhancement) 2026-07-12 — accelerate live cross-client sync via a change
+  push.** Owner want: when a member changes an item, push an update notice to the OTHER remote
+  clients on that vault so they pick it up quickly (use case: edit in the web app because it's
+  easier to navigate → want the extension to reflect it without a manual refresh). **Current
+  state to verify:** the server already has a WebSocket notify path (spec 03 §WS notify) that the
+  web client uses for live updates; the **extension (MV3 service worker) most likely does NOT
+  hold a live WS** (SW eviction makes a persistent socket hard) and refreshes on popup-open /
+  poll instead. **Fix direction:** extend the live-notify to the extension — an MV3-safe WS that
+  reconnects on SW wake (or a lighter push/alarm that triggers a sync) so a peer change lands
+  fast; confirm the natives (Android/desktop core `SyncEngine`) also consume the WS notify vs
+  poll. **Size M** (server notify infra exists; the MV3 SW WS lifecycle is the real work — pairs
+  with the extension's existing WS-down-poll handling). No data-model change; pure freshness.
+
 ## Horizons & cycle doctrine (2026-07-08 brainstorm — the spine behind the queues)
 
 **The organizing gate is the real-secrets migration.** Features are cheap before it and
