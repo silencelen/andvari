@@ -425,8 +425,13 @@ export function showSaveBanner(
   const { bar, body } = bannerShell();
   const msg = document.createElement("div");
   msg.className = "msg";
-  if (pending.updatesItemId) msg.append("Update the password for ", span("hl", pending.updatesItemName ?? "this login"), "?");
-  else msg.append("Save this login for ", span("hl", pending.host), " to andvari?");
+  if (pending.updatesItemId) {
+    // Show the existing item's username too — auto-saved items are named after the host, so the
+    // name alone can't distinguish a password change from a wrong-account merge (2b guard).
+    msg.append("Update the password for ", span("hl", pending.updatesItemName ?? "this login"));
+    if (pending.updatesItemUsername) msg.append(" (", span("hl", pending.updatesItemUsername), ")");
+    msg.append("?");
+  } else msg.append("Save this login for ", span("hl", pending.host), " to andvari?");
   const actions = document.createElement("div");
   actions.className = "actions";
   const primary = document.createElement("button");

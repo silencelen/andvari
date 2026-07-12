@@ -1,6 +1,21 @@
 # andvari — changelog
 
-## Unreleased (2026-07-12, web — additive; the fleet stays 0.15.0)
+## Unreleased (2026-07-12 — additive; web + Android stay 0.15.0, browser extension → 0.12.0)
+
+### Re-logging in no longer creates a duplicate (browser extension + Android autofill)
+
+- **Fixed:** on a site whose re-login form shows only a password field, filling your saved password
+  and submitting used to offer to "save this login" as if it were new — and accepting made a second,
+  password-only copy beside the original. Now a password-only submit is matched to the login it came
+  from: an unchanged re-login is recognized as a no-op (no prompt, no duplicate), and a changed
+  password offers to **update** the existing login instead of creating a twin.
+- The "Update the password for …?" prompt now shows the existing login's **username** too, so you can
+  tell a password change from the wrong account before you confirm — and andvari will never silently
+  overwrite a different account: when it can't tell which saved login you mean, it leaves them alone
+  and saves a new one (a duplicate is easy to delete; a clobbered password is not).
+- **Android hardening:** offering to update a login now applies the same verified-browser check that
+  filling already uses, so a malicious app can't claim to be a website (e.g. "github.com") to make
+  andvari update the wrong saved login — an untrusted app is matched only to itself.
 
 ### One "Invite" button, and you choose how long an invite lasts
 
