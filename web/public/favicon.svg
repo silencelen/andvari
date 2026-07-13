@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="andvari">
+  <rect width="24" height="24" rx="5" fill="#14120e"/>
+  <g fill="none" stroke="#d0a94a" stroke-width="1.8" stroke-linecap="round">
+    <path d="M12 5v14"/>
+    <path d="M6.5 9.2l11 5"/>
+  </g>
+</svg>

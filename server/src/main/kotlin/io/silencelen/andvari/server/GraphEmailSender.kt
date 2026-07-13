@@ -73,10 +73,12 @@ class GraphEmailSender(
     private suspend fun sendMail(token: String, to: String, enrollLink: String) {
         val payload = buildJsonObject {
             putJsonObject("message") {
-                put("subject", "You're invited to andvari")
+                put("subject", InviteEmailBody.SUBJECT)
                 putJsonObject("body") {
-                    put("contentType", "Text")
-                    put("content", body(enrollLink))
+                    // Branded HTML (Graph sends a single body; email clients render the inline-styled
+                    // treasury card). See InviteEmailBody — one source shared with the SMTP transport.
+                    put("contentType", "HTML")
+                    put("content", InviteEmailBody.html(enrollLink))
                 }
                 putJsonArray("toRecipients") {
                     addJsonObject { putJsonObject("emailAddress") { put("address", to) } }
@@ -91,17 +93,4 @@ class GraphEmailSender(
         }
         if (!resp.status.isSuccess()) error("graph sendMail ${resp.status.value}") // A4: status only
     }
-
-    private fun body(enrollLink: String): String = """
-        You've been invited to andvari, your household's password manager.
-
-        Open this link on the same network as the app to set up your account:
-
-        $enrollLink
-
-        This link is a one-time key — it expires within the hour, and it can't be undone once used.
-        You'll also need the printed recovery sheet, handed to you in person, to finish setting up.
-
-        If you weren't expecting this, you can safely ignore it.
-    """.trimIndent()
 }

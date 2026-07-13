@@ -27,7 +27,7 @@ const UI_CSS = `
   --anv-edge-strong: #4a3f28;
   --anv-ink: #ede4d0;
   --anv-ink-dim: #a79c85;
-  --anv-ink-faint: #6f6752;
+  --anv-ink-faint: #8d8370;
   --anv-gold: #d0a94a;
   --anv-gold-bright: #e8c66a;
   --anv-btn-ink: #1a1509;
@@ -48,7 +48,7 @@ const UI_CSS = `
     --anv-edge-strong: #c9bfa2;
     --anv-ink: #2c2517;
     --anv-ink-dim: #6b6047;
-    --anv-ink-faint: #9a8f74;
+    --anv-ink-faint: #786c50;
     --anv-gold: #9a7420;
     --anv-gold-bright: #7d5e14;
     --anv-btn-ink: #fdf9f0;
