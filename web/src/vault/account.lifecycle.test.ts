@@ -42,7 +42,7 @@ describe("Account vault-lifecycle crypto (spec 03 §11)", () => {
       kdfParams: KDF, recoveryPublicKey: rec1.publicKey, recoveryFingerprint: fp1,
     });
     // Oracle: the UVK recovered from the ORIGINAL escrow (sealed to key #1).
-    const uvk1 = await openEscrow(rec1.publicKey, rec1.privateKey, fromB64(request.escrow.sealed));
+    const uvk1 = await openEscrow(rec1.publicKey, rec1.privateKey, fromB64(request.escrow!.sealed));
 
     // Re-ceremony rotates to recovery key #2; the user confirmed fp2 against the new sheet.
     const rec2 = boxKeypairFromSeed(randomBytes(32));

@@ -9,10 +9,14 @@ const vectorsDir = fileURLToPath(new URL("../../../spec/test-vectors/", import.m
 const v: any = JSON.parse(readFileSync(vectorsDir + "enrolllink.json", "utf-8"));
 
 describe("enrolllink.json — round trips (link strings byte-frozen)", () => {
-  it("compose reproduces the pinned link and parse carries o/t/e back verbatim", () => {
+  it("compose reproduces the pinned link and parse carries o/t/e/rfp back verbatim", () => {
     for (const c of v.roundTrips) {
-      expect(composeEnrollLink(c.o, c.t, c.e), `compose ${c.name}`).toBe(c.link);
-      const expected: EnrollPayload = { v: 1, o: c.o, t: c.t, e: c.e };
+      // rfp (§F.2): rows with it must stamp it into the exact pinned link; rows without it must
+      // compose byte-identically to a pre-rfp link (the 3-arg call and rfp=undefined agree).
+      expect(composeEnrollLink(c.o, c.t, c.e, c.rfp), `compose ${c.name}`).toBe(c.link);
+      const expected: EnrollPayload = c.rfp
+        ? { v: 1, o: c.o, t: c.t, e: c.e, rfp: c.rfp }
+        : { v: 1, o: c.o, t: c.t, e: c.e };
       expect(parseEnrollLink(c.link), `parse ${c.name}`).toEqual(expected);
     }
   });

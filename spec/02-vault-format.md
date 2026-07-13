@@ -44,6 +44,7 @@ blobs between items, vaults, or purposes (`|`-joined UTF-8, spec 00 conventions)
 |---|---|---|
 | Item blob | VK(vaultId) | `andvari/v1|item|{vaultId}|{itemId}|{formatVersion}` |
 | UVK wrap | wrapKey | `andvari/v1|uvk|{userId}` |
+| Member-recovery UVK wrap (spec 04 §per-member) | recoveryWrapKey | `andvari/v1|recovery-uvk|{userId}` |
 | Identity seed | UVK | `andvari/v1|idkey|{userId}` |
 | Personal-vault VK wrap | UVK | `andvari/v1|vk|{vaultId}|{userId}` |
 | Vault metadata (§4) | VK(vaultId) | `andvari/v1|vaultmeta|{vaultId}` |
@@ -205,8 +206,8 @@ spec violation.
 
 | Surface | Fields |
 |---|---|
-| users | userId, email, displayName, kdfSalt, kdfParams, verifier(argon2id str), **wrappedUvk** (UVK ciphertext under the master key — opaque to the server, stored so a fresh device can unlock), identityPub, **encryptedIdentitySeed** (identity-seed ciphertext under the UVK — same story), isAdmin, status, mustChangePassword, createdAt, server-TOTP columns (totpSecret, totpPendingSecret, totpEnrolledAt, totpLastStep — a server-side authenticator secret by design, never vault data; spec 03 §2) |
-| invites | tokenHash, **invitee email in plaintext** (a person who may not have an account yet — accepted: invites are short-lived and admin-created), isAdmin, createdAt, expiresAt, usedAt |
+| users | userId, email, displayName, kdfSalt, kdfParams, verifier(argon2id str), **wrappedUvk** (UVK ciphertext under the master key — opaque to the server, stored so a fresh device can unlock), identityPub, **encryptedIdentitySeed** (identity-seed ciphertext under the UVK — same story), isAdmin, status, mustChangePassword, **recoveryConfirmed** (boolean flag, plaintext metadata — the durable, cross-device capture-confirmation signal, design §F.9; not a secret; 0 until the user confirms saving their recovery phrase), createdAt, server-TOTP columns (totpSecret, totpPendingSecret, totpEnrolledAt, totpLastStep — a server-side authenticator secret by design, never vault data; spec 03 §2) |
+| invites | tokenHash, **invitee email in plaintext** (a person who may not have an account yet — accepted: invites are short-lived and admin-created), isAdmin, createdAt, expiresAt, usedAt, **escrowPolicy** ('required'\|'waived' — the admin's per-invite recovery posture, plaintext metadata; read server-side at register, design §F.4) |
 | devices | deviceId, userId, platform, **name (user-chosen device label, plaintext)**, clientVersion, createdAt, lastSeenAt, revokedAt |
 | sessions | sessionId, userId, deviceId, hashed access+refresh tokens, access/refresh expiries, refreshConsumedAt, createdAt, revokedAt |
 | vaults | vaultId, type, rev, createdAt (names/icons are ciphertext); **lifecycle** — deletedAt/purgeAt/purgedAt/deletedBy/deleteId, transferSeq, pendingOwnerId/pendingOfferId/pendingOfferExpiresAt/pendingOfferSetAt/lastTransferOfferId (ids + epoch times), and opaque VK-derived MACs deleteProof/restoreProof/pendingOfferProof/lastTransferAcceptProof (PRF outputs — reveal nothing about VK) |
@@ -217,14 +218,17 @@ spec violation.
 | mutations | (deviceId, mutationId) → resultJson, createdAt — idempotency replay cache; resultJson holds per-mutation status/rev, no vault content |
 | attachments | attachmentId, itemId, vaultId, ciphertext size, sha256(ciphertext), header, createdAt (filenames + file keys are inside item ciphertext) |
 | escrow | userId, sealed blob, fingerprint (of the recovery key), updatedAt |
+| member_recovery | userId, **recoveryWrappedUvk** (the UVK sealed under the member's recovery-secret-derived wrap key — ciphertext, opaque; AD `andvari/v1\|recovery-uvk\|{userId}`, §2), **recoveryVerifier** (one-way `crypto_pwhash_str(recoveryAuthKey)` — a DB leak is not a replayable recovery, exactly as the login verifier), updatedAt — the per-member self-service recovery row (spec 04 §per-member / design §F); ZK-clean, the symmetric counterpart to `escrow` |
 | audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, emails of existing users, or any decrypted content) |
 | policies | org policy JSON (min versions, KDF policy, lock timeouts…) |
 | hibp_cache | sha1-prefix → upstream HIBP range body + fetchedAt (public breach data, no user linkage stored) |
 | meta | key/value operational markers (schemaVersion, lastPublicRequestAt…) |
 
 Traffic analysis (who syncs when, item counts, sizes) is visible to the server by
-nature and accepted (spec 05). This table describes **schema v5 exactly** — adding any
-table or plaintext column requires updating it in the same change.
+nature and accepted (spec 05). This table describes **schema v7 exactly** — adding any
+table or plaintext column requires updating it in the same change. (v6 = design 2026-07-12
+§F: the `member_recovery` table + the `invites.escrowPolicy` column. v7 = design 2026-07-12
+§F.9: the `users.recoveryConfirmed` capture-confirmation flag.)
 
 ## 6. Attachments
 

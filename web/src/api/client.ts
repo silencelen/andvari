@@ -16,6 +16,9 @@ import type {
   PasswordChangeRequest,
   PreloginResponse,
   PushResponse,
+  RecoveryCommitRequest,
+  RecoverySelfSetupRequest,
+  RecoveryVerifyResponse,
   RegisterRequest,
   SessionResponse,
   SyncResponse,
@@ -37,7 +40,7 @@ import type {
   WsTicketResponse,
 } from "./types";
 
-export const CLIENT_VERSION = "0.15.0";
+export const CLIENT_VERSION = "0.16.0";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
 
 export class ApiError extends Error {
@@ -260,9 +263,10 @@ export class ApiClient {
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
-  /** For endpoints that answer plain text ("ok") — errors still surface as ApiError. */
-  private async text(method: string, path: string, body?: unknown): Promise<string> {
-    const resp = await this.raw(method, path, body);
+  /** For endpoints that answer plain text ("ok") — errors still surface as ApiError. `auth=false`
+   *  for the pre-auth recovery endpoints (no session in hand; the recovery ticket is the credential). */
+  private async text(method: string, path: string, body?: unknown, auth = true): Promise<string> {
+    const resp = await this.raw(method, path, body, auth);
     if (!resp.ok) await this.throwApiError(resp);
     return resp.text();
   }
@@ -422,6 +426,38 @@ export class ApiClient {
     return this.text("GET", "/api/v1/recovery-pubkey");
   }
 
+  // ---- per-member self-service recovery (design §F.3) — refused on the public break-glass origin ----
+
+  /** Phase 1 (§F.3): prove possession of the recovery phrase. Unauthenticated (the user forgot their
+   *  password). On success the server mints a single-use, short-TTL, userId-bound recoveryTicket and
+   *  returns the material the client needs to open the UVK + run the identity-pubkey hard-fail. A bad
+   *  phrase / unknown email / no-recovery-row all return a uniform 401 (`ApiError`, anti-enumeration). */
+  recoverySelfVerify(email: string, recoveryAuthKey: string) {
+    return this.json<RecoveryVerifyResponse>("POST", "/api/v1/recovery/self/verify", { email, recoveryAuthKey }, false);
+  }
+
+  /** Phase 2 (§F.3): commit the reset. Unauthenticated — the `recoveryTicket` from phase 1 is the
+   *  credential. Overwrites verifier/wrappedUvk/kdf and revokes all sessions, so the user signs in
+   *  fresh with the new password afterward. Answers plain text. */
+  recoverySelfCommit(req: RecoveryCommitRequest) {
+    return this.text("POST", "/api/v1/recovery/self/commit", req, false);
+  }
+
+  /** Migration/rotation (§F.3): add or rotate THIS account's recovery piece over the in-memory UVK.
+   *  Authenticated; the server re-verifies `currentAuthKey` (fresh master-password reauth) before
+   *  storing the block. Answers plain text. */
+  recoverySelfSetup(req: RecoverySelfSetupRequest) {
+    return this.text("PUT", "/api/v1/recovery/self-setup", req);
+  }
+
+  /** design §F.9: flip this account's durable `recoveryConfirmed` flag after the ENROLL reveal was
+   *  saved + confirmed in-flow — NO regenerate; the register-committed piece IS what the user saved.
+   *  No key material rides this (unlike self-setup). Authenticated; server-refused on the public
+   *  break-glass origin; rate-limited. Answers plain text ("ok"). */
+  recoverySelfConfirm() {
+    return this.text("POST", "/api/v1/recovery/self/confirm");
+  }
+
   // ---- attachments (spec 02 §6: body = 24-byte header ‖ ciphertext chunks) ----
 
   async uploadAttachment(id: string, itemId: string, vaultId: string, body: Uint8Array): Promise<AttachmentMeta> {
@@ -465,12 +501,15 @@ export class ApiClient {
     return this.json<AdminUserSummary[]>("GET", "/api/v1/admin/users");
   }
 
-  adminInvite(email: string, isAdmin: boolean, ttlMinutes?: number, sendEmail?: boolean) {
+  adminInvite(email: string, isAdmin: boolean, ttlMinutes?: number, sendEmail?: boolean, escrowPolicy?: string) {
     // ttlMinutes absent → the server keeps its 72h default; the QR flow passes ~60 min
     // (the server clamps to [5, 4320]). It is the only containment for a photographed QR.
     // sendEmail (cut 4) → the server ALSO emails the enroll link and forces the ttl to ≤60 min;
     // it's a no-op unless the server is email-configured (AdminStatus.emailConfigured).
-    return this.json<InviteResponse>("POST", "/api/v1/admin/users", { email, isAdmin, ttlMinutes, sendEmail });
+    // escrowPolicy (design §F.2) → the invite's recovery posture, "required" (default, admin backstop)
+    // or "waived". Read SERVER-SIDE from the invite row at register; additive/defaulted so omitting it
+    // keeps the safe "required" posture on rollback servers.
+    return this.json<InviteResponse>("POST", "/api/v1/admin/users", { email, isAdmin, ttlMinutes, sendEmail, escrowPolicy });
   }
 
   adminDisableUser(userId: string) {

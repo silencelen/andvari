@@ -22,6 +22,7 @@ class EnrollLinkVectorTest {
         o = o.getValue("o").jsonPrimitive.content,
         t = o.getValue("t").jsonPrimitive.content,
         e = o.getValue("e").jsonPrimitive.content,
+        rfp = o["rfp"]?.jsonPrimitive?.content, // optional; absent ⇒ null (the safe typed-sheet fallback)
     )
 
     @Test
@@ -31,11 +32,12 @@ class EnrollLinkVectorTest {
             val o = case.getValue("o").jsonPrimitive.content
             val t = case.getValue("t").jsonPrimitive.content
             val e = case.getValue("e").jsonPrimitive.content
+            val rfp = case["rfp"]?.jsonPrimitive?.content // optional; absent ⇒ null, byte-identical to a pre-rfp link
             val link = case.getValue("link").jsonPrimitive.content
             // The pinned link string is byte-exact: compose must reproduce it, and parse
-            // must carry o/t/e back verbatim (e in particular is NOT normalized).
-            assertEquals(link, EnrollLink.compose(o, t, e), "compose $name")
-            assertEquals(EnrollPayload(1, o, t, e), EnrollLink.parse(link), "parse $name")
+            // must carry o/t/e/rfp back verbatim (e and rfp in particular are NOT normalized).
+            assertEquals(link, EnrollLink.compose(o, t, e, rfp), "compose $name")
+            assertEquals(EnrollPayload(1, o, t, e, rfp), EnrollLink.parse(link), "parse $name")
         }
     }
 

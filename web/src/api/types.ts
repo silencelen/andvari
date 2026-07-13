@@ -29,6 +29,28 @@ export interface AccountKeys {
   // and must be re-sealed to the current one. `escrowFingerprint` is the CURRENT org fingerprint
   // (the re-seal target + pubkey-verification anchor). Optional for back-compat with old servers.
   escrowStale?: boolean;
+  /** design §F.2: true when this existing account has NO member_recovery row yet (migration nudge).
+   *  On the next full-password unlock the client offers "set up your recovery phrase"
+   *  (PUT /recovery/self-setup). Additive/defaulted — old servers omit it (⇒ treated as false). */
+  recoverySetupNeeded?: boolean;
+  /** design §F.9: the durable, cross-device signal that this account's recovery piece was actually
+   *  CAPTURED (the user saw + confirmed the phrase), not merely registered. Register sets it false;
+   *  POST /recovery/self/confirm and PUT /recovery/self-setup set it true. The web vault-entry gate
+   *  BLOCKS on `!== true` and forces setup-and-reveal — so an interrupted reveal (silent-total-loss
+   *  for a waived account) is caught on the next unlock, on ANY device. Additive/defaulted: an old
+   *  server omits it ⇒ treated as unconfirmed ⇒ the gate re-nudges (harmless; escrow backstop intact). */
+  recoveryConfirmed?: boolean;
+}
+
+/**
+ * design §F.2 — the per-member self-service recovery block sent at register / self-setup. The server
+ * stores `recoveryVerifier = crypto_pwhash_str(recoveryAuthKey)` + `recoveryWrappedUvk`; it NEVER
+ * persists `recoveryAuthKey` raw (identical to how `authKey → verifier` works). MANDATORY on every
+ * NEW registration (§F.4). Both fields base64url.
+ */
+export interface MemberRecoveryBlock {
+  recoveryWrappedUvk: string;
+  recoveryAuthKey: string;
 }
 
 export interface SessionResponse {
@@ -309,7 +331,12 @@ export interface RegisterRequest {
   wrappedUvk: string;
   identityPub: string;
   encryptedIdentitySeed: string;
-  escrow: EscrowUpload;
+  /** design §F.2/§F.4: escrow becomes OPTIONAL — present iff the invite's escrowPolicy == "required"
+   *  (org backstop). FORBIDDEN when waived (server rejects `escrow_not_allowed_when_waived`). */
+  escrow?: EscrowUpload;
+  /** design §F.4: MANDATORY for every NEW registration — the self-service recovery piece, so an
+   *  account can never be created with neither recovery path. */
+  memberRecovery: MemberRecoveryBlock;
   personalVault: { vaultId: string; wrappedVk: string; metaBlob: string };
   /** installId (F28) is web-additive: a stable per-browser id the server currently
    *  ignores (DeviceInfo has only platform+name; its Json is ignoreUnknownKeys) —
@@ -351,6 +378,49 @@ export interface PasswordChangeRequest {
   newWrappedUvk: string;
 }
 
+// ---- per-member self-service recovery (design §F.3) ----
+
+/** `POST /recovery/self/verify` request. The recovery secret is high-entropy and derivation is
+ *  HKDF-only (no server salt/params), so there is nothing to prelogin-fetch first. Anti-enumeration:
+ *  unknown email OR a known email with no member_recovery row runs a fixed DUMMY_RECOVERY_VERIFIER
+ *  and returns a uniform 401 (§F.5). */
+export interface RecoveryVerifyRequest {
+  email: string;
+  recoveryAuthKey: string;
+}
+
+/** `POST /recovery/self/verify` success response. `recoveryTicket` is single-use, short-TTL,
+ *  userId-bound. `userId` is REQUIRED to compute Ad.recovery(userId) (open recoveryWrappedUvk) and
+ *  Ad.idkey(userId) (the identity-pubkey hard-fail). `encryptedIdentitySeed` + `identityPub` feed
+ *  that hard-fail so a substituted identity key is caught BEFORE commit. */
+export interface RecoveryVerifyResponse {
+  userId: string;
+  recoveryTicket: string;
+  recoveryWrappedUvk: string;
+  encryptedIdentitySeed: string;
+  identityPub: string;
+}
+
+/** `POST /recovery/self/commit` request. The ticket is validated (live, unconsumed, then consumed).
+ *  The reset overwrites verifier/wrappedUvk/kdf and revokes sessions but — unlike admin recovery —
+ *  does NOT set status='active' or mustChangePassword (the user just chose the new password). The UVK
+ *  is invariant (recover re-wraps the SAME UVK), so the org-escrow + member-recovery blobs stay valid. */
+export interface RecoveryCommitRequest {
+  recoveryTicket: string;
+  newAuthKey: string;
+  newKdfSalt: string;
+  newKdfParams: KdfParams;
+  newWrappedUvk: string;
+}
+
+/** `PUT /recovery/self-setup` request (authenticated migration/rotation path). The server requires a
+ *  FRESH master-password reauth — it verifies `currentAuthKey` against the login verifier exactly
+ *  like changePassword — before storing `memberRecovery`. */
+export interface RecoverySelfSetupRequest {
+  currentAuthKey: string;
+  memberRecovery: MemberRecoveryBlock;
+}
+
 // ---- admin ----
 
 export interface AdminUserSummary {
@@ -362,6 +432,12 @@ export interface AdminUserSummary {
   createdAt: number;
   deviceCount: number;
   escrowFingerprint: string | null;
+  /** design §F.9 posture reconciliation (additive; optional): whether this member has a member_recovery
+   *  row (a self-service recovery piece). This is the field the server ACTUALLY sends per-user (an
+   *  invite's `escrowPolicy` is NOT persisted onto the users row in this cut — deferred to
+   *  recovery-cut-2). Lets the Admin UI distinguish "waived (intended)" (no escrow but a member piece)
+   *  from "no recovery / needs setup" (neither) when `escrowFingerprint == null`. Old servers omit it. */
+  recoveryEnrolled?: boolean;
 }
 
 export interface InviteResponse {

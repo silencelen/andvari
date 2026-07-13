@@ -17,6 +17,11 @@ object Ad {
 
     fun uvk(userId: String): ByteArray = join("uvk", userId)
 
+    /** spec 04 §per-member (design 2026-07-12 §F.6) — the per-member self-service recovery
+     *  envelope binding. Distinct from [uvk] (`recovery-uvk` vs `uvk`), so a recovery blob and a
+     *  password-wrapped UVK blob can never be cross-substituted between slots for the same user. */
+    fun recovery(userId: String): ByteArray = join("recovery-uvk", userId)
+
     fun idkey(userId: String): ByteArray = join("idkey", userId)
 
     fun vk(vaultId: String, userId: String): ByteArray = join("vk", vaultId, userId)

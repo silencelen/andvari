@@ -26,6 +26,14 @@ object ServerCrypto {
     fun verify(storedVerifier: String, authKeyB64: String): Boolean =
         ls.cryptoPwHashStrVerify(storedVerifier, authKeyB64)
 
+    /**
+     * A fixed valid argon2id string so a `/recovery/self/verify` for an unknown email OR a known
+     * email with no member_recovery row spends the SAME argon2id CPU as a real verify (anti-enum,
+     * design §F.5). Mirrors Service.DUMMY_VERIFIER on the login path (Service.kt:1050). Computed
+     * once, after `ls`/`crypto` are initialized above.
+     */
+    val DUMMY_RECOVERY_VERIFIER: String = hashVerifier("andvari-dummy-recovery-authkey")
+
     fun newToken(): String = Bytes.toB64(crypto.randomBytes(32))
 
     fun hashToken(token: String): String = Bytes.toB64(crypto.sha256(token.encodeToByteArray()))

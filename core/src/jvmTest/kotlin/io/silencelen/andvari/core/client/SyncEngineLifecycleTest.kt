@@ -61,7 +61,7 @@ class SyncEngineLifecycleTest {
     private fun enroll(email: String): Account {
         val recovery = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
         val fp = Escrow.fingerprint(crypto, recovery.publicKey)
-        return Account.enroll("test-invite", email, email, "pw $email", kdf, recovery.publicKey, fp, "test-device", crypto).second
+        return Account.enroll("test-invite", email, email, "pw $email", kdf, recovery.publicKey, fp, "test-device", crypto).account
     }
 
     /** Fake server: sync queue + push knobs, same drive pattern as the web FakeApi. */
@@ -451,7 +451,7 @@ class SyncEngineLifecycleTest {
         val fp1 = Escrow.fingerprint(crypto, rec1.publicKey)
         val (reg, account) = Account.enroll("inv", "u@e.com", "u", "pw", kdf, rec1.publicKey, fp1, "dev", crypto)
         // Oracle: the UVK recovered from the ORIGINAL escrow (sealed to key #1).
-        val uvkFrom1 = Escrow.open(crypto, rec1.publicKey, rec1.privateKey, Bytes.fromB64(reg.escrow.sealed))
+        val uvkFrom1 = Escrow.open(crypto, rec1.publicKey, rec1.privateKey, Bytes.fromB64(reg.escrow!!.sealed))
 
         // Re-ceremony rotates to recovery key #2. The user confirmed fp2 against the new sheet.
         val rec2 = crypto.boxKeypairFromSeed(crypto.randomBytes(32))

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { enrollPrefillFor, type EnrollPayload } from "./enrolllink";
-import { INVITE_TTL_DEFAULT, inviteResultView, inviteTtlMinutes, shouldOfferQr, tryQrModules } from "../ui/Admin";
+import {
+  INVITE_TTL_DEFAULT,
+  escrowPostureLabel,
+  inviteResultView,
+  inviteTtlMinutes,
+  normalizeOrgFp,
+  shouldOfferQr,
+  stampedRfp,
+  tryQrModules,
+} from "../ui/Admin";
 
 // The two client-side security gates of the S4 web slice, pinned as pure functions so a
 // refactor that drops or inverts either trips a test instead of silently exposing it.
@@ -81,5 +90,39 @@ describe("inviteResultView — the public break-glass origin is ALWAYS token-onl
     expect(inviteResultView(true, true, false)).toBe("overflow-link");
     expect(inviteResultView(true, false, false)).toBe("compose-note");
     expect(inviteResultView(true, false, true)).toBe("compose-note"); // a null link dominates
+  });
+});
+
+describe("stampedRfp — a QR stamps rfp ONLY from an admin-confirmed sheet, never a server fetch (§F.2)", () => {
+  it("stamps the confirmed org fingerprint on a required invite", () => {
+    expect(stampedRfp("required", "b26efdd3eafc9dad")).toBe("b26efdd3eafc9dad");
+  });
+  it("stamps NOTHING when the admin hasn't confirmed their sheet (invitee falls back to typing)", () => {
+    expect(stampedRfp("required", null)).toBeUndefined();
+  });
+  it("never stamps rfp on a waived invite (no fingerprint anywhere)", () => {
+    expect(stampedRfp("waived", "b26efdd3eafc9dad")).toBeUndefined();
+    expect(stampedRfp("waived", null)).toBeUndefined();
+  });
+});
+
+describe("normalizeOrgFp — a typed sheet fingerprint is 16 hex after normalization", () => {
+  it("lowercases and drops separators", () => {
+    expect(normalizeOrgFp("B26E-FDD3 EAFC:9DAD")).toBe("b26efdd3eafc9dad");
+    expect(normalizeOrgFp("B26E FDD3 EAFC 9DAD").length).toBe(16);
+  });
+});
+
+describe("escrowPostureLabel — a null fingerprint is not just '—' (§F.9 reconciliation, keyed on recoveryEnrolled)", () => {
+  it("a present escrow fingerprint is an admin backstop — regardless of the member piece", () => {
+    expect(escrowPostureLabel("b26efdd3eafc9dad00", true)).toEqual({ label: "admin backstop", tone: "good" });
+    expect(escrowPostureLabel("b26efdd3eafc9dad00", false)).toEqual({ label: "admin backstop", tone: "good" });
+  });
+  it("no escrow but a member piece reads as waived-by-intent (the member holds their own recovery)", () => {
+    expect(escrowPostureLabel(null, true)).toEqual({ label: "waived (intended)", tone: "muted" });
+  });
+  it("no escrow AND no member piece reads as no-recovery / needs-setup (genuinely at risk)", () => {
+    expect(escrowPostureLabel(null, false)).toEqual({ label: "no recovery / needs setup", tone: "bad" });
+    expect(escrowPostureLabel(null, undefined)).toEqual({ label: "no recovery / needs setup", tone: "bad" });
   });
 });

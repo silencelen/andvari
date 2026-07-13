@@ -40,7 +40,7 @@ class AccountUnlockWithUvkTest {
             wrappedUvk = reg.wrappedUvk,
             encryptedIdentitySeed = reg.encryptedIdentitySeed,
             identityPub = reg.identityPub,
-            escrowFingerprint = reg.escrow.fingerprint,
+            escrowFingerprint = reg.escrow!!.fingerprint,
         )
         return Enrolled(reg, account, keys)
     }

@@ -26,7 +26,11 @@ comes from `/client-policy`); they block writes and show the upgrade path
 - `POST /auth/login { email, authKey, device: { platform, name } , totp? }` →
   `200 { userId, deviceId, accessToken, refreshToken, accountKeys }` where
   `accountKeys = { wrappedUvk, kdfParams, encryptedIdentitySeed, identityPub,
-  escrowFingerprint }`. Failures are uniform `401 invalid_credentials` (no
+  escrowFingerprint, recoverySetupNeeded }`. `recoverySetupNeeded` (additive, default
+  `false` — same additive shape as `escrowStale`, spec 04 §4) is `true` for an existing
+  account with no `member_recovery` row: the per-member-recovery migration nudge (§12,
+  spec 04 §6). `escrowFingerprint` is **absent/null for a `waived` member** (no org
+  escrow — §7 register gate). Failures are uniform `401 invalid_credentials` (no
   user/password distinction). Via the public origin, server-TOTP is mandatory
   (break-glass hardening): an account without it enrolled is refused outright
   (`403 public_login_requires_totp`); enrolled accounts must supply `totp`
@@ -50,9 +54,12 @@ comes from `/client-policy`); they block writes and show the upgrade path
 - `PUT /account/password { currentAuthKey, newAuthKey, newKdfSalt, newKdfParams,
   newWrappedUvk }` — atomic; server verifies currentAuthKey, swaps verifier + salt +
   params + wrappedUvk, revokes all sessions except the calling one, audits. Used for
-  both password change and KDF upgrade (spec 01 §7).
+  both password change and KDF upgrade (spec 01 §7). UVK is unchanged, so the org-escrow
+  and per-member-recovery (§12) blobs both stay valid (spec 01 §4).
 - `PUT /escrow/self { sealed, fingerprint }` — client (re)uploads its
   sealed UVK; server validates fingerprint equals the pinned org fingerprint.
+- Per-member recovery setup/rotation (`PUT /recovery/self-setup`) and the two-phase
+  self-service reset (`POST /recovery/self/verify` + `/commit`) live in §12.
 
 ## 4. Sync — pull
 
@@ -204,15 +211,40 @@ proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — veri
 
 ## 7. Admin (isAdmin only; every call audited)
 
-- `GET/POST /admin/users` — list; create → invite `{ inviteToken (72 h), email }`.
+- `GET/POST /admin/users` — list; create → invite `{ inviteToken (72 h), email }`. The
+  create body (`InviteRequest`) gains **`escrowPolicy: "required" | "waived"`** — the
+  admin's per-invite opt-out knob for the org backstop (spec 04 §6). The DB default is
+  `required`; the emailed-invite compose path sets `waived` explicitly, the in-person QR
+  path defaults `required`. It is stored on the invite row (`invites.escrowPolicy`) and
+  read **server-side at register** — the register body never carries it. The enroll-link
+  payload additionally gains **`rfp`** (org recovery **short** fingerprint, 16 hex),
+  authoritative **only** on a client-composed in-person QR and `null` on the
+  server-composed emailed link — provenance semantics: spec 04 §6.5.
   Registration is **invite-only, always** (even break-glass): `POST /auth/register
   { inviteToken, email, displayName, kdfSalt, kdfParams, authKey, wrappedUvk,
-  identityPub, encryptedIdentitySeed, escrow: { sealed, fingerprint },
+  identityPub, encryptedIdentitySeed, escrow?: { sealed, fingerprint },
+  memberRecovery: { recoveryWrappedUvk, recoveryAuthKey },
   personalVault: { vaultId, wrappedVk, metaBlob }, device: { platform, name } }` —
-  one shot, atomic (user + escrow + personal vault + owner grant + first device +
-  session; response = the login response). The enrolling client MUST have verified
-  the recovery fingerprint (spec 04) before this call; the server rejects
-  registration whose asserted escrow fingerprint ≠ pinned.
+  one shot, atomic (user + [escrow] + `member_recovery` row + personal vault + owner
+  grant + first device + session; response = the login response). **`escrow` is now
+  nullable and `memberRecovery` is mandatory.** The register gate is a **total function**
+  over the invite's server-side `escrowPolicy` (full truth-table + rationale: spec 04 §6):
+  - `memberRecovery` is **mandatory for every new account** (`recovery_required` if
+    absent/malformed) — every member gets a self-service recovery piece at signup.
+  - `escrowPolicy == required` (default; read from the invite row, never the client
+    body) → `escrow` **mandatory** and the asserted fingerprint MUST equal the pinned org
+    fingerprint (rejected as today on a missing escrow or fingerprint mismatch — the
+    enrolling client must have obtained/verified the fingerprint per spec 04 §6.5).
+  - `escrowPolicy == waived` → `escrow` is **forbidden** (`escrow_not_allowed_when_waived`
+    if present); the account has only the self-service piece, no admin backstop.
+  - Any `escrowPolicy` value other than the literal `waived` (NULL / unknown / typo) is
+    treated as `required` (fail-safe), so an account can **never** be created with neither
+    recovery path.
+  The server stores `recoveryVerifier = crypto_pwhash_str(recoveryAuthKey)` +
+  `recoveryWrappedUvk` in the new `member_recovery` row and never persists
+  `recoveryAuthKey` raw (identical to the `authKey → verifier` story, §2 / spec 01 §3).
+  Pre-`memberRecovery` clients are gated out by the min-version pin (§1) so an old client
+  cannot register into a partial (recovery-less) state.
 - `POST /admin/users/{id}/disable` — disables the account + revokes its sessions.
   Refuses with `400 last_admin` if the target is the only ACTIVE admin (an
   instance-wide lockout, recoverable only by DB surgery) and `400 no_such_user` for an
@@ -248,7 +280,10 @@ proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — veri
   **login** drops to 5/min (prelogin stays 10/min), TOTP is required, and
   register/refresh are hard-disabled (`403 register_public_disabled` /
   `public_refresh_disabled` — no policy flag enables them; break-glass sessions
-  re-login with TOTP instead of refreshing).
+  re-login with TOTP instead of refreshing). The `/recovery/self/*` routes (§12) are
+  **per-IP fixed-window** (≥ public-login tightness; **no** per-account counter, so a
+  targeted account cannot be locked out of its own recovery — spec 05 R9) and, like
+  register, **hard-refused on the public break-glass origin** (`403`).
 - Client IP (rate keys + audit rows): derived from `CF-Connecting-IP`, else the
   **rightmost** `X-Forwarded-For` entry, **only when the direct TCP peer is
   loopback** (both front-ends terminate there). Any other peer uses the socket
@@ -395,3 +430,52 @@ first armed week): purge vaults past grace (spec 02 §7) and expire transfer off
 NULL`. **Admin succession: no admin lifecycle route exists BY DESIGN** (a server route that
 reassigns owner rows *is* the F16 forgery class) — a lost/disabled owner is recovered via
 spec 04 §4 escrow recovery, then acts as owner (`ops/runbooks/vault-succession.md`).
+
+## 12. Per-member self-service recovery
+
+The self-service counterpart to admin escrow recovery (§7 `/admin/recovery`): a member
+who kept their generated recovery piece (spec 01 §2.1, spec 04 §6) resets their own
+password without the admin. **Two-phase**, so the server hands out no pre-auth UVK blob,
+exposes no enumeration oracle, and binds the reset to one replay-bound ticket. **All three
+routes are refused on the public break-glass origin** (`403`, same guard as register) and
+**per-IP fixed-window rate-limited** at ≥ public-login tightness (§8; no per-account
+counter → a targeted account cannot be locked out of its own recovery, spec 05 R9). No
+`/recovery/prelogin` exists: the recovery secret is high-entropy and its derivation is
+HKDF-only with no server salt/params (spec 01 §2.1), so there is nothing to fetch before
+phase 1 — hence no recovery-side prelogin oracle to equalize.
+
+- **Phase 1 — `POST /recovery/self/verify { email, recoveryAuthKey }`** → server verifies
+  `crypto_pwhash_str_verify(recoveryVerifier, recoveryAuthKey)`. **Anti-enumeration (§2
+  parity, spec 05 T11/R9):** an unknown email OR a known email with **no**
+  `member_recovery` row runs a fixed `DUMMY_RECOVERY_VERIFIER` verify and returns the same
+  uniform `401` as a bad key — timing/shape-uniform across all three states, mirroring
+  login's `DUMMY_VERIFIER`; a null/absent/malformed stored verifier never matches. On
+  success **only** → mint a **single-use, short-TTL, userId-bound recovery ticket** (same
+  store as the §6 WS ticket) and return
+  `{ recoveryTicket, recoveryWrappedUvk, encryptedIdentitySeed, identityPub }`. No UVK
+  ciphertext is ever served before this verifier gate passes.
+- **Phase 2 — `POST /recovery/self/commit { recoveryTicket, newAuthKey, newKdfSalt,
+  newKdfParams, newWrappedUvk }`** → validate the ticket (live, unconsumed → consume it),
+  then a **dedicated reset** (deliberately **NOT** the admin `applyRecovery` verbatim):
+  (a) refuse if `status != 'active'` (`recovery_account_not_active` — a disabled account
+  is admin-recoverable only); (b) does **not** set `status='active'`; (c) does **not** set
+  `mustChangePassword` (the user just chose the password); (d) enforces the KDF floor on
+  `newKdfParams` (spec 01 §1/§7); (e) overwrites `verifier/wrappedUvk/kdfSalt/kdfParams`;
+  (f) revokes all sessions. Audited `recovery_self_commit`. The client's `recover()`
+  routes the phase-1 unwrap through the shared UVK-unlock tail so the **seed-derived
+  identity-pubkey hard-fail still fires** (spec 01 §5) before commit, and MUST NOT
+  regenerate UVK / identitySeed / identityPub — `newWrappedUvk` wraps the **same**
+  (invariant) UVK, so the org-escrow blob (if any) and the member-recovery blob both stay
+  valid.
+- **`PUT /recovery/self-setup` (authenticated) `{ currentAuthKey, memberRecovery }`** —
+  the migration / rotation path. Requires **fresh master-password reauth**: the server
+  verifies `currentAuthKey` against the login verifier exactly like `PUT /account/password`
+  (§3) before storing the `member_recovery` row. A quick-unlock / biometric session (no
+  password in hand) cannot call it — the setup nudge (`recoverySetupNeeded`, §2) defers to
+  the next full-password unlock. Audited `recovery_self_setup`.
+
+**Errors:** `recovery_required`, `escrow_not_allowed_when_waived` (register gate, §7);
+`recovery_account_not_active` (commit); an invalid/consumed ticket and all verify failures
+are the uniform `401`. New audit types: `recovery_self_commit`, `recovery_self_setup`.
+New stored surface: table `member_recovery` + column `invites.escrowPolicy` (ZK contract:
+spec 02 §5).

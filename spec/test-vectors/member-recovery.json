@@ -1,0 +1,10 @@
+{
+    "userId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    "recoverySecretB64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "uvkB64": "DRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3-Y",
+    "adUtf8": "andvari/v1|recovery-uvk|eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    "recoveryWrapKeyB64": "J9rS9MHHJ_G42sjHxCOzoLF2WXkfmbBhbxH9MnGTLlI",
+    "recoveryAuthKeyB64": "oioGCbDMIns8wOgSjnq9BvxM4gjhPwysah0TAISALbA",
+    "nonceB64": "GiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7",
+    "recoveryWrappedUvkB64": "AQEaISgvNj1ES1JZYGdudXyDipGYn6attLvZoallekfMkwJvvyIaxVHd0XAYNpoyMoR2zqlnJh2iTj6I0s91xTMUs8pCaP6bTSw"
+}

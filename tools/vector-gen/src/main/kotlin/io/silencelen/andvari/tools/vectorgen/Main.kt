@@ -9,6 +9,7 @@ import io.silencelen.andvari.core.crypto.Hkdf
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.crypto.Keys
+import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.client.Backup
 import io.silencelen.andvari.core.client.BackupItem
 import io.silencelen.andvari.core.client.BackupPayload
@@ -66,6 +67,7 @@ fun main(args: Array<String>) {
     write(outDir, "kdf.json", kdf())
     write(outDir, "envelope.json", envelope())
     write(outDir, "wrap.json", wrap())
+    write(outDir, "member-recovery.json", memberRecovery())
     write(outDir, "seal.json", seal())
     write(outDir, "secretstream.json", secretstream())
     write(outDir, "totp.json", totp())
@@ -78,7 +80,7 @@ fun main(args: Array<String>) {
     write(outDir, "strength.json", strength())
     write(outDir, "conflictcopy.json", conflictCopy())
     write(outDir, "lifecycleproof.json", lifecycleProof())
-    println("vector-gen: wrote 15 files to ${outDir.absolutePath}")
+    println("vector-gen: wrote 16 files to ${outDir.absolutePath}")
 }
 
 /** Argon2id timing on this host (spec 01 §9 benchmark table). */
@@ -234,6 +236,33 @@ private fun wrap(): JsonObject = buildJsonObject {
     put("itemPlaintextUtf8", itemPlain)
     put("itemNonceB64", b64(pat(24, 20)))
     put("itemEnvelopeB64", b64(Envelope.sealWithNonce(crypto, vk, pat(24, 20), itemPlain.encodeToByteArray(), Ad.item(vaultId, itemId, 1))))
+}
+
+/**
+ * Per-member self-service recovery (design 2026-07-12 §F.6). Deterministic: a FIXED recoverySecret
+ * (00 01 … 1f) + fixed userId → pinned HKDF outputs and — with a FIXED nonce, exactly like
+ * wrap.json/envelope.json — an exact `recoveryWrappedUvk` ciphertext. Both the Kotlin and TS suites
+ * assert these byte-for-byte; each also round-trips openUvk == uvk to cover the random-nonce
+ * production path.
+ */
+private fun memberRecovery(): JsonObject = buildJsonObject {
+    val userId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    val recoverySecret = ByteArray(32) { it.toByte() } // 00 01 02 … 1f
+    val uvk = pat(32, 40)
+    val nonce = pat(24, 41)
+
+    val recoveryWrapKey = MemberRecovery.wrapKey(crypto, recoverySecret)
+    val recoveryAuthKey = MemberRecovery.authKey(crypto, recoverySecret)
+    val ad = Ad.recovery(userId)
+
+    put("userId", userId)
+    put("recoverySecretB64", b64(recoverySecret))
+    put("uvkB64", b64(uvk))
+    put("adUtf8", ad.decodeToString())
+    put("recoveryWrapKeyB64", b64(recoveryWrapKey))
+    put("recoveryAuthKeyB64", b64(recoveryAuthKey))
+    put("nonceB64", b64(nonce))
+    put("recoveryWrappedUvkB64", b64(Envelope.sealWithNonce(crypto, recoveryWrapKey, nonce, uvk, ad)))
 }
 
 private fun seal(): JsonObject = buildJsonObject {

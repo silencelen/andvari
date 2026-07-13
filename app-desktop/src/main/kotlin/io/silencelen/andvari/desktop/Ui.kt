@@ -111,7 +111,8 @@ fun DesktopApp(state: DesktopState) {
         // anyway, so a lock-screen dead-action card is structurally impossible).
         when (state.screen) {
             is DesktopScreen.Vault, is DesktopScreen.Settings, is DesktopScreen.Trash, is DesktopScreen.Sharing -> AttentionArea(state)
-            is DesktopScreen.Loading, is DesktopScreen.Welcome, is DesktopScreen.Unlock -> {}
+            // RecoverySetup is a mid-enroll gate (no account chrome yet), like Welcome/Unlock — no attention area.
+            is DesktopScreen.Loading, is DesktopScreen.Welcome, is DesktopScreen.Unlock, is DesktopScreen.RecoverySetup -> {}
         }
         Box(Modifier.weight(1f)) {
             when (val s = state.screen) {
@@ -122,6 +123,7 @@ fun DesktopApp(state: DesktopState) {
                 is DesktopScreen.Sharing -> SharingScreen(state)
                 is DesktopScreen.Settings -> SettingsScreen(state)
                 is DesktopScreen.Trash -> TrashScreen(state)
+                is DesktopScreen.RecoverySetup -> RecoverySetupScreen(state)
             }
         }
     }
@@ -334,6 +336,68 @@ private fun Enroll(state: DesktopState) {
         }
         Spacer(Modifier.height(12.dp))
         Primary("Create vault", ready && !state.busy, state.busy, submit)
+    }
+}
+
+/**
+ * Shown-once self-service recovery phrase (design 2026-07-12 §F.4/§F.7). The per-member piece is
+ * MANDATORY and was already committed in register(), but a member who never SEES it is silently
+ * unrecoverable — so this un-skippable gate reveals the base64url phrase ONCE and makes the user
+ * TYPE IT BACK (constant-time [MemberRecovery.confirmMatches] in DesktopState) before the vault
+ * opens. Shown-once discipline: the phrase is never persisted (not in DesktopStore/files), never
+ * logged, and is dropped the instant the confirm passes. There is NO skip/back affordance — the
+ * silent-total-loss guard. Idle auto-lock still applies (desktop has no screenshot shield), so the
+ * phrase is never left on an unattended screen.
+ *
+ * TODO(recovery-cut-2): the native self-recovery flow (POST /recovery/self/verify + commit) — a member using this
+ * phrase to reset a forgotten master password — and the native admin fingerprint-confirm-for-QR are
+ * deferred; web covers self-recovery for this cut. This screen only SHOWS the piece at signup.
+ */
+@Composable
+private fun RecoverySetupScreen(state: DesktopState) {
+    // Defensive: recoveryPhrase is set atomically with this screen in enrollOp and cleared with the
+    // move to Vault in confirmRecoverySaved(), so a null here is only the one-frame transition —
+    // render nothing rather than a blank form; the next state emission lands the vault.
+    val phrase = state.recoveryPhrase ?: return
+    var typedBack by remember { mutableStateOf("") }
+    var mismatch by remember { mutableStateOf(false) }
+    // A "copy phrase" button is a SECRET clipboard write (auto-clear after the policy window), never
+    // the non-secret copyPlain exemption (§F.7).
+    val clipClear = maxOf(1, state.policy?.clipboardClearSeconds ?: 30)
+    val confirm = { if (typedBack.isNotBlank() && !state.confirmRecoverySaved(typedBack)) mismatch = true }
+    Column(Modifier.fillMaxSize().padding(28.dp).verticalScroll(rememberScrollState())) {
+        Text("Save your recovery phrase", style = MaterialTheme.typography.headlineSmall)
+        Spacer(Modifier.height(12.dp))
+        // Posture copy (§F.4): waived = NO admin backstop (stark, error-toned); required = the
+        // household admin can also help. Native enroll is required-only today (recoverySetupWaived is
+        // always false), but both strings ship so the waived toggle (TODO(recovery-cut-2)) is a flip.
+        Text(
+            if (state.recoverySetupWaived)
+                "There is NO admin backstop for this account. Only this recovery phrase can restore it. If you lose BOTH your master password AND this phrase, this account is gone forever — no one can recover it. Write it down and keep it somewhere safe and offline."
+            else
+                "Write this down and keep it somewhere safe and offline. If you ever forget your master password, this phrase lets you recover your account yourself. (Your household admin can also help you recover.)",
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (state.recoverySetupWaived) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(16.dp))
+        Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Column(Modifier.padding(16.dp)) {
+                SelectionContainer { Text(phrase, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyLarge) }
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = { copyWithAutoClear(phrase, clipClear) }) { Text("Copy phrase") }
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+        Text("Type it back to confirm you saved it", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // NOT a Secret field — a recovery phrase must never be masked-then-password-managed; mono
+        // renders it verbatim. The typed value is its OWN state, never bound to the secret; a mistype
+        // fails the confirm and is discarded (never a KDF input).
+        Field("Recovery phrase", typedBack, { typedBack = it; mismatch = false }, mono = true, onEnter = confirm)
+        if (mismatch) {
+            Text("That doesn't match — check the phrase above and type it exactly.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        Spacer(Modifier.height(16.dp))
+        Primary("I've saved it — open my vault", typedBack.isNotBlank() && !state.busy, state.busy, confirm)
     }
 }
 

@@ -4,10 +4,23 @@ import { open, seal } from "../crypto/envelope";
 import { fingerprint as recoveryFingerprint, sealUvk } from "../crypto/escrow";
 import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
 import { lifecycleKey } from "../crypto/lifecycleproof";
+import { generate as generateMemberRecovery, openUvk as openMemberRecoveryUvk } from "../crypto/member-recovery";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
 import { CryptoError } from "../crypto/sodium";
-import type { AccountKeys, CreateVaultRequest, ItemDoc, ItemVersion, RegisterRequest, WireGrant, WireItem } from "../api/types";
+import type {
+  AccountKeys,
+  CreateVaultRequest,
+  EscrowUpload,
+  ItemDoc,
+  ItemVersion,
+  RecoveryCommitRequest,
+  RecoverySelfSetupRequest,
+  RecoveryVerifyResponse,
+  RegisterRequest,
+  WireGrant,
+  WireItem,
+} from "../api/types";
 
 /** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed; core parity). */
 export const ITEM_FORMAT_VERSION = 2;
@@ -73,9 +86,19 @@ export class Account {
   ) {}
 
   /**
-   * Enrollment: generate all keys client-side, seal escrow to the org recovery key,
-   * and produce the one-shot register request (spec 01/04). The caller must have
-   * confirmed the recovery fingerprint out-of-band first.
+   * Enrollment (spec 01/04, design 2026-07-12 §F.4): generate all keys client-side, CONDITIONALLY
+   * seal org escrow, ALWAYS mint the per-member self-service recovery piece, and produce the one-shot
+   * register request plus the SHOWN-ONCE `recoverySecret`.
+   *
+   * Escrow is policy-driven by the org key: pass `recoveryPublicKey` (+ its already-verified
+   * `recoveryFingerprint`, the human out-of-band anchor — never a server-sourced value the client
+   * auto-trusted) for a `required` invite → the UVK is sealed to the org key with the same
+   * verified-fingerprint discipline as before. Pass neither for a `waived` invite → no escrow blob.
+   * The member-recovery piece is MANDATORY regardless, so an account can never be created with
+   * neither recovery path.
+   *
+   * `recoverySecret` (the raw 32 CSPRNG bytes) is returned for the UI to display ONCE and then drop
+   * (§F.7 shown-once discipline); it is NEVER persisted here.
    */
   static async enroll(params: {
     inviteToken: string;
@@ -83,11 +106,14 @@ export class Account {
     displayName: string;
     password: string;
     kdfParams: KdfParams;
-    recoveryPublicKey: Uint8Array;
-    recoveryFingerprint: string;
+    /** `required` invite → the org recovery PUBLIC key to seal escrow to; omit for a `waived` invite. */
+    recoveryPublicKey?: Uint8Array | null;
+    /** The org recovery FULL fingerprint the human anchored (printed sheet / in-person QR). Required
+     *  when sealing escrow; enroll refuses to seal a UVK to a key whose fingerprint differs. */
+    recoveryFingerprint?: string | null;
     /** F28: stable per-browser-install id (see ui/session.ts installId) — additive; the fielded server ignores it. */
     installId?: string;
-  }): Promise<{ request: RegisterRequest; account: Account }> {
+  }): Promise<{ request: RegisterRequest; account: Account; recoverySecret: Uint8Array }> {
     const userId = uuidv4();
     const personalVaultId = uuidv4();
     const kdfSalt = randomBytes(16);
@@ -105,13 +131,22 @@ export class Account {
     const wrappedVk = seal(uvk, vk, adVk(personalVaultId, userId));
     const metaBlob = seal(vk, utf8(JSON.stringify({ name: "Personal" })), adVaultMeta(personalVaultId));
 
-    // Escrow: the org fingerprint must match what the client was told (defense-in-depth;
-    // the human already compared it to the printed sheet).
-    const computedFp = await recoveryFingerprint(params.recoveryPublicKey);
-    if (computedFp !== params.recoveryFingerprint) {
-      throw new CryptoError("recovery public key does not match its fingerprint");
+    // Org escrow is CONDITIONAL (§F.4): sealed only for a `required` invite (org key present),
+    // preserving the verified-fingerprint discipline — refuse to seal the UVK to a key whose
+    // fingerprint the enrollee did not confirm out-of-band. Waived ⇒ no escrow blob (undefined
+    // ⇒ JSON.stringify omits the key, which the server requires when the invite is waived).
+    let escrow: EscrowUpload | undefined;
+    if (params.recoveryPublicKey != null) {
+      const fp = params.recoveryFingerprint;
+      if (fp == null) throw new CryptoError("recoveryFingerprint is required when sealing org escrow");
+      const computedFp = await recoveryFingerprint(params.recoveryPublicKey);
+      if (computedFp !== fp) throw new CryptoError("recovery public key does not match its fingerprint");
+      escrow = { sealed: toB64(await sealUvk(params.recoveryPublicKey, userId, uvk)), fingerprint: fp };
     }
-    const sealed = await sealUvk(params.recoveryPublicKey, userId, uvk);
+
+    // Per-member self-service recovery piece — MANDATORY for every new account (§F.4). The 256-bit
+    // recoverySecret is GENERATED (never user input) and returned to be SHOWN ONCE.
+    const recovery = await generateMemberRecovery(userId, uvk);
 
     const request: RegisterRequest = {
       inviteToken: params.inviteToken,
@@ -124,7 +159,8 @@ export class Account {
       wrappedUvk: toB64(wrappedUvk),
       identityPub: toB64(identity.publicKey),
       encryptedIdentitySeed: toB64(encryptedIdentitySeed),
-      escrow: { sealed: toB64(sealed), fingerprint: params.recoveryFingerprint },
+      escrow,
+      memberRecovery: { recoveryWrappedUvk: recovery.recoveryWrappedUvk, recoveryAuthKey: recovery.recoveryAuthKey },
       personalVault: { vaultId: personalVaultId, wrappedVk: toB64(wrappedVk), metaBlob: toB64(metaBlob) },
       device: { platform: "web", name: deviceName(), installId: params.installId },
     };
@@ -132,7 +168,51 @@ export class Account {
     const vaultKeys = new Map([[personalVaultId, vk]]);
     const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, personalVaultId, vaultKeys);
     account.vaultRoles.set(personalVaultId, "owner");
-    return { request, account };
+    return { request, account, recoverySecret: recovery.recoverySecret };
+  }
+
+  /**
+   * Self-service account recovery (design §F.3, client half of `POST /recovery/self/commit`). Opens
+   * the SAME UVK from the recovery piece, routes it through the shared unlock tail so the spec 01 §5
+   * identity-pubkey HARD-FAIL fires (a server that substituted an identity key is caught BEFORE
+   * commit), then derives fresh {kdfSalt, authKey, wrapKey} from `newPassword` and re-wraps the UVK —
+   * producing the commit body. It MUST NOT regenerate UVK / identitySeed / identityPub: the new
+   * `newWrappedUvk` wraps the invariant UVK, so both the org-escrow and member-recovery blobs stay
+   * valid. A wrong secret / hostile blob fails closed (AEAD tag), surfacing as CryptoError; a
+   * substituted identity key surfaces as the distinct {@link IdentityMismatchError}.
+   */
+  static async recover(params: {
+    recoverySecret: Uint8Array;
+    verify: RecoveryVerifyResponse;
+    newPassword: string;
+    newKdfParams: KdfParams;
+  }): Promise<RecoveryCommitRequest> {
+    const userId = params.verify.userId;
+    // 1. Recover the SAME UVK (fail-closed: wrong secret / wrong-or-tampered blob → AEAD tag fail).
+    const uvk = await openMemberRecoveryUvk(params.recoverySecret, params.verify.recoveryWrappedUvk, userId);
+    // 2. Run the SHARED unlock tail purely for its identity-pubkey hard-fail (§F.8): it opens
+    //    encryptedIdentitySeed under the recovered UVK and refuses if the seed-derived pubkey does
+    //    not equal verify.identityPub. The returned Account is discarded — only the check matters.
+    Account.unlockFromUvk(userId, uvk, {
+      kdfSalt: "",
+      kdfParams: params.newKdfParams,
+      wrappedUvk: "",
+      encryptedIdentitySeed: params.verify.encryptedIdentitySeed,
+      identityPub: params.verify.identityPub,
+      escrowFingerprint: "",
+    });
+    // 3. Derive fresh password material and re-wrap the SAME UVK (invariant).
+    const newKdfSalt = randomBytes(16);
+    const newMk = masterKey(params.newPassword, newKdfSalt, params.newKdfParams);
+    const newAuthKey = await deriveAuthKey(newMk);
+    const newWrapKey = await deriveWrapKey(newMk);
+    return {
+      recoveryTicket: params.verify.recoveryTicket,
+      newAuthKey: toB64(newAuthKey),
+      newKdfSalt: toB64(newKdfSalt),
+      newKdfParams: params.newKdfParams,
+      newWrappedUvk: toB64(seal(newWrapKey, uvk, adUvk(userId))),
+    };
   }
 
   /** Derive the login authKey from a password + the account's stored salt/params. */
@@ -154,15 +234,25 @@ export class Account {
     } catch {
       throw new CryptoError("wrong master password");
     }
+    // Password path validates the password by the wrappedUvk open above; from here the work is
+    // identical to the recovery (UVK-in-hand) path — one shared tail, so the identity-pubkey
+    // hard-fail can never diverge between them (core Account.unlock parity).
+    return Account.unlockFromUvk(userId, uvk, keys);
+  }
+
+  /**
+   * Shared unlock tail (spec 01 §5) reached by BOTH {@link unlock} (after it recovers the UVK from
+   * the password) and {@link recover} (given the UVK from the member-recovery piece). The identity
+   * keypair is DERIVED from the UVK-sealed seed — which the server cannot forge — so a server-sent
+   * `identityPub` that does not equal the derived key is a pubkey-substitution attempt: hard-fail
+   * with the DISTINCT {@link IdentityMismatchError}, never softened to "wrong password" (including
+   * when the field is MALFORMED — garbage where the identity key belongs is exactly the tampering
+   * this check exists to name). Keeping it single-sourced is the invariant that stops the recovery
+   * path from ever skipping the check.
+   */
+  private static unlockFromUvk(userId: string, uvk: Uint8Array, keys: AccountKeys): Account {
     const identitySeed = open(uvk, fromB64(keys.encryptedIdentitySeed), adIdkey(userId));
     const identity = boxKeypairFromSeed(identitySeed);
-    // spec 01 §5 (core parity): fingerprints and sealed-grant opening use the
-    // SEED-derived keypair, which the server cannot forge — so a server-sent
-    // identityPub that does not equal the derived key is a substitution attempt.
-    // Hard-fail with a distinct error; this must NEVER read as "wrong password" —
-    // including when the field is MALFORMED (fromB64 throws CryptoError, which the
-    // auth surfaces map to "wrong master password"): garbage where the identity key
-    // belongs is tampering/corruption, the very thing this check exists to name.
     let serverIdentityPub: Uint8Array | null = null;
     try {
       serverIdentityPub = fromB64(keys.identityPub);
@@ -403,6 +493,24 @@ export class Account {
     }
     const sealed = await sealUvk(pub, this.userId, this.uvk);
     return { sealed: toB64(sealed), fingerprint: verifiedFingerprint };
+  }
+
+  /**
+   * Migration/rotation path (design §F.3, client half of `PUT /recovery/self-setup`): add or rotate
+   * THIS account's per-member self-service recovery piece over the in-memory UVK. `currentAuthKey` is
+   * re-derived from a fresh master-password prompt by the caller and re-verified server-side (like
+   * changePassword) before the block is stored. The generated `recoverySecret` is SHOWN ONCE then
+   * dropped (§F.7); the UVK is invariant, so the existing org-escrow blob stays valid too (§C.3).
+   */
+  async setupMemberRecovery(currentAuthKey: string): Promise<{ request: RecoverySelfSetupRequest; recoverySecret: Uint8Array }> {
+    const recovery = await generateMemberRecovery(this.userId, this.uvk);
+    return {
+      request: {
+        currentAuthKey,
+        memberRecovery: { recoveryWrappedUvk: recovery.recoveryWrappedUvk, recoveryAuthKey: recovery.recoveryAuthKey },
+      },
+      recoverySecret: recovery.recoverySecret,
+    };
   }
 }
 

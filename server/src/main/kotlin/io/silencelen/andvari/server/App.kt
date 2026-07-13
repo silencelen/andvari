@@ -37,7 +37,10 @@ import io.silencelen.andvari.core.model.ItemVersionsResponse
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.PreloginRequest
 import io.silencelen.andvari.core.model.PushRequest
+import io.silencelen.andvari.core.model.RecoveryCommitRequest
+import io.silencelen.andvari.core.model.RecoverySelfSetupRequest
 import io.silencelen.andvari.core.model.RecoveryUpload
+import io.silencelen.andvari.core.model.RecoveryVerifyRequest
 import io.silencelen.andvari.core.model.RefreshRequest
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.ktor.client.HttpClient
@@ -579,6 +582,41 @@ fun Application.andvariModule(services: Services) {
             call.respondText("ok")
         }
 
+        // ---- per-member self-service recovery (design 2026-07-12 §F.3) ----
+        // Two-phase (verify → commit) + a setup/rotation path. ALL THREE refuse the public break-glass
+        // origin (like register, App.kt:332) and are per-IP fixed-window rate-limited at the public-login
+        // tightness (5/min) — a per-IP counter, never per-account, so a targeted account can't be locked
+        // out of its own recovery (§F.8). No enforceVersion: recovery must work even for a client the
+        // min-version pin would gate, and pre-recovery clients never call these paths.
+        post("/api/v1/recovery/self/verify") {
+            if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
+            if (!limiter.allow("recovery_verify:${call.clientIp(config)}", 5, 60_000)) throw RateLimited()
+            call.respond(service.recoverySelfVerify(call.receive<RecoveryVerifyRequest>(), call.clientIp(config)))
+        }
+        post("/api/v1/recovery/self/commit") {
+            if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
+            if (!limiter.allow("recovery_commit:${call.clientIp(config)}", 5, 60_000)) throw RateLimited()
+            service.recoverySelfCommit(call.receive<RecoveryCommitRequest>(), call.clientIp(config))
+            call.respondText("ok")
+        }
+        put("/api/v1/recovery/self-setup") {
+            if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
+            if (!limiter.allow("recovery_setup:${call.clientIp(config)}", 5, 60_000)) throw RateLimited()
+            val p = requirePrincipal(call, service)
+            service.recoverySelfSetup(p, call.receive<RecoverySelfSetupRequest>(), call.clientIp(config))
+            call.respondText("ok")
+        }
+        // §F.9 capture confirmation (enroll happy-path): authenticated, public-origin-refused, per-IP
+        // rate-limited like the other recovery routes. A session suffices (no key material moves — the
+        // register-committed piece is what was shown); it just flips the durable recoveryConfirmed flag.
+        post("/api/v1/recovery/self/confirm") {
+            if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
+            if (!limiter.allow("recovery_confirm:${call.clientIp(config)}", 5, 60_000)) throw RateLimited()
+            val p = requirePrincipal(call, service)
+            service.recoverySelfConfirm(p, call.clientIp(config))
+            call.respondText("ok")
+        }
+
         // ---- hibp relay ----
         get("/api/v1/hibp/range/{prefix}") {
             requirePrincipal(call, service)
@@ -595,7 +633,13 @@ fun Application.andvariModule(services: Services) {
             val p = requireAdmin(call, service)
             if (!limiter.allow("invite:${p.userId}", 20, 3_600_000)) throw RateLimited() // A6: cap invite mints (mail-abuse)
             val req = call.receive<InviteRequest>()
-            val (resp, token) = services.admin.createInvite(req.email, req.isAdmin, p.userId, req.ttlMinutes, req.sendEmail)
+            // escrowPolicy is persisted on the invite row and read SERVER-SIDE at register (design §F.4).
+            // Passed through as the admin's explicit posture — the Admin UI defaults it to "waived" for
+            // emailed invites (§F.1: a server-composed emailed link carries no authoritative rfp, so
+            // required+emailed forces the discouraged typed-sheet ceremony; frictionless waived is the
+            // common remote case). The server never forces it, so an explicit in-person-QR required
+            // invite is preserved and a silent posture strip stays visible on admin reconciliation.
+            val (resp, token) = services.admin.createInvite(req.email, req.isAdmin, p.userId, req.ttlMinutes, req.sendEmail, req.escrowPolicy)
             // A3: send the enroll link AFTER the tx committed (createInvite returned), off the request
             // path, best-effort, in the APPLICATION scope so it survives the response — a slow/failed
             // relay never stalls the SQLite writer or the HTTP reply. The link is composed from the

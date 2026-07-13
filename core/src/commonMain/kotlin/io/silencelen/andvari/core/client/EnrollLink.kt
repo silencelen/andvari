@@ -3,14 +3,20 @@ package io.silencelen.andvari.core.client
 import io.silencelen.andvari.core.crypto.Bytes
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * The parsed one-scan enroll link payload (design 2026-07-10 one-scan onboarding).
- * Carries NO key material and NO fingerprint — exactly {v, o, t, e}. [e] is verbatim
- * (no case/unicode normalization here; the server does the case-insensitive bind).
+ * Carries NO key material — exactly {v, o, t, e} plus the OPTIONAL org recovery short-fingerprint
+ * [rfp] (design 2026-07-12 §F.1). [e] and [rfp] are verbatim (no case/unicode normalization here;
+ * the server does the case-insensitive bind). [rfp] is null when the link omits it — the fail-safe
+ * fallback to the typed-sheet ceremony; a present [rfp] is honored ONLY via the in-person QR
+ * affirmation, and a server-composed emailed link MUST carry no rfp (the server can force "missing"
+ * but can never force silent auto-trust of a fingerprint it controls).
  */
-data class EnrollPayload(val v: Int, val o: String, val t: String, val e: String)
+data class EnrollPayload(val v: Int, val o: String, val t: String, val e: String, val rfp: String? = null)
 
 /**
  * Enroll-link compose/parse — one of two byte-identical twins (the other is
@@ -55,16 +61,23 @@ object EnrollLink {
     )
     private val json = Json { ignoreUnknownKeys = true }
 
-    /** Wire shape for compose — v as Int (no default, so encodeDefaults can never omit it). */
+    /**
+     * Wire shape for compose — v/o/t/e have no default (always emitted, in order); [rfp] defaults
+     * null and `json` leaves encodeDefaults=false, so an absent rfp is OMITTED and compose stays
+     * byte-identical to a pre-rfp link (the additive/back-compat pin). A present rfp appends
+     * `"rfp":"…"` last.
+     */
     @Serializable
-    private data class WireOut(val v: Int, val o: String, val t: String, val e: String)
+    private data class WireOut(val v: Int, val o: String, val t: String, val e: String, val rfp: String? = null)
 
     /**
      * Wire shape for parse — v as JsonPrimitive so quoted-vs-bare and 1-vs-1.0 are checked
-     * explicitly instead of trusting kotlinx numeric coercion to match JS.
+     * explicitly instead of trusting kotlinx numeric coercion to match JS. [rfp] is optional
+     * (defaulted null); as a JsonPrimitive so a present non-string / explicit-null is checked
+     * explicitly rather than coerced.
      */
     @Serializable
-    private data class WireIn(val v: JsonPrimitive, val o: String, val t: String, val e: String)
+    private data class WireIn(val v: JsonPrimitive, val o: String, val t: String, val e: String, val rfp: JsonElement? = null)
 
     /**
      * Build `<origin>/enroll#a1.<b64url(payload)>`, or null when any input carries
@@ -74,8 +87,8 @@ object EnrollLink {
      * minting client's `location.origin` equivalent (a non-canonical origin simply
      * produces a link [parse] refuses).
      */
-    fun compose(origin: String, token: String, email: String): String? {
-        val payload = json.encodeToString(WireOut.serializer(), WireOut(1, origin, token, email))
+    fun compose(origin: String, token: String, email: String, rfp: String? = null): String? {
+        val payload = json.encodeToString(WireOut.serializer(), WireOut(1, origin, token, email, rfp))
         // kotlinx writes surrogates through raw, so a lone one in ANY input survives into
         // [payload] and trips the strict encoder here (the sibling decode in parseInner
         // uses the same flag).
@@ -126,7 +139,17 @@ object EnrollLink {
         if (w.v.isString || w.v.content.toDoubleOrNull() != 1.0) return null
         if (!ORIGIN.matches(w.o)) return null
         if (w.t.isEmpty() || w.e.isEmpty()) return null
-        return EnrollPayload(1, w.o, w.t, w.e)
+        // rfp is OPTIONAL (design §F.1): absent OR explicit JSON null ⇒ null (the safe typed-sheet
+        // fallback — matches JS where both `undefined` and `null` read as "no rfp"). Present ⇒ a
+        // NON-EMPTY string, carried VERBATIM like e; a present number/bool/empty rejects the whole
+        // link (fail-safe). The duplicate-/escaped-key gate already covers a repeated `rfp` key.
+        val rfpEl = w.rfp
+        val rfp: String? = when {
+            rfpEl == null || rfpEl is JsonNull -> null
+            rfpEl is JsonPrimitive && rfpEl.isString && rfpEl.content.isNotEmpty() -> rfpEl.content
+            else -> return null
+        }
+        return EnrollPayload(1, w.o, w.t, w.e, rfp)
     }
 
     /**

@@ -39,7 +39,7 @@ async function enrolledKeys(): Promise<{ userId: string; keys: AccountKeys }> {
       wrappedUvk: request.wrappedUvk,
       encryptedIdentitySeed: request.encryptedIdentitySeed,
       identityPub: request.identityPub,
-      escrowFingerprint: request.escrow.fingerprint,
+      escrowFingerprint: request.escrow!.fingerprint, // required-path enroll always seals escrow
     },
   };
 }
