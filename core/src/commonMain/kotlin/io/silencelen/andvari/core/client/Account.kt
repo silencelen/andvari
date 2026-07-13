@@ -8,6 +8,7 @@ import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
+import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
@@ -16,7 +17,11 @@ import io.silencelen.andvari.core.model.DeviceInfo
 import io.silencelen.andvari.core.model.EscrowUpload
 import io.silencelen.andvari.core.model.ItemUpload
 import io.silencelen.andvari.core.model.ItemVersion
+import io.silencelen.andvari.core.model.MemberRecoveryBlock
 import io.silencelen.andvari.core.model.PersonalVaultUpload
+import io.silencelen.andvari.core.model.RecoveryCommitRequest
+import io.silencelen.andvari.core.model.RecoverySelfSetupRequest
+import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
@@ -160,6 +165,28 @@ internal object AttachmentRefSerializer : ExtrasOverlaySerializer<AttachmentRef>
 internal object ItemDocSerializer : ExtrasOverlaySerializer<ItemDoc>(ItemDoc.generatedSerializer(), ItemDoc::extras, { v, e -> v.copy(extras = e) })
 
 /**
+ * The result of [Account.enroll]: the one-shot [RegisterRequest], the unlocked [Account], and the
+ * SHOWN-ONCE [recoverySecret] — the raw 32 CSPRNG bytes of the member's self-service recovery piece
+ * (design 2026-07-12 §F.6/§F.7). The UI displays [recoverySecret] once (via
+ * [io.silencelen.andvari.core.crypto.MemberRecovery.displayForm]) for the member to save, gates
+ * account use behind an un-skippable type-it-back confirm
+ * ([io.silencelen.andvari.core.crypto.MemberRecovery.confirmMatches]), then DROPS it — it is never
+ * persisted or logged. Destructures as `(request, account)` so existing call sites are unchanged;
+ * the secret is [component3].
+ */
+class EnrollResult(val request: RegisterRequest, val account: Account, val recoverySecret: ByteArray) {
+    operator fun component1(): RegisterRequest = request
+    operator fun component2(): Account = account
+    operator fun component3(): ByteArray = recoverySecret
+}
+
+/**
+ * The result of [Account.setupMemberRecovery]: the [RecoverySelfSetupRequest] to PUT and the same
+ * SHOWN-ONCE [recoverySecret] discipline as [EnrollResult] (design §F.6/§F.7).
+ */
+class SelfSetupResult(val request: RecoverySelfSetupRequest, val recoverySecret: ByteArray)
+
+/**
  * An unlocked account — the Kotlin sibling of web/src/vault/account.ts. Holds the
  * in-memory UVK + personal vault key and performs item AEAD (AD-bound to
  * userId/vaultId/itemId, spec 02 §2). Nothing here is persisted in the clear.
@@ -200,18 +227,32 @@ class Account private constructor(
             return Bytes.toB64(Keys.authKey(crypto, mk))
         }
 
-        /** Enrollment: generate all keys, seal escrow, return the one-shot register request. */
+        /**
+         * Enrollment (design 2026-07-12 §F.4): generate all keys, ALWAYS mint the per-member
+         * self-service recovery piece, CONDITIONALLY seal org escrow, and return the one-shot
+         * register request plus the SHOWN-ONCE recovery secret.
+         *
+         * Escrow is policy-driven by the org key: pass [recoveryPublicKey] (+ its verified
+         * [recoveryFingerprint]) for a `required` invite → the UVK is sealed to the org key with the
+         * existing verified-fingerprint discipline (spec 05 T10 / [resealEscrowFor]). Pass null (the
+         * `waived` posture) → NO org escrow blob (per-member piece only; server rejects escrow if the
+         * invite is waived). The member-recovery piece is MANDATORY regardless, so an account can
+         * never be created with neither recovery path.
+         *
+         * Returns [EnrollResult] — `(request, account)` destructures as before; [EnrollResult.recoverySecret]
+         * is the raw 32 bytes the UI must show ONCE and then drop.
+         */
         fun enroll(
             inviteToken: String,
             email: String,
             displayName: String,
             password: String,
             params: KdfParams,
-            recoveryPublicKey: ByteArray,
-            recoveryFingerprint: String,
+            recoveryPublicKey: ByteArray?,
+            recoveryFingerprint: String?,
             deviceName: String,
             crypto: CryptoProvider = createCryptoProvider(),
-        ): Pair<RegisterRequest, Account> {
+        ): EnrollResult {
             val userId = uuid(crypto)
             val personalVaultId = uuid(crypto)
             val kdfSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
@@ -224,8 +265,21 @@ class Account private constructor(
             val identity = crypto.boxKeypairFromSeed(identitySeed)
             val vk = crypto.randomBytes(32)
 
-            val computedFp = Escrow.fingerprint(crypto, recoveryPublicKey)
-            if (computedFp != recoveryFingerprint) throw CryptoException("recovery public key does not match its fingerprint")
+            // Org escrow is CONDITIONAL (§F.4): sealed only for a `required` invite (org key present),
+            // preserving the verified-fingerprint discipline — refuse to seal the UVK to a key whose
+            // fingerprint the enrollee did not confirm out-of-band. Waived ⇒ no escrow blob.
+            val escrow: EscrowUpload? = if (recoveryPublicKey != null) {
+                val fp = requireNotNull(recoveryFingerprint) { "recoveryFingerprint is required when sealing org escrow" }
+                val computedFp = Escrow.fingerprint(crypto, recoveryPublicKey)
+                if (computedFp != fp) throw CryptoException("recovery public key does not match its fingerprint")
+                EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recoveryPublicKey, userId, uvk)), fp)
+            } else {
+                null
+            }
+
+            // Per-member self-service recovery piece — MANDATORY for every new account (§F.4). The
+            // 256-bit recoverySecret is GENERATED (never user input) and returned to be SHOWN ONCE.
+            val recovery = MemberRecovery.generate(crypto, userId, uvk)
 
             val req = RegisterRequest(
                 inviteToken = inviteToken,
@@ -238,7 +292,8 @@ class Account private constructor(
                 wrappedUvk = Envelope.sealB64(crypto, wrapKey, uvk, Ad.uvk(userId)),
                 identityPub = Bytes.toB64(identity.publicKey),
                 encryptedIdentitySeed = Envelope.sealB64(crypto, uvk, identitySeed, Ad.idkey(userId)),
-                escrow = EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recoveryPublicKey, userId, uvk)), recoveryFingerprint),
+                escrow = escrow,
+                memberRecovery = MemberRecoveryBlock(recovery.recoveryWrappedUvk, recovery.recoveryAuthKey),
                 personalVault = PersonalVaultUpload(
                     vaultId = personalVaultId,
                     wrappedVk = Envelope.sealB64(crypto, uvk, vk, Ad.vk(personalVaultId, userId)),
@@ -250,7 +305,57 @@ class Account private constructor(
                 crypto, userId, uvk, identity.publicKey, identity.privateKey, personalVaultId,
                 mutableMapOf(personalVaultId to vk), mutableMapOf(personalVaultId to "owner"),
             )
-            return req to account
+            return EnrollResult(req, account, recovery.recoverySecret)
+        }
+
+        /**
+         * Self-service account recovery (design §F.3, client half of `POST /recovery/self/commit`).
+         * Opens the SAME UVK from the recovery piece, routes it through the shared unlock tail so the
+         * spec 01 §5 identity-pubkey HARD-FAIL fires (a server that substituted an identity key is
+         * caught BEFORE commit), then derives fresh {kdfSalt, authKey, wrapKey} from [newPassword] and
+         * re-wraps the UVK — producing the commit body. It MUST NOT regenerate UVK / identitySeed /
+         * identityPub: the new `newWrappedUvk` wraps the invariant UVK, so both the org-escrow and
+         * member-recovery blobs stay valid. A wrong secret / hostile blob fails closed (AEAD tag).
+         */
+        fun recover(
+            recoverySecret: ByteArray,
+            verifyResponse: RecoveryVerifyResponse,
+            newPassword: String,
+            newParams: KdfParams = KdfParams.DEFAULT,
+            crypto: CryptoProvider = createCryptoProvider(),
+        ): RecoveryCommitRequest {
+            val userId = verifyResponse.userId
+            // 1. Recover the SAME UVK (fail-closed: wrong secret / wrong-or-tampered blob → AEAD tag fail).
+            val uvk = MemberRecovery.openUvk(crypto, recoverySecret, verifyResponse.recoveryWrappedUvk, userId)
+
+            // 2. Route through the SHARED unlock tail purely for its identity-pubkey hard-fail (§F.8):
+            //    it opens encryptedIdentitySeed under the recovered UVK and refuses if the seed-derived
+            //    pubkey ≠ verifyResponse.identityPub (possible server compromise). Only those two fields
+            //    are consulted, so the other AccountKeys slots are unused placeholders here.
+            unlockFromUvk(
+                userId,
+                uvk,
+                AccountKeys(
+                    kdfSalt = "",
+                    kdfParams = newParams,
+                    wrappedUvk = "",
+                    encryptedIdentitySeed = verifyResponse.encryptedIdentitySeed,
+                    identityPub = verifyResponse.identityPub,
+                    escrowFingerprint = "",
+                ),
+                crypto,
+            )
+
+            // 3. Derive fresh password material and re-wrap the SAME UVK (invariant).
+            val newKdfSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
+            val newMk = Keys.masterKey(crypto, newPassword, newKdfSalt, newParams)
+            return RecoveryCommitRequest(
+                recoveryTicket = verifyResponse.recoveryTicket,
+                newAuthKey = Bytes.toB64(Keys.authKey(crypto, newMk)),
+                newKdfSalt = Bytes.toB64(newKdfSalt),
+                newKdfParams = newParams,
+                newWrappedUvk = Envelope.sealB64(crypto, Keys.wrapKey(crypto, newMk), uvk, Ad.uvk(userId)),
+            )
         }
 
         /** Unlock a device holding only the password + the server's account keys. */
@@ -542,5 +647,20 @@ class Account private constructor(
             "recovery public key does not match the verified fingerprint — refusing to re-seal escrow"
         }
         return EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, pub, userId, uvk)), verifiedFingerprint)
+    }
+
+    /**
+     * Migration/rotation path (design §F.3, client half of `PUT /recovery/self-setup`): add or rotate
+     * THIS account's per-member self-service recovery piece over the in-memory UVK. [currentAuthKey]
+     * (base64url, derived from the just-entered master password via [deriveAuthKey]) is carried so the
+     * server can require a FRESH master-password reauth before storing the block — a quick-unlock /
+     * biometric session with no password in hand must DEFER this and prompt for the full password.
+     * The generated recoverySecret is SHOWN ONCE then dropped (returned in [SelfSetupResult]); the UVK
+     * is invariant, so a pre-existing org-escrow blob stays valid alongside the new piece.
+     */
+    fun setupMemberRecovery(currentAuthKey: String): SelfSetupResult {
+        val recovery = MemberRecovery.generate(crypto, userId, uvk)
+        val req = RecoverySelfSetupRequest(currentAuthKey, MemberRecoveryBlock(recovery.recoveryWrappedUvk, recovery.recoveryAuthKey))
+        return SelfSetupResult(req, recovery.recoverySecret)
     }
 }

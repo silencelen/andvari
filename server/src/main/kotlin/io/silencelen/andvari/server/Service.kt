@@ -11,11 +11,16 @@ import io.silencelen.andvari.core.model.UserLookupResponse
 import io.silencelen.andvari.core.model.VaultMemberAdd
 import io.silencelen.andvari.core.model.VaultMemberSummary
 import io.silencelen.andvari.core.model.LoginRequest
+import io.silencelen.andvari.core.model.MemberRecoveryBlock
 import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.MutationResult
 import io.silencelen.andvari.core.model.PasswordChangeRequest
 import io.silencelen.andvari.core.model.PreloginResponse
 import io.silencelen.andvari.core.model.PushResponse
+import io.silencelen.andvari.core.model.RecoveryCommitRequest
+import io.silencelen.andvari.core.model.RecoverySelfSetupRequest
+import io.silencelen.andvari.core.model.RecoveryVerifyRequest
+import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.TokenPair
@@ -37,6 +42,24 @@ import io.silencelen.andvari.core.crypto.TotpConfig
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import java.security.MessageDigest
 import java.sql.Connection
+import java.sql.ResultSet
+
+/** The invite row fields the register gate reads, incl. the v6 escrowPolicy (design §F.4). */
+private class InviteRow(
+    val email: String,
+    val isAdmin: Boolean,
+    val expiresAt: Long,
+    val usedAt: Long?,
+    val escrowPolicy: String,
+)
+
+private fun inviteRowOf(rs: ResultSet) = InviteRow(
+    email = rs.getString("email"),
+    isAdmin = rs.getInt("isAdmin") != 0,
+    expiresAt = rs.getLong("expiresAt"),
+    usedAt = rs.getLong("usedAt").let { if (rs.wasNull()) null else it },
+    escrowPolicy = rs.getString("escrowPolicy"),
+)
 
 /**
  * Business logic — decoupled from ktor so integration tests drive it directly and
@@ -52,6 +75,12 @@ class Service(
     private val crypto = createCryptoProvider()
     private val accessTtlMs get() = policy().sessionAccessTtlSeconds * 1000
     private val refreshTtlMs get() = policy().sessionRefreshTtlDays * 24 * 3600 * 1000
+
+    // Two-phase self-recovery tickets (design §F.3): a `/recovery/self/verify` success mints a
+    // single-use, short-TTL, userId-bound ticket that `/recovery/self/commit` redeems. Reuses the
+    // WsTicketStore primitive (ConcurrentHashMap.remove ⇒ at-most-one winner); in-memory only, so a
+    // restart drops pending tickets and the member re-verifies — no spec 02 §5 surface added.
+    private val recoveryTickets = WsTicketStore(RECOVERY_TICKET_TTL_MS)
 
     fun policy(): ClientPolicy {
         val stored = repo.policyJson()?.let { json.decodeFromString(ClientPolicy.serializer(), it) } ?: ClientPolicy()
@@ -83,22 +112,38 @@ class Service(
     }
 
     // ---- register ----
+    //
+    // The §F.4 register gate is a TOTAL function over the invite's escrowPolicy (read from the
+    // invite ROW, never the client body): every branch either persists an account with AT LEAST
+    // the self-service recovery piece, or rejects — an account can never be created with neither
+    // recovery path. `memberRecovery` is MANDATORY for all; org `escrow` is mandatory iff the
+    // invite is required and FORBIDDEN iff waived. Any escrowPolicy value other than the literal
+    // "waived" (NULL, unknown, typo) is treated as `required` — fail-safe toward the admin backstop.
     fun register(req: RegisterRequest, ip: String): SessionResponse = repo.db.tx { c ->
-        if (!config.escrowConfigured) throw BadRequest("escrow_not_configured")
-        if (req.escrow.fingerprint != config.recoveryFingerprint) throw BadRequest("escrow_fingerprint_mismatch")
-        requireEscrowBlob(req.escrow.sealed)
         requireKdfFloor(req.kdfParams)
+        // A self-service recovery piece for EVERY new account, regardless of escrow policy (the
+        // owner's core ask). Absent/structurally-invalid ⇒ recovery_required (never trust the client).
+        val memberRecovery = requireMemberRecovery(req.memberRecovery)
 
         val tokenHash = ServerCrypto.hashToken(req.inviteToken)
-        val invite = c.queryOne("SELECT email,isAdmin,expiresAt,usedAt FROM invites WHERE tokenHash=?", tokenHash) { rs ->
-            Triple(rs.getString("email"), rs.getInt("isAdmin") != 0, rs.getLong("expiresAt")) to
-                (rs.getLong("usedAt").let { if (rs.wasNull()) null else it })
-        } ?: throw BadRequest("invalid_invite")
-        val (invData, usedAt) = invite
-        val (invEmail, invAdmin, expiresAt) = invData
-        if (usedAt != null) throw BadRequest("invite_used")
-        if (expiresAt < now()) throw BadRequest("invite_expired")
-        if (invEmail != BOOTSTRAP_ANY_EMAIL && !invEmail.equals(req.email, ignoreCase = true)) throw BadRequest("invite_email_mismatch")
+        val invite = c.queryOne("SELECT email,isAdmin,expiresAt,usedAt,escrowPolicy FROM invites WHERE tokenHash=?", tokenHash, map = ::inviteRowOf)
+            ?: throw BadRequest("invalid_invite")
+        if (invite.usedAt != null) throw BadRequest("invite_used")
+        if (invite.expiresAt < now()) throw BadRequest("invite_expired")
+        if (invite.email != BOOTSTRAP_ANY_EMAIL && !invite.email.equals(req.email, ignoreCase = true)) throw BadRequest("invite_email_mismatch")
+
+        // §F.4 escrow-polarity gate (escrowPolicy read from the invite row above, never the body).
+        val waived = invite.escrowPolicy == "waived"
+        if (waived) {
+            // waived ⇒ per-member piece only, no admin backstop → an escrow blob MUST NOT be present.
+            if (req.escrow != null) throw BadRequest("escrow_not_allowed_when_waived")
+        } else {
+            // required ⇒ org escrow mandatory + fingerprint-match, exactly as before (Service.kt:87-89).
+            if (!config.escrowConfigured) throw BadRequest("escrow_not_configured")
+            val escrow = req.escrow ?: throw BadRequest("escrow_required")
+            if (escrow.fingerprint != config.recoveryFingerprint) throw BadRequest("escrow_fingerprint_mismatch")
+            requireEscrowBlob(escrow.sealed)
+        }
         if (repo.userByEmail(req.email) != null) throw BadRequest("email_taken")
 
         val userId = req.userId
@@ -111,9 +156,17 @@ class Service(
                VALUES(?,?,?,?,?,?,?,?,?,?, 'active', 0, ?)""",
             userId, req.email.lowercase(), req.displayName, req.kdfSalt, encodeParams(req.kdfParams),
             ServerCrypto.hashVerifier(req.authKey), req.wrappedUvk, req.identityPub,
-            req.encryptedIdentitySeed, invAdmin, t,
+            req.encryptedIdentitySeed, invite.isAdmin, t,
         )
-        c.exec("INSERT INTO escrow(userId,sealed,fingerprint,updatedAt) VALUES(?,?,?,?)", userId, req.escrow.sealed, req.escrow.fingerprint, t)
+        // Org escrow (the admin backstop) only when the invite required it; in the required branch
+        // req.escrow is guaranteed non-null above, so this always inserts there and never when waived.
+        if (!waived) req.escrow?.let { c.exec("INSERT INTO escrow(userId,sealed,fingerprint,updatedAt) VALUES(?,?,?,?)", userId, it.sealed, it.fingerprint, t) }
+        // The self-service member-recovery row: UVK ciphertext + a one-way hash of recoveryAuthKey
+        // (never the raw key — identical to how authKey → verifier works).
+        c.exec(
+            "INSERT INTO member_recovery(userId,recoveryWrappedUvk,recoveryVerifier,updatedAt) VALUES(?,?,?,?)",
+            userId, memberRecovery.recoveryWrappedUvk, ServerCrypto.hashVerifier(memberRecovery.recoveryAuthKey), t,
+        )
 
         val vaultRev = repo.nextRev(c, "vault", req.personalVault.vaultId, req.personalVault.vaultId)
         c.exec(
@@ -131,7 +184,7 @@ class Service(
         // Meta = invite token-hash prefix, not the email (INFO-1): joins this row to its
         // invite_create without copying PII into the central log store.
         repo.auditOn(c, "register", userId, session.deviceId, ip, tokenHash.take(12))
-        session.toResponse(user(c, userId), invAdmin, false)
+        session.toResponse(user(c, userId), invite.isAdmin, false)
     }
 
     // ---- login ----
@@ -252,6 +305,125 @@ class Service(
         }
     }
 
+    // ---- per-member self-service recovery (design 2026-07-12 §F.3) ----
+    // Two-phase, verifier-gated, replay-bound; the ROUTES additionally refuse the public
+    // break-glass origin and per-IP rate-limit (App.kt). Verify OUTSIDE a write tx so a failure's
+    // audit persists in its own tx; only success opens a tx (to mint nothing DB-side — the ticket is
+    // in-memory) / the commit tx does the reset. This is the account-takeover flow the v6 trustee idea
+    // was vetoed for lacking (docs/design/2026-07-08-v6-idea-tournament.md:23), so it is gated exactly
+    // like login: a one-way `crypto_pwhash_str_verify` of recoveryAuthKey against recoveryVerifier.
+
+    /**
+     * Phase 1 (§F.3.1): verify the recovery secret's auth half, and on success hand back the sealed
+     * UVK + identity material bound to a single-use, short-TTL, userId-bound ticket.
+     *
+     * Anti-enumeration (§F.5): unknown email, a non-active account, OR a known email with NO
+     * member_recovery row all run a fixed DUMMY_RECOVERY_VERIFIER and return a uniform 401 — timing/
+     * shape-identical across every state, mirroring login's DUMMY_VERIFIER. (A disabled account is
+     * admin-recoverable only; treating it as "no row" here also keeps the commit's not-active guard a
+     * pure TOCTOU belt.) The stored recoveryVerifier is NOT NULL, so a null/absent verifier can never
+     * match.
+     */
+    fun recoverySelfVerify(req: RecoveryVerifyRequest, ip: String): RecoveryVerifyResponse {
+        val user = repo.userByEmail(req.email)?.takeIf { it.status == "active" }
+        val row = user?.let { repo.memberRecoveryRow(it.userId) }
+        if (user == null || row == null) {
+            ServerCrypto.verify(ServerCrypto.DUMMY_RECOVERY_VERIFIER, req.recoveryAuthKey) // uniform cost
+            throw Unauthorized()
+        }
+        if (!ServerCrypto.verify(row.recoveryVerifier, req.recoveryAuthKey)) {
+            repo.audit("recovery_self_verify_fail", user.userId, null, ip)
+            throw Unauthorized()
+        }
+        val ticket = recoveryTickets.mint(user.userId)
+        repo.audit("recovery_self_verify", user.userId, null, ip)
+        return RecoveryVerifyResponse(
+            userId = user.userId,
+            recoveryTicket = ticket,
+            recoveryWrappedUvk = row.recoveryWrappedUvk,
+            encryptedIdentitySeed = user.encryptedIdentitySeed,
+            identityPub = user.identityPub,
+        )
+    }
+
+    /**
+     * Phase 2 (§F.3.2): validate+consume the ticket, then a DEDICATED reset — deliberately NOT
+     * AdminService.applyRecovery: (a) refuse a non-active account (recovery_account_not_active — a
+     * disabled account is admin-recoverable only); (b) do NOT set status='active'; (c) do NOT set
+     * mustChangePassword (the user just chose the password); (d) enforce the KDF floor; (e) overwrite
+     * verifier/wrappedUvk/kdfSalt/kdfParams; (f) revoke ALL sessions. The UVK is invariant (the client
+     * re-wraps the SAME UVK it recovered), so the org-escrow + member-recovery blobs stay valid.
+     */
+    fun recoverySelfCommit(req: RecoveryCommitRequest, ip: String) {
+        // The ticket is the sole authorization: single-use (ConcurrentHashMap.remove) + userId-bound.
+        val userId = recoveryTickets.redeem(req.recoveryTicket) ?: throw Unauthorized("invalid_ticket")
+        requireKdfFloor(req.newKdfParams)
+        repo.db.tx { c ->
+            val status = c.queryOne("SELECT status FROM users WHERE userId=?", userId) { it.getString(1) }
+                ?: throw BadRequest("no_such_user")
+            if (status != "active") throw BadRequest("recovery_account_not_active")
+            c.exec(
+                "UPDATE users SET verifier=?, wrappedUvk=?, kdfSalt=?, kdfParams=? WHERE userId=?",
+                ServerCrypto.hashVerifier(req.newAuthKey), req.newWrappedUvk, req.newKdfSalt, encodeParams(req.newKdfParams), userId,
+            )
+            c.exec("UPDATE sessions SET revokedAt=? WHERE userId=? AND revokedAt IS NULL", now(), userId)
+            repo.auditOn(c, "recovery_self_commit", userId, null, ip)
+        }
+    }
+
+    /**
+     * Migration / rotation path (§F.3.3): store (or replace) the member_recovery row for an existing
+     * account. Requires a FRESH master-password reauth — verify currentAuthKey against the login
+     * verifier exactly like changePassword — BEFORE storing anything. A quick-unlock/biometric session
+     * has no password in hand, cannot produce a valid currentAuthKey, and is refused here (401); the
+     * client defers the setup nudge to the next full-password unlock.
+     */
+    fun recoverySelfSetup(p: Principal, req: RecoverySelfSetupRequest, ip: String) {
+        val u = repo.userById(p.userId) ?: throw Unauthorized()
+        if (!ServerCrypto.verify(u.verifier, req.currentAuthKey)) {
+            repo.audit("recovery_self_setup_fail", p.userId, p.deviceId, ip)
+            throw Unauthorized()
+        }
+        val block = requireMemberRecovery(req.memberRecovery)
+        repo.db.tx { c ->
+            c.exec(
+                """INSERT INTO member_recovery(userId,recoveryWrappedUvk,recoveryVerifier,updatedAt) VALUES(?,?,?,?)
+                   ON CONFLICT(userId) DO UPDATE SET recoveryWrappedUvk=excluded.recoveryWrappedUvk, recoveryVerifier=excluded.recoveryVerifier, updatedAt=excluded.updatedAt""",
+                p.userId, block.recoveryWrappedUvk, ServerCrypto.hashVerifier(block.recoveryAuthKey), now(),
+            )
+            // §F.9 (round-3 fix): self-setup COMMITS/rotates the piece but MUST NOT flip recoveryConfirmed.
+            // The block-path capture gate calls self-setup on MOUNT — before the user has seen or typed back
+            // the revealed phrase — so confirming here would mark an interrupted reveal "captured" and re-open
+            // the silent-total-loss hole. recoveryConfirmed means "user demonstrably captured" and is flipped
+            // ONLY by /recovery/self/confirm after the type-back (both the enroll path and the gate use it).
+            repo.auditOn(c, "recovery_self_setup", p.userId, p.deviceId, ip)
+        }
+    }
+
+    /**
+     * §F.9 capture confirmation — the enroll happy-path. Authenticated (a session is sufficient); no key
+     * material moves, unlike self-setup which needs a fresh currentAuthKey — the recovery piece was already
+     * committed at register, and the user is merely confirming they SAVED it. Flips the durable, cross-device
+     * recoveryConfirmed flag to 1 so the client's first-vault-entry capture gate stops firing on every device.
+     * Idempotent. Audit `recovery_self_confirm`.
+     */
+    fun recoverySelfConfirm(p: Principal, ip: String) = repo.db.tx { c ->
+        repo.setRecoveryConfirmed(c, p.userId)
+        repo.auditOn(c, "recovery_self_confirm", p.userId, p.deviceId, ip)
+    }
+
+    /**
+     * §F.4: structural gate for the member-recovery block. Absent OR malformed (either field not a
+     * bounded base64url string) ⇒ recovery_required — treated identically to "no recovery" so the
+     * TOTAL register/self-setup invariant holds. Never trusts the client; a decode failure is a reject.
+     */
+    private fun requireMemberRecovery(mr: MemberRecoveryBlock?): MemberRecoveryBlock {
+        val block = mr ?: throw BadRequest("recovery_required")
+        // recoveryWrappedUvk ≈ Envelope(32B UVK) = 72B → 96 b64url chars; recoveryAuthKey = 32B → 43.
+        if (!isB64(block.recoveryWrappedUvk, 1024) || !isB64(block.recoveryAuthKey, 64)) throw BadRequest("recovery_required")
+        return block
+    }
+
     // ---- refresh (rotating; reuse of a consumed token revokes the device) ----
     fun refresh(refreshToken: String, ip: String): TokenPair {
         val hash = ServerCrypto.hashToken(refreshToken)
@@ -302,8 +474,23 @@ class Service(
 
     fun accountKeys(userId: String): AccountKeys {
         val u = repo.userById(userId) ?: throw Unauthorized()
-        return AccountKeys(u.kdfSalt, u.kdfParams, u.wrappedUvk, u.encryptedIdentitySeed, u.identityPub, config.recoveryFingerprint, escrowStale(u.userId))
+        return buildAccountKeys(u)
     }
+
+    /**
+     * The AccountKeys bundle a fresh device unlocks with (register response + GET /account/keys). Sole
+     * builder so escrowStale (F57) and recoverySetupNeeded (§F.2) can't drift between the two sites.
+     * recoverySetupNeeded = the migration nudge: true for an existing account with NO member_recovery
+     * row (the client offers "set up your recovery phrase" over the in-memory UVK). A fresh register
+     * inserts the row first, so its response reads back false.
+     */
+    private fun buildAccountKeys(u: UserRow): AccountKeys = AccountKeys(
+        u.kdfSalt, u.kdfParams, u.wrappedUvk, u.encryptedIdentitySeed, u.identityPub, config.recoveryFingerprint,
+        escrowStale = escrowStale(u.userId), recoverySetupNeeded = !repo.hasMemberRecovery(u.userId),
+        // §F.9: read straight off the users row; a fresh register reads back false (capture not yet
+        // confirmed), driving the client's capture-and-confirm gate on first vault entry.
+        recoveryConfirmed = repo.isRecoveryConfirmed(u.userId),
+    )
 
     /**
      * F57: true when the account has an escrow blob sealed to a SUPERSEDED org recovery key (a
@@ -536,11 +723,14 @@ class Service(
 
     // ---- shared vaults (spec 03 §10) ----
 
+    /** True iff [value] is a non-empty base64url string within a [maxBytes] decoded-size cap. */
+    private fun isB64(value: String, maxBytes: Int): Boolean =
+        value.isNotEmpty() && value.length <= maxBytes * 4 / 3 + 4 &&
+            value.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }
+
     /** base64url ciphertext bound by a byte cap (opaque to the server). ASCII alphabet only. */
     private fun requireB64(value: String, maxBytes: Int, field: String): String {
-        val ok = value.isNotEmpty() && value.length <= maxBytes * 4 / 3 + 4 &&
-            value.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }
-        if (!ok) throw BadRequest("bad_$field")
+        if (!isB64(value, maxBytes)) throw BadRequest("bad_$field")
         return value
     }
 
@@ -1041,11 +1231,14 @@ class Service(
 
     private fun IssuedSession.toResponse(u: UserRow, isAdmin: Boolean, mustChange: Boolean) = SessionResponse(
         userId = u.userId, deviceId = deviceId, accessToken = access, refreshToken = refresh,
-        accountKeys = AccountKeys(u.kdfSalt, u.kdfParams, u.wrappedUvk, u.encryptedIdentitySeed, u.identityPub, config.recoveryFingerprint, escrowStale(u.userId)),
+        accountKeys = buildAccountKeys(u),
         isAdmin = isAdmin, mustChangePassword = mustChange, totpEnrolled = u.totpSecret != null,
     )
 
     companion object {
+        // Single-use self-recovery ticket lifetime (design §F.3): a short window that still leaves a
+        // human time to choose a new password (its Argon2id derivation is ~1 s). In-memory + userId-bound.
+        const val RECOVERY_TICKET_TTL_MS = 5L * 60 * 1000
         // A fixed valid argon2id string so unknown-user logins spend the same CPU (timing).
         val DUMMY_VERIFIER: String = ServerCrypto.hashVerifier("andvari-dummy-authkey")
         private val UUID_RE = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")

@@ -29,6 +29,16 @@ data class EscrowUpload(val sealed: String, val fingerprint: String)
 @Serializable
 data class PersonalVaultUpload(val vaultId: String, val wrappedVk: String, val metaBlob: String)
 
+/**
+ * The per-member self-service recovery block (design 2026-07-12 §F.2/§F.6). `recoveryWrappedUvk`
+ * is the UVK sealed under the member's recovery-secret-derived wrap key (base64url [io.silencelen.andvari.core.crypto.Envelope]);
+ * `recoveryAuthKey` is the HKDF-derived proof (base64url) the server one-way hashes into
+ * `recoveryVerifier = crypto_pwhash_str(recoveryAuthKey)` — it never persists the raw value, exactly
+ * as it treats `authKey`. Also carried by [RecoverySelfSetupRequest] (the migration/rotation path).
+ */
+@Serializable
+data class MemberRecoveryBlock(val recoveryWrappedUvk: String, val recoveryAuthKey: String)
+
 @Serializable
 data class RegisterRequest(
     val inviteToken: String,
@@ -41,7 +51,15 @@ data class RegisterRequest(
     val wrappedUvk: String,
     val identityPub: String,
     val encryptedIdentitySeed: String,
-    val escrow: EscrowUpload,
+    // design §F.2/§F.4: escrow becomes NULLABLE — present iff the invite's escrowPolicy == "required".
+    // Defaulted null so a `waived` register omits it and old payloads still parse (additive contract).
+    // The server-side register gate (read from the invite row, never the client) enforces the polarity:
+    // required ⇒ escrow mandatory + fingerprint-match; waived ⇒ escrow FORBIDDEN.
+    val escrow: EscrowUpload? = null,
+    // design §F.2/§F.4: MANDATORY for every NEW account (server rejects `recovery_required` if absent),
+    // giving every member a self-service piece regardless of escrow policy. Nullable+defaulted only so
+    // the wire parses old/rollback payloads; pre-memberRecovery clients are gated out by the version pin.
+    val memberRecovery: MemberRecoveryBlock? = null,
     val personalVault: PersonalVaultUpload,
     val device: DeviceInfo,
 )
@@ -67,6 +85,16 @@ data class AccountKeys(
     // the CURRENT org fingerprint (the re-seal target + pubkey-verification anchor). Additive,
     // defaulted false so older clients ignore it and a rollback server that omits it is safe.
     val escrowStale: Boolean = false,
+    // design §F.2: true for an existing account with no member_recovery row — the migration nudge to
+    // set up a self-service recovery piece over the in-memory UVK (setupMemberRecovery). Same additive
+    // shape as escrowStale: defaulted false so older clients ignore it and a rollback server is safe.
+    val recoverySetupNeeded: Boolean = false,
+    // design §F.9: the durable, cross-device capture-confirmation flag. false ⇒ the registered piece was
+    // never CAPTURED (interrupted reveal) or this is a migration account — a client MUST force
+    // capture-and-confirm before granting vault access (POST /recovery/self/confirm, or a full
+    // setupMemberRecovery, flips it true server-side). recoverySetupNeeded stays informational. Additive,
+    // defaulted false so older clients ignore it and a rollback server that omits it is safe.
+    val recoveryConfirmed: Boolean = false,
 )
 
 @Serializable
@@ -95,6 +123,62 @@ data class PasswordChangeRequest(
     val newKdfParams: KdfParams,
     val newWrappedUvk: String,
 )
+
+// ---- per-member self-service recovery (design 2026-07-12 §F.3) ----
+// Two-phase, verifier-gated, replay-bound; all endpoints are refused on the public break-glass
+// origin and per-IP rate-limited (no per-account counter ⇒ no targeted attempt-lockout DoS).
+
+/**
+ * `POST /recovery/self/verify` request. The recovery secret is high-entropy and derivation is HKDF-
+ * only (no server salt/params), so there is nothing to prelogin-fetch first. The server verifies
+ * `recoveryAuthKey` against the stored `recoveryVerifier`. Anti-enumeration (§F.5): unknown email OR
+ * a known email with no member_recovery row runs a fixed DUMMY_RECOVERY_VERIFIER and returns a
+ * uniform 401 — timing/shape-identical across all three states.
+ */
+@Serializable
+data class RecoveryVerifyRequest(val email: String, val recoveryAuthKey: String)
+
+/**
+ * `POST /recovery/self/verify` success response. `recoveryTicket` is single-use, short-TTL and
+ * userId-bound (WsTicketStore pattern). `userId` is REQUIRED by the client to compute
+ * `Ad.recovery(userId)` (to open recoveryWrappedUvk) and `Ad.idkey(userId)` (the identity-pubkey
+ * hard-fail on the shared unlock tail) — the AEAD ADs bind it, so recovery cannot proceed without it.
+ * `encryptedIdentitySeed` + `identityPub` feed that hard-fail so a substituted identity key is caught
+ * BEFORE commit.
+ */
+@Serializable
+data class RecoveryVerifyResponse(
+    val userId: String,
+    val recoveryTicket: String,
+    val recoveryWrappedUvk: String,
+    val encryptedIdentitySeed: String,
+    val identityPub: String,
+)
+
+/**
+ * `POST /recovery/self/commit` request. The ticket is validated (live, unconsumed, then consumed).
+ * The reset overwrites verifier/wrappedUvk/kdf and revokes sessions but — unlike admin recovery —
+ * does NOT set status='active' or mustChangePassword (the user just chose the new password);
+ * `newKdfParams` must clear `requireKdfFloor`. The UVK is invariant (recover re-wraps the SAME UVK),
+ * so the org-escrow + member-recovery blobs stay valid.
+ */
+@Serializable
+data class RecoveryCommitRequest(
+    val recoveryTicket: String,
+    val newAuthKey: String,
+    val newKdfSalt: String,
+    val newKdfParams: KdfParams,
+    val newWrappedUvk: String,
+)
+
+/**
+ * `PUT /recovery/self-setup` request (authenticated migration/rotation path). The server requires a
+ * FRESH master-password reauth — it verifies `currentAuthKey` against the login verifier exactly like
+ * changePassword — before storing `memberRecovery`. A quick-unlock/biometric session (no password in
+ * hand) DEFERS the setup nudge to the next full-password unlock.
+ */
+@Serializable
+data class RecoverySelfSetupRequest(val currentAuthKey: String, val memberRecovery: MemberRecoveryBlock)
 
 // ---- sync ----
 
@@ -380,10 +464,25 @@ data class AdminUserSummary(
     val createdAt: Long,
     val deviceCount: Int,
     val escrowFingerprint: String?,
+    // design §F.4 posture reconciliation: true iff the account holds a member_recovery row (its
+    // self-service piece). Paired with escrowFingerprint (the admin backstop), it lets the Admin UI
+    // distinguish "waived (intended)" from "no recovery / needs setup" and catch a policy flip.
+    // Additive + defaulted so older clients ignore it and a rollback server that omits it is safe.
+    val recoveryEnrolled: Boolean = false,
 )
 
+// design §F.2: escrowPolicy is the admin's per-invite recovery posture — "required" (default; org
+// escrow backstop mandatory + fingerprint ceremony) or "waived" (per-member piece only, no admin
+// backstop). Read SERVER-SIDE from the invite row at register, NEVER from the client body. Additive +
+// defaulted so existing callers/rollback servers keep the safe "required" posture.
 @Serializable
-data class InviteRequest(val email: String, val isAdmin: Boolean = false, val ttlMinutes: Int? = null, val sendEmail: Boolean = false)
+data class InviteRequest(
+    val email: String,
+    val isAdmin: Boolean = false,
+    val ttlMinutes: Int? = null,
+    val sendEmail: Boolean = false,
+    val escrowPolicy: String = "required",
+)
 
 @Serializable
 data class InviteResponse(val inviteToken: String, val email: String, val expiresAt: Long)

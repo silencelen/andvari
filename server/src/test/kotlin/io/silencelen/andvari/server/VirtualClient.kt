@@ -7,6 +7,7 @@ import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.LifecycleProof
+import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
@@ -14,8 +15,12 @@ import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.DeviceInfo
 import io.silencelen.andvari.core.model.EscrowUpload
 import io.silencelen.andvari.core.model.ItemUpload
+import io.silencelen.andvari.core.model.MemberRecoveryBlock
 import io.silencelen.andvari.core.model.PasswordChangeRequest
 import io.silencelen.andvari.core.model.PersonalVaultUpload
+import io.silencelen.andvari.core.model.RecoveryCommitRequest
+import io.silencelen.andvari.core.model.RecoverySelfSetupRequest
+import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.RegisterRequest
 
 /**
@@ -50,14 +55,27 @@ class VirtualClient(val email: String, val password: String, fast: Boolean = tru
     var accessToken: String = ""
     var refreshToken: String = ""
 
+    // The per-member self-service recovery piece (design §F.6), retained after buildRegister/
+    // buildMemberRecovery so the recovery flow can re-derive the auth half + open the sealed UVK.
+    var recoveryPiece: MemberRecovery.Piece? = null
+
     private fun uuidV4() = java.util.UUID.randomUUID().toString()
 
     /**
      * Registration bundle. Because AEAD AD binds to userId (spec 02 §2), the client
      * chooses its own userId (a UUID) and the server honors it — the server never
      * needs to re-encrypt, so client-chosen ids are fine and keep AD stable forever.
+     *
+     * [includeEscrow]/[includeMemberRecovery] let register-gate tests build the `waived` (escrow
+     * omitted) and the reject (memberRecovery omitted) shapes; both default on = the `required` path.
      */
-    fun buildRegister(inviteToken: String, recoveryPub: ByteArray, fingerprint: String): RegisterRequest {
+    fun buildRegister(
+        inviteToken: String,
+        recoveryPub: ByteArray,
+        fingerprint: String,
+        includeEscrow: Boolean = true,
+        includeMemberRecovery: Boolean = true,
+    ): RegisterRequest {
         userId = uuidV4()
         val wrappedUvk = Envelope.sealB64(crypto, wrapKey, uvk, Ad.uvk(userId))
         val encIdentity = Envelope.sealB64(crypto, uvk, identitySeed, Ad.idkey(userId))
@@ -75,11 +93,47 @@ class VirtualClient(val email: String, val password: String, fast: Boolean = tru
             wrappedUvk = wrappedUvk,
             identityPub = Bytes.toB64(identity.publicKey),
             encryptedIdentitySeed = encIdentity,
-            escrow = EscrowUpload(sealed, fingerprint),
+            escrow = if (includeEscrow) EscrowUpload(sealed, fingerprint) else null,
+            memberRecovery = if (includeMemberRecovery) buildMemberRecovery() else null,
             personalVault = PersonalVaultUpload(personalVaultId, wrappedVk, metaBlob),
             device = DeviceInfo("test", "vc-${email.take(3)}"),
         )
     }
+
+    // ---- per-member self-service recovery (design 2026-07-12 §F) ----
+
+    /** Generate + retain a recovery piece over the current UVK; returns the wire block. */
+    fun buildMemberRecovery(): MemberRecoveryBlock {
+        val piece = MemberRecovery.generate(crypto, userId, uvk)
+        recoveryPiece = piece
+        return MemberRecoveryBlock(piece.recoveryWrappedUvk, piece.recoveryAuthKey)
+    }
+
+    /** The recovery-secret's auth half (b64url) the client posts to /recovery/self/verify. */
+    val recoveryAuthKey: String get() = recoveryPiece!!.recoveryAuthKey
+
+    /**
+     * The /recovery/self/commit body from a verify response: open the SAME UVK from the returned
+     * recoveryWrappedUvk with the retained secret (fail-closed AEAD), mutate this client's uvk to it,
+     * then re-wrap under [newPassword]. The UVK is invariant, so escrow + member-recovery stay valid.
+     */
+    fun buildRecoveryCommit(resp: RecoveryVerifyResponse, newPassword: String): RecoveryCommitRequest {
+        val piece = recoveryPiece!!
+        MemberRecovery.openUvk(crypto, piece.recoverySecret, resp.recoveryWrappedUvk, resp.userId).copyInto(uvk)
+        val newSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
+        val newMk = Keys.masterKey(crypto, newPassword, newSalt, kdfParams)
+        return RecoveryCommitRequest(
+            recoveryTicket = resp.recoveryTicket,
+            newAuthKey = Bytes.toB64(Keys.authKey(crypto, newMk)),
+            newKdfSalt = Bytes.toB64(newSalt),
+            newKdfParams = kdfParams,
+            newWrappedUvk = Envelope.sealB64(crypto, Keys.wrapKey(crypto, newMk), uvk, Ad.uvk(resp.userId)),
+        )
+    }
+
+    /** A /recovery/self-setup body: a fresh piece over the current UVK, gated by currentAuthKey. */
+    fun buildRecoverySelfSetup(): RecoverySelfSetupRequest =
+        RecoverySelfSetupRequest(currentAuthKey = authKey, memberRecovery = buildMemberRecovery())
 
     /**
      * The full zero-knowledge unlock a fresh device performs with ONLY the password:

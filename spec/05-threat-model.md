@@ -22,13 +22,18 @@ vault without the master password.
 | T7 | **B2 / PBS / backup theft** | Backups contain only what T1 sees (ciphertext + metadata). Neutralized by design. |
 | T8 | **DB leak → offline cracking** | authKey verifier is argon2id-hashed server-side; vault security rests on Argon2id(master password) at ≥64 MiB — weak master passwords remain the user's risk (policy enforces minimum strength at enrollment). |
 | T9 | **Recovery-sheet thief** | Holds A4 ⇒ can decrypt every escrowed UVK **given the sealed blobs** (needs server data too). Physical security of the two sheets + USB is the control; annual drill verifies presence. Compromise response: re-ceremony + full re-escrow + item re-key (manual runbook). |
-| T10 | **Malicious server during enrollment** (pubkey substitution) | Blocked by triple pinning + human fingerprint check (spec 04 §2). |
+| T10 | **Malicious server during enrollment** (pubkey substitution) | Blocked by triple pinning + human fingerprint check (spec 04 §2). **Per-member recovery (spec 04 §6):** `waived` members carry no org escrow ⇒ no pubkey to substitute ⇒ T10 N/A to them; for `required` members the fingerprint reaches the invitee out-of-band via the **client-composed** in-person QR (or the typed-sheet fallback), never a server-stamped pin (`rfp=null` on the server-composed emailed link — spec 04 §6.5). The symmetric member-recovery blob has no pubkey and is T10-immune by construction. |
 | T11 | **User enumeration / credential stuffing** | Deterministic fake prelogin salts, uniform 401s, per-IP rate limits (no per-account keys on any auth endpoint — per-account login limiting is a deferred hardening item; the per-account buckets that do exist are listed in spec 03 §8), public-origin lockdown (TOTP + tighter limits + registration disabled). |
 
 ## Accepted risks (signed off by owner at hardening gate)
 R1 JVM/JS cannot guarantee secret zeroization (GC copies) — industry-standard gap.
 R2 Web client page-load trust (T6). R3 Escrow key holder can decrypt all (deliberate
-— the recovery feature). R4 Server metadata visibility (A6) — includes a residual
+— the recovery feature). **Amended for per-member recovery (spec 04 §6):** under the
+Hybrid default the admin backstop **persists** for `escrowPolicy=required` members (the
+admin can still decrypt them — R3 stands); for a **`waived`** member R3 is **retired** (no
+org escrow blob exists ⇒ private from admin) at the cost of **no backstop** — losing both
+the master password and the generated recovery piece ⇒ permanent data loss (the accepted
+hard-loss trade, R9). R4 Server metadata visibility (A6) — includes a residual
 prelogin oracle: after a KDF-policy change, an account whose stored params differ
 from the current default answers prelogin with diverged params (existence confirmed)
 until it re-keys via password change; unknown emails always answer the current
@@ -61,6 +66,36 @@ an accepted residual until P6 owner-signed grants — the "you were added to <va
 transparency for honest servers only and is NOT an F16 defense. Shared-vault membership
 topology (which userId holds which role on which vaultId) is server-visible metadata,
 subsumed by A6/R4.
+**R8 extended (per-member recovery `rfp`, spec 04 §6.5):** the emailed enroll link is
+**server-composed**, so any org recovery fingerprint it carried would be server-attested
+(TOFU-from-server, T1-bounded) rather than out-of-band — which is exactly why the
+server-composed emailed link carries **no authoritative `rfp` (`rfp=null`)** and emailed
+invites **default to `escrowPolicy=waived`** (no fingerprint needed → frictionless and
+safe). A required-backstop invite that needs a genuine org pubkey uses the
+client-composed in-person QR (fingerprint out-of-band via the admin's screen) or the
+typed-sheet fallback; a missing `rfp` fails safe to typed-sheet, never to server
+auto-trust. No new server capability beyond the existing R8 email relay.
+**R9 (per-member recovery piece — a member holds a UVK-equivalent secret, spec 01 §2.1 /
+spec 04 §6).** The generated `recoverySecret` wraps that member's own UVK, so possession
+of the piece is UVK-equivalent **for that one account** (never the fleet). Two faces:
+(1) **LOSS** — a `waived` member who loses **both** master password and piece has **no
+backstop ⇒ permanent data loss** (accepted; the register-time posture acknowledgment,
+spec 04 §6.3, makes the trade explicit and un-skippable); a `required` member is covered
+by the admin escrow backstop (R3), so their loss is recoverable. (2) **THEFT** — the piece
+is the self-held analogue of the org recovery-sheet thief (T9): whoever holds it can, *with
+server data*, decrypt/reset that one account. Controls: physical/digital custody of the
+member's sheet/QR (same class as T9's sheet custody); and the online reset is gated by the
+phase-1 **verifier** (a thief still needs the piece), the **per-IP rate-limit**, and the
+**single-use replay-bound ticket** (spec 03 §12), so the stolen piece alone is not a remote
+reset/lockout oracle. The recovery unlock **preserves the identity-pubkey hard-fail
+linchpin** (spec 01 §5): `recover()` routes through the shared UVK-unlock tail, so a server
+substituting an identity pubkey is caught during recovery exactly as on every normal unlock
+(spec 04 §6.2) — untouched by this change. The **opt-out authorization** (who may waive) is
+**server-trusted state with admin-visible, non-silent reconciliation — NOT tamper-proof**:
+the admin UI distinguishes "waived (intended)" from "escrow missing/failed"
+(`escrowFingerprint == null` on a `required` invite), so a hostile-server policy flip is
+*visible* on reconciliation but not *prevented* (acceptable under T1 for the household
+model; spec 04 §6.5).
 
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 

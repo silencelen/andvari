@@ -203,7 +203,18 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
         <td>{u.status === "active" ? u.status : <span className="tone-bad">{u.status}</span>}</td>
         <td className="muted">{fmtDate(u.createdAt)}</td>
         <td><button type="button" className="link" onClick={onToggleDevices}>{u.deviceCount} device{u.deviceCount === 1 ? "" : "s"} {expanded ? "▴" : "▾"}</button></td>
-        <td className="mono muted" title={u.escrowFingerprint ?? undefined}>{u.escrowFingerprint ? u.escrowFingerprint.slice(0, 12) + "…" : "—"}</td>
+        {(() => {
+          // §F.9 reconciliation: a null fingerprint is "waived (intended)" (member holds their own
+          // piece) or "no recovery / needs setup" (neither) — not just "—" — keyed on recoveryEnrolled.
+          const posture = escrowPostureLabel(u.escrowFingerprint, u.recoveryEnrolled);
+          const cls = posture.tone === "good" ? "tone-good" : posture.tone === "bad" ? "tone-bad" : "muted";
+          return (
+            <td className="muted" title={u.escrowFingerprint ?? undefined}>
+              <span className={cls}>{posture.label}</span>
+              {u.escrowFingerprint && <div className="mono muted">{u.escrowFingerprint.slice(0, 12)}…</div>}
+            </td>
+          );
+        })()}
         <td>
           {u.escrowFingerprint && (
             <div style={{ marginBottom: u.status === "active" ? 6 : 0 }}>
@@ -307,6 +318,42 @@ export function inviteResultView(qrAvailable: boolean, linkComposed: boolean, mo
   return modulesOk ? "qr" : "overflow-link";
 }
 
+// design §F.1/§F.2 — the admin's per-invite recovery posture and the rfp it stamps.
+export type EscrowPolicy = "required" | "waived";
+
+/** The rfp an invite stamps into its QR (§F.2). ONLY a `required` invite whose org short-fingerprint
+ *  the admin type-confirmed against their PRINTED sheet stamps one — never a server-fetched value
+ *  (`/admin/status`). A waived invite, or a required invite the admin declined to confirm, stamps
+ *  NONE, and the invitee falls back to the typed-sheet ceremony (safe). Pure + exported so a refactor
+ *  that stamps an unconfirmed/ server-sourced rfp trips a test. */
+export function stampedRfp(escrowPolicy: EscrowPolicy, confirmedOrgFp: string | null): string | undefined {
+  return escrowPolicy === "required" && confirmedOrgFp ? confirmedOrgFp : undefined;
+}
+
+/** Normalize a typed org short-fingerprint (lowercase, drop separators); valid iff exactly 16 hex. */
+export function normalizeOrgFp(entry: string): string {
+  return entry.toLowerCase().replace(/[^0-9a-f]/g, "");
+}
+
+/** design §F.9 reconciliation: how a user's recovery posture renders in the admin list. Keyed on the
+ *  fields the server ACTUALLY sends — `escrowFingerprint` (the org backstop) and `recoveryEnrolled`
+ *  (whether the member has a self-service piece) — NOT the never-populated per-user `escrowPolicy`.
+ *   - escrow present            → "admin backstop" (good);
+ *   - no escrow but a member piece → "waived (intended)" (muted — the member holds their own recovery);
+ *   - neither                   → "no recovery / needs setup" (bad — genuinely unrecoverable until the
+ *                                 vault-entry capture gate fires on their next unlock).
+ *  Pure + exported so a refactor that re-reads a dead field trips a test. */
+export type EscrowPostureTone = "good" | "muted" | "bad";
+export function escrowPostureLabel(escrowFingerprint: string | null, recoveryEnrolled?: boolean): { label: string; tone: EscrowPostureTone } {
+  if (escrowFingerprint) return { label: "admin backstop", tone: "good" };
+  if (recoveryEnrolled) return { label: "waived (intended)", tone: "muted" };
+  return { label: "no recovery / needs setup", tone: "bad" };
+}
+
+// Session-memory (per page load) for the admin's type-confirmed org recovery short-fingerprint — so
+// the admin confirms it against their printed sheet ONCE per session, not per invite (§F.1).
+let sessionOrgFp: string | null = null;
+
 function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () => void }) {
   const [email, setEmail] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
@@ -319,6 +366,25 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
   const [err, setErr] = useState("");
   const [sendEmail, setSendEmail] = useState(false);
   const [emailAvailable, setEmailAvailable] = useState(false);
+  // design §F.2: the invite's recovery posture. Default "required" (admin backstop); emailed invites
+  // are frictionless "waived" (a server-composed link can't carry an authoritative rfp anyway, §F.1).
+  const [escrowPolicy, setEscrowPolicy] = useState<EscrowPolicy>("required");
+  // §F.1: the admin confirms their PRINTED recovery sheet's first 16 hex ONCE per session; that
+  // human-anchored value (never a /admin/status fetch) is what a required QR invite stamps as rfp.
+  const [orgFpInput, setOrgFpInput] = useState("");
+  const [confirmedOrgFp, setConfirmedOrgFp] = useState<string | null>(sessionOrgFp);
+  const [orgFpErr, setOrgFpErr] = useState("");
+  // The posture the LAST minted invite actually used (sendEmail resets after mint, so read it here).
+  const [resultPolicy, setResultPolicy] = useState<EscrowPolicy>("required");
+
+  const confirmOrgFp = () => {
+    const norm = normalizeOrgFp(orgFpInput);
+    if (norm.length !== 16) return setOrgFpErr("Type the FIRST 16 characters (hex) from your printed recovery sheet.");
+    sessionOrgFp = norm; // cache for the session (§F.1: confirm once, not per invite)
+    setConfirmedOrgFp(norm);
+    setOrgFpErr("");
+    setOrgFpInput("");
+  };
   // The enroll link embeds location.origin verbatim. On the public break-glass origin that link
   // would sail through the whole ceremony and then die at register (public-register is
   // server-refused) — so the QR path simply doesn't exist there; the plain token stays, redeemed
@@ -340,19 +406,26 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
     setResult(null);
     setResultLink(null);
     try {
-      const r = await client.adminInvite(email.trim(), isAdmin, inviteTtlMinutes(ttl), sendEmail && emailAvailable);
+      // The effective posture: emailed invites are always waived (§F.1). Read server-side from the
+      // invite row too — the client value is only advisory to the register gate.
+      const effectivePolicy: EscrowPolicy = sendEmail && emailAvailable ? "waived" : escrowPolicy;
+      const r = await client.adminInvite(email.trim(), isAdmin, inviteTtlMinutes(ttl), sendEmail && emailAvailable, effectivePolicy);
       setResult(r);
+      setResultPolicy(effectivePolicy);
       if (qrAvailable) {
         // composeEnrollLink refuses ill-formed UTF-16 (null) — a lone surrogate can round-trip
         // JSON as \udXXX, so "the server validated the email" is no guarantee. On null we KEEP the
         // token (the invite WAS minted) and fall to the "compose-note" view — there is no plain
         // Invite button to retry with anymore, so NEVER clear the result.
-        setResultLink(composeEnrollLink(window.location.origin, r.inviteToken, r.email));
+        // §F.2: stamp the admin's type-confirmed org fingerprint as rfp ONLY on a required invite —
+        // never a server-fetched value; a waived/unconfirmed invite carries no rfp (typed-sheet fallback).
+        setResultLink(composeEnrollLink(window.location.origin, r.inviteToken, r.email, stampedRfp(effectivePolicy, confirmedOrgFp)));
       }
       setEmail("");
       setIsAdmin(false);
       setSendEmail(false);
-      // keep `ttl` — an admin minting several invites is likely using one delivery method
+      // keep `ttl` + `escrowPolicy` + the confirmed org fp — an admin minting several invites is
+      // likely using one delivery method and posture.
       onInvited();
     } catch (e) {
       setErr(errText(e));
@@ -396,6 +469,12 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
             <option value="3d">3 days</option>
           </select>
         </Field>
+        <Field label="Recovery" style={{ marginBottom: 0 }}>
+          <select value={sendEmail ? "waived" : escrowPolicy} disabled={sendEmail} onChange={(e) => setEscrowPolicy(e.target.value as EscrowPolicy)}>
+            <option value="required">admin backstop</option>
+            <option value="waived">member-only (no backstop)</option>
+          </select>
+        </Field>
         <label className="check" style={{ margin: "0 0 10px" }}>
           <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} />
           <span>admin</span>
@@ -411,13 +490,44 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
       {qrAvailable && emailAvailable && sendEmail && (
         <div className="muted" style={{ marginTop: 8 }}>
           andvari will also email the enroll link to this address — a one-time key that expires within
-          the hour. Still hand over the printed recovery sheet in person.
+          the hour. Emailed invites use the frictionless <strong>member-only</strong> posture (no admin backstop);
+          the member secures their own recovery phrase.
+        </div>
+      )}
+      {/* §F.1: for a REQUIRED QR invite, the admin type-confirms the org short-fingerprint against
+          their PRINTED sheet ONCE per session; the confirmed value (never a server fetch) is stamped
+          as rfp. Declining stamps no rfp — the invitee then types the sheet themselves (safe). */}
+      {escrowPolicy === "required" && qrAvailable && !sendEmail && (
+        <div className="muted" style={{ marginTop: 8 }}>
+          {confirmedOrgFp ? (
+            <span>
+              Recovery sheet confirmed for this session — a scannable recovery code will be stamped into QR invites.{" "}
+              <button type="button" className="link" onClick={() => { sessionOrgFp = null; setConfirmedOrgFp(null); }}>change</button>
+            </span>
+          ) : (
+            <>
+              <div className="secret-row" style={{ alignItems: "flex-end" }}>
+                <Field label="Confirm your recovery sheet (first 16 characters) to stamp a scannable code into the QR" style={{ flex: 1, marginBottom: 0 }}>
+                  <input className="mono" value={orgFpInput} onChange={(e) => setOrgFpInput(e.target.value)} placeholder="from your printed sheet, not the server" />
+                </Field>
+                <button type="button" className="ghost" onClick={confirmOrgFp}>Confirm</button>
+              </div>
+              {orgFpErr && <div style={{ color: "var(--danger)", marginTop: 4 }}>{orgFpErr}</div>}
+              <div style={{ marginTop: 4 }}>Skip this and the invitee will type your recovery sheet's fingerprint themselves.</div>
+            </>
+          )}
         </div>
       )}
       {result && (
         <div className="token-box">
           <div className="muted" style={{ marginBottom: 6 }}>
             One-time invite token for <strong>{result.email}</strong> — shown ONCE, expires {fmtDate(result.expiresAt)}. Hand it over securely.
+          </div>
+          <div className="muted" style={{ marginBottom: 6 }}>
+            Recovery posture: <strong>{resultPolicy === "required" ? "admin backstop" : "member-only (no admin backstop)"}</strong>
+            {resultPolicy === "required"
+              ? " — this member will also confirm your recovery fingerprint at signup."
+              : " — this member can only be recovered with their own recovery phrase; there is no admin backstop."}
           </div>
           <div className="secret-row">
             <input readOnly className="mono token" value={result.inviteToken} onFocus={(e) => e.target.select()} />
@@ -440,7 +550,10 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
                 <button type="button" className="ghost" onClick={() => void copy(resultLink, true)}>{copiedLink ? "Copied ✓" : "Copy link"}</button>
               </div>
               <div className="muted" style={{ marginTop: 8 }}>
-                Expires {fmtDate(result.expiresAt)}. They scan this with their phone camera (or open the link) <strong>while on the same network as this page's address</strong> — for a phone that isn't on the tailnet yet, mint from the LAN address instead. <strong>Anyone who photographs this can use it until it expires — it can't be revoked</strong>, so keep the window short and hand them the <strong>printed recovery sheet in person</strong>.
+                Expires {fmtDate(result.expiresAt)}. They scan this with their phone camera (or open the link) <strong>while on the same network as this page's address</strong> — for a phone that isn't on the tailnet yet, mint from the LAN address instead. <strong>Anyone who photographs this can use it until it expires — it can't be revoked</strong>, so keep the window short.
+                {resultPolicy === "required" && (
+                  <> {" "}This is an <strong>admin-backstop</strong> invite: show your <strong>printed recovery sheet</strong> to the invitee in person so they can eyeball-confirm the code.</>
+                )}
               </div>
             </div>
           )}

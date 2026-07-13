@@ -331,5 +331,51 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 6) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Per-member SELF-SERVICE recovery (design 2026-07-12 §F). ZK-clean, and the
+                    // symmetric counterpart to org `escrow`: the server holds only ciphertext + a
+                    // one-way hash, exactly like users.wrappedUvk + users.verifier.
+                    //   recoveryWrappedUvk — the UVK sealed under the member's recovery-secret-derived
+                    //     wrap key (AEAD Envelope, AD `andvari/v1|recovery-uvk|{userId}`); opaque.
+                    //   recoveryVerifier   — crypto_pwhash_str(recoveryAuthKey), one-way; a DB leak is
+                    //     not a replayable recovery, exactly as the login verifier (spec 01 §3).
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE member_recovery(
+                          userId TEXT PRIMARY KEY REFERENCES users(userId),
+                          recoveryWrappedUvk TEXT NOT NULL,
+                          recoveryVerifier TEXT NOT NULL,
+                          updatedAt INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    // The admin's per-invite recovery posture (design §F.4): 'required' (default; org
+                    // escrow backstop mandatory + fingerprint ceremony) or 'waived' (per-member piece
+                    // only, no admin backstop). Read SERVER-SIDE from the invite row at register — never
+                    // from the client body. Additive O(1) ALTER with a NOT NULL default so pre-v6 invites
+                    // read back 'required' (the fail-safe posture).
+                    st.executeUpdate("ALTER TABLE invites ADD COLUMN escrowPolicy TEXT NOT NULL DEFAULT 'required'")
+                    st.executeUpdate("UPDATE meta SET value='6' WHERE key='schemaVersion'")
+                }
+            }
+        }
+        if (version < 7) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Capture-confirmation durability (design 2026-07-12 §F.9). memberRecovery stays
+                    // MANDATORY at register, but a piece the user never CAPTURED (interrupted reveal) was a
+                    // silent-total-loss path for waived accounts, and the migration nudge (recoverySetupNeeded)
+                    // was consumed by no client. This durable, cross-device flag lets any client force
+                    // capture-and-confirm until it flips to 1. Additive O(1) ALTER with a NOT NULL default so
+                    // existing users read back 0 (they get nudged — harmless, they retain the escrow backstop).
+                    // Register leaves it 0 (the column default); it flips to 1 only on an explicit capture —
+                    // POST /recovery/self/confirm (enroll happy-path) or PUT /recovery/self-setup.
+                    st.executeUpdate("ALTER TABLE users ADD COLUMN recoveryConfirmed INTEGER NOT NULL DEFAULT 0")
+                    st.executeUpdate("UPDATE meta SET value='7' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }

@@ -8,6 +8,14 @@
   ],
   "roundTrips": [
     {
+      "name": "with-rfp-in-person-qr",
+      "o": "https://vault.example",
+      "t": "tok123",
+      "e": "a@example.com",
+      "rfp": "b26efdd3eafc9dad",
+      "link": "https://vault.example/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHM6Ly92YXVsdC5leGFtcGxlIiwidCI6InRvazEyMyIsImUiOiJhQGV4YW1wbGUuY29tIiwicmZwIjoiYjI2ZWZkZDNlYWZjOWRhZCJ9"
+    },
+    {
       "name": "tsnet-https-43char-token",
       "o": "https://andvari.taila2dff2.ts.net",
       "t": "K7gNU3sdo-OL0wNhqoVWhr3g6s1xYv72ol_pe_Unols",
@@ -51,6 +59,42 @@
     }
   ],
   "parse": [
+    {
+      "name": "rfp-present-carried-verbatim",
+      "input": "https://vault.example/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHM6Ly92YXVsdC5leGFtcGxlIiwidCI6InRvazEyMyIsImUiOiJhQGV4YW1wbGUuY29tIiwicmZwIjoiYjI2ZWZkZDNlYWZjOWRhZCJ9",
+      "expected": {
+        "v": 1,
+        "o": "https://vault.example",
+        "t": "tok123",
+        "e": "a@example.com",
+        "rfp": "b26efdd3eafc9dad"
+      }
+    },
+    {
+      "name": "rfp-explicit-null-parses-as-fallback",
+      "input": "https://vault.example/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHM6Ly92YXVsdC5leGFtcGxlIiwidCI6InRvazEyMyIsImUiOiJhQGV4YW1wbGUuY29tIiwicmZwIjpudWxsfQ",
+      "expected": {
+        "v": 1,
+        "o": "https://vault.example",
+        "t": "tok123",
+        "e": "a@example.com"
+      }
+    },
+    {
+      "name": "rfp-empty-string-rejected",
+      "input": "https://vault.example/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHM6Ly92YXVsdC5leGFtcGxlIiwidCI6InRvazEyMyIsImUiOiJhQGV4YW1wbGUuY29tIiwicmZwIjoiIn0",
+      "expected": null
+    },
+    {
+      "name": "rfp-number-rejected",
+      "input": "https://vault.example/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHM6Ly92YXVsdC5leGFtcGxlIiwidCI6InRvazEyMyIsImUiOiJhQGV4YW1wbGUuY29tIiwicmZwIjoxMjN9",
+      "expected": null
+    },
+    {
+      "name": "rfp-duplicate-key-rejected",
+      "input": "https://vault.example/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHM6Ly92YXVsdC5leGFtcGxlIiwidCI6InRvazEyMyIsImUiOiJhQGV4YW1wbGUuY29tIiwicmZwIjoiYWEiLCJyZnAiOiJiYiJ9",
+      "expected": null
+    },
     {
       "name": "unknown-extra-key-ignored-forward-compat",
       "input": "https://vault.example/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHM6Ly92YXVsdC5leGFtcGxlIiwidCI6InRvazEyMyIsImUiOiJhQGV4YW1wbGUuY29tIiwieCI6eyJ5IjpbMSx7InoiOm51bGx9XX19",

@@ -28,6 +28,7 @@ import java.io.File
 import java.sql.DriverManager
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -294,9 +295,11 @@ class SharedVaultTest : P4TestSupport() {
     @Test
     fun migration_v2ToV3_addsNullableSealedVk() {
         val dbFile = File(tmpDir, "v2fixture-${System.nanoTime()}.db")
-        // Hand-build a v2-shaped DB: meta(schemaVersion=2) + the v1 grants/vaults/items
-        // tables (no sealedVk; vaults included because the v4 lifecycle migration ALTERs
-        // it too, items because the v5 tombstone index is created on it).
+        // Hand-build a v2-shaped DB: meta(schemaVersion=2) + the v1 grants/vaults/items/invites
+        // tables (no sealedVk; vaults included because the v4 lifecycle migration ALTERs it too,
+        // items because the v5 tombstone index is created on it, invites because the v6 recovery
+        // migration ALTERs it — ADD COLUMN escrowPolicy; users because the v7 §F.9 migration ALTERs
+        // it — ADD COLUMN recoveryConfirmed).
         DriverManager.getConnection("jdbc:sqlite:${dbFile.absolutePath}").use { c ->
             c.createStatement().use { st ->
                 st.executeUpdate("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -311,24 +314,46 @@ class SharedVaultTest : P4TestSupport() {
                        conflict INTEGER NOT NULL DEFAULT 0, formatVersion INTEGER NOT NULL,
                        attachmentIds TEXT NOT NULL DEFAULT '[]', blob TEXT, blobSize INTEGER NOT NULL DEFAULT 0)""",
                 )
+                st.executeUpdate(
+                    """CREATE TABLE invites(tokenHash TEXT PRIMARY KEY, email TEXT NOT NULL, isAdmin INTEGER NOT NULL DEFAULT 0,
+                       createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, usedAt INTEGER)""",
+                )
+                // v2-shaped users table (v1 columns + the v2 server-TOTP columns) so the v7 ALTER has a
+                // table to extend and a pre-existing user row to read recoveryConfirmed back off.
+                st.executeUpdate(
+                    """CREATE TABLE users(userId TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, displayName TEXT NOT NULL,
+                       kdfSalt TEXT NOT NULL, kdfParams TEXT NOT NULL, verifier TEXT NOT NULL, wrappedUvk TEXT NOT NULL,
+                       identityPub TEXT NOT NULL, encryptedIdentitySeed TEXT NOT NULL, isAdmin INTEGER NOT NULL DEFAULT 0,
+                       status TEXT NOT NULL DEFAULT 'active', mustChangePassword INTEGER NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL,
+                       totpSecret TEXT, totpPendingSecret TEXT, totpEnrolledAt INTEGER, totpLastStep INTEGER NOT NULL DEFAULT 0)""",
+                )
                 st.executeUpdate("INSERT INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES('v','u','owner','wv',1)")
+                st.executeUpdate("INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES('th','e@x.com',0,1,9)")
+                st.executeUpdate("INSERT INTO users(userId,email,displayName,kdfSalt,kdfParams,verifier,wrappedUvk,identityPub,encryptedIdentitySeed,createdAt) VALUES('u','e@x.com','n','s','p','vf','wu','ip','eis',1)")
                 st.executeUpdate("INSERT INTO meta(key,value) VALUES('schemaVersion','2')")
             }
         }
 
-        // Opening through Db() runs the v3 (and then v4 lifecycle + v5 index) migration chain.
+        // Opening through Db() runs the v3 (then v4 lifecycle + v5 index + v6 recovery + v7 confirm) chain.
         Db(dbFile.absolutePath).use { db ->
             val (version, sealed) = db.read { c ->
                 val v = c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) }
                 val s = c.queryOne("SELECT sealedVk FROM grants WHERE userId='u'") { rs -> rs.getString(1) }
                 v to s
             }
-            assertEquals("5", version)
+            assertEquals("7", version)
             assertNull(sealed, "the pre-existing v2 grant reads back sealedVk=NULL")
+            db.read { c ->
+                // v6 recovery migration landed: member_recovery table + invites.escrowPolicy default.
+                assertNotNull(c.queryOne("SELECT name FROM sqlite_master WHERE type='table' AND name='member_recovery'") { it.getString(1) })
+                assertEquals("required", c.queryOne("SELECT escrowPolicy FROM invites WHERE tokenHash='th'") { it.getString(1) })
+                // v7 §F.9 migration landed: users.recoveryConfirmed, pre-existing user reads back 0 (nudged).
+                assertEquals(0, c.queryOne("SELECT recoveryConfirmed FROM users WHERE userId='u'") { it.getInt(1) })
+            }
         }
         // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("5", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("7", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

@@ -38,7 +38,16 @@
  * resolves, so the sodium-backed helpers would throw. No React imports either.
  */
 
-export type EnrollPayload = { v: number; o: string; t: string; e: string };
+/**
+ * `rfp` (design 2026-07-12 §F.2) is the org recovery SHORT fingerprint (16 hex) an admin's IN-PERSON
+ * QR carries so the invitee can eyeball-confirm it (§F.1). Twin rules, vector-pinned:
+ *  - absent OR explicit JSON `null` ⇒ the field is OMITTED from the parsed payload (safe fallback:
+ *    the invitee client falls back to the typed-sheet ceremony, never auto-trusts the server key);
+ *  - a present NON-EMPTY string ⇒ carried verbatim;
+ *  - an empty string, a non-string, or a duplicate `rfp` key ⇒ the whole parse REJECTS (null).
+ * compose OMITS `rfp` when null/absent, so a waived/emailed link is BYTE-IDENTICAL to a pre-rfp link.
+ */
+export type EnrollPayload = { v: number; o: string; t: string; e: string; rfp?: string };
 
 const PREFIX = "a1.";
 const MAX_LEN = 8192;
@@ -81,9 +90,16 @@ function b64urlDecode(body: string): Uint8Array | null {
  * origin simply produces a link parseEnrollLink refuses). JSON.stringify emits the
  * pinned compact key order v,o,t,e.
  */
-export function composeEnrollLink(origin: string, token: string, email: string): string | null {
-  for (const s of [origin, token, email]) if (!WELL_FORMED_UTF16_RE.test(s)) return null;
-  const payload = JSON.stringify({ v: 1, o: origin, t: token, e: email });
+export function composeEnrollLink(origin: string, token: string, email: string, rfp?: string | null): string | null {
+  // An in-person-QR admin may stamp `rfp` (§F.1/§F.2); a waived/emailed/typed-sheet invite passes
+  // none, and the link is then byte-identical to a pre-rfp link (the empty/null branch OMITS the key
+  // — JSON.stringify would emit "rfp":null otherwise, minting a link parseEnrollLink refuses).
+  const stamped = rfp != null && rfp.length > 0 ? rfp : null;
+  const scan = stamped === null ? [origin, token, email] : [origin, token, email, stamped];
+  for (const s of scan) if (!WELL_FORMED_UTF16_RE.test(s)) return null;
+  const obj: Record<string, unknown> = { v: 1, o: origin, t: token, e: email };
+  if (stamped !== null) obj.rfp = stamped; // insertion order pins the compact key order v,o,t,e,rfp
+  const payload = JSON.stringify(obj);
   return `${origin}/enroll#${PREFIX}${b64urlEncode(new TextEncoder().encode(payload))}`;
 }
 
@@ -130,7 +146,12 @@ function parseInner(input: string): EnrollPayload | null {
   if (typeof r.o !== "string" || !ORIGIN_RE.test(r.o)) return null;
   if (typeof r.t !== "string" || r.t.length === 0) return null;
   if (typeof r.e !== "string" || r.e.length === 0) return null;
-  return { v: 1, o: r.o, t: r.t, e: r.e };
+  // rfp (§F.2, fail-SAFE): absent/explicit-null ⇒ OMIT (fall back to the typed ceremony, never
+  // auto-trust); a present non-empty string ⇒ carry verbatim; empty/non-string ⇒ reject the whole
+  // payload (a duplicate rfp key was already rejected by hasHostileTopLevelKeys above).
+  if (r.rfp === undefined || r.rfp === null) return { v: 1, o: r.o, t: r.t, e: r.e };
+  if (typeof r.rfp !== "string" || r.rfp.length === 0) return null;
+  return { v: 1, o: r.o, t: r.t, e: r.e, rfp: r.rfp };
 }
 
 /**

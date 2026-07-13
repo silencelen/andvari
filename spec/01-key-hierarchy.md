@@ -42,6 +42,42 @@ RFC 5869, full extract-then-expand. `salt = empty` means the RFC's default
 the KDF step; authKey and wrapKey MUST NOT be persisted (only re-derived) — with no
 exception: quick-unlock (§8) persists a hardware-wrapped UVK, never these.
 
+### 2.1 Per-member recovery secret split (spec 04 §6)
+
+Per-member self-service recovery (full flow + trust model: spec 04 §6; endpoints: spec
+03 §12) is backed by a **second, independent** purpose split whose IKM is **not** the
+MK — it is a freshly generated high-entropy secret, never derived from the master
+password and never typed:
+
+```
+recoverySecret  = randomBytes(32)                                                       # 256-bit CSPRNG (≥128 required, 256 recommended)
+recoveryWrapKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andvari/v1/recovery-wrap", L = 32)   # the KEK
+recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andvari/v1/recovery-auth", L = 32)   # login-proof analogue
+```
+
+- `recoverySecret` = `CryptoProvider.randomBytes(32)` (libsodium `randombytes_buf`) —
+  **NEVER `Math.random`, never user-influenced or typed.** base64url of the raw 32
+  CSPRNG bytes is unbiased, so no rejection sampling is needed (only a
+  restricted-alphabet / BIP39 encoding — deferred — would require it).
+- Same empty-salt extract-then-expand as §2. The two infos `andvari/v1/recovery-wrap`
+  and `andvari/v1/recovery-auth` are literal ASCII and **distinct** from
+  `andvari/v1/auth` / `andvari/v1/wrap`, so the two hierarchies never collide.
+- **No Argon2id on this path.** ≥128 generated bits are computationally unreachable, so
+  HKDF alone suffices — unlike the human-chosen master password (§1), which must be
+  Argon2id-stretched. This makes the recovery piece **stronger** than the master
+  password and improves the weakest-link posture — **but only while the "generated,
+  never typed" invariant holds.** A user-influenced/typed recovery secret would remove
+  the entropy floor and (with no Argon2id) become the weakest link, offline-crackable
+  from a leaked `recoveryVerifier` (spec 05 T8). The invariant is load-bearing.
+- **UVK wrap:** `recoveryWrappedUvk = Envelope(key = recoveryWrapKey, plaintext = UVK,
+  ad = "andvari/v1|recovery-uvk|{userId}")` (envelope format: spec 02 §2). This AD is a
+  new domain string, **distinct** from the `andvari/v1|uvk|{userId}` MK-wrap AD (§4), so
+  a recovery blob and a UVK-wrap blob can never be cross-substituted between slots.
+- `recoveryAuthKey` is the login-verifier analogue: the server stores only
+  `recoveryVerifier = crypto_pwhash_str(recoveryAuthKey)` (one-way, exactly like the §3
+  login verifier), never the raw key — so the `member_recovery` row is zero-knowledge
+  (ciphertext + a one-way hash; spec 02 §5).
+
 ## 3. Login verifier
 
 - Client → server at login: `authKey` (base64url) over TLS. The server never sees the
@@ -59,8 +95,9 @@ exception: quick-unlock (§8) persists a hardware-wrapped UVK, never these.
 ## 4. User Vault Key (UVK)
 
 - `UVK` = 32 random bytes, generated at enrollment, **never rotated by password
-  change** (invariant: escrow blobs and vault-key wraps stay valid for the account's
-  lifetime; rotation of UVK is a full-account re-key, out of scope v1).
+  change** (invariant: escrow blobs, per-member recovery blobs (§2.1, spec 04 §6), and
+  vault-key wraps stay valid for the account's lifetime; rotation of UVK is a
+  full-account re-key, out of scope v1).
 - Stored server-side as `wrappedUvk = Envelope(key = wrapKey, plaintext = UVK,
   ad = "andvari/v1|uvk|{userId}")` (envelope format: spec 02 §2), alongside a copy of
   the kdfParams used, so `{kdfSalt, kdfParams, wrappedUvk}` is sufficient to unlock

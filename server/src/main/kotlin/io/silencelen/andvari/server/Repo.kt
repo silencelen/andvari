@@ -89,6 +89,20 @@ class UserRow(
     val totpLastStep: Long,
 )
 
+/** The per-member self-service recovery row (design 2026-07-12 §F): UVK ciphertext + a one-way
+ *  hash of recoveryAuthKey. Held server-side, opaque — the symmetric counterpart to `escrow`. */
+class MemberRecoveryRow(
+    val userId: String,
+    val recoveryWrappedUvk: String,
+    val recoveryVerifier: String,
+)
+
+private fun memberRecoveryRowOf(rs: ResultSet) = MemberRecoveryRow(
+    userId = rs.getString("userId"),
+    recoveryWrappedUvk = rs.getString("recoveryWrappedUvk"),
+    recoveryVerifier = rs.getString("recoveryVerifier"),
+)
+
 fun userRowPublic(rs: ResultSet) = userRow(rs)
 
 private fun userRow(rs: ResultSet) = UserRow(
@@ -248,6 +262,29 @@ class Repo(val db: Db) {
 
     fun escrowFingerprint(userId: String): String? =
         db.read { it.queryOne("SELECT fingerprint FROM escrow WHERE userId=?", userId) { rs -> rs.getString(1) } }
+
+    // member recovery (design 2026-07-12 §F) — the per-member self-service recovery row.
+    fun memberRecoveryRow(userId: String): MemberRecoveryRow? =
+        db.read { it.queryOne("SELECT userId,recoveryWrappedUvk,recoveryVerifier FROM member_recovery WHERE userId=?", userId, map = ::memberRecoveryRowOf) }
+
+    /** True iff [userId] has a member_recovery row — drives AccountKeys.recoverySetupNeeded (the
+     *  migration nudge, §F.2) and AdminUserSummary.recoveryEnrolled (posture reconciliation, §F.4). */
+    fun hasMemberRecovery(userId: String): Boolean =
+        db.read { it.queryOne("SELECT 1 FROM member_recovery WHERE userId=?", userId) { true } ?: false }
+
+    /** design §F.9: the durable, cross-device capture-confirmation flag on the users row — drives
+     *  AccountKeys.recoveryConfirmed. false ⇒ the client forces capture-and-confirm before vault
+     *  access (closes the interrupted-reveal / migration silent-total-loss path). A missing user
+     *  reads back false (fail-safe: nudge). */
+    fun isRecoveryConfirmed(userId: String): Boolean =
+        db.read { it.queryOne("SELECT recoveryConfirmed FROM users WHERE userId=?", userId) { rs -> rs.getInt(1) != 0 } ?: false }
+
+    /** design §F.9: flip [userId]'s capture-confirmation flag to 1. Idempotent; takes the caller's
+     *  Connection so it commits atomically with the confirm/self-setup audit row (like clearPendingOffer).
+     *  Set by POST /recovery/self/confirm (enroll happy-path) and by recoverySelfSetup (explicit capture). */
+    fun setRecoveryConfirmed(c: Connection, userId: String) {
+        c.exec("UPDATE users SET recoveryConfirmed=1 WHERE userId=?", userId)
+    }
 
     // sessions
     fun sessionByAccessHash(hash: String): SessionRow? = db.read {

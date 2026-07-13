@@ -23,13 +23,22 @@ class AdminService(private val repo: Repo) {
                 status = rs.getString("status"),
                 createdAt = rs.getLong("createdAt"),
                 deviceCount = c.queryOne("SELECT COUNT(*) FROM devices WHERE userId=? AND revokedAt IS NULL", userId) { r -> r.getInt(1) } ?: 0,
+                // Posture reconciliation (design §F.4): escrowFingerprint==null ⇒ no admin backstop
+                // (waived, intended — or, for a legacy pre-migration account, never escrowed).
+                // recoveryEnrolled ⇒ the account holds its self-service piece. The two together let the
+                // Admin UI distinguish "waived (intended)" from "no recovery at all (needs setup)" and
+                // surface a server-side policy flip on reconciliation.
                 escrowFingerprint = c.queryOne("SELECT fingerprint FROM escrow WHERE userId=?", userId) { r -> r.getString(1) },
+                recoveryEnrolled = c.queryOne("SELECT 1 FROM member_recovery WHERE userId=?", userId) { true } ?: false,
             )
         }
     }
 
-    /** Create an invite; returns the plaintext token ONCE (only its hash is stored). */
-    fun createInvite(email: String, isAdmin: Boolean, byUserId: String, ttlMinutes: Int? = null, sendEmail: Boolean = false): Pair<InviteResponse, String> = repo.db.tx { c ->
+    /** Create an invite; returns the plaintext token ONCE (only its hash is stored). [escrowPolicy]
+     *  is the admin's per-invite recovery posture (design §F.4), persisted on the invite row and read
+     *  SERVER-SIDE at register — normalized to 'waived'|'required' (anything but the literal 'waived'
+     *  ⇒ 'required', fail-safe, matching the register gate). */
+    fun createInvite(email: String, isAdmin: Boolean, byUserId: String, ttlMinutes: Int? = null, sendEmail: Boolean = false, escrowPolicy: String = "required"): Pair<InviteResponse, String> = repo.db.tx { c ->
         // B1: validate the address BEFORE it is stored — it's admin-typed free text that can reach
         // SMTP, and a CR/LF/comma is a header-injection primitive. Applies to ALL invites (the
         // bootstrap "*" invite is a raw insert in App.kt, not this path, so it is unaffected).
@@ -45,9 +54,10 @@ class AdminService(private val repo: Repo) {
         // ≤60 min (AFTER the null→72h default resolves, so no client can email a 72h token).
         if (sendEmail) ttlMs = minOf(ttlMs, 60L * 60_000L)
         val expiresAt = now() + ttlMs
+        val policy = if (escrowPolicy == "waived") "waived" else "required"
         c.exec(
-            "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES(?,?,?,?,?)",
-            tokenHash, email.lowercase(), isAdmin, now(), expiresAt,
+            "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt,escrowPolicy) VALUES(?,?,?,?,?,?)",
+            tokenHash, email.lowercase(), isAdmin, now(), expiresAt, policy,
         )
         // Meta = token-hash prefix, not the email (INFO-1): the register row logs the same
         // prefix, so create↔redeem stays correlatable with zero PII in Loki.

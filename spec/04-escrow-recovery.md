@@ -101,3 +101,149 @@ argument. Input/output via files + stdin/QR. Ships with `keygen`,
 `canary make`/`canary verify`, the fleet `verify <seedFile> <escrowDumpJson>`,
 `recover`, `fingerprint <pubkey>`. Uses the same `:core` crypto as
 everything else, so vectors pin its behavior too.
+
+## 6. Per-member self-service recovery
+
+§§1–5 are the **org escrow** backstop (an admin holds one offline key that opens every
+account) and are **unchanged**. This section adds a **second, independent** recovery path
+a member drives themselves, plus the **opt-out** that lets an invite waive the org
+backstop. The two coexist per the register truth-table (§6.3). Crypto constants + the
+generated-entropy invariant are spec 01 §2.1 (authoritative); the wire/endpoints are spec
+03 §7 (register) + §12 (recovery); the binding build contract is
+`docs/design/2026-07-12-auth-secret-recovery-review.md` §F.
+
+### 6.1 Why symmetric — and why T10 does not apply here
+
+Org escrow (§3) is **asymmetric**: the UVK is `crypto_box_seal`'d to the org recovery
+**public** key, so a hostile server that substitutes its own pubkey at enrollment steals
+every new account (spec 05 T10) — which is the entire reason for the typed-fingerprint
+ceremony (§2).
+
+Per-member recovery is **symmetric**: the member holds one generated `recoverySecret`
+(spec 01 §2.1) at both seal-time and open-time, and the UVK is wrapped with the AEAD
+`Envelope` (XChaCha20-Poly1305 + domain-separated AD `andvari/v1|recovery-uvk|{userId}`),
+**not** a sealed box. There is **no public key to substitute**, so **T10 does not apply to
+this path and the fingerprint ceremony has nothing to defend on it.** The worst a hostile
+server can do is serve a wrong `recoveryWrappedUvk` → the AEAD tag fails → recovery
+**fails closed** (pure availability denial, already accepted under spec 05 T1). Because the
+piece is generated ≥128-bit and never typed, it needs no Argon2id and is stronger than the
+master password (spec 01 §2.1); the invariant that keeps it strong — generated, never
+user-influenced — is load-bearing (spec 05 T8).
+
+### 6.2 Two-phase flow (endpoints: spec 03 §12)
+
+- **At signup** the client generates `recoverySecret`, wraps the UVK into
+  `recoveryWrappedUvk`, and derives `recoveryAuthKey`; the register body carries
+  `memberRecovery = { recoveryWrappedUvk, recoveryAuthKey }` (spec 03 §7). The secret is
+  shown **once** as the same printable base64url sheet + QR the `recovery-cli` renders
+  (§1 form, zero new deps); the user types it back for a `ctEquals` confirm (confirmation
+  only — never the KDF source, so a mistype fails the confirm rather than silently
+  mis-keying), then it is dropped from memory. The shown-once web leak-vector discipline
+  (no `type="password"`, no localStorage/session/IndexedDB, secret-clipboard auto-clear,
+  un-skippable confirm gate) is build-contract §F.7.
+- **Recovery** is two-phase (spec 03 §12): phase-1 `POST /recovery/self/verify` gates on
+  the server-side `recoveryVerifier` (a one-way hash of `recoveryAuthKey`, never the raw
+  key) and only then returns `recoveryWrappedUvk` + a single-use, short-TTL,
+  userId-bound ticket; phase-2 `POST /recovery/self/commit` consumes the ticket and applies
+  a dedicated password reset. The two phases exist so the server hands out **no pre-auth
+  UVK blob**, exposes **no enumeration oracle** (§6.4), and binds the reset to a
+  **replay-bound ticket**. This verifier gate is the account-takeover auth flow a
+  self-service reset requires: an attacker without the piece can neither reset nor lock out
+  the account. The unwrap routes through the shared UVK-unlock tail so the seed-derived
+  identity-pubkey hard-fail (spec 01 §5) still fires, and `recover()` never regenerates UVK
+  / identitySeed / identityPub (the reset re-wraps the **same** invariant UVK).
+
+### 6.3 Register truth-table — the opt-out (a total function)
+
+The opt-out is **admin-set per invite**, not member-chosen: `InviteRequest.escrowPolicy ∈
+{ required (default), waived }`, stored on the invite row and read **server-side at
+register** (never from the client body — spec 03 §7). Rationale (build-contract §D/§F): in
+a household the admin provisions accounts and owns the backstop policy; a member cannot
+*unilaterally* deny the admin a backstop (a kid silently opting out then losing
+everything), and the admin cannot *silently* strip a member's privacy (the posture is
+shown to the member at signup and is reconcilable in the admin UI — §6.5). The register
+gate is a **total function** over `policy = invites.escrowPolicy`:
+
+| `escrowPolicy` | `memberRecovery` (self-service piece) | `escrow` (org backstop) | Member private from admin? |
+|---|---|---|---|
+| `required` (default) | **MANDATORY** | **MANDATORY** + fingerprint-match (§2/§6.5) | No — admin can still decrypt (spec 05 R3 persists) |
+| `waived` | **MANDATORY** | **FORBIDDEN** (`escrow_not_allowed_when_waived`) | Yes — no backstop, hard-loss risk (spec 05 R3 retired for this member; R9) |
+
+- **`memberRecovery` is MANDATORY for every new account regardless of policy** — the
+  owner's core ask (every member gets a self-service piece at signup). Absent/malformed →
+  `recovery_required`.
+- **Any policy value other than the literal `waived`** (NULL / unknown / typo) is treated
+  as `required` (fail-safe). The table is exhaustive, so an account can **never** be
+  created with *neither* path. Pre-`memberRecovery` clients are gated out by the
+  min-version pin (spec 03 §1/§7) so they cannot register into a recovery-less state.
+- A `waived` register requires a posture-specific acknowledgment from the member — copy:
+  *"There is NO admin backstop. Only your recovery phrase can restore this account. Lose
+  both your master password and this phrase and this account is gone forever."* — visually
+  distinct from the backstop copy, and un-skippable (silent-total-loss guard).
+
+### 6.4 Anti-enumeration
+
+`POST /recovery/self/verify` is timing/shape-uniform across all three states — no such
+email / known email with no `member_recovery` row / known email with a row — running a
+fixed `DUMMY_RECOVERY_VERIFIER` on the first two and returning a bare uniform `401` for
+every failure, mirroring login's `DUMMY_VERIFIER` (spec 03 §2, spec 05 T11). A
+null/absent/malformed stored verifier never matches. No `/recovery/prelogin` exists (the
+secret is high-entropy, derivation is HKDF-only with no server salt/params — nothing to
+fetch, hence no recovery-side prelogin oracle).
+
+### 6.5 Fingerprint provenance — `required`-path invites only (the T10 boundary)
+
+For `waived` members there is **no org escrow, hence no org pubkey and no fingerprint
+anywhere, ever** — the frictionless path, nothing to verify. Provenance is a concern
+**only** on the `required` path, where the escrow must seal to the *genuine* org pubkey.
+The invariant (build-contract §F.1, CRITICAL):
+
+> The enrolling client MUST NEVER treat a **server-sourced** recovery-pubkey fingerprint
+> as out-of-band-verified. A fingerprint is an anchor only when a **human** or a
+> **build-baked** value put it there.
+
+- **In-person QR (client-composed, full T10 guarantee):** the **admin** type-confirms the
+  org short-fingerprint against the printed sheet at compose time (the
+  `Account.resealEscrowFor` verified-fingerprint discipline) and the admin's own client
+  stamps *that confirmed value* as the enroll link's `rfp` — never a `/admin/status` or
+  `/client-policy` fetch. The invitee scans the QR off the admin's screen (bypassing the
+  server) and eyeball-confirms the displayed `rfp` matches what the admin shows — a
+  one-tap confirm, not a 16-char type. This `rfp` is as trustworthy as the old printed
+  sheet.
+- **Emailed / remote (server-composed):** the emailed link is composed on the server, so a
+  hostile server could stamp a fingerprint it controls — TOFU-from-server, only as
+  trustworthy as the server at compose time (spec 05 R8/T1). Therefore the server-composed
+  emailed link carries **NO authoritative `rfp` (`rfp = null`)**, and **emailed invites
+  default to `escrowPolicy = waived`** so the common remote case is frictionless *and*
+  safe. A remote *required* invite is supported only by the invitee typing the short
+  fingerprint from a sheet the admin shared out-of-band (the §2 ceremony); the UI
+  discourages it.
+- **Fail-safe polarity:** a **missing** `rfp` ⇒ fall back to the typed-sheet ceremony (or,
+  if waived, to nothing) — **NEVER** auto-trust the server pubkey. A **present** `rfp` is
+  honored only via the in-person affirmation above. The server can force "missing" (safe)
+  but can never force silent auto-trust. The invitee client cannot cryptographically tell a
+  client-composed link from a server-composed one (no shared enroll secret; identity keys
+  are box, not signing, keys), so provenance is a **human** decision the UI surfaces, never
+  a client guess.
+- **Admin reconciliation:** the admin UI renders each user's enrolled posture and
+  **distinguishes "waived (intended)" from "escrow missing/failed"** (an
+  `AdminUserSummary.escrowFingerprint == null` on a `required` invite is the red flag), so
+  a server-side policy flip is *visible* on reconciliation. The opt-out authorization is
+  therefore **server-trusted state with admin-visible, non-silent reconciliation — not
+  tamper-proof** (accepted under spec 05 T1 for the household model; recorded in spec 05
+  R9).
+
+### 6.6 Migration — additive, no re-enroll, UVK unchanged
+
+Existing accounts (e.g. jacob) have an org `escrow` row and no `member_recovery` row. On
+the next **authenticated, unlocked, full-master-password** session (UVK in memory), login
+returns `recoverySetupNeeded = true` (spec 03 §2); the client offers "set up your recovery
+phrase," wraps the in-memory UVK, and calls `PUT /recovery/self-setup` with a fresh
+`currentAuthKey` reauth (spec 03 §12). A quick-unlock/biometric session cannot perform it
+(no password in hand); the nudge defers to the next full-password unlock — the same shape
+as the F57 `escrowStale` re-seal nudge (§4). **Because the UVK never changes (spec 01 §4),
+the org escrow blob stays valid too:** an existing member keeps the admin backstop *and*
+gains a self-service piece, and both blobs stay valid across password change,
+self-recovery, and admin recovery. `member_recovery` is symmetric and not sealed to the org
+key, so an org-key rotation / re-ceremony (§4) never touches it, and `recovery-cli` and the
+F57 re-seal path are **unchanged**.
