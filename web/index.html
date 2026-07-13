@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
+    <!-- Self-contained brand favicon (the ᛅ sigil) + per-scheme chrome tint. Same-origin assets,
+         so the strict self-only CSP is satisfied; no external requests. -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#14120e" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f4efe4" media="(prefers-color-scheme: light)" />
+    <meta name="description" content="andvari — your household's zero-knowledge password manager." />
     <title>andvari</title>
   </head>
   <body>

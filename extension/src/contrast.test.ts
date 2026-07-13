@@ -85,3 +85,38 @@ test("7b: input::placeholder uses var(--ink-dim)", () => {
   assert.ok(m, "input::placeholder color rule not found");
   assert.equal(m[1], "ink-dim", "placeholder should use --ink-dim for AA contrast");
 });
+
+// --- Overlay (content-script) tokens: a THIRD independent copy of the palette (content-ui.ts's
+// UI_CSS), which the popup.css gate above never touched. Its --anv-ink-faint had drifted to the
+// pre-AA value while web+popup were bumped; gate it here so the injected overlay's faint/dim text
+// can't silently regress below AA (UI-audit 2026-07). --anv-bg is the RAISED tone; --anv-bg-deep
+// the ground — faint text renders on both, both must clear AA. ---
+const overlay = readFileSync(fileURLToPath(new URL("./content-ui.ts", import.meta.url)), "utf-8");
+const OV_LIGHT_AT = overlay.indexOf("@media (prefers-color-scheme: light)");
+const overlayDark = overlay.slice(0, OV_LIGHT_AT >= 0 ? OV_LIGHT_AT : overlay.length);
+const overlayLight = block(overlay, "@media (prefers-color-scheme: light)");
+function anv(blk: string, name: string): string {
+  const m = new RegExp(`--anv-${name}\\s*:\\s*(#[0-9a-fA-F]{3,6})`).exec(blk);
+  assert.ok(m, `overlay token --anv-${name} not found`);
+  return m[1];
+}
+for (const [theme, blk] of [
+  ["dark", overlayDark],
+  ["light", overlayLight],
+] as const) {
+  const faint = anv(blk, "ink-faint");
+  const dim = anv(blk, "ink-dim");
+  const bg = anv(blk, "bg"); // overlay --anv-bg is the RAISED surface tone
+  const bgDeep = anv(blk, "bg-deep");
+
+  test(`overlay 7a ${theme}: --anv-ink-faint ${faint} clears AA on --anv-bg and --anv-bg-deep`, () => {
+    const onBg = ratio(faint, bg);
+    const onDeep = ratio(faint, bgDeep);
+    assert.ok(onBg >= AA, `--anv-ink-faint on --anv-bg = ${onBg.toFixed(2)} (< ${AA})`);
+    assert.ok(onDeep >= AA, `--anv-ink-faint on --anv-bg-deep = ${onDeep.toFixed(2)} (< ${AA})`);
+  });
+  test(`overlay ${theme}: --anv-ink-dim ${dim} clears AA on --anv-bg`, () => {
+    const r = ratio(dim, bg);
+    assert.ok(r >= AA, `--anv-ink-dim on --anv-bg = ${r.toFixed(2)} (< ${AA})`);
+  });
+}

@@ -7,7 +7,9 @@ import jakarta.mail.PasswordAuthentication
 import jakarta.mail.Session
 import jakarta.mail.Transport
 import jakarta.mail.internet.InternetAddress
+import jakarta.mail.internet.MimeBodyPart
 import jakarta.mail.internet.MimeMessage
+import jakarta.mail.internet.MimeMultipart
 import org.slf4j.LoggerFactory
 import java.util.Properties
 
@@ -80,22 +82,14 @@ class SmtpEmailSender(
         val msg = MimeMessage(session)
         msg.setFrom(fromAddr)
         msg.setRecipient(Message.RecipientType.TO, toAddr)
-        msg.subject = "You're invited to andvari"
-        msg.setText(body(enrollLink), "utf-8")
+        msg.subject = InviteEmailBody.SUBJECT
+        // multipart/alternative: the plain-text part first (least-preferred), the branded HTML last
+        // (most-preferred) — a client renders the last part it understands, so text-only clients get
+        // the plain version and everything else gets the treasury card. See InviteEmailBody.
+        val text = MimeBodyPart().apply { setText(InviteEmailBody.text(enrollLink), "utf-8") }
+        val htmlPart = MimeBodyPart().apply { setContent(InviteEmailBody.html(enrollLink), "text/html; charset=utf-8") }
+        msg.setContent(MimeMultipart("alternative").apply { addBodyPart(text); addBodyPart(htmlPart) })
         Transport.send(msg)
         log.info("invite email dispatched") // A4: no recipient, no link, no token
     }
-
-    private fun body(enrollLink: String): String = """
-        You've been invited to andvari, your household's password manager.
-
-        Open this link on the same network as the app to set up your account:
-
-        $enrollLink
-
-        This link is a one-time key — it expires within the hour, and it can't be undone once used.
-        You'll also need the printed recovery sheet, handed to you in person, to finish setting up.
-
-        If you weren't expecting this, you can safely ignore it.
-    """.trimIndent()
 }
