@@ -1,6 +1,30 @@
 # andvari — changelog
 
-## Unreleased (2026-07-12 — additive; web / server / Android stay 0.15.0, browser extension → 0.12.0)
+## 0.16.0 (2026-07-12) — per-member recovery + escrow opt-out (web/server 0.16.0, schema v7; browser extension 0.12.0)
+
+### Sign up with just the link — and hold your own recovery key
+
+- **Invited members now enroll from the link alone.** No more typing a recovery fingerprint off a
+  printed sheet during signup — that step is gone. When you accept an invite you're handed your **own
+  recovery phrase** right there, shown once: save it, type it back to confirm, and you're in. Forget
+  your master password later and you can reset it yourself with that phrase — no admin needed.
+- **You choose, per person, whether you (the admin) can also recover them.** Each invite is either
+  **"admin backstop" (the default)** — the household recovery key can still restore that account, so
+  nothing is ever truly lost — or **"private"** — only that member's own phrase can restore them, and
+  not even you can read or reset their vault. You pick it when you create the invite.
+- **The recovery phrase is a real key — treat it like a spare house key.** It's generated for you
+  (never something you type), shown once, and andvari won't let you into your vault until you've
+  confirmed you saved it. If you're already set up (the admin account), you'll be prompted to create
+  yours the next time you sign in on the web.
+- **Emailed invites default to "private"** (no admin backstop), because an emailed link can't carry
+  the tamper-proof recovery-key check that an in-person QR can. Use an in-person QR invite if you want
+  the admin backstop on someone you're onboarding remotely.
+- The phone and desktop apps show + confirm your recovery phrase too; the rest of their recovery
+  screens arrive in the next app update — **enroll new members on the web for now.**
+
+*Under the hood: your recovery phrase is a symmetric key you alone hold, so it needs no
+server-trusted public-key check — which is exactly why the signup fingerprint step could go away.
+Your master-password → vault-key chain is unchanged and the server still never sees your secrets.*
 
 ### Email an invite (OFF by default — you turn it on)
 
