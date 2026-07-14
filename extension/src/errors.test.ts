@@ -3,7 +3,7 @@
 // is cross-client copy drift and must be a deliberate, twin-side change.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { lockNoticeCopy, saveErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors.ts";
+import { fillErrorCopy, lockNoticeCopy, saveErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors.ts";
 
 test("UNREACHABLE is the canonical web sentence", () => {
   // Byte-equal to web/src/ui/errors.ts UNREACHABLE (em dash U+2014, ASCII apostrophes).
@@ -33,6 +33,18 @@ test("save banner: the three codes render copy, never SW-internal strings", () =
   assert.equal(saveErrorCopy("conflict"), "This login changed elsewhere — open it in the web vault.");
   assert.equal(saveErrorCopy("failed"), "Could not save — try again.");
   assert.equal(saveErrorCopy(undefined), "Could not save — try again."); // SW unreachable
+});
+
+test("fill outcomes (Cut M, v2 #14): every code renders canon copy, never SW/content-internal strings", () => {
+  assert.equal(fillErrorCopy("locked"), "andvari locked before it could fill — unlock and try again.");
+  assert.equal(fillErrorCopy("not_allowed"), "andvari wouldn't release this login for this page — try again from the popup.");
+  assert.equal(fillErrorCopy("no_form"), "No login fields found on this page — copy the username and password instead.");
+  assert.equal(fillErrorCopy("no_fields"), "Couldn't fill the fields on this page — copy the username and password instead.");
+  assert.equal(fillErrorCopy("no_secret"), "Nothing to fill — this login has no username or password saved.");
+  // "unreachable" and an absent code (SW mid-restart / no outcome from the page) share the
+  // popup's long-standing delivery-failure sentence.
+  assert.equal(fillErrorCopy("unreachable"), "Couldn't reach the page — reload the tab and retry.");
+  assert.equal(fillErrorCopy(undefined), "Couldn't reach the page — reload the tab and retry.");
 });
 
 test("lock notice: verbatim web format.ts rounding (AM3 — minutes at ≥ 60 s)", () => {

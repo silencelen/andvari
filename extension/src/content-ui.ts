@@ -107,10 +107,13 @@ const UI_CSS = `
 }
 .row .name { color: var(--anv-ink); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .row .user { font-family: var(--anv-mono); font-size: 12px; color: var(--anv-ink-dim); overflow: hidden; text-overflow: ellipsis; }
-.row:hover { background: var(--anv-bg-deep); box-shadow: inset 2px 0 0 var(--anv-gold); }
-.row:hover .name { color: var(--anv-gold-bright); }
+.row:hover, .row.active { background: var(--anv-bg-deep); box-shadow: inset 2px 0 0 var(--anv-gold); }
+.row:hover .name, .row.active .name { color: var(--anv-gold-bright); }
 .row.action { color: var(--anv-gold-text); font-size: 12.5px; }
-.row.action:hover { color: var(--anv-gold-bright); }
+.row.action:hover, .row.action.active { color: var(--anv-gold-bright); }
+/* Cut N (v2 #18): the keyboard-active row mirrors hover and adds a gold ring — a focus-visible
+   equivalent, since real focus stays in the page's own field and :focus can never land here. */
+.row.active { outline: 2px solid var(--anv-gold); outline-offset: -2px; }
 
 .state { padding: 14px 12px; color: var(--anv-ink-dim); font-size: 12.5px; cursor: default; }
 
@@ -216,6 +219,59 @@ let toastTimer = 0;
  *  safety-critical 2FA-clipboard fallback is assertive and routine toasts stay polite. */
 let politeLive: HTMLElement | null = null;
 let assertiveLive: HTMLElement | null = null;
+/** Cut N (v2 #18): keyboard model — the pickable rows in render order + the roving highlight.
+ *  Rebuilt on every render; -1 = no selection (a plain Enter falls through to the page). Real
+ *  focus STAYS in the page's own input the dropdown anchors to — a closed shadow root cannot be
+ *  referenced by aria-activedescendant from the page DOM — so arrows move this highlight and the
+ *  polite live region speaks each move. */
+let listRows: { el: HTMLElement; act: () => void }[] = [];
+let activeIdx = -1;
+/** Cut N (v2 #18): Escape returns focus to the origin field, which fires a TRUSTED focusin —
+ *  content.ts would instantly reopen the dropdown it just closed. A short suppression window
+ *  keeps Escape meaning closed (a fresh click/refocus after it reopens normally). */
+let suppressOpenUntil = 0;
+
+/** a11y 6d (AM-7) / Cut N: clear-then-set into a persistent off-screen region so a repeated
+ *  message re-announces; assertive is reserved for the safety-critical 2FA-clipboard fallback. */
+function announceLive(text: string, assertive = false): void {
+  const live = assertive ? assertiveLive : politeLive;
+  if (!live) return;
+  live.textContent = "";
+  window.setTimeout(() => {
+    live.textContent = text;
+  }, 50);
+}
+
+function resetRows(): void {
+  listRows = [];
+  activeIdx = -1;
+}
+
+/** Spoken form of a row for the live region: "name, username" or the action label. */
+function rowLabel(el: HTMLElement): string {
+  const name = el.querySelector(".name")?.textContent;
+  const user = el.querySelector(".user")?.textContent;
+  return name ? (user ? `${name}, ${user}` : name) : (el.textContent ?? "");
+}
+
+/** Move the roving highlight (wraps at both ends). The active row mirrors the hover treatment
+ *  (treasury gold inset + ring) and is announced with its position. */
+function setActive(i: number): void {
+  const n = listRows.length;
+  if (n === 0) return;
+  const idx = ((i % n) + n) % n;
+  const prev = listRows[activeIdx];
+  if (prev) {
+    prev.el.classList.remove("active");
+    prev.el.setAttribute("aria-selected", "false");
+  }
+  activeIdx = idx;
+  const cur = listRows[idx]!;
+  cur.el.classList.add("active");
+  cur.el.setAttribute("aria-selected", "true");
+  cur.el.scrollIntoView({ block: "nearest" });
+  announceLive(`${rowLabel(cur.el)}, ${idx + 1} of ${n}`);
+}
 
 function ui(): ShadowRoot {
   if (shadow) return shadow;
@@ -247,10 +303,38 @@ function ui(): ShadowRoot {
     if (anchorEl && path.includes(anchorEl)) return;
     closeDropdown();
   });
+  // Cut N (v2 #18): keyboard operability, on document-level CAPTURE so the keys are seen while
+  // focus sits in the page's own input (or in our shadow search box, whose stopPropagation runs
+  // later at target phase). Keys are swallowed ONLY while the dropdown is open — and Enter only
+  // while a row is active, so a plain Enter still submits the page's form. isTrusted-gated like
+  // every activation path here (anti-spoof: a page-synthesized KeyboardEvent cannot fill).
   document.addEventListener(
     "keydown",
     (e) => {
-      if (e.isTrusted && e.key === "Escape" && dropdownEl) closeDropdown();
+      if (!dropdownEl || !e.isTrusted) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (listRows.length === 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const down = e.key === "ArrowDown";
+        setActive(activeIdx < 0 ? (down ? 0 : listRows.length - 1) : activeIdx + (down ? 1 : -1));
+      } else if (e.key === "Enter") {
+        if (activeIdx < 0) return; // no selection — the page's own submit proceeds untouched
+        e.preventDefault();
+        e.stopPropagation();
+        listRows[activeIdx]?.act();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        const origin = anchorEl;
+        closeDropdown();
+        // Return focus to the origin field; the suppression window keeps the trusted focusin
+        // this fires (content.ts focusin → openDropdown) from instantly reopening.
+        suppressOpenUntil = Date.now() + 400;
+        if (origin?.isConnected) origin.focus();
+      } else if (e.key === "Tab") {
+        closeDropdown(); // never trap — the Tab itself proceeds (a login-field target reopens naturally)
+      }
     },
     true,
   );
@@ -282,7 +366,18 @@ function stateCard(text: string): HTMLElement {
   const d = document.createElement("div");
   d.className = "state";
   d.textContent = text;
+  // Cut N review: a state message is NOT a listbox option — hide it from AT so it never appears
+  // as an invalid listbox child. Its content is spoken via the live region on open / search-run.
+  d.setAttribute("aria-hidden", "true");
   return d;
+}
+
+/** Cut N (v2 #18): every pickable row joins the keyboard model — listbox option semantics plus
+ *  registration for the arrow-key highlight (keyboard Enter runs the same handler as mousedown). */
+function registerRow(row: HTMLElement, act: () => void): void {
+  row.setAttribute("role", "option");
+  row.setAttribute("aria-selected", "false");
+  listRows.push({ el: row, act });
 }
 
 function matchRow(m: MatchItem, pick: () => void): HTMLElement {
@@ -295,6 +390,7 @@ function matchRow(m: MatchItem, pick: () => void): HTMLElement {
     e.preventDefault(); // keep focus on the page field so it stays fillable
     pick();
   });
+  registerRow(row, pick);
   return row;
 }
 
@@ -307,6 +403,7 @@ function actionRow(label: string, act: () => void): HTMLElement {
     e.preventDefault();
     act();
   });
+  registerRow(row, act);
   return row;
 }
 
@@ -331,10 +428,18 @@ function positionDropdown(): void {
 
 function renderMain(body: HTMLElement, state: DropdownState, h: DropdownHandlers): void {
   body.textContent = "";
+  resetRows();
+  // Cut N review: only mark the container a listbox when it actually holds option rows — the
+  // locked state is a lone (aria-hidden) message with no options, so it stays role-less there.
+  body.removeAttribute("role");
+  body.removeAttribute("aria-label");
   if (state.kind === "locked") {
     body.appendChild(stateCard("Locked — click the andvari toolbar icon to unlock"));
     return;
   }
+  // From here on the container always carries at least the "Search all logins…" option.
+  body.setAttribute("role", "listbox");
+  body.setAttribute("aria-label", `andvari — saved logins for ${state.host}`);
   if (state.kind === "empty") body.appendChild(stateCard(`No saved login for ${state.host}`));
   else for (const m of state.matches) body.appendChild(matchRow(m, () => h.onPick(m)));
   if (state.isSignup) body.appendChild(actionRow("Use a strong password", () => h.onStrongPassword()));
@@ -343,6 +448,11 @@ function renderMain(body: HTMLElement, state: DropdownState, h: DropdownHandlers
 
 function renderSearch(body: HTMLElement, h: DropdownHandlers): void {
   body.textContent = "";
+  resetRows();
+  // Cut N (v2 #18): in search mode the listbox is the RESULTS container (the search box is not
+  // an option) — move the role off the body it sat on in renderMain.
+  body.removeAttribute("role");
+  body.removeAttribute("aria-label");
   const wrap = document.createElement("div");
   wrap.className = "search";
   const inp = document.createElement("input");
@@ -352,6 +462,8 @@ function renderSearch(body: HTMLElement, h: DropdownHandlers): void {
   inp.setAttribute("aria-label", "Search all logins"); // a11y 1b: placeholder is not a name
   wrap.appendChild(inp);
   const results = document.createElement("div");
+  results.setAttribute("role", "listbox");
+  results.setAttribute("aria-label", "andvari — matching logins");
   body.append(wrap, results);
 
   // Key/input events are composed — without this, page-level listeners see every
@@ -367,8 +479,12 @@ function renderSearch(body: HTMLElement, h: DropdownHandlers): void {
     const items = await h.onSearch(query);
     if (mine !== seq || !dropdownEl) return; // stale response, or closed while in flight
     results.textContent = "";
+    resetRows(); // Cut N: the keyboard model tracks the freshly rendered result set
     if (items.length === 0) results.appendChild(stateCard("No logins found"));
     else for (const m of items) results.appendChild(matchRow(m, () => h.onSearchPick(m)));
+    // Cut N (v2 #18): result counts are invisible to a screen reader otherwise (focus stays in
+    // the search box and options never take focus).
+    announceLive(items.length === 0 ? "No logins found" : `${items.length} login${items.length === 1 ? "" : "s"} found, arrows to browse`);
     positionDropdown(); // result list changes our height
   };
   inp.addEventListener("input", () => void run(inp.value));
@@ -377,7 +493,17 @@ function renderSearch(body: HTMLElement, h: DropdownHandlers): void {
   positionDropdown();
 }
 
+/** Cut N review: content.ts's Enter-capture hook (a document-capture keydown registered at load,
+ *  BEFORE this file's lazy one) would snapshot the focused field as a "typed credential" on the
+ *  same Enter that we consume as a row pick — offering to overwrite the stored password with the
+ *  junk partial. content.ts gates its captureNow on this so a dropdown-pick Enter is never a
+ *  credential capture. Registration order guarantees the flag is still accurate when it reads it. */
+export function dropdownWillConsumeEnter(): boolean {
+  return dropdownEl !== null && activeIdx >= 0;
+}
+
 export function openDropdown(anchor: HTMLElement, state: DropdownState, handlers: DropdownHandlers): void {
+  if (Date.now() < suppressOpenUntil) return; // Cut N: just Escape-closed — the refocus must not reopen
   const root = ui();
   closeDropdown();
   anchorEl = anchor;
@@ -391,12 +517,23 @@ export function openDropdown(anchor: HTMLElement, state: DropdownState, handlers
   root.appendChild(box);
   dropdownEl = box;
   positionDropdown();
+  // Cut N (v2 #18): announce availability on open — focus never enters the dropdown, so without
+  // this a screen-reader user cannot know the listbox exists at all.
+  const n = state.matches.length;
+  announceLive(
+    state.kind === "locked"
+      ? "andvari is locked — click the andvari toolbar icon to unlock"
+      : state.kind === "empty"
+        ? `No saved login for ${state.host}, arrows to browse`
+        : `${n} login${n === 1 ? "" : "s"} available, arrows to browse`,
+  );
 }
 
 export function closeDropdown(): void {
   dropdownEl?.remove();
   dropdownEl = null;
   anchorEl = null;
+  resetRows(); // Cut N: no highlight survives a close — Enter must never fire on a gone row
 }
 
 function bannerShell(): { bar: HTMLElement; body: HTMLElement } {
@@ -445,6 +582,9 @@ export function showSaveBanner(
   ghost.textContent = "Not now";
   actions.append(primary, ghost);
   body.append(msg, actions);
+  // Cut N (v2 #18): banners appear without any focus change and auto-dismiss — announce the
+  // offer (and, below, its verdict) or a screen-reader user never knows it existed.
+  announceLive(`andvari: ${msg.textContent ?? ""}`);
 
   const idle = window.setTimeout(() => closeBanner(bar), 30_000);
   primary.addEventListener("click", (e) => {
@@ -455,6 +595,7 @@ export function showSaveBanner(
     void onSave().then((r) => {
       actions.remove();
       body.appendChild(span(r.ok ? "result ok" : "result err", r.text));
+      announceLive(r.text); // Cut N: the verdict is spoken, not just painted (the banner auto-closes)
       window.setTimeout(() => closeBanner(bar), r.ok ? 4000 : 8000);
     });
   });
@@ -482,6 +623,7 @@ export function showLinkOffer(itemName: string, host: string, onLink: () => Prom
   ghost.textContent = "No";
   actions.append(primary, ghost);
   body.append(msg, actions);
+  announceLive(`andvari: ${msg.textContent ?? ""}`); // Cut N (v2 #18): see showSaveBanner
 
   const idle = window.setTimeout(() => closeBanner(bar), 20_000);
   primary.addEventListener("click", (e) => {
@@ -491,7 +633,9 @@ export function showLinkOffer(itemName: string, host: string, onLink: () => Prom
     ghost.disabled = true;
     void onLink().then((ok) => {
       actions.remove();
-      body.appendChild(span(ok ? "result ok" : "result err", ok ? "Linked." : "Could not link."));
+      const text = ok ? "Linked." : "Could not link.";
+      body.appendChild(span(ok ? "result ok" : "result err", text));
+      announceLive(text); // Cut N: spoken verdict
       window.setTimeout(() => closeBanner(bar), ok ? 3000 : 6000);
     });
   });
@@ -512,16 +656,8 @@ export function showToast(text: string, assertive = false): void {
   toastEl = t;
   // a11y 6d (AM-7): mirror the text into the PERSISTENT region so it is spoken (the fresh toast
   // node above is populated-on-mount → polite is unreliable). `assertive` is the safety-critical
-  // 2FA-clipboard fallback, where the code is shown only in this 5 s toast. Clear-then-set so a
-  // repeated toast re-announces.
-  const live = assertive ? assertiveLive : politeLive;
-  if (live) {
-    live.textContent = "";
-    const region = live;
-    window.setTimeout(() => {
-      region.textContent = text;
-    }, 50);
-  }
+  // 2FA-clipboard fallback, where the code is shown only in this 5 s toast.
+  announceLive(text, assertive);
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => {
     t.remove();

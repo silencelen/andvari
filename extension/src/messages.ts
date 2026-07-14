@@ -51,6 +51,26 @@ export interface RevealedSecret {
   totpCode: string | null;
 }
 
+/** Cut M (v2 #14): why a fill wrote NOTHING — crosses the seam as a code (the user-facing
+ *  sentences live in errors.ts fillErrorCopy, per the error canon). `locked`/`not_allowed`
+ *  come from the SW's reveal gate; the rest are the content script's own ground truth. */
+export type FillFailCode =
+  | "locked" //        vault locked before the secret could be revealed
+  | "not_allowed" //   reveal refused (host mismatch, expired grant, unknown item)
+  | "no_form" //       no fillable login form in the page (or it left the DOM)
+  | "no_fields" //     a form exists but none of its fields matched the secret's parts
+  | "no_secret" //     the item carries neither username nor password
+  | "unreachable"; //  SW/content messaging failed mid-flight
+
+/** Cut M (v2 #14): the content script's HONEST fill outcome — exactly which parts landed in
+ *  the page's fields. The old contract reported message DELIVERY as success; this is what the
+ *  dropdown toast and the popup's "Fill this page" verdict are built from. */
+export interface FillOutcome {
+  filled: "both" | "username" | "password" | "nothing";
+  /** Set iff filled === "nothing". */
+  code?: FillFailCode;
+}
+
 export interface PendingSave {
   host: string;
   username: string;
@@ -149,9 +169,14 @@ export type Res<T extends Req["type"]> = T extends "status"
           : T extends "allItems"
             ? { locked: boolean; items: MatchItem[] }
             : T extends "reveal"
-              ? { ok: boolean; secret?: RevealedSecret; error?: string }
+              ? /** Cut M (v2 #14): failures carry a seam code (additive) so fill surfaces can
+                 *  render canon copy — `error` stays debug-only detail, never rendered. */
+                { ok: boolean; secret?: RevealedSecret; code?: "locked" | "not_allowed"; error?: string }
               : T extends "fillFromPopup"
-                ? { ok: boolean; error?: string }
+                ? /** Cut M (v2 #14): `ok` is the FILL outcome, not delivery — true only when the
+                   *  content script reports it actually wrote into a field. `outcome` is the full
+                   *  verdict; `code` is set on every failure (additive fields, same shape). */
+                  { ok: boolean; outcome?: FillOutcome; code?: FillFailCode; error?: string }
                 : T extends "capturedCredential"
                   ? { ok: boolean; pending?: PendingSave }
                   : T extends "pendingSave"
@@ -184,7 +209,8 @@ export type Res<T extends Req["type"]> = T extends "status"
 
 /** SW → content (chrome.tabs.sendMessage): fill this item now (popup-granted). The
  *  content script performs its normal `reveal` round-trip with its own host — the SW
- *  honors it via the one-shot grant, keeping a single secret-egress path. */
+ *  honors it via the one-shot grant, keeping a single secret-egress path. Cut M (v2 #14):
+ *  the receiver answers a FillOutcome via sendResponse, which the SW relays to the popup. */
 export type TabMsg =
   | { type: "fillItem"; itemId: string }
   /** SW → content: (re-)offer the tab's pending save banner (e.g. after navigation). */

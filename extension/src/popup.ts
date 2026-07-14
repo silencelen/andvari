@@ -6,7 +6,7 @@
  * TOTP chips re-polled each second. The SW holds all key material — this page only messages it.
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
-import { lockNoticeCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
+import { fillErrorCopy, lockNoticeCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
 import { displaySite, safeSiteUrl } from "./siteurl";
 
@@ -464,10 +464,13 @@ async function scheduleClipboardClear(): Promise<void> {
 
 async function fillItem(itemId: string): Promise<void> {
   const r = await ask({ type: "fillFromPopup", itemId });
+  // Cut M (v2 #14): ok is now the FILL outcome (the content script's ground truth), not message
+  // delivery — close only when something actually landed in the page; otherwise stay open and
+  // render the canon sentence for the seam code (never the SW's raw `error` debug string).
   if (r?.ok) {
-    window.close(); // the fill lands in the page
+    window.close(); // the fill really landed in the page
   } else {
-    showMsg("err", r?.error ?? "Couldn't reach the page — reload the tab and retry.");
+    showMsg("err", fillErrorCopy(r?.code));
   }
 }
 
