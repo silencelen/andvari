@@ -26,6 +26,8 @@ import io.silencelen.andvari.core.client.BackupVault
 import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.CsvPreflight
 import io.silencelen.andvari.core.client.ExportPlanner
+import io.silencelen.andvari.core.client.HouseholdCopy
+import io.silencelen.andvari.core.client.KdfPolicyViolationException
 import io.silencelen.andvari.core.client.PlannedAttachment
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.DecryptedItemVersion
@@ -56,9 +58,11 @@ import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.MemberRecovery
+import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
+import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import kotlinx.coroutines.Dispatchers
@@ -126,6 +130,13 @@ sealed interface Screen {
     // setup minted and AWAITED (piece-binding design 2026-07-13 §3) — flips recoveryConfirmed.
     // Offline unlocks never gate (the setup PUT needs the network anyway).
     data object RecoveryCapture : Screen
+    // Self-service forgot-master-password recovery (design 2026-07-12 §F.3; recovery-cut-2's
+    // deferred native half; web Recover.tsx twin): email + saved recovery phrase →
+    // POST /recovery/self/verify, then a fresh master password → Account.recover →
+    // POST /recovery/self/commit. Pre-session (both endpoints are unauthenticated), reached
+    // from the Unlock screen's "Forgot your master password?" signpost — [email] prefills
+    // from the stored session, exactly like [Unlock].
+    data class Recover(val email: String) : Screen
 }
 
 data class UiState(
@@ -272,6 +283,11 @@ data class UiState(
     // mid-gate). Both gate screens render [RECOVERY_PHRASE_REPLACED_NOTICE] while set; cleared on
     // vault landing / lock / sign-out.
     val recoveryReplacedNotice: Boolean = false,
+    // Forgot-master-password recovery (Screen.Recover), the two-phase wizard flag (web Recover.tsx
+    // step parity): false = phase 1 (email + phrase → verify), true = phase 2 (the phrase checked
+    // out — choose a new master password). The verify response + raw secret live OFF UiState
+    // (AndvariViewModel.pendingRecover*, §F.7); this render-only flag is all the composition needs.
+    val recoverVerified: Boolean = false,
     // Item history (feature): decrypted archived versions of the currently-viewed item, loaded on
     // demand (null = not loaded / loading). Restore a chosen version with saveItem.
     val itemVersions: List<DecryptedItemVersion>? = null,
@@ -687,35 +703,22 @@ class AndvariViewModel(
         }
     }
 
-    private fun fail(t: Throwable) {
-        _ui.value = _ui.value.copy(busy = false, error = friendlyError(t))
+    /** #23: every op-failure surfaces through the shared household canon ([HouseholdCopy] —
+     *  the Kotlin twin of web errors.ts), NEVER an exception's raw message. The old
+     *  android-local friendlyError map is deleted: its ten §11 vault-lifecycle rows + 429
+     *  live byte-identical inside [HouseholdCopy.forError]'s code map (that hand-synced
+     *  duplication was the finding), and its `t.message ?: …` fallback was the defect.
+     *  Context-aware call sites pass the matching mapper ([op]'s parameter). */
+    private fun fail(t: Throwable, map: (Throwable) -> String = HouseholdCopy::forError) {
+        _ui.value = _ui.value.copy(busy = false, error = map(t))
     }
 
-    /** §11 friendlyError mappings (mirrors web Sharing.tsx) — lifecycle codes get honest,
-     *  human copy; everything else keeps the raw message the app always showed. */
-    private fun friendlyError(t: Throwable): String {
-        // H1 (spec 05 T1): a hostile/misconfigured server sent a weakened master-password KDF — a
-        // distinct security block, never surfaced as a wrong-password or transport error.
-        if (t is io.silencelen.andvari.core.client.KdfPolicyViolationException) {
-            return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your administrator."
-        }
-        if (t is ApiException) {
-            when (t.code) {
-                "owner_must_transfer_or_delete" -> return "You own this vault, so you can't just leave it — make someone else the owner first, or delete it."
-                "vault_deleted" -> return "This vault was deleted. The owner can restore it for a few more days."
-                "vault_gone" -> return "The restore window has passed — this vault's data has been erased."
-                "vault_state_changed" -> return "This vault changed since you tried that — reload and try again."
-                "transfer_not_pending" -> return "This ownership offer is no longer active."
-                "not_transfer_target" -> return "This ownership offer isn't for you, or it couldn't be verified."
-                "stale_meta" -> return "This vault changed somewhere else — reload and try the rename again."
-                "not_a_member" -> return "They have to be a member of this vault first."
-                "user_inactive" -> return "That account has been disabled — ask your admin to re-enable it first."
-                "not_vault_owner" -> return "Only the vault's owner can do that."
-            }
-            if (t.status == 429) return "Too many requests — please wait a bit and try again."
-        }
-        return t.message ?: "something went wrong"
-    }
+    /** #23 carve-out for the spec 07 export paths: their [IllegalStateException]s are OUR
+     *  curated, user-facing sentences minted app-side ("backup verification failed — …",
+     *  openTruncated's destination failure) — never wire text — so they surface verbatim;
+     *  everything else routes through the shared canon like any other op. */
+    private fun exportError(t: Throwable): String =
+        if (t is IllegalStateException && !t.message.isNullOrBlank()) t.message!! else HouseholdCopy.forError(t)
 
     fun clearError() { _ui.value = _ui.value.copy(error = null) }
 
@@ -775,7 +778,7 @@ class AndvariViewModel(
 
     fun closeTrash() { _ui.value = _ui.value.copy(screen = Screen.Vault, deletedItems = null) }
 
-    fun signIn(email: String, password: String, totp: String? = null) = op {
+    fun signIn(email: String, password: String, totp: String? = null) = op(mapError = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }) {
         val a = newApi()
         try {
             val pre = a.prelogin(email)
@@ -794,8 +797,8 @@ class AndvariViewModel(
                         )
                         return@op
                     }
-                    "public_login_requires_totp" ->
-                        throw ApiException(e.status, e.code, "this account has no server-TOTP enrolled; public access is blocked")
+                    // #23: public_login_requires_totp no longer needs a re-minted message —
+                    // op's forSignInError mapper carries the canonical break-glass sentence.
                     else -> throw e
                 }
             }
@@ -831,7 +834,7 @@ class AndvariViewModel(
         }
     }
 
-    fun unlock(email: String, password: String) = op {
+    fun unlock(email: String, password: String) = op(mapError = HouseholdCopy::forUnlockError) {
         val session = store.load() ?: throw IllegalStateException("no session")
         // §F.9: set when this unlock must land in the capture gate — the FRESH accountKeys said
         // recoveryConfirmed=false. Decided inside the mutex (where the keys are in scope), acted
@@ -1230,7 +1233,220 @@ class AndvariViewModel(
         }
     }
 
-    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op {
+    // ---- forgot-master-password self-recovery (design §F.3; web Recover.tsx twin) ----
+
+    // §F.7: the raw 32 recovery-secret bytes parsed from the typed phrase, held ONLY between a
+    // successful verify and the commit (Account.recover consumes them). NEVER persisted, NEVER
+    // logged; zeroed + dropped on commit success, cancel, lock and sign-out (web's secretRef +
+    // unmount-clear discipline). The verify response beside it is server-public material (ticket +
+    // wrapped blobs) but composes nothing, so it stays off UiState with the secret.
+    private var pendingRecoverSecret: ByteArray? = null
+    private var pendingRecoverVerify: RecoveryVerifyResponse? = null
+    // The email the verify proved — decides whether a commit invalidated THIS device's stored
+    // session (the commit revokes every session of the recovered account, spec 03 §12).
+    private var pendingRecoverEmail: String? = null
+
+    /** The §F.7 zeroize for the recover flow: secret + verify ticket + email die together. */
+    private fun zeroPendingRecover() {
+        pendingRecoverSecret?.fill(0)
+        pendingRecoverSecret = null
+        pendingRecoverVerify = null
+        pendingRecoverEmail = null
+    }
+
+    /** Enter the recover wizard from the Unlock screen's "Forgot your master password?" signpost. */
+    fun openRecover() {
+        if (_ui.value.busy) return
+        zeroPendingRecover() // a fresh entry never inherits a previous attempt's material
+        _ui.value = _ui.value.copy(
+            screen = Screen.Recover(store.load()?.email ?: ""),
+            recoverVerified = false, error = null, notice = null,
+        )
+    }
+
+    /** Back out of the wizard (either phase): zero the held material, land where start() would.
+     *  System back is NOT busy-gated (only the Cancel buttons are), so this can win an in-flight
+     *  verify/commit — `busy` resets HERE (the op no longer owns the screen; nothing else can be
+     *  busy on Recover), and the screen swap is what the §F.7 cancel fences inside those
+     *  continuations key on: they zero their material and die instead of landing. */
+    fun cancelRecover() {
+        zeroPendingRecover()
+        val session = store.load()
+        _ui.value = _ui.value.copy(
+            screen = if (session != null && session.accessToken.isNotEmpty()) Screen.Unlock(session.email) else Screen.Welcome,
+            recoverVerified = false, error = null, busy = false,
+        )
+    }
+
+    /**
+     * Phase 1 (web submitVerify parity): parse the typed phrase (total — a malformed phrase is a
+     * user error, not an exception), derive the recovery authKey (HKDF only, no Argon2id — the
+     * server proves possession without ever seeing the phrase) and POST /recovery/self/verify.
+     * On success the raw secret + response are stashed (§F.7) and the wizard flips to phase 2;
+     * the SCREEN keeps its own typed-phrase state and clears it on the flip.
+     */
+    fun recoverVerify(email: String, phrase: String) {
+        if (_ui.value.busy) return
+        val wizard = _ui.value.screen as? Screen.Recover ?: return // stale tap after a screen swap
+        val secret = MemberRecovery.parseSecret(phrase)
+        if (secret == null) {
+            _ui.value = _ui.value.copy(error = "That doesn't look like a recovery phrase — check it and try again.")
+            return
+        }
+        _ui.value = _ui.value.copy(busy = true, error = null)
+        viewModelScope.launch {
+            val a = newApi() // unauthenticated probe — closed in finally (F74)
+            try {
+                val authKey = withContext(Dispatchers.Default) { MemberRecovery.deriveAuthKey(createCryptoProvider(), secret) }
+                // §F.7 cancel fence, re-checked after EVERY await: system back (cancelRecover)
+                // isn't busy-gated, so it can win any of these suspensions — and once THIS
+                // wizard instance is gone (cancelled, or replaced by a fresh openRecover — the
+                // `!== wizard` identity gate, the B1 `account !== acct` idiom) the continuation
+                // owns nothing. Zero the parsed bytes and die: landing would stash a raw secret
+                // + live single-use ticket that no screen consumes and nothing ever zeroes.
+                if (_ui.value.screen !== wizard) { secret.fill(0); return@launch }
+                val resp = a.recoverySelfVerify(email.trim(), authKey)
+                if (_ui.value.screen !== wizard) { secret.fill(0); return@launch } // cancelled mid-POST: the ticket dies unstashed with this frame
+                zeroPendingRecover() // any earlier attempt's bytes die before the fresh stash
+                pendingRecoverSecret = secret
+                pendingRecoverVerify = resp
+                pendingRecoverEmail = email.trim()
+                _ui.value = _ui.value.copy(busy = false, recoverVerified = true, error = null)
+            } catch (t: Throwable) {
+                secret.fill(0) // §F.7: a refused phrase's bytes don't linger
+                // Cancelled mid-flight: cancelRecover already reset busy + cleared error — a late
+                // failure must not repaint the Unlock/Welcome screen the user backed out to.
+                if (_ui.value.screen !== wizard) return@launch
+                _ui.value = _ui.value.copy(busy = false, error = recoverVerifyError(t))
+            } finally {
+                a.close()
+            }
+        }
+    }
+
+    /**
+     * Phase 2 (web submitReset parity): floor-check the new master password, then
+     * [Account.recover] — which opens the SAME UVK from the phrase and runs the spec 01 §5
+     * identity-pubkey HARD-FAIL before producing the commit body (a substituted identity key
+     * aborts HERE, before commit) — and POST /recovery/self/commit under the policy KDF params
+     * (H1 floor: clientPolicy() already fenced them; when the cold-start probe never landed the
+     * policy is re-probed lazily below — the locked side reaches no other probe). Success revokes
+     * every session of the account server-side, so when the recovered email is THIS device's
+     * stored session the local session dies with it (the unlock-time-401 purge idiom) and the
+     * flow lands on sign-in with a success notice. The screen's password fields are composition
+     * state and die with the swap.
+     */
+    fun recoverCommit(newPassword: String) {
+        if (_ui.value.busy) return
+        val wizard = _ui.value.screen as? Screen.Recover ?: return
+        val secret = pendingRecoverSecret
+        val verify = pendingRecoverVerify
+        if (secret == null || verify == null) {
+            _ui.value = _ui.value.copy(error = "Your recovery session expired — start again.", recoverVerified = false)
+            return
+        }
+        // F60 floor, state-layer re-assert (the enabled flag lags a frame): a sub-floor master
+        // password is the one irreversible outcome of this screen.
+        if (!Strength.meetsMasterPasswordFloor(newPassword)) {
+            _ui.value = _ui.value.copy(error = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols.")
+            return
+        }
+        _ui.value = _ui.value.copy(busy = true, error = null)
+        viewModelScope.launch {
+            val a = newApi() // unauthenticated — closed in finally (F74)
+            try {
+                // Captured BEFORE any await: this is the email the verify proved, and a cancel
+                // racing this coroutine nulls the field — but a commit that still LANDS revokes
+                // that account's sessions regardless, so the same-account purge below must never
+                // lose its anchor.
+                val recoveredEmail = pendingRecoverEmail
+                // Web parity: the KDF params must be the server's fenced policy set, never a
+                // guess. But every stored-policy probe (start/setBaseUrl/retryPolicy + the
+                // unlocked poll) lives on the Welcome/unlocked side — unreachable from here — so
+                // an app that cold-started offline would otherwise dead-end this button forever.
+                // Phase 1 just proved the server reachable: re-probe lazily, exactly when phase 2
+                // needs the params (enrollOp's idiom). clientPolicy() runs the H1 KDF floor fence
+                // (spec 05 T1); a failed probe surfaces through recoverResetError below.
+                val policy = _ui.value.policy ?: a.clientPolicy().also { applyPolicy(it) }
+                // §F.7 cancel fence (recoverVerify's twin), re-checked after EVERY await: system
+                // back isn't busy-gated, and once THIS wizard instance is gone the continuation
+                // must zero its alias and die without touching UI state. The pendingRecover*
+                // fields are NOT re-zeroed here — every screen-swapper already did, and by now
+                // they may hold a NEWER wizard's material.
+                if (_ui.value.screen !== wizard) { secret.fill(0); return@launch }
+                // Argon2id (fresh salt under the policy params) — off the Main thread.
+                val commit = withContext(Dispatchers.Default) { Account.recover(secret, verify, newPassword, policy.kdfParams) }
+                // Cancelled during the derivation (cancelRecover may even have zeroed `secret`
+                // mid-read, making `commit` garbage): the reset is abandoned — NEVER post it.
+                if (_ui.value.screen !== wizard) { secret.fill(0); return@launch }
+                a.recoverySelfCommit(commit)
+                // Past the point of no return: the commit LANDED and revoked EVERY session of the
+                // recovered account — even when a cancel won the POST race just now. If that
+                // account is this device's stored session, its persisted tokens/keys/cache are
+                // dead — purge like the definitive-401 path instead of letting the next unlock
+                // trip over it (skipping this on cancel would strand a revoked session).
+                val cancelled = _ui.value.screen !== wizard
+                if (cancelled) secret.fill(0) else zeroPendingRecover()
+                val session = store.load()
+                if (session != null && recoveredEmail != null && session.email.equals(recoveredEmail, ignoreCase = true)) {
+                    OfflineData.purgeRevoked(cacheDir, store, session.userId)
+                }
+                if (cancelled) return@launch // …but the wizard is gone: no screen/notice to paint
+                val next = store.load()?.takeIf { it.accessToken.isNotEmpty() }?.let { Screen.Unlock(it.email) } ?: Screen.Welcome
+                _ui.value = _ui.value.copy(
+                    busy = false, screen = next, recoverVerified = false, lockReason = null,
+                    // purgeRevoked dropped the persisted F58 flag with the session — mirror it.
+                    mustChangePassword = store.mustChangePassword,
+                    notice = "Master password reset — sign in with your new password.",
+                )
+            } catch (t: Throwable) {
+                // Held material survives a failed commit (web parity): a transient failure
+                // retries without re-running phase 1; Cancel remains the way out — and when it
+                // already WAS the way out (mid-flight), the stash is zeroed and busy reset:
+                // never repaint the screen the user backed out to.
+                if (_ui.value.screen !== wizard) return@launch
+                _ui.value = _ui.value.copy(busy = false, error = recoverResetError(t))
+            } finally {
+                a.close()
+            }
+        }
+    }
+
+    /**
+     * Phase-1 (verify) copy — the native twin of web Recover.tsx `verifyErrorMessage`, pinned
+     * sentence-for-sentence. Uniform copy on 401 — the server is anti-enumeration (§F.5); never
+     * reveal which of email / phrase / no-recovery-row was wrong. Static strings only, never
+     * interpolating anything near secret material (§F.7).
+     */
+    private fun recoverVerifyError(t: Throwable): String = when {
+        t is KdfPolicyViolationException -> HouseholdCopy.WEAK_KDF_ACTION // H1 (spec 05 T1)
+        t is ApiException -> when {
+            t.status == 401 -> "We couldn't verify that email and recovery phrase."
+            t.code == "recovery_public_disabled" -> "Account recovery isn't available from this public address — connect from inside (VPN/LAN) and try again."
+            else -> HouseholdCopy.SERVER_PROBLEM
+        }
+        t is IOException -> HouseholdCopy.UNREACHABLE
+        else -> "Recovery failed. Please try again."
+    }
+
+    /**
+     * Phase-2 (reset/commit) copy — web `resetErrorMessage` twin. The identity mismatch is a
+     * DISTINCT tampering signal (spec 01 §5) — never softened into "wrong phrase"; an expired/
+     * consumed ticket is `invalid_ticket` (the server value, pinned by RecoveryTest.kt).
+     */
+    private fun recoverResetError(t: Throwable): String = when {
+        t is KdfPolicyViolationException -> HouseholdCopy.WEAK_KDF_ACTION // H1 (spec 05 T1)
+        t is CryptoException && t.message?.contains("identity key mismatch") == true -> HouseholdCopy.IDENTITY_MISMATCH
+        t is ApiException -> when {
+            t.code == "invalid_ticket" || t.status == 401 -> "Your recovery session expired — start again."
+            t.code == "recovery_account_not_active" -> "This account is disabled — self-recovery isn't available. Ask your admin to recover it."
+            else -> HouseholdCopy.SERVER_PROBLEM
+        }
+        t is IOException -> HouseholdCopy.UNREACHABLE
+        else -> "Recovery failed. Please try again."
+    }
+
+    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op(mapError = HouseholdCopy::forSaveError) {
         // F18: [vaultId] is the NEW-item vault picker's choice. saveWithUploads HONORS it only
         // when itemId == null; for an existing item it re-targets the item's OWN vault (its blob
         // AD binds that vault; the server enforces vault_mismatch), so a stray picker value can
@@ -1245,7 +1461,14 @@ class AndvariViewModel(
         refreshItems()
     }
 
-    fun refresh() = op { syncNow(engine!!); refreshItems() }
+    /** Manual sync (the top-bar refresh icon). #24: lands a brief "Synced." notice — the
+     *  tap previously gave zero feedback (ui.syncing renders only for the background poll,
+     *  and this op's `busy` showed nothing moving on the vault list). */
+    fun refresh() = op(mapError = HouseholdCopy::forSyncError) {
+        syncNow(engine!!)
+        refreshItems()
+        _ui.value = _ui.value.copy(notice = "Synced.")
+    }
 
     fun item(itemId: String): VaultItem? = engine?.item(itemId)
 
@@ -1594,9 +1817,12 @@ class AndvariViewModel(
                     return@launch
                 }
                 // Locked/rebound mid-sync (auto-lock is NOT deferred for `syncing`): the
-                // engine was closed under us — expected teardown, swallow it.
+                // engine was closed under us — expected teardown, swallow it. #23: what DOES
+                // surface (rev regression, denied writes) maps through the sync canon —
+                // never `t.message`. IO stays silent here (unattended poll), so forSyncError's
+                // SYNC_OFFLINE branch is deliberately unreachable on this path.
                 val torn = VaultSession.get() !== current
-                _ui.value = _ui.value.copy(syncing = false, error = if (t is IOException || torn) _ui.value.error else t.message)
+                _ui.value = _ui.value.copy(syncing = false, error = if (t is IOException || torn) _ui.value.error else HouseholdCopy.forSyncError(t))
                 if (!torn) refreshLifecycle() // even a denied/park cycle leaves notices to show
             }
         }
@@ -1663,7 +1889,9 @@ class AndvariViewModel(
         } catch (e: CsvImport.ImportException) {
             _ui.value = _ui.value.copy(importError = friendlyImport(e.code), importPlan = null, importDone = false)
         } catch (t: Throwable) {
-            _ui.value = _ui.value.copy(importError = t.message ?: "could not read that file", importPlan = null, importDone = false)
+            // #23: the bytes never left the device — forImportError says "couldn't read that
+            // file", never network copy and never the exception's own message.
+            _ui.value = _ui.value.copy(importError = HouseholdCopy.forImportError(t), importPlan = null, importDone = false)
         }
     }
 
@@ -1705,7 +1933,8 @@ class AndvariViewModel(
                 _ui.value = _ui.value.copy(importPlan = plan, importVaultId = vaultId, importBusy = false, importProgress = null)
             } catch (t: Throwable) {
                 // plan/vault left unchanged — still a matched pair, so Confirm stays safe.
-                _ui.value = _ui.value.copy(importBusy = false, importError = t.message ?: "could not re-check that file")
+                // #23: a local re-plan failure is a read failure, never raw exception text.
+                _ui.value = _ui.value.copy(importBusy = false, importError = HouseholdCopy.forImportError(t))
             }
         }
     }
@@ -1924,7 +2153,7 @@ class AndvariViewModel(
                 // delete it (§2.6). The success path above never reaches here, so a
                 // completed backup is never discarded.
                 runCatching { discard(writeBegan) }
-                fail(t)
+                fail(t, ::exportError)
             }
         }
     }
@@ -2111,7 +2340,7 @@ class AndvariViewModel(
                 _ui.value = _ui.value.copy(busy = false, notice = "Exported $count logins. Delete the CSV once the other manager has imported it.")
             } catch (t: Throwable) {
                 runCatching { discard(writeBegan) }
-                fail(t)
+                fail(t, ::exportError)
             }
         }
     }
@@ -2138,8 +2367,10 @@ class AndvariViewModel(
         pendingBackupRequest = null // a stashed export must not survive a lock (see stash docs)
         // §F.7: an interrupted reveal dies with the lock — zero the raw secret + its pieceId; the
         // §F.9 capture gate re-issues a fresh phrase at the next unlock (recoveryConfirmed is
-        // still false server-side). The capture reauth proof is password-equivalent — dies too.
+        // still false server-side). The capture reauth proof is password-equivalent — dies too,
+        // and so does any half-finished forgot-password attempt's material.
         zeroPendingRecovery()
+        zeroPendingRecover()
         pendingCaptureAuthKey = null
         closeEditor() // the editor session (and its picked plaintext bytes) dies with the lock
         importDismiss() // the parsed CSV + plan hold every password in the file — never outlive the lock
@@ -2164,6 +2395,7 @@ class AndvariViewModel(
             // §F.7/§F.9: the reveal's display form + gate state die with the lock (the raw secret
             // was zeroed above); a fresh unlock re-derives everything.
             recoveryPhrase = null, recoverySetupWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false,
+            recoverVerified = false,
             // N2 §3/§6 (review MED): clear the probe-failure flag only when a policy is
             // LOADED — then it's stale noise. With policy == null the failure is CURRENT
             // (nothing re-probes on the way to Welcome), and clearing it would strand the
@@ -2205,6 +2437,7 @@ class AndvariViewModel(
             VaultSession.lock()
             pendingBackupRequest = null // never carry a stashed export into a different account
             zeroPendingRecovery() // §F.7: the raw secret + its pieceId never outlive the account
+            zeroPendingRecover() // …nor a forgot-password attempt's parsed phrase/ticket
             pendingCaptureAuthKey = null // password-equivalent — dies with the session
             closeEditor()
             importDismiss() // account A's plaintext CSV/plan must never resurface in account B's session
@@ -2232,6 +2465,7 @@ class AndvariViewModel(
                 escrowStale = false, escrowFingerprint = "", // P4: global ReSealCard must not linger on Welcome
                 // §F.7/§F.9: reveal display form + gate state never outlive the account (raw secret zeroed above)
                 recoveryPhrase = null, recoverySetupWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false,
+                recoverVerified = false,
                 // N2 §3/§6 (review MED): a probe failure with NO policy loaded is current,
                 // not stale — keep it so Welcome shows the failure + Retry instead of the
                 // dead-end "Checking the server…" (nothing re-probes on this path). With a
@@ -2255,7 +2489,7 @@ class AndvariViewModel(
             try {
                 _ui.value = _ui.value.copy(totpStatus = api!!.totpStatus())
             } catch (t: Throwable) {
-                _ui.value = _ui.value.copy(totpMessage = t.message ?: "could not load TOTP status")
+                _ui.value = _ui.value.copy(totpMessage = HouseholdCopy.forTotpError(t)) // #23: never raw wire text
             }
         }
     }
@@ -2292,8 +2526,9 @@ class AndvariViewModel(
             try {
                 block()
             } catch (t: Throwable) {
-                val msg = if (t is ApiException && t.code == "bad_totp_code") "That code didn't match — try again." else t.message ?: "something went wrong"
-                _ui.value = _ui.value.copy(busy = false, totpMessage = msg)
+                // #23: the shared canon covers bad_totp_code (its authenticator-hint wording
+                // deliberately unifies android's old shorter variant) and never leaks raw text.
+                _ui.value = _ui.value.copy(busy = false, totpMessage = HouseholdCopy.forTotpError(t))
             }
         }
     }
@@ -2337,7 +2572,10 @@ class AndvariViewModel(
         refreshQuickUnlockState() // may surface the one-time enrollment offer card
     }
 
-    private fun op(block: suspend () -> Unit) {
+    /** [mapError] is the #23 context seam: sign-in/unlock/save/sync ops pass their
+     *  [HouseholdCopy] mapper so a failure reads right for ITS surface; everything else
+     *  takes the general [HouseholdCopy.forError]. */
+    private fun op(mapError: (Throwable) -> String = HouseholdCopy::forError, block: suspend () -> Unit) {
         _ui.value = _ui.value.copy(busy = true, error = null)
         viewModelScope.launch {
             try {
@@ -2347,7 +2585,7 @@ class AndvariViewModel(
                 // minVersion pin. Raise the blocking upgrade screen (A9), not a dismissable toast.
                 _ui.value = _ui.value.copy(busy = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
             } catch (t: Throwable) {
-                fail(t)
+                fail(t, mapError)
             }
         }
     }

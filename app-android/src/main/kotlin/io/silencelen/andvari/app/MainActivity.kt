@@ -47,7 +47,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
@@ -66,6 +65,7 @@ import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
 import io.silencelen.andvari.core.crypto.Escrow
+import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ImportHelp
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
@@ -232,7 +232,13 @@ fun AndvariApp(vm: AndvariViewModel) {
             if (ui.screen is Screen.Vault) AutofillOfferCard(vm)
             Box(Modifier.weight(1f)) {
                 when (val screen = ui.screen) {
-                    is Screen.Loading -> Centered { Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary) }
+                    // #24/#25: the start-up screen was a lone raw rune — geometry now (tofu-proof),
+                    // plus one quiet line in the household voice so the wait reads as alive.
+                    is Screen.Loading -> Centered {
+                        SigilMark(BrandSigil, 46.dp)
+                        Spacer(Modifier.height(12.dp))
+                        Text("Waking the keeper…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     is Screen.Welcome -> WelcomeScreen(vm, ui)
                     is Screen.Unlock -> UnlockScreen(vm, ui, screen.email)
                     is Screen.Vault -> VaultScreen(vm, ui)
@@ -242,6 +248,7 @@ fun AndvariApp(vm: AndvariViewModel) {
                     is Screen.AutofillStatus -> AutofillStatusScreen(vm, ui)
                     is Screen.RecoverySetup -> RecoverySetupScreen(vm, ui)
                     is Screen.RecoveryCapture -> RecoveryCaptureScreen(vm, ui)
+                    is Screen.Recover -> RecoverScreen(vm, ui, screen.email)
                 }
             }
         }
@@ -369,7 +376,10 @@ private fun Centered(content: @Composable ColumnScope.() -> Unit) {
 
 @Composable
 private fun Sigil() {
-    Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
+    // #25: the wordmark rune as geometry (Theme.kt BrandSigil, the web Sigil.tsx port) — the
+    // raw ᛅ codepoint rendered as a tofu box wherever no installed font covers the Runic block.
+    SigilMark(BrandSigil, 46.dp)
+    Spacer(Modifier.height(4.dp))
     Text("andvari", style = MaterialTheme.typography.titleLarge)
     Text("the keeper of the hoard", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
@@ -457,6 +467,9 @@ fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
         }
         Spacer(Modifier.height(20.dp))
         ErrorBar(ui.error, vm::clearError)
+        // Success landings that end HERE need a voice too — chiefly the recover flow's
+        // "Master password reset — sign in with your new password." (sessions were revoked).
+        NoticeBar(ui.notice, vm::clearNotice)
         if (tab == 0) SignInForm(vm, ui) else EnrollForm(vm, ui)
         Spacer(Modifier.height(24.dp))
         ServerField(ui.baseUrl, vm::setBaseUrl)
@@ -908,6 +921,8 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
         }
         Spacer(Modifier.height(24.dp))
         ErrorBar(ui.error, vm::clearError)
+        // A recover-flow landing ("Master password reset — sign in…") can arrive here too.
+        NoticeBar(ui.notice, vm::clearNotice)
         // Runtime notice from a biometric attempt (temp lockout / cancel / biometrics-changed).
         ui.quickUnlockMessage?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -941,10 +956,9 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
                 Text("Use fingerprint / face")
             }
         }
-        // Cut H (v2 #6): a forgotten master password stranded users here — the self-recovery
-        // flow lives in the web app (#recover); this signposts it instead of dead-ending.
-        val uriHandler = LocalUriHandler.current
-        TextButton(onClick = { runCatching { uriHandler.openUri("${ui.baseUrl}/#recover") } }) {
+        // Cut H (v2 #6) signposted the WEB #recover flow here; the self-recovery wizard is
+        // native now (RecoverScreen, wave-2) — enter it in-app instead of bouncing browsers.
+        TextButton(onClick = vm::openRecover, enabled = !ui.busy) {
             Text("Forgot your master password?")
         }
         // Cut D (v2 #3): sign-out clears the local vault cache, quick unlock, and any unsynced
@@ -959,6 +973,118 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
                 confirmButton = { TextButton(onClick = { confirmSignOut = false; vm.signOut() }) { Text("Sign out") } },
                 dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Stay signed in") } },
             )
+        }
+    }
+}
+
+/**
+ * Forgot-master-password self-recovery (design 2026-07-12 §F.3) — the native twin of web
+ * Recover.tsx's two-phase wizard, reached from the Unlock screen's "Forgot your master
+ * password?" signpost (the flow used to bounce to the web client's #recover):
+ *
+ *  1. verify — email + the saved recovery phrase → the VM derives `recoveryAuthKey` (HKDF
+ *     only) and POSTs it; the server proves possession WITHOUT ever seeing the phrase.
+ *  2. reset  — choose a new master password (F60 strength floor; KDF params = the fenced
+ *     server policy); the VM opens the SAME UVK from the phrase, runs the spec 01 §5
+ *     identity hard-fail, re-wraps, and commits. All sessions are revoked, so the flow
+ *     lands back on sign-in with a success notice.
+ *
+ * §F.7 hygiene: the typed phrase is plain `remember` (never SavedState), typed under
+ * KeyboardType.Password with autocorrect off (the RecoverySetup type-back idiom — the IME's
+ * suggestion strip and personal dictionary must not learn it) and cleared from composition
+ * state the moment the verify succeeds; the raw secret bytes live only in the VM
+ * (zeroized on cancel/commit/lock). Passwords use SecretField (masked + Password IME).
+ * System back = Cancel, so leaving the screen always routes through the VM's zeroize.
+ */
+@Composable
+private fun RecoverScreen(vm: AndvariViewModel, ui: UiState, sessionEmail: String) {
+    var email by rememberSaveable { mutableStateOf(sessionEmail) } // non-secret; fold-safe
+    var phrase by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    BackHandler(onBack = vm::cancelRecover)
+    // Web parity (submitVerify): drop the typed phrase from state once the VM holds the
+    // parsed bytes — the display string must not linger through phase 2.
+    LaunchedEffect(ui.recoverVerified) { if (ui.recoverVerified) phrase = "" }
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+        verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        SigilMark(BrandSigil, 46.dp)
+        Spacer(Modifier.height(4.dp))
+        Text("Recover your account", style = MaterialTheme.typography.titleLarge)
+        Text(
+            if (ui.recoverVerified) "choose a new master password" else "with your saved recovery phrase",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(16.dp))
+        ErrorBar(ui.error, vm::clearError)
+        if (!ui.recoverVerified) {
+            Text(
+                "Enter the recovery phrase you saved when you set up this account. Your master " +
+                    "password is not needed — the phrase alone lets you set a new one.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
+            // The RecoverySetup type-back idiom: NOT a SecretField (a recovery phrase must never
+            // be masked-then-password-managed, §F.7) but Password IME + mono so nothing learns it.
+            Field("Recovery phrase", phrase, { phrase = it }, mono = true, keyboard = KeyboardType.Password)
+            Text(
+                "exactly as you saved it — spaces are ignored",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            PrimaryButton("Continue", enabled = email.isNotBlank() && phrase.isNotBlank() && !ui.busy, busy = ui.busy) {
+                vm.recoverVerify(email.trim(), phrase)
+            }
+            if (ui.busy) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Checking your recovery phrase…",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+            TextButton(onClick = vm::cancelRecover, enabled = !ui.busy) { Text("Back to sign in") }
+        } else {
+            Text(
+                "Your recovery phrase checked out. Choose a new master password — it re-locks the " +
+                    "same vault; nothing you stored is lost.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            SecretField("New master password", password) { password = it }
+            if (password.isNotEmpty()) {
+                // The EnrollForm strength block (F60 floor) — same copy, same gate.
+                val score = Strength.estimateStrength(password)
+                if (Strength.meetsMasterPasswordFloor(password)) {
+                    Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                if (Strength.masterPasswordHasNonAscii(password)) {
+                    Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+                }
+            }
+            SecretField("Confirm new master password", confirm) { confirm = it }
+            InlineError(if (confirm.isNotEmpty() && confirm != password) "passwords don't match" else null)
+            Spacer(Modifier.height(12.dp))
+            val ready = Strength.meetsMasterPasswordFloor(password) && password == confirm
+            // onClick re-asserts the gate from live reads (S2-review race class; the VM
+            // re-checks the floor + busy too).
+            PrimaryButton("Reset master password", enabled = ready && !ui.busy, busy = ui.busy) {
+                if (Strength.meetsMasterPasswordFloor(password) && password == confirm) vm.recoverCommit(password)
+            }
+            if (ui.busy) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Re-locking your vault with the new password — this takes a few seconds.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+            TextButton(onClick = vm::cancelRecover, enabled = !ui.busy) { Text("Cancel") }
         }
     }
 }
@@ -1016,7 +1142,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
             result.onSuccess { bytes ->
                 if (bytes == null) vm.importReject("That file is larger than 10 MiB — far bigger than any real browser password export.")
                 else vm.importParse(bytes)
-            }.onFailure { vm.importReject(it.message ?: "could not read the selected file") }
+            }.onFailure { vm.importReject(HouseholdCopy.forImportError(it)) } // #23: local read failure, never raw text
         }
     }
 
@@ -1042,18 +1168,24 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("andvari", style = MaterialTheme.typography.titleLarge) },
-                actions = {
-                    // Universal importer (design 2026-07-11): the one import sheet first, THEN the file picker.
-                    IconButton(onClick = { vm.importBegin() }) { Icon(Icons.Default.FileUpload, "import CSV") }
-                    IconButton(onClick = { vm.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
-                    IconButton(onClick = { vm.openSharing() }) { Icon(Icons.Default.Group, "sharing") }
-                    IconButton(onClick = { vm.openTrash() }) { Icon(Icons.Default.Delete, "trash") }
-                    IconButton(onClick = { vm.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
-                    IconButton(onClick = { vm.lock() }) { Icon(Icons.Default.Lock, "lock") }
-                },
-            )
+            Column {
+                TopAppBar(
+                    title = { Text("andvari", style = MaterialTheme.typography.titleLarge) },
+                    actions = {
+                        // Universal importer (design 2026-07-11): the one import sheet first, THEN the file picker.
+                        IconButton(onClick = { vm.importBegin() }) { Icon(Icons.Default.FileUpload, "import CSV") }
+                        IconButton(onClick = { vm.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
+                        IconButton(onClick = { vm.openSharing() }) { Icon(Icons.Default.Group, "sharing") }
+                        IconButton(onClick = { vm.openTrash() }) { Icon(Icons.Default.Delete, "trash") }
+                        IconButton(onClick = { vm.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
+                        IconButton(onClick = { vm.lock() }) { Icon(Icons.Default.Lock, "lock") }
+                    },
+                )
+                // #24: honest motion for the multi-second syncs — ui.syncing (the quiet 5-min /
+                // foreground poll) was rendered NOWHERE, and a manual refresh (op → busy) showed
+                // nothing moving either. One thin indeterminate line under the bar covers both.
+                if (ui.syncing || ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
         },
         floatingActionButton = {
             if (editorInitial == null && detailId == null) {
@@ -1099,7 +1231,8 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                     }
                     if (filtered.isEmpty()) {
                         item(key = "empty") {
-                            Centered { Spacer(Modifier.height(60.dp)); Text("ᛝ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary); Text(if (ui.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            // #25: the empty-hoard ᛝ as geometry (Theme.kt EmptySigil) — see Sigil().
+                            Centered { Spacer(Modifier.height(60.dp)); SigilMark(EmptySigil, 40.dp); Spacer(Modifier.height(8.dp)); Text(if (ui.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         }
                     } else {
                         items(filtered, key = { it.itemId }) { item ->
@@ -1623,7 +1756,7 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
                         }
                     }
                 }
-            }.onFailure { attachError = it.message ?: "could not read the selected file" }
+            }.onFailure { attachError = HouseholdCopy.forImportError(it) } // #23: the pick never left the device
         }
     }
 
@@ -1909,6 +2042,8 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                     Text("Sign out to connect to a different server.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+            Spacer(Modifier.height(16.dp))
+            AppearanceCard()
             Spacer(Modifier.height(16.dp))
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
@@ -2361,6 +2496,45 @@ private fun QuickUnlockSettingsCard(vm: AndvariViewModel, ui: UiState) {
                             onCheckedChange = null,
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+/** #26: device-local Auto/Light/Dark appearance pref (ThemePref, SharedPreferences
+ *  "andvari-ui"). Selecting recomposes every AndvariTheme in the process live — including
+ *  the autofill overlays. The two color schemes themselves are untouched (token lockstep);
+ *  only the theme's selection expression reads this. */
+@Composable
+private fun AppearanceCard() {
+    val ctx = LocalContextCompat()
+    val mode = ThemePref.mode(ctx)
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("Appearance", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Auto follows this device's light/dark setting.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            ThemeMode.entries.forEach { m ->
+                Row(
+                    Modifier.fillMaxWidth()
+                        .selectable(selected = mode == m, role = Role.RadioButton, onClick = { ThemePref.set(ctx, m) })
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = mode == m, onClick = null)
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        when (m) {
+                            ThemeMode.Auto -> "Auto (match device)"
+                            ThemeMode.Light -> "Light"
+                            ThemeMode.Dark -> "Dark"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
             }
         }

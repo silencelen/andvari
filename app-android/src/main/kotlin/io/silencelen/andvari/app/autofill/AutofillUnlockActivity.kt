@@ -42,11 +42,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import io.silencelen.andvari.app.AndvariTheme
+import io.silencelen.andvari.app.BrandSigil
 import io.silencelen.andvari.app.QuickUnlock
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
+import io.silencelen.andvari.app.SigilMark
 import io.silencelen.andvari.app.VaultSession
 import io.silencelen.andvari.core.client.ApiException
+import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.crypto.CryptoException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -262,11 +265,14 @@ class AutofillUnlockActivity : FragmentActivity() {
         finish()
     }
 
+    /** #23: this overlay pre-maps its two lane-specific contexts — it renders inside ANOTHER
+     *  app (so a dead session must say "open andvari"), and [AutofillUnlock.unlock] only
+     *  throws IO when there are NO cached keys — then delegates everything else to the shared
+     *  household canon. Never the exception's raw message (the old `t.message ?: …`). */
     private fun friendly(t: Throwable): String = when {
-        t is CryptoException -> t.message ?: "Wrong master password."
-        t is ApiException && t.status == 401 -> "Session expired — open andvari and sign in again."
-        t is IOException -> "Offline, and no saved keys — open andvari once while online."
-        else -> t.message ?: "Couldn't unlock."
+        t is ApiException && t.status == 401 -> HouseholdCopy.SESSION_EXPIRED_AUTOFILL
+        t is IOException -> HouseholdCopy.UNLOCK_OFFLINE_NO_KEYS
+        else -> HouseholdCopy.forUnlockError(t)
     }
 
     @Suppress("DEPRECATION")
@@ -306,7 +312,9 @@ private fun UnlockCard(
     ) {
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
+                // #25: geometry, not the raw ᛅ codepoint — this overlay renders over arbitrary
+                // apps, exactly where a tofu box would undercut the anti-spoof brand signal.
+                SigilMark(BrandSigil, 40.dp)
                 Text("Unlock andvari", style = MaterialTheme.typography.titleLarge)
                 Text(email, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(16.dp))

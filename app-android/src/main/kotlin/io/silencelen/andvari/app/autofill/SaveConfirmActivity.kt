@@ -42,22 +42,23 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import io.silencelen.andvari.app.AndvariTheme
+import io.silencelen.andvari.app.BrandSigil
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
+import io.silencelen.andvari.app.SigilMark
 import io.silencelen.andvari.app.VaultSession
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
+import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.client.autofill.FillTarget
 import io.silencelen.andvari.core.client.autofill.UriMatch
-import io.silencelen.andvari.core.crypto.CryptoException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.IOException
 
 /**
  * Card confirm variant, resolved POST-unlock (the normalized-PAN dedupe needs the decrypted
@@ -83,6 +84,11 @@ private sealed interface LoginPlan {
     data class Update(val itemId: String, val name: String, val username: String?) : LoginPlan
     object New : LoginPlan
 }
+
+/** App-minted, user-facing save-stage failure (the planned item vanished between resolve and
+ *  save — deleted on another device mid-flow). A DISTINCT type so `friendly` can show the
+ *  curated sentence verbatim without ever falling back to raw exception text (#23). */
+private class SaveStageException(message: String) : IllegalStateException(message)
 
 /**
  * "Save to andvari?" — launched by [AndvariAutofillService.onSaveRequest] via an IntentSender after
@@ -289,7 +295,7 @@ class SaveConfirmActivity : ComponentActivity() {
                         // Name untouched; only captured (non-null) fields overwrite; number stays
                         // the matched number; brand recomputed (the stored field is display-only).
                         val existing = engine.items().firstOrNull { it.itemId == plan.itemId }
-                            ?: throw IllegalStateException("This card is no longer in the vault.")
+                            ?: throw SaveStageException("This card is no longer in the vault.")
                         val c = existing.doc.card ?: CardData()
                         existing.doc.copy(
                             card = c.copy(
@@ -359,7 +365,7 @@ class SaveConfirmActivity : ComponentActivity() {
                         // passwordHistory/notes/favorite/extras/attachments all ride the copy. Never
                         // a field-by-field rebuild (the 0.2.x data-loss class, :77). Amendment D.
                         val existing = engine.items().firstOrNull { it.itemId == plan.itemId }
-                            ?: throw IllegalStateException("That login is no longer in your vault.")
+                            ?: throw SaveStageException("That login is no longer in your vault.")
                         val doc = existing.doc.copy(login = (existing.doc.login ?: LoginData()).copy(password = creds.password))
                         withContext(Dispatchers.IO) { engine.save(plan.itemId, doc) }
                     }
@@ -374,11 +380,14 @@ class SaveConfirmActivity : ComponentActivity() {
         }
     }
 
+    /** #23: pre-map the overlay-specific contexts — [SaveStageException] carries OUR minted
+     *  copy (the target item vanished mid-flow) and a dead session must say "open andvari"
+     *  (this surface renders inside another app) — then delegate to the shared household
+     *  canon (wrong password, save-offline, conflict codes). Never a raw `.message`. */
     private fun friendly(t: Throwable): String = when {
-        t is CryptoException -> t.message ?: "Wrong master password."
-        t is ApiException && t.status == 401 -> "Session expired — open andvari and sign in again."
-        t is IOException -> "Offline — try saving again when you're connected."
-        else -> t.message ?: "Couldn't save."
+        t is SaveStageException -> t.message ?: HouseholdCopy.SAVE_FAILED
+        t is ApiException && t.status == 401 -> HouseholdCopy.SESSION_EXPIRED_AUTOFILL
+        else -> HouseholdCopy.forSaveError(t)
     }
 
     @Suppress("DEPRECATION")
@@ -492,7 +501,9 @@ private fun UnlockToSaveCard(
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
+                // #25: geometry, not the raw ᛅ codepoint (tofu on font-hostile surfaces) — see
+                // Theme.kt BrandSigil.
+                SigilMark(BrandSigil, 40.dp)
                 Text("Unlock to save", style = MaterialTheme.typography.titleLarge)
                 Text("$email · saving $subject", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(16.dp))

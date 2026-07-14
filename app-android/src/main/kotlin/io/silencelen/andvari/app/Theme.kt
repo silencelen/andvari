@@ -1,15 +1,28 @@
 package io.silencelen.andvari.app
 
+import android.content.Context
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 // Treasury/gold palette — matches the web client (aged gold on deep charcoal).
@@ -120,10 +133,101 @@ private val AndvariType = Typography(
     titleLarge = TextStyle(fontFamily = serif, fontWeight = FontWeight.SemiBold, fontSize = 22.sp),
 )
 
+// ---- brand sigils (UI-audit #25) ----
+// The brand (ᛅ) and empty-hoard (ᛝ) marks as GEOMETRY, not runic codepoints: the Runic
+// block is absent from most default system fonts, so Text("ᛅ") renders as a tofu box on
+// exactly the surfaces that lean on the mark as a trust signal (web/src/ui/Sigil.tsx
+// documents the risk and ships SVG; these are byte-for-byte ports of its two paths —
+// viewBox 24, stroke 1.8, round caps). Keep the path data in lockstep with Sigil.tsx.
+// The base stroke color is a placeholder: render through [SigilMark] (or Icon), whose
+// tint drives the actual color.
+
+/** ᛅ (long-branch ár), the wordmark rune: a stave crossed by one falling stroke. */
+val BrandSigil: ImageVector = ImageVector.Builder(
+    name = "BrandSigil", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,
+).apply {
+    path(stroke = SolidColor(Color.White), strokeLineWidth = 1.8f, strokeLineCap = StrokeCap.Round) {
+        moveTo(12f, 3f); verticalLineToRelative(18f) // M12 3v18
+    }
+    path(stroke = SolidColor(Color.White), strokeLineWidth = 1.8f, strokeLineCap = StrokeCap.Round) {
+        moveTo(5.5f, 8.5f); lineToRelative(13f, 6f) // M5.5 8.5l13 6
+    }
+}.build()
+
+/** ᛝ (Ingwaz), the empty-state mark, reduced to its enclosing diamond (web parity). */
+val EmptySigil: ImageVector = ImageVector.Builder(
+    name = "EmptySigil", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,
+).apply {
+    path(
+        stroke = SolidColor(Color.White), strokeLineWidth = 1.8f,
+        strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round,
+    ) {
+        moveTo(12f, 4.5f); lineTo(19f, 12f); lineToRelative(-7f, 7.5f); lineTo(5f, 12f); close() // M12 4.5 19 12l-7 7.5L5 12Z
+    }
+}.build()
+
+/** One sigil render seam for every call site (app + autofill overlays): decorative
+ *  (contentDescription null, the web marks are aria-hidden), tinted like the Text("ᛅ")
+ *  sites it replaces. */
+@Composable
+fun SigilMark(vector: ImageVector, size: Dp, tint: Color = MaterialTheme.colorScheme.primary) {
+    Icon(vector, contentDescription = null, tint = tint, modifier = Modifier.size(size))
+}
+
+// ---- appearance preference (UI-audit #26) ----
+
+/** The three-way appearance choice. Auto = follow the system (the pre-#26 behavior). */
+enum class ThemeMode(val storageValue: String) {
+    Auto("auto"), Light("light"), Dark("dark");
+
+    companion object {
+        fun fromStorage(v: String?): ThemeMode = entries.firstOrNull { it.storageValue == v } ?: Auto
+    }
+}
+
+/**
+ * #26: device-local Auto/Light/Dark preference, persisted in the "andvari-ui"
+ * SharedPreferences (where cut L put autofill_offer_dismissed — plain UI prefs, nothing
+ * secret). Backed by process-wide snapshot state so EVERY [AndvariTheme] in the process —
+ * the main app and the autofill overlay activities — recomposes live when Settings flips
+ * it. Main-thread only (composition + the Settings tap).
+ */
+object ThemePref {
+    private const val PREFS_NAME = "andvari-ui"
+    private const val KEY = "theme_mode"
+
+    private val state = mutableStateOf(ThemeMode.Auto)
+    private var loaded = false
+
+    /** Current mode; first call per process hydrates from disk (write-before-read, so the
+     *  hydration never schedules a spurious recomposition). */
+    fun mode(ctx: Context): ThemeMode {
+        if (!loaded) {
+            loaded = true
+            state.value = ThemeMode.fromStorage(
+                ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY, null),
+            )
+        }
+        return state.value
+    }
+
+    fun set(ctx: Context, mode: ThemeMode) {
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString(KEY, mode.storageValue).apply()
+        state.value = mode
+    }
+}
+
 @Composable
 fun AndvariTheme(content: @Composable () -> Unit) {
+    // #26: the ThemePref selector gates the system signal — ONLY this selection expression
+    // changed; the two schemes above stay byte-identical (token-lockstep with web/desktop).
+    val dark = when (ThemePref.mode(LocalContext.current)) {
+        ThemeMode.Light -> false
+        ThemeMode.Dark -> true
+        ThemeMode.Auto -> isSystemInDarkTheme()
+    }
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) AndvariDark else AndvariLight,
+        colorScheme = if (dark) AndvariDark else AndvariLight,
         typography = AndvariType,
         content = content,
     )
