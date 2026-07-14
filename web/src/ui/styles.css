@@ -130,7 +130,8 @@ body {
   min-height: 100%;
   display: grid;
   place-items: center;
-  padding: 40px 0;
+  /* Cut G (v2 #8): a horizontal gutter — the sign-in card ran edge-to-edge on phones. */
+  padding: 40px 16px;
 }
 .card {
   width: 100%;
@@ -415,8 +416,20 @@ input.token { font-size: 15px; color: var(--gold-bright); }
   .appbar .brand { font-size: 18px; flex: none; }
   .nav { margin-left: 10px; overflow-x: auto; scrollbar-width: none; }
   .nav::-webkit-scrollbar { display: none; }
+  /* Cut G (v2 #8): the hidden-scrollbar nav gave NO hint more tabs exist off-screen
+     (Admin could be invisible on phones) — a right-edge fade marks the overflow. The
+     matching end padding keeps the fade over EMPTY space at rest and at scroll-end, so
+     the last tab's glyphs and focus ring never render through it. */
+  .nav {
+    padding-right: 18px;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+  }
   .navbtn { padding: 6px 10px; }
   .appbar > .row:last-child { flex: none; gap: 8px; }
+  /* Cut G: the toolbar wrapped into a ragged 3-row stack with a stranded trash icon —
+     the search box takes its own full row; the action buttons then wrap as one group. */
+  .toolbar > input { flex: 1 1 100%; }
 }
 @media (max-width: 430px) {
   /* Drop the userId text on the smallest phones; the connectivity dot + Lock stay. */

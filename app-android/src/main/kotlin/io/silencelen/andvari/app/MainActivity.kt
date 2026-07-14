@@ -54,6 +54,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.BackupPreflight
+import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.BackupRequest
 import io.silencelen.andvari.core.client.BackupResult
 import io.silencelen.andvari.core.client.CsvPreflight
@@ -163,6 +164,9 @@ class MainActivity : FragmentActivity() {
             orientation = android.widget.LinearLayout.VERTICAL
             setBackgroundColor(0xFF14120E.toInt())
             setPadding(pad, pad, pad, pad)
+            // Cut F review: this plain-View fallback bypasses AndvariApp's safeDrawing Column —
+            // view-level fitting keeps the header out of the status bar on Android 15+.
+            fitsSystemWindows = true
         }
         root.addView(android.widget.TextView(this).apply {
             text = "andvari hit an error — screenshot this and send it"
@@ -202,7 +206,11 @@ fun AndvariApp(vm: AndvariViewModel) {
         return
     }
     Surface(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize()) {
+        // UI-audit Cut F (v2 #5): targetSdk 35 forces edge-to-edge — without insets handling the
+        // banner stack + non-Scaffold screens (Welcome/Unlock/RecoverySetup) draw under the system
+        // bars on Android 15+. safeDrawing (system bars + cutout + IME) is padded ONCE here;
+        // windowInsetsPadding consumes what it pads, so the Scaffold screens inside don't double-pad.
+        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
             // F58: sits ABOVE the screen switch so it survives every in-app navigation —
             // no screen can compose it away while the flag is true.
             MustChangePasswordBanner(ui)
@@ -379,7 +387,19 @@ private fun UpgradeRequiredScreen(message: String, onSignOut: () -> Unit) {
                 modifier = Modifier.widthIn(max = 380.dp).padding(top = 8.dp),
             )
             Spacer(Modifier.height(24.dp))
-            OutlinedButton(onClick = onSignOut) { Text("Sign out / change server") }
+            // Cut D review: the OTHER live signOut site — same one-tap cache/quick-unlock/unsynced
+            // wipe as the Unlock screen's, so it gets the same confirm.
+            var confirmSignOut by remember { mutableStateOf(false) }
+            OutlinedButton(onClick = { confirmSignOut = true }) { Text("Sign out / change server") }
+            if (confirmSignOut) {
+                AlertDialog(
+                    onDismissRequest = { confirmSignOut = false },
+                    title = { Text("Sign out of this device?") },
+                    text = { Text("This removes the vault copy, quick unlock, and any unsynced changes from this device. You'll need your master password — and a reachable server — to sign back in.") },
+                    confirmButton = { TextButton(onClick = { confirmSignOut = false; onSignOut() }) { Text("Sign out") } },
+                    dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Stay") } },
+                )
+            }
         }
     }
 }
@@ -704,7 +724,12 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
     LaunchedEffect(canBiometric) {
         if (canBiometric && !autoShown && !ui.busy) { autoShown = true; vm.unlockWithBiometric(activity!!) }
     }
-    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+    // Cut F (v2 #5): scrollable — a centered fixed column left the Unlock button unreachable
+    // with the IME open in landscape / split-screen / half-fold.
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+        verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
         Sigil()
         Spacer(Modifier.height(8.dp))
         Text(email, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -737,7 +762,19 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
                 Text("Use fingerprint / face")
             }
         }
-        TextButton(onClick = vm::signOut) { Text("Sign out / use a different account") }
+        // Cut D (v2 #3): sign-out clears the local vault cache, quick unlock, and any unsynced
+        // edits — it must never be a one-tap action from a screen whose main button is right above.
+        var confirmSignOut by remember { mutableStateOf(false) }
+        TextButton(onClick = { confirmSignOut = true }) { Text("Sign out / use a different account") }
+        if (confirmSignOut) {
+            AlertDialog(
+                onDismissRequest = { confirmSignOut = false },
+                title = { Text("Sign out of this device?") },
+                text = { Text("This removes the vault copy, quick unlock, and any unsynced changes from this device. You'll need your master password — and a connection to your server — to sign back in.") },
+                confirmButton = { TextButton(onClick = { confirmSignOut = false; vm.signOut() }) { Text("Sign out") } },
+                dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Stay signed in") } },
+            )
+        }
     }
 }
 
@@ -1125,6 +1162,17 @@ private fun VaultRow(item: VaultItem, onClick: () -> Unit) {
 @Composable
 private fun ItemHistorySection(vm: AndvariViewModel, ui: UiState, item: VaultItem, readOnly: Boolean, onRestored: () -> Unit) {
     var open by rememberSaveable(item.itemId) { mutableStateOf(false) }
+    // Cut D (v2 #3): the pending restore target — Restore was a one-tap unconfirmed overwrite.
+    var confirmRestore by remember(item.itemId) { mutableStateOf<DecryptedItemVersion?>(null) }
+    confirmRestore?.let { v ->
+        AlertDialog(
+            onDismissRequest = { confirmRestore = null },
+            title = { Text("Restore this version?") },
+            text = { Text("The item's current version will be replaced by the one from ${java.time.Instant.ofEpochMilli(v.archivedAt).toString().take(10)}. The replaced version stays in history.") },
+            confirmButton = { TextButton(onClick = { confirmRestore = null; vm.saveItem(item.itemId, v.doc) { onRestored() } }) { Text("Restore") } },
+            dismissButton = { TextButton(onClick = { confirmRestore = null }) { Text("Cancel") } },
+        )
+    }
     if (!open) {
         TextButton(onClick = { open = true; vm.loadItemVersions(item.itemId, item.vaultId) }) { Text("Version history") }
         return
@@ -1153,7 +1201,9 @@ private fun ItemHistorySection(vm: AndvariViewModel, ui: UiState, item: VaultIte
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (pw != null) TextButton(onClick = { revealed = !revealed }) { Text(if (revealed) "Hide" else "Show") }
-                if (!readOnly) TextButton(onClick = { vm.saveItem(item.itemId, v.doc) { onRestored() } }) { Text("Restore") }
+                // Cut D (v2 #3): Restore overwrites the LIVE item in one tap — confirm first.
+                // (The overwritten version itself lands in history, so the copy says so.)
+                if (!readOnly) TextButton(onClick = { confirmRestore = v }) { Text("Restore") }
             }
         }
     }
@@ -1369,7 +1419,9 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
-        TextButton(onClick = onCancel) { Text("cancel") }
+        // Cut D (v2 #3): cancel rides the SAME discard-confirm as system Back — it was the
+        // one-tap path that silently threw away typed work.
+        TextButton(onClick = { confirmDiscard = true }) { Text("cancel") }
         Text(if (itemId != null) "Edit" else if (isLogin) "New login" else if (isCard) "New card" else "New note", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(8.dp))
         ErrorBar(ui.error, vm::clearError)
@@ -1386,7 +1438,9 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
             // RAW text while typing — normalizeTotp per keystroke rewrote the field to an
             // otpauth:// URI on the first character, making hand-typing a secret impossible.
             // Normalization + validation happen once, on Save.
-            Field("TOTP (otpauth:// or base32)", totp, { totp = it; totpError = null }, mono = true)
+            // Cut E review: a TOTP seed is a secret too — Password type keeps it out of the
+            // IME's suggestion strip and personal dictionary (usually pasted, but not always).
+            Field("TOTP (otpauth:// or base32)", totp, { totp = it; totpError = null }, mono = true, keyboard = KeyboardType.Password)
             InlineError(totpError)
         }
         if (isCard) {
@@ -2146,6 +2200,10 @@ private fun SecretField(label: String, value: String, onChange: (String) -> Unit
     var show by remember { mutableStateOf(false) }
     OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp), label = { Text(label) }, singleLine = true,
         visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
+        // Cut E (v2 #4): a masking transformation alone does NOT tell the IME the field is a
+        // secret — without KeyboardType.Password the keyboard's suggestion strip and personal
+        // dictionary learn master passwords, item passwords, and backup passphrases.
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
         trailingIcon = { IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "Hide $label" else "Show $label") } })
 }

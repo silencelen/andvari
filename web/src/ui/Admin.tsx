@@ -458,8 +458,10 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
       {/* AM-2 / BL-1: "Invite created" is async status → a PERSISTENT (unconditionally mounted)
           visually-hidden region, driven by result?.email so it re-announces on a same-email repeat. */}
       <Announcer text={result ? `Invite created for ${result.email}` : ""} />
-      <div className="row" style={{ alignItems: "flex-end" }}>
-        <Field label="Email" style={{ flex: 1, marginBottom: 0 }}>
+      {/* Cut G (v2 #8): flexWrap + a real email min-width — the old no-wrap row crushed the
+          email input to a few characters at desktop width and collided the labels. */}
+      <div className="row" style={{ alignItems: "flex-end", flexWrap: "wrap", rowGap: 12 }}>
+        <Field label="Email" style={{ flex: "1 1 220px", marginBottom: 0 }}>
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="new@user" />
         </Field>
         <Field label="Invite expires in" style={{ marginBottom: 0 }}>
