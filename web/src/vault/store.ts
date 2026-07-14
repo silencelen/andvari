@@ -391,7 +391,10 @@ export class VaultStore {
         if (!heldBefore) this.undecryptableGrants.add(grant.vaultId);
       }
     }
-    for (const vault of resp.vaults) {
+    for (const delivered of resp.vaults) {
+      // spec 02 §4 warn-and-keep-newer: a delivered metaBlob whose metaV regressed keeps
+      // the newer local blob (rev/lifecycle fields still apply).
+      const vault = this.keepNewerMeta(delivered);
       this.vaultsById.set(vault.vaultId, vault);
       // Discover the personal vault so save()/encrypt default to it.
       if (vault.type === "personal" && this.account.hasVault(vault.vaultId)) {
@@ -544,6 +547,48 @@ export class VaultStore {
     }
 
     this._lastSyncAt = Date.now();
+  }
+
+  /**
+   * spec 02 §4 warn-and-keep-newer: the metaBlob plaintext carries the monotonic `metaV`
+   * counter (bumped by every rename write), and a DELIVERED blob whose counter regresses
+   * below the locally-held one is a replayed/rolled-back row — warn and keep the newer
+   * local blob, never silently apply (the metaBlob-level sibling of the rollback guards
+   * above; an absent or non-integral metaV reads as 0, the pre-rename floor, matching
+   * buildRenameMeta — see metaVOf).
+   * Comparable only when the VK is held, a previous row exists (never on a since=0 /
+   * resync pull — vaultsById was just cleared), and BOTH blobs decrypt; anything
+   * unverifiable applies the delivered row as-is (this guard is anti-replay, not
+   * availability). ONLY the metaBlob is kept — rev and the lifecycle fields always apply.
+   * Core twin: SyncEngine.keepNewerMeta.
+   */
+  private keepNewerMeta(delivered: WireVault): WireVault {
+    const held = this.vaultsById.get(delivered.vaultId);
+    if (!held || held.metaBlob === delivered.metaBlob || !this.account.hasVault(delivered.vaultId)) return delivered;
+    try {
+      const heldV = this.metaVOf(delivered.vaultId, held.metaBlob);
+      const deliveredV = this.metaVOf(delivered.vaultId, delivered.metaBlob);
+      if (deliveredV < heldV) {
+        console.warn(
+          `vault ${delivered.vaultId}: delivered metaV ${deliveredV} regressed below held ${heldV} — replayed metaBlob; keeping the newer local one`,
+        );
+        return { ...delivered, metaBlob: held.metaBlob };
+      }
+    } catch {
+      /* VK missing or a blob doesn't open — unverifiable, apply the delivered row as-is */
+    }
+    return delivered;
+  }
+
+  /** The row's plaintext `metaV` (spec 02 §4): it counts ONLY when it is an integral,
+   *  non-negative JSON number, else 0 — a string-encoded/fractional/negative value must
+   *  read identically on every client (the same read buildRenameMeta uses), or one impl
+   *  pins while another applies, forking the fleet in exactly the adversarial anti-replay
+   *  path this guard exists for. Core twin: SyncEngine.metaV. */
+  private metaVOf(vaultId: string, metaBlob: string): number {
+    const meta = this.account.decryptVaultMeta(vaultId, metaBlob);
+    const v = meta.metaV;
+    return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : 0;
   }
 
   private async materializeConflict(item: WireItem): Promise<void> {

@@ -482,9 +482,12 @@ function baseNameOf(name: string): string | null {
  *  when the uri is EMPTY (no class). A non-empty uri that fails to parse (A5 junk like
  *  ".example.com" — parseable before 2026-07-10) keys a verbatim `j:` class instead of
  *  dropping to null: silently dropping it collapsed junk-uri-only items into the NO_URI
- *  class, where a re-import could false-merge rows that differ only by that junk uri. */
+ *  class, where a re-import could false-merge rows that differ only by that junk uri.
+ *  Entry trim is the pinned csvTrim, never platform trim() — JS trim() strips U+FEFF
+ *  where the JVM keeps it, so a uri cell carrying a residual BOM landed in DIFFERENT
+ *  equality classes per impl, flipping alreadyInVault/passwordDiffers verdicts. */
 function uriClass(raw: string): string | null {
-  const trimmed = raw.trim();
+  const trimmed = csvTrim(raw);
   if (!trimmed) return null;
   const s = parseSavedUri(trimmed);
   if (s === null) return `j:${trimmed.toLowerCase()}`;
