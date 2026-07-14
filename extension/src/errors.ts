@@ -21,6 +21,7 @@ type UnlockCode =
   | "unknown";
 type SaveErrorCode = "locked" | "conflict" | "failed";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
+type RevealFailCode = "locked" | "not_allowed";
 
 /** Verbatim web/src/ui/errors.ts UNREACHABLE — the one canonical "can't reach the server"
  *  sentence, duplicated as a const because no build path from extension/ to web/src exists. */
@@ -96,6 +97,32 @@ export function fillErrorCopy(code: FillFailCode | undefined): string {
       return "Couldn't reach the page — reload the tab and retry.";
   }
 }
+
+/** Reveal-seam failure line (#23 string sweep): the popup's clipboard path AND the show/hide
+ *  password toggle both used to render the SW's raw `error` debug detail ("locked" / "unknown
+ *  item" / "not allowed for this site") straight into the #msg strip. Codes come from the reveal
+ *  seam (messages.ts); the popup always asks with explicit:true, so not_allowed here means a stale
+ *  row — the item changed or vanished under a sync — not a host mismatch. Verb-neutral ("release
+ *  that login", not "copy") because the same sentences render on the show-password path too. */
+export function revealErrorCopy(code: RevealFailCode | undefined): string {
+  switch (code) {
+    case "locked":
+      return "andvari locked before it could release that login — unlock and try again.";
+    case "not_allowed":
+      return "andvari wouldn't release that login — reopen the popup and try again.";
+    default:
+      // an absent code (SW mid-restart) — retryable, no jargon (the saveErrorCopy idiom).
+      return "Could not release that login — try again.";
+  }
+}
+
+/** Card-field copy failure (#23): the card seam carries no code (messages.ts) — one honest
+ *  retryable sentence, never the SW's internal "unknown item"/"no number on this card". The
+ *  popup's has* flags gate the buttons, so a real miss is a locked race or a stale row. */
+export const CARD_COPY_FAILED = "Could not copy from this card — reopen the popup and try again.";
+
+/** Clipboard write refused (#23; focus loss / browser policy) — never the raw exception text. */
+export const CLIPBOARD_FAILED = "Couldn't copy to the clipboard — try again.";
 
 /**
  * F26 lock-reason line (E1-7): verbatim port of web format.ts inactivityNotice. Seconds

@@ -6,7 +6,7 @@
  * TOTP chips re-polled each second. The SW holds all key material — this page only messages it.
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
-import { fillErrorCopy, lockNoticeCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
+import { CARD_COPY_FAILED, CLIPBOARD_FAILED, fillErrorCopy, lockNoticeCopy, revealErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
 import { displaySite, safeSiteUrl } from "./siteurl";
 
@@ -217,6 +217,33 @@ async function activeTabHost(): Promise<string | null> {
   }
 }
 
+/** F80 port (web Sigil.tsx, geometry verbatim): the ᛅ/ᛝ marks as inline SVG — the runic
+ *  codepoints render as tofu wherever no installed font covers the Runic block, and the CSP
+ *  posture (self-contained, nothing loads over the network) bars shipping one. Strokes inherit
+ *  currentColor, so the existing .sigil/.glyph color tokens keep working in both themes.
+ *  Duplicated from web because no build path from extension/ to web/src exists (the errors.ts
+ *  UNREACHABLE idiom); popup.html carries the same geometry statically. */
+const SVG_NS = "http://www.w3.org/2000/svg";
+function sigilSvg(mark: "brand" | "empty", size: number): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8");
+  svg.setAttribute("stroke-linecap", "round");
+  if (mark === "empty") svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  // ᛅ (long-branch ár) = a stave crossed by one falling stroke; ᛝ (Ingwaz) = its enclosing diamond.
+  for (const d of mark === "brand" ? ["M12 3v18", "M5.5 8.5l13 6"] : ["M12 4.5 19 12l-7 7.5L5 12Z"]) {
+    const p = document.createElementNS(SVG_NS, "path");
+    p.setAttribute("d", d);
+    svg.append(p);
+  }
+  return svg;
+}
+
 function renderList(list: HTMLElement, items: MatchItem[], emptyText: string, slim = false): void {
   list.replaceChildren();
   if (items.length === 0) {
@@ -225,7 +252,7 @@ function renderList(list: HTMLElement, items: MatchItem[], emptyText: string, sl
     if (!slim) {
       const sigil = document.createElement("div");
       sigil.className = "sigil";
-      sigil.textContent = "ᛅ";
+      sigil.append(sigilSvg("empty", 30)); // ᛝ, the empty-hoard mark (web Vault parity) — was a tofu-prone ᛅ
       empty.append(sigil);
     }
     empty.append(emptyText);
@@ -247,7 +274,9 @@ function row(it: MatchItem): HTMLElement {
 
   const glyph = document.createElement("span");
   glyph.className = "glyph";
-  glyph.textContent = (it.name.trim().charAt(0) || "ᛅ").toUpperCase();
+  const initial = it.name.trim().charAt(0).toUpperCase();
+  if (initial) glyph.textContent = initial;
+  else glyph.append(sigilSvg("brand", 15)); // a nameless login falls back to the mark, not a tofu rune
 
   const body = document.createElement("div");
   body.className = "body";
@@ -327,7 +356,8 @@ async function toggleReveal(it: MatchItem, value: HTMLElement, btn: HTMLButtonEl
   }
   const r = await ask({ type: "reveal", itemId: it.itemId, host: tabHost ?? "", explicit: true });
   if (!r?.ok || r.secret?.password == null) {
-    showMsg("err", r?.error ?? "No password on this item.");
+    // #23: canon copy, never the SW's raw `error` debug detail (the messages.ts contract).
+    showMsg("err", r?.ok ? "No password on this item." : revealErrorCopy(r?.code));
     return;
   }
   value.textContent = r.secret.password;
@@ -441,8 +471,8 @@ function flash(btn: HTMLElement): void {
 async function toClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
-  } catch (e) {
-    showMsg("err", `Clipboard: ${String(e)}`);
+  } catch {
+    showMsg("err", CLIPBOARD_FAILED); // #23: household copy, never the raw exception text
     return false;
   }
   await scheduleClipboardClear();
@@ -482,7 +512,8 @@ async function copyUsername(it: MatchItem, btn: HTMLElement): Promise<void> {
 async function copyPassword(it: MatchItem, btn: HTMLElement): Promise<void> {
   const r = await ask({ type: "reveal", itemId: it.itemId, host: tabHost ?? "", explicit: true });
   if (!r?.ok || r.secret?.password == null) {
-    showMsg("err", r?.error ?? "No password on this item.");
+    // #23: canon copy, never the SW's raw `error` debug detail (the messages.ts contract).
+    showMsg("err", r?.ok ? "No password on this item." : revealErrorCopy(r?.code));
     return;
   }
   if (await toClipboard(r.secret.password)) flash(btn); // just the one field, straight to clipboard
@@ -605,7 +636,9 @@ function cardRow(it: CardItem): HTMLElement {
 
   const glyph = document.createElement("span");
   glyph.className = "glyph";
-  glyph.textContent = (it.name.trim().charAt(0) || "ᛅ").toUpperCase();
+  const initial = it.name.trim().charAt(0).toUpperCase();
+  if (initial) glyph.textContent = initial;
+  else glyph.append(sigilSvg("brand", 15)); // a nameless card falls back to the mark, not a tofu rune
 
   const body = document.createElement("div");
   body.className = "body";
@@ -632,7 +665,8 @@ function cardRow(it: CardItem): HTMLElement {
 async function copyCardField(itemId: string, field: "number" | "expiry" | "cvv", btn: HTMLElement): Promise<void> {
   const r = await ask({ type: "revealCardField", itemId, field });
   if (!r?.ok || r.value == null) {
-    showMsg("err", r?.error ?? "Nothing to copy on this card.");
+    // #23: the card seam carries no code — one canon sentence, never the SW's raw `error`.
+    showMsg("err", CARD_COPY_FAILED);
     return;
   }
   if (await toClipboard(r.value)) flash(btn);
@@ -768,7 +802,8 @@ el("ping").addEventListener("click", async () => {
   showMsg("info", "…");
   const r = await ask({ type: "ping" });
   setConn(r?.ok === true);
-  if (r?.ok) showMsg("info", `server reachable (t=${r.serverTime})`);
+  // #23: the conn-status twin's sentence — the old line leaked a raw epoch (`t=1752…`).
+  if (r?.ok) showMsg("info", "Server reachable.");
   // E1-3/extux-05: the one canonical unreachable sentence — never the raw exception text. (A
   // mid-restart SW → undefined shares this copy, mildly conflating SW death with the network;
   // accepted per design.)
