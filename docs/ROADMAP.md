@@ -4,6 +4,30 @@ Where andvari is, what gates real-secret migration, and where it goes next. Livi
 the SSOT for *state* is the memory file `andvari-password-manager-2026-07-05.md` + the
 git history. This is the SSOT for *direction*.
 
+## Security pentest 2026-07-13 — remediation status + open H2 items
+
+Whole-fleet adversarial pentest (`docs/pentest/2026-07-13-comprehensive-pentest.md`): **0 crit / 2
+high / 8 med**. All fixable compliance gaps SHIPPED + DEPLOYED (each breaker'd → find→refute reviewed →
+verified): **H1/L1** client-side KDF floor, **M2** refresh-revocation CAS, **M3** CF-Connecting-IP
+trust scoping, **M6** backup-cli PAN/CVV redaction, **L6** identityPub tampering parity, **M8**
+revoked-session WS teardown. **H2** (signed updates) load-bearing OS-signing DONE — MSI Authenticode +
+deb GPG (ceremony 2026-07-14, `docs/runbooks/release-signing-keys.md`).
+
+**Open — two H2 items (both owner-adjacent):**
+1. **Extension store-signing — DO FIRST.** Self-hosted extension zips have no integrity; the real fix
+   is publishing to the **Chrome Web Store (unlisted)** + **Firefox AMO (self-distribution signing)**.
+   The 0.13.0 zips are built + ready; step-by-step + listing copy + privacy policy in
+   `docs/runbooks/extension-store-publishing.md`. This is the only platform with NO installer signing.
+2. **Client manifest-verify wiring — secondary / defense-in-depth.** The pinned update-signing pubkey
+   + a signed `/downloads` manifest, so clients also reject a *fabricated* update nag or a
+   downgrade-steer. Remaining build: desktop `Platform.kt` (raw `ofByteArray` fetch + `.sig` +
+   `UpdateVerify.verify` + `seq`/`signedAt` + fail-closed-quiet) + extension `background.ts`
+   (`arrayBuffer` + `tweetnacl.sign` verify) + a manifest `seq`/`signedAt`/`sig` model; then a
+   per-release `update-signer sign` on the workstation + a one-time client rebuild. Foundation
+   (`core UpdateVerify` + `tools/update-signer`, pubkey pinned) is BUILT + tested — only the client
+   wiring remains. Design: `docs/design/2026-07-13-signed-updates.md` §M (authoritative). Optional now
+   that the installers are OS-signed.
+
 ## v5 refinement cycle — batches B1–B8 SHIPPED (2026-07-07)
 
 A 14-lens recon (168 raw → 84 deduped findings) drove eight reviewed batches, all shipped
