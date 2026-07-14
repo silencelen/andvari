@@ -35,6 +35,9 @@ type Phase =
   | { kind: "vault"; account: Account; store: VaultStore; meta: LoginMeta };
 
 const UPGRADE_NOTICE = "This tab is running an older version — reload to update.";
+// Cut M (v2 #16): pre-lock warning copy — the listed gestures are exactly the activity
+// events useAutoLock tracks (pointer/key/touch), so doing any of them keeps the vault open.
+const LOCK_WARNING_NOTICE = "Still there? Locking soon — click, tap, or press a key to stay unlocked.";
 
 export function App() {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
@@ -215,7 +218,10 @@ export function App() {
     vaultUserId === null
       ? 0
       : resolveAutoLockSeconds(fetchedAutoLock, readPersistedAutoLockSeconds(vaultUserId)).seconds;
-  useAutoLock(autoLockSeconds, () => lock(inactivityNotice(autoLockSeconds)));
+  // Cut M (v2 #16): `lockWarning` is true while ~30 s remain (windows > 60 s only) — an
+  // unannounced lock silently destroys open editor work, so the user gets a chance to
+  // wiggle first. Rendered as a slim .banner + spoken via the persistent Announcer below.
+  const lockWarning = useAutoLock(autoLockSeconds, () => lock(inactivityNotice(autoLockSeconds)));
 
   // 426 nudge: a persistent, non-dismissable slim bar (the Vault mustChange-banner
   // idiom) above whichever phase shell is showing. App itself never unmounts, so the
@@ -233,10 +239,19 @@ export function App() {
           and go silent. App itself never unmounts, so these survive every phase change. */}
       <Announcer text={upgradeStale ? UPGRADE_NOTICE : ""} />
       <Announcer text={phaseNotice ?? ""} />
+      <Announcer text={lockWarning ? LOCK_WARNING_NOTICE : ""} />
       {upgradeStale && (
         <div className="banner">
           <span>{UPGRADE_NOTICE}</span>
           <button className="link" onClick={() => window.location.reload()}>Reload</button>
+        </div>
+      )}
+      {/* Cut M (v2 #16): pre-lock countdown notice. No dismiss button — ANY tracked
+          activity (including tapping the banner) clears it via the hook; a dedicated
+          button would just be a slower way to move the pointer. */}
+      {lockWarning && (
+        <div className="banner">
+          <span>{LOCK_WARNING_NOTICE}</span>
         </div>
       )}
       {content}

@@ -698,6 +698,13 @@ function FingerprintProvenance(p: {
  * bound to its own `typed` state (never to the secret) with autoComplete off and sits OUTSIDE any
  * credential <form>; the copy button uses the SECRET clipboard-clear path. The gate is un-skippable
  * (no dismiss) — matching today's fpConfirmed gate.
+ *
+ * Cut M (v2 #7): the Copy button used to sit ABOVE the type-back, so copy → paste → confirm passed
+ * the gate without the phrase ever being saved — and the clipboard auto-wipe then destroyed the only
+ * copy (silent total loss for a waived account). Now the confirm input refuses pastes, and copying
+ * is offered only AFTER the type-back has proven a saved copy exists (for the password-manager
+ * use-case). This component is the ONE gate body — both surfaces (enroll reveal + vault-entry
+ * capture gate) render it, so both are covered.
  */
 function RecoveryReveal({
   secretRef,
@@ -710,6 +717,9 @@ function RecoveryReveal({
 }) {
   const [typed, setTyped] = useState("");
   const [copied, setCopied] = useState(false);
+  // Cut M (v2 #7): a refused paste/drop into the type-back sets this so the refusal is
+  // explained in place rather than looking like a broken input.
+  const [pasteTried, setPasteTried] = useState(false);
   const secret = secretRef.current;
   if (!secret) return null;
   const phrase = displayForm(secret); // base64url of the raw 32 bytes — computed per render, not stored
@@ -743,7 +753,8 @@ function RecoveryReveal({
         >
           {grouped}
         </div>
-        <button type="button" className="ghost" style={{ marginTop: 8 }} onClick={copy}>{copied ? "Copied ✓" : "Copy phrase"}</button>
+        {/* Cut M (v2 #7): no Copy button here — it moved BELOW the type-back gate (see the
+            post-confirm section) so a clipboard round-trip can't stand in for saving. */}
       </div>
       <div className="field">
         <label>Type your recovery phrase back to confirm you saved it</label>
@@ -755,10 +766,28 @@ function RecoveryReveal({
           spellCheck={false}
           value={typed}
           onChange={(e) => setTyped(e.target.value)}
-          placeholder="paste or type it here"
+          // Cut M (v2 #7): pasting (or dropping selected text) proves nothing about a saved
+          // copy — refuse it and say why. Typing stays the only way through the gate.
+          onPaste={(e) => { e.preventDefault(); setPasteTried(true); }}
+          onDrop={(e) => { e.preventDefault(); setPasteTried(true); }}
+          placeholder="type it in from where you saved it"
         />
+        {pasteTried && !matches && (
+          <span className="muted" style={{ display: "block", color: "var(--gold-text)" }}>
+            Type it from your written note — pasting doesn't prove you saved it.
+          </span>
+        )}
         {typed.trim() && !matches && <span className="muted" style={{ color: "var(--danger)" }}>doesn't match — check what you saved</span>}
       </div>
+      {/* Cut M (v2 #7): the gate is open — the phrase demonstrably exists outside this screen —
+          so offering the clipboard here can no longer defeat it. Same SECRET clipboard-clear
+          path as before (the secret is still live; it's only zeroed by onConfirmed). */}
+      {matches && (
+        <div className="msg info" style={{ display: "block" }}>
+          That matches — your phrase is saved. Want it in another password manager too?{" "}
+          <button type="button" className="ghost" onClick={copy}>{copied ? "Copied ✓" : "Copy phrase"}</button>
+        </div>
+      )}
       <button type="button" className="primary" disabled={!matches} onClick={onConfirmed}>I've saved it — open my vault</button>
     </div>
   );

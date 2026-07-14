@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * Inactivity auto-lock (spec 01 §8, policy `autoLockSeconds`): after `timeoutSeconds`
@@ -14,6 +14,11 @@ import { useEffect, useRef } from "react";
 const CHECK_INTERVAL_MS = 1_000;
 /** Coarse activity throttle: sub-second repeat events don't rewrite the timestamp. */
 const ACTIVITY_THROTTLE_MS = 1_000;
+/** Cut M (v2 #16): how far ahead of the lock the pre-warning surfaces. */
+const WARNING_LEAD_MS = 30_000;
+/** Cut M (v2 #16): windows this short (or shorter) get NO pre-warning — a 30 s lead on a
+ *  60 s window would start nagging half-way through every idle pause. */
+const WARNING_MIN_TIMEOUT_S = 60;
 
 export interface AutoLockHandle {
   /** Record user interaction (throttled to >=1 s granularity). */
@@ -28,20 +33,44 @@ export interface AutoLockHandle {
  * DOM-free timer core (unit-tested in useAutoLock.test.ts). Checks expiry on a 1 s
  * interval rather than one long setTimeout so a forward wall-clock jump (sleep, NTP)
  * is noticed at the next tick instead of stretching the deadline. Fires at most once.
+ *
+ * Cut M (v2 #16): `onWarning` (optional) is edge-triggered — called with `true` when the
+ * idle time crosses T-{@link WARNING_LEAD_MS} (only for windows > {@link WARNING_MIN_TIMEOUT_S})
+ * and with `false` the moment activity resets the window or the lock itself fires. Never
+ * re-fires per tick; the caller renders it, so it must be a clean boolean transition.
  */
-export function createAutoLock(timeoutSeconds: number, onExpire: () => void, now: () => number = Date.now): AutoLockHandle {
+export function createAutoLock(
+  timeoutSeconds: number,
+  onExpire: () => void,
+  now: () => number = Date.now,
+  onWarning?: (active: boolean) => void,
+): AutoLockHandle {
   const disabled = !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0;
   let last = now();
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | undefined;
 
+  // Idle threshold (ms) past which the pre-warning is up; Infinity = warning disabled
+  // (short window or no listener), so the comparison below is always false.
+  const warnAtMs = !disabled && timeoutSeconds > WARNING_MIN_TIMEOUT_S ? timeoutSeconds * 1_000 - WARNING_LEAD_MS : Infinity;
+  let warned = false;
+  const setWarned = (v: boolean) => {
+    if (warned === v) return; // edge-triggered — quiet across the 1 s ticks in between
+    warned = v;
+    onWarning?.(v);
+  };
+
   const check = () => {
     if (stopped || disabled) return;
-    if (now() - last >= timeoutSeconds * 1_000) {
+    const idle = now() - last;
+    if (idle >= timeoutSeconds * 1_000) {
       stopped = true; // fire exactly once; consumer teardown calls stop() anyway
       if (timer !== undefined) clearInterval(timer);
+      setWarned(false); // the lock notice supersedes the warning banner
       onExpire();
+      return;
     }
+    setWarned(idle >= warnAtMs);
   };
   if (!disabled) timer = setInterval(check, CHECK_INTERVAL_MS);
 
@@ -50,6 +79,10 @@ export function createAutoLock(timeoutSeconds: number, onExpire: () => void, now
       if (stopped || disabled) return;
       const n = now();
       if (n - last >= ACTIVITY_THROTTLE_MS) last = n;
+      // Clear an active warning NOW, not at the next tick — the banner says "touch
+      // anywhere to stay unlocked", so the touch must visibly land. (A throttled repeat
+      // can't strand it: a live warning means >=30 s idle, far past the 1 s throttle.)
+      setWarned(n - last >= warnAtMs);
     },
     checkNow: check,
     stop() {
@@ -107,13 +140,18 @@ export function writePersistedAutoLockSeconds(userId: string, seconds: number): 
  * moment the tab becomes visible again (background tabs throttle intervals, so the
  * lock for an expired hidden tab lands on return, before the user can read anything
  * beyond one frame). Pass 0 while locked/logged out to disable.
+ *
+ * Cut M (v2 #16): returns the pre-warning flag — true while ~30 s remain before the lock
+ * (windows > 60 s only). The same activity events that feed the timer clear it, so any
+ * click/keypress/touch dismisses the caller's banner.
  */
-export function useAutoLock(timeoutSeconds: number, onLock: () => void): void {
+export function useAutoLock(timeoutSeconds: number, onLock: () => void): boolean {
   const onLockRef = useRef(onLock);
   onLockRef.current = onLock;
+  const [warning, setWarning] = useState(false);
   useEffect(() => {
     if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) return;
-    const ctl = createAutoLock(timeoutSeconds, () => onLockRef.current());
+    const ctl = createAutoLock(timeoutSeconds, () => onLockRef.current(), Date.now, setWarning);
     const activity = () => ctl.activity();
     const vis = () => {
       if (document.visibilityState === "visible") ctl.checkNow();
@@ -124,10 +162,12 @@ export function useAutoLock(timeoutSeconds: number, onLock: () => void): void {
     document.addEventListener("visibilitychange", vis);
     return () => {
       ctl.stop();
+      setWarning(false); // a re-arm (policy change, lock, sign-out) must not strand a stale banner
       window.removeEventListener("pointerdown", activity, true);
       window.removeEventListener("keydown", activity, true);
       window.removeEventListener("touchstart", activity, true);
       document.removeEventListener("visibilitychange", vis);
     };
   }, [timeoutSeconds]);
+  return warning;
 }

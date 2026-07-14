@@ -99,6 +99,91 @@ describe("createAutoLock", () => {
 });
 
 /**
+ * Cut M (v2 #16) pre-lock warning: edge-triggered onWarning(true) at T-30 s so the caller
+ * can surface a "locking soon" banner before unsaved editor work is destroyed; any
+ * activity (the same events that feed the timer) clears it, and windows <= 60 s never
+ * warn at all — a 30 s lead there would nag half-way through every idle pause.
+ */
+describe("pre-lock warning (Cut M v2 #16)", () => {
+  let t: number;
+  const now = () => t;
+
+  beforeEach(() => {
+    t = 100_000;
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const advance = (ms: number) => {
+    t += ms;
+    vi.advanceTimersByTime(ms);
+  };
+
+  it("fires once at T-30 s and is withdrawn when the lock itself lands", () => {
+    const onExpire = vi.fn();
+    const onWarning = vi.fn();
+    const ctl = createAutoLock(90, onExpire, now, onWarning);
+    advance(59_000); // 31 s remain — still quiet
+    expect(onWarning).not.toHaveBeenCalled();
+    advance(1_000); // 60 s idle = T-30
+    expect(onWarning).toHaveBeenCalledTimes(1);
+    expect(onWarning).toHaveBeenLastCalledWith(true);
+    advance(20_000); // edge-triggered: the ticks inside the window don't re-fire
+    expect(onWarning).toHaveBeenCalledTimes(1);
+    advance(10_000); // 90 s → lock; the lock notice supersedes the banner
+    expect(onExpire).toHaveBeenCalledTimes(1);
+    expect(onWarning).toHaveBeenCalledTimes(2);
+    expect(onWarning).toHaveBeenLastCalledWith(false);
+    ctl.stop();
+  });
+
+  it("activity clears an active warning immediately, then it re-arms for the next approach", () => {
+    const onExpire = vi.fn();
+    const onWarning = vi.fn();
+    const ctl = createAutoLock(90, onExpire, now, onWarning);
+    advance(61_000);
+    expect(onWarning).toHaveBeenLastCalledWith(true);
+    ctl.activity(); // the banner says "touch anywhere" — no waiting for the next tick
+    expect(onWarning).toHaveBeenCalledTimes(2);
+    expect(onWarning).toHaveBeenLastCalledWith(false);
+    advance(59_000); // only 59 s since the touch — quiet
+    expect(onWarning).toHaveBeenCalledTimes(2);
+    advance(1_000); // T-30 of the NEW window
+    expect(onWarning).toHaveBeenCalledTimes(3);
+    expect(onWarning).toHaveBeenLastCalledWith(true);
+    expect(onExpire).not.toHaveBeenCalled();
+    ctl.stop();
+  });
+
+  it("never fires for windows of 60 s or less — the lock still lands normally", () => {
+    for (const timeout of [60, 45, 30]) {
+      const onExpire = vi.fn();
+      const onWarning = vi.fn();
+      const ctl = createAutoLock(timeout, onExpire, now, onWarning);
+      advance(timeout * 1_000 + 5_000);
+      expect(onExpire).toHaveBeenCalledTimes(1);
+      expect(onWarning).not.toHaveBeenCalled();
+      ctl.stop();
+    }
+  });
+
+  it("checkNow raises the warning when a hidden tab returns inside the window", () => {
+    const onExpire = vi.fn();
+    const onWarning = vi.fn();
+    const ctl = createAutoLock(90, onExpire, now, onWarning);
+    // Wall clock jumps 65 s with no interval ticks (throttled background tab).
+    t += 65_000;
+    ctl.checkNow();
+    expect(onWarning).toHaveBeenCalledTimes(1);
+    expect(onWarning).toHaveBeenLastCalledWith(true);
+    expect(onExpire).not.toHaveBeenCalled();
+    ctl.stop();
+  });
+});
+
+/**
  * spec 01 §8 policy fallback (native SessionStore parity): a transient policy-fetch
  * failure right after login must NOT silently disable the lock — the last
  * successfully fetched value takes over; a genuinely fetched 0 stays authoritative.
