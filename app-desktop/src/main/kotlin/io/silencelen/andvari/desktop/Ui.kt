@@ -31,6 +31,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.BackupPreflight
+import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.BackupResult
 import io.silencelen.andvari.core.client.CsvPreflight
 import io.silencelen.andvari.core.client.CardData
@@ -432,7 +433,19 @@ private fun Unlock(state: DesktopState, email: String) {
         Secret("Master password", password, onEnter = submit, autoFocus = true) { password = it } // a11ydesk-06: focus password on unlock (the most-repeated interaction)
         Spacer(Modifier.height(12.dp))
         Primary("Unlock", password.isNotBlank() && !state.busy, state.busy, submit)
-        TextButton(onClick = state::signOut) { Text("Sign out / use a different account") }
+        // Cut D (v2 #3): sign-out revokes the session and deletes the local cache including any
+        // unsynced edits — never a one-tap action (Android parity).
+        var confirmSignOut by remember { mutableStateOf(false) }
+        TextButton(onClick = { confirmSignOut = true }) { Text("Sign out / use a different account") }
+        if (confirmSignOut) {
+            AlertDialog(
+                onDismissRequest = { confirmSignOut = false },
+                title = { Text("Sign out of this device?") },
+                text = { Text("This removes the vault copy and any unsynced changes from this device. You'll need your master password — and a connection to your server — to sign back in.") },
+                confirmButton = { TextButton(onClick = { confirmSignOut = false; state.signOut() }) { Text("Sign out") } },
+                dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Stay signed in") } },
+            )
+        }
     }
 }
 
@@ -1486,6 +1499,17 @@ private fun RecentlyRemovedSection(held: List<HeldVaultInfo>) {
 @Composable
 private fun ItemHistorySection(state: DesktopState, item: VaultItem, readOnly: Boolean, onRestored: () -> Unit) {
     var open by remember(item.itemId) { mutableStateOf(false) }
+    // Cut D (v2 #3): Restore was a one-tap unconfirmed overwrite of the live item (Android parity).
+    var confirmRestore by remember(item.itemId) { mutableStateOf<DecryptedItemVersion?>(null) }
+    confirmRestore?.let { v ->
+        AlertDialog(
+            onDismissRequest = { confirmRestore = null },
+            title = { Text("Restore this version?") },
+            text = { Text("The item's current version will be replaced by the one from ${java.time.Instant.ofEpochMilli(v.archivedAt).toString().take(10)}. The replaced version stays in history.") },
+            confirmButton = { TextButton(onClick = { confirmRestore = null; state.saveItem(item.itemId, v.doc) { onRestored() } }) { Text("Restore") } },
+            dismissButton = { TextButton(onClick = { confirmRestore = null }) { Text("Cancel") } },
+        )
+    }
     if (!open) {
         TextButton(onClick = { open = true; state.loadItemVersions(item.itemId, item.vaultId) }) { Text("Version history") }
         return
@@ -1515,7 +1539,7 @@ private fun ItemHistorySection(state: DesktopState, item: VaultItem, readOnly: B
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (pw != null) TextButton(onClick = { revealed = !revealed }) { Text(if (revealed) "Hide" else "Show") }
-                if (!readOnly) TextButton(onClick = { state.saveItem(item.itemId, v.doc) { onRestored() } }) { Text("Restore") }
+                if (!readOnly) TextButton(onClick = { confirmRestore = v }) { Text("Restore") }
             }
         }
     }
@@ -1749,7 +1773,18 @@ private fun Editor(
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         // Busy-gated like every other dialog's Cancel here: a mid-save click would unmount
         // the editor and destroy the very draft F71 keeps alive for the retry.
-        TextButton(onClick = onCancel, enabled = !busy) { Text("cancel") }
+        // Cut D review: cancel discarded typed work in one click — Android's discard-confirm parity.
+        var confirmDiscard by remember { mutableStateOf(false) }
+        TextButton(onClick = { confirmDiscard = true }, enabled = !busy) { Text("cancel") }
+        if (confirmDiscard) {
+            AlertDialog(
+                onDismissRequest = { confirmDiscard = false },
+                title = { Text("Discard changes?") },
+                text = { Text("Anything typed in this editor will be lost.") },
+                confirmButton = { TextButton(onClick = { confirmDiscard = false; onCancel() }) { Text("Discard") } },
+                dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text("Keep editing") } },
+            )
+        }
         Text(if (itemId != null) "Edit" else if (isLogin) "New login" else if (isCard) "New card" else "New note", style = MaterialTheme.typography.headlineMedium)
         // F18: shown only when there's a choice to make (>1 writable vault). A single-vault
         // user's new item lands in Personal exactly as before — no picker.

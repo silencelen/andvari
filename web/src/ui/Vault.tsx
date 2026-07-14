@@ -964,7 +964,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
 
       {(doc.attachments?.length ?? 0) > 0 && <AttachmentList item={item} store={store} />}
 
-      <ItemHistory item={item} store={store} readOnly={readOnly} onRestored={onBack} />
+      <ItemHistory key={item.itemId} item={item} store={store} readOnly={readOnly} onRestored={onBack} />
 
       {/* A reader-role member cannot edit/delete/attach — the push would be denied. */}
       {!readOnly && (
@@ -1102,6 +1102,10 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
   const [versions, setVersions] = useState<{ rev: number; archivedAt: number; doc: ItemDoc }[] | null>(null);
   const [err, setErr] = useState("");
   const [restoringRev, setRestoringRev] = useState<number | null>(null);
+  // Cut D (v2 #3): Restore was a one-click unconfirmed overwrite of the live item —
+  // first click arms, second confirms (the Detail-delete inline idiom). Arming another
+  // row re-arms to it; Hide disarms below; the key on <ItemHistory> resets per item.
+  const [armedRev, setArmedRev] = useState<number | null>(null);
 
   const load = async () => {
     setOpen(true);
@@ -1147,13 +1151,17 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
             <span className="muted" style={{ flex: 1 }}>{v.doc.type === "login" ? "(no password in this version)" : v.doc.type === "card" ? cardSubtitle(v.doc) : "note"}</span>
           )}
           {!readOnly && (
-            <button className="ghost" disabled={restoringRev !== null} onClick={() => restore(v)}>
-              {restoringRev === v.rev ? "Restoring…" : "Restore"}
+            <button
+              className="ghost"
+              disabled={restoringRev !== null}
+              onClick={() => (armedRev === v.rev ? (setArmedRev(null), restore(v)) : setArmedRev(v.rev))}
+            >
+              {restoringRev === v.rev ? "Restoring…" : armedRev === v.rev ? "Overwrite current?" : "Restore"}
             </button>
           )}
         </div>
       ))}
-      <button className="link" style={{ marginTop: 8 }} onClick={() => setOpen(false)}>Hide history</button>
+      <button className="link" style={{ marginTop: 8 }} onClick={() => { setArmedRev(null); setOpen(false); }}>Hide history</button>
     </div>
   );
 }
@@ -1299,7 +1307,9 @@ function SecretInput({ value, onChange, ariaLabel }: { value: string; onChange: 
   return (
     <div className="secret-row">
       {/* BL-2: this custom input never gets Field's injected id, so name it here. */}
-      <input className="mono" type={show ? "text" : "password"} inputMode="numeric" autoComplete="off" aria-label={ariaLabel} value={value} onChange={(e) => onChange(e.target.value)} />
+      {/* Cut E review: browsers ignore autocomplete="off" on password-type inputs —
+          "new-password" is the signal that actually suppresses fill/save offers. */}
+      <input className="mono" type={show ? "text" : "password"} inputMode="numeric" autoComplete="new-password" aria-label={ariaLabel} value={value} onChange={(e) => onChange(e.target.value)} />
       <button type="button" className="ghost" aria-label={show ? "Hide value" : "Show value"} onClick={() => setShow((s) => !s)}>{show ? "Hide" : "Show"}</button>
     </div>
   );
@@ -1507,10 +1517,19 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
 
   const attachments = doc.attachments ?? [];
   const pendingIds = new Set(pending.map((p) => p.id));
+  // Cut D review: cancel discarded typed work in one click while Android confirms —
+  // the same two-click inline arm as history's Restore (full dirty-guard is v2 #16).
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
   return (
-    <form className="sheet" onSubmit={submit}>
-      <button type="button" className="link" onClick={onCancel}>← cancel</button>
+    // Cut E (v2 #4): autoComplete off — WITHOUT it the browser's own password manager
+    // interposes save/fill prompts inside the vault's editor (its suggestions overlay the
+    // generator, and it offers to save the household's secrets into the browser store).
+    // Password fields ignore form-level "off", so the password input adds "new-password".
+    <form className="sheet" autoComplete="off" onSubmit={submit}>
+      <button type="button" className="link" onClick={() => (confirmCancel ? onCancel() : setConfirmCancel(true))}>
+        {confirmCancel ? "Discard changes?" : "← cancel"}
+      </button>
       <h2 style={{ marginTop: 12 }}>{initial.name ? "Edit" : isLogin ? "New login" : isCard ? "New card" : "New note"}</h2>
       {vaultChoices && vaultChoices.length > 1 && (
         <Field label="Vault">
@@ -1538,7 +1557,7 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
             <div className="secret-row">
               {/* Masked by default (F78); typing stays possible — a password field the user
                   can't read is the login-editor's one blind spot the reveal toggle fixes. */}
-              <input className="mono" aria-label="Password" type={showPw ? "text" : "password"} value={login.password ?? ""} onChange={(e) => { setLogin({ password: e.target.value }); setConfirmGen(false); }} />
+              <input className="mono" aria-label="Password" type={showPw ? "text" : "password"} autoComplete="new-password" value={login.password ?? ""} onChange={(e) => { setLogin({ password: e.target.value }); setConfirmGen(false); }} />
               <button type="button" className="ghost" aria-label={showPw ? "Hide password" : "Show password"} onClick={() => setShowPw((s) => !s)}>{showPw ? "Hide" : "Show"}</button>
               <button type="button" className="ghost" onClick={gen}>{confirmGen ? "Replace?" : "Generate"}</button>
             </div>
