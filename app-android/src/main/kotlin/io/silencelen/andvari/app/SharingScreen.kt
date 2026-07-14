@@ -200,6 +200,15 @@ fun SharingScreen(vm: AndvariViewModel, ui: UiState) {
         },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+            // Cut L (v2 #20): honest wayfinding — inviting members and granting access are
+            // WEB-ONLY actions, and this screen never said so.
+            if (settingsVault == null) {
+                Text(
+                    "Invite household members and manage who can open each vault from the web app.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
             // A6/A7 branch boundary: bars, lifecycle notices, incoming ownership offers and
             // the copy status line stay ABOVE the list/settings branch — an op failure
             // inside settings is never silent, and an arriving offer shows immediately.
