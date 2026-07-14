@@ -168,8 +168,13 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   // F76: any open layer makes Back close it instead of leaving the vault. Topmost-first order
   // mirrors how the layers stack (editor/import/export over a view; detail over the list).
   const deep = view !== "vault" || selected !== null || editing !== null || importOpen || exportMode !== null;
+  // Cut M (v2 #16): the mounted Editor parks its dirty-aware cancel here, so the ONE back
+  // guard routes a hardware Back through the same "Discard changes?" arm as the cancel
+  // button — popstate can never silently discard a typed draft. null = no editor mounted
+  // (the fallback close keeps behavior sane if the ref is ever empty mid-teardown).
+  const editorBack = useRef<(() => void) | null>(null);
   const closeTop = useCallback(() => {
-    if (editing) return setEditing(null);
+    if (editing) return editorBack.current ? editorBack.current() : setEditing(null);
     if (importOpen) return setImportOpen(false);
     if (exportMode) return setExportMode(null);
     if (selected) return setSelected(null);
@@ -341,7 +346,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
 
   const navBtn = (v: View, label: string) => (
     // a11yweb-05: aria-current marks the active view for AT (the .active class is visual only).
-    <button className={`navbtn ${view === v ? "active" : ""}`} aria-current={view === v ? "page" : undefined} onClick={() => { setView(v); setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); }}>{label}</button>
+    <button className={`navbtn ${view === v ? "active" : ""}`} aria-current={view === v ? "page" : undefined} onClick={() => { if (editing && editorBack.current) return editorBack.current(); setView(v); setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); }}>{label}</button>
   );
 
   const current = selected ? store.get(selected) : null;
@@ -399,7 +404,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       {mustChange && (
         <div className="banner">
           <span>Recovery sign-in — set a new master password now.</span>
-          <button className="link" onClick={() => { setView("settings"); setEditing(null); setSelected(null); }}>Go to Settings →</button>
+          <button className="link" onClick={() => { if (editing && editorBack.current) return editorBack.current(); setView("settings"); setEditing(null); setSelected(null); }}>Go to Settings →</button>
         </div>
       )}
 
@@ -473,6 +478,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             vaultChoices={selected === null && hasWritableShared ? newItemVaultChoices : undefined}
             onSave={save}
             onCancel={() => setEditing(null)}
+            backRef={editorBack}
           />
         ) : current ? (
           <Detail
@@ -1390,7 +1396,7 @@ function expiryYearChoices(stored: (string | undefined)[]): string[] {
   return ys;
 }
 
-function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: ItemDoc; policy: ClientPolicy | null; vaultChoices?: VaultInfo[]; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => Promise<void>; onCancel: () => void }) {
+function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { initial: ItemDoc; policy: ClientPolicy | null; vaultChoices?: VaultInfo[]; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => Promise<void>; onCancel: () => void; backRef?: React.MutableRefObject<(() => void) | null> }) {
   const [doc, setDoc] = useState<ItemDoc>(structuredClone(initial));
   // New items only: which vault to create in (existing items never move vaults).
   const [vaultId, setVaultId] = useState<string | undefined>(vaultChoices?.[0]?.vaultId);
@@ -1524,9 +1530,31 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
 
   const attachments = doc.attachments ?? [];
   const pendingIds = new Set(pending.map((p) => p.id));
-  // Cut D review: cancel discarded typed work in one click while Android confirms —
-  // the same two-click inline arm as history's Restore (full dirty-guard is v2 #16).
+  // Cut D review, made dirty-aware in Cut M (v2 #16): the two-click "Discard changes?"
+  // inline arm (same idiom as history's Restore) now only stands between the user and
+  // close when there is actually work to lose — a pristine editor cancels in one click.
   const [confirmCancel, setConfirmCancel] = useState(false);
+  // Dirty = the doc differs from what the editor opened with, or uploads are queued.
+  // JSON compare is honest here: `doc` starts as a structuredClone of `initial` and only
+  // user edits rewrite it, spread-in-place, so an edit typed then reverted compares equal
+  // again (attachments are metadata refs — file bytes live in `pending`, counted apart).
+  // The vault <select> alone is deliberately NOT dirty: nothing typed, nothing to lose.
+  const dirty = pending.length > 0 || JSON.stringify(doc) !== JSON.stringify(initial);
+  // ONE cancel path for the button AND hardware Back: pristine closes immediately; dirty
+  // arms the confirm first, and only the second press/tap discards for real.
+  const cancel = () => (dirty && !confirmCancel ? setConfirmCancel(true) : onCancel());
+  // Cut M review: disarm a stale "Discard changes?" the moment editing resumes — otherwise
+  // one accidental Back arms it invisibly (the label is off-viewport on a scrolled form) and a
+  // later cancel/Back discards with no visible confirm. Mirrors confirmGen's edit-reset idiom.
+  useEffect(() => setConfirmCancel(false), [doc, pending]);
+  // Cut M (v2 #16): park `cancel` in the parent's ref so Vault's single back guard routes
+  // popstate here (a second useBackGuard under Vault is forbidden — see its closeTop).
+  // Re-assigned every render so the ref never sees stale dirty/confirm state.
+  useEffect(() => {
+    if (!backRef) return;
+    backRef.current = cancel;
+    return () => { backRef.current = null; };
+  });
 
   return (
     // Cut E (v2 #4): autoComplete off — WITHOUT it the browser's own password manager
@@ -1534,7 +1562,7 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
     // generator, and it offers to save the household's secrets into the browser store).
     // Password fields ignore form-level "off", so the password input adds "new-password".
     <form className="sheet" autoComplete="off" onSubmit={submit}>
-      <button type="button" className="link" onClick={() => (confirmCancel ? onCancel() : setConfirmCancel(true))}>
+      <button type="button" className="link" onClick={cancel}>
         {confirmCancel ? "Discard changes?" : "← cancel"}
       </button>
       <h2 style={{ marginTop: 12 }}>{initial.name ? "Edit" : isLogin ? "New login" : isCard ? "New card" : "New note"}</h2>
@@ -1658,7 +1686,7 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
         <button className="primary" disabled={busy || !doc.name}>
           {busy ? (progress && progress.total > 0 ? `Sealing… ${Math.min(progress.done + 1, progress.total)}/${progress.total}` : "Sealing…") : "Save"}
         </button>
-        <button type="button" className="ghost" onClick={onCancel}>Cancel</button>
+        <button type="button" className="ghost" onClick={cancel}>{confirmCancel ? "Discard changes?" : "Cancel"}</button>
       </div>
     </form>
   );

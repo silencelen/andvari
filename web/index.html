@@ -12,9 +12,29 @@
     <meta name="theme-color" content="#f4efe4" media="(prefers-color-scheme: light)" />
     <meta name="description" content="andvari — your household's zero-knowledge password manager." />
     <title>andvari</title>
+    <!-- Cut M (v2 #22): pre-hydration shell. Inline <style> is fine under the server CSP
+         (style-src allows 'unsafe-inline'; script-src does NOT — so no inline JS here).
+         These are literal twins of styles.css --bg/--ink-dim/--serif: this file paints
+         frames before the bundle (and its tokens) arrives, so the values are inlined. -->
+    <style>
+      html { background: #14120e; }
+      .boot { display: flex; min-height: 100vh; min-height: 100dvh; align-items: center; justify-content: center; color: #a79c85; font: 15px/1.4 "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; letter-spacing: 0.04em; }
+      @media (prefers-color-scheme: light) {
+        html { background: #f4efe4; }
+        .boot { color: #6b6047; }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- No JS = no crypto, no app — say so instead of a permanent blank page. -->
+    <noscript>
+      <div class="boot">andvari needs JavaScript to unseal your hoard — enable it, then reload.</div>
+    </noscript>
+    <div id="root">
+      <!-- Boot placeholder over the blank first paint; createRoot clears the container,
+           so React's first render sweeps this away. Copy mirrors App's loading phase. -->
+      <div class="boot">unsealing…</div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
