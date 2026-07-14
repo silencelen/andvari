@@ -10,6 +10,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
@@ -103,6 +104,9 @@ fun main() = application {
         // consumes.
         onPreviewKeyEvent = { state.touch(); false },
     ) {
+        // Cut I (v2 #9): a hard floor — below ~480×600 the auth card and vault toolbar
+        // truncate into unusability; AWT minimumSize is the only enforcement point.
+        LaunchedEffect(Unit) { window.minimumSize = java.awt.Dimension(480, 600) }
         // Sync (and enforce the idle lock) whenever the window regains OS focus (spec 03 §6).
         DisposableEffect(Unit) {
             val focus = object : WindowFocusListener {

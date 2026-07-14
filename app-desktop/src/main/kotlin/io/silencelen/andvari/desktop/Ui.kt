@@ -28,6 +28,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.BackupPreflight
@@ -72,11 +73,19 @@ fun DesktopApp(state: DesktopState) {
             Spacer(Modifier.height(16.dp))
             Text("Update required", style = MaterialTheme.typography.titleMedium)
             Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 380.dp).padding(top = 8.dp))
-            Text(downloadsUrl(state.baseUrl), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
+            // Cut I (v2 #9): the downloads URL was inert text on a KEYBOARD-DEAD screen — make
+            // it a real button that opens the browser.
+            val uriHandler = LocalUriHandler.current
+            TextButton(onClick = { runCatching { uriHandler.openUri(downloadsUrl(state.baseUrl)) } }, modifier = Modifier.padding(top = 4.dp)) {
+                Text(downloadsUrl(state.baseUrl), style = MaterialTheme.typography.bodySmall)
+            }
         }
         return
     }
-    Column(Modifier.fillMaxSize()) {
+    // Cut I (v2 #9): cap the content width — a maximized window stretched every field,
+    // banner, and button edge-to-edge (~full-monitor-wide inputs). 760dp = the web .wrap.
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+    Column(Modifier.widthIn(max = 760.dp).fillMaxSize()) {
         // A found update is a soft nudge — a thin bar above whatever screen is showing, so
         // a signed-in user (who never sees the Welcome screen) actually learns about it.
         state.updateAvailable?.let { v ->
@@ -127,6 +136,7 @@ fun DesktopApp(state: DesktopState) {
                 is DesktopScreen.RecoverySetup -> RecoverySetupScreen(state)
             }
         }
+    }
     }
 }
 
@@ -433,6 +443,12 @@ private fun Unlock(state: DesktopState, email: String) {
         Secret("Master password", password, onEnter = submit, autoFocus = true) { password = it } // a11ydesk-06: focus password on unlock (the most-repeated interaction)
         Spacer(Modifier.height(12.dp))
         Primary("Unlock", password.isNotBlank() && !state.busy, state.busy, submit)
+        // Cut H (v2 #6): a forgotten master password stranded users here — self-recovery lives
+        // in the web app (#recover); signpost it instead of dead-ending at destructive sign-out.
+        val uriHandler = LocalUriHandler.current
+        TextButton(onClick = { runCatching { uriHandler.openUri("${state.baseUrl}/#recover") } }) {
+            Text("Forgot your master password?")
+        }
         // Cut D (v2 #3): sign-out revokes the session and deletes the local cache including any
         // unsynced edits — never a one-tap action (Android parity).
         var confirmSignOut by remember { mutableStateOf(false) }
@@ -2393,12 +2409,23 @@ private fun Secret(label: String, value: String, onEnter: (() -> Unit)? = null, 
 @Composable
 private fun CopyRow(label: String, value: String, secret: Boolean, clearSeconds: Int, display: String = value) {
     var show by remember { mutableStateOf(!secret) }
+    // Cut J (v2 #10): the app's primary action gave ZERO visible feedback, and the silent
+    // ~30s auto-wipe read as a random paste failure. Flash the button + disclose the window.
+    var copied by remember { mutableStateOf(false) }
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (show) display else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
             if (secret) IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "hide value" else "show value") } // a11ydesk-02
-            TextButton(onClick = { copyWithAutoClear(value, clearSeconds) }) { Text("Copy") }
+            TextButton(onClick = { copyWithAutoClear(value, clearSeconds); copied = true }) { Text(if (copied) "Copied ✓" else "Copy") }
+        }
+        if (copied) {
+            Text(
+                if (clearSeconds > 0) "Copied — clears from the clipboard in ${clearSeconds}s" else "Copied",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            LaunchedEffect(Unit) { delay(3500); copied = false }
         }
     }
 }

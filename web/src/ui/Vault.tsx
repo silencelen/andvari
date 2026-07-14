@@ -828,20 +828,25 @@ function ExportMenu({ onBackup, onCsv }: { onBackup: () => void; onCsv: () => vo
 // ---- copy with auto-clear ----
 function useCopy(clearSeconds: number) {
   const [flash, setFlash] = useState<string | null>(null);
-  const timer = useRef<number | null>(null);
+  const flashTimer = useRef<number | null>(null);
+  const wipeTimer = useRef<number | null>(null);
   const copy = async (label: string, value: string) => {
     await navigator.clipboard.writeText(value);
     setFlash(label);
-    if (timer.current) window.clearTimeout(timer.current);
-    window.setTimeout(() => setFlash((f) => (f === label ? null : f)), 1200);
-    // Auto-clear the clipboard after the policy window (best-effort).
-    window.setTimeout(() => navigator.clipboard.writeText("").catch(() => {}), Math.max(1, clearSeconds) * 1000);
+    // Cut J (v2 #10, review fix): the flash-timer id was never STORED, so the dedupe guard
+    // was dead code; and each copy stacked a fresh unconditional wipe — copying B after A
+    // let A's stale timer blank the clipboard mid-way through B's window. One live timer each.
+    if (flashTimer.current) window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setFlash((f) => (f === label ? null : f)), 2600);
+    if (wipeTimer.current) window.clearTimeout(wipeTimer.current);
+    wipeTimer.current = window.setTimeout(() => navigator.clipboard.writeText("").catch(() => {}), Math.max(1, clearSeconds) * 1000);
   };
   return { flash, copy };
 }
 
 function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets, onEdit, onDelete, onMoved, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; moveTargets: VaultInfo[]; onEdit: () => void; onDelete: () => Promise<void>; onMoved: () => void; onBack: () => void }) {
-  const { flash, copy } = useCopy(policy?.clipboardClearSeconds ?? 30);
+  const clearSecs = Math.max(1, policy?.clipboardClearSeconds ?? 30);
+  const { flash, copy } = useCopy(clearSecs);
   const [deleting, setDeleting] = useState(false);
   const [delBusy, setDelBusy] = useState(false);
   const [delErr, setDelErr] = useState("");
@@ -897,7 +902,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           )}
           {doc.login.password && (
             <div className="field">
-              <label>Password {flash === "password" && <span className="copy-flash">copied ✓</span>}</label>
+              <label>Password {flash === "password" && <span className="copy-flash">copied ✓ · clears in {clearSecs}s</span>}</label>
               <div className="secret-row">
                 <PasswordField value={doc.login.password} />
                 <button className="ghost" onClick={() => copy("password", doc.login!.password!)}>Copy</button>
@@ -927,7 +932,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           )}
           {doc.card.number && (
             <div className="field">
-              <label>Card number {flash === "card number" && <span className="copy-flash">copied ✓</span>}</label>
+              <label>Card number {flash === "card number" && <span className="copy-flash">copied ✓ · clears in {clearSecs}s</span>}</label>
               {/* Reveal shows the grouped form; Copy hands checkout forms the bare digits. */}
               <div className="secret-row">
                 <PasswordField value={groupNumber(doc.card.number)} />
@@ -946,7 +951,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           )}
           {doc.card.securityCode && (
             <div className="field">
-              <label>Security code {flash === "security code" && <span className="copy-flash">copied ✓</span>}</label>
+              <label>Security code {flash === "security code" && <span className="copy-flash">copied ✓ · clears in {clearSecs}s</span>}</label>
               <div className="secret-row">
                 <PasswordField value={doc.card.securityCode} />
                 <button className="ghost" onClick={() => copy("security code", doc.card!.securityCode!)}>Copy</button>
