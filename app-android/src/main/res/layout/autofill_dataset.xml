@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Dropdown (menu) presentation for one autofill suggestion. RemoteViews inflates in the
-     platform autofill UI process, so it uses only literal colors (no theme attrs) in the
-     treasury palette: gold title on charcoal, dim subtitle. -->
+     platform autofill UI process, so it can't use theme attrs — but @color references DO
+     resolve per system config, so the treasury palette follows light/dark via
+     values(-night)/colors_autofill.xml (UI-audit 2026-07, Cut B). -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="horizontal"
     android:gravity="center_vertical"
-    android:background="#1E1B15"
+    android:background="@color/autofill_bg"
     android:paddingStart="16dp"
     android:paddingEnd="16dp"
     android:paddingTop="12dp"
@@ -30,7 +31,7 @@
             android:id="@+id/andvari_autofill_title"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="#D0A94A"
+            android:textColor="@color/autofill_title"
             android:textSize="15sp"
             android:maxLines="1"
             android:ellipsize="end"
@@ -40,7 +41,7 @@
             android:id="@+id/andvari_autofill_subtitle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="#A79C85"
+            android:textColor="@color/autofill_subtitle"
             android:textSize="13sp"
             android:maxLines="1"
             android:ellipsize="end" />

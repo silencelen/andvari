@@ -30,8 +30,10 @@ const UI_CSS = `
   --anv-ink-faint: #8d8370;
   --anv-gold: #d0a94a;
   --anv-gold-bright: #e8c66a;
+  /* Cut A (web parity): normal-size gold TEXT darkens in light for AA; dark equals gold. */
+  --anv-gold-text: #d0a94a;
   --anv-btn-ink: #1a1509;
-  --anv-danger: #cf6b5a;
+  --anv-danger: #d97f6f;
   --anv-ok: #7fa86a;
   --anv-serif: "Iowan Old Style", Palatino, Georgia, serif;
   --anv-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -51,6 +53,7 @@ const UI_CSS = `
     --anv-ink-faint: #786c50;
     --anv-gold: #9a7420;
     --anv-gold-bright: #7d5e14;
+    --anv-gold-text: #7d5e14;
     --anv-btn-ink: #fdf9f0;
     --anv-danger: #b3402c;
     --anv-ok: #4f7a3a;
@@ -106,7 +109,7 @@ const UI_CSS = `
 .row .user { font-family: var(--anv-mono); font-size: 12px; color: var(--anv-ink-dim); overflow: hidden; text-overflow: ellipsis; }
 .row:hover { background: var(--anv-bg-deep); box-shadow: inset 2px 0 0 var(--anv-gold); }
 .row:hover .name { color: var(--anv-gold-bright); }
-.row.action { color: var(--anv-gold); font-size: 12.5px; }
+.row.action { color: var(--anv-gold-text); font-size: 12.5px; }
 .row.action:hover { color: var(--anv-gold-bright); }
 
 .state { padding: 14px 12px; color: var(--anv-ink-dim); font-size: 12.5px; cursor: default; }

@@ -126,7 +126,9 @@ fun AutofillStatusScreen(vm: AndvariViewModel, ui: UiState) {
                         if (noPicker) {
                             Text(
                                 "This device offers no picker — enable it under System settings → Passwords & accounts → Autofill service.",
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                                // a11y (Cut B review): `error` on the filled-card tone is 4.38:1 in light;
+                                // onErrorContainer keeps the danger tint AND clears AA in both themes.
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer,
                             )
                         }
                     }
@@ -176,7 +178,8 @@ fun AutofillStatusScreen(vm: AndvariViewModel, ui: UiState) {
                             if (alreadyTrusted) {
                                 Text(
                                     "✓ You've trusted ${browserLabel(obsPkg)} on this device. Reopen your login form and try autofill again.",
-                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary,
+                                    // a11y (Cut B review): primary on the filled-card tone is 3.77:1 in light.
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             } else {
                                 Text(
@@ -411,7 +414,7 @@ private fun StatusRow(label: String, ok: Boolean) {
         )
         Spacer(Modifier.width(8.dp))
         Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-        Text(if (ok) "yes" else "no", style = MaterialTheme.typography.bodyMedium, color = if (ok) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error)
+        Text(if (ok) "yes" else "no", style = MaterialTheme.typography.bodyMedium, color = if (ok) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onErrorContainer)
     }
 }
 

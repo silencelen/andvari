@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Autofill dropdown/chip palette (UI-audit 2026-07, Cut B). RemoteViews can't use
+         theme attrs, but @color references DO resolve per system config at inflate time,
+         so the dataset row + key glyph follow light/dark via values-night/. LIGHT values:
+         title #7D5E14 = 5.68:1 on #FBF8F1 (AA), subtitle = the web ink-dim light token. -->
+    <color name="autofill_bg">#FBF8F1</color>
+    <color name="autofill_title">#7D5E14</color>
+    <color name="autofill_subtitle">#6B6047</color>
+    <color name="autofill_icon">#7D5E14</color>
+</resources>

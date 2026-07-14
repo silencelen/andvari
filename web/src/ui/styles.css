@@ -24,7 +24,22 @@
      --gold (which would flatten button.primary's gold gradient in light mode). In dark
      it equals --gold (already 7.7:1); light darkens it (5.26:1 on --bg). */
   --link: #d0a94a;
-  --danger: #cf6b5a;
+  /* UI-audit Cut A: gold rendered as NORMAL-SIZE text (tags, hints, .tone-mid). In dark it
+     equals --gold; light darkens to clear AA — decorative/large gold stays on --gold. */
+  --gold-text: #d0a94a;
+  /* Cut A: THE keyboard-focus indicator color (inputs, rowlinks, buttons/links via
+     :focus-visible). The old light indicator (--gold-deep #c9a94a) was ~2.1:1 — invisible.
+     Dark 7.2:1 on --bg-input; light 6.0:1 on #fff — ≥3:1 non-text minimum everywhere. */
+  --focus: #d0a94a;
+  /* Cut A: primary-button gradient stops, tokenized so the LIGHTER stop is always on top
+     (light mode's old (--gold-bright → --gold) had the darker stop on top — an inverted
+     sheen) and both stops keep ≥4.5:1 under --btn-ink. */
+  --gold-hi: #e8c66a;
+  --gold-lo: #d0a94a;
+  /* Cut A: lifted from #cf6b5a — dark danger text on its own tinted plates (.msg.err
+     composite #33251d) was 4.15:1; #d97f6f is 5.07:1 there, 5.90 on --bg-raised. Native
+     `error` + the extension twins follow in lockstep. */
+  --danger: #d97f6f;
   --ok: #7fa86a;
   /* Primary-button ink + the item-monogram coin, tokenized so both stay legible
      when the palette flips in light mode (dark ink on bright gold here). */
@@ -53,6 +68,13 @@
        --gold — matches --gold-bright's value but is a distinct token so the button
        gradient (--gold-bright → --gold) stays a real two-stop gradient. */
     --link: #7d5e14;
+    /* Cut A: light gold-as-text — 5.26:1 on --bg / 5.68 on --bg-raised (raw --gold was 3.74). */
+    --gold-text: #7d5e14;
+    --focus: #7d5e14;
+    /* Cut A: light stops darkened so --btn-ink clears AA on BOTH (4.67 / 5.74) and the
+       lighter stop sits on top (matches dark's lit-from-above sheen). */
+    --gold-hi: #8f6b16;
+    --gold-lo: #7d5e14;
     --danger: #b3402c;
     --ok: #4f7a3a;
     /* Light theme: the golds darken, so primary buttons need light ink and the coin
@@ -150,19 +172,28 @@ input, textarea, select {
   padding: 11px 13px; transition: border-color 0.15s, box-shadow 0.15s;
 }
 input:focus, textarea:focus, select:focus {
-  outline: none; border-color: var(--gold-deep);
+  outline: none; border-color: var(--focus);
   box-shadow: 0 0 0 3px rgba(208, 169, 74, 0.14);
 }
+/* Cut A: buttons/links/summary had NO focus indicator at all (only inputs + rowlinks did).
+   One ≥3:1 ring everywhere; the nav's variant is inset so the ≤560px scroll container
+   (overflow-x) can't clip it. */
+button:focus-visible, a:focus-visible, [role="button"]:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--focus); outline-offset: 2px;
+}
+.navbtn:focus-visible { outline-offset: -2px; }
 input.mono, textarea.mono { font-family: var(--mono); font-size: 13px; }
 
 button.primary {
   width: 100%; font: inherit; font-weight: 600; font-size: 15px;
   color: var(--btn-ink); cursor: pointer; border: 0; border-radius: var(--radius); padding: 12px;
-  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  background: linear-gradient(180deg, var(--gold-hi), var(--gold-lo));
   box-shadow: 0 6px 18px -8px rgba(208, 169, 74, 0.6); transition: 0.15s;
 }
 button.primary:hover { filter: brightness(1.06); }
-button.primary:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
+/* Cut A: pure opacity left light-mode disabled buttons looking pressable — desaturating
+   reads as "off" in both themes. (Disabled is WCAG-exempt; this is an affordance fix.) */
+button.primary:disabled { opacity: 0.55; cursor: not-allowed; filter: saturate(0.3); }
 
 button.ghost {
   font: inherit; color: var(--ink-dim); background: transparent;
@@ -254,7 +285,7 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
   border: 1px solid var(--edge); border-radius: 5px; padding: 2px 6px; white-space: nowrap;
 }
-.tag.brand { color: var(--gold); border-color: color-mix(in oklab, var(--gold) 45%, transparent); }
+.tag.brand { color: var(--gold-text); border-color: color-mix(in oklab, var(--gold) 45%, transparent); }
 .tag.expired { color: var(--danger); border-color: color-mix(in oklab, var(--danger) 45%, transparent); }
 
 .empty { text-align: center; color: var(--ink-faint); padding: 60px 0; }
@@ -313,7 +344,7 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .tile-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); margin-top: 2px; }
 
 .tone-bad { color: var(--danger); }
-.tone-mid { color: var(--gold); }
+.tone-mid { color: var(--gold-text); }
 .tone-good { color: var(--ok); }
 
 /* ---- tables ---- */
@@ -331,7 +362,7 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .table tr.rowlink:hover { background: var(--bg-input); }
 /* F80: rowlinks are focusable (tabIndex) — inset outline because the row spans the
    scroll container edge-to-edge, so an outset ring would be clipped. */
-.table tr.rowlink:focus-visible { outline: 2px solid var(--gold-deep); outline-offset: -2px; background: var(--bg-input); }
+.table tr.rowlink:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; background: var(--bg-input); }
 .table tr.subrow > td { background: var(--bg-input); padding: 12px 16px; }
 .table.inner { font-size: 13px; }
 .table.inner th, .table.inner td { padding: 6px 10px; border-bottom: 1px solid var(--edge); }

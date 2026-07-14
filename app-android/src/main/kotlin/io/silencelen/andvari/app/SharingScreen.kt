@@ -104,11 +104,16 @@ internal fun LifecycleNoticesBanner(notices: List<LifecycleNotice>, onDismiss: (
             colors = if (warn) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer) else CardDefaults.cardColors(),
         ) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                // a11y (Cut B, desktop AM-8 parity): the warn branch sits on errorContainer, where
+                // `error` text fails AA in light (4.43:1) — text + Dismiss use onErrorContainer there.
                 Text(
                     body, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                    color = if (warn) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary,
+                    color = if (warn) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.secondary,
                 )
-                TextButton(onClick = { onDismiss(n.id) }) { Text("Dismiss") }
+                TextButton(
+                    onClick = { onDismiss(n.id) },
+                    colors = ButtonDefaults.textButtonColors(contentColor = if (warn) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant),
+                ) { Text("Dismiss") }
             }
         }
     }
@@ -400,7 +405,11 @@ private fun TransferControl(vm: AndvariViewModel, ui: UiState, v: VaultInfo) {
                     "Ownership offer to $pendingName — expires ${fmtDay(pending.expiresAt)}",
                     Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                 )
-                TextButton(onClick = { vm.cancelTransfer(v.vaultId) }, enabled = !ui.busy) { Text("Cancel offer") }
+                TextButton(
+                    onClick = { vm.cancelTransfer(v.vaultId) }, enabled = !ui.busy,
+                    // a11y (Cut B review): primary on the surfaceVariant card is 3.77:1 in light.
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                ) { Text("Cancel offer") }
             }
         }
         return

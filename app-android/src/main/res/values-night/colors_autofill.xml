@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark autofill palette — the original treasury row: gold on charcoal. -->
+    <color name="autofill_bg">#1E1B15</color>
+    <color name="autofill_title">#D0A94A</color>
+    <color name="autofill_subtitle">#A79C85</color>
+    <color name="autofill_icon">#D0A94A</color>
+</resources>

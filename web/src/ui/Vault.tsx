@@ -356,7 +356,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         <div className="sub">{it.doc.type === "login" ? it.doc.login?.username || it.doc.login?.uris?.[0] || "login" : it.doc.type === "card" ? cardSubtitle(it.doc) : "secure note"}</div>
       </span>
       {it.vaultId !== account.personalVaultId && (
-        <span className="tag" style={{ color: "var(--gold)" }}>{vaultNameById.get(it.vaultId) ?? "shared"}</span>
+        <span className="tag" style={{ color: "var(--gold-text)" }}>{vaultNameById.get(it.vaultId) ?? "shared"}</span>
       )}
       <span className="tag">{it.doc.type}</span>
     </button>
@@ -1542,7 +1542,7 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
               <button type="button" className="ghost" aria-label={showPw ? "Hide password" : "Show password"} onClick={() => setShowPw((s) => !s)}>{showPw ? "Hide" : "Show"}</button>
               <button type="button" className="ghost" onClick={gen}>{confirmGen ? "Replace?" : "Generate"}</button>
             </div>
-            {confirmGen && <span className="muted" style={{ color: "var(--gold)" }}>this replaces the current password — tap “Replace?” to confirm, or edit the field to cancel</span>}
+            {confirmGen && <span className="muted" style={{ color: "var(--gold-text)" }}>this replaces the current password — tap “Replace?” to confirm, or edit the field to cancel</span>}
             {login.password && <StrengthBar password={login.password} />}
           </div>
           <Field label="Website">
@@ -1565,7 +1565,7 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel }: { initial: 
             label={<>Card number {cardBrand && <span className="tag brand">{cardBrand}</span>}</>}
             hint={
               luhnWarn ? (
-                <div className="muted" style={{ marginTop: 6, color: "var(--gold)" }}>
+                <div className="muted" style={{ marginTop: 6, color: "var(--gold-text)" }}>
                   this number doesn’t pass the usual check — you can still save it
                 </div>
               ) : undefined
