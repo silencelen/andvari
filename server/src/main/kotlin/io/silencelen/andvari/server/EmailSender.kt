@@ -37,8 +37,11 @@ object EmailAddress {
  */
 interface EmailSender {
     /** `to` MUST be pre-validated (EmailAddress.isValid). Throws on failure — the caller swallows and
-     *  logs an error CLASS only, never the address/link/exception message (breaker A4). */
-    fun sendInvite(to: String, enrollLink: String)
+     *  logs an error CLASS only, never the address/link/exception message (breaker A4). The body
+     *  context (item #2): [inviterName] is the authed admin's displayName (member-typed free text —
+     *  sanitized in InviteEmailBody, never trusted raw), [escrowWaived] the invite's persisted
+     *  recovery posture, [expiresAt] the invite's real expiry (epoch ms) for the concrete fuse copy. */
+    fun sendInvite(to: String, enrollLink: String, inviterName: String?, escrowWaived: Boolean, expiresAt: Long)
 }
 
 class SmtpEmailSender(
@@ -50,7 +53,7 @@ class SmtpEmailSender(
 ) : EmailSender {
     private val log = LoggerFactory.getLogger("andvari.email")
 
-    override fun sendInvite(to: String, enrollLink: String) {
+    override fun sendInvite(to: String, enrollLink: String, inviterName: String?, escrowWaived: Boolean, expiresAt: Long) {
         require(EmailAddress.isValid(to)) { "invalid recipient" } // caller pre-validates; defense in depth
         val props = Properties().apply {
             put("mail.smtp.host", host)
@@ -86,8 +89,8 @@ class SmtpEmailSender(
         // multipart/alternative: the plain-text part first (least-preferred), the branded HTML last
         // (most-preferred) — a client renders the last part it understands, so text-only clients get
         // the plain version and everything else gets the treasury card. See InviteEmailBody.
-        val text = MimeBodyPart().apply { setText(InviteEmailBody.text(enrollLink), "utf-8") }
-        val htmlPart = MimeBodyPart().apply { setContent(InviteEmailBody.html(enrollLink), "text/html; charset=utf-8") }
+        val text = MimeBodyPart().apply { setText(InviteEmailBody.text(enrollLink, inviterName, escrowWaived, expiresAt), "utf-8") }
+        val htmlPart = MimeBodyPart().apply { setContent(InviteEmailBody.html(enrollLink, inviterName, escrowWaived, expiresAt), "text/html; charset=utf-8") }
         msg.setContent(MimeMultipart("alternative").apply { addBodyPart(text); addBodyPart(htmlPart) })
         Transport.send(msg)
         log.info("invite email dispatched") // A4: no recipient, no link, no token

@@ -42,11 +42,11 @@ class GraphEmailSender(
 ) : EmailSender {
     private val log = LoggerFactory.getLogger("andvari.email")
 
-    override fun sendInvite(to: String, enrollLink: String) {
+    override fun sendInvite(to: String, enrollLink: String, inviterName: String?, escrowWaived: Boolean, expiresAt: Long) {
         require(EmailAddress.isValid(to)) { "invalid recipient" } // caller pre-validates; defense in depth
         runBlocking {
             withTimeout(20_000) { // bound a hung Graph call so no IO thread parks (A3)
-                sendMail(fetchToken(), to, enrollLink)
+                sendMail(fetchToken(), to, enrollLink, inviterName, escrowWaived, expiresAt)
             }
         }
         log.info("invite email dispatched (graph)") // A4: no recipient, no link, no token
@@ -70,7 +70,7 @@ class GraphEmailSender(
             ?: error("token response had no access_token")
     }
 
-    private suspend fun sendMail(token: String, to: String, enrollLink: String) {
+    private suspend fun sendMail(token: String, to: String, enrollLink: String, inviterName: String?, escrowWaived: Boolean, expiresAt: Long) {
         val payload = buildJsonObject {
             putJsonObject("message") {
                 put("subject", InviteEmailBody.SUBJECT)
@@ -78,7 +78,7 @@ class GraphEmailSender(
                     // Branded HTML (Graph sends a single body; email clients render the inline-styled
                     // treasury card). See InviteEmailBody — one source shared with the SMTP transport.
                     put("contentType", "HTML")
-                    put("content", InviteEmailBody.html(enrollLink))
+                    put("content", InviteEmailBody.html(enrollLink, inviterName, escrowWaived, expiresAt))
                 }
                 putJsonArray("toRecipients") {
                     addJsonObject { putJsonObject("emailAddress") { put("address", to) } }

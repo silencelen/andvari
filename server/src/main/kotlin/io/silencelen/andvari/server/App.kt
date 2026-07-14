@@ -62,6 +62,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import io.silencelen.andvari.core.model.WsTicketResponse
+import kotlinx.serialization.Serializable
 import java.io.File
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
@@ -72,6 +73,18 @@ const val BOOTSTRAP_ANY_EMAIL = "*"
 // Aliases the single release-version source in :core — Admin Status and the update
 // check lied for a whole release when this was a separate hand-bumped literal.
 const val SERVER_VERSION = io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
+
+/**
+ * The POST /api/v1/admin/users wire shape (#21): InviteResponse + the email-dispatch outcome, so
+ * "she never got it" is debuggable from the Admin UI. Server-local (NOT core Wire.kt) — the shape
+ * is additive and every client decodes with ignoreUnknownKeys, so older ones simply don't see it.
+ * emailStatus reports the dispatch ATTEMPT honestly: the send runs off-thread AFTER the tx commits
+ * (A3), so "queued" is the ceiling — never a delivery claim. Values:
+ *   queued | skipped_rate_limited | not_requested | not_configured | failed
+ * Status only — the recipient/link never ride it (A4).
+ */
+@Serializable
+data class InviteCreateResponse(val inviteToken: String, val email: String, val expiresAt: Long, val emailStatus: String)
 
 private val UUID_PATH_RE = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -184,6 +197,12 @@ private fun seedBootstrap(repo: Repo, config: Config) {
     val userCount = repo.db.read { it.queryOne("SELECT COUNT(*) FROM users") { rs -> rs.getInt(1) } ?: 0 }
     if (userCount > 0) return
     val token = config.bootstrapToken ?: return
+    // #22 self-heal: with ZERO users no invite was ever redeemed (redeem creates the user in the
+    // same tx), so an EXPIRED leftover row here is pure debris — yet it used to count as "existing"
+    // and block re-minting until the janitor's 30-day prune, bricking a first-run admin whose 72 h
+    // fuse lapsed before enrollment. Clear it (which also frees the tokenHash PK for the same
+    // ANDVARI_BOOTSTRAP_TOKEN), then only a LIVE invite blocks the re-mint.
+    repo.db.tx { c -> c.exec("DELETE FROM invites WHERE usedAt IS NULL AND expiresAt < ?", now()) }
     val existing = repo.db.read { it.queryOne("SELECT COUNT(*) FROM invites") { rs -> rs.getInt(1) } ?: 0 }
     if (existing > 0) return
     repo.db.tx { c ->
@@ -246,6 +265,19 @@ fun Application.andvariModule(services: Services) {
         }
     }
 
+    // Pentest hygiene (#22): baseline security headers on EVERY response — API and SPA alike.
+    // nosniff stops MIME-sniffing of API JSON/served files; no-referrer keeps the private origin
+    // out of outbound Referer headers; the minimal Permissions-Policy denies powerful features the
+    // app never uses (QR codes are DISPLAYED here, scanned by a phone camera — the web app itself
+    // never opens one); X-Robots-Tag backstops /robots.txt so the public break-glass origin's
+    // 200-HTML SPA fallthrough is never indexed. ADD-only — the SPA route's self-only CSP stands.
+    intercept(ApplicationCallPipeline.Plugins) {
+        context.response.headers.append("X-Content-Type-Options", "nosniff", false)
+        context.response.headers.append("Referrer-Policy", "no-referrer", false)
+        context.response.headers.append("Permissions-Policy", "camera=(), microphone=(), geolocation=()", false)
+        context.response.headers.append("X-Robots-Tag", "noindex, nofollow", false)
+    }
+
     // Attachment orphan GC (spec 02 §6): hourly sweep, first pass shortly after boot.
     launch(Dispatchers.IO) {
         delay(10.minutes)
@@ -285,6 +317,13 @@ fun Application.andvariModule(services: Services) {
             } else {
                 call.respondText(services.metricsScrape())
             }
+        }
+
+        // #22: a household hoard has no business in a search index — the public break-glass origin
+        // otherwise serves the SPA fallthrough as 200 HTML to any crawler. Exact path beats the
+        // {path...} SPA catch-all in Ktor routing, so this wins regardless of declaration order.
+        get("/robots.txt") {
+            call.respondText("User-agent: *\nDisallow: /\n")
         }
 
         get("/api/v1/client-policy") {
@@ -648,25 +687,38 @@ fun Application.andvariModule(services: Services) {
             // server-owned base URL (never a client-supplied URL); a null (ill-formed) skips the email.
             val emailSender = services.email
             val base = config.inviteBaseUrl
-            // A6: a PER-RECIPIENT email cap on top of the per-admin invite cap above — so a
-            // compromised admin can't email-bomb one address under the household mail domain. The
-            // invite still MINTS (and responds); only the email is skipped past the cap.
-            if (req.sendEmail && emailSender != null && base != null &&
-                limiter.allow("invite_email:${resp.email}", 5, 3_600_000)
-            ) {
-                val link = EnrollLink.compose(base, token, resp.email)
-                if (link != null) {
-                    val to = resp.email
-                    call.application.launch(Dispatchers.IO) {
-                        try {
-                            emailSender.sendInvite(to, link)
-                        } catch (e: Exception) {
-                            call.application.environment.log.warn("invite email failed (${e.javaClass.simpleName})") // A4: no PII
+            // #21: each branch reports its own emailStatus (see InviteCreateResponse) so a mint-but-
+            // no-email outcome is visible to the admin, not indistinguishable from a send.
+            val emailStatus = when {
+                !req.sendEmail -> "not_requested"
+                emailSender == null || base == null -> "not_configured"
+                // A6: a PER-RECIPIENT email cap on top of the per-admin invite cap above — so a
+                // compromised admin can't email-bomb one address under the household mail domain. The
+                // invite still MINTS (and responds); only the email is skipped past the cap.
+                !limiter.allow("invite_email:${resp.email}", 5, 3_600_000) -> "skipped_rate_limited"
+                else -> {
+                    val link = EnrollLink.compose(base, token, resp.email)
+                    if (link == null) "failed" else {
+                        val to = resp.email
+                        // #2: the branded body names the inviter and matches the invite's real posture —
+                        // read here (request path, cheap single-row) so the launch captures plain values.
+                        // escrowWaived mirrors createInvite's normalization (anything but the literal
+                        // "waived" ⇒ required — fail-safe in the same direction).
+                        val inviterName = services.repo.userById(p.userId)?.displayName
+                        val escrowWaived = req.escrowPolicy == "waived"
+                        val expiresAt = resp.expiresAt
+                        call.application.launch(Dispatchers.IO) {
+                            try {
+                                emailSender.sendInvite(to, link, inviterName, escrowWaived, expiresAt)
+                            } catch (e: Exception) {
+                                call.application.environment.log.warn("invite email failed (${e.javaClass.simpleName})") // A4: no PII
+                            }
                         }
+                        "queued"
                     }
                 }
             }
-            call.respond(resp)
+            call.respond(InviteCreateResponse(resp.inviteToken, resp.email, resp.expiresAt, emailStatus))
         }
         post("/api/v1/admin/users/{id}/disable") {
             val p = requireAdmin(call, service)
