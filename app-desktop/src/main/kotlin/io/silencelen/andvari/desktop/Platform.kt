@@ -1,5 +1,8 @@
 package io.silencelen.andvari.desktop
 
+import io.silencelen.andvari.core.client.UpdateVerify
+import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.awt.Toolkit
@@ -9,6 +12,7 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -47,8 +51,20 @@ fun clearVaultClipboard() {
 }
 
 @Serializable
-private data class DownloadsManifest(val windows: PlatformBuild? = null, val linux: PlatformBuild? = null)
+private data class DownloadsManifest(
+    val windows: PlatformBuild? = null,
+    val linux: PlatformBuild? = null,
+    // H2 signed-update envelope (design 2026-07-13-signed-updates §C/§M) — parsed only AFTER
+    // UpdateVerify accepted the raw fetched bytes. `seq` = the monotonic anti-rollback counter;
+    // `signedAt` = the signing timestamp the §M-D4 staleness check consumes. Defaults keep the
+    // decode total; a genuine signed manifest carries both.
+    val seq: Long = 0,
+    val signedAt: String = "",
+)
 
+// `sha256` is retained for parse-compat but consumed by NOBODY on this path (§M-D1): the desktop
+// update flow is nag-only — the browser is opened at /downloads and the OS-level installer
+// signature (Authenticode MSI / GPG deb) is the load-bearing integrity control, never this field.
 @Serializable
 private data class PlatformBuild(val version: String = "", val url: String = "", val sha256: String = "")
 
@@ -56,20 +72,95 @@ private data class PlatformBuild(val version: String = "", val url: String = "",
 fun downloadsUrl(baseUrl: String): String = "$baseUrl/downloads"
 
 /**
- * In-app update check (spec P3): fetch {base}/downloads/manifest.json and return the
- * available version string if it's newer than this build, else null. No auto-install.
- * Selects the manifest entry for THIS OS — a Linux build must not compare itself against
- * the Windows MSI's version (and vice-versa).
+ * The outcome of one update check (H2, design 2026-07-13-signed-updates §M). Everything that is
+ * not a VERIFIED manifest collapses into [Unverified] — a deliberately QUIET state (§M-D5): a
+ * tampering/sig-stripping server must never be able to force a scary banner (cry-wolf DoS), so
+ * the UI shows at most one muted Settings line, never a nag and never a modal.
  */
-fun checkForUpdate(baseUrl: String): String? {
+sealed interface UpdateCheck {
+    /** Verified manifest, strictly newer version for THIS OS — show the update nag. */
+    data class Available(val version: String, val seq: Long) : UpdateCheck
+
+    /** Verified manifest, nothing newer. */
+    data class UpToDate(val seq: Long) : UpdateCheck
+
+    /** Verified, nothing newer, but `signedAt` is older than [UPDATE_STALE_AFTER_DAYS] (or
+     *  unreadable) — the channel can't prove freshness (§M-D4: withheld updates made DETECTABLE). */
+    data class Stale(val seq: Long) : UpdateCheck
+
+    /** Fail-closed-quiet (§M-D5/D6): fetch failed, sig missing/invalid, parse failed, or the seq
+     *  regressed below the persisted floor. NO update is offered; no state is persisted. */
+    data object Unverified : UpdateCheck
+
+    /** §M-D3: only the TEST pubkey is pinned — the entire update path is compile-time disabled. */
+    data object Disabled : UpdateCheck
+}
+
+/** §M-D4: a verified manifest signed longer ago than this can't prove the channel is fresh. */
+private const val UPDATE_STALE_AFTER_DAYS = 45L
+
+// Verify-only Ed25519 (jvm lazysodium); lazy so sodium loads on the checker's IO thread, not at class init.
+private val updateCrypto by lazy { createCryptoProvider() }
+
+/**
+ * In-app update check (spec P3 + H2 §M): fetch the EXACT bytes of {base}/downloads/manifest.json
+ * (ofByteArray — §M-D6: the sig is over the raw bytes, so no string round-trip may touch them),
+ * fetch the detached base64url Ed25519 signature from manifest.json.sig (the update-signer's
+ * output format), verify against the pinned key set BEFORE parsing, then gate on the anti-rollback
+ * `seq` against [lastAcceptedSeq] (the caller's persisted floor). ANY failure on that path returns
+ * the quiet [UpdateCheck.Unverified] — never an offer, never a loud error. Still nag-only: no
+ * installer is ever downloaded or run from here (§M-D1). Selects the manifest entry for THIS OS —
+ * a Linux build must not compare itself against the Windows MSI's version (and vice-versa).
+ *
+ * Blocking I/O — call from a background dispatcher (UI-audit #24: this ran synchronously on the
+ * Compose thread and froze the window for up to ~8 s).
+ */
+fun checkForUpdate(baseUrl: String, lastAcceptedSeq: Long): UpdateCheck {
+    if (!UpdateVerify.updatesEnabled()) return UpdateCheck.Disabled // §M-D3 hard-off on the test key
     val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4)).build()
-    val req = HttpRequest.newBuilder(URI.create("$baseUrl/downloads/manifest.json")).timeout(Duration.ofSeconds(4)).GET().build()
-    val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
-    if (resp.statusCode() != 200) return null
-    val manifest = json.decodeFromString(DownloadsManifest.serializer(), resp.body())
+    val raw: ByteArray = try {
+        val req = HttpRequest.newBuilder(URI.create("$baseUrl/downloads/manifest.json")).timeout(Duration.ofSeconds(4)).GET().build()
+        val resp = client.send(req, HttpResponse.BodyHandlers.ofByteArray())
+        if (resp.statusCode() != 200) return UpdateCheck.Unverified
+        resp.body()
+    } catch (_: Exception) {
+        return UpdateCheck.Unverified
+    }
+    val sig: ByteArray = try {
+        val req = HttpRequest.newBuilder(URI.create("$baseUrl/downloads/manifest.json.sig")).timeout(Duration.ofSeconds(4)).GET().build()
+        val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
+        if (resp.statusCode() != 200) return UpdateCheck.Unverified
+        Bytes.fromB64(resp.body().trim())
+    } catch (_: Exception) {
+        return UpdateCheck.Unverified
+    }
+    // The crux (§D#2): verify the raw bytes against the pinned key set BEFORE any parse.
+    if (!UpdateVerify.verify(updateCrypto, raw, sig)) return UpdateCheck.Unverified
+    val manifest = try {
+        json.decodeFromString(DownloadsManifest.serializer(), raw.decodeToString())
+    } catch (_: Exception) {
+        return UpdateCheck.Unverified
+    }
+    // Anti-rollback (§B/§M-D4): refuse a manifest BELOW the floor — a validly-signed but OLD
+    // manifest replayed to steer a downgrade. `==` is NOT refused: steady state re-fetches the
+    // very manifest whose seq set the floor, and refusing our own current manifest would turn
+    // every launch into a false "couldn't verify". The floor only advances on seq > floor.
+    if (manifest.seq < lastAcceptedSeq) return UpdateCheck.Unverified
     val isWindows = System.getProperty("os.name").orEmpty().lowercase().contains("win")
-    val available = (if (isWindows) manifest.windows else manifest.linux)?.version?.takeIf { it.isNotBlank() } ?: return null
-    return if (compareVersions(available, DESKTOP_VERSION) > 0) available else null
+    val available = (if (isWindows) manifest.windows else manifest.linux)?.version?.takeIf { it.isNotBlank() }
+    return when {
+        available != null && compareVersions(available, DESKTOP_VERSION) > 0 -> UpdateCheck.Available(available, manifest.seq)
+        updateChannelStale(manifest.signedAt) -> UpdateCheck.Stale(manifest.seq)
+        else -> UpdateCheck.UpToDate(manifest.seq)
+    }
+}
+
+/** §M-D4 freshness: true when `signedAt` is missing/unreadable or older than the window — a
+ *  verified-but-old manifest is safe to be QUIETLY suspicious about, never loud. */
+private fun updateChannelStale(signedAt: String): Boolean = try {
+    Instant.parse(signedAt).isBefore(Instant.now().minus(Duration.ofDays(UPDATE_STALE_AFTER_DAYS)))
+} catch (_: Exception) {
+    true
 }
 
 private fun compareVersions(a: String, b: String): Int {

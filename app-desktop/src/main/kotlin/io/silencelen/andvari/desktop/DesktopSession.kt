@@ -41,6 +41,15 @@ class DesktopSessionStore {
         val autoLockSeconds: Int = 0,
         val lastExportAt: Long = 0,
         val lastSyncAt: Long = 0,
+        // UI-audit #26: the user's Auto/Light/Dark override ("auto"/"light"/"dark"). Additive with
+        // a default, so a pre-#26 prefs.json parses unchanged. Kept a plain STRING (not an enum):
+        // an unrecognized value must degrade to Auto in the reader, never fail the whole Prefs
+        // decode (which getOrDefault would silently reset to factory settings).
+        val themeMode: String = "auto",
+        // H2 signed updates (design 2026-07-13-signed-updates §B/§M-D4): the highest `seq` of any
+        // VERIFIED downloads manifest this install ever accepted — the anti-rollback floor a
+        // replayed old-but-validly-signed manifest is refused against. Additive; ratchets up only.
+        val lastAcceptedSeq: Long = 0,
     )
 
     private fun prefs(): Prefs = runCatching { json.decodeFromString(Prefs.serializer(), prefsFile.readText()) }.getOrDefault(Prefs())
@@ -88,6 +97,19 @@ class DesktopSessionStore {
     var lastSyncAt: Long
         get() = prefs().lastSyncAt
         set(v) { writePrefs(prefs().copy(lastSyncAt = v)) }
+
+    /** UI-audit #26: the persisted Auto/Light/Dark theme override (see the Prefs field note —
+     *  raw store string; [ThemeMode.fromStore] does the lenient parse). */
+    var themeMode: String
+        get() = prefs().themeMode
+        set(v) { writePrefs(prefs().copy(themeMode = v)) }
+
+    /** H2 anti-rollback floor (signed updates §M): highest verified manifest `seq` ever accepted.
+     *  Written only after [io.silencelen.andvari.core.client.UpdateVerify] passed on the raw bytes
+     *  (design §D#5 — never persisted off an unverified fetch). */
+    var lastAcceptedSeq: Long
+        get() = prefs().lastAcceptedSeq
+        set(v) { writePrefs(prefs().copy(lastAcceptedSeq = v)) }
 
     fun load(): DesktopSession? =
         runCatching { json.decodeFromString(DesktopSession.serializer(), file.readText()) }.getOrNull()

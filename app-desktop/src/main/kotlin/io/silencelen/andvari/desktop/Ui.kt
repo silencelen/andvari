@@ -1,8 +1,10 @@
 package io.silencelen.andvari.desktop
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.lazy.LazyColumn
@@ -21,6 +23,12 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -31,6 +39,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.BackupPreflight
@@ -77,10 +86,21 @@ fun DesktopApp(state: DesktopState) {
             Text("Update required", style = MaterialTheme.typography.titleMedium)
             Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 380.dp).padding(top = 8.dp))
             // Cut I (v2 #9): the downloads URL was inert text on a KEYBOARD-DEAD screen — make
-            // it a real button that opens the browser.
+            // it a real button that opens the browser. openUri on headless/no-browser Linux
+            // THROWS (Desktop.browse) — swallowing it made the only exit a silent no-op, so
+            // surface it and fall back to a copyable link.
             val uriHandler = LocalUriHandler.current
-            TextButton(onClick = { runCatching { uriHandler.openUri(downloadsUrl(state.baseUrl)) } }, modifier = Modifier.padding(top = 4.dp)) {
+            var openFailed by remember { mutableStateOf(false) }
+            TextButton(onClick = { runCatching { uriHandler.openUri(downloadsUrl(state.baseUrl)) }.onFailure { openFailed = true } }, modifier = Modifier.padding(top = 4.dp)) {
                 Text(downloadsUrl(state.baseUrl), style = MaterialTheme.typography.bodySmall)
+            }
+            if (openFailed) {
+                Text(
+                    "Couldn't open a browser on this machine — copy the link and open it elsewhere.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 380.dp).padding(top = 4.dp),
+                )
+                TextButton(onClick = { copyPlain(downloadsUrl(state.baseUrl)) }) { Text("Copy link") }
             }
         }
         return
@@ -125,13 +145,20 @@ fun DesktopApp(state: DesktopState) {
         when (state.screen) {
             is DesktopScreen.Vault, is DesktopScreen.Settings, is DesktopScreen.Trash, is DesktopScreen.Sharing -> AttentionArea(state)
             // RecoverySetup is a mid-enroll gate (no account chrome yet), like Welcome/Unlock — no
-            // attention area; RecoveryCapture (v2 #15) is the same gate reached from unlock/sign-in.
+            // attention area; RecoveryCapture (v2 #15) is the same gate reached from unlock/sign-in;
+            // Recover is the pre-session forgot-password flow (no account chrome by definition).
             is DesktopScreen.Loading, is DesktopScreen.Welcome, is DesktopScreen.Unlock,
-            is DesktopScreen.RecoverySetup, is DesktopScreen.RecoveryCapture -> {}
+            is DesktopScreen.RecoverySetup, is DesktopScreen.RecoveryCapture, is DesktopScreen.Recover -> {}
         }
         Box(Modifier.weight(1f)) {
             when (val s = state.screen) {
-                is DesktopScreen.Loading -> Center { Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary) }
+                is DesktopScreen.Loading -> Center {
+                    BrandRune() // #25 geometry
+                    // #24: the startup probe can take seconds — something must visibly move
+                    // (a still rune is indistinguishable from a hang for this audience).
+                    Spacer(Modifier.height(16.dp))
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                }
                 is DesktopScreen.Welcome -> Welcome(state)
                 is DesktopScreen.Unlock -> Unlock(state, s.email)
                 is DesktopScreen.Vault -> Vault(state)
@@ -140,6 +167,7 @@ fun DesktopApp(state: DesktopState) {
                 is DesktopScreen.Trash -> TrashScreen(state)
                 is DesktopScreen.RecoverySetup -> RecoverySetupScreen(state)
                 is DesktopScreen.RecoveryCapture -> RecoveryCaptureScreen(state)
+                is DesktopScreen.Recover -> RecoverScreen(state)
             }
         }
     }
@@ -150,9 +178,44 @@ fun DesktopApp(state: DesktopState) {
 private fun Center(content: @Composable ColumnScope.() -> Unit) =
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally, content = content)
 
+/**
+ * UI-audit #25: the brand (ᛅ) and empty-hoard (ᛝ) marks as PATH GEOMETRY (the web Sigil.tsx
+ * port) — the runic codepoints render as tofu wherever no installed font covers the Runic
+ * block (stock Linux/macOS), exactly where first-launch trust impressions live. Same 24-unit
+ * viewBox, 1.8-unit round-capped strokes, color = the caller's tint (web: currentColor).
+ * Purely decorative — no semantics, like the web marks' aria-hidden.
+ */
+
+/** ᛅ (long-branch ár), the wordmark rune: a stave crossed by one falling stroke. */
+@Composable
+private fun BrandRune(size: Dp = 40.dp, color: Color = MaterialTheme.colorScheme.primary) {
+    Canvas(Modifier.size(size)) {
+        val u = this.size.minDimension / 24f
+        val w = 1.8f * u
+        drawLine(color, Offset(12f * u, 3f * u), Offset(12f * u, 21f * u), strokeWidth = w, cap = StrokeCap.Round)
+        drawLine(color, Offset(5.5f * u, 8.5f * u), Offset(18.5f * u, 14.5f * u), strokeWidth = w, cap = StrokeCap.Round)
+    }
+}
+
+/** ᛝ (Ingwaz), the empty-state mark, reduced to its enclosing diamond. */
+@Composable
+private fun EmptyRune(size: Dp = 36.dp, color: Color = MaterialTheme.colorScheme.primary) {
+    Canvas(Modifier.size(size)) {
+        val u = this.size.minDimension / 24f
+        val diamond = Path().apply {
+            moveTo(12f * u, 4.5f * u)
+            lineTo(19f * u, 12f * u)
+            lineTo(12f * u, 19.5f * u)
+            lineTo(5f * u, 12f * u)
+            close()
+        }
+        drawPath(diamond, color, style = Stroke(width = 1.8f * u, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    }
+}
+
 @Composable
 private fun Sigil() {
-    Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
+    BrandRune() // #25: geometry, not the ᛅ codepoint (tofu on stock Linux)
     Text("andvari", style = MaterialTheme.typography.titleLarge)
     Text("the keeper of the hoard", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
@@ -244,6 +307,9 @@ private fun Welcome(state: DesktopState) {
         }
         Spacer(Modifier.height(16.dp))
         ErrorBar(state.error, state::clearError)
+        // Self-recovery lands here with "Master password reset — sign in with your new password."
+        // — Welcome composed no notice surface before, so the line was silently lost.
+        NoticeBar(state.notice, state::clearNotice)
         if (tab == 0) SignIn(state) else Enroll(state)
         Spacer(Modifier.height(20.dp))
         ServerField(state.baseUrl, state::updateServer)
@@ -269,6 +335,20 @@ private fun SignIn(state: DesktopState) {
         }
         Spacer(Modifier.height(12.dp))
         Primary("Sign in", ready && !state.busy, state.busy, submit)
+        if (state.busy) {
+            // #24: sign-in runs Argon2id twice (~seconds of silence beyond the button spinner) —
+            // say what the wait IS so it can't read as a hang.
+            Text(
+                "Checking your master password — this can take a few seconds…",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+        // Native self-recovery (web Welcome parity): a member holding their saved recovery
+        // phrase resets the master password right here — no web app required.
+        TextButton(onClick = { if (!state.busy) state.openRecover(email.trim()) }) {
+            Text("Forgot your master password?")
+        }
     }
 }
 
@@ -463,10 +543,10 @@ private fun Enroll(state: DesktopState) {
  * THIS reveal showed — on the capture path it is AWAITED under [DesktopState.busy] (the button
  * spins), and a replaced-phrase conflict re-runs the capture with the notice rendered below.
  *
- * TODO(recovery-cut-2): the native self-recovery flow (POST /recovery/self/verify + commit) — a member using this
- * phrase to reset a forgotten master password — and the native admin fingerprint-confirm-for-QR are
- * deferred; web covers self-recovery for this cut. This screen SHOWS the piece (at signup, or a
- * fresh one via the capture gate) — it never consumes one.
+ * The native self-recovery flow (POST /recovery/self/verify + commit) — a member using this
+ * phrase to reset a forgotten master password — now lives in [RecoverScreen] (recovery-cut-2;
+ * the admin fingerprint-confirm-for-QR remains deferred). This screen SHOWS the piece (at
+ * signup, or a fresh one via the capture gate) — it never consumes one.
  */
 @Composable
 private fun RecoverySetupScreen(state: DesktopState) {
@@ -582,6 +662,104 @@ private fun RecoveryCaptureScreen(state: DesktopState) {
     }
 }
 
+/**
+ * Native self-service recovery (DesktopScreen.Recover — design 2026-07-12 §F.3, the web
+ * Recover.tsx mirror): the "I forgot my master password" flow for a member who saved their
+ * recovery phrase. Two phases, both owned by DesktopState (which carries the §F.7 secret
+ * discipline — the parsed phrase bytes never live in this composable):
+ *   1. verify — email + phrase. Only the HKDF-derived `recoveryAuthKey` leaves this machine;
+ *      the server's uniform 401 never reveals which part was wrong (anti-enumeration §F.5).
+ *   2. reset — choose a new master password (F60 floor + confirm, the Enroll hint idiom). Core
+ *      [io.silencelen.andvari.core.client.Account.recover] re-wraps the SAME UVK and runs the
+ *      spec 01 §5 identity hard-fail BEFORE commit. Success revokes every session server-side
+ *      and lands on Welcome with the sign-in-fresh notice.
+ * Cancel affordances are busy-gated, so leaving can never race an in-flight verify/commit
+ * against the stashed secret.
+ */
+@Composable
+private fun RecoverScreen(state: DesktopState) {
+    var email by remember { mutableStateOf(state.recoverPrefillEmail) }
+    var phrase by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    // Web parity (§F.7): drop the typed phrase string the moment verify accepts — the reset
+    // step works off the state-held raw bytes, so the visible copy must not linger.
+    LaunchedEffect(state.recoverVerified) { if (state.recoverVerified) phrase = "" }
+    Column(Modifier.fillMaxSize().padding(28.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
+        Spacer(Modifier.height(24.dp))
+        BrandRune()
+        Text("Recover your account", style = MaterialTheme.typography.titleLarge)
+        Text(
+            if (state.recoverVerified) "choose a new master password" else "with your saved recovery phrase",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(16.dp))
+        ErrorBar(state.recoverError, state::clearRecoverError)
+        if (!state.recoverVerified) {
+            val ready = email.isNotBlank() && phrase.isNotBlank()
+            val submit = { if (ready && !state.busy) state.recoverVerifySubmit(email, phrase) }
+            Text(
+                "Enter the recovery phrase you saved when you set up this account. Your master password is not needed — the phrase alone lets you set a new one.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Field("Email", email, { email = it }, onEnter = submit, autoFocus = true) // a11ydesk-06
+            // NOT a Secret field (RecoverySetupScreen's rule): a recovery phrase must never be
+            // masked-then-password-managed; mono renders it verbatim.
+            Field("Recovery phrase", phrase, { phrase = it }, mono = true, onEnter = submit)
+            Text(
+                "exactly as you saved it — spaces are ignored",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            Primary("Continue", ready && !state.busy, state.busy, submit)
+            if (state.busy) {
+                Text(
+                    "Checking your recovery phrase…",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+            TextButton(onClick = { if (!state.busy) state.cancelRecover() }) { Text("Back to sign in") }
+        } else {
+            val strong = Strength.meetsMasterPasswordFloor(password)
+            val ready = strong && password == confirm
+            val submit = { if (ready && !state.busy) state.recoverCommitSubmit(password) }
+            Text(
+                "Your recovery phrase checked out. Choose a new master password — it re-locks the same vault; nothing you stored is lost.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Secret("New master password", password, onEnter = submit, autoFocus = true) { password = it } // a11ydesk-06
+            if (password.isNotEmpty()) {
+                val score = Strength.estimateStrength(password)
+                if (strong) {
+                    Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                if (Strength.masterPasswordHasNonAscii(password)) {
+                    Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+                }
+            }
+            Secret("Confirm new master password", confirm, onEnter = submit) { confirm = it }
+            if (confirm.isNotEmpty() && confirm != password) {
+                Text("passwords don't match", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            Spacer(Modifier.height(12.dp))
+            Primary("Reset master password", ready && !state.busy, state.busy, submit)
+            if (state.busy) {
+                Text(
+                    "Re-protecting your vault — this can take a few seconds…",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+            TextButton(onClick = { if (!state.busy) state.cancelRecover() }) { Text("Cancel") }
+        }
+    }
+}
+
 @Composable
 private fun Unlock(state: DesktopState, email: String) {
     var password by remember { mutableStateOf("") }
@@ -601,10 +779,19 @@ private fun Unlock(state: DesktopState, email: String) {
         Secret("Master password", password, onEnter = submit, autoFocus = true) { password = it } // a11ydesk-06: focus password on unlock (the most-repeated interaction)
         Spacer(Modifier.height(12.dp))
         Primary("Unlock", password.isNotBlank() && !state.busy, state.busy, submit)
-        // Cut H (v2 #6): a forgotten master password stranded users here — self-recovery lives
-        // in the web app (#recover); signpost it instead of dead-ending at destructive sign-out.
-        val uriHandler = LocalUriHandler.current
-        TextButton(onClick = { runCatching { uriHandler.openUri("${state.baseUrl}/#recover") } }) {
+        if (state.busy) {
+            // #24: the unlock KDF is a multi-second Argon2id pass — name the wait (the button
+            // spinner alone reads as a hang to this audience).
+            Text(
+                "Checking your master password — this can take a few seconds…",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+        // Cut H (v2 #6) → native now: a forgotten master password used to signpost the WEB app's
+        // #recover (an openUri that silently no-ops with no browser); the native self-recovery
+        // screen (design §F.3, web Recover.tsx mirror) handles it in-app instead.
+        TextButton(onClick = { if (!state.busy) state.openRecover(email) }) {
             Text("Forgot your master password?")
         }
         // Cut D (v2 #3): sign-out revokes the session and deletes the local cache including any
@@ -771,7 +958,7 @@ private fun Vault(state: DesktopState) {
                 LazyColumn(Modifier.weight(1f)) {
                     if (filtered.isEmpty()) {
                         item(key = "empty") {
-                            Center { Spacer(Modifier.height(48.dp)); Text("ᛝ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary); Text(if (state.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            Center { Spacer(Modifier.height(48.dp)); EmptyRune(); Spacer(Modifier.height(8.dp)); Text(if (state.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         }
                     } else {
                         items(filtered, key = { it.itemId }) { item ->
@@ -1309,12 +1496,26 @@ private fun SharingScreen(state: DesktopState) {
         // where they live (inviting members / granting access are web-only).
         if (settingsVault == null) {
             val uriHandler = LocalUriHandler.current
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "Invite household members and manage who can open each vault from the web app.",
-                    Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = { runCatching { uriHandler.openUri(state.baseUrl) } }) { Text("Open web app") }
+            // openUri THROWS on headless/no-browser Linux (Desktop.browse) — swallowed, the
+            // button was a silent no-op. Surface it + a copyable-address fallback.
+            var openWebFailed by remember { mutableStateOf(false) }
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Invite household members and manage who can open each vault from the web app.",
+                        Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = { runCatching { uriHandler.openUri(state.baseUrl) }.onFailure { openWebFailed = true } }) { Text("Open web app") }
+                }
+                if (openWebFailed) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Couldn't open a browser on this machine — the web app lives at ${state.baseUrl}.",
+                            Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(onClick = { copyPlain(state.baseUrl) }) { Text("Copy address") }
+                    }
+                }
             }
         }
 
@@ -2220,6 +2421,39 @@ private fun SettingsScreen(state: DesktopState) {
                 }
                 Spacer(Modifier.height(4.dp))
                 Text("Sign out to connect to a different server.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // H2 §M-D5: the update channel's QUIET degraded states (unverified listing /
+                // stale signature) live here as one muted line — deliberately not error-toned,
+                // never a banner: a sig-stripping server must not get a scary lever to pull.
+                state.updateChannelNotice?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                // UI-audit #26: Auto/Light/Dark override — Linux desktops routinely report
+                // light to isSystemInDarkTheme regardless of the actual theme, hard-sticking
+                // those users in light mode with no recourse.
+                Text("Appearance", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "Auto follows your system's light or dark setting.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                ThemeMode.entries.forEach { mode ->
+                    // a11ydesk-03 idiom: the whole row is one selectable radio target, the
+                    // label is the accessible name (RadioButton itself takes no click).
+                    Row(
+                        Modifier.fillMaxWidth().selectable(selected = state.themeMode == mode, role = Role.RadioButton, onClick = { state.chooseThemeMode(mode) }).padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = state.themeMode == mode, onClick = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(mode.label, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
             }
         }
         Spacer(Modifier.height(16.dp))
