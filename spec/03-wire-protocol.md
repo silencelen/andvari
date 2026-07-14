@@ -26,7 +26,10 @@ comes from `/client-policy`); they block writes and show the upgrade path
 - `POST /auth/login { email, authKey, device: { platform, name } , totp? }` →
   `200 { userId, deviceId, accessToken, refreshToken, accountKeys }` where
   `accountKeys = { wrappedUvk, kdfParams, encryptedIdentitySeed, identityPub,
-  escrowFingerprint, recoverySetupNeeded }`. `recoverySetupNeeded` (additive, default
+  escrowFingerprint, recoverySetupNeeded, recoveryConfirmed }`. `recoveryConfirmed`
+  (additive, default `false`) is the §12 capture-confirmation flag — `false` ⇒ the client
+  MUST run the vault-entry capture gate before granting vault access; `accountKeys` never
+  carries the piece id itself. `recoverySetupNeeded` (additive, default
   `false` — same additive shape as `escrowStale`, spec 04 §4) is `true` for an existing
   account with no `member_recovery` row: the per-member-recovery migration nudge (§12,
   spec 04 §6). `escrowFingerprint` is **absent/null for a `waived` member** (no org
@@ -226,7 +229,9 @@ proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — veri
   memberRecovery: { recoveryWrappedUvk, recoveryAuthKey },
   personalVault: { vaultId, wrappedVk, metaBlob }, device: { platform, name } }` —
   one shot, atomic (user + [escrow] + `member_recovery` row + personal vault + owner
-  grant + first device + session; response = the login response). **`escrow` is now
+  grant + first device + session; response = the login response **plus
+  `recoveryPieceId`** — the register-committed recovery piece's opaque id, presented by the
+  enroll path's `POST /recovery/self/confirm` (§12); login/refresh never populate it). **`escrow` is now
   nullable and `memberRecovery` is mandatory.** The register gate is a **total function**
   over the invite's server-side `escrowPolicy` (full truth-table + rationale: spec 04 §6):
   - `memberRecovery` is **mandatory for every new account** (`recovery_required` if
@@ -436,8 +441,8 @@ spec 04 §4 escrow recovery, then acts as owner (`ops/runbooks/vault-succession.
 The self-service counterpart to admin escrow recovery (§7 `/admin/recovery`): a member
 who kept their generated recovery piece (spec 01 §2.1, spec 04 §6) resets their own
 password without the admin. **Two-phase**, so the server hands out no pre-auth UVK blob,
-exposes no enumeration oracle, and binds the reset to one replay-bound ticket. **All three
-routes are refused on the public break-glass origin** (`403`, same guard as register) and
+exposes no enumeration oracle, and binds the reset to one replay-bound ticket. **All four
+routes (verify, commit, self-setup, self-confirm) are refused on the public break-glass origin** (`403`, same guard as register) and
 **per-IP fixed-window rate-limited** at ≥ public-login tightness (§8; no per-account
 counter → a targeted account cannot be locked out of its own recovery, spec 05 R9). No
 `/recovery/prelogin` exists: the recovery secret is high-entropy and its derivation is
@@ -473,9 +478,30 @@ phase 1 — hence no recovery-side prelogin oracle to equalize.
   (§3) before storing the `member_recovery` row. A quick-unlock / biometric session (no
   password in hand) cannot call it — the setup nudge (`recoverySetupNeeded`, §2) defers to
   the next full-password unlock. Audited `recovery_self_setup`.
+  Every setup (and every register) mints a fresh, opaque, server-side **`pieceId`**
+  (random, `ServerCrypto.newToken`) stored on the `member_recovery` row together with the
+  committing **`setupDeviceId`**; the response is `200 { pieceId }` (was `"ok"` — no
+  fielded client parses that body). Because a setup ROTATES the piece, it also clears
+  `users.recoveryConfirmed` to 0: the flag always describes the CURRENT piece.
+- **`POST /recovery/self/confirm` (authenticated) `{ pieceId? }`** — flips the durable,
+  cross-device `users.recoveryConfirmed` flag to 1 after the user demonstrably typed the
+  revealed phrase back (design §F.9). The flag flips ONLY here — never at register, setup,
+  or commit. **Piece binding:** a confirm carrying `pieceId` is accepted iff it equals the
+  CURRENT row's `pieceId`; otherwise `409 recovery_piece_stale` — the client must discard
+  the shown phrase as invalid and re-run setup + reveal. A body-less confirm (fielded
+  pre-binding natives) is accepted only when the current row's `setupDeviceId` is the
+  caller's device (or the row predates the columns), so a legacy confirm can never attest
+  a piece rotated in from another device; rejected legacy confirms are fail-open for
+  availability (fielded confirm calls are fire-and-forget) and the cleared flag re-gates.
+  Audited `recovery_self_confirm` / `recovery_self_confirm_unbound` /
+  `recovery_self_confirm_stale`. An empty body parses as `pieceId = null`; register's
+  response carries the register-committed piece's id as `recoveryPieceId` for the enroll
+  path's bound confirm.
 
 **Errors:** `recovery_required`, `escrow_not_allowed_when_waived` (register gate, §7);
-`recovery_account_not_active` (commit); an invalid/consumed ticket and all verify failures
-are the uniform `401`. New audit types: `recovery_self_commit`, `recovery_self_setup`.
-New stored surface: table `member_recovery` + column `invites.escrowPolicy` (ZK contract:
-spec 02 §5).
+`recovery_account_not_active` (commit); `recovery_piece_stale` (`409`, confirm — stale or
+foreign-device piece); an invalid/consumed ticket and all verify failures are the uniform
+`401`. New audit types: `recovery_self_commit`, `recovery_self_setup`,
+`recovery_self_confirm`, `recovery_self_confirm_unbound`, `recovery_self_confirm_stale`.
+New stored surface: table `member_recovery` (+ v8 `pieceId`, `setupDeviceId`) + columns
+`invites.escrowPolicy`, `users.recoveryConfirmed` (ZK contract: spec 02 §5).

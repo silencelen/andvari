@@ -141,6 +141,10 @@ user-influenced — is load-bearing (spec 05 T8).
   mis-keying), then it is dropped from memory. The shown-once web leak-vector discipline
   (no `type="password"`, no localStorage/session/IndexedDB, secret-clipboard auto-clear,
   un-skippable confirm gate) is build-contract §F.7.
+  The register response returns the committed piece's opaque `recoveryPieceId`; the
+  type-back confirm presents it to `POST /recovery/self/confirm`, which flips the durable
+  `recoveryConfirmed` flag only when the id still names the CURRENT `member_recovery` row
+  (spec 03 §12) — a confirm can never attest a piece that a concurrent setup rotated away.
 - **Recovery** is two-phase (spec 03 §12): phase-1 `POST /recovery/self/verify` gates on
   the server-side `recoveryVerifier` (a one-way hash of `recoveryAuthKey`, never the raw
   key) and only then returns `recoveryWrappedUvk` + a single-use, short-TTL,
@@ -247,3 +251,12 @@ gains a self-service piece, and both blobs stay valid across password change,
 self-recovery, and admin recovery. `member_recovery` is symmetric and not sealed to the org
 key, so an org-key rotation / re-ceremony (§4) never touches it, and `recovery-cli` and the
 F57 re-seal path are **unchanged**.
+
+Because `PUT /recovery/self-setup` ROTATES the piece, every setup also clears
+`recoveryConfirmed` to 0 and mints a fresh `pieceId` (returned in its response); the
+vault-entry capture gate on any device therefore re-fires until the CURRENT piece is
+type-backed, and a stale confirm (an interleaved rotation from another device) is refused
+`409 recovery_piece_stale` — the client discards the shown phrase and re-runs
+setup + reveal. Two devices racing the gate converge on whichever completes
+reveal → type-back → confirm against the newest piece; no ordering can leave
+`recoveryConfirmed = 1` attesting an uncaptured piece.

@@ -62,6 +62,10 @@ export interface SessionResponse {
   isAdmin: boolean;
   mustChangePassword: boolean;
   totpEnrolled: boolean;
+  /** Piece-binding (design 2026-07-13): opaque id of the recovery piece THIS register committed,
+   *  presented by the enroll path's `POST /recovery/self/confirm` so the confirm attests the current
+   *  piece. Populated ONLY by register; login/refresh leave it undefined. Additive/optional. */
+  recoveryPieceId?: string | null;
 }
 
 export interface WireVault {
@@ -421,6 +425,21 @@ export interface RecoverySelfSetupRequest {
   memberRecovery: MemberRecoveryBlock;
 }
 
+/** `PUT /recovery/self-setup` success response (design 2026-07-13 piece-binding). Carries the fresh,
+ *  server-minted opaque `pieceId` of the piece this setup committed; the capture gate threads it into
+ *  the subsequent `POST /recovery/self/confirm`. A pre-binding server answered `"ok"` (non-JSON) →
+ *  `client.recoverySelfSetup` yields `{ pieceId: null }` (legacy, unbound confirm). */
+export interface RecoverySelfSetupResponse {
+  pieceId?: string | null;
+}
+
+/** `POST /recovery/self/confirm` request body (design 2026-07-13 piece-binding). Optional: sending the
+ *  revealed `pieceId` binds the confirm to the current piece; a mismatch is refused
+ *  `409 recovery_piece_stale`. An empty body is the legacy (device-scoped) path. No key material. */
+export interface RecoverySelfConfirmRequest {
+  pieceId?: string | null;
+}
+
 // ---- admin ----
 
 export interface AdminUserSummary {
@@ -433,11 +452,15 @@ export interface AdminUserSummary {
   deviceCount: number;
   escrowFingerprint: string | null;
   /** design §F.9 posture reconciliation (additive; optional): whether this member has a member_recovery
-   *  row (a self-service recovery piece). This is the field the server ACTUALLY sends per-user (an
-   *  invite's `escrowPolicy` is NOT persisted onto the users row in this cut — deferred to
-   *  recovery-cut-2). Lets the Admin UI distinguish "waived (intended)" (no escrow but a member piece)
-   *  from "no recovery / needs setup" (neither) when `escrowFingerprint == null`. Old servers omit it. */
+   *  row (a self-service recovery piece). Lets the Admin UI distinguish "waived (intended)" (no escrow
+   *  but a member piece) from "no recovery / needs setup" (neither) when `escrowFingerprint == null`.
+   *  Old servers omit it. */
   recoveryEnrolled?: boolean;
+  /** design §F.4 (2026-07-13): the invite's escrow posture persisted onto the user at register
+   *  ("required" | "waived"). Paired with `recoveryEnrolled`, it distinguishes an intended waiver from
+   *  a required-member whose escrow blob is missing (hostile flip / escrow deletion). Undefined for
+   *  pre-v8 users (shown as legacy). Additive/optional. */
+  escrowPolicy?: string | null;
 }
 
 export interface InviteResponse {
