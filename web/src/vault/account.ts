@@ -469,7 +469,10 @@ export class Account {
    */
   buildRenameMeta(vaultId: string, metaBlob: string, newName: string): string {
     const meta = this.decryptVaultMeta(vaultId, metaBlob);
-    const metaV = typeof meta.metaV === "number" ? meta.metaV : 0;
+    // spec 02 §4: metaV counts ONLY when it is an integral, non-negative JSON number,
+    // else 0 — the SAME rule store.ts metaVOf applies, so write and apply agree.
+    const v = meta.metaV;
+    const metaV = typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : 0;
     const next = { ...meta, name: newName, metaV: metaV + 1 };
     return toB64(seal(this.vk(vaultId), utf8(JSON.stringify(next)), adVaultMeta(vaultId)));
   }

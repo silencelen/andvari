@@ -1203,6 +1203,100 @@
           }
         ]
       }
+    },
+    {
+      "name": "chrome-port-strip-ascii-digits",
+      "csv": "name,url,username,password,note\n,https://one.example:8080,u1,p1,\n,https://two.example:١٢٣,u2,p2,\n,three.example:65535,u3,p3,\n,https://four.example:12x,u4,p4,\n,\ufeffhttps://five.example/x,u5,p5,\n",
+      "existing": null,
+      "expect": {
+        "format": "chrome",
+        "report": {
+          "imported": 5,
+          "skippedEmpty": 0,
+          "collapsed": 0,
+          "flagged": [],
+          "alreadyInVault": [],
+          "passwordDiffers": [],
+          "totpDiffers": [],
+          "archivedSkipped": [],
+          "unknownTypeSkipped": [],
+          "totpUnsupported": [],
+          "noteItems": [],
+          "errors": []
+        },
+        "items": [
+          {
+            "type": "login",
+            "name": "one.example",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u1",
+              "password": "p1",
+              "uris": [
+                "https://one.example:8080"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "two.example:١٢٣",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u2",
+              "password": "p2",
+              "uris": [
+                "https://two.example:١٢٣"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "three.example",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u3",
+              "password": "p3",
+              "uris": [
+                "three.example:65535"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "four.example:12x",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u4",
+              "password": "p4",
+              "uris": [
+                "https://four.example:12x"
+              ],
+              "totp": null
+            }
+          },
+          {
+            "type": "login",
+            "name": "five.example",
+            "notes": null,
+            "favorite": false,
+            "login": {
+              "username": "u5",
+              "password": "p5",
+              "uris": [
+                "\ufeffhttps://five.example/x"
+              ],
+              "totp": null
+            }
+          }
+        ]
+      }
     }
   ],
   "reject": [

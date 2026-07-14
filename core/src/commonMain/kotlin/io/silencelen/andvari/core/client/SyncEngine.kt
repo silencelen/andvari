@@ -434,7 +434,10 @@ class SyncEngine(
                     if (cache.getHeld(grant.vaultId) != null) reinstatedIds.add(grant.vaultId)
                 }
             }
-            for (vault in resp.vaults) {
+            for (delivered in resp.vaults) {
+                // spec 02 §4 warn-and-keep-newer: a delivered metaBlob whose metaV
+                // regressed keeps the newer local blob (rev/lifecycle fields still apply).
+                val vault = keepNewerMeta(delivered)
                 cache.upsertVault(vault)
                 if (vault.type == "personal" && account.hasVault(vault.vaultId)) account.setPersonalVault(vault.vaultId)
                 // Consumed-deleteId marker (spec 03 §11): a live vault that WAS restored
@@ -514,6 +517,47 @@ class SyncEngine(
     }
 
     // ==== vault lifecycle: sync-time handling (spec 03 §11) ====
+
+    /**
+     * spec 02 §4 warn-and-keep-newer: the metaBlob plaintext carries the monotonic `metaV`
+     * counter (bumped by every rename write), and a DELIVERED blob whose counter regresses
+     * below the locally-held one is a replayed/rolled-back row — warn and keep the newer
+     * local blob, never silently apply (the metaBlob-level sibling of [pull]'s rev rollback
+     * guards; an absent or non-integral metaV reads as 0, the pre-rename floor, matching
+     * [Account.buildRenameMeta] — see [metaV]). Comparable only when the VK is held, a previous row
+     * exists (never on a since=0 / resync pull — the cache was just cleared), and BOTH
+     * blobs decrypt; anything unverifiable applies the delivered row as-is (this guard is
+     * anti-replay, not availability). ONLY the metaBlob is kept — rev and the lifecycle
+     * fields always apply. Web twin: store.ts keepNewerMeta.
+     */
+    private fun keepNewerMeta(delivered: WireVault): WireVault {
+        if (!account.hasVault(delivered.vaultId)) return delivered
+        val held = cache.vaults().find { it.vaultId == delivered.vaultId } ?: return delivered
+        if (held.metaBlob == delivered.metaBlob) return delivered
+        return runCatching {
+            val heldV = metaV(held)
+            val deliveredV = metaV(delivered)
+            if (deliveredV < heldV) {
+                println(
+                    "andvari: vault ${delivered.vaultId} delivered metaV $deliveredV regressed below held $heldV" +
+                        " — replayed metaBlob; keeping the newer local one",
+                )
+                delivered.copy(metaBlob = held.metaBlob)
+            } else delivered
+        }.getOrDefault(delivered)
+    }
+
+    /** The row's plaintext `metaV` (spec 02 §4): it counts ONLY when it is an integral,
+     *  non-negative JSON number, else 0 — a string-encoded/fractional/negative value must
+     *  read identically on every client (the same read [Account.buildRenameMeta] uses), or
+     *  one impl pins while another applies, forking the fleet in exactly the adversarial
+     *  anti-replay path this guard exists for. Web twin: store.ts metaVOf. */
+    private fun metaV(v: WireVault): Long {
+        val meta = account.decryptVaultMeta(v.vaultId, v.metaBlob)
+        val p = meta["metaV"] as? kotlinx.serialization.json.JsonPrimitive ?: return 0L
+        if (p.isString) return 0L // "999999" is not a counter
+        return p.content.toLongOrNull()?.takeIf { it >= 0 } ?: 0L // fractional/exponent/negative → 0
+    }
 
     /**
      * One removedGrants entry, tri-state (spec 03 §4/§11):

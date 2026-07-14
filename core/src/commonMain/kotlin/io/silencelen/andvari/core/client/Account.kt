@@ -542,7 +542,10 @@ class Account private constructor(
      */
     fun buildRenameMeta(vaultId: String, metaBlob: String, newName: String): String {
         val meta = decryptVaultMeta(vaultId, metaBlob)
-        val metaV = (meta["metaV"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+        // spec 02 §4: metaV counts ONLY when it is an integral, non-negative JSON number,
+        // else 0 — the SAME rule SyncEngine.metaV applies, so write and apply agree.
+        val metaV = (meta["metaV"] as? kotlinx.serialization.json.JsonPrimitive)
+            ?.takeIf { !it.isString }?.content?.toLongOrNull()?.takeIf { it >= 0 } ?: 0L
         val next = buildJsonObject {
             for ((k, v) in meta) if (k != "name" && k != "metaV") put(k, v)
             put("name", newName)

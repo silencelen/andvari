@@ -588,9 +588,12 @@ object CsvImport {
      *  → the NO_URI sentinel at call sites. A non-empty uri that fails to parse (A5 junk
      *  like ".example.com" — parseable before 2026-07-10) keys a verbatim `j:` class
      *  instead of dropping: dropping collapsed junk-uri-only items into NO_URI, where a
-     *  re-import could false-merge rows differing only by that junk uri (web csv.ts twin). */
+     *  re-import could false-merge rows differing only by that junk uri (web csv.ts twin).
+     *  Entry trim is the pinned [csvTrim], never platform trim() — JS trim() strips U+FEFF
+     *  where the JVM keeps it, so a uri cell carrying a residual BOM landed in DIFFERENT
+     *  equality classes per impl, flipping alreadyInVault/passwordDiffers verdicts. */
     private fun uriClass(raw: String): String? {
-        val trimmed = raw.trim()
+        val trimmed = raw.csvTrim()
         if (trimmed.isEmpty()) return null
         return when (val s = UriMatch.parseSavedUri(trimmed)) {
             is SavedUri.Web -> "w:${s.host}"
@@ -642,7 +645,10 @@ object CsvImport {
             if (close >= 0) s.substring(1, close) else s.drop(1) // IPv6 bracket contents
         } else {
             val colon = s.lastIndexOf(':') // strip a trailing :digits port only
-            if (colon >= 0 && colon < s.length - 1 && s.substring(colon + 1).all { it.isDigit() }) s.substring(0, colon) else s
+            // ASCII digits ONLY (the UriMatch.isIpLiteral precedent): Char.isDigit() accepts
+            // any Unicode Nd digit, so "host:١٢٣" stripped its "port" here while the TS
+            // twin's 0-9 check kept it — divergent fallback names. Vector-pinned (import-foreign.json).
+            if (colon >= 0 && colon < s.length - 1 && s.substring(colon + 1).all { it in '0'..'9' }) s.substring(0, colon) else s
         }
         s = s.lowercase()
         return if (s.isNotEmpty()) s else url.csvTrim().ifEmpty { "Imported login" }
