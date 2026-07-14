@@ -99,10 +99,11 @@ class CardDisplayTest {
     }
 
     @Test
-    fun pinsCreateEnabledFalse() {
-        // The Option A dark gate (like web's CARD_CREATE_ENABLED pin): flipped DELIBERATELY
-        // at the release that retires the 0.2.x MSI — never by accident. Editing this
-        // assertion is the conscious act that enables card creation on the native clients.
-        assertFalse(CardDisplay.CREATE_ENABLED)
+    fun pinsCreateEnabledTrue() {
+        // The Option A gate (like web's CARD_CREATE_ENABLED pin): flipped DELIBERATELY at
+        // the release that retires the 0.2.x MSI — never by accident. That trigger has now
+        // fired (0.2.x MSI retired; fleet manifest windows=0.16.0), so card creation is live
+        // on the native clients and this pins the enabled state.
+        assertTrue(CardDisplay.CREATE_ENABLED)
     }
 }
