@@ -10,6 +10,7 @@ import io.ktor.server.plugins.origin
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.contentLength
 import io.ktor.server.request.header
+import io.ktor.server.request.path
 import io.ktor.server.request.receive
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
@@ -53,9 +54,12 @@ import io.ktor.http.defaultForFile
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.metrics.micrometer.MicrometerMetrics
+import io.ktor.server.request.ApplicationReceivePipeline
 import io.ktor.server.request.receiveChannel
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondOutputStream
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.readRemaining
 import io.micrometer.prometheusmetrics.PrometheusConfig
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry
 import io.silencelen.andvari.core.model.PasswordChangeRequest
@@ -64,6 +68,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.io.readByteArray
 import io.silencelen.andvari.core.model.WsTicketResponse
 import kotlinx.serialization.Serializable
 import java.io.File
@@ -120,6 +125,39 @@ fun requireEscrowBlob(sealedB64: String) {
         throw BadRequest("bad_escrow_blob")
     }
     if (bytes.size < ESCROW_SEALED_MIN || bytes.size > ESCROW_SEALED_MAX) throw BadRequest("bad_escrow_blob")
+}
+
+/**
+ * Global request-body caps (spec 03; pentest M4 [S4-01]: an 8 MiB body POSTed to the
+ * unauthenticated /auth/prelogin was fully heap-buffered — a concurrent flood away from
+ * OOMing the single CT122 process). Three route classes:
+ *   EXEMPT   — the attachment upload streams via receiveChannel and AttachmentStore
+ *              enforces its own per-attachment/per-user quotas mid-stream; the /events
+ *              WebSocket upgrade (draining its live bidirectional channel in the layer-2
+ *              receive interceptor would block the handshake forever).
+ *   GENEROUS — /sync/push: a CSV import lands here as ONE JSON body (up to 200
+ *              mutations, item blobs uncapped upstream), so the ceiling is sized to
+ *              bound the buffer without breaking a fat import batch.
+ *   TIGHT    — every other route, notably ALL unauthenticated ones; the largest
+ *              legitimate body (register, a single-item restore) sits well under it.
+ * Enforced in two layers in [andvariModule]: a declared Content-Length over the cap is
+ * refused before the handler runs; chunked/undeclared bodies are cut off at receive time.
+ * Breach ⇒ 413 [PayloadTooLarge] "body_too_large" via StatusPages' house error shape.
+ */
+internal const val BODY_CAP_TIGHT_BYTES = 256L * 1024
+internal const val BODY_CAP_PUSH_BYTES = 8L * 1024 * 1024
+
+/** The request-body cap for [path], or null when exempt (the streamed attachment upload; the
+ *  /events WebSocket upgrade, whose live channel must not be drained by the receive interceptor). */
+internal fun bodyCapBytes(path: String): Long? = when {
+    path.startsWith("/api/v1/attachments/") -> null
+    path == "/api/v1/events" -> null
+    path == "/api/v1/sync/push" -> BODY_CAP_PUSH_BYTES
+    // A single-item restore re-uploads that item's re-encrypted blob, which is uncapped upstream
+    // exactly like a push mutation — so it gets the GENEROUS ceiling, not TIGHT. Otherwise a big
+    // item the server accepted at creation (via push) would 413 on restore = un-restorable Trash.
+    path.startsWith("/api/v1/items/") && path.endsWith("/restore") -> BODY_CAP_PUSH_BYTES
+    else -> BODY_CAP_TIGHT_BYTES
 }
 
 class Services(
@@ -279,6 +317,30 @@ fun Application.andvariModule(services: Services) {
         context.response.headers.append("Referrer-Policy", "no-referrer", false)
         context.response.headers.append("Permissions-Policy", "camera=(), microphone=(), geolocation=()", false)
         context.response.headers.append("X-Robots-Tag", "noindex, nofollow", false)
+    }
+
+    // Request-body cap, layer 1 (spec 03; pentest M4): a declared Content-Length over the
+    // route's cap is refused up front — before routing, auth, or rate-limit work — so an
+    // oversize body never costs more than header parsing (nothing of it is read).
+    intercept(ApplicationCallPipeline.Plugins) {
+        val cap = bodyCapBytes(context.request.path())
+        val declared = context.request.contentLength()
+        if (cap != null && declared != null && declared > cap) throw PayloadTooLarge("body_too_large")
+    }
+
+    // Layer 2: chunked/undeclared-length bodies. Read at most cap+1 bytes at receive time
+    // and hand the handler a bounded replay channel — every capped route buffers its whole
+    // body in call.receive anyway (the streaming attachment upload is exempt), so this adds
+    // no buffering, just a bound. Deliberately NOT a wrapper channel whose writer coroutine
+    // throws mid-stream: ktor-io's CloseToken rewraps a writer failure in IOException, which
+    // would surface the house PayloadTooLarge as a 500 instead of a 413 at StatusPages.
+    receivePipeline.intercept(ApplicationReceivePipeline.Before) {
+        val cap = bodyCapBytes(context.request.path()) ?: return@intercept
+        val body = subject as? ByteReadChannel ?: return@intercept
+        val head = body.readRemaining(cap + 1).readByteArray()
+        body.closedCause?.let { throw it } // a mid-body client abort stays an IO failure, as before
+        if (head.size > cap) throw PayloadTooLarge("body_too_large")
+        proceedWith(ByteReadChannel(head))
     }
 
     // Attachment orphan GC (spec 02 §6): hourly sweep, first pass shortly after boot.
