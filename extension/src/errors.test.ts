@@ -3,7 +3,7 @@
 // is cross-client copy drift and must be a deliberate, twin-side change.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { fillErrorCopy, lockNoticeCopy, saveErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors.ts";
+import { CARD_COPY_FAILED, CLIPBOARD_FAILED, fillErrorCopy, lockNoticeCopy, revealErrorCopy, saveErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors.ts";
 
 test("UNREACHABLE is the canonical web sentence", () => {
   // Byte-equal to web/src/ui/errors.ts UNREACHABLE (em dash U+2014, ASCII apostrophes).
@@ -45,6 +45,19 @@ test("fill outcomes (Cut M, v2 #14): every code renders canon copy, never SW/con
   // popup's long-standing delivery-failure sentence.
   assert.equal(fillErrorCopy("unreachable"), "Couldn't reach the page — reload the tab and retry.");
   assert.equal(fillErrorCopy(undefined), "Couldn't reach the page — reload the tab and retry.");
+});
+
+test("reveal-seam failures (#23): every code renders verb-neutral copy, never SW-internal strings", () => {
+  // Verb-neutral ("release that login") because these render on BOTH the copy button and the
+  // show/hide password toggle — a "copy" verb would misdescribe the reveal action.
+  assert.equal(revealErrorCopy("locked"), "andvari locked before it could release that login — unlock and try again.");
+  assert.equal(revealErrorCopy("not_allowed"), "andvari wouldn't release that login — reopen the popup and try again.");
+  assert.equal(revealErrorCopy(undefined), "Could not release that login — try again."); // SW mid-restart
+});
+
+test("card + clipboard copy failures (#23): honest retryable sentences, never raw exception text", () => {
+  assert.equal(CARD_COPY_FAILED, "Could not copy from this card — reopen the popup and try again.");
+  assert.equal(CLIPBOARD_FAILED, "Couldn't copy to the clipboard — try again.");
 });
 
 test("lock notice: verbatim web format.ts rounding (AM3 — minutes at ≥ 60 s)", () => {

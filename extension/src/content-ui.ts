@@ -10,8 +10,9 @@
  * Theming trap the token layout answers: `all: initial` does NOT reset custom properties, and
  * the page can out-cascade :host rules on the host element — so the full --anv-* token set is
  * defined ON the component roots (.dropdown/.banner/.toast), never :host, making each surface
- * self-sealed on any site. The serif ᛅ+wordmark header doubles as anti-spoof attribution: a
- * distinctive treasury surface is harder for a page to convincingly fake.
+ * self-sealed on any site. The ᛅ+wordmark header doubles as anti-spoof attribution: a
+ * distinctive treasury surface is harder for a page to convincingly fake — so the mark is
+ * drawn as SVG geometry (sigilSpan), never a runic codepoint that tofus on font-poor hosts.
  */
 import type { MatchItem, PendingSave } from "./messages";
 
@@ -93,7 +94,10 @@ const UI_CSS = `
   color: var(--anv-ink);
   cursor: default;
 }
-.hdr .sigil { color: var(--anv-gold); font-size: 15px; line-height: 1; text-shadow: 0 1px 12px rgba(208, 169, 74, .4); }
+/* The mark is inline SVG (see sigilSpan) — centered against the baseline-flex text, and the
+   old text-shadow glow restated as a drop-shadow (shadows can't reach SVG strokes). */
+.hdr .sigil { color: var(--anv-gold); align-self: center; display: inline-flex; }
+.hdr .sigil svg { filter: drop-shadow(0 1px 12px rgba(208, 169, 74, .4)); }
 .hdr .a-mark { color: var(--anv-gold); }
 
 .list { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
@@ -190,7 +194,7 @@ button.ghost:disabled { opacity: .5; cursor: default; }
   font: 12.5px/1.4 var(--anv-sans);
   animation: anv-in .16s ease-out;
 }
-.toast .sigil { font-family: var(--anv-serif); color: var(--anv-gold); }
+.toast .sigil { color: var(--anv-gold); align-self: center; display: inline-flex; }
 `;
 
 export interface DropdownState {
@@ -353,12 +357,37 @@ function span(className: string, text: string): HTMLSpanElement {
   return s;
 }
 
+/** The ᛅ brand mark as a span-wrapped inline SVG (web Sigil.tsx geometry, verbatim): the raw
+ *  runic codepoint renders as tofu wherever no installed font covers the Runic block — fatal
+ *  for a header whose whole job is anti-spoof attribution on arbitrary sites. The stroke
+ *  inherits currentColor from the .sigil gold. */
+function sigilSpan(size: number): HTMLSpanElement {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("aria-hidden", "true");
+  for (const d of ["M12 3v18", "M5.5 8.5l13 6"]) { // a stave crossed by one falling stroke (long-branch ár)
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", d);
+    svg.append(p);
+  }
+  const s = span("sigil", "");
+  s.append(svg);
+  return s;
+}
+
 function brandHeader(): HTMLElement {
   const hdr = document.createElement("div");
   hdr.className = "hdr";
   const brand = document.createElement("span");
   brand.append(span("a-mark", "and"), document.createTextNode("vari"));
-  hdr.append(span("sigil", "ᛅ"), brand);
+  hdr.append(sigilSpan(14), brand);
   return hdr;
 }
 
@@ -651,7 +680,7 @@ export function showToast(text: string, assertive = false): void {
   toastEl?.remove();
   const t = document.createElement("div");
   t.className = "toast";
-  t.append(span("sigil", "ᛅ"), document.createTextNode(text));
+  t.append(sigilSpan(12), document.createTextNode(text));
   root.appendChild(t);
   toastEl = t;
   // a11y 6d (AM-7): mirror the text into the PERSISTENT region so it is spoken (the fresh toast

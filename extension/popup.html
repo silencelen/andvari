@@ -7,7 +7,10 @@
   </head>
   <body>
     <header class="pop-head">
-      <span class="brand"><span class="sigil-sm">ᛅ</span><span class="a-mark">and</span>vari</span>
+      <!-- The ᛅ marks are inline SVG (web Sigil.tsx geometry) — the raw runic codepoint renders
+           as tofu wherever no installed font covers the Runic block. Kept in lockstep with
+           popup.ts sigilSvg(). No whitespace between the brand spans (inline flow). -->
+      <span class="brand"><span class="sigil-sm"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v18"/><path d="M5.5 8.5l13 6"/></svg></span><span class="a-mark">and</span>vari</span>
       <!-- a11y 5a: the coloured dot is decorative; the visually-hidden twin carries the state
            to AT (a title on a non-interactive span is unreliable + unfocusable). -->
       <span id="conn" class="dot off" title="server" aria-hidden="true"></span>
@@ -33,7 +36,7 @@
 
     <section id="locked" class="locked" hidden>
       <div class="hero">
-        <div class="sigil">ᛅ</div>
+        <div class="sigil"><svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v18"/><path d="M5.5 8.5l13 6"/></svg></div>
         <span class="brand"><span class="a-mark">and</span>vari</span>
         <p>the keeper of the hoard</p>
       </div>

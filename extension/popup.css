@@ -113,6 +113,10 @@ body {
 .brand { font-family: var(--serif); font-weight: 600; font-size: 18px; letter-spacing: 0.02em; color: var(--ink); }
 .brand .a-mark { color: var(--gold); }
 .brand .sigil-sm { color: var(--gold); margin-right: 6px; text-shadow: 0 1px 10px rgba(208, 169, 74, 0.35); }
+/* The marks are inline SVG (web Sigil.tsx geometry — the raw runic codepoints tofu without a
+   Runic-covering font); text-shadow can't reach SVG strokes, so the glows are restated as
+   drop-shadows (web styles.css idiom). Nudged to sit on the wordmark baseline. */
+.brand .sigil-sm svg { vertical-align: -0.12em; filter: drop-shadow(0 1px 10px rgba(208, 169, 74, 0.35)); }
 .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 .dot.off { background: var(--ink-faint); }
@@ -124,6 +128,7 @@ body {
   font-family: var(--serif); font-size: 38px; line-height: 1; color: var(--gold);
   text-shadow: 0 2px 20px rgba(208, 169, 74, 0.3);
 }
+.hero .sigil svg { filter: drop-shadow(0 2px 14px rgba(208, 169, 74, 0.35)); } /* SVG glow (see .sigil-sm note) */
 .hero .brand { display: block; font-size: 21px; margin-top: 8px; }
 .hero p { margin: 2px 0 0; font-size: 12.5px; color: var(--ink-dim); }
 
