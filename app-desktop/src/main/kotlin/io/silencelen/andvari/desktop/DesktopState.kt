@@ -5,8 +5,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.java.Java
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.put
+import io.ktor.client.request.setBody
+import io.ktor.http.ContentType
+import io.ktor.http.contentType
+import io.ktor.http.isSuccess
 import io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
@@ -51,6 +58,7 @@ import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
+import io.silencelen.andvari.core.model.RecoverySelfSetupRequest
 import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
@@ -61,6 +69,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.Json
 import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -79,6 +88,15 @@ sealed interface DesktopScreen {
     // unrecoverable. This screen reveals it once and makes the user type it back before the vault
     // opens. Un-skippable (no back/skip) — the silent-total-loss guard.
     data object RecoverySetup : DesktopScreen
+    // (v2 #15) §F.9 vault-entry capture gate, native (mirrors web's RecoveryCaptureGate): reached
+    // from unlock/sign-in when the server reports recoveryConfirmed=false — an interrupted reveal
+    // (idle lock / quit / crash mid-RecoverySetup destroyed the shown-once phrase before the user
+    // typed it back) or a pre-flag migration account. Commits a FRESH piece (PUT /recovery/self-setup,
+    // which does NOT flip the flag), then hands off to the same un-skippable RecoverySetup reveal;
+    // only the type-back confirm flips recoveryConfirmed. Without this, the "un-skippable" gate was
+    // skippable by the app's own idle lock and the next unlock landed straight in the vault with the
+    // member's self-recovery silently dead.
+    data object RecoveryCapture : DesktopScreen
 }
 
 /** F74: the Settings server-TOTP status fetch as an honest tri-state — Failed must STOP
@@ -139,6 +157,22 @@ class DesktopState(private val scope: CoroutineScope) {
         private set
     var busy by mutableStateOf(false)
         private set
+    // Cut O (v2 #17): the SYNC flag, split off the user-op [busy]. One global flag coupled
+    // unrelated operations — every 5-minute poll and every window-refocus sync repainted the
+    // editor's Save button into an anonymous spinner and greyed Cancel/Trash/Settings for a
+    // network round-trip the user never initiated (unbounded when the server black-holed).
+    // Background AND manual pulls (timer poll, focus sync, the toolbar Refresh) run under THIS
+    // flag only; op() and every user-op UI gate ignore it (the engine's syncMutex already
+    // serializes a pull against a save's reconcile, so the overlap is safe by construction).
+    // The UI surfaces it on a dedicated toolbar affordance — never by repainting user buttons.
+    var syncBusy by mutableStateOf(false)
+        private set
+    // Cut O (v2 #17): the in-flight attachment download's ref id. The Detail row's "Save"
+    // action swaps to a small spinner keyed on THIS id — before the split, a multi-second
+    // download over a household link looked frozen (every busy-gated control just greyed,
+    // with nothing tying the wait to the file the user clicked).
+    var downloadingAttachmentId by mutableStateOf<String?>(null)
+        private set
     var error by mutableStateOf<String?>(null)
     /** F71 review: the editor's INLINE save error. Kept apart from the global [error] —
      *  backgroundSync writes that one every 5 min / on focus, and piping it into the editor
@@ -189,6 +223,29 @@ class DesktopState(private val scope: CoroutineScope) {
     // the waived toggle a later cut adds (TODO(recovery-cut-2)).
     var recoverySetupWaived by mutableStateOf(false)
         private set
+    // (v2 #15) RecoveryCapture screen state: null = the self-setup commit is in flight ("Preparing
+    // your recovery phrase…"); non-null = it failed and the gate offers Retry. The gate NEVER
+    // proceeds to the vault on failure (web RecoveryCaptureGate parity — a failed commit keeps the
+    // gate closed, never leaves a live secret dangling).
+    var recoveryCaptureError by mutableStateOf<String?>(null)
+        private set
+    // (v2 #15) pre-lock protection: TRUE while the vault screen has an item editor mounted —
+    // mirrored in by the UI (the editor's draft is remember-scoped Compose state this holder
+    // can't see). While set, maybeIdleLock defers by ONE bounded grace window instead of
+    // silently unmounting the editor and destroying the typed draft + picked attachments.
+    var editorOpen by mutableStateOf(false)
+        private set
+    // (v2 #15): the idle window elapsed but the editor grace is holding the lock off — the UI
+    // shows a "the vault will lock soon" warning above the editor. Any interaction (touch())
+    // resets the idle clock and the next 1 s tick clears this.
+    var idleLockImminent by mutableStateOf(false)
+        private set
+    // (v2 #15): the login authKey (base64url, password-equivalent — treat like web's meta.authKey)
+    // held ONLY while the RecoveryCapture gate is unresolved: PUT /recovery/self-setup requires a
+    // fresh master-password reauth and the gate's Retry must not re-prompt. Derived from the
+    // just-typed password at unlock/sign-in; cleared the moment the commit succeeds and on
+    // lock/sign-out. Never persisted, never logged.
+    private var pendingCaptureAuthKey: String? = null
     // Item history (feature): decrypted archived versions of the currently-viewed item, loaded on
     // demand (null = not loaded / loading). Restore a chosen version with saveItem.
     var itemVersions by mutableStateOf<List<DecryptedItemVersion>?>(null)
@@ -327,8 +384,23 @@ class DesktopState(private val scope: CoroutineScope) {
     // stale snapshot); Cancel/mode-change discards. Mirrors Android's moveGestures.
     private val moveGestures = mutableMapOf<String, MoveGesture>()
 
+    /**
+     * Cut O (v2 #17): every desktop HTTP client is built here, with a CONNECT timeout. The java.net.http
+     * engine has NO default timeouts (unlike Android's OkHttp, whose 10 s defaults bound the same
+     * calls), so an unreachable-but-not-refusing server (firewall DROP, dead route) hung every call —
+     * and through the old shared `busy` flag, the whole UI — indefinitely. Connect-only is deliberate:
+     * a request/socket cap on the SHARED client would sever legitimate large attachment transfers
+     * (ktor 3 buffers response bodies inside the call, so a 25 MiB download counts against a request
+     * cap; a slow-uplink upload likewise). The sync path bounds its whole cycle separately
+     * ([SYNC_TIMEOUT_MS] — sync never carries attachment bytes), and the small hand-rolled recovery
+     * calls opt into a per-request cap via `timeout {}`.
+     */
+    private fun newHttpClient() = HttpClient(Java) {
+        install(HttpTimeout) { connectTimeoutMillis = CONNECT_TIMEOUT_MS }
+    }
+
     private fun newApi(tokens: Tokens? = null) =
-        AndvariApi(store.baseUrl, HttpClient(Java), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
+        AndvariApi(store.baseUrl, newHttpClient(), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
 
     fun start() {
         scope.launch {
@@ -429,7 +501,11 @@ class DesktopState(private val scope: CoroutineScope) {
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
             mustChangePassword = s.mustChangePassword // F58: a recovery temp password forces the banner
             signInTotpRequired = false
-            toVault()
+            // (v2 #15) §F.9 vault-entry capture gate (web Unlock/SignIn parity): the server says this
+            // account's recovery piece was never durably CONFIRMED — an interrupted reveal or a
+            // migration account. Route into the capture flow INSTEAD of the vault; the login authKey
+            // just derived above is the fresh-reauth proof PUT /recovery/self-setup requires.
+            if (s.accountKeys.recoveryConfirmed != true) startRecoveryCapture(authKey) else toVault()
         } catch (t: Throwable) {
             // Android-parity leak guard: any PRE-bind failure — incl. the H1 KdfPolicyViolationException
             // (not an ApiException), IdentityMismatch, or a network error — must close the transient
@@ -443,10 +519,16 @@ class DesktopState(private val scope: CoroutineScope) {
         val session = store.load() ?: error("no session")
         val a = newApi(session.tokens())
         // Offline unlock (spec 02 §8): cached keys when the network is down; wipe on a
-        // definitive auth rejection.
+        // definitive auth rejection. (v2 #15): track WHERE the keys came from — the recovery
+        // capture gate below keys off the server's recoveryConfirmed flag, and a cached copy is
+        // both possibly stale AND useless for the gate (the self-setup PUT needs the network
+        // anyway), so an offline unlock deliberately skips the gate rather than stranding
+        // offline vault access behind an unreachable server. The flag re-gates next online unlock.
+        var freshKeys = true
         val keys = try {
             a.accountKeys().also { persistAccountKeys(it) }
         } catch (e: java.io.IOException) {
+            freshKeys = false
             store.loadAccountKeys() ?: throw e
         } catch (e: ApiException) {
             if (e.status == 401) { purgeOfflineData(session.userId); store.clear() }
@@ -459,7 +541,15 @@ class DesktopState(private val scope: CoroutineScope) {
         runCatching { syncNow(engine!!) }.onFailure {
             if (it is java.io.IOException) notice = "Offline — showing cached data" else throw it
         }
-        toVault()
+        // (v2 #15) §F.9 vault-entry capture gate — see signIn. Unlock never derived a login
+        // authKey (it opens the UVK locally), so derive it here ONLY when the gate actually
+        // fires: accountKeys' kdfSalt/kdfParams are the same user-row values prelogin serves,
+        // so this authKey verifies against the same server-side login verifier. One extra
+        // argon2id pass (off the UI thread), paid only on the rare unconfirmed path.
+        if (freshKeys && keys.recoveryConfirmed != true) {
+            val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams) }
+            startRecoveryCapture(authKey)
+        } else toVault()
     }
 
     fun enroll(invite: String, email: String, name: String, password: String, typedShortFp: String) {
@@ -557,14 +647,14 @@ class DesktopState(private val scope: CoroutineScope) {
         val secret = pendingRecoverySecret ?: return false
         if (!MemberRecovery.confirmMatches(secret, typedBack)) return false
         // §F.9: tell the server this native enrollee saved the register-committed phrase, so the
-        // (web) vault-entry gate never re-nudges the account. Fire this BEFORE we touch the secret:
-        // it reads the session creds and launches asynchronously, so a slow/failed ping can never
-        // delay or block the zeroize + navigate below (see markRecoveryConfirmed's best-effort note).
-        // TODO(recovery-cut-2): the NATIVE vault-entry capture gate (blocking vault access on
-        // recoveryConfirmed==false for migration/interrupted-reveal accounts, mirroring web's
-        // Unlock/SignIn gate) is DEFERRED — web covers that cut cross-device via the server flag;
-        // native `waived` is off and `required` keeps the escrow backstop, so no native total-loss
-        // is reachable. This confirm ping is the only §F.9 native surface for now.
+        // vault-entry gates (web's AND desktop's — v2 #15) never re-nudge the account. Fire this
+        // BEFORE we touch the secret: it reads the session creds and launches asynchronously, so a
+        // slow/failed ping can never delay or block the zeroize + navigate below (see
+        // markRecoveryConfirmed's best-effort note). (v2 #15): the NATIVE vault-entry capture gate
+        // formerly deferred as TODO(recovery-cut-2) now EXISTS — startRecoveryCapture routes an
+        // unlock/sign-in whose fresh accountKeys carry recoveryConfirmed=false into a fresh
+        // reveal+confirm instead of the vault, so an interrupted reveal (idle lock, quit, crash)
+        // self-heals and a failed/skipped confirm ping here is likewise recoverable.
         markRecoveryConfirmed()
         secret.fill(0) // best-effort zeroization before dropping the reference
         pendingRecoverySecret = null
@@ -590,9 +680,12 @@ class DesktopState(private val scope: CoroutineScope) {
         val clientTag = "${desktopPlatform()}/$ANDVARI_CLIENT_VERSION"
         scope.launch(Dispatchers.IO) {
             runCatching {
-                val client = HttpClient(Java)
+                val client = newHttpClient()
                 try {
                     client.post("$base/api/v1/recovery/self/confirm") {
+                        // Cut O (v2 #17): tiny JSON-less POST — a full request cap is safe here and
+                        // keeps a black-holed send from leaking this fire-and-forget coroutine+client.
+                        timeout { requestTimeoutMillis = RECOVERY_CALL_TIMEOUT_MS }
                         header("Authorization", "Bearer $token")
                         header("X-Andvari-Client", clientTag)
                     }
@@ -600,6 +693,105 @@ class DesktopState(private val scope: CoroutineScope) {
                     client.close()
                 }
             }
+        }
+    }
+
+    /**
+     * (v2 #15) Enter the §F.9 vault-entry capture gate. [currentAuthKey] is the login authKey
+     * derived from the master password the user JUST typed (the fresh-reauth proof the server
+     * demands before storing a new recovery block); it is held only until the gate resolves.
+     * Kicks the commit immediately — the screen renders "Preparing…" until it lands or fails.
+     */
+    private fun startRecoveryCapture(currentAuthKey: String) {
+        pendingCaptureAuthKey = currentAuthKey
+        recoveryCaptureError = null
+        busy = false // the op() that routed here is done; the commit runs under its own busy below
+        screen = DesktopScreen.RecoveryCapture
+        runRecoveryCapture()
+    }
+
+    /** (v2 #15) The gate screen's Retry — same commit, same stashed reauth proof. */
+    fun retryRecoveryCapture() {
+        if (busy) return
+        if (screen != DesktopScreen.RecoveryCapture) return // stale click after a lock swapped screens
+        runRecoveryCapture()
+    }
+
+    /**
+     * (v2 #15) The capture gate's commit half (web setupAndCommitRecovery parity): generate a FRESH
+     * per-member piece over the in-memory UVK ([Account.setupMemberRecovery]) and PUT it to
+     * `/recovery/self-setup` — which stores/rotates the block but deliberately does NOT flip
+     * recoveryConfirmed (the flag means "user demonstrably captured" and only the type-back confirm
+     * may set it). On success the fresh secret feeds the SAME un-skippable RecoverySetup reveal the
+     * enroll path uses; on any failure the secret is zeroed and the gate stays closed with Retry —
+     * never the vault, never a dangling live secret. Runs under [busy] so the idle lock defers while
+     * key material is in flight (maybeIdleLock's existing busy gate). A rotation invalidates any
+     * previously-written-but-unconfirmed phrase — the screen copy says so.
+     */
+    private fun runRecoveryCapture() {
+        val a = api ?: return
+        val acct = account ?: return
+        val authKey = pendingCaptureAuthKey ?: return
+        recoveryCaptureError = null
+        busy = true
+        scope.launch {
+            try {
+                val setup = acct.setupMemberRecovery(authKey)
+                var committed = false
+                try {
+                    putRecoverySelfSetup(a, setup.request)
+                    committed = true
+                } finally {
+                    // §F.7 discipline: a failed commit must not leave the raw secret alive.
+                    if (!committed) setup.recoverySecret.fill(0)
+                }
+                // B1 identity gate: a manual lock / sign-out mid-commit tore this session down —
+                // the fresh phrase must not leak into whatever session renders next.
+                if (account !== acct) { setup.recoverySecret.fill(0); busy = false; return@launch }
+                pendingCaptureAuthKey = null // reauth proof served its purpose — drop it
+                pendingRecoverySecret = setup.recoverySecret
+                recoveryPhrase = MemberRecovery.displayForm(setup.recoverySecret)
+                // Capture-gate accounts predate the waived posture (enrolled under required, or
+                // migration-era with org escrow) — the required copy ("admin can also help") is honest.
+                recoverySetupWaived = false
+                busy = false
+                screen = DesktopScreen.RecoverySetup
+            } catch (t: Throwable) {
+                busy = false
+                if (account !== acct) return@launch // torn down mid-flight — nothing to report
+                // Static copy only — NEVER interpolate anything near secret material (§F.7).
+                recoveryCaptureError = if (t is java.io.IOException) {
+                    "Can't reach the server right now — check your connection and try again."
+                } else {
+                    "Couldn't set up your recovery phrase just now — try again in a moment."
+                }
+            }
+        }
+    }
+
+    /**
+     * (v2 #15) Hand-rolled `PUT /recovery/self-setup` (the shared AndvariApi has no method for it —
+     * same one-shot-client pattern as [markRecoveryConfirmed], reusing the live session's baseUrl +
+     * bearer). The token is seconds old (the gate fires straight off unlock/sign-in), so no
+     * 401/refresh handling is in play; a token that DID age out on the error screen surfaces as the
+     * generic retryable failure. Small JSON body → a full request cap is safe (Cut O v2 #17).
+     */
+    private suspend fun putRecoverySelfSetup(a: AndvariApi, req: RecoverySelfSetupRequest) {
+        val token = a.currentTokens()?.accessToken ?: throw IllegalStateException("no session")
+        val client = newHttpClient()
+        try {
+            val resp = client.put("${a.baseUrl}/api/v1/recovery/self-setup") {
+                timeout { requestTimeoutMillis = RECOVERY_CALL_TIMEOUT_MS }
+                header("Authorization", "Bearer $token")
+                header("X-Andvari-Client", "${desktopPlatform()}/$ANDVARI_CLIENT_VERSION")
+                contentType(ContentType.Application.Json)
+                setBody(WIRE_JSON.encodeToString(RecoverySelfSetupRequest.serializer(), req))
+            }
+            if (!resp.status.isSuccess()) {
+                throw ApiException(resp.status.value, "recovery_setup_failed", "recovery self-setup failed (${resp.status.value})")
+            }
+        } finally {
+            client.close()
         }
     }
 
@@ -666,7 +858,11 @@ class DesktopState(private val scope: CoroutineScope) {
 
     fun clearItemVersions() { itemVersions = null }
     fun deleteItem(itemId: String) = op { engine!!.remove(itemId); refreshItems() }
-    fun refresh() = op { syncNow(engine!!); refreshItems() }
+    /** Cut O (v2 #17): the toolbar's manual Refresh — the SAME single-flighted sync path as the
+     *  poll (it used to run under op{}/busy with no overlap guard, so repeat clicks stacked
+     *  concurrent syncs), but `manual = true` so an offline blip answers with an honest notice
+     *  instead of the old silence. */
+    fun refresh() = runSync(manual = true)
     fun item(itemId: String): VaultItem? = engine?.item(itemId)
 
     /** Server-declared role for a vault (mirrors web's account.roleFor) — null when unknown. */
@@ -974,12 +1170,34 @@ class DesktopState(private val scope: CoroutineScope) {
         lastInteractionMs = System.currentTimeMillis()
     }
 
+    /** (v2 #15): the Vault screen mirrors its editor's mounted/unmounted state in (the draft is
+     *  remember-scoped Compose state this holder can't see) so [maybeIdleLock] can grant the
+     *  bounded grace instead of silently destroying typed work. (Named `note…`, not `set…` —
+     *  the property's own JVM setter already claims the setEditorOpen(Z) signature.) */
+    fun noteEditorOpen(open: Boolean) {
+        editorOpen = open
+        if (!open) idleLockImminent = false
+    }
+
     /**
      * Lock if the inactivity window elapsed (policy `autoLockSeconds`; persisted last-known
      * value when the live policy hasn't loaded; 0 disables). Never yanks the engine under an
      * in-flight op ([busy]/import) — the durable queue would survive it, but the op would
      * surface a spurious error; the next 1 s tick re-checks, so the lock is deferred, not
      * skipped.
+     *
+     * (v2 #15) pre-lock protection — the idle lock used to destroy in-progress work SILENTLY:
+     *  - An open editor (typed fields + picked attachments are remember-scoped, unmounted by the
+     *    screen swap) gets ONE bounded grace window ([editorGraceMs]) past the policy window,
+     *    with [idleLockImminent] raised so the returning user sees WHY the vault hasn't locked
+     *    and that the clock is running. Bounded by design: the grace serves the walked-away
+     *    editor, it must never become "an open editor disables the security lock".
+     *  - RecoverySetup mid-reveal gets NO grace — the shown-once phrase is on screen, and
+     *    leaving a secret up longer on an unattended machine is the wrong trade. Instead the
+     *    lock is HONEST about what it destroyed (the lockReason below) and the §F.9 capture
+     *    gate re-issues a fresh phrase at the next unlock (recoveryConfirmed is still false
+     *    server-side), so the interrupted reveal self-heals instead of silently skipping the
+     *    "un-skippable" gate.
      */
     private fun maybeIdleLock() {
         if (engine == null) return
@@ -989,37 +1207,103 @@ class DesktopState(private val scope: CoroutineScope) {
         // clears it — the op guard is what actually keeps the idle lock off the engine
         // for the whole copy (never yank the engine mid-rescue).
         if (busy || importBusy || copyOpVaultId != null) return
-        if (System.currentTimeMillis() - lastInteractionMs >= window * 1000L) lock("Locked after inactivity.")
+        val idleMs = System.currentTimeMillis() - lastInteractionMs
+        if (idleMs < window * 1000L) {
+            if (idleLockImminent) idleLockImminent = false // interaction reset the clock — stand down
+            return
+        }
+        if (editorOpen && pendingRecoverySecret == null && idleMs < window * 1000L + editorGraceMs(window)) {
+            idleLockImminent = true // the editor's grace is holding the lock — warn, don't lock yet
+            return
+        }
+        idleLockImminent = false
+        lock(when {
+            // §F.7: the phrase (and its raw secret) die with lock() below — say so, and say the
+            // recovery, not just "locked". The next unlock lands in the capture gate (v2 #15).
+            pendingRecoverySecret != null ->
+                "Locked after inactivity. Your recovery phrase was not confirmed — you'll be shown a fresh one after you unlock."
+            editorOpen -> "Locked after inactivity — the editor's unsaved changes were discarded."
+            else -> "Locked after inactivity."
+        })
     }
+
+    /** (v2 #15): the editor's bounded pre-lock grace — one extra policy window, capped at
+     *  [EDITOR_LOCK_GRACE_MAX_MS] so a long-window org (30 min) doesn't see its lock double. */
+    private fun editorGraceMs(windowSeconds: Int): Long =
+        minOf(windowSeconds * 1000L, EDITOR_LOCK_GRACE_MAX_MS)
 
     /**
      * Quiet poll sync (spec 03 §6: focus regained + every 5 min while unlocked): refresh
      * policy first (so autoLock/clipboard windows track admin changes mid-session), then
-     * push-queue + pull. Reuses [busy] as the overlap guard — read and set on the single
-     * UI thread, so it can't interleave with a user-initiated op. Offline blips stay
-     * silent; anything else (rev regression, denied writes) surfaces like a manual sync.
+     * push-queue + pull. Cut O (v2 #17): runs under [syncBusy], NOT [busy] — see [runSync].
+     * Offline blips stay silent; anything else (rev regression, denied writes) surfaces
+     * like a manual sync.
      */
-    fun backgroundSync() {
+    fun backgroundSync() = runSync(manual = false)
+
+    /**
+     * Cut O (v2 #17): the ONE sync path behind both the passive pulls (timer poll, focus sync)
+     * and the toolbar Refresh. Design points, each fixing a confirmed audit failure:
+     *  - Runs under [syncBusy], which op() and every user-op UI gate ignore — a poll/refocus can
+     *    no longer repaint the editor's Save into a spinner or grey Cancel/Trash/Settings. The
+     *    overlap is engine-safe: SyncEngine.sync() is syncMutex-serialized against a save's
+     *    reconcile, so a user op landing mid-pull just queues behind it inside core.
+     *  - Single-flight: [syncBusy] is read+set on the UI thread, so repeat Refresh clicks and a
+     *    poll tick landing on a running sync are no-ops (they used to STACK concurrent op{} runs).
+     *    A sync also never STARTS under a user op / import — their engine writes finish first.
+     *  - Bounded: the whole cycle (policy probe + push + pull — never attachment bytes, those
+     *    move only inside user-op saves/gestures) lives inside withTimeoutOrNull, so a server
+     *    that accepts the connection and then black-holes can wedge the flag — and with it the
+     *    single-flight gate — for at most [SYNC_TIMEOUT_MS]. Cancellation is safe by the same
+     *    contract as an offline blip: an idempotent push replays, an unfinished pull never
+     *    advanced the cursor.
+     *  - [manual] only changes the OFFLINE answer: the toolbar Refresh owes feedback ("no
+     *    feedback" was the audit finding), the silent 5-min poll does not.
+     *  - The idle lock deliberately does NOT defer on [syncBusy] (unlike [busy]): the pull is
+     *    teardown-safe by construction (the B1 identity gates below make a mid-sync lock an
+     *    expected, silent outcome), and a hung sync must never postpone the security lock.
+     */
+    private fun runSync(manual: Boolean) {
         val e = engine ?: return
-        if (busy || importBusy) return
-        busy = true
+        if (syncBusy || busy || importBusy) return
+        // op()-parity for the USER-initiated path: the old op{}-based Refresh opened by clearing
+        // the global bars (pressing Refresh to retry after an error must not leave the stale
+        // error up over a now-clean sync). The passive poll keeps its hands off them.
+        if (manual) { error = null; notice = null }
+        syncBusy = true
         scope.launch {
-            runCatching { api?.clientPolicy() }.getOrNull()?.let { applyPolicy(it) }
             try {
-                syncNow(e)
-                // B1: `busy` alone is no teardown guard — a manual lock (or sign-out→sign-in)
+                val completed = withTimeoutOrNull(SYNC_TIMEOUT_MS) {
+                    runCatching { api?.clientPolicy() }.getOrNull()?.let { applyPolicy(it) }
+                    syncNow(e)
+                }
+                // Timed out = the server is reachable-but-unresponsive — same posture as offline
+                // (InterruptedIOException IS an IOException, so ONE handling branch below).
+                if (completed == null) throw java.io.InterruptedIOException("sync timed out")
+                // B1: `syncBusy` alone is no teardown guard — a manual lock (or sign-out→sign-in)
                 // mid-sync leaves this continuation holding the OLD engine; identity-gate every
                 // post-suspension state write so nothing stale lands in the new session.
-                if (engine !== e) { busy = false; return@launch }
+                if (engine !== e) { syncBusy = false; return@launch }
                 items = e.items()
                 needsUpdateCount = e.needsUpdateCount()
-                busy = false
+                syncBusy = false
                 refreshLifecycle() // A-funnel: a background pull may have delivered notices/offers
             } catch (t: Throwable) {
-                busy = false
+                syncBusy = false
                 val torn = engine !== e // locked/rebound mid-sync — an expected teardown, not an error
-                if (t !is java.io.IOException && !torn) error = t.message ?: "sync failed"
-                if (!torn) refreshLifecycle() // A-funnel: even a denied/park cycle leaves notices to show
+                if (torn) return@launch
+                when {
+                    // A 426 mid-poll is not a per-sync error — this build is too old for the
+                    // server's pin (op()-parity; the old manual refresh via op{} already did this).
+                    t is UpgradeRequiredException ->
+                        upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${store.baseUrl}/downloads."
+                    // Offline blip: silent for the background poll (by design), an honest one-liner
+                    // for the toolbar Refresh the user just clicked.
+                    t is java.io.IOException ->
+                        if (manual) notice = "Can't reach the server right now — showing what's synced on this device."
+                    else -> error = friendlyError(t)
+                }
+                refreshLifecycle() // A-funnel: even a denied/park cycle leaves notices to show
             }
         }
     }
@@ -1213,11 +1497,19 @@ class DesktopState(private val scope: CoroutineScope) {
     /** Download + decrypt an attachment off the UI thread and write it to [dest] via the
      *  same temp-then-atomic-move discipline as the exports ([writeVerifiedAtomically],
      *  F71): a failed write must never leave a torn file — or destroy a pre-existing
-     *  one — at [dest]. */
+     *  one — at [dest]. Cut O (v2 #17): the clicked row's ref id is published for the
+     *  duration ([downloadingAttachmentId]) so the Detail row can show a spinner ON the
+     *  file being fetched — a many-second download over a household link used to look
+     *  frozen (nothing but the global grey-out moved). */
     fun saveAttachmentTo(ref: AttachmentRef, dest: File) = op {
-        withContext(Dispatchers.IO) {
-            val bytes = engine!!.downloadAttachment(ref)
-            try { writeVerifiedAtomically(dest, bytes) } finally { bytes.fill(0) } // attachment plaintext — wipe our copy
+        downloadingAttachmentId = ref.id
+        try {
+            withContext(Dispatchers.IO) {
+                val bytes = engine!!.downloadAttachment(ref)
+                try { writeVerifiedAtomically(dest, bytes) } finally { bytes.fill(0) } // attachment plaintext — wipe our copy
+            }
+        } finally {
+            downloadingAttachmentId = null // op()'s catch owns the error surface; the spinner must not outlive the attempt
         }
         busy = false
         notice = "Saved ${ref.name} to ${dest.absolutePath}"
@@ -1592,6 +1884,7 @@ class DesktopState(private val scope: CoroutineScope) {
         engine?.close(); api?.close(); api = null; account = null; engine = null
         clearVaultClipboard() // a copied secret must not outlive the unlocked session
         pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
+        pendingCaptureAuthKey = null // (v2 #15): password-equivalent — dies with the session; the gate re-derives at next unlock
         clearSecondary()
         // §6: set FRESH per event — the default serves the manual Lock button; the idle
         // watcher passes "Locked after inactivity.". Never carried stale (B6).
@@ -1628,6 +1921,7 @@ class DesktopState(private val scope: CoroutineScope) {
             engine?.close(); a?.close(); api = null; account = null; engine = null
             clearVaultClipboard()
             pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
+            pendingCaptureAuthKey = null // (v2 #15): see lock()
             session?.userId?.let { deleteCache(it) }
             store.clear()
             clearSecondary(); signInTotpRequired = false
@@ -1644,6 +1938,11 @@ class DesktopState(private val scope: CoroutineScope) {
 
     private fun clearSecondary() {
         importDismiss() // the parsed CSV + plan hold every password in the file — never outlive the session
+        // (v2 #15)/(Cut O v2 #17): per-session UI slices — the capture gate's error, the editor
+        // mirror + its pre-lock warning, and the per-row download marker die with the session.
+        // syncBusy is deliberately NOT reset here: its in-flight continuation clears it itself
+        // (B1 identity gates), and a blind reset would disarm the single-flight guard under it.
+        recoveryCaptureError = null; editorOpen = false; idleLockImminent = false; downloadingAttachmentId = null
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
         backupPreflight = null; backupResult = null; csvPreflight = null
         // F19: drop any in-flight move state + memoized gesture ids/fileKeys on lock/sign-out.
@@ -1786,6 +2085,22 @@ class DesktopState(private val scope: CoroutineScope) {
 
     private companion object {
         const val POLL_INTERVAL_MS = 5L * 60 * 1000 // spec 03 §6 poll interval
+
+        // Cut O (v2 #17) timeout tiers — see newHttpClient()/runSync() for the full rationale:
+        /** TCP/TLS connect cap on EVERY desktop client (java.net.http ships with none). */
+        const val CONNECT_TIMEOUT_MS = 10_000L
+        /** Whole-cycle cap on the sync path (poll/focus/Refresh) — it never carries attachment
+         *  bytes, so 60 s is generous for a policy probe + queued envelope pushes + a delta pull. */
+        const val SYNC_TIMEOUT_MS = 60_000L
+        /** Full-request cap for the tiny hand-rolled recovery calls (small JSON, no streaming). */
+        const val RECOVERY_CALL_TIMEOUT_MS = 30_000L
+
+        /** (v2 #15): ceiling on the editor's pre-lock grace (see editorGraceMs). */
+        const val EDITOR_LOCK_GRACE_MAX_MS = 5L * 60 * 1000
+
+        /** (v2 #15): wire-encoder for the hand-rolled recovery self-setup PUT (default strict
+         *  Json — encode-only, no defaults to omit on RecoverySelfSetupRequest). */
+        val WIRE_JSON = Json
 
         /** A10's pinned pattern — the entities a LastPass in-page export mangles values with. */
         val HTML_ENTITY = Regex("&(amp|lt|gt|quot|#\\d+);")
