@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApiClient, type SessionEndKind } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { initSodium } from "../crypto/sodium";
@@ -8,6 +8,8 @@ import { VaultStore } from "../vault/store";
 import { Welcome, type LoginMeta } from "./Welcome";
 import { peekPendingEnroll } from "../enroll/enrolllink";
 import { BrandSigil } from "./Sigil";
+import { Busy } from "./Busy";
+import { initTheme } from "./useTheme";
 import { Vault } from "./Vault";
 import { Announcer } from "./Msg";
 import { inactivityNotice } from "./format";
@@ -40,6 +42,11 @@ const UPGRADE_NOTICE = "This tab is running an older version — reload to updat
 const LOCK_WARNING_NOTICE = "Still there? Locking soon — click, tap, or press a key to stay unlocked.";
 
 export function App() {
+  // UI-audit #26: apply the persisted theme preference before first paint, so every
+  // phase (including the signed-out cards) honors it. Layout-effect, not effect —
+  // an effect would flash the OS scheme for one painted frame on a forced theme.
+  useLayoutEffect(() => initTheme(), []);
+
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [policy, setPolicy] = useState<ClientPolicy | null>(null);
   // Distinct from `policy === null`: true means the policy fetch FAILED (can't reach the
@@ -264,7 +271,8 @@ export function App() {
         <div className="card">
           <div className="card-hero" style={{ marginBottom: 0 }}>
             <div className="sigil"><BrandSigil /></div>
-            <p className="muted">unsealing…</p>
+            {/* UI-audit #24: the boot wait (sodium + policy fetch) visibly moves. */}
+            <p className="muted"><Busy>unsealing…</Busy></p>
           </div>
         </div>
       </div>

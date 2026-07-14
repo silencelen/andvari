@@ -125,4 +125,31 @@ describe("escrowPostureLabel — a null fingerprint is not just '—' (§F.9 rec
     expect(escrowPostureLabel(null, false)).toEqual({ label: "no recovery / needs setup", tone: "bad" });
     expect(escrowPostureLabel(null, undefined)).toEqual({ label: "no recovery / needs setup", tone: "bad" });
   });
+  // §F.4 (2026-07-13): with the persisted escrowPolicy, a *required* member whose escrow blob is
+  // missing is a hostile-flip / deletion anomaly, NOT a waiver — this is the silent-loss signal the
+  // reconciliation exists to surface, so pin every arm (the branch previously claimed coverage it lacked).
+  it("a required member with no backstop key on file is a flagged anomaly, not a waiver", () => {
+    expect(escrowPostureLabel(null, true, "required")).toEqual({
+      label: "backstop missing (was required)",
+      tone: "bad",
+      detail: "This member signed up with a required admin backstop, but no backstop key is on file — it may have been deleted. Only their own recovery phrase can rescue them now; investigate.",
+    });
+    expect(escrowPostureLabel(null, false, "required")).toEqual({
+      label: "no recovery — backstop missing",
+      tone: "bad",
+      detail: "This member signed up with a required admin backstop, but no backstop key or recovery phrase is on file — investigate before they're locked out for good.",
+    });
+    expect(escrowPostureLabel(null, undefined, "required")).toEqual({
+      label: "no recovery — backstop missing",
+      tone: "bad",
+      detail: "This member signed up with a required admin backstop, but no backstop key or recovery phrase is on file — investigate before they're locked out for good.",
+    });
+    // a present fingerprint still wins (backstop is there) even for a required member.
+    expect(escrowPostureLabel("b26efdd3eafc9dad00", false, "required")).toEqual({ label: "admin backstop", tone: "good" });
+  });
+  it("escrowPolicy 'waived' or null (old server) degrades byte-identically to the legacy heuristic", () => {
+    expect(escrowPostureLabel(null, true, "waived")).toEqual({ label: "waived (intended)", tone: "muted" });
+    expect(escrowPostureLabel(null, true, null)).toEqual({ label: "waived (intended)", tone: "muted" });
+    expect(escrowPostureLabel(null, false, "waived")).toEqual({ label: "no recovery / needs setup", tone: "bad" });
+  });
 });

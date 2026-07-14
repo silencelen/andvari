@@ -1,6 +1,10 @@
 /* andvari — treasury/vault aesthetic. Aged gold on deep charcoal; warm system
    serif for display, monospace for secrets. Fully self-contained (CSP: no external
-   fonts/assets). Dark-first with a light variant via prefers-color-scheme. */
+   fonts/assets). Dark-first with a light variant via prefers-color-scheme; a user
+   override (UI-audit #26: Settings → Appearance, useTheme.ts) stamps
+   <html data-theme="light|dark">, whose twin blocks live BELOW the two scheme blocks —
+   token-lockstep.test.ts keys on the FIRST :root / first light-scheme media block, so
+   those two must stay byte-positionally first in this file. */
 
 :root {
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
@@ -84,6 +88,61 @@
     --glyph-lo: #d8bd7a;
     --shadow: 0 18px 50px -24px rgba(70, 55, 20, 0.35);
   }
+}
+
+/* UI-audit #26: user theme override. useTheme.ts stamps <html data-theme="light|dark">
+   (persisted per-browser); no attribute = Auto, and the two scheme blocks above rule.
+   Each block is a BYTE-TWIN of its source block above (token-lockstep.test.ts asserts
+   both), and both must stay BELOW those two — the lockstep/contrast parsers key on the
+   file's first occurrences. Specificity (0,2,0) beats the (0,1,0) scheme blocks in
+   either OS mode, so a forced theme wins without !important. */
+:root[data-theme="light"] {
+  --bg: #f4efe4;
+  --bg-raised: #fbf8f1;
+  --bg-input: #fff;
+  --edge: #e0d8c5;
+  --edge-strong: #c9bfa2;
+  --ink: #2c2517;
+  --ink-dim: #6b6047;
+  --ink-faint: #786c50;
+  --gold: #9a7420;
+  --gold-bright: #7d5e14;
+  --gold-deep: #c9a94a;
+  --link: #7d5e14;
+  --gold-text: #7d5e14;
+  --focus: #7d5e14;
+  --gold-hi: #8f6b16;
+  --gold-lo: #7d5e14;
+  --danger: #b3402c;
+  --ok: #4f7a3a;
+  --btn-ink: #fdf9f0;
+  --glyph-hi: #e9d9a6;
+  --glyph-lo: #d8bd7a;
+  --shadow: 0 18px 50px -24px rgba(70, 55, 20, 0.35);
+}
+:root[data-theme="dark"] {
+  --bg: #14120e;
+  --bg-raised: #1e1b15;
+  --bg-input: #262119;
+  --edge: #38311f;
+  --edge-strong: #4a3f28;
+  --ink: #ede4d0;
+  --ink-dim: #a79c85;
+  --ink-faint: #8d8370;
+  --gold: #d0a94a;
+  --gold-bright: #e8c66a;
+  --gold-deep: #8a6d28;
+  --link: #d0a94a;
+  --gold-text: #d0a94a;
+  --focus: #d0a94a;
+  --gold-hi: #e8c66a;
+  --gold-lo: #d0a94a;
+  --danger: #d97f6f;
+  --ok: #7fa86a;
+  --btn-ink: #1a1509;
+  --glyph-hi: #8a6d28;
+  --glyph-lo: #2a2110;
+  --shadow: 0 18px 50px -20px rgba(0, 0, 0, 0.7);
 }
 
 * { box-sizing: border-box; }
@@ -201,6 +260,21 @@ button.ghost {
   border: 1px solid var(--edge); border-radius: var(--radius); padding: 8px 14px; cursor: pointer; transition: 0.15s;
 }
 button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
+
+/* ---- busy dial (UI-audit #24 — see Busy.tsx) ---- */
+/* The one shared progress affordance for multi-second work (the Argon2id unlock and
+   password change, syncs, downloads): a small turning dial beside the existing busy
+   label. currentColor, so it inherits whatever ink it sits in (primary-button ink,
+   ghost-button dim, muted text). Under prefers-reduced-motion (end of file) it freezes
+   into a static ring — the state stays visible, nothing moves. */
+.busy { display: inline-flex; align-items: center; gap: 8px; }
+.busy .dial {
+  width: 0.9em; height: 0.9em; flex: none; border-radius: 50%;
+  border: 2px solid color-mix(in oklab, currentColor 30%, transparent);
+  border-top-color: currentColor;
+  animation: busy-turn 0.9s linear infinite;
+}
+@keyframes busy-turn { to { transform: rotate(360deg); } }
 
 .row { display: flex; gap: 10px; align-items: center; }
 .msg { font-size: 13px; padding: 10px 12px; border-radius: var(--radius); margin-bottom: 16px; }
@@ -434,4 +508,18 @@ input.token { font-size: 15px; color: var(--gold-bright); }
 @media (max-width: 430px) {
   /* Drop the userId text on the smallest phones; the connectivity dot + Lock stay. */
   .appbar .userid { display: none; }
+}
+
+/* ---- reduced motion (UI-audit #24, WCAG 2.3.3) ---- */
+/* Zero every animation and transition and the list-row hover lift. The near-zero
+   duration (rather than `animation: none`) keeps animation/transition end events
+   firing for any code that awaits them, and leaves the busy dial visible as a static
+   ring. Last in the file so the .item:hover override wins on order at equal specificity. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .item:hover { transform: none; }
 }

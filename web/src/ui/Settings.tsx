@@ -5,13 +5,16 @@ import type { ClientPolicy, TotpSetupResponse, TotpStatus } from "../api/types";
 import { backupNudge, readLastExportAt } from "../export/plan";
 import { qrModules } from "../vendor/qrcode-generator";
 import { Account } from "../vault/account";
+import { Busy } from "./Busy";
 import { DevicesCard } from "./Devices";
+import { UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDate } from "./format";
 import { Announcer, Msg } from "./Msg";
 import { QrSvg } from "./QrSvg";
 import { MasterPasswordHint } from "./Welcome";
 import { meetsMasterPasswordFloor } from "./strength";
+import { useThemePref, type ThemePref } from "./useTheme";
 import { ViewHeader } from "./ViewHeader";
 
 interface Props {
@@ -45,6 +48,7 @@ export function Settings({ client, account, policy, onPasswordChanged, onBackup,
       <BackupCard account={account} onBackup={onBackup} onCsv={onCsv} />
       <TotpCard client={client} />
       <PasswordCard client={client} account={account} policy={policy} onPasswordChanged={onPasswordChanged} />
+      <AppearanceCard />
       <div className="sheet">
         <button type="button" className="link" onClick={() => setSub("devices")}>Get andvari on your other devices →</button>
       </div>
@@ -131,7 +135,7 @@ function TotpCard({ client }: { client: ApiClient }) {
   const otpModules = useMemo(() => (setup ? qrModules(setup.otpauthUri, "M") : null), [setup]);
 
   useEffect(() => {
-    client.totpStatus().then(setStatus).catch(() => setErr("Could not load TOTP status."));
+    client.totpStatus().then(setStatus).catch(() => setErr("Couldn't check two-factor sign-in — reload to try again."));
   }, [client]);
 
   const run = async (fn: () => Promise<void>) => {
@@ -141,7 +145,15 @@ function TotpCard({ client }: { client: ApiClient }) {
     try {
       await fn();
     } catch (e) {
-      setErr(e instanceof ApiError && e.code === "bad_totp_code" ? "That code is wrong or expired — try the current one." : "Request failed.");
+      // #23 household voice (errors.ts canon): a fetch rejection (TypeError) is transport,
+      // never the user's fault; everything else gets the neutral retryable sentence.
+      setErr(
+        e instanceof ApiError && e.code === "bad_totp_code"
+          ? "That code is wrong or expired — try the current one."
+          : e instanceof TypeError
+            ? UNREACHABLE
+            : "Something went wrong — please try again.",
+      );
     } finally {
       setBusy(false);
     }
@@ -153,27 +165,30 @@ function TotpCard({ client }: { client: ApiClient }) {
       setCode("");
     });
 
+  // #23 household voice: "break-glass"/"public address" is ops jargon (it stays in code
+  // comments) — members hear "outside your home network".
   const confirm = () =>
     run(async () => {
       setStatus(await client.totpConfirm(code.replace(/\s/g, "")));
       setSetup(null);
       setCode("");
-      setMsg("Two-factor sign-in enrolled. Public (break-glass) sign-ins now require a one-time code.");
+      setMsg("Two-factor sign-in is on. Signing in from outside your home network now asks for a one-time code.");
     });
 
   const disable = () =>
     run(async () => {
       setStatus(await client.totpDisable(code.replace(/\s/g, "")));
       setCode("");
-      setMsg("Two-factor sign-in disabled. This account can no longer sign in from the public address.");
+      setMsg("Two-factor sign-in is off. This account can no longer sign in from outside your home network.");
     });
 
   return (
     <div className="sheet">
       <h2>Two-factor sign-in (server)</h2>
       <p className="muted" style={{ marginTop: 0 }}>
-        A second factor checked by the server on break-glass sign-ins from the public internet.
-        It is separate from your vault crypto — your master password alone still unseals the hoard.
+        An extra one-time code the server asks for when you sign in from outside your home
+        network. It's separate from your vault's encryption — your master password alone
+        still unseals the hoard.
       </p>
       {err && <Msg kind="err">{err}</Msg>}
       {msg && <Msg kind="info">{msg}</Msg>}
@@ -183,16 +198,16 @@ function TotpCard({ client }: { client: ApiClient }) {
       <Announcer text={msg} />
 
       {!status ? (
-        <p className="muted">loading…</p>
+        <p className="muted"><Busy>loading…</Busy></p>
       ) : status.enrolled ? (
         <>
-          <div className="msg info">Enrolled ✓ — public sign-ins require your authenticator code.</div>
+          <div className="msg info">On ✓ — signing in from outside your home network asks for your authenticator code.</div>
           <div className="field">
-            <label>One-time code (required to disable)</label>
+            <label>One-time code (required to turn off)</label>
             <div className="secret-row">
-              <input className="mono" inputMode="numeric" aria-label="One-time code (required to disable)" placeholder="123 456" value={code} onChange={(e) => setCode(e.target.value)} />
+              <input className="mono" inputMode="numeric" aria-label="One-time code (required to turn off)" placeholder="123 456" value={code} onChange={(e) => setCode(e.target.value)} />
               <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy || !code.trim()} onClick={disable}>
-                {busy ? "Working…" : "Disable"}
+                {busy ? <Busy>Working…</Busy> : "Turn off"}
               </button>
             </div>
           </div>
@@ -200,29 +215,31 @@ function TotpCard({ client }: { client: ApiClient }) {
       ) : setup ? (
         <>
           <p className="muted">
-            Add this to your authenticator app, then confirm with a code. This protects
-            break-glass/public logins — without it enrolled, this account cannot sign in
-            from the public address at all.
+            Add this to your authenticator app, then confirm with a code. It guards
+            sign-ins from outside your home network — without it, this account can't
+            sign in from out there at all.
           </p>
           {otpModules && (
             <div className="field">
               <QrSvg modules={otpModules} ariaLabel="Two-factor enrollment QR code" />
               <p className="muted" style={{ marginTop: 6 }}>
-                Scan with an authenticator app (Aegis, Google Authenticator…) — or copy the URI or secret below.
+                Scan with an authenticator app (Aegis, Google Authenticator…) — or copy the setup link or code below.
               </p>
             </div>
           )}
+          {/* #23: "otpauth URI" / "Secret (base32)" were developer labels; the wire shapes
+              stay in the values, the labels say what a family member does with them. */}
           <div className="field">
-            <label>otpauth URI</label>
+            <label>Setup link (if you can't scan)</label>
             <div className="secret-row">
-              <input readOnly className="mono" aria-label="otpauth URI" value={setup.otpauthUri} />
+              <input readOnly className="mono" aria-label="Setup link (if you can't scan)" value={setup.otpauthUri} />
               <CopyButton value={setup.otpauthUri} />
             </div>
           </div>
           <div className="field">
-            <label>Secret (base32)</label>
+            <label>Setup code (to type into your app)</label>
             <div className="secret-row">
-              <input readOnly className="mono" aria-label="Secret (base32)" value={setup.secretBase32} />
+              <input readOnly className="mono" aria-label="Setup code (to type into your app)" value={setup.secretBase32} />
               <CopyButton value={setup.secretBase32} />
             </div>
           </div>
@@ -230,14 +247,14 @@ function TotpCard({ client }: { client: ApiClient }) {
             <label>Code from your app</label>
             <div className="secret-row">
               <input className="mono" inputMode="numeric" aria-label="Code from your app" placeholder="123 456" value={code} onChange={(e) => setCode(e.target.value)} />
-              <button type="button" className="ghost" disabled={busy || !code.trim()} onClick={confirm}>{busy ? "Working…" : "Confirm"}</button>
+              <button type="button" className="ghost" disabled={busy || !code.trim()} onClick={confirm}>{busy ? <Busy>Working…</Busy> : "Confirm"}</button>
             </div>
           </div>
         </>
       ) : (
         <>
-          {status.pendingSetup && <p className="muted">A previous setup was started but never confirmed — enabling again generates a fresh secret.</p>}
-          <button type="button" className="ghost" disabled={busy} onClick={begin}>{busy ? "Working…" : "Enable TOTP"}</button>
+          {status.pendingSetup && <p className="muted">A setup was started earlier but never finished — turning it on again starts fresh.</p>}
+          <button type="button" className="ghost" disabled={busy} onClick={begin}>{busy ? <Busy>Working…</Busy> : "Turn on two-factor sign-in"}</button>
         </>
       )}
     </div>
@@ -304,8 +321,37 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Props) {
         <input type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
       </Field>
       <div className="actions">
-        <button className="primary" disabled={busy || !canSubmit}>{busy ? "Re-forging…" : "Change password"}</button>
+        {/* UI-audit #24: the double Argon2id derivation here runs multi-second — show motion. */}
+        <button className="primary" disabled={busy || !canSubmit}>{busy ? <Busy>Re-forging…</Busy> : "Change password"}</button>
       </div>
     </form>
+  );
+}
+
+// ---- appearance (UI-audit #26 — user theme override) ----
+
+const THEME_CHOICES: Array<{ value: ThemePref; label: string }> = [
+  { value: "auto", label: "Match my device" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
+
+function AppearanceCard() {
+  const [pref, setPref] = useThemePref();
+  return (
+    <div className="sheet">
+      <h2>Appearance</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        "Match my device" follows your device's light/dark setting. Picking one keeps
+        andvari that way in this browser only — your other devices choose for themselves.
+      </p>
+      <div className="tabs" role="group" aria-label="Theme" style={{ maxWidth: 400, marginBottom: 0 }}>
+        {THEME_CHOICES.map(({ value, label }) => (
+          <button key={value} type="button" className={pref === value ? "active" : ""} aria-pressed={pref === value} onClick={() => setPref(value)}>
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
