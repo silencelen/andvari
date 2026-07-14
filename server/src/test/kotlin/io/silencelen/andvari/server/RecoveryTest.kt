@@ -16,6 +16,7 @@ import io.ktor.server.testing.testApplication
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.model.AccountKeys
+import io.silencelen.andvari.core.model.AdminUserSummary
 import io.silencelen.andvari.core.model.DeviceInfo
 import io.silencelen.andvari.core.model.InviteRequest
 import io.silencelen.andvari.core.model.InviteResponse
@@ -23,16 +24,21 @@ import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.PreloginRequest
 import io.silencelen.andvari.core.model.PreloginResponse
 import io.silencelen.andvari.core.model.RecoveryCommitRequest
+import io.silencelen.andvari.core.model.RecoverySelfConfirmRequest
 import io.silencelen.andvari.core.model.RecoverySelfSetupRequest
+import io.silencelen.andvari.core.model.RecoverySelfSetupResponse
 import io.silencelen.andvari.core.model.RecoveryVerifyRequest
 import io.silencelen.andvari.core.model.RecoveryUpload
 import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
+import kotlinx.serialization.builtins.ListSerializer
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -41,6 +47,9 @@ import kotlin.test.assertTrue
  * dedicated-reset guards (non-active refusal, KDF floor, session revocation, NO active/mustChange
  * flip), the authenticated self-setup reauth (§F.3.3 / §F.2 migration nudge), the public-origin
  * refusal, and single-use ticket replay — same house style as the other server integration tests.
+ * Also the confirm piece-binding contract (design 2026-07-13): R1 bound / R2 unbound-device-scoped /
+ * R3 no-row, reset-on-rotate (leg ii), the register-returned recoveryPieceId, the setup route's JSON
+ * response, the empty/malformed confirm-body parse rule, and the v8 escrowPolicy reconciliation.
  */
 class RecoveryTest : P4TestSupport() {
 
@@ -92,12 +101,32 @@ class RecoveryTest : P4TestSupport() {
         return json.decodeFromString(AccountKeys.serializer(), resp.bodyAsText())
     }
 
-    /** §F.9 capture-confirmation POST (no body; a session suffices — no key material moves). */
-    private suspend fun HttpClient.confirm(vc: VirtualClient, host: String? = null): HttpResponse =
+    /** §F.9 capture-confirmation POST. [pieceId] = null posts NO body and NO content-type — the exact
+     *  fielded 0.15/0.16 wire shape (R2, device-scoped); non-null posts the bound
+     *  RecoverySelfConfirmRequest (R1). [accessToken] selects the confirming DEVICE (defaults to the
+     *  register session). A session suffices — no key material moves. */
+    private suspend fun HttpClient.confirm(
+        vc: VirtualClient,
+        pieceId: String? = null,
+        accessToken: String = vc.accessToken,
+        host: String? = null,
+    ): HttpResponse =
         post("/api/v1/recovery/self/confirm") {
-            authed(vc)
+            authed(accessToken)
             if (host != null) header(HttpHeaders.Host, host)
+            if (pieceId != null) { contentType(ContentType.Application.Json); setBody(RecoverySelfConfirmRequest(pieceId)) }
         }
+
+    /** PUT /recovery/self-setup (fresh piece + currentAuthKey reauth) → the parsed JSON response.
+     *  [accessToken] selects the committing DEVICE — the server stamps it as the row's setupDeviceId. */
+    private suspend fun HttpClient.selfSetup(vc: VirtualClient, accessToken: String = vc.accessToken): RecoverySelfSetupResponse {
+        val resp = put("/api/v1/recovery/self-setup") {
+            contentType(ContentType.Application.Json); authed(accessToken)
+            setBody(vc.buildRecoverySelfSetup())
+        }
+        assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+        return json.decodeFromString(RecoverySelfSetupResponse.serializer(), resp.bodyAsText())
+    }
 
     /** A full fresh-device login (prelogin → derive authKey → login) → the SessionResponse. */
     private suspend fun HttpClient.freshLogin(vc: VirtualClient): SessionResponse {
@@ -430,7 +459,8 @@ class RecoveryTest : P4TestSupport() {
         client.register(vc, tok)
         assertFalse(client.accountKeys(vc).recoveryConfirmed, "precondition: unconfirmed")
 
-        // confirm (authenticated, no body — a session is sufficient) → 200 "ok"
+        // confirm (authenticated, no body — the fielded wire shape; rides R2 device-scoped acceptance,
+        // and this IS the register session whose register stamped setupDeviceId) → 200 "ok"
         val resp = client.confirm(vc)
         assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
         assertEquals("ok", resp.bodyAsText())
@@ -492,5 +522,302 @@ class RecoveryTest : P4TestSupport() {
         // … only the explicit type-back confirm flips it.
         assertEquals(HttpStatusCode.OK, client.confirm(vc).status)
         assertTrue(client.accountKeys(vc).recoveryConfirmed, "confirm after capture ⇒ recoveryConfirmed=true")
+
+        // Piece-binding leg (ii), reset-on-rotate (design 2026-07-13 §2.1): a LATER setup rotates the
+        // piece, so it must also CLEAR the previously-true flag — the confirmation attested a phrase the
+        // rotation just killed, and the flag always describes the CURRENT piece.
+        client.selfSetup(vc)
+        assertFalse(client.accountKeys(vc).recoveryConfirmed, "setup rotates the piece ⇒ clears recoveryConfirmed")
+    }
+
+    // ---- design 2026-07-13 piece binding: R1 bound confirm attests the CURRENT piece ----
+    @Test
+    fun recovery_confirm_bound_setsConfirmed() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-b1@x.com", "admin bound one password")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "b1@x.com")
+        val vc = VirtualClient("b1@x.com", "b1 password one")
+        client.register(vc, tok)
+
+        val pieceId = assertNotNull(client.selfSetup(vc).pieceId)
+        val resp = client.confirm(vc, pieceId)
+        assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+        assertTrue(client.accountKeys(vc).recoveryConfirmed, "bound confirm of the current piece ⇒ flag flips")
+    }
+
+    // ---- THE repro (design 2026-07-13 §0 ordering 1): two devices interleave setup/confirm — the
+    //      loser's confirm must NEVER attest the winner's (uncaptured-by-the-loser) piece ----
+    @Test
+    fun recovery_twoDevice_interleaving_confirmNeverAttestsOtherPiece() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-2d@x.com", "admin two device password")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "2d@x.com")
+        val vc = VirtualClient("2d@x.com", "2d password one")
+        client.register(vc, tok)
+
+        // device A = the register session; device B = a second device (fresh full login)
+        val deviceA = vc.accessToken
+        val deviceB = client.freshLogin(vc).accessToken
+        val idA = assertNotNull(client.selfSetup(vc, accessToken = deviceA).pieceId)
+        val idB = assertNotNull(client.selfSetup(vc, accessToken = deviceB).pieceId) // rotates A's piece away
+
+        // A type-backs the phrase IT revealed — but the server row is now B's piece: refused, flag untouched
+        val stale = client.confirm(vc, idA, accessToken = deviceA)
+        assertEquals(HttpStatusCode.Conflict, stale.status, stale.bodyAsText())
+        assertEquals("recovery_piece_stale", errorOf(stale))
+        assertFalse(client.accountKeys(vc).recoveryConfirmed, "a confirm must never attest a rotated-away piece")
+
+        // B's confirm names the CURRENT piece: accepted
+        assertEquals(HttpStatusCode.OK, client.confirm(vc, idB, accessToken = deviceB).status)
+        assertTrue(client.accountKeys(vc).recoveryConfirmed)
+    }
+
+    // ---- same-device rotation: a bound confirm of the SUPERSEDED id is stale, of the current one accepted ----
+    @Test
+    fun recovery_confirm_staleAfterRotation_409() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-rot@x.com", "admin rotation password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "rot@x.com")
+        val vc = VirtualClient("rot@x.com", "rot password one")
+        client.register(vc, tok)
+
+        val id1 = assertNotNull(client.selfSetup(vc).pieceId)
+        val id2 = assertNotNull(client.selfSetup(vc).pieceId) // same device — still rotates id1 away
+        val stale = client.confirm(vc, id1)
+        assertEquals(HttpStatusCode.Conflict, stale.status, stale.bodyAsText())
+        assertEquals("recovery_piece_stale", errorOf(stale))
+        assertFalse(client.accountKeys(vc).recoveryConfirmed)
+        assertEquals(HttpStatusCode.OK, client.confirm(vc, id2).status)
+        assertTrue(client.accountKeys(vc).recoveryConfirmed)
+    }
+
+    // ---- leg (ii) reset-on-rotate: a setup after a confirm drops the flag back to false, durably ----
+    @Test
+    fun recovery_setup_rotation_clearsConfirmed() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-clr@x.com", "admin clear password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "clr@x.com")
+        val vc = VirtualClient("clr@x.com", "clr password one")
+        client.register(vc, tok)
+
+        val id1 = assertNotNull(client.selfSetup(vc).pieceId)
+        assertEquals(HttpStatusCode.OK, client.confirm(vc, id1).status)
+        assertTrue(client.accountKeys(vc).recoveryConfirmed, "precondition: confirmed")
+
+        client.selfSetup(vc) // rotation ⇒ the confirmed phrase is dead ⇒ flag must drop
+        assertFalse(client.accountKeys(vc).recoveryConfirmed, "rotation clears recoveryConfirmed on keys")
+        assertFalse(client.freshLogin(vc).accountKeys.recoveryConfirmed, "…and on a brand-new login (durable)")
+    }
+
+    // ---- R2: a body-less (fielded-native) confirm from the device whose setup committed the row is accepted ----
+    @Test
+    fun recovery_confirm_unbound_sameDevice_accepted() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-ub@x.com", "admin unbound password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "ub@x.com")
+        val vc = VirtualClient("ub@x.com", "ub password one")
+        client.register(vc, tok)
+
+        client.selfSetup(vc) // the register session's device commits (and stamps) the current row
+        val resp = client.confirm(vc) // body-less from that SAME device
+        assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+        assertTrue(client.accountKeys(vc).recoveryConfirmed)
+        // audited as the legacy acceptance — distinct from the bound recovery_self_confirm type
+        val rows = client.auditRows(admin, "recovery_self_confirm_unbound")
+        assertTrue(rows.any { it.userId == vc.userId }, "unbound acceptance must audit recovery_self_confirm_unbound")
+    }
+
+    // ---- R2 rejection: after a FOREIGN device rotated the piece, a body-less confirm is stale ----
+    @Test
+    fun recovery_confirm_unbound_afterForeignRotation_409() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-fr@x.com", "admin foreign password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "fr@x.com")
+        val vc = VirtualClient("fr@x.com", "fr password one")
+        client.register(vc, tok)
+
+        val deviceB = client.freshLogin(vc).accessToken
+        client.selfSetup(vc) // device A commits…
+        client.selfSetup(vc, accessToken = deviceB) // …then device B rotates (foreign to A)
+
+        val stale = client.confirm(vc) // body-less as A: the current row is B's
+        assertEquals(HttpStatusCode.Conflict, stale.status, stale.bodyAsText())
+        assertEquals("recovery_piece_stale", errorOf(stale))
+        val staleRows = client.auditRows(admin, "recovery_self_confirm_stale")
+        assertTrue(staleRows.any { it.userId == vc.userId && it.meta == "unbound" }, "rejected legacy confirm audits meta=unbound")
+
+        assertEquals(HttpStatusCode.OK, client.confirm(vc, accessToken = deviceB).status) // body-less as B: same-device
+        assertTrue(client.accountKeys(vc).recoveryConfirmed)
+    }
+
+    // ---- migration compat: a pre-v8 row (both columns NULL, no backfill) accepts a body-less confirm ----
+    @Test
+    fun recovery_confirm_unbound_preV8Row_accepted() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-v7@x.com", "admin prev8 password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "v7@x.com")
+        val vc = VirtualClient("v7@x.com", "v7 password one")
+        client.register(vc, tok)
+
+        // simulate a row the v8 migration inherited: no pieceId, no setupDeviceId
+        services.repo.db.tx { c -> c.exec("UPDATE member_recovery SET pieceId=NULL, setupDeviceId=NULL WHERE userId=?", vc.userId) }
+        // NULL setupDeviceId accepts ANY device (a pre-v8 piece predates the columns) — use a second
+        // device to prove the acceptance is the NULL arm, not the same-device arm.
+        val deviceB = client.freshLogin(vc).accessToken
+        val resp = client.confirm(vc, accessToken = deviceB)
+        assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+        assertTrue(client.accountKeys(vc).recoveryConfirmed)
+    }
+
+    // ---- a BOUND confirm can never match a NULL-id (pre-v8) row ----
+    @Test
+    fun recovery_confirm_boundAgainstPreV8Row_409() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-bn@x.com", "admin boundnull password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "bn@x.com")
+        val vc = VirtualClient("bn@x.com", "bn password one")
+        client.register(vc, tok)
+
+        services.repo.db.tx { c -> c.exec("UPDATE member_recovery SET pieceId=NULL, setupDeviceId=NULL WHERE userId=?", vc.userId) }
+        val resp = client.confirm(vc, "any-claimed-piece-id")
+        assertEquals(HttpStatusCode.Conflict, resp.status, resp.bodyAsText())
+        assertEquals("recovery_piece_stale", errorOf(resp))
+        assertFalse(client.accountKeys(vc).recoveryConfirmed, "a bound confirm never matches a NULL-id row")
+    }
+
+    // ---- §2.3: register returns the committed piece's id; the enroll path's bound confirm accepts it ----
+    @Test
+    fun recovery_register_returnsPieceId_boundEnrollConfirm() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-rp@x.com", "admin regpiece password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "rp@x.com")
+        val vc = VirtualClient("rp@x.com", "rp password one")
+
+        val session = client.register(vc, tok)
+        val pieceId = assertNotNull(session.recoveryPieceId, "register response must carry the committed piece's id")
+        // §1.3: ONLY register populates it — a login leaves it null
+        assertNull(client.freshLogin(vc).recoveryPieceId, "login must NOT hand out the current piece's id")
+        // the enroll happy-path: bound confirm with the register-returned id, from the register session
+        assertEquals(HttpStatusCode.OK, client.confirm(vc, pieceId).status)
+        assertTrue(client.accountKeys(vc).recoveryConfirmed)
+    }
+
+    // ---- §1.4: the exact fielded wire shape (POST, no body, no content-type) parses as pieceId=null ----
+    @Test
+    fun recovery_confirm_emptyBody_noContentType_parses() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-eb@x.com", "admin emptybody password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "eb@x.com")
+        val vc = VirtualClient("eb@x.com", "eb password one")
+        client.register(vc, tok)
+
+        val resp = client.confirm(vc) // the helper posts NO body and NO content-type
+        assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText()) // not 400/500 — legacy shape must keep working
+        assertEquals("ok", resp.bodyAsText(), "confirm response body unchanged for fielded clients")
+    }
+
+    // ---- §1.4: a non-blank garbage body is 400 bad_request and must not touch the flag ----
+    @Test
+    fun recovery_confirm_malformedBody_400() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-mb@x.com", "admin malformed password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "mb@x.com")
+        val vc = VirtualClient("mb@x.com", "mb password one")
+        client.register(vc, tok)
+
+        val resp = client.post("/api/v1/recovery/self/confirm") {
+            authed(vc); contentType(ContentType.Application.Json); setBody("{not json")
+        }
+        assertEquals(HttpStatusCode.BadRequest, resp.status, resp.bodyAsText())
+        assertEquals("bad_request", errorOf(resp))
+        assertFalse(client.accountKeys(vc).recoveryConfirmed, "a malformed body must not touch the flag")
+    }
+
+    // ---- §2.1: the setup route's JSON response carries the id the next bound confirm accepts ----
+    @Test
+    fun recovery_selfSetup_responseCarriesPieceId() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-sr@x.com", "admin setupresp password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "sr@x.com")
+        val vc = VirtualClient("sr@x.com", "sr password one")
+        client.register(vc, tok)
+
+        val setup = client.selfSetup(vc)
+        val pieceId = assertNotNull(setup.pieceId, "setup response must carry the fresh pieceId (was the text \"ok\")")
+        assertEquals(HttpStatusCode.OK, client.confirm(vc, pieceId).status, "the returned id is exactly what the next bound confirm accepts")
+        assertTrue(client.accountKeys(vc).recoveryConfirmed)
+    }
+
+    // ---- R3: an account whose member_recovery row is gone gets a clean 409, never a 500 ----
+    @Test
+    fun recovery_confirm_noRow_409() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-nr@x.com", "admin norow password one")
+        client.register(admin, bootstrapToken)
+        val tok = client.createInvite(admin, "nr@x.com")
+        val vc = VirtualClient("nr@x.com", "nr password one")
+        client.register(vc, tok)
+
+        services.repo.db.tx { c -> c.exec("DELETE FROM member_recovery WHERE userId=?", vc.userId) }
+        val resp = client.confirm(vc)
+        assertEquals(HttpStatusCode.Conflict, resp.status, "no row ⇒ 409, never a 500")
+        assertEquals("recovery_piece_stale", errorOf(resp))
+        assertFalse(client.accountKeys(vc).recoveryConfirmed)
+    }
+
+    // ---- §F.4 (v8): AdminUserSummary.escrowPolicy reconciliation — the persisted invite posture ----
+    @Test
+    fun adminUsers_escrowPolicy_reflectsInvitePosture() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-pol@x.com", "admin policy password one")
+        client.register(admin, bootstrapToken) // the bootstrap invite row defaults to 'required'
+
+        val reqTok = client.createInvite(admin, "polreq@x.com") // InviteRequest defaults to "required"
+        val reqVc = VirtualClient("polreq@x.com", "polreq password one")
+        client.register(reqVc, reqTok)
+
+        val wTok = client.createInvite(admin, "polwaived@x.com", escrowPolicy = "waived")
+        val wVc = VirtualClient("polwaived@x.com", "polwaived password one")
+        assertEquals(HttpStatusCode.OK, client.rawRegister(wVc.buildRegister(wTok, recovery.publicKey, fingerprint, includeEscrow = false)).status)
+
+        // simulate a pre-v8 account: the column is NULL (no backfill) → posture unknown/legacy
+        services.repo.db.tx { c -> c.exec("UPDATE users SET escrowPolicy=NULL WHERE userId=?", admin.userId) }
+
+        val resp = client.get("/api/v1/admin/users") { authed(admin) }
+        assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+        val users = json.decodeFromString(ListSerializer(AdminUserSummary.serializer()), resp.bodyAsText())
+        assertEquals("required", users.first { it.email == "polreq@x.com" }.escrowPolicy, "required invite ⇒ persisted posture 'required'")
+        assertEquals("waived", users.first { it.email == "polwaived@x.com" }.escrowPolicy, "waived invite ⇒ persisted posture 'waived'")
+        assertNull(users.first { it.email == admin.email }.escrowPolicy, "pre-v8 user (no backfill) ⇒ null posture")
     }
 }

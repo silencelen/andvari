@@ -377,5 +377,31 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 8) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Confirm piece-binding (design 2026-07-13 §1.1) + admin posture reconciliation
+                    // (§F.4 rider) — ONE shared v8 bump (prod CT122 is at v7; both ship in one release).
+                    // All additive O(1) ALTERs, deliberately NO backfill: no fielded client ever received
+                    // an id for a pre-v8 piece, so NULL drives the legacy acceptance branch (R2/R3 in
+                    // Service.recoverySelfConfirm).
+                    //   pieceId       — opaque random id (ServerCrypto.newToken) of the CURRENT piece,
+                    //     minted at every member_recovery INSERT/UPSERT (register + self-setup); a bound
+                    //     confirm is accepted only while it still names this row. Not a secret — it rides
+                    //     an authenticated channel and grants nothing a session couldn't get by calling
+                    //     setup itself; deliberately NOT updatedAt-as-token (ms-grained collisions).
+                    //   setupDeviceId — the deviceId whose register/setup committed the row; scopes the
+                    //     LEGACY body-less confirm (fielded 0.15/0.16 natives) to the committing device.
+                    st.executeUpdate("ALTER TABLE member_recovery ADD COLUMN pieceId TEXT")
+                    st.executeUpdate("ALTER TABLE member_recovery ADD COLUMN setupDeviceId TEXT")
+                    // The invite's escrow posture persisted onto the user at register ('required'|'waived',
+                    // the ENFORCED polarity — design §F.4), so the Admin UI can tell an intended waiver
+                    // from a required member whose escrow blob is missing (hostile policy flip / escrow
+                    // deletion). Nullable, no backfill: NULL = pre-v8 account (posture unknown/legacy).
+                    st.executeUpdate("ALTER TABLE users ADD COLUMN escrowPolicy TEXT")
+                    st.executeUpdate("UPDATE meta SET value='8' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }
