@@ -223,6 +223,9 @@ fun AndvariApp(vm: AndvariViewModel) {
             AttentionArea(vm, ui)
             // One-time quick-unlock enrollment offer, only over the vault list (design §3/§8).
             if (ui.quickUnlockOffer && ui.screen is Screen.Vault) QuickUnlockOfferCard(vm)
+            // Cut L (v2 #20): autofill — the product's core daily value — was never offered;
+            // it hid behind a diagnostics-framed Settings card. One-time offer over the vault.
+            if (ui.screen is Screen.Vault) AutofillOfferCard(vm)
             Box(Modifier.weight(1f)) {
                 when (val screen = ui.screen) {
                     is Screen.Loading -> Centered { Text("ᛅ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary) }
@@ -2193,6 +2196,34 @@ private fun QuickUnlockSettingsCard(vm: AndvariViewModel, ui: UiState) {
 
 /** One-time post-unlock offer card (design §8 default). "Not now" dismisses for good; the Settings
  *  toggle remains the durable control. */
+@Composable
+private fun AutofillOfferCard(vm: AndvariViewModel) {
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("andvari-ui", Context.MODE_PRIVATE) }
+    var dismissed by remember { mutableStateOf(prefs.getBoolean("autofill_offer_dismissed", false)) }
+    // Checked once per composition of the vault screen — enabling via the offer navigates
+    // away, so a stale `false` can't stick around after setup.
+    val afm = remember { ctx.getSystemService(android.view.autofill.AutofillManager::class.java) }
+    val active = remember { runCatching { afm?.hasEnabledAutofillServices() == true }.getOrDefault(false) }
+    if (dismissed || active || afm?.isAutofillSupported != true) return
+    Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text("Fill passwords everywhere", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Turn on andvari autofill and your logins appear right in apps and browsers — no copy-paste.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row {
+                TextButton(onClick = { vm.openAutofillStatus() }) { Text("Set up") }
+                TextButton(
+                    onClick = { prefs.edit().putBoolean("autofill_offer_dismissed", true).apply(); dismissed = true },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                ) { Text("Not now") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun QuickUnlockOfferCard(vm: AndvariViewModel) {
     val activity = LocalContext.current as? FragmentActivity ?: return

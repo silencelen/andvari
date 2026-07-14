@@ -1111,6 +1111,18 @@ private fun SharingScreen(state: DesktopState) {
         ErrorBar(state.error, state::clearError)
         NoticeBar(state.notice, state::clearNotice)
         CopyStatusLine(state, vaults)
+        // Cut L (v2 #20): honest wayfinding — this screen had NO share actions and never said
+        // where they live (inviting members / granting access are web-only).
+        if (settingsVault == null) {
+            val uriHandler = LocalUriHandler.current
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Invite household members and manage who can open each vault from the web app.",
+                    Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = { runCatching { uriHandler.openUri(state.baseUrl) } }) { Text("Open web app") }
+            }
+        }
 
         if (settingsVault != null) {
             if (settingsVault.type == "shared" && settingsVault.role == "owner") {

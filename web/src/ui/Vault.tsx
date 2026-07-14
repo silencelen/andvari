@@ -516,9 +516,11 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                 title="Vault health"
                 onClick={() => { setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); setView("health"); }}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px" }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px", marginRight: 5 }}>
                   <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
                 </svg>
+                {/* Cut L (v2 #20): a visible label — the bare pulse glyph didn't read as "password health". */}
+                Health
               </button>
               {/* DN-2: the Trash entry point — a small icon here instead of a main-nav item.
                   Mirrors navBtn's layer-clearing so it behaves like navigation, not a layer. */}
