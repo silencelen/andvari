@@ -7,6 +7,7 @@
  */
 import {
   closeDropdown,
+  dropdownWillConsumeEnter,
   openDropdown,
   showLinkOffer,
   showSaveBanner,
@@ -14,8 +15,17 @@ import {
   type DropdownState,
 } from "./content-ui";
 import { findLoginForms, isSubmitLike, type LoginForm } from "./detect";
-import { saveErrorCopy } from "./errors";
-import { send, type MatchItem, type PendingSave, type Req, type RevealedSecret, type Res, type TabMsg } from "./messages";
+import { fillErrorCopy, saveErrorCopy } from "./errors";
+import {
+  send,
+  type FillOutcome,
+  type MatchItem,
+  type PendingSave,
+  type Req,
+  type RevealedSecret,
+  type Res,
+  type TabMsg,
+} from "./messages";
 
 const isTop = window.self === window.top;
 
@@ -72,18 +82,33 @@ function liveForm(f: LoginForm): LoginForm | null {
   return all.find((x) => x.kind === f.kind) ?? all.find((x) => x.kind === "login") ?? all[0] ?? null;
 }
 
-function fillForm(f: LoginForm, s: RevealedSecret): void {
+/** Cut M (v2 #14): fill is truthful — answers exactly which parts landed in the page's fields
+ *  (the old void return swallowed every miss: dead form refs, mismatched fields, empty items).
+ *  The TOTP side-copy runs only when a credential actually landed — a failed fill must not
+ *  half-succeed into the clipboard while the caller reports failure. */
+function fillForm(f: LoginForm, s: RevealedSecret): FillOutcome {
   const live = liveForm(f);
-  if (!live) return;
+  if (!live) return { filled: "nothing", code: "no_form" };
+  if (!s.username && !s.password) return { filled: "nothing", code: "no_secret" };
+  let wroteUser = false;
+  let wrotePass = false;
   filling = true;
   try {
-    if (live.username && s.username) setValue(live.username, s.username);
-    if (live.password && s.password) setValue(live.password, s.password);
+    if (live.username && s.username) {
+      setValue(live.username, s.username);
+      wroteUser = true;
+    }
+    if (live.password && s.password) {
+      setValue(live.password, s.password);
+      wrotePass = true;
+    }
   } finally {
     filling = false;
   }
+  if (!wroteUser && !wrotePass) return { filled: "nothing", code: "no_fields" };
   updateSnapshot(live); // our dispatched events are !isTrusted — feed the capture engine directly
   if (s.totpCode) void copyTotp(s.totpCode);
+  return { filled: wroteUser && wrotePass ? "both" : wroteUser ? "username" : "password" };
 }
 
 async function copyTotp(code: string): Promise<void> {
@@ -138,7 +163,7 @@ async function openFor(anchor: HTMLInputElement, f: LoginForm): Promise<void> {
     isSignup: f.isSignup,
   };
   openDropdown(anchor, state, {
-    onPick: (m) => void fillItem(m.itemId, f, false),
+    onPick: (m) => void fillFromDropdown(m.itemId, f, false),
     onStrongPassword: () => void useStrongPassword(f),
     onSearch: async (query) => {
       const r = await safeSend({ type: "allItems", query });
@@ -148,19 +173,32 @@ async function openFor(anchor: HTMLInputElement, f: LoginForm): Promise<void> {
   });
 }
 
-async function fillItem(itemId: string, f: LoginForm, explicit: boolean): Promise<void> {
+async function fillItem(itemId: string, f: LoginForm, explicit: boolean): Promise<FillOutcome> {
   const r = await safeSend({ type: "reveal", itemId, host: location.hostname, explicit });
   closeDropdown();
-  if (r?.ok && r.secret) fillForm(f, r.secret);
+  if (!r) return { filled: "nothing", code: "unreachable" };
+  if (!r.ok || !r.secret) return { filled: "nothing", code: r.code ?? "not_allowed" };
+  return fillForm(f, r.secret);
+}
+
+/** Cut M (v2 #14): dropdown picks surface their verdict in-page — the old path closed the
+ *  dropdown and did nothing visible either way, leaving the user to guess from the fields.
+ *  Success names exactly what landed (a username-step fill is NOT "Login filled"); failures
+ *  render the canon line. A TOTP side-copy toast may follow and supersede the success one —
+ *  the 2FA instruction is the more urgent of the two. */
+async function fillFromDropdown(itemId: string, f: LoginForm, explicit: boolean): Promise<FillOutcome> {
+  const o = await fillItem(itemId, f, explicit);
+  if (o.filled === "nothing") showToast(fillErrorCopy(o.code));
+  else showToast(o.filled === "both" ? "Login filled" : o.filled === "username" ? "Username filled" : "Password filled");
+  return o;
 }
 
 /** Search-all pick: explicit reveal (user chose it in OUR closed-shadow UI), then offer the
- *  one-tap URI backfill so the item matches this site next time. */
+ *  one-tap URI backfill so the item matches this site next time — but only after a REAL fill
+ *  (Cut M: linking a site the fill never reached would compound the silent failure). */
 async function fillExplicit(m: MatchItem, f: LoginForm): Promise<void> {
-  const r = await safeSend({ type: "reveal", itemId: m.itemId, host: location.hostname, explicit: true });
-  closeDropdown();
-  if (!r?.ok || !r.secret) return;
-  fillForm(f, r.secret);
+  const o = await fillFromDropdown(m.itemId, f, true);
+  if (o.filled === "nothing") return;
   if (!m.siteMatch) {
     showLinkOffer(
       m.name,
@@ -173,10 +211,21 @@ async function fillExplicit(m: MatchItem, f: LoginForm): Promise<void> {
 async function useStrongPassword(f: LoginForm): Promise<void> {
   const r = await safeSend({ type: "generate" });
   closeDropdown();
-  if (!r) return;
+  // Cut M (v2 #14): every dead end here used to be silent — the dropdown just vanished.
+  if (!r) {
+    showToast(fillErrorCopy("unreachable"));
+    return;
+  }
   const live = liveForm(f);
-  if (!live) return;
+  if (!live) {
+    showToast(fillErrorCopy("no_form"));
+    return;
+  }
   const targets = live.newPasswords.length > 0 ? live.newPasswords : live.password ? [live.password] : [];
+  if (targets.length === 0) {
+    showToast(fillErrorCopy("no_fields"));
+    return;
+  }
   filling = true;
   try {
     for (const t of targets) setValue(t, r.password);
@@ -184,6 +233,7 @@ async function useStrongPassword(f: LoginForm): Promise<void> {
     filling = false;
   }
   updateSnapshot(live); // the generated secret must reach the save banner, not just the page
+  showToast("Strong password filled"); // Cut M (v2 #14): success is visible too, not just failure
 }
 
 // ---- capture engine ----
@@ -280,6 +330,11 @@ function init(): void {
     "keydown",
     (e) => {
       if (!e.isTrusted || e.key !== "Enter" || !(e.target instanceof HTMLInputElement)) return;
+      // Cut N review: when the dropdown is about to consume this Enter as a row pick, it is NOT a
+      // login submit — snapshotting the (possibly junk partial) field here would offer to overwrite
+      // the stored password. This listener runs BEFORE the dropdown's Enter handler, so the flag is
+      // still accurate. (Enter with no active row still submits the page form → capture stays valid.)
+      if (dropdownWillConsumeEnter()) return;
       const f = formFor(e.target);
       if (!f) return;
       if (e.target.type === "password" || (f.kind === "username-step" && f.username === e.target)) captureNow(f);
@@ -336,16 +391,23 @@ function init(): void {
     }, 150);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  chrome.runtime.onMessage.addListener((msg: TabMsg) => {
+  chrome.runtime.onMessage.addListener((msg: TabMsg, _sender, sendResponse: (o: FillOutcome) => void) => {
     if (msg.type === "fillItem") {
       // Popup-granted fill: the SW minted a one-shot grant, so the normal host-bound reveal
-      // path clears it — single secret-egress path. Frames without a form stay silent.
+      // path clears it — single secret-egress path. Cut M (v2 #14): the REAL outcome goes back
+      // via sendResponse (the SW relays it to the popup, whose ok used to mean mere delivery) —
+      // a form-less page answers no_form instead of staying silent.
       const all = scanForms();
       const f = all.find((x) => x.kind === "login") ?? all[0];
-      if (f) void fillItem(msg.itemId, f, false);
-    } else if (msg.type === "offerPendingSave" && isTop) {
-      offerBanner(msg.pending);
+      if (!f) {
+        sendResponse({ filled: "nothing", code: "no_form" });
+        return undefined;
+      }
+      void fillItem(msg.itemId, f, false).then(sendResponse);
+      return true; // keep the channel open for the async outcome
     }
+    if (msg.type === "offerPendingSave" && isTop) offerBanner(msg.pending);
+    return undefined;
   });
 
   void safeSend({ type: "pageInfo", host: location.hostname });

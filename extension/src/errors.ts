@@ -20,6 +20,7 @@ type UnlockCode =
   | "network"
   | "unknown";
 type SaveErrorCode = "locked" | "conflict" | "failed";
+type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
 
 /** Verbatim web/src/ui/errors.ts UNREACHABLE — the one canonical "can't reach the server"
  *  sentence, duplicated as a const because no build path from extension/ to web/src exists. */
@@ -70,6 +71,29 @@ export function saveErrorCopy(code: SaveErrorCode | undefined): string {
     default:
       // "failed" and an absent code (SW unreachable) — retryable, no jargon.
       return "Could not save — try again.";
+  }
+}
+
+/** Fill-failure line (Cut M, v2 #14): shared by the in-page dropdown toast and the popup's
+ *  "Fill this page" #msg strip — the fill paths used to fail SILENTLY (dropdown closed, popup
+ *  reported delivery as success). Codes come from messages.ts FillOutcome/FillFailCode; the
+ *  content script is the ground truth for what actually landed in the page's fields. */
+export function fillErrorCopy(code: FillFailCode | undefined): string {
+  switch (code) {
+    case "locked":
+      return "andvari locked before it could fill — unlock and try again.";
+    case "not_allowed":
+      return "andvari wouldn't release this login for this page — try again from the popup.";
+    case "no_form":
+      return "No login fields found on this page — copy the username and password instead.";
+    case "no_fields":
+      return "Couldn't fill the fields on this page — copy the username and password instead.";
+    case "no_secret":
+      return "Nothing to fill — this login has no username or password saved.";
+    default:
+      // "unreachable" and an absent code (SW mid-restart / no outcome from the page) share the
+      // popup's long-standing delivery-failure sentence.
+      return "Couldn't reach the page — reload the tab and retry.";
   }
 }
 

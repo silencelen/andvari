@@ -21,7 +21,7 @@ import {
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "./format";
 import { isNewerVersion } from "./version";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
-import type { CardItem, MatchItem, PendingSave, Req, Res, SaveErrorCode, TabMsg, UnlockCode } from "./messages";
+import type { CardItem, FillOutcome, MatchItem, PendingSave, Req, Res, SaveErrorCode, TabMsg, UnlockCode } from "./messages";
 import { currentCode } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
@@ -826,11 +826,13 @@ function toCardItem(it: DecryptedItem): CardItem {
 
 // ---- reveal + popup fill (the ZK egress gate) ----
 
-/** Contract reveal rules: host-match ∨ one-shot popup grant (consumed) ∨ explicit user pick. */
+/** Contract reveal rules: host-match ∨ one-shot popup grant (consumed) ∨ explicit user pick.
+ *  Cut M (v2 #14): failures carry a seam `code` so the fill surfaces render canon copy — the
+ *  raw `error` strings here are debug detail and must never reach a user. */
 function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.MessageSender): Res<"reveal"> {
-  if (!session) return { ok: false, error: "locked" };
+  if (!session) return { ok: false, code: "locked", error: "locked" };
   const it = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "login");
-  if (!it) return { ok: false, error: "unknown item" };
+  if (!it) return { ok: false, code: "not_allowed", error: "unknown item" };
 
   const webHost = normalizeHost(msg.host);
   let allowed =
@@ -847,7 +849,7 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
       allowed = true;
     }
   }
-  if (!allowed) return { ok: false, error: "not allowed for this site" };
+  if (!allowed) return { ok: false, code: "not_allowed", error: "not allowed for this site" };
 
   let totpCode: string | null = null;
   const totp = it.doc.login?.totp;
@@ -893,26 +895,47 @@ function revealCardField(
   }
 }
 
+/** Cut M (v2 #14): shape-check the content script's sendResponse before trusting it as an
+ *  outcome — an old/orphaned script (or a frame answering nothing) yields undefined, which must
+ *  read as "no verdict", never as success. */
+function asFillOutcome(v: unknown): FillOutcome | null {
+  if (typeof v !== "object" || v === null) return null;
+  const f = (v as { filled?: unknown }).filled;
+  return f === "both" || f === "username" || f === "password" || f === "nothing" ? (v as FillOutcome) : null;
+}
+
 /** Explicit popup pick → mint the tab's one-shot grant, then tell the tab to run its normal
- *  reveal round-trip. Single secret-egress path: the SW never pushes a secret at a tab. */
+ *  reveal round-trip. Single secret-egress path: the SW never pushes a secret at a tab.
+ *  Cut M (v2 #14): `ok` used to mean sendMessage DELIVERY, so the popup closed over a fill
+ *  that wrote nothing — now the content script answers its real FillOutcome and ok is true
+ *  only when something actually landed in a field. */
 async function fillFromPopup(itemId: string): Promise<Res<"fillFromPopup">> {
-  if (!session) return { ok: false, error: "locked" };
+  if (!session) return { ok: false, code: "locked", error: "locked" };
   if (!session.items.some((i) => i.itemId === itemId && i.doc.type === "login")) {
-    return { ok: false, error: "unknown item" };
+    return { ok: false, code: "not_allowed", error: "unknown item" };
   }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id === undefined) return { ok: false, error: "no active tab" };
+  if (tab?.id === undefined) return { ok: false, code: "unreachable", error: "no active tab" };
   grants.set(tab.id, { itemId, expiresMs: Date.now() + GRANT_TTL_MS });
   const msg: TabMsg = { type: "fillItem", itemId };
+  let raw: unknown;
   try {
     // Top frame ONLY — both the message and the grant (redeemed in reveal()) are frame-0-bound so
     // a cross-origin sub-frame can neither receive the fill request nor consume the grant.
-    await chrome.tabs.sendMessage(tab.id, msg, { frameId: 0 });
+    raw = await chrome.tabs.sendMessage(tab.id, msg, { frameId: 0 });
   } catch {
     grants.delete(tab.id);
-    return { ok: false, error: "page not reachable — reload the tab and retry" };
+    return { ok: false, code: "unreachable", error: "page not reachable — reload the tab and retry" };
   }
-  return { ok: true };
+  // The fill round-trip is over — void any unconsumed grant (e.g. the content answered no_form
+  // before its reveal ran) rather than leaving it armed for the 30 s TTL.
+  grants.delete(tab.id);
+  const outcome = asFillOutcome(raw);
+  if (!outcome) return { ok: false, code: "unreachable", error: "no fill outcome from the page" };
+  if (outcome.filled === "nothing") {
+    return { ok: false, outcome, code: outcome.code ?? "no_fields", error: `fill wrote nothing (${outcome.code ?? "no_fields"})` };
+  }
+  return { ok: true, outcome };
 }
 
 // ---- capture → pending save → resolve ----
