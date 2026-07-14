@@ -282,11 +282,26 @@ private fun Enroll(state: DesktopState) {
     var fpOk by remember { mutableStateOf(false) }
     // spec 04 §2(3): the user TYPES the first 16 sheet chars — never shown until matched.
     var shortFp by remember { mutableStateOf("") }
+    // §F.1 posture (the waived toggle, [enrollPosture] — web Enroll parity): no sheet ⇒ WAIVED by
+    // default (per-member piece only, no admin backstop), sheet declared ⇒ the typed-sheet
+    // ceremony seals org escrow. Desktop has no rfp channel (a paste has no provenance — see the
+    // invite-field note below), so web's required-affirm leg doesn't exist here.
+    var hasSheet by remember { mutableStateOf(false) }
+    var waivedAck by remember { mutableStateOf(false) }
+    val posture = enrollPosture(hasSheet)
     val fp = state.policy?.recoveryFingerprint ?: ""
     val shortOk = Escrow.shortFormMatches(shortFp, fp)
-    // One shared gate (core EnrollCeremony, jvm-tested): F60 floor + typed ceremony —
-    // the two legs this form historically under-enforced (length>=8, display+checkbox).
-    val ready = EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, fp)
+    // Required-typed rides the ONE shared native gate (core EnrollCeremony, jvm-tested): F60
+    // floor + typed ceremony — the two legs this form historically under-enforced. The waived
+    // leg has no core twin (it is fingerprint-free by design): the same non-escrow legs plus
+    // the explicit no-backstop acknowledgment (web canSubmit parity). One function feeds BOTH
+    // the button visual and the submit re-check, so the two gates cannot drift.
+    fun readyNow(liveFp: String): Boolean = when (enrollPosture(hasSheet)) {
+        EnrollPosture.RequiredTyped -> EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, liveFp)
+        EnrollPosture.Waived -> invite.isNotBlank() && email.isNotBlank() &&
+            Strength.meetsMasterPasswordFloor(password) && password == confirm && waivedAck
+    }
+    val ready = readyNow(fp)
     // F72: single gated submit — Enter can't create a vault before the ceremony is complete.
     // The gate is RE-EVALUATED inside the lambda from the same live reads it submits: the
     // composition-captured `ready` Boolean can be a frame stale while `password` et al are
@@ -295,11 +310,11 @@ private fun Enroll(state: DesktopState) {
     // The FINGERPRINT is re-read live too (review, 4th sighting of this class): updateServer
     // can swap/null the policy mid-screen, and the typed-sheet check must run against the
     // CURRENT server's fingerprint at the instant of submit — never the captured frame's.
-    // (state.enroll re-asserts the same match against the policy it actually seals to.)
+    // (state.enroll re-asserts the floor + posture + match against the policy it seals to.)
     val submit = {
         val liveFp = state.policy?.recoveryFingerprint ?: ""
-        if (EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, liveFp) && !state.busy) {
-            state.enroll(invite.trim(), email.trim(), name.trim(), password, shortFp)
+        if (readyNow(liveFp) && !state.busy) {
+            state.enroll(invite.trim(), email.trim(), name.trim(), password, shortFp, hasSheet)
         }
     }
     // (v2 #13): the origin a successfully-pasted invite LINK applied — drives the "recognized"
@@ -363,41 +378,69 @@ private fun Enroll(state: DesktopState) {
         if (confirm.isNotEmpty() && confirm != password) {
             Text("passwords don't match", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
-        // §3 honesty (B4, web render order): fingerprint present → ceremony; probe FAILED →
-        // say so + Retry; probe in flight → neutral line; only a SUCCESSFUL fetch that
-        // returned an empty fingerprint may render the no-key text.
-        when {
-            fp.isNotEmpty() -> {
+        // §F.1 fingerprint provenance (web FingerprintProvenance parity): render EXACTLY the
+        // anchor the posture allows — the typed-sheet ceremony, or the stark waived ack. Each
+        // branch ends with the way into the OTHER posture (the sheet is the member's call).
+        when (posture) {
+            EnrollPosture.RequiredTyped -> {
+                // §3 honesty (B4, web render order): fingerprint present → ceremony; probe FAILED →
+                // say so + Retry; probe in flight → neutral line; only a SUCCESSFUL fetch that
+                // returned an empty fingerprint may render the no-key text.
+                when {
+                    fp.isNotEmpty() -> {
+                        Spacer(Modifier.height(8.dp))
+                        // Deliberately NOT displayed until typed — showing it above the input would
+                        // reduce the check to transcription (spec 04 §2(3); web Enroll parity; the
+                        // F57 re-seal card already works this way).
+                        Text("Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true, onEnter = submit)
+                        if (shortFp.isNotBlank() && !shortOk) {
+                            Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        }
+                        if (shortOk) {
+                            Text("matches — full fingerprint: ${fp.chunked(4).joinToString(" ")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                        }
+                        // a11ydesk-03: the whole row is one toggle target and the label becomes the
+                        // control's accessible name. `enabled` moves onto the toggleable so the gate holds
+                        // (the Checkbox keeps it only for the disabled tint; onCheckedChange = null).
+                        Row(Modifier.padding(top = 8.dp).toggleable(value = fpOk, enabled = shortOk, role = Role.Checkbox, onValueChange = { fpOk = it }), verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(fpOk, onCheckedChange = null, enabled = shortOk)
+                            Text("This fingerprint matches the recovery sheet. I understand this account also has an admin backstop.", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    state.policyFetchFailed -> {
+                        // Web-parity copy (errors.ts POLICY_UNAVAILABLE) — verbatim, do not paraphrase.
+                        Text("Couldn't load the server's settings — it may be briefly unavailable. Try again in a moment.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
+                        Primary("Retry", !state.busy, state.busy) { state.retryPolicy() }
+                    }
+                    state.policy == null -> {
+                        Text("Checking the server…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                    }
+                    else -> {
+                        // The waived link below is the live way forward, so no "disabled" claim (web copy).
+                        Text("This server has no recovery key configured — the admin backstop can't be set up.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
+                    }
+                }
+                TextButton(onClick = { hasSheet = false }) {
+                    Text("I don't have a recovery sheet — set up without an admin backstop", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            EnrollPosture.Waived -> {
+                // Waived — no fingerprint ANYWHERE (there is no org pubkey to substitute); the
+                // distinct stark acknowledgment instead. Copy is web-verbatim (§F.4).
                 Spacer(Modifier.height(8.dp))
-                // Deliberately NOT displayed until typed — showing it above the input would
-                // reduce the check to transcription (spec 04 §2(3); web Enroll parity; the
-                // F57 re-seal card already works this way).
-                Text("Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true, onEnter = submit)
-                if (shortFp.isNotBlank() && !shortOk) {
-                    Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                Text(
+                    "There is NO admin backstop. Only your recovery phrase can restore this account. Lose both your master password and this phrase and this account is gone forever.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                )
+                // a11ydesk-03 idiom: one toggle target, label = accessible name (see fpOk above).
+                Row(Modifier.padding(top = 8.dp).toggleable(value = waivedAck, role = Role.Checkbox, onValueChange = { waivedAck = it }), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(waivedAck, onCheckedChange = null)
+                    Text("I understand: without my master password AND my recovery phrase, this account cannot be recovered by anyone.", style = MaterialTheme.typography.bodySmall)
                 }
-                if (shortOk) {
-                    Text("matches — full fingerprint: ${fp.chunked(4).joinToString(" ")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                TextButton(onClick = { hasSheet = true }) {
+                    Text("My admin gave me a printed recovery sheet (add the admin backstop)", style = MaterialTheme.typography.bodySmall)
                 }
-                // a11ydesk-03: the whole row is one toggle target and the label becomes the
-                // control's accessible name. `enabled` moves onto the toggleable so the gate holds
-                // (the Checkbox keeps it only for the disabled tint; onCheckedChange = null).
-                Row(Modifier.padding(top = 8.dp).toggleable(value = fpOk, enabled = shortOk, role = Role.Checkbox, onValueChange = { fpOk = it }), verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(fpOk, onCheckedChange = null, enabled = shortOk)
-                    Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-            state.policyFetchFailed -> {
-                // Web-parity copy (errors.ts POLICY_UNAVAILABLE) — verbatim, do not paraphrase.
-                Text("Couldn't load the server's settings — it may be briefly unavailable. Try again in a moment.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
-                Primary("Retry", !state.busy, state.busy) { state.retryPolicy() }
-            }
-            state.policy == null -> {
-                Text("Checking the server…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-            }
-            else -> {
-                Text("This server has no recovery key configured yet — enrollment is disabled until the escrow ceremony is done.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
             }
         }
         Spacer(Modifier.height(12.dp))
@@ -416,6 +459,9 @@ private fun Enroll(state: DesktopState) {
  * phrase is never left on an unattended screen — and (v2 #15) an interruption is no longer a silent
  * skip: the lockReason says the phrase died unconfirmed, and the §F.9 capture gate
  * ([RecoveryCaptureScreen]) re-routes the next unlock into a fresh reveal instead of the vault.
+ * Piece binding (design 2026-07-13): the server confirm behind a passed type-back names the piece
+ * THIS reveal showed — on the capture path it is AWAITED under [DesktopState.busy] (the button
+ * spins), and a replaced-phrase conflict re-runs the capture with the notice rendered below.
  *
  * TODO(recovery-cut-2): the native self-recovery flow (POST /recovery/self/verify + commit) — a member using this
  * phrase to reset a forgotten master password — and the native admin fingerprint-confirm-for-QR are
@@ -437,9 +483,16 @@ private fun RecoverySetupScreen(state: DesktopState) {
     Column(Modifier.fillMaxSize().padding(28.dp).verticalScroll(rememberScrollState())) {
         Text("Save your recovery phrase", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
+        // Piece binding (2026-07-13 §3): a previous reveal's confirm hit the replaced-phrase
+        // conflict — the phrase BELOW is the fresh one; any earlier saved copy is dead. Static
+        // state-layer copy only (§F.7); cleared on vault landing.
+        state.recoveryReplacedNotice?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.height(12.dp))
+        }
         // Posture copy (§F.4): waived = NO admin backstop (stark, error-toned); required = the
-        // household admin can also help. Native enroll is required-only today (recoverySetupWaived is
-        // always false), but both strings ship so the waived toggle (TODO(recovery-cut-2)) is a flip.
+        // household admin can also help. The enroll path now derives the posture (the §F.1 waived
+        // toggle); the capture-gate path pins required (posture is server-unknown there).
         Text(
             if (state.recoverySetupWaived)
                 "There is NO admin backstop for this account. Only this recovery phrase can restore it. If you lose BOTH your master password AND this phrase, this account is gone forever — no one can recover it. Write it down and keep it somewhere safe and offline."
@@ -505,6 +558,13 @@ private fun RecoveryCaptureScreen(state: DesktopState) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        // Piece binding (2026-07-13 §3): the LIVE conflict — the phrase the user just typed back
+        // was rotated away by another device mid-reveal, and this re-run replaces it. Sharper than
+        // the generic line above because it names a phrase the user demonstrably saved.
+        state.recoveryReplacedNotice?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
         Spacer(Modifier.height(20.dp))
         val err = state.recoveryCaptureError
         if (err != null) {

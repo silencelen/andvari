@@ -9,9 +9,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
-import io.ktor.client.request.header
-import io.ktor.client.request.post
-import io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
@@ -81,12 +78,29 @@ private const val UPGRADE_REQUIRED_MSG =
     "This andvari server needs a newer version of the app. Update from the devstore, then reopen andvari."
 
 // F26 (N2 design 2026-07-10 §6/B6): the pinned lock/session-end reason strings — web's exact
-// copy ("Locked after inactivity." is native-only). EXACTLY these three: the "device revoked"
-// string is unreachable on Android (no server-events client — a dead token surfaces as a plain
-// 401), so no revoked variant exists here; do not invent one.
+// copy ("Locked after inactivity." is native-only). The "device revoked" string is unreachable
+// on Android (no server-events client — a dead token surfaces as a plain 401), so no revoked
+// variant exists here; do not invent one.
 private const val REASON_LOCKED = "Locked."
 private const val REASON_IDLE = "Locked after inactivity."
 private const val REASON_SESSION_ENDED = "Your session ended — sign in again."
+
+// §F.7/§F.9 (desktop v2 #15 parity): the idle-reason variant for a lock that lands mid-reveal —
+// the shown-once phrase died unconfirmed, and the vault-entry capture gate re-issues a fresh one
+// at the next unlock. Desktop's exact copy; not a new session-end class (the rule above bans a
+// REVOKED variant, not this honesty line).
+private const val REASON_IDLE_RECOVERY =
+    "Locked after inactivity. Your recovery phrase was not confirmed — you'll be shown a fresh one after you unlock."
+
+// Piece-binding (design 2026-07-13 §3): the STATIC replaced-phrase notice — shown when a bound
+// confirm is refused `409 recovery_piece_stale` (a concurrent setup, possibly on another device,
+// rotated the piece away). No secret material, no interpolation (§F.7). Shared by the capture
+// gate (which re-runs setup+reveal under it) and the enroll path (which proceeds unconfirmed —
+// the vault-entry gate re-fires at the next entry and heals). Internal so both gate screens in
+// MainActivity render the same pinned copy.
+internal const val RECOVERY_PHRASE_REPLACED_NOTICE =
+    "This recovery phrase was replaced — a newer one was created, possibly from another device. " +
+        "A fresh phrase will be shown; discard any phrase you saved before it."
 
 sealed interface Screen {
     data object Loading : Screen
@@ -97,11 +111,21 @@ sealed interface Screen {
     data object Settings : Screen
     data object Trash : Screen
     data object AutofillStatus : Screen
-    // Shown-once recovery-phrase gate after a fresh enroll (design 2026-07-12 §F.4/§F.7): the
-    // per-member self-service piece is MANDATORY, so a member who never SEES it is silently
-    // unrecoverable. This screen reveals it once and makes the user type it back before the vault
-    // opens. Un-skippable (no back/skip) — the silent-total-loss guard.
+    // Shown-once recovery-phrase gate (design 2026-07-12 §F.4/§F.7): the per-member self-service
+    // piece is MANDATORY, so a member who never SEES it is silently unrecoverable. This screen
+    // reveals it once — after a fresh enroll, or a fresh piece via the RecoveryCapture gate below —
+    // and makes the user type it back before the vault opens. Un-skippable (no back/skip) — the
+    // silent-total-loss guard.
     data object RecoverySetup : Screen
+    // §F.9 vault-entry capture gate, native (desktop RecoveryCapture / web RecoveryCaptureGate
+    // parity): reached from unlock/sign-in when the server reports recoveryConfirmed=false — an
+    // interrupted reveal (idle lock / process death mid-RecoverySetup destroyed the shown-once
+    // phrase before the user typed it back) or a pre-flag migration account. Commits a FRESH piece
+    // (PUT /recovery/self-setup, which does NOT flip the flag), then hands off to the same
+    // un-skippable RecoverySetup reveal; only the type-back confirm — BOUND to the pieceId the
+    // setup minted and AWAITED (piece-binding design 2026-07-13 §3) — flips recoveryConfirmed.
+    // Offline unlocks never gate (the setup PUT needs the network anyway).
+    data object RecoveryCapture : Screen
 }
 
 data class UiState(
@@ -225,17 +249,29 @@ data class UiState(
     val escrowStale: Boolean = false,
     val escrowFingerprint: String = "",
     // Shown-once recovery-phrase reveal (design §F.4/§F.7): the base64url display form
-    // (MemberRecovery.displayForm) of a fresh enrollee's self-service recovery secret, held ONLY
-    // for the RecoverySetup screen's reveal+confirm gate and nulled the instant the confirm passes.
-    // Never persisted (not in SessionStore/DataStore/files), never logged. The RAW secret bytes
-    // used for the constant-time confirm live OFF UiState (AndvariViewModel.pendingRecoverySecret)
-    // and are zeroed on confirm; only this render-only String reaches the composition.
+    // (MemberRecovery.displayForm) of a self-service recovery secret — a fresh enrollee's, or the
+    // fresh piece the §F.9 capture gate committed — held ONLY for the RecoverySetup screen's
+    // reveal+confirm gate and nulled the instant the confirm passes. Never persisted (not in
+    // SessionStore/DataStore/files), never logged. The RAW secret bytes used for the constant-time
+    // confirm live OFF UiState (AndvariViewModel.pendingRecoverySecret) and are zeroed on confirm;
+    // only this render-only String reaches the composition.
     val recoveryPhrase: String? = null,
     // §F.4 posture: the enroll sealed NO org escrow (waived) → the phrase is the ONLY recovery
-    // path (no admin backstop) and the copy is the stark "gone forever" acknowledgment. Native
-    // enroll is required-only today, so this is always false; wired for the waived toggle a later
-    // cut adds (TODO(recovery-cut-2)).
+    // path (no admin backstop) and the copy is the stark "gone forever" acknowledgment. Set by
+    // enrollOp from the client-derived posture (§F.1 [enrollPosture] — waived unless the member
+    // declares a printed sheet). The §F.9 capture gate sets false: the posture is unknowable at
+    // unlock (AccountKeys deliberately carries none), and fielded gate accounts enrolled required.
     val recoverySetupWaived: Boolean = false,
+    // §F.9 RecoveryCapture screen state (desktop parity): null = the self-setup commit is in
+    // flight ("Preparing your recovery phrase…"); non-null = it failed and the gate offers Retry.
+    // The gate NEVER proceeds to the vault on failure (a failed commit keeps the gate closed,
+    // never leaves a live secret dangling).
+    val recoveryCaptureError: String? = null,
+    // Piece-binding (design 2026-07-13 §3): a bound confirm was refused 409 recovery_piece_stale —
+    // the phrase the user just typed back is DEAD (another device's setup rotated it away
+    // mid-gate). Both gate screens render [RECOVERY_PHRASE_REPLACED_NOTICE] while set; cleared on
+    // vault landing / lock / sign-out.
+    val recoveryReplacedNotice: Boolean = false,
     // Item history (feature): decrypted archived versions of the currently-viewed item, loaded on
     // demand (null = not loaded / loading). Restore a chosen version with saveItem.
     val itemVersions: List<DecryptedItemVersion>? = null,
@@ -264,6 +300,27 @@ internal fun importFormatLabel(format: CsvImport.ImportFormat): String = when (f
     "BITWARDEN" -> "Bitwarden"
     "LASTPASS" -> "LastPass"
     else -> "1Password"
+}
+
+/** §F.1 fingerprint-provenance postures (design 2026-07-12) — which human anchor, if any, the
+ *  enrollment seals org escrow under. Never "the server said so". */
+internal enum class EnrollPosture { Waived, RequiredAffirm, RequiredTyped }
+
+/**
+ * Decide the enrollment posture from the two inputs the client actually has — a local port of the
+ * web's unit-pinned pure function (web/src/enroll/enrollposture.ts `enrollPosture`; keep in
+ * lockstep — core is frozen this wave, so the port lives app-side):
+ *  - [linkRfp]: an rfp on an enroll link ⇒ the invitee scanned an IN-PERSON QR off the admin's
+ *    screen ⇒ one-tap eyeball affirmation. Android has no enroll-link channel today (the invite
+ *    token is typed), so callers pass null — the parameter keeps the port faithful.
+ *  - [memberHasSheet]: no rfp — default WAIVED (frictionless, no admin backstop); a member who was
+ *    handed a printed recovery SHEET declares it ⇒ the typed-sheet ceremony (the pre-rfp channel).
+ * Either "required" branch anchors on a human value; a missing rfp NEVER auto-trusts the server key.
+ */
+internal fun enrollPosture(linkRfp: String?, memberHasSheet: Boolean): EnrollPosture = when {
+    !linkRfp.isNullOrEmpty() -> EnrollPosture.RequiredAffirm
+    memberHasSheet -> EnrollPosture.RequiredTyped
+    else -> EnrollPosture.Waived
 }
 
 class AndvariViewModel(
@@ -752,7 +809,19 @@ class AndvariViewModel(
             _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint, mustChangePassword = s.mustChangePassword)
             // A1: stamp the 30-day window on a real full-password unlock; A6/§7: F61 rides online.
             store.stampFullPasswordUnlock(s.userId)
-            runKdfUpgrade(s.userId, password, s.accountKeys)
+            // §F.9 gate decision: the server says this account's recovery piece was never durably
+            // CONFIRMED — an interrupted reveal or a migration account.
+            val gate = s.accountKeys.recoveryConfirmed != true
+            // F61 re-key NEVER under a pending capture gate: the detached re-key rotates the login
+            // verifier, which would strand the gate's stashed reauth proof (PUT /recovery/self-setup
+            // re-verifies it) in a permanent 401 Retry loop. The rare upgrade defers to the next
+            // (confirmed) sign-in/unlock, like the quick-unlock defer (§F.3).
+            if (!gate) runKdfUpgrade(s.userId, password, s.accountKeys)
+            syncNow(engine!!)
+            // §F.9 vault-entry capture gate (desktop signIn / web SignIn parity): route into the
+            // capture flow INSTEAD of the vault; the login authKey derived above is the
+            // fresh-reauth proof PUT /recovery/self-setup requires.
+            if (gate) startRecoveryCapture(authKey) else toVault()
         } catch (t: Throwable) {
             // F74: no throw path (prelogin/KDF/login/Account.unlock) may leak the transient
             // client. Once bind() succeeded the api is VaultSession-OWNED — never close it
@@ -760,12 +829,15 @@ class AndvariViewModel(
             if (VaultSession.get()?.api !== a) a.close()
             throw t
         }
-        syncNow(engine!!)
-        toVault()
     }
 
     fun unlock(email: String, password: String) = op {
         val session = store.load() ?: throw IllegalStateException("no session")
+        // §F.9: set when this unlock must land in the capture gate — the FRESH accountKeys said
+        // recoveryConfirmed=false. Decided inside the mutex (where the keys are in scope), acted
+        // on after the sync below; the gate's authKey derivation (an extra argon2id) deliberately
+        // runs OUTSIDE the mutex so the autofill unlock path is never serialized behind it.
+        var gateKeys: AccountKeys? = null
         // Serialize with the autofill unlock path: both reuse this session's refresh token,
         // and a concurrent refresh would consume it twice → whole-device revocation.
         VaultSession.unlockMutex.withLock {
@@ -804,8 +876,16 @@ class AndvariViewModel(
                 _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowFingerprint = keys.escrowFingerprint)
                 // A1: stamp on EVERY full-password unlock, including offline ones.
                 store.stampFullPasswordUnlock(session.userId)
-                // A6/§7: F61 re-key only when this unlock actually reached the server.
-                if (online) runKdfUpgrade(session.userId, password, keys)
+                // §F.9 gate decision (desktop unlock parity): only FRESH keys may gate — an
+                // offline unlock (cached keys) deliberately skips it rather than stranding
+                // offline vault access behind an unreachable server (the self-setup PUT needs
+                // the network anyway); the flag re-gates the next online unlock.
+                if (online && keys.recoveryConfirmed != true) gateKeys = keys
+                // A6/§7: F61 re-key only when this unlock actually reached the server — and NEVER
+                // under a pending capture gate: the detached re-key rotates the login verifier,
+                // which would strand the gate's stashed reauth proof (self-setup re-verifies it)
+                // in a permanent 401 Retry loop. It defers to the next (confirmed) unlock.
+                if (online && gateKeys == null) runKdfUpgrade(session.userId, password, keys)
             } catch (t: Throwable) {
                 if (VaultSession.get()?.api !== a) a.close()
                 throw t
@@ -816,10 +896,19 @@ class AndvariViewModel(
             if (it is IOException) _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
             else throw it
         }
-        toVault()
+        // §F.9 vault-entry capture gate — see signIn. Unlock never derived a login authKey (it
+        // opens the UVK locally), so derive one ONLY when the gate actually fires: accountKeys'
+        // kdfSalt/kdfParams are the same user-row values prelogin serves, so this authKey verifies
+        // against the same server-side login verifier. One extra argon2id pass (off the Main
+        // thread), paid only on the rare unconfirmed path.
+        val gk = gateKeys
+        if (gk != null) {
+            val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, gk.kdfSalt, gk.kdfParams) }
+            startRecoveryCapture(authKey)
+        } else toVault()
     }
 
-    fun enroll(invite: String, email: String, name: String, password: String) {
+    fun enroll(invite: String, email: String, name: String, password: String, waived: Boolean) {
         // State-layer re-assert (the S2-review race class: a Compose enabled flag lags a
         // frame while onClick reads live fields). Busy first — op() sets busy but never
         // checks it, so a same-frame double-tap would run two registers (second dies
@@ -830,10 +919,10 @@ class AndvariViewModel(
             _ui.value = _ui.value.copy(error = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols.")
             return
         }
-        enrollOp(invite, email, name, password)
+        enrollOp(invite, email, name, password, waived)
     }
 
-    private fun enrollOp(invite: String, email: String, name: String, password: String) = op {
+    private fun enrollOp(invite: String, email: String, name: String, password: String, waived: Boolean) = op {
         // F74: the old fallback built a client, closed it UNUSED, then leaked the second one
         // it actually called (`newApi().also { it.close() }.let { newApi().clientPolicy() }`).
         // One probe, closed in finally (AndvariApi has close() but isn't Closeable — no .use).
@@ -845,26 +934,32 @@ class AndvariViewModel(
         // §F.4/§F.7: the per-member recovery piece is generated by enroll() and committed inside
         // register(); it is held here transiently so the shown-once gate (below) can reveal it.
         var recoverySecret: ByteArray? = null
+        // Piece-binding (design 2026-07-13): the register-committed piece's opaque id — the enroll
+        // path's BOUND confirm presents it (stashed beside the secret below, dropped together).
+        var recoveryPieceId: String? = null
         try {
-            val recoveryPub = Bytes.fromB64(a.recoveryPubkey())
-            // TODO(recovery-cut-2): native enroll is the `required` (org-escrow) path ONLY — it
-            // always seals to the org key, so recoveryPub is non-null here and the account gets
-            // BOTH the self-service piece and an admin backstop. Account.enroll now ALSO accepts
-            // recoveryPublicKey = null (the `waived` posture: per-member piece only, no backstop),
-            // but the waived path needs an admin-set policy toggle + the in-person-QR fingerprint
-            // provenance of §F.1 before native can offer it. Until that UI exists, keep required.
+            // §F.1 posture (client-derived, [enrollPosture]): `waived` seals NO org escrow — pass
+            // recoveryPublicKey = null and Account.enroll skips the blob entirely (the server
+            // rejects escrow on a waived invite; the account gets the self-service piece only, no
+            // admin backstop). `required-typed` keeps the verified-fingerprint ceremony exactly as
+            // before: the user TYPED the sheet's short form (EnrollForm gate re-checked at submit)
+            // and Account.enroll refuses a fetched pubkey whose fingerprint doesn't match the
+            // policy value that check anchored. The org key isn't even fetched when waived.
+            val recoveryPub = if (waived) null else Bytes.fromB64(a.recoveryPubkey())
             // Key generation + KDF are CPU-bound (argon2id) — off the Main thread. EnrollResult
             // destructures to (request, account, recoverySecret) — the 3rd is the SHOWN-ONCE piece.
             val (req, acct, secret) = withContext(Dispatchers.Default) {
                 Account.enroll(
                     inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
                     password = password, params = policy.kdfParams,
-                    recoveryPublicKey = recoveryPub, recoveryFingerprint = policy.recoveryFingerprint,
+                    recoveryPublicKey = recoveryPub,
+                    recoveryFingerprint = if (waived) null else policy.recoveryFingerprint,
                     deviceName = android.os.Build.MODEL ?: "android",
                 )
             }
             recoverySecret = secret
             val s = a.register(req)
+            recoveryPieceId = s.recoveryPieceId
             store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.accountKeys)
             bind(a, acct)
@@ -890,72 +985,246 @@ class AndvariViewModel(
         val secret = recoverySecret
         if (secret == null) { toVault(); return@op }
         pendingRecoverySecret = secret
+        pendingRecoveryPieceId = recoveryPieceId
         _ui.value = _ui.value.copy(
             screen = Screen.RecoverySetup,
             recoveryPhrase = MemberRecovery.displayForm(secret),
-            recoverySetupWaived = false, // required path today (recoveryPub non-null); TODO(recovery-cut-2)
+            recoverySetupWaived = waived, // §F.4 posture copy: stark "gone forever" when waived
             busy = false, error = null,
         )
     }
 
-    // Shown-once recovery secret (design §F.7): the RAW 32 bytes of a fresh enrollee's recovery
-    // piece, held transiently between a successful enroll and the confirm gate ONLY for the
-    // constant-time confirmMatches. NEVER persisted, NEVER logged; zeroed + dropped the instant the
-    // confirm passes (confirmRecoverySaved) or on sign-out. The user-visible base64url form lives
-    // in UiState.recoveryPhrase (also transient) so Compose can render it.
+    // Shown-once recovery secret (design §F.7): the RAW 32 bytes of a recovery piece — a fresh
+    // enrollee's, or the fresh one the §F.9 capture gate committed — held transiently between the
+    // commit and the confirm gate ONLY for the constant-time confirmMatches. NEVER persisted,
+    // NEVER logged; zeroed + dropped the instant the confirm resolves ([zeroPendingRecovery]) and
+    // on lock/sign-out. The user-visible base64url form lives in UiState.recoveryPhrase (also
+    // transient) so Compose can render it.
     private var pendingRecoverySecret: ByteArray? = null
+    // Piece-binding (design 2026-07-13): the opaque server-minted id of the piece
+    // [pendingRecoverySecret] holds — register's recoveryPieceId on the enroll path, the self-setup
+    // response's pieceId on the capture-gate path. Presented by the BOUND confirm so it can only
+    // ever attest the piece THIS device revealed. Not a secret (it rides an authenticated channel
+    // and grants nothing a session couldn't get by calling setup itself), but it lives and dies
+    // WITH the secret ([zeroPendingRecovery]) — a dangling id must never outlive its phrase.
+    private var pendingRecoveryPieceId: String? = null
+    // §F.9 (desktop v2 #15 parity): the login authKey (base64url, password-equivalent — treat like
+    // the typed master password) held ONLY while the RecoveryCapture gate is unresolved: PUT
+    // /recovery/self-setup requires a fresh master-password reauth, and BOTH the gate's Retry and
+    // the 409-stale re-run must not re-prompt. Piece-binding §3: held until the BOUND CONFIRM
+    // resolves (not just the commit) — a stale confirm re-runs the setup, which needs it. Cleared
+    // on the confirm's terminal paths, lock and sign-out. Never persisted, never logged. Doubles
+    // as the confirm-route discriminator in [confirmRecoverySaved] (non-null ⇒ capture-gate path).
+    private var pendingCaptureAuthKey: String? = null
+
+    /** §F.7 + piece-binding: the raw secret and its pieceId live and die TOGETHER (a dangling id
+     *  could bind a confirm to a phrase no longer on screen). The display form is the callers'
+     *  (toVault / the explicit screen swaps clear UiState.recoveryPhrase). */
+    private fun zeroPendingRecovery() {
+        pendingRecoverySecret?.fill(0) // best-effort zeroization before dropping the reference
+        pendingRecoverySecret = null
+        pendingRecoveryPieceId = null
+    }
 
     /**
      * The un-skippable "I saved my recovery phrase" gate (design §F.7). Does [typedBack] re-decode
-     * to the SAME secret we generated at enroll? Constant-time (core [MemberRecovery.confirmMatches]).
-     * On a match: ZERO + DROP the raw secret and its display form, then open the vault. A mistype
-     * returns false and the screen shows a STATIC error (never the secret). This is NEVER a KDF
-     * source — the piece was already committed at register(); this only proves the user saved it.
+     * to the SAME secret we committed (register / self-setup)? Constant-time (core
+     * [MemberRecovery.confirmMatches]). A mistype returns false and the screen shows a STATIC error
+     * (never the secret); this is NEVER a KDF source — the piece is already committed, this only
+     * proves the user saved it. On a match the two reveal paths diverge (piece-binding design
+     * 2026-07-13 §3):
+     *  - ENROLL (no capture gate in progress): fire the BOUND confirm (register's recoveryPieceId)
+     *    without blocking navigation, ZERO + DROP the raw secret + id, open the vault — a 409
+     *    surfaces the static replaced-phrase notice and proceeds unconfirmed (the vault-entry gate
+     *    re-fires at the next entry and heals).
+     *  - CAPTURE GATE ([pendingCaptureAuthKey] held): the bound confirm is AWAITED before the
+     *    vault opens — see [confirmCaptureGate].
      */
     fun confirmRecoverySaved(typedBack: String): Boolean {
         val secret = pendingRecoverySecret ?: return false
         if (!MemberRecovery.confirmMatches(secret, typedBack)) return false
-        // §F.9: tell the server this native enrollee saved the register-committed phrase, so the
-        // (web) vault-entry gate never re-nudges the account. Fire this BEFORE we touch the secret:
-        // it reads the session creds and launches asynchronously, so a slow/failed ping can never
-        // delay or block the zeroize + navigate below (see markRecoveryConfirmed's best-effort note).
-        // TODO(recovery-cut-2): the NATIVE vault-entry capture gate (blocking vault access on
-        // recoveryConfirmed==false for migration/interrupted-reveal accounts, mirroring web's
-        // Unlock/SignIn gate) is DEFERRED — web covers that cut cross-device via the server flag;
-        // native `waived` is off and `required` keeps the escrow backstop, so no native total-loss
-        // is reachable. This confirm ping is the only §F.9 native surface for now.
-        markRecoveryConfirmed()
-        secret.fill(0) // best-effort zeroization before dropping the reference
-        pendingRecoverySecret = null
+        if (pendingCaptureAuthKey != null) {
+            // §F.9 capture-gate path: bound + AWAITED (contract §3) — the vault must not open on a
+            // phrase the server no longer holds. Runs under `busy` (the reveal's button spins).
+            confirmCaptureGate()
+            return true
+        }
+        // ENROLL path. §F.9: tell the server this enrollee saved the register-committed phrase, so
+        // the vault-entry gates (web's, desktop's and this app's) never re-nudge the account. Fire
+        // this BEFORE we touch the secret: it captures the pieceId and launches asynchronously, so
+        // a slow confirm can never delay or block the zeroize + navigate below — best-effort
+        // NAVIGATION, but the outcome IS handled (409 ⇒ static notice; markRecoveryConfirmed).
+        markRecoveryConfirmed(pendingRecoveryPieceId)
+        zeroPendingRecovery()
         toVault() // clears recoveryPhrase too (the display form must not survive landing)
         return true
     }
 
     /**
-     * §F.9 best-effort "recovery confirmed" ping. POSTs the current session's bearer to
-     * `POST /api/v1/recovery/self/confirm` (session-auth only — no key material or password needed)
-     * so the server flips this account's `recoveryConfirmed=true` and the (web) vault-entry gate
-     * stops nudging. Deliberately fire-and-forget on [viewModelScope] + [Dispatchers.IO] and fully
-     * runCatching-swallowed: a network failure must NEVER strand the enrollee or leave the raw
-     * secret un-zeroed — [confirmRecoverySaved] zeroes + navigates regardless, and the flag can be
-     * re-set on a later capture. Reuses the live [AndvariApi]'s baseUrl + access token via a
-     * one-shot client of the same engine the app uses everywhere (the token is seconds old
-     * post-enroll, so no 401/refresh is in play; a fresh sign-out mid-flight just no-ops the send).
+     * §F.9 ENROLL-path "recovery confirmed" call, BOUND per the piece-binding contract (design
+     * 2026-07-13 §3): presents [pieceId] — register's recoveryPieceId — so the confirm can only
+     * ever attest the piece THIS device revealed. Rides the live session's shared
+     * [AndvariApi.recoverySelfConfirm] (step-0; the old hand-rolled POST bypassed the shared
+     * refresh/error path). Deliberately never blocks navigation ([confirmRecoverySaved] zeroes +
+     * lands the vault regardless), but the outcome is handled, not dropped:
+     * `409 recovery_piece_stale` ⇒ the static replaced-phrase notice + proceed unconfirmed (the
+     * flag stays 0/cleared, so the vault-entry gate re-fires at the next entry and heals); any
+     * other failure ⇒ proceed unconfirmed (today's polarity — the flag can be re-set later).
      */
-    private fun markRecoveryConfirmed() {
+    private fun markRecoveryConfirmed(pieceId: String?) {
         val a = api ?: return
-        val token = a.currentTokens()?.accessToken ?: return
-        val base = a.baseUrl
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                val client = HttpClient(OkHttp)
-                try {
-                    client.post("$base/api/v1/recovery/self/confirm") {
-                        header("Authorization", "Bearer $token")
-                        header("X-Andvari-Client", "android/$ANDVARI_CLIENT_VERSION")
-                    }
+        viewModelScope.launch {
+            try {
+                a.recoverySelfConfirm(pieceId)
+            } catch (e: ApiException) {
+                if (e.status == 409 && e.code == "recovery_piece_stale") {
+                    // Static copy only (§F.7) — the phrase this enrollee just saved is already
+                    // dead (a concurrent setup rotated it). toVault deliberately keeps `notice`.
+                    _ui.value = _ui.value.copy(notice = RECOVERY_PHRASE_REPLACED_NOTICE)
+                }
+                // else: proceed unconfirmed — the vault-entry gate re-fires later and heals.
+            } catch (_: Throwable) {
+                // Network failure: proceed unconfirmed (the flag can be re-set on a later capture).
+            }
+        }
+    }
+
+    /**
+     * §F.9 (desktop v2 #15 parity): enter the vault-entry capture gate. [currentAuthKey] is the
+     * login authKey derived from the master password the user JUST typed (the fresh-reauth proof
+     * the server demands before storing a new recovery block); held until the gate resolves —
+     * including across a 409-stale re-run (piece-binding §3). Kicks the commit immediately — the
+     * screen renders "Preparing…" until it lands or fails.
+     */
+    private fun startRecoveryCapture(currentAuthKey: String) {
+        pendingCaptureAuthKey = currentAuthKey
+        // The op() that routed here is done; the commit runs under its own busy in runRecoveryCapture.
+        _ui.value = _ui.value.copy(screen = Screen.RecoveryCapture, recoveryCaptureError = null, recoveryReplacedNotice = false, busy = false, error = null)
+        runRecoveryCapture()
+    }
+
+    /** §F.9: the gate screen's Retry — same commit, same stashed reauth proof. */
+    fun retryRecoveryCapture() {
+        if (_ui.value.busy) return
+        if (_ui.value.screen != Screen.RecoveryCapture) return // stale tap after a lock swapped screens
+        runRecoveryCapture()
+    }
+
+    /**
+     * §F.9: the capture gate's commit half (desktop runRecoveryCapture / web setupAndCommitRecovery
+     * parity): generate a FRESH per-member piece over the in-memory UVK
+     * ([Account.setupMemberRecovery]) and PUT it via the shared [AndvariApi.recoverySelfSetup] —
+     * which stores/rotates the block but deliberately does NOT flip recoveryConfirmed (the flag
+     * means "user demonstrably captured" and only the type-back confirm may set it). Piece-binding:
+     * the response's pieceId is stashed beside the secret — the eventual bound confirm presents it.
+     * On success the fresh secret feeds the SAME un-skippable RecoverySetup reveal the enroll path
+     * uses; on any failure the secret is zeroed and the gate stays closed with Retry — never the
+     * vault, never a dangling live secret. Runs under `busy` so the idle lock defers while key
+     * material is in flight (checkIdleLock's busy gate). A rotation invalidates any
+     * previously-written-but-unconfirmed phrase — the screen copy says so.
+     */
+    private fun runRecoveryCapture() {
+        val a = api ?: return
+        val acct = account ?: return
+        val authKey = pendingCaptureAuthKey ?: return
+        _ui.value = _ui.value.copy(recoveryCaptureError = null, busy = true)
+        viewModelScope.launch {
+            try {
+                val setup = acct.setupMemberRecovery(authKey)
+                var committed = false
+                val resp = try {
+                    a.recoverySelfSetup(setup.request).also { committed = true }
                 } finally {
-                    client.close()
+                    // §F.7 discipline: a failed commit must not leave the raw secret alive.
+                    if (!committed) setup.recoverySecret.fill(0)
+                }
+                // B1 identity gate: a hard lock / sign-out mid-commit tore this session down — the
+                // fresh phrase must not leak into whatever session renders next.
+                if (account !== acct) { setup.recoverySecret.fill(0); _ui.value = _ui.value.copy(busy = false); return@launch }
+                pendingRecoverySecret = setup.recoverySecret
+                pendingRecoveryPieceId = resp.pieceId // null on a pre-binding server rollback ⇒ legacy device-scoped confirm
+                _ui.value = _ui.value.copy(
+                    busy = false,
+                    screen = Screen.RecoverySetup,
+                    recoveryPhrase = MemberRecovery.displayForm(setup.recoverySecret),
+                    // Fielded gate accounts enrolled under `required` (or migration-era with org
+                    // escrow), and AccountKeys deliberately carries no posture — the required copy
+                    // ("admin can also help") is the honest default here (desktop parity).
+                    recoverySetupWaived = false,
+                )
+            } catch (t: Throwable) {
+                if (t is UpgradeRequiredException) {
+                    // A8 parity: a 426 mid-gate must raise the blocking upgrade screen — a static
+                    // Retry loop against a version-pinned server is a dead end.
+                    _ui.value = _ui.value.copy(busy = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
+                    return@launch
+                }
+                if (account !== acct) { _ui.value = _ui.value.copy(busy = false); return@launch } // torn down mid-flight — nothing to report
+                // Static copy only — NEVER interpolate anything near secret material (§F.7).
+                _ui.value = _ui.value.copy(
+                    busy = false,
+                    recoveryCaptureError = if (t is IOException) {
+                        "Can't reach the server right now — check your connection and try again."
+                    } else {
+                        "Couldn't set up your recovery phrase just now — try again in a moment."
+                    },
+                )
+            }
+        }
+    }
+
+    /** [confirmCaptureGate]'s three server verdicts — decided in the coroutine, acted on after the
+     *  B1 identity re-check (the decision must never navigate a torn-down session). */
+    private enum class ConfirmOutcome { Confirmed, Stale, Failed }
+
+    /**
+     * Piece-binding (design 2026-07-13 §3): the capture gate's BOUND + AWAITED confirm — the
+     * type-back matched, so present the pieceId this gate's setup minted and only open the vault
+     * once the server answers. Outcomes:
+     *  - 200 → captured: zero the secret+pieceId, drop the reauth proof, land the vault.
+     *  - 409 recovery_piece_stale → the phrase JUST typed is DEAD (another device's setup rotated
+     *    it away mid-gate). Zero it, raise the static replaced-phrase notice, and re-run
+     *    setup + reveal — the stashed [pendingCaptureAuthKey] is the reauth proof, which is exactly
+     *    why it survives the commit. NEVER mark captured, never present the typed phrase as saved.
+     *  - anything else (network / server trouble) → proceed to the vault UNCONFIRMED (today's
+     *    polarity): the flag stays 0, so the gate re-fires at the next entry and heals — the user
+     *    DID type the phrase back, and keeping them out over a blip helps nobody.
+     * Runs under `busy` (the reveal's confirm button spins; the idle lock defers).
+     */
+    private fun confirmCaptureGate() {
+        if (_ui.value.busy) return // in-flight confirm; the reveal's button is busy-gated too
+        val a = api
+        val acct = account
+        if (a == null || acct == null) {
+            // Session torn down under the reveal (autofill hard-lock): the next checkIdleLock tick
+            // locks this screen (zeroing the secret); never navigate a dead session into the vault.
+            return
+        }
+        val pieceId = pendingRecoveryPieceId
+        _ui.value = _ui.value.copy(busy = true)
+        viewModelScope.launch {
+            val outcome = try {
+                a.recoverySelfConfirm(pieceId)
+                ConfirmOutcome.Confirmed
+            } catch (e: ApiException) {
+                if (e.status == 409 && e.code == "recovery_piece_stale") ConfirmOutcome.Stale else ConfirmOutcome.Failed
+            } catch (_: Throwable) {
+                ConfirmOutcome.Failed
+            }
+            // B1 identity gate: torn down mid-confirm — lock()/signOut() own the cleanup.
+            if (account !== acct) { _ui.value = _ui.value.copy(busy = false); return@launch }
+            when (outcome) {
+                ConfirmOutcome.Stale -> {
+                    // §3 stale rule: zero the dead phrase together with its id, say so (statically),
+                    // and re-run setup + reveal under the held reauth proof.
+                    zeroPendingRecovery()
+                    _ui.value = _ui.value.copy(busy = false, screen = Screen.RecoveryCapture, recoveryPhrase = null, recoveryReplacedNotice = true)
+                    runRecoveryCapture()
+                }
+                ConfirmOutcome.Confirmed, ConfirmOutcome.Failed -> {
+                    zeroPendingRecovery()
+                    pendingCaptureAuthKey = null // the gate is resolved — the reauth proof dies here
+                    toVault()
                 }
             }
         }
@@ -1265,19 +1534,24 @@ class AndvariViewModel(
      */
     fun checkIdleLock() {
         val s = _ui.value
+        // §F.7 (desktop v2 #15 parity): a lock that lands mid-reveal destroys the shown-once
+        // phrase — the honest reason says so, and that the §F.9 gate re-issues at the next unlock.
+        // Mid-reveal gets NO grace: leaving a secret on an unattended screen is the wrong trade.
+        val idleReason = if (pendingRecoverySecret != null) REASON_IDLE_RECOVERY else REASON_IDLE
         if (VaultSession.get() == null) {
             // Locked underneath us (autofill gate) — reflect it in the UI. Trash was missing
             // from this list (IA audit): a Trash screen left open must kick to lock like
             // every other unlocked view. Idle-class reason (F26): the autofill gate only
-            // drops a session because its idle window expired.
-            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus || s.screen is Screen.Trash) lock(REASON_IDLE)
+            // drops a session because its idle window expired. The two §F.9 recovery screens
+            // are unlocked views too — a reveal over a dead session must die with it.
+            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus || s.screen is Screen.Trash || s.screen is Screen.RecoverySetup || s.screen is Screen.RecoveryCapture) lock(idleReason)
             return
         }
         // A-copyGate: the rescue copy holds `busy`, but any OTHER op finishing mid-copy
         // clears it — the op guard is what actually keeps the idle lock off the engine
         // for the whole copy (never yank the engine mid-rescue).
         if (s.busy || s.importBusy || s.copyOpVaultId != null) return
-        if (VaultSession.idleExpired()) lock(REASON_IDLE)
+        if (VaultSession.idleExpired()) lock(idleReason)
     }
 
     /**
@@ -1862,6 +2136,11 @@ class AndvariViewModel(
         // cache is retained on lock (spec 05 T3); a relaunch hydrates it.
         VaultSession.lock()
         pendingBackupRequest = null // a stashed export must not survive a lock (see stash docs)
+        // §F.7: an interrupted reveal dies with the lock — zero the raw secret + its pieceId; the
+        // §F.9 capture gate re-issues a fresh phrase at the next unlock (recoveryConfirmed is
+        // still false server-side). The capture reauth proof is password-equivalent — dies too.
+        zeroPendingRecovery()
+        pendingCaptureAuthKey = null
         closeEditor() // the editor session (and its picked plaintext bytes) dies with the lock
         importDismiss() // the parsed CSV + plan hold every password in the file — never outlive the lock
         moveGestures.clear() // gestures reference the dead engine's item state
@@ -1882,6 +2161,9 @@ class AndvariViewModel(
             // so escrowStale MUST clear on lock — else a "Later"-deferred re-seal card shows on
             // the lock screen with a dead action (engine torn down). Fresh unlock re-reads it.
             escrowStale = false, escrowFingerprint = "",
+            // §F.7/§F.9: the reveal's display form + gate state die with the lock (the raw secret
+            // was zeroed above); a fresh unlock re-derives everything.
+            recoveryPhrase = null, recoverySetupWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false,
             // N2 §3/§6 (review MED): clear the probe-failure flag only when a policy is
             // LOADED — then it's stale noise. With policy == null the failure is CURRENT
             // (nothing re-probes on the way to Welcome), and clearing it would strand the
@@ -1922,7 +2204,8 @@ class AndvariViewModel(
             // VaultSession.lock() closes the engine BEFORE we delete the DB (holders), then the api.
             VaultSession.lock()
             pendingBackupRequest = null // never carry a stashed export into a different account
-            pendingRecoverySecret?.fill(0); pendingRecoverySecret = null // §F.7: never outlive the account
+            zeroPendingRecovery() // §F.7: the raw secret + its pieceId never outlive the account
+            pendingCaptureAuthKey = null // password-equivalent — dies with the session
             closeEditor()
             importDismiss() // account A's plaintext CSV/plan must never resurface in account B's session
             moveGestures.clear()
@@ -1947,6 +2230,8 @@ class AndvariViewModel(
                 undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
                 copyProgress = null, copiedNote = null, copyVaultId = null, copyOpVaultId = null, moveProgress = null,
                 escrowStale = false, escrowFingerprint = "", // P4: global ReSealCard must not linger on Welcome
+                // §F.7/§F.9: reveal display form + gate state never outlive the account (raw secret zeroed above)
+                recoveryPhrase = null, recoverySetupWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false,
                 // N2 §3/§6 (review MED): a probe failure with NO policy loaded is current,
                 // not stale — keep it so Welcome shows the failure + Retry instead of the
                 // dead-end "Checking the server…" (nothing re-probes on this path). With a
@@ -2045,7 +2330,9 @@ class AndvariViewModel(
     private fun toVault() {
         // lockReason clears HERE — the one success landing shared by unlock, sign-in, quick
         // unlock, and enroll (F26: the explanation must not outlive the event it explains).
-        _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null, loginTotpRequired = false, quickUnlockMessage = null, lockReason = null, recoveryPhrase = null)
+        // §F.9 gate state clears with it (recoveryPhrase always did; the capture error and the
+        // replaced-phrase notice are meaningless once the vault is open).
+        _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null, loginTotpRequired = false, quickUnlockMessage = null, lockReason = null, recoveryPhrase = null, recoveryCaptureError = null, recoveryReplacedNotice = false)
         refreshLifecycle()
         refreshQuickUnlockState() // may surface the one-time enrollment offer card
     }
