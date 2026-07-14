@@ -190,7 +190,13 @@ class AndvariApi(
         return ApiException(resp.status.value, err.error, err.message)
     }
 
-    suspend fun clientPolicy(): ClientPolicy = call("GET", "/api/v1/client-policy", auth = false)
+    suspend fun clientPolicy(): ClientPolicy {
+        // H1 fence (spec 05 T1): a server-chosen enrollment/upgrade KDF policy can never weaken or
+        // DoS the master-password KDF. Closes the export/backup (R1) + password-change (R2) reuse paths.
+        val p: ClientPolicy = call("GET", "/api/v1/client-policy", auth = false)
+        KdfUpgrade.requireServerKdfParams(p.kdfParams)
+        return p
+    }
 
     suspend fun recoveryPubkey(): String {
         val resp = request("GET", "/api/v1/recovery-pubkey", auth = false)
@@ -225,21 +231,35 @@ class AndvariApi(
     suspend fun purgeItem(itemId: String): Long =
         call<ItemRestoreResponse>("POST", "/api/v1/items/$itemId/purge").rev
 
-    suspend fun prelogin(email: String): PreloginResponse = call("POST", "/api/v1/auth/prelogin", PreloginRequest(email), auth = false)
+    suspend fun prelogin(email: String): PreloginResponse {
+        // H1 fence (spec 05 T1): the login KDF params the fresh-device client is about to derive
+        // under must sit within [64 MiB, 1 GiB] / [t=3, t=10] — a weakened set makes the transmitted
+        // authKey offline-crackable once a hostile server captures it.
+        val p: PreloginResponse = call("POST", "/api/v1/auth/prelogin", PreloginRequest(email), auth = false)
+        KdfUpgrade.requireServerKdfParams(p.kdfParams)
+        return p
+    }
 
     suspend fun register(req: RegisterRequest): SessionResponse {
         val s: SessionResponse = call("POST", "/api/v1/auth/register", req, auth = false)
+        KdfUpgrade.requireServerKdfParams(s.accountKeys.kdfParams) // H1: fence BEFORE installing the session
         setTokens(Tokens(s.accessToken, s.refreshToken))
         return s
     }
 
     suspend fun login(req: LoginRequest): SessionResponse {
         val s: SessionResponse = call("POST", "/api/v1/auth/login", req, auth = false)
+        KdfUpgrade.requireServerKdfParams(s.accountKeys.kdfParams) // H1: fence BEFORE installing the session
         setTokens(Tokens(s.accessToken, s.refreshToken))
         return s
     }
 
-    suspend fun accountKeys(): AccountKeys = call("GET", "/api/v1/account/keys")
+    suspend fun accountKeys(): AccountKeys {
+        // H1 fence (spec 05 T1): re-unlock / KdfReKey / autofill all derive under these stored params.
+        val k: AccountKeys = call("GET", "/api/v1/account/keys")
+        KdfUpgrade.requireServerKdfParams(k.kdfParams)
+        return k
+    }
 
     suspend fun sync(since: Long): SyncResponse = call("GET", "/api/v1/sync?since=$since")
 

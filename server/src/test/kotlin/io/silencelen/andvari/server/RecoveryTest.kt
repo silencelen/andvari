@@ -25,6 +25,7 @@ import io.silencelen.andvari.core.model.PreloginResponse
 import io.silencelen.andvari.core.model.RecoveryCommitRequest
 import io.silencelen.andvari.core.model.RecoverySelfSetupRequest
 import io.silencelen.andvari.core.model.RecoveryVerifyRequest
+import io.silencelen.andvari.core.model.RecoveryUpload
 import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
@@ -285,6 +286,30 @@ class RecoveryTest : P4TestSupport() {
         val resp = client.commit(weak)
         assertEquals(HttpStatusCode.BadRequest, resp.status)
         assertEquals("kdf_too_weak", errorOf(resp))
+    }
+
+    // ---- L1: admin recovery enforces the SAME KDF floor as register/change/self-commit (spec 05 T1/T8) ----
+    @Test
+    fun adminRecovery_enforcesKdfFloor() = testApplication {
+        application { andvariModule(buildServices(flooredConfig(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-rec@x.com", "admin recovery password one", fast = false)
+        client.register(admin, bootstrapToken)
+
+        suspend fun postRecovery(p: KdfParams): HttpResponse = client.post("/api/v1/admin/recovery") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(RecoveryUpload(admin.userId, "AA", "AA", "AA", p))
+        }
+
+        // A sub-floor bundle is refused BEFORE the user lookup / verifier write — the floor is line 1
+        // of applyRecovery, closing the one password-set path that previously skipped it.
+        val weak = postRecovery(KdfParams(ops = 1, memBytes = 8 * 1024 * 1024))
+        assertEquals(HttpStatusCode.BadRequest, weak.status)
+        assertEquals("kdf_too_weak", errorOf(weak))
+
+        // recovery-cli's real output is KdfParams.DEFAULT (at-floor) — it clears the inclusive floor.
+        val ok = postRecovery(KdfParams.DEFAULT)
+        assertEquals(HttpStatusCode.OK, ok.status, ok.bodyAsText())
     }
 
     // ---- §F.3.3 self-setup: requires a fresh currentAuthKey reauth; clears the migration nudge ----

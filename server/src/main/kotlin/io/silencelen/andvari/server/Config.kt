@@ -100,7 +100,15 @@ class Config(
     }
 
     companion object {
-        val DEFAULT_TRUSTED_IP_HEADERS = listOf("CF-Connecting-IP", "X-Forwarded-For")
+        // M3: X-Forwarded-For ONLY — NOT CF-Connecting-Ip. Both front-ends terminate on loopback, so
+        // any loopback-peer header is trusted; but only the genuine CF tunnel sets CF-Connecting-Ip,
+        // while tailscale-serve (and LAN) leave it UNSET and pass a client-supplied one through —
+        // making it forgeable there (a tailnet client rotates it to evade per-IP rate limits, spec 05
+        // T11). Probed 2026-07-13: cloudflared AND tailscale-serve both set X-Forwarded-For to the
+        // REAL client as the RIGHTMOST entry (tailscale OVERWRITES a client-sent XFF; CF appends the
+        // edge-observed IP), and pickClientIp already takes the rightmost — so XFF is un-forgeable on
+        // both paths while CF-Connecting-Ip is not. An all-CF deployment can re-add it via env.
+        val DEFAULT_TRUSTED_IP_HEADERS = listOf("X-Forwarded-For")
 
         fun fromEnv(env: (String) -> String? = System::getenv): Config {
             val recoveryPub = env("ANDVARI_RECOVERY_PUBKEY")?.let { Bytes.fromB64(it) } ?: ByteArray(0)

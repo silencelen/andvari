@@ -62,6 +62,17 @@ private fun inviteRowOf(rs: ResultSet) = InviteRow(
 )
 
 /**
+ * The KDF-floor gate (spec 05 T1 / T8): refuse to persist a login verifier whose Argon2id params the
+ * org policy deems too weak to resist offline cracking. Shared by [Service] (register / password
+ * change / self-recovery-commit) and [AdminService.applyRecovery] so NO password-set path can drift
+ * below the floor. Strict `<` (at-floor passes); off (floor 0/0) under the test config, 64 MiB / ops 3
+ * in production via [Config.fromEnv].
+ */
+internal fun requireKdfFloor(p: KdfParams, config: Config) {
+    if (p.memBytes < config.minKdfMemBytes || p.ops < config.minKdfOps) throw BadRequest("kdf_too_weak")
+}
+
+/**
  * Business logic — decoupled from ktor so integration tests drive it directly and
  * routes stay thin. Emits (userIds, rev) sync notifications through [onChange] which
  * the app layer forwards to the [Notifier].
@@ -283,9 +294,7 @@ class Service(
      * authoritative gate against a weak-policy server persisting brute-forceable verifiers.
      * Off (floor 0/0) under the test config; production sets 64 MiB / ops 3 via fromEnv.
      */
-    private fun requireKdfFloor(p: KdfParams) {
-        if (p.memBytes < config.minKdfMemBytes || p.ops < config.minKdfOps) throw BadRequest("kdf_too_weak")
-    }
+    private fun requireKdfFloor(p: KdfParams) = requireKdfFloor(p, config)
 
     // ---- password change (spec 03 §3; also the tail of the recovery flow, spec 04 §4) ----
     fun changePassword(p: Principal, req: PasswordChangeRequest, ip: String) {
@@ -354,7 +363,7 @@ class Service(
      * verifier/wrappedUvk/kdfSalt/kdfParams; (f) revoke ALL sessions. The UVK is invariant (the client
      * re-wraps the SAME UVK it recovered), so the org-escrow + member-recovery blobs stay valid.
      */
-    fun recoverySelfCommit(req: RecoveryCommitRequest, ip: String) {
+    fun recoverySelfCommit(req: RecoveryCommitRequest, ip: String): String {
         // The ticket is the sole authorization: single-use (ConcurrentHashMap.remove) + userId-bound.
         val userId = recoveryTickets.redeem(req.recoveryTicket) ?: throw Unauthorized("invalid_ticket")
         requireKdfFloor(req.newKdfParams)
@@ -369,6 +378,7 @@ class Service(
             c.exec("UPDATE sessions SET revokedAt=? WHERE userId=? AND revokedAt IS NULL", now(), userId)
             repo.auditOn(c, "recovery_self_commit", userId, null, ip)
         }
+        return userId // M8: the route pushes {revoked} + closes every one of this user's sockets (all sessions revoked)
     }
 
     /**
@@ -440,13 +450,16 @@ class Service(
         if (s.refreshExpiresAt < now()) throw Unauthorized("refresh_expired")
 
         return repo.db.tx { c ->
-            // Guarded consume (CAS): the reuse check above ran on a snapshot outside this tx,
-            // so two concurrent uses of one token could both pass it. Consuming only when
-            // still-null and checking the affected-row count makes exactly one winner; a
-            // loser means a concurrent consume already happened → treat as reuse (spec 03 §2:
-            // reuse revokes the whole device), mirroring the TOTP guarded-step at login.
+            // Guarded consume (CAS): the reuse/revoked checks above ran on a snapshot outside this
+            // tx, so a concurrent consume — OR a concurrent device-revoke / password-change (both set
+            // sessions.revokedAt) — could commit in the window. Consuming only when refreshConsumedAt
+            // IS NULL *and revokedAt IS NULL* makes exactly one winner AND ensures a session revoked in
+            // that race can never be rotated into a fresh, un-revoked session (spec 05 T1/T3: a
+            // device-revoke / password change must terminate in-flight sessions). SQLite serializes
+            // write txs, so the revoke either committed before this CAS (→ 0 rows, refused below) or
+            // runs after this tx and revokes the newly-minted row too. A loser row → reuse (spec 03 §2).
             val consumed = c.exec(
-                "UPDATE sessions SET refreshConsumedAt=? WHERE sessionId=? AND refreshConsumedAt IS NULL",
+                "UPDATE sessions SET refreshConsumedAt=? WHERE sessionId=? AND refreshConsumedAt IS NULL AND revokedAt IS NULL",
                 now(), s.sessionId,
             )
             if (consumed != 1) {
@@ -512,6 +525,24 @@ class Service(
         val u = repo.userById(s.userId) ?: return null
         if (u.status != "active") return null
         return Principal(s.userId, s.deviceId, s.sessionId, u.isAdmin)
+    }
+
+    /**
+     * M8: WS ticket-path revocation re-check. The events ticket only carries (userId, deviceId) and
+     * [EventsTicketStore.redeem] checks TTL only — so a device revoked INSIDE its 30 s ticket window
+     * would otherwise re-register and keep receiving dirty-bells (the metadata leak M8 closes). Admit
+     * the socket only if the device still has a live (non-revoked) session under an active user and a
+     * non-revoked device row: fails closed on device-revoke, user-disable, and admin/self recovery
+     * (which revoke every session), while still admitting the current device after a password change
+     * (its own session is deliberately kept). Not expiry-gated — an expired access token is still
+     * refreshable, so the device stays "logged in".
+     */
+    fun deviceHasLiveSession(deviceId: String): Boolean = repo.db.read { c ->
+        c.queryOne(
+            """SELECT 1 FROM sessions s JOIN users u ON u.userId = s.userId JOIN devices d ON d.deviceId = s.deviceId
+               WHERE s.deviceId = ? AND s.revokedAt IS NULL AND u.status = 'active' AND d.revokedAt IS NULL LIMIT 1""",
+            deviceId,
+        ) { true } ?: false
     }
 
     // ---- sync ----

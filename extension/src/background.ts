@@ -6,6 +6,8 @@ import {
   adUvk,
   adVk,
   authKey,
+  assertServerKdfParams,
+  KdfPolicyError,
   boxKeypairFromSeed,
   deriveMasterKey,
   fromB64,
@@ -554,6 +556,7 @@ function deriveMasterKeyAsync(password: string, params: KdfParams, salt: Uint8Ar
 
 async function unlock(email: string, password: string): Promise<Res<"unlock">> {
   const pre = await api.prelogin(email);
+  assertServerKdfParams(pre.kdfParams); // H1 (spec 05 T1): refuse a weakened/absurd KDF before deriving (also blocks a 4 GiB SW OOM)
   const mk = await deriveMasterKeyAsync(password, pre.kdfParams, fromB64(pre.kdfSalt));
   const s = await api.login(email, toB64(authKey(mk)));
   api.setTokens(s.accessToken, s.refreshToken);
@@ -659,6 +662,7 @@ async function unlockWithMapping(email: string, password: string): Promise<Res<"
 }
 
 function mapUnlockError(e: unknown): UnlockCode {
+  if (e instanceof KdfPolicyError) return "kdf_policy"; // H1 (spec 05 T1): server tried to weaken/DoS the KDF
   if (e instanceof IdentityMismatchError) return "identity_mismatch";
   if (e instanceof ApiError) {
     if (e.code === "upgrade_required") return "upgrade_required"; // 426 min-version pin (any status)

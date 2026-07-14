@@ -29,3 +29,29 @@ class WsTicketStore(private val ttlMs: Long = 30_000) {
         return if (e.expiresAt >= now()) e.userId else null
     }
 }
+
+/**
+ * Events-channel variant of [WsTicketStore] that additionally binds the ticket to the minting
+ * session's deviceId (M8) — so the WS registration knows which device the socket belongs to and a
+ * single-device revoke can target it. A DISTINCT type (not a signature change on [WsTicketStore])
+ * because the two-phase self-recovery flow reuses [WsTicketStore] and has no device concept.
+ */
+class EventsTicketStore(private val ttlMs: Long = 30_000) {
+    data class Redeemed(val userId: String, val deviceId: String)
+    private class Entry(val userId: String, val deviceId: String, val expiresAt: Long)
+
+    private val tickets = ConcurrentHashMap<String, Entry>()
+
+    fun mint(userId: String, deviceId: String): String {
+        val t = now()
+        tickets.entries.removeIf { it.value.expiresAt < t }
+        val token = ServerCrypto.newToken()
+        tickets[ServerCrypto.hashToken(token)] = Entry(userId, deviceId, t + ttlMs)
+        return token
+    }
+
+    fun redeem(token: String): Redeemed? {
+        val e = tickets.remove(ServerCrypto.hashToken(token)) ?: return null
+        return if (e.expiresAt >= now()) Redeemed(e.userId, e.deviceId) else null
+    }
+}

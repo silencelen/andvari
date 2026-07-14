@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiClient, type SessionEndKind } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { initSodium } from "../crypto/sodium";
+import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import { Account } from "../vault/account";
 import { VaultStore } from "../vault/store";
 import { Welcome, type LoginMeta } from "./Welcome";
@@ -43,6 +44,7 @@ export function App() {
   // recovery key). Without this, a transient fetch failure shows the scary — and now false —
   // "escrow ceremony isn't done" message during enrollment.
   const [policyError, setPolicyError] = useState(false);
+  const [policyErrorMessage, setPolicyErrorMessage] = useState<string | undefined>(undefined);
   // 426 min-version pin tripped (api/client.ts onUpgradeRequired): this tab's bundle
   // is older than the server's pin, and every gated API call keeps failing until the
   // tab reloads — sticky once set; only the reload itself clears it.
@@ -54,9 +56,13 @@ export function App() {
     try {
       setPolicy(await clientRef.current!.clientPolicy());
       setPolicyError(false);
-    } catch {
+      setPolicyErrorMessage(undefined);
+    } catch (e) {
       setPolicy(null);
       setPolicyError(true);
+      // H1 (spec 05 T1): a weakened-KDF policy is a security block, NOT a transient "unavailable" —
+      // keep the distinct signal so enrollment shows the weak-KDF warning, never "try again".
+      setPolicyErrorMessage(e instanceof KdfPolicyError ? WEAK_KDF_MESSAGE : undefined);
     }
   }, []);
 
@@ -273,6 +279,7 @@ export function App() {
       client={clientRef.current!}
       policy={policy}
       policyError={policyError}
+      policyErrorMessage={policyErrorMessage}
       onRetryPolicy={loadPolicy}
       mode={phase.kind === "unlock" ? { unlock: phase.session } : { fresh: true }}
       notice={phase.notice}

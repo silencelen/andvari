@@ -136,4 +136,10 @@ internal class LazySodiumCryptoProvider(private val ls: LazySodium) : CryptoProv
             message
         }
     }
+
+    // H2 signed-update channel: Ed25519 crypto_sign_verify_detached. Verify-only (clients never sign).
+    // Fail-closed on bad sizes; lazysodium returns false on a bad signature (never throws here).
+    override fun signVerifyDetached(publicKey: ByteArray, signature: ByteArray, message: ByteArray): Boolean =
+        signature.size == 64 && publicKey.size == 32 &&
+            ls.cryptoSignVerifyDetached(signature, message, message.size, publicKey)
 }

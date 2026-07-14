@@ -637,6 +637,11 @@ class AndvariViewModel(
     /** §11 friendlyError mappings (mirrors web Sharing.tsx) — lifecycle codes get honest,
      *  human copy; everything else keeps the raw message the app always showed. */
     private fun friendlyError(t: Throwable): String {
+        // H1 (spec 05 T1): a hostile/misconfigured server sent a weakened master-password KDF — a
+        // distinct security block, never surfaced as a wrong-password or transport error.
+        if (t is io.silencelen.andvari.core.client.KdfPolicyViolationException) {
+            return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your administrator."
+        }
         if (t is ApiException) {
             when (t.code) {
                 "owner_must_transfer_or_delete" -> return "You own this vault, so you can't just leave it — make someone else the owner first, or delete it."

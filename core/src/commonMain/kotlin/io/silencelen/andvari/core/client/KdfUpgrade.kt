@@ -45,4 +45,31 @@ object KdfUpgrade {
         // ...and be strictly greater on at least one (else it is an equal-params no-op).
         return policy.memBytes > account.memBytes || policy.ops > account.ops
     }
+
+    /**
+     * H1 compliance fence (spec 05 T1 / spec 01 §9) — reject SERVER-SUPPLIED [KdfParams] that fall
+     * outside the client-side sanity bounds BEFORE they are ever fed to argon2id on a login / enroll
+     * / recovery path. A compromised or misconfigured server must be unable to (a) WEAKEN the
+     * master-password KDF below the 64 MiB floor (the derived authKey would become offline-crackable
+     * once the server captures it — the exact T1 break), or (b) inflate it past the ceiling to turn
+     * every unlock into a memory-exhaustion DoS. Enforced at the server-response ingestion boundary
+     * (AndvariApi), NEVER inside Keys.masterKey: the cross-impl test vectors and the deliberately
+     * separate backup-KDF window (spec 07 §2.3) legitimately derive below this floor. Inclusive
+     * bounds — at-floor DEFAULT (64 MiB / t=3) passes (mirrors [shouldUpgrade]'s strict `<`/`>`).
+     * The fence numbers are pinned by KdfBoundsTest against the web + extension copies (spec 01 §9).
+     */
+    fun requireServerKdfParams(p: KdfParams) {
+        if (p.memBytes < MIN_MEM_BYTES || p.ops < MIN_OPS) throw KdfPolicyViolationException("kdf_below_floor", p)
+        if (p.memBytes > MAX_MEM_BYTES || p.ops > MAX_OPS) throw KdfPolicyViolationException("kdf_above_ceiling", p)
+    }
 }
+
+/**
+ * Raised when a server-supplied [KdfParams] fails [KdfUpgrade.requireServerKdfParams] — a hostile or
+ * misconfigured server tried to weaken (or DoS) the master-password KDF (spec 05 T1). Deliberately
+ * NOT an ApiException, so generic API error handling cannot relabel it as a transport / auth failure:
+ * clients surface it as a distinct "the server sent weakened security settings" warning, never as a
+ * wrong-password error. [reason] is `kdf_below_floor` or `kdf_above_ceiling`.
+ */
+class KdfPolicyViolationException(val reason: String, val params: KdfParams) :
+    Exception("server KDF params rejected ($reason): ops=${params.ops} memBytes=${params.memBytes}")

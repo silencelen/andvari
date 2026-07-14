@@ -113,6 +113,9 @@ class DesktopSessionStore {
 
     fun loadAccountKeys(): AccountKeys? =
         runCatching { json.decodeFromString(AccountKeys.serializer(), keysFile.readText()) }.getOrNull()
+            // H1 cache belt (spec 05 T1): evict a cache poisoned pre-fix with sub-floor / absurd KDF
+            // params -> null = cache miss -> the caller refetches through the fenced AndvariApi.
+            ?.takeIf { runCatching { io.silencelen.andvari.core.client.KdfUpgrade.requireServerKdfParams(it.kdfParams) }.isSuccess }
 
     fun clearAccountKeys() { keysFile.delete() }
 

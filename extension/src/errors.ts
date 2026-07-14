@@ -15,6 +15,7 @@ type UnlockCode =
   | "totp_required"
   | "upgrade_required"
   | "identity_mismatch"
+  | "kdf_policy"
   | "server_error"
   | "network"
   | "unknown";
@@ -44,6 +45,10 @@ export function unlockErrorCopy(code: UnlockCode | undefined): string {
       return "Your server requires a newer extension — get the update from the web vault or the link above.";
     case "identity_mismatch":
       return "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.";
+    case "kdf_policy":
+      // H1 (spec 05 T1): the server sent weakened master-password security settings — a hard block,
+      // never softened into wrong-password.
+      return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.";
     case "server_error":
       return "The server had a problem answering — your details may be fine. Try again in a moment.";
     case "network":

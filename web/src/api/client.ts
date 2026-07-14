@@ -39,6 +39,7 @@ import type {
   VaultRestoreRequest,
   WsTicketResponse,
 } from "./types";
+import { assertServerKdfParams } from "../crypto/keys";
 
 export const CLIENT_VERSION = "0.16.0";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
@@ -271,12 +272,17 @@ export class ApiClient {
     return resp.text();
   }
 
-  prelogin(email: string) {
-    return this.json<PreloginResponse>("POST", "/api/v1/auth/prelogin", { email }, false);
+  async prelogin(email: string) {
+    // H1 fence (spec 05 T1): reject a weakened login KDF before any argon2id runs under it.
+    const p = await this.json<PreloginResponse>("POST", "/api/v1/auth/prelogin", { email }, false);
+    assertServerKdfParams(p.kdfParams);
+    return p;
   }
 
-  register(req: RegisterRequest) {
-    return this.json<SessionResponse>("POST", "/api/v1/auth/register", req, false);
+  async register(req: RegisterRequest) {
+    const s = await this.json<SessionResponse>("POST", "/api/v1/auth/register", req, false);
+    assertServerKdfParams(s.accountKeys.kdfParams); // H1: refuse a weakened enroll before proceeding
+    return s;
   }
 
   /**
@@ -304,6 +310,7 @@ export class ApiClient {
       },
       false,
     );
+    assertServerKdfParams(s.accountKeys.kdfParams); // H1: fence BEFORE installing the session
     this.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
     return s;
   }
@@ -312,12 +319,20 @@ export class ApiClient {
     return this.raw("POST", "/api/v1/auth/logout").finally(() => this.setTokens(null));
   }
 
-  accountKeys() {
-    return this.json<AccountKeys>("GET", "/api/v1/account/keys");
+  async accountKeys() {
+    // H1: validate-if-present (re-unlock/change derive under these). Absence already fails closed in
+    // masterKey; a mocked {} body (client.refresh.test.ts) legitimately carries no kdfParams.
+    const k = await this.json<AccountKeys>("GET", "/api/v1/account/keys");
+    if (k?.kdfParams) assertServerKdfParams(k.kdfParams);
+    return k;
   }
 
-  clientPolicy() {
-    return this.json<ClientPolicy>("GET", "/api/v1/client-policy", undefined, false);
+  async clientPolicy() {
+    // H1: fencing the enrollment/upgrade policy at parse also closes the export/backup (R1) and
+    // password-change (R2) KDF-reuse paths, whose only param source is this response.
+    const p = await this.json<ClientPolicy>("GET", "/api/v1/client-policy", undefined, false);
+    if (p?.kdfParams) assertServerKdfParams(p.kdfParams);
+    return p;
   }
 
   sync(since: number) {

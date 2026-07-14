@@ -413,7 +413,11 @@ class Account private constructor(
         private fun unlockFromUvk(userId: String, uvk: ByteArray, keys: AccountKeys, crypto: CryptoProvider): Account {
             val identitySeed = Envelope.openB64(crypto, uvk, keys.encryptedIdentitySeed, Ad.idkey(userId))
             val identity = crypto.boxKeypairFromSeed(identitySeed)
-            if (!identity.publicKey.contentEquals(Bytes.fromB64(keys.identityPub))) {
+            // spec 01 §5 (web account.ts parity): a MALFORMED/undecodable server identityPub is itself
+            // the tampering signal — decode defensively so garbage-where-the-key-belongs raises the
+            // SAME "possible server compromise" CryptoException, never a generic base64 decode error.
+            val serverIdentityPub = runCatching { Bytes.fromB64(keys.identityPub) }.getOrNull()
+            if (serverIdentityPub == null || !identity.publicKey.contentEquals(serverIdentityPub)) {
                 throw CryptoException(
                     "identity key mismatch — the server returned an identity public key that " +
                         "your account's sealed seed does not derive; possible server compromise. Do not proceed.",

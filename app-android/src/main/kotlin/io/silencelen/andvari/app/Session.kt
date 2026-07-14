@@ -220,6 +220,9 @@ class SessionStore(context: Context) {
 
     fun loadAccountKeys(): AccountKeys? =
         prefs.getString("accountKeys", null)?.let { runCatching { json.decodeFromString(AccountKeys.serializer(), it) }.getOrNull() }
+            // H1 cache belt (spec 05 T1): evict a cache poisoned pre-fix with sub-floor / absurd KDF
+            // params -> null = cache miss -> the caller refetches through the fenced AndvariApi.
+            ?.takeIf { runCatching { io.silencelen.andvari.core.client.KdfUpgrade.requireServerKdfParams(it.kdfParams) }.isSuccess }
 
     fun clearAccountKeys() { prefs.edit().remove("accountKeys").apply() }
 

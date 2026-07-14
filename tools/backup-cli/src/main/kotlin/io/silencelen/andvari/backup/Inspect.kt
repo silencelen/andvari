@@ -165,13 +165,16 @@ object BackupInspect {
  * Dump redaction (spec 07 §3 tooling posture: the payload holds every password in
  * plaintext, so the DEFAULT output must be safe to scroll on a shared screen or paste
  * into a ticket). Masking is by KEY NAME over the serialized JSON tree — `password`
- * (items and passwordHistory alike), `totp`, and `fileKey` (doc refs AND the section
- * manifest) — so same-named keys inside preserved unknown-field extras are masked too
- * (fail-safe). JSON `null` stays `null`: "no password" must remain distinguishable
- * from "a password you can't see".
+ * (items and passwordHistory alike), `totp`, `fileKey` (doc refs AND the section
+ * manifest), plus card PAN (`number`) + CVV (`securityCode`) and note bodies (`notes`,
+ * where login items also stash 2FA backup codes) — so same-named keys inside preserved
+ * unknown-field extras are masked too (fail-safe). JSON `null` stays `null`: "no
+ * password" must remain distinguishable from "a password you can't see".
  */
 object Redact {
-    val SECRET_KEYS = setOf("password", "totp", "fileKey")
+    // number/securityCode/notes were MISSING: the old set silently leaked full card numbers + CVV and
+    // every secure-note body in cleartext from the "safe to share" default, contradicting the CLI's promise.
+    val SECRET_KEYS = setOf("password", "totp", "fileKey", "number", "securityCode", "notes")
     const val MASK = "•••"
 
     fun tree(element: JsonElement): JsonElement = when (element) {

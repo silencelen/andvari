@@ -291,9 +291,11 @@ class AuditHardeningTest : P4TestSupport() {
             return client.auditRows(admin, "escrow_self_upload").first().ip // DESC → latest
         }
 
-        // CF-Connecting-IP wins outright over XFF.
-        assertEquals("203.0.113.9", escrowWith("CF-Connecting-IP" to "203.0.113.9", "X-Forwarded-For" to "6.6.6.6, 100.101.102.103"))
-        // No CF header → RIGHTMOST XFF entry (proxy-appended), never the forgeable left one.
+        // M3: CF-Connecting-IP is NO LONGER in the default trusted set (forgeable on tailscale/LAN,
+        // where nothing sets it) — a forged one is IGNORED and the RIGHTMOST XFF (proxy-appended /
+        // -overwritten, un-forgeable on both the CF tunnel and tailscale-serve) wins.
+        assertEquals("100.101.102.103", escrowWith("CF-Connecting-IP" to "203.0.113.9", "X-Forwarded-For" to "6.6.6.6, 100.101.102.103"))
+        // XFF alone → its RIGHTMOST entry (proxy-appended), never the forgeable left one.
         assertEquals("100.101.102.103", escrowWith("X-Forwarded-For" to "6.6.6.6, 100.101.102.103"))
         // Garbage header falls back to the raw peer — no crash, no garbage in the audit.
         val fallback = escrowWith("X-Forwarded-For" to "not-an-ip")
@@ -303,6 +305,11 @@ class AuditHardeningTest : P4TestSupport() {
     /** Pure selection rules (no ktor): loopback gating, rightmost-XFF, literal-only, loopback-literal skip. */
     @Test
     fun pickClientIp_pureRules() {
+        // M3: the SHIPPED default trusts X-Forwarded-For ONLY — CF-Connecting-Ip is forgeable on
+        // tailscale/LAN loopback paths (nothing sets it there), so it must never be a default source.
+        assertEquals(listOf("X-Forwarded-For"), Config.DEFAULT_TRUSTED_IP_HEADERS)
+        // The function itself stays generic (honors whatever list it's given — an all-CF deployment
+        // can opt CF-Connecting-Ip back in via env), so the ordering rules below use an explicit list.
         val trusted = listOf("CF-Connecting-IP", "X-Forwarded-For")
         fun of(vararg h: Pair<String, String>): (String) -> String? = { name -> h.toMap()[name] }
 
@@ -570,6 +577,54 @@ class AuditHardeningTest : P4TestSupport() {
         ws.webSocket("/api/v1/events", request = { authed(admin) }) {
             outgoing.send(Frame.Text("ping"))
             assertEquals("pong", (incoming.receive() as Frame.Text).readText())
+        }
+    }
+
+    // ---- M8 (spec 03 §6): revoking a device pushes {revoked} to its live socket, then closes it ----
+    @Test
+    fun revokeDevice_pushesRevokedFrameAndClosesSocket() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val ws = createClient { install(ContentNegotiation) { json(json) }; install(WebSockets) }
+        val admin = VirtualClient("wsrevoke@x.com", "ws revoke password one", fast = true)
+        val session = ws.register(admin, bootstrapToken)
+        val ticketResp = ws.post("/api/v1/events/ticket") { authed(admin) }
+        val ticket = json.decodeFromString(WsTicketResponse.serializer(), ticketResp.bodyAsText()).ticket
+
+        ws.webSocket("/api/v1/events?ticket=${ticket.encodeURLParameter()}") {
+            // The socket is now registered under (userId, this device). Revoke THIS device.
+            val revoke = ws.post("/api/v1/admin/devices/${session.deviceId}/revoke") { authed(admin) }
+            assertEquals(HttpStatusCode.OK, revoke.status, revoke.bodyAsText())
+            // It must be told to lock — {type:revoked} — before the server closes the channel (M8).
+            assertTrue((incoming.receive() as Frame.Text).readText().contains("\"revoked\""), "revoked device must get the lock frame")
+            assertTrue(closeReason.await() != null, "the revoked device's dirty-bell socket must be closed, not left live")
+        }
+    }
+
+    // ---- M8 TOCTOU: a ticket minted BEFORE a device revoke must be refused at connect (not left live) ----
+    @Test
+    fun revokedDevice_preMintedTicket_refusedAtConnect() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val ws = createClient { install(ContentNegotiation) { json(json) }; install(WebSockets) }
+        val admin = VirtualClient("toctou-admin@x.com", "toctou admin password one", fast = true)
+        ws.register(admin, bootstrapToken)
+        val inviteResp = ws.post("/api/v1/admin/users") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(InviteRequest("toctou-member@x.com", isAdmin = false))
+        }
+        val inviteTok = json.decodeFromString(InviteResponse.serializer(), inviteResp.bodyAsText()).inviteToken
+        val member = VirtualClient("toctou-member@x.com", "toctou member password one", fast = true)
+        val memberSession = ws.register(member, inviteTok)
+
+        // Member mints a ticket while its session is valid…
+        val ticket = json.decodeFromString(
+            WsTicketResponse.serializer(),
+            ws.post("/api/v1/events/ticket") { authed(member) }.bodyAsText(),
+        ).ticket
+        // …the admin revokes the member's device BEFORE the socket opens…
+        assertEquals(HttpStatusCode.OK, ws.post("/api/v1/admin/devices/${memberSession.deviceId}/revoke") { authed(admin) }.status)
+        // …so the pre-minted ticket is refused at connect (the deviceHasLiveSession re-check), never registered.
+        ws.webSocket("/api/v1/events?ticket=${ticket.encodeURLParameter()}") {
+            assertEquals(CloseReason.Codes.VIOLATED_POLICY.code, closeReason.await()?.code, "a device revoked inside its ticket window must not connect")
         }
     }
 
