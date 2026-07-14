@@ -21,6 +21,7 @@ import {
 import { startEvents, type EventsHandle, type WsLike } from "./events";
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "./format";
 import { isNewerVersion } from "./version";
+import { evaluateSignedManifest, updatesEnabled } from "./updateverify";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
 import type { CardItem, FillOutcome, MatchItem, PendingSave, Req, Res, SaveErrorCode, TabMsg, UnlockCode } from "./messages";
 import { currentCode } from "./totp";
@@ -54,6 +55,8 @@ const TKEY = "tabs"; //    storage.session: Record<tabId, TabState>
 const NKEY = "lockNotice"; // storage.session: { kind:"idle"; seconds } — F26 reason line (E1-7)
 const UKEY = "updateInfo"; // storage.local (non-secret): UpdateInfo while a newer build is live
 const ULAST = "updateCheckedAt"; // storage.local: epoch ms of the last COMPLETED update fetch
+const USEQ = "updateAcceptedSeq"; // storage.local: highest signed-manifest seq ever accepted (§B anti-rollback)
+const UQUIET = "updateChannelQuiet"; // storage.local: { reason } — H2 fail-closed-QUIET state (§M-D5), never a nag
 const DEFAULT_AUTOLOCK_SECONDS = 15 * 60; // policy fetch failed/absent — never "no lock at all"
 const DEFAULT_CLIPBOARD_CLEAR_SECONDS = 30; // spec 01 §8 policy default; clearing is safety-positive
 const CLIPBOARD_CLEAR_ALARM = "clipboardclear"; // SW backstop clear (E1-4); survives idle doLock
@@ -426,11 +429,17 @@ function downloadUrl(u: unknown): string | null {
 }
 
 /**
- * Fetch /downloads/manifest.json and, if it advertises a strictly-newer extension build, record
- * an [UpdateInfo] in storage.local; if it advertises an equal-or-older build, clear any stale
- * signal. NEVER throws, and a transient failure LEAVES an existing signal intact (one dropped
- * fetch must not un-nag a real update) — only a clean read supersedes the stored verdict. Reads
- * no vault state, so it is safe to run locked. [force] bypasses the wake throttle.
+ * H2 signed-update check (design 2026-07-13-signed-updates §D/§M). Fetch the manifest as RAW BYTES
+ * plus its detached `manifest.json.sig`, verify the Ed25519 signature over the EXACT bytes against
+ * the pinned key SET (updateverify.ts), and ONLY THEN parse + enforce the anti-rollback `seq` and
+ * the `signedAt` staleness window. On a strictly-newer build it records an [UpdateInfo]; on an
+ * equal-or-older build it clears any stale signal.
+ *
+ * FAIL-CLOSED QUIET (§M-D5/D6): any fetch/verify/seq/staleness failure records a distinct quiet
+ * reason and NEVER fabricates or refreshes a nag — an existing previously-VERIFIED signal is left
+ * intact (only a clean verified read supersedes it), so a T1 server stripping the sig can DoS the
+ * fetch but never conjure a scary banner. Records no vault state, so it is safe to run locked.
+ * [force] bypasses the wake throttle. Never throws.
  */
 async function checkForUpdate(force = false): Promise<void> {
   try {
@@ -438,21 +447,56 @@ async function checkForUpdate(force = false): Promise<void> {
       const seen = (await chrome.storage.local.get(ULAST))[ULAST];
       if (typeof seen === "number" && Date.now() - seen < UPDATE_MIN_GAP_MS) return;
     }
-    const resp = await fetch(SERVER_URL + "/downloads/manifest.json", { cache: "no-store" });
-    if (!resp.ok) return; // transient (offline / 5xx) — keep any prior signal, don't stamp ULAST
-    const m = (await resp.json()) as { browserExtension?: { version?: unknown; chromeUrl?: unknown; firefoxUrl?: unknown } };
-    const ext = m?.browserExtension;
-    const latest = typeof ext?.version === "string" ? ext.version : null;
+    // §M-D3: a build pinning only the placeholder sentinel has NO update path — do not even fetch.
+    if (!updatesEnabled()) return;
+
+    const base = SERVER_URL + "/downloads/manifest.json";
+    let mResp: Response;
+    let sResp: Response;
+    try {
+      // §M-D6: the sig is a SECOND request over the same raw bytes — either fetch failing → quiet.
+      [mResp, sResp] = await Promise.all([fetch(base, { cache: "no-store" }), fetch(base + ".sig", { cache: "no-store" })]);
+    } catch {
+      return; // network (offline / DNS) — transient; keep any prior signal, don't stamp ULAST
+    }
+    if (!mResp.ok || !sResp.ok) {
+      // Reachable server but the manifest or its detached sig errored (404/5xx) — a misconfigured or
+      // tampering server, NOT offline. Fail-closed QUIET and STAMP ULAST so the wake-throttle floors it
+      // (§M-D5): otherwise, once ULAST ages past UPDATE_MIN_GAP_MS, every SW wake (content message,
+      // popup, alarm) would re-hammer two no-store fetches indefinitely. A genuine network reject is
+      // caught above and left un-stamped for prompt retry when connectivity returns.
+      await chrome.storage.local.set({ [UQUIET]: { reason: "manifest_fetch_failed" }, [ULAST]: Date.now() });
+      return;
+    }
+
+    const raw = new Uint8Array(await mResp.arrayBuffer()); // EXACT bytes — never resp.json() (§M-D6)
+    const sigText = await sResp.text();
+    const storedSeq = (await chrome.storage.local.get(USEQ))[USEQ];
+    const lastAcceptedSeq = typeof storedSeq === "number" ? storedSeq : 0;
+    const decision = evaluateSignedManifest(raw, sigText, { lastAcceptedSeq, now: Date.now() });
+
+    // A completed fetch stamps ULAST regardless of verdict (the throttle floors real fetches, §M-D5
+    // — a tampering/stale server must not be hammered on every SW wake).
+    if (decision.kind === "quiet") {
+      // Fail-closed QUIET: record the distinct reason; leave any prior VERIFIED [UKEY] signal alone.
+      await chrome.storage.local.set({ [UQUIET]: { reason: decision.reason }, [ULAST]: Date.now() });
+      return;
+    }
+
+    // Fully verified, seq-monotonic, fresh — this read supersedes the stored verdict.
+    const ext = decision.ext;
+    const latest = typeof ext.version === "string" ? ext.version : null;
     const current = chrome.runtime.getManifest().version;
+    await chrome.storage.local.remove(UQUIET); // a clean verified read clears the quiet marker
     if (latest && isNewerVersion(latest, current)) {
-      const info: UpdateInfo = { latest, chromeUrl: downloadUrl(ext?.chromeUrl), firefoxUrl: downloadUrl(ext?.firefoxUrl) };
-      await chrome.storage.local.set({ [UKEY]: info, [ULAST]: Date.now() });
+      const info: UpdateInfo = { latest, chromeUrl: downloadUrl(ext.chromeUrl), firefoxUrl: downloadUrl(ext.firefoxUrl) };
+      await chrome.storage.local.set({ [UKEY]: info, [USEQ]: decision.seq, [ULAST]: Date.now() });
     } else {
       await chrome.storage.local.remove(UKEY); // up to date (or unreadable version) → no signal
-      await chrome.storage.local.set({ [ULAST]: Date.now() });
+      await chrome.storage.local.set({ [USEQ]: decision.seq, [ULAST]: Date.now() });
     }
   } catch {
-    /* network/JSON error — any existing signal stands until a clean read supersedes it */
+    /* unexpected — any existing signal stands until a clean verified read supersedes it */
   }
 }
 
