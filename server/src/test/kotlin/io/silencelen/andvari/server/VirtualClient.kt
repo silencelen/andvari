@@ -31,6 +31,10 @@ import io.silencelen.andvari.core.model.RegisterRequest
  */
 class VirtualClient(val email: String, val password: String, fast: Boolean = true) {
     private val crypto = createCryptoProvider()
+    // H1 note: `fast` params (ops=1/8 MiB) are sub-floor. Server integration tests are fine (the test
+    // Config's kdf floor is 0/0), but a REAL AndvariApi login/accountKeys for a fast-param client would
+    // now trip the CLIENT-side fence (KdfUpgrade.requireServerKdfParams). Use `fast = false` for any
+    // future test that drives the real client stack against a floored server (see AndvariApiFenceTest).
     val kdfParams = if (fast) KdfParams(ops = 1, memBytes = 8 * 1024 * 1024) else KdfParams.DEFAULT
     val kdfSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
 

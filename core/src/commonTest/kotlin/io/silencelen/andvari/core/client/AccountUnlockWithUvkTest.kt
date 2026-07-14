@@ -55,6 +55,17 @@ class AccountUnlockWithUvkTest {
     )
 
     @Test
+    fun malformedServerIdentityPubIsTampering() {
+        // spec 01 §5 (web account.ts parity): garbage where the identity pubkey belongs IS the
+        // tampering signal — a malformed identityPub must raise the "possible server compromise"
+        // CryptoException, never a bare base64 decode error the caller can't distinguish.
+        val e = enroll()
+        val tampered = e.keys.copy(identityPub = "!!!not-valid-base64!!!")
+        val ex = assertFailsWith<CryptoException> { Account.unlock(e.reg.userId, password, tampered, crypto) }
+        assertTrue(ex.message!!.contains("possible server compromise"))
+    }
+
+    @Test
     fun happyPathUnlocksAndOpensPersonalVault() {
         val e = enroll()
         val uvk = e.account.uvkCopyForPlatformWrap()

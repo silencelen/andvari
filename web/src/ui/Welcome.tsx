@@ -7,6 +7,7 @@ import { confirmMatches, displayForm } from "../crypto/member-recovery";
 import { clearPendingEnroll, enrollPrefillFor, peekPendingEnroll, type EnrollPayload } from "../enroll/enrolllink";
 import { enrollPosture, escrowGate, type EnrollPosture } from "../enroll/enrollposture";
 import { Account, IdentityMismatchError, deviceName } from "../vault/account";
+import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import { VaultStore } from "../vault/store";
 import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
 import { Field } from "./Field";
@@ -44,6 +45,7 @@ interface Props {
   client: ApiClient;
   policy: ClientPolicy | null;
   policyError: boolean;
+  policyErrorMessage?: string;
   onRetryPolicy: () => Promise<void>;
   mode: Mode;
   /** F26: one-line reason this screen is showing ("Locked.", revoked, …) — rendered on the card. */
@@ -52,11 +54,11 @@ interface Props {
   onForget: () => void;
 }
 
-export function Welcome({ client, policy, policyError, onRetryPolicy, mode, notice, onReady, onForget }: Props) {
+export function Welcome({ client, policy, policyError, policyErrorMessage, onRetryPolicy, mode, notice, onReady, onForget }: Props) {
   if ("unlock" in mode) {
     return <Unlock client={client} policy={policy} session={mode.unlock} notice={notice} onReady={onReady} onForget={onForget} />;
   }
-  return <FreshStart client={client} policy={policy} policyError={policyError} onRetryPolicy={onRetryPolicy} notice={notice} onReady={onReady} />;
+  return <FreshStart client={client} policy={policy} policyError={policyError} policyErrorMessage={policyErrorMessage} onRetryPolicy={onRetryPolicy} notice={notice} onReady={onReady} />;
 }
 
 /** Reload or F26 lock with an existing session: master password re-derives keys. */
@@ -90,6 +92,7 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
       }
       onReady(account, store, meta);
     } catch (e) {
+      if (e instanceof KdfPolicyError) { setErr(WEAK_KDF_MESSAGE); return; } // H1 (spec 05 T1)
       // Only a throw from Account.unlock (the sole un-wrapped, non-ApiError step) may be
       // blamed on the password — EXCEPT its IdentityMismatchError (F31/spec 01 §5),
       // which is a tampering signal and must never be softened into "wrong password".
@@ -160,7 +163,7 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
 }
 
 /** No session: sign in to an existing account, or enroll with an invite. */
-function FreshStart({ client, policy, policyError, onRetryPolicy, notice, onReady }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; onRetryPolicy: () => Promise<void>; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
+function FreshStart({ client, policy, policyError, policyErrorMessage, onRetryPolicy, notice, onReady }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; policyErrorMessage?: string; onRetryPolicy: () => Promise<void>; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
   // One-scan onboarding: peek (never consume) the captured enroll link so a StrictMode
   // double-invoked initializer reads the same value both times. The seed is read ONCE here.
   const [pending] = useState<EnrollPayload | null>(() => peekPendingEnroll());
@@ -243,7 +246,7 @@ function FreshStart({ client, policy, policyError, onRetryPolicy, notice, onRead
         {tab === "signin" ? (
           <SignIn client={client} policy={policy} onReady={onReady} onForgot={() => { setLocalNotice(""); setRecovering(true); }} onBlockingChange={setBlocking} />
         ) : (
-          <Enroll client={client} policy={policy} policyError={policyError} onRetryPolicy={onRetryPolicy} onReady={onReady} prefill={consented ? validPrefill : null} onBlockingChange={setBlocking} />
+          <Enroll client={client} policy={policy} policyError={policyError} policyErrorMessage={policyErrorMessage} onRetryPolicy={onRetryPolicy} onReady={onReady} prefill={consented ? validPrefill : null} onBlockingChange={setBlocking} />
         )}
       </div>
     </div>
@@ -308,6 +311,10 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
         setErr("");
       } else if (e instanceof ApiError && e.code === "public_login_requires_totp") {
         setErr("This account has no TOTP enrolled — sign-in from the public address is blocked. Connect from inside (VPN/LAN), enroll TOTP in Settings, then retry.");
+      } else if (e instanceof KdfPolicyError) {
+        // H1 (spec 05 T1): the server tried to weaken the master-password KDF — a distinct
+        // security block, never softened into a wrong-password/credentials error.
+        setErr(WEAK_KDF_MESSAGE);
       } else if (e instanceof IdentityMismatchError) {
         // F31/spec 01 §5: the password DID check out (login succeeded) — the server sent
         // an identity key our sealed seed does not derive. Never blame the password.
@@ -375,7 +382,7 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
   );
 }
 
-function Enroll({ client, policy, policyError, onRetryPolicy, onReady, prefill, onBlockingChange }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; prefill?: EnrollPayload | null; onBlockingChange: (blocking: boolean) => void }) {
+function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy, onReady, prefill, onBlockingChange }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; policyErrorMessage?: string; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; prefill?: EnrollPayload | null; onBlockingChange: (blocking: boolean) => void }) {
   // A prefill applies ONLY if the link was minted FOR this exact origin — the page IS served
   // by payload.o, so a mismatch means a redirect or a hand-mangled link; fall through to manual
   // entry rather than silently enrolling against the wrong server.
@@ -439,7 +446,7 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady, prefill, 
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!policy) return setErr(policyError ? POLICY_UNAVAILABLE : "Server settings are unavailable — try again in a moment.");
+    if (!policy) return setErr(policyErrorMessage ?? (policyError ? POLICY_UNAVAILABLE : "Server settings are unavailable — try again in a moment."));
     if (posture !== "waived" && !fp) return setErr("This server has no recovery key configured — the admin backstop can't be set up. Ask your admin, or set up without a backstop.");
     if (!meetsMasterPasswordFloor(password)) return setErr("Choose a stronger master password — mix length with upper/lower case, digits, or symbols.");
     setBusy(true);
@@ -493,7 +500,7 @@ function Enroll({ client, policy, policyError, onRetryPolicy, onReady, prefill, 
       setReady({ account, store, meta: { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint } });
     } catch (e) {
       // Static error strings only — NEVER interpolate secret material.
-      setErr(e instanceof NetworkError ? UNREACHABLE : e instanceof ApiError ? enrollError(e.code) : "Enrollment failed.");
+      setErr(e instanceof KdfPolicyError ? WEAK_KDF_MESSAGE : e instanceof NetworkError ? UNREACHABLE : e instanceof ApiError ? enrollError(e.code) : "Enrollment failed.");
     } finally {
       setBusy(false);
     }

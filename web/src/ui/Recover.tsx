@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
+import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import type { ClientPolicy, RecoveryVerifyResponse } from "../api/types";
 import { deriveAuthKey as deriveRecoveryAuthKey, parseSecret } from "../crypto/member-recovery";
 import { Account, IdentityMismatchError } from "../vault/account";
@@ -181,6 +182,7 @@ export function Recover({
  * no-recovery-row was wrong. NEVER interpolates secret material (§F.7 static-error discipline).
  */
 export function verifyErrorMessage(e: unknown): string {
+  if (e instanceof KdfPolicyError) return WEAK_KDF_MESSAGE; // H1 (spec 05 T1)
   return e instanceof NetworkError
     ? UNREACHABLE
     : e instanceof ApiError && e.status === 401
@@ -198,6 +200,7 @@ export function verifyErrorMessage(e: unknown): string {
  * IdentityMismatchError is a DISTINCT tampering signal — never softened into "wrong phrase".
  */
 export function resetErrorMessage(e: unknown): string {
+  if (e instanceof KdfPolicyError) return WEAK_KDF_MESSAGE; // H1 (spec 05 T1)
   return e instanceof IdentityMismatchError
     ? e.message
     : e instanceof NetworkError

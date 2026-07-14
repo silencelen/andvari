@@ -97,6 +97,21 @@ class BackupCliTest {
     }
 
     @Test
+    fun redact_masksCardPanCvvAndNoteBodies() {
+        // Regression: the old SECRET_KEYS omitted number/securityCode/notes, silently leaking full
+        // card PAN + CVV and secure-note bodies from the "safe to share" default dump.
+        val obj = Redact.tree(
+            kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"number":"4111111111111111","securityCode":"987","notes":"wifi pw hunter2","password":"pw","name":"Visa"}""",
+            ),
+        ) as kotlinx.serialization.json.JsonObject
+        assertEquals(Redact.MASK, (obj["number"] as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals(Redact.MASK, (obj["securityCode"] as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals(Redact.MASK, (obj["notes"] as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals("Visa", (obj["name"] as kotlinx.serialization.json.JsonPrimitive).content) // non-secret preserved
+    }
+
+    @Test
     fun dump_secretsFlag_printsRaw() {
         val sample = TestBackups.buildSample("dump secrets phrase")
         val opened = Backup.open(crypto, sample.passphrase, sample.file)

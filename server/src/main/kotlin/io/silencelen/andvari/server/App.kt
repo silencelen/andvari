@@ -116,7 +116,7 @@ class Services(
     val metrics: PrometheusMeterRegistry,
     val janitor: Janitor,
     val email: EmailSender? = null, // cut 4: the SMTP sender when config.emailConfigured, else null (feature off)
-    val wsTickets: WsTicketStore = WsTicketStore(),
+    val wsTickets: EventsTicketStore = EventsTicketStore(),
 ) {
     fun metricsScrape(): String = metrics.scrape()
 }
@@ -142,7 +142,7 @@ fun buildServices(config: Config, notifier: Notifier): Services {
     if (email == null && anyEmailEnv) {
         System.err.println("[andvari] email-invite is OFF — ${config.inviteBaseUrlIssue() ?: "email transport config incomplete (a full SMTP or Graph set)"}")
     }
-    return Services(repo, service, AdminService(repo), HibpRelay(repo, http), notifier, config, metrics, janitor, email)
+    return Services(repo, service, AdminService(repo, config), HibpRelay(repo, http), notifier, config, metrics, janitor, email)
 }
 
 /** A purge stalled this long past its due time means the janitor is dead — alert-worthy. */
@@ -364,6 +364,7 @@ fun Application.andvariModule(services: Services) {
         put("/api/v1/account/password") {
             val p = requirePrincipal(call, service)
             service.changePassword(p, call.receive<PasswordChangeRequest>(), call.clientIp(config))
+            services.notifier.notifyRevokedUserExcept(p.userId, p.deviceId) // M8: lock the user's OTHER devices (this one is kept)
             call.respondText("ok")
         }
 
@@ -596,7 +597,8 @@ fun Application.andvariModule(services: Services) {
         post("/api/v1/recovery/self/commit") {
             if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
             if (!limiter.allow("recovery_commit:${call.clientIp(config)}", 5, 60_000)) throw RateLimited()
-            service.recoverySelfCommit(call.receive<RecoveryCommitRequest>(), call.clientIp(config))
+            val recovered = service.recoverySelfCommit(call.receive<RecoveryCommitRequest>(), call.clientIp(config))
+            services.notifier.notifyRevokedUser(recovered) // M8: self-recovery revoked all this user's sessions
             call.respondText("ok")
         }
         put("/api/v1/recovery/self-setup") {
@@ -668,12 +670,16 @@ fun Application.andvariModule(services: Services) {
         }
         post("/api/v1/admin/users/{id}/disable") {
             val p = requireAdmin(call, service)
-            services.admin.disableUser(requireUuid(call.parameters["id"], "user_id"), p.userId)
+            val targetId = requireUuid(call.parameters["id"], "user_id")
+            services.admin.disableUser(targetId, p.userId)
+            services.notifier.notifyRevokedUser(targetId) // M8 (spec 03 §6): drop the disabled user's live sockets
             call.respondText("ok")
         }
         post("/api/v1/admin/devices/{id}/revoke") {
             val p = requireAdmin(call, service)
-            services.admin.revokeDevice(requireUuid(call.parameters["id"], "device_id"), p.userId)
+            val deviceId = requireUuid(call.parameters["id"], "device_id")
+            val owner = services.admin.revokeDevice(deviceId, p.userId)
+            if (owner != null) services.notifier.notifyRevokedDevice(owner, deviceId) // M8: lock + close that device's socket
             call.respondText("ok")
         }
         get("/api/v1/admin/users/{id}/escrow") {
@@ -683,7 +689,9 @@ fun Application.andvariModule(services: Services) {
         }
         post("/api/v1/admin/recovery") {
             val p = requireAdmin(call, service)
-            services.admin.applyRecovery(call.receive<RecoveryUpload>(), p.userId)
+            val req = call.receive<RecoveryUpload>()
+            services.admin.applyRecovery(req, p.userId)
+            services.notifier.notifyRevokedUser(req.userId) // M8: admin recovery revokes all the user's sessions
             call.respondText("ok")
         }
         get("/api/v1/admin/audit") {
@@ -721,23 +729,28 @@ fun Application.andvariModule(services: Services) {
         // callers.
         post("/api/v1/events/ticket") {
             val p = requirePrincipal(call, service)
-            call.respond(WsTicketResponse(services.wsTickets.mint(p.userId), 30))
+            call.respond(WsTicketResponse(services.wsTickets.mint(p.userId, p.deviceId), 30))
         }
         webSocket("/api/v1/events") {
-            val userId = call.request.queryParameters["ticket"]?.let { services.wsTickets.redeem(it) }
+            // M8: bind the socket to (userId, deviceId) — ticket carries the minting device; the Bearer
+            // fallback takes the token's own session device — so a single-device revoke can target it.
+            val auth = call.request.queryParameters["ticket"]?.let { services.wsTickets.redeem(it) }
                 ?: call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ")?.trim()
-                    ?.let { service.authenticate(it)?.userId }
-            if (userId == null) {
+                    ?.let { service.authenticate(it) }?.let { EventsTicketStore.Redeemed(it.userId, it.deviceId) }
+            // M8: re-check revocation at (re)connect — the ticket path (EventsTicketStore.redeem) only
+            // checks TTL, so a device revoked inside its 30 s ticket window must be refused here, not
+            // left registered and receiving dirty-bells. (The Bearer path already re-checked in authenticate.)
+            if (auth == null || !service.deviceHasLiveSession(auth.deviceId)) {
                 close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "unauthorized"))
                 return@webSocket
             }
-            services.notifier.register(userId, this)
+            services.notifier.register(auth.userId, auth.deviceId, this)
             try {
                 for (frame in incoming) {
                     if (frame is Frame.Text && frame.readText() == "ping") outgoing.send(Frame.Text("pong"))
                 }
             } finally {
-                services.notifier.unregister(userId, this)
+                services.notifier.unregister(auth.userId, this)
             }
         }
 

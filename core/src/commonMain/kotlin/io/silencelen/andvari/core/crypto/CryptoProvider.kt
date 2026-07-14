@@ -54,6 +54,15 @@ interface CryptoProvider {
 
     /** Pull counterpart; throws [CryptoException] on any corrupt/truncated chunk. */
     fun secretstreamDecrypt(key: ByteArray, header: ByteArray, chunks: List<ByteArray>): List<ByteArray>
+
+    /**
+     * Ed25519 detached-signature VERIFY (crypto_sign_verify_detached) — the signed-update channel
+     * (H2). True iff [signature] (64 bytes) is a valid signature of [message] by [publicKey] (32
+     * bytes). Verify-only on purpose: clients never sign; the release-signing private key lives on
+     * the owner's workstation (design 2026-07-13-signed-updates §A/§F). Never throws — bad sizes or
+     * a bad signature return false (fail-closed).
+     */
+    fun signVerifyDetached(publicKey: ByteArray, signature: ByteArray, message: ByteArray): Boolean
 }
 
 /** Platform factory; each target wires its libsodium binding here. */

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
+import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import type { ClientPolicy, TotpSetupResponse, TotpStatus } from "../api/types";
 import { backupNudge, readLastExportAt } from "../export/plan";
 import { qrModules } from "../vendor/qrcode-generator";
@@ -273,7 +274,7 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Props) {
       setMsg("Master password changed — sessions on other devices were signed out.");
       onPasswordChanged();
     } catch (e) {
-      setErr(e instanceof ApiError && e.status === 401 ? "Current master password is wrong." : "Password change failed.");
+      setErr(e instanceof KdfPolicyError ? WEAK_KDF_MESSAGE : e instanceof ApiError && e.status === 401 ? "Current master password is wrong." : "Password change failed."); // H1 (spec 05 T1)
     } finally {
       setBusy(false);
     }

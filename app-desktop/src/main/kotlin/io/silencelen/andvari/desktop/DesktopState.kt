@@ -407,29 +407,36 @@ class DesktopState(private val scope: CoroutineScope) {
 
     fun signIn(email: String, password: String, totp: String? = null) = op {
         val a = newApi()
-        val pre = a.prelogin(email)
-        // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on the UI thread.
-        val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams) }
-        val s = try {
-            a.login(LoginRequest(email, authKey, Account.deviceInfo(deviceName(), desktopPlatform()), totp = totp))
-        } catch (e: ApiException) {
-            a.close()
-            when (e.code) {
-                // Server-TOTP is enrolled: reveal the code field and let the user retry.
-                "totp_required" -> { signInTotpRequired = true; busy = false; return@op }
-                "public_login_requires_totp" ->
-                    throw ApiException(e.status, e.code, "this account has no server-TOTP enrolled; public access is blocked")
-                else -> throw e
+        try {
+            val pre = a.prelogin(email)
+            // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on the UI thread.
+            val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams) }
+            val s = try {
+                a.login(LoginRequest(email, authKey, Account.deviceInfo(deviceName(), desktopPlatform()), totp = totp))
+            } catch (e: ApiException) {
+                when (e.code) {
+                    // Server-TOTP is enrolled: reveal the code field and let the user retry.
+                    "totp_required" -> { signInTotpRequired = true; busy = false; a.close(); return@op }
+                    "public_login_requires_totp" ->
+                        throw ApiException(e.status, e.code, "this account has no server-TOTP enrolled; public access is blocked")
+                    else -> throw e
+                }
             }
+            val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys) }
+            store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            persistAccountKeys(s.accountKeys)
+            bind(a, acct); syncNow(engine!!)
+            escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
+            mustChangePassword = s.mustChangePassword // F58: a recovery temp password forces the banner
+            signInTotpRequired = false
+            toVault()
+        } catch (t: Throwable) {
+            // Android-parity leak guard: any PRE-bind failure — incl. the H1 KdfPolicyViolationException
+            // (not an ApiException), IdentityMismatch, or a network error — must close the transient
+            // OkHttp-backed client. Once bind() ran, `api === a` and it is session-owned; never close it.
+            if (api !== a) a.close()
+            throw t
         }
-        val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys) }
-        store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
-        persistAccountKeys(s.accountKeys)
-        bind(a, acct); syncNow(engine!!)
-        escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
-        mustChangePassword = s.mustChangePassword // F58: a recovery temp password forces the banner
-        signInTotpRequired = false
-        toVault()
     }
 
     fun unlock(email: String, password: String) = op {
@@ -472,10 +479,17 @@ class DesktopState(private val scope: CoroutineScope) {
         // the submit gate needs the fingerprint, so policy is already loaded). Success
         // clears the honesty flag like every enroll-feeding fetch; failure sets it and
         // still throws, so op() surfaces the error as before.
-        val pol = policy ?: runCatching { newApi().clientPolicy() }
-            .onSuccess { policy = it; policyFetchFailed = false }
-            .onFailure { policyFetchFailed = true }
-            .getOrThrow()
+        val pol = policy ?: run {
+            // Close the throwaway probe client whether the (now KDF-fenced) policy fetch succeeds or throws.
+            val probe = newApi()
+            try {
+                probe.clientPolicy().also { policy = it; policyFetchFailed = false }
+            } catch (t: Throwable) {
+                policyFetchFailed = true; throw t
+            } finally {
+                probe.close()
+            }
+        }
         // Typed-sheet ceremony re-assert at the STATE layer against the policy this enroll
         // actually seals to (review LOW, 4th sighting of the frame-stale class): updateServer
         // can swap the policy mid-screen, and a one-frame-stale submit would otherwise pass
@@ -485,37 +499,44 @@ class DesktopState(private val scope: CoroutineScope) {
             "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 16 characters."
         }
         val a = newApi()
-        val recoveryPub = Bytes.fromB64(a.recoveryPubkey())
-        // TODO(recovery-cut-2): native enroll is the `required` (org-escrow) path ONLY — it always
-        // seals to the org key (recoveryPub non-null), so the account gets BOTH the self-service
-        // piece and an admin backstop. Account.enroll now ALSO accepts recoveryPublicKey = null (the
-        // `waived` posture: per-member piece only, no backstop), but the waived path needs an
-        // admin-set policy toggle + the in-person-QR fingerprint provenance of §F.1 before native can
-        // offer it. Until that UI exists, keep required.
-        // Key generation + KDF are CPU-bound (argon2id) — off the UI thread. EnrollResult
-        // destructures to (request, account, recoverySecret) — the 3rd is the SHOWN-ONCE piece.
-        val (req, acct, recoverySecret) = withContext(Dispatchers.Default) {
-            Account.enroll(
-                inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
-                password = password, params = pol.kdfParams,
-                recoveryPublicKey = recoveryPub, recoveryFingerprint = pol.recoveryFingerprint, deviceName = deviceName(),
-            )
+        try {
+            val recoveryPub = Bytes.fromB64(a.recoveryPubkey())
+            // TODO(recovery-cut-2): native enroll is the `required` (org-escrow) path ONLY — it always
+            // seals to the org key (recoveryPub non-null), so the account gets BOTH the self-service
+            // piece and an admin backstop. Account.enroll now ALSO accepts recoveryPublicKey = null (the
+            // `waived` posture: per-member piece only, no backstop), but the waived path needs an
+            // admin-set policy toggle + the in-person-QR fingerprint provenance of §F.1 before native can
+            // offer it. Until that UI exists, keep required.
+            // Key generation + KDF are CPU-bound (argon2id) — off the UI thread. EnrollResult
+            // destructures to (request, account, recoverySecret) — the 3rd is the SHOWN-ONCE piece.
+            val (req, acct, recoverySecret) = withContext(Dispatchers.Default) {
+                Account.enroll(
+                    inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
+                    password = password, params = pol.kdfParams,
+                    recoveryPublicKey = recoveryPub, recoveryFingerprint = pol.recoveryFingerprint, deviceName = deviceName(),
+                )
+            }
+            val s = a.register(req)
+            store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            persistAccountKeys(s.accountKeys)
+            bind(a, acct); syncNow(engine!!)
+            escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
+            mustChangePassword = s.mustChangePassword // F58: never true for a fresh enroll; wired for truth
+            // §F.4/§F.7: the recovery piece is MANDATORY and already committed in register(), but a
+            // member who never SEES it is silently unrecoverable. Hold it transiently and route to the
+            // shown-once reveal+confirm gate (RecoverySetup) instead of the vault; the gate zeroes it
+            // once the user types it back.
+            pendingRecoverySecret = recoverySecret
+            recoveryPhrase = MemberRecovery.displayForm(recoverySecret)
+            recoverySetupWaived = false // required path today (recoveryPub non-null); TODO(recovery-cut-2)
+            busy = false
+            screen = DesktopScreen.RecoverySetup
+        } catch (t: Throwable) {
+            // Leak guard (Android-parity): a pre-bind failure — incl. the H1 KdfPolicyViolationException
+            // from register() — must close the transient client. After bind(), `api === a` (session-owned).
+            if (api !== a) a.close()
+            throw t
         }
-        val s = a.register(req)
-        store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
-        persistAccountKeys(s.accountKeys)
-        bind(a, acct); syncNow(engine!!)
-        escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
-        mustChangePassword = s.mustChangePassword // F58: never true for a fresh enroll; wired for truth
-        // §F.4/§F.7: the recovery piece is MANDATORY and already committed in register(), but a
-        // member who never SEES it is silently unrecoverable. Hold it transiently and route to the
-        // shown-once reveal+confirm gate (RecoverySetup) instead of the vault; the gate zeroes it
-        // once the user types it back.
-        pendingRecoverySecret = recoverySecret
-        recoveryPhrase = MemberRecovery.displayForm(recoverySecret)
-        recoverySetupWaived = false // required path today (recoveryPub non-null); TODO(recovery-cut-2)
-        busy = false
-        screen = DesktopScreen.RecoverySetup
     }
 
     // Shown-once recovery secret (design §F.7): the RAW 32 bytes of a fresh enrollee's recovery
@@ -1718,6 +1739,11 @@ class DesktopState(private val scope: CoroutineScope) {
      *  human copy; everything else keeps the raw message the app always showed. Wired into
      *  [op]'s generic catch, deliberately upgrading ALL desktop ops (design §5). */
     private fun friendlyError(t: Throwable): String {
+        // H1 (spec 05 T1): a hostile/misconfigured server sent a weakened master-password KDF — a
+        // distinct security block, never surfaced as a wrong-password or transport error.
+        if (t is io.silencelen.andvari.core.client.KdfPolicyViolationException) {
+            return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your administrator."
+        }
         if (t is ApiException) {
             when (t.code) {
                 "owner_must_transfer_or_delete" -> return "You own this vault, so you can't just leave it — make someone else the owner first, or delete it."

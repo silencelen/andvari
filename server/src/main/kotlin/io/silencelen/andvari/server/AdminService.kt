@@ -8,7 +8,7 @@ import io.silencelen.andvari.core.model.RecoveryUpload
 import java.io.File
 
 /** Admin operations (spec 03 §7). All callers are already checked isAdmin by the route. */
-class AdminService(private val repo: Repo) {
+class AdminService(private val repo: Repo, private val config: Config) {
 
     private val inviteTtlMs = 72L * 3600 * 1000
 
@@ -99,14 +99,23 @@ class AdminService(private val repo: Repo) {
         if (refusal != null) throw BadRequest(refusal)
     }
 
-    fun revokeDevice(deviceId: String, byUserId: String) = repo.db.tx { c ->
+    /** Returns the revoked device's owner userId (null if the device row is absent) so the route can
+     *  push {revoked} + close that device's live WS socket (M8). */
+    fun revokeDevice(deviceId: String, byUserId: String): String? = repo.db.tx { c ->
+        val owner = c.queryOne("SELECT userId FROM devices WHERE deviceId=?", deviceId) { it.getString(1) }
         c.exec("UPDATE devices SET revokedAt=? WHERE deviceId=?", now(), deviceId)
         c.exec("UPDATE sessions SET revokedAt=? WHERE deviceId=? AND revokedAt IS NULL", now(), deviceId)
         repo.auditOn(c, "device_revoke", byUserId, deviceId, null)
+        owner
     }
 
     /** Upload recovery-cli output (spec 04 §4): set temp creds + force change + revoke sessions. */
     fun applyRecovery(req: RecoveryUpload, byUserId: String) = repo.db.tx { c ->
+        // L1 (spec 05 T1/T8): the admin recovery bundle sets a login verifier + kdfParams exactly like
+        // register / change / self-recovery — floor it too, so no password-set path can persist a
+        // brute-forceable verifier. recovery-cli emits KdfParams.DEFAULT (at-floor) so this is a no-op
+        // for the honest producer; it fails closed only on a hand-edited sub-floor bundle.
+        requireKdfFloor(req.tempKdfParams, config)
         val exists = c.queryOne("SELECT userId FROM users WHERE userId=?", req.userId) { it.getString(1) }
             ?: throw BadRequest("no_such_user")
         c.exec(

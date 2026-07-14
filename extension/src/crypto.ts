@@ -25,6 +25,39 @@ export interface KdfParams {
 }
 export const DEFAULT_KDF_PARAMS: KdfParams = { v: 1, alg: "argon2id13", ops: 3, memBytes: 67_108_864 };
 
+// H1 client-side sanity fence (spec 05 T1 / spec 01 §9). Mirrors core KdfUpgrade.MIN_/MAX_* and web
+// keys.ts verbatim (drift-pinned by crypto.test). A hostile/misconfigured server must not WEAKEN the
+// master-password KDF below 64 MiB (its authKey would become offline-crackable once captured) nor
+// inflate it past 1 GiB — a 4 GiB memBytes would OOM the MV3 service worker.
+export const KDF_MIN_MEM_BYTES = 67_108_864; // 64 MiB
+export const KDF_MIN_OPS = 3;
+export const KDF_MAX_MEM_BYTES = 1_073_741_824; // 1 GiB
+export const KDF_MAX_OPS = 10;
+
+/** Distinct security signal — a server tried to weaken/DoS the master-password KDF (spec 05 T1). */
+export class KdfPolicyError extends Error {
+  // Explicit field (not a constructor parameter property): the extension test runner is Node
+  // --experimental-strip-types (strip-only), which rejects TS parameter-property shorthand.
+  readonly reason: "kdf_below_floor" | "kdf_above_ceiling";
+  constructor(reason: "kdf_below_floor" | "kdf_above_ceiling") {
+    super(`server KDF params rejected (${reason})`);
+    this.name = "KdfPolicyError";
+    this.reason = reason;
+  }
+}
+
+/** H1 fence — reject SERVER-SUPPLIED KDF params before any argon2id derives under them. Inclusive
+ *  bounds (at-floor DEFAULT passes); applied at the unlock ingestion boundary, never in the primitive. */
+export function assertServerKdfParams(p: KdfParams): void {
+  // Non-numeric / omitted fields (undefined, NaN, a string) slip past a bare `<`/`>` in JS, so reject
+  // them explicitly — an omitted ops/memBytes must still hit the distinct KdfPolicyError, not derive
+  // under garbage (mirrors web keys.ts).
+  if (typeof p.ops !== "number" || !Number.isFinite(p.ops) || typeof p.memBytes !== "number" || !Number.isFinite(p.memBytes))
+    throw new KdfPolicyError("kdf_below_floor");
+  if (p.memBytes < KDF_MIN_MEM_BYTES || p.ops < KDF_MIN_OPS) throw new KdfPolicyError("kdf_below_floor");
+  if (p.memBytes > KDF_MAX_MEM_BYTES || p.ops > KDF_MAX_OPS) throw new KdfPolicyError("kdf_above_ceiling");
+}
+
 const utf8 = (s: string) => new TextEncoder().encode(s);
 
 // Associated data (spec 02 §2, mirrors core Ad.kt / web ad.ts): "andvari/v1|<parts joined by |>".

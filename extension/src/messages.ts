@@ -70,6 +70,7 @@ export type UnlockCode =
   | "totp_required"
   | "upgrade_required"
   | "identity_mismatch"
+  | "kdf_policy"
   | "server_error"
   | "network"
   | "unknown";
