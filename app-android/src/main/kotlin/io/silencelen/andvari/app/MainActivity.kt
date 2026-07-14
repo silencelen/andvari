@@ -537,7 +537,10 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                 // Deliberately NOT displayed until typed — showing it above the input would
                 // reduce the check to transcription (spec 04 §2(3); web Enroll parity; the
                 // F57 re-seal card already works this way).
-                Text("Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // Cut M (v2 #13): the printed sheet belongs to the ADMIN (required posture,
+                // handed over in person) — "your printed recovery sheet" sent an emailed
+                // enrollee hunting for a sheet that was never theirs.
+                Text("Recovery check — type the FIRST 16 characters of the fingerprint on the printed recovery sheet your admin gave you", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true)
                 if (shortFp.isNotBlank() && !shortOk) {
                     Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
@@ -554,6 +557,15 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                     Checkbox(fpOk, onCheckedChange = null, enabled = shortOk)
                     Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
                 }
+                // Cut M (v2 #13): an EMAILED invite is the waived posture — there IS no sheet
+                // for that enrollee, and native enroll is required-only (enrollOp's
+                // TODO(recovery-cut-2)) — so signpost the browser flow instead of dead-ending.
+                Text(
+                    "Invited by email, with no sheet? Open your invite link in a browser instead — you'll set up your own recovery phrase there.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
             // (2) The policy probe FAILED — don't claim the ceremony isn't done (it may well
             // be). Web-parity copy (errors.ts POLICY_UNAVAILABLE) + a Retry that re-probes.
@@ -598,6 +610,12 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
  * passes. There is NO skip/back affordance — the silent-total-loss guard, mirroring the enroll
  * ceremony's fpConfirmed gate.
  *
+ * Cut M (v2 #7): the fastest path through this gate used to be Copy → paste → confirm — "saved"
+ * while the phrase only ever lived on a clipboard the app itself wipes after the policy window.
+ * Compose has no per-field paste hook to refuse (web's onPaste deterrent), so the deterrent here
+ * is presentation + guidance: the phrase renders GROUPED for transcription, and the type-back
+ * says plainly it's about proving a written copy exists. The constant-time match is unchanged.
+ *
  * TODO(recovery-cut-2): the native self-recovery flow (POST /recovery/self/verify + commit) — a member using this
  * phrase to reset a forgotten master password — and the native admin fingerprint-confirm-for-QR
  * are deferred; web covers self-recovery for this cut. This screen only SHOWS the piece at signup.
@@ -614,6 +632,10 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
     // A "copy phrase" button is a SECRET clipboard write (EXTRA_IS_SENSITIVE + auto-clear after
     // the policy window), never the non-secret setup-material exemption (§F.7).
     val clipClear = maxOf(1, ui.policy?.clipboardClearSeconds ?: 30)
+    // Cut M (v2 #7): 4-char groups for transcription — a 43-char unbroken run defeats
+    // write-it-down. Visual only: displayForm's contract says confirmMatches strips
+    // whitespace, so a grouped type-back still passes; Copy carries the bare phrase.
+    val grouped = remember(phrase) { phrase.chunked(4).joinToString(" ") }
     Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState())) {
         Text("Save your recovery phrase", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
@@ -633,7 +655,7 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
         Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             Column(Modifier.padding(16.dp)) {
                 SelectionContainer {
-                    Text(phrase, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyLarge)
+                    Text(grouped, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyLarge)
                 }
                 Spacer(Modifier.height(8.dp))
                 // a11y (Cut B): primary on the surfaceVariant card is 3.77:1 in light — use the pair's own ink.
@@ -648,7 +670,14 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
         // NOT a SecretField and NOT autofill-savable — a recovery phrase must never be offered to
         // a password manager (§F.7). `mono` kills IME autocorrect; the typed value is its OWN state,
         // never bound to the secret. A mistype fails the confirm and is discarded — never a KDF input.
-        Field("Recovery phrase", typedBack, { typedBack = it; mismatch = false }, mono = true)
+        Field("Type your recovery phrase", typedBack, { typedBack = it; mismatch = false }, mono = true)
+        // Cut M (v2 #7): guidance is the paste deterrent (see the header note) — the hint
+        // names what the type-back is FOR, so the clipboard shortcut reads as self-defeating.
+        Text(
+            "Type it from your written note — pasting doesn't prove you saved it.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         if (mismatch) {
             Text(
                 "That doesn't match — check the phrase above and type it exactly.",
@@ -763,6 +792,18 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
         SecretField("Master password", password) { password = it }
         Spacer(Modifier.height(12.dp))
         PrimaryButton("Unlock", enabled = password.isNotBlank() && !ui.busy, busy = ui.busy) { vm.unlock(email, password) }
+        // Cut M (v2 #24): the ~6 s Argon2id derivation behind Unlock read as a hang — the
+        // button spinner alone has no voice. One honest, motion-free caption (web/extension
+        // "Unsealing…" parity); polite live region so reader users hear it too.
+        if (ui.busy) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Unsealing your vault — this takes a few seconds.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
         if (canBiometric) {
             OutlinedButton(onClick = { vm.unlockWithBiometric(activity!!) }, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) {
                 Text("Use fingerprint / face")
