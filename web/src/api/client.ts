@@ -18,6 +18,7 @@ import type {
   PushResponse,
   RecoveryCommitRequest,
   RecoverySelfSetupRequest,
+  RecoverySelfSetupResponse,
   RecoveryVerifyResponse,
   RegisterRequest,
   SessionResponse,
@@ -460,17 +461,27 @@ export class ApiClient {
 
   /** Migration/rotation (§F.3): add or rotate THIS account's recovery piece over the in-memory UVK.
    *  Authenticated; the server re-verifies `currentAuthKey` (fresh master-password reauth) before
-   *  storing the block. Answers plain text. */
-  recoverySelfSetup(req: RecoverySelfSetupRequest) {
-    return this.text("PUT", "/api/v1/recovery/self-setup", req);
+   *  storing the block. Answers `{ pieceId }` (design 2026-07-13 piece-binding) — the opaque id the
+   *  capture gate presents at confirm. A pre-binding server answered plain "ok": a non-JSON 2xx body
+   *  yields `{ pieceId: null }` (legacy, unbound confirm) — never a throw on body shape alone. */
+  async recoverySelfSetup(req: RecoverySelfSetupRequest): Promise<RecoverySelfSetupResponse> {
+    const body = await this.text("PUT", "/api/v1/recovery/self-setup", req);
+    try {
+      return { pieceId: (JSON.parse(body) as RecoverySelfSetupResponse)?.pieceId ?? null };
+    } catch {
+      return { pieceId: null }; // pre-binding server rollback: plain "ok"
+    }
   }
 
-  /** design §F.9: flip this account's durable `recoveryConfirmed` flag after the ENROLL reveal was
-   *  saved + confirmed in-flow — NO regenerate; the register-committed piece IS what the user saved.
-   *  No key material rides this (unlike self-setup). Authenticated; server-refused on the public
-   *  break-glass origin; rate-limited. Answers plain text ("ok"). */
-  recoverySelfConfirm() {
-    return this.text("POST", "/api/v1/recovery/self/confirm");
+  /** design §F.9: flip this account's durable `recoveryConfirmed` flag after the revealed phrase was
+   *  saved + confirmed in-flow — NO regenerate; the committed piece IS what the user saved. `pieceId`
+   *  (design 2026-07-13 piece-binding: the register/self-setup-minted id of the piece the caller
+   *  revealed) rides the body so the confirm can never attest a piece a concurrent setup rotated away
+   *  — a mismatch is refused `409 recovery_piece_stale`; null/absent sends the legacy EMPTY body (the
+   *  server's device-scoped rule applies). No key material rides this (unlike self-setup).
+   *  Authenticated; server-refused on the public break-glass origin; rate-limited. Answers "ok". */
+  recoverySelfConfirm(pieceId?: string | null) {
+    return this.text("POST", "/api/v1/recovery/self/confirm", pieceId != null ? { pieceId } : undefined);
   }
 
   // ---- attachments (spec 02 §6: body = 24-byte header ‖ ciphertext chunks) ----
