@@ -41,6 +41,7 @@ import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
+import io.silencelen.andvari.core.client.EnrollLink
 import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.ImportHelp
 import io.silencelen.andvari.core.client.ItemDoc
@@ -123,8 +124,10 @@ fun DesktopApp(state: DesktopState) {
         // anyway, so a lock-screen dead-action card is structurally impossible).
         when (state.screen) {
             is DesktopScreen.Vault, is DesktopScreen.Settings, is DesktopScreen.Trash, is DesktopScreen.Sharing -> AttentionArea(state)
-            // RecoverySetup is a mid-enroll gate (no account chrome yet), like Welcome/Unlock — no attention area.
-            is DesktopScreen.Loading, is DesktopScreen.Welcome, is DesktopScreen.Unlock, is DesktopScreen.RecoverySetup -> {}
+            // RecoverySetup is a mid-enroll gate (no account chrome yet), like Welcome/Unlock — no
+            // attention area; RecoveryCapture (v2 #15) is the same gate reached from unlock/sign-in.
+            is DesktopScreen.Loading, is DesktopScreen.Welcome, is DesktopScreen.Unlock,
+            is DesktopScreen.RecoverySetup, is DesktopScreen.RecoveryCapture -> {}
         }
         Box(Modifier.weight(1f)) {
             when (val s = state.screen) {
@@ -136,6 +139,7 @@ fun DesktopApp(state: DesktopState) {
                 is DesktopScreen.Settings -> SettingsScreen(state)
                 is DesktopScreen.Trash -> TrashScreen(state)
                 is DesktopScreen.RecoverySetup -> RecoverySetupScreen(state)
+                is DesktopScreen.RecoveryCapture -> RecoveryCaptureScreen(state)
             }
         }
     }
@@ -298,8 +302,49 @@ private fun Enroll(state: DesktopState) {
             state.enroll(invite.trim(), email.trim(), name.trim(), password, shortFp)
         }
     }
+    // (v2 #13): the origin a successfully-pasted invite LINK applied — drives the "recognized"
+    // confirmation line below the field. Display-only; the fingerprint ceremony is the gate.
+    var linkOrigin by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxWidth()) {
-        Field("Invite token", invite, { invite = it }, mono = true, onEnter = submit, autoFocus = true) // a11ydesk-06: focus first field on open
+        // (v2 #13): the invite email carries a LINK (<origin>/enroll#a1.<payload>), not a bare
+        // token — but this field demanded exactly the token, rejected the pasted link with zero
+        // guidance, and made the invitee hand-copy email + server on top. Run EVERY change
+        // through the shared EnrollLink twin (total parse: null on anything that isn't a link,
+        // so plain token entry falls through untouched) and unpack a recognized link into all
+        // three fields. Setting the server goes through updateServer, which re-probes policy —
+        // the typed-sheet fingerprint ceremony below re-renders against the LINK'S server, so a
+        // hostile link can point anywhere it likes and still can't pass enrollment without the
+        // printed sheet matching that server's recovery key.
+        //
+        // payload.rfp is deliberately IGNORED here: a present rfp is honored ONLY via the
+        // in-person QR affirmation (design §F.1 — web gates it on the page origin; a
+        // server-composed emailed link is contractually rfp-free), and a desktop PASTE has no
+        // provenance — so this path always falls back to the fail-safe typed-sheet ceremony.
+        Field("Invite code or link", invite, { raw ->
+            val p = EnrollLink.parse(raw)
+            if (p != null) {
+                invite = p.t
+                email = p.e // the invite-bound address (server binds case-insensitively); still editable
+                if (p.o != state.baseUrl) state.updateServer(p.o)
+                linkOrigin = p.o
+            } else {
+                invite = raw
+                linkOrigin = null // hand-edits after a link are a NEW entry — drop the stale confirmation
+            }
+        }, mono = true, onEnter = submit, autoFocus = true) // a11ydesk-06: focus first field on open
+        // Confirmation only while the applied origin still IS the live server (a later manual
+        // ServerField change must not keep claiming the link's server); helper line otherwise.
+        if (linkOrigin != null && linkOrigin == state.baseUrl) {
+            Text(
+                "Invite link recognized — code, email, and server were filled in for $linkOrigin.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary,
+            )
+        } else {
+            Text(
+                "Paste the link from your invite email — or just the invite code.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Field("Email", email, { email = it }, onEnter = submit)
         Field("Name (optional)", name, { name = it }, onEnter = submit)
         Secret("Master password", password, onEnter = submit) { password = it }
@@ -368,11 +413,14 @@ private fun Enroll(state: DesktopState) {
  * opens. Shown-once discipline: the phrase is never persisted (not in DesktopStore/files), never
  * logged, and is dropped the instant the confirm passes. There is NO skip/back affordance — the
  * silent-total-loss guard. Idle auto-lock still applies (desktop has no screenshot shield), so the
- * phrase is never left on an unattended screen.
+ * phrase is never left on an unattended screen — and (v2 #15) an interruption is no longer a silent
+ * skip: the lockReason says the phrase died unconfirmed, and the §F.9 capture gate
+ * ([RecoveryCaptureScreen]) re-routes the next unlock into a fresh reveal instead of the vault.
  *
  * TODO(recovery-cut-2): the native self-recovery flow (POST /recovery/self/verify + commit) — a member using this
  * phrase to reset a forgotten master password — and the native admin fingerprint-confirm-for-QR are
- * deferred; web covers self-recovery for this cut. This screen only SHOWS the piece at signup.
+ * deferred; web covers self-recovery for this cut. This screen SHOWS the piece (at signup, or a
+ * fresh one via the capture gate) — it never consumes one.
  */
 @Composable
 private fun RecoverySetupScreen(state: DesktopState) {
@@ -423,6 +471,54 @@ private fun RecoverySetupScreen(state: DesktopState) {
         }
         Spacer(Modifier.height(16.dp))
         Primary("I've saved it — open my vault", typedBack.isNotBlank() && !state.busy, state.busy, confirm)
+    }
+}
+
+/**
+ * (v2 #15) §F.9 vault-entry capture gate — the working/error half (web RecoveryCaptureGate parity).
+ * Reached from unlock/sign-in when the server reports recoveryConfirmed=false: DesktopState is
+ * committing a FRESH per-member piece (PUT /recovery/self-setup); on success the flow lands in the
+ * same un-skippable [RecoverySetupScreen] reveal, on failure this shows the error + Retry and NEVER
+ * proceeds to the vault (no skip affordance — the whole point is that the "un-skippable" gate was
+ * skippable via idle lock/quit/crash). Offline unlocks never reach this screen (the state layer
+ * skips the gate when accountKeys came from the offline cache), so vault access without a network
+ * is preserved.
+ */
+@Composable
+private fun RecoveryCaptureScreen(state: DesktopState) {
+    Column(Modifier.fillMaxSize().padding(28.dp).verticalScroll(rememberScrollState())) {
+        Text("Finish protecting your account", style = MaterialTheme.typography.headlineSmall)
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "Your recovery phrase was never confirmed as saved — if you forgot your master password " +
+                "today, that phrase couldn't help you. A fresh phrase is being prepared now; you'll " +
+                "write it down and type it back before the vault opens.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        // Honesty over comfort: the self-setup ROTATES the stored piece, so a phrase written down
+        // during an interrupted reveal (saved but never typed back) stops working the moment the
+        // commit lands. Saying so beats a member trusting a dead phrase.
+        Text(
+            "If you wrote down a phrase before and never finished confirming it, it's replaced by the new one.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(20.dp))
+        val err = state.recoveryCaptureError
+        if (err != null) {
+            // Static copy from the state layer only — never interpolate near secret material (§F.7).
+            Text(err, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.height(12.dp))
+            Primary("Try again", !state.busy, state.busy) { state.retryRecoveryCapture() }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+                Text("Preparing your recovery phrase…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 }
 
@@ -495,6 +591,16 @@ private fun Vault(state: DesktopState) {
     // choice decrypts vault metadata, so — like vaultBadges — recompute only when the item set
     // changes (sync/refresh replace `items`), never per search keystroke.
     val newItemVaultChoices = remember(state.items) { state.newItemVaultChoices() }
+    // (v2 #15): mirror the editor's mounted state into DesktopState — the draft lives in
+    // remember-scoped fields the state layer can't see, and without this the idle lock unmounted
+    // it silently. Keyed DisposableEffect: open/close flips the mirror, and Vault itself
+    // unmounting (lock, sign-out, navigation) resets it via onDispose so a dead mirror can never
+    // hold the grace open.
+    val editorMounted = editing != null
+    DisposableEffect(editorMounted) {
+        state.noteEditorOpen(editorMounted)
+        onDispose { state.noteEditorOpen(false) }
+    }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("andvari", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
@@ -502,7 +608,21 @@ private fun Vault(state: DesktopState) {
             IconButton(onClick = { state.openSharing() }) { Icon(Icons.Default.Group, "sharing") }
             IconButton(onClick = { state.openTrash() }) { Icon(Icons.Default.Delete, "trash") }
             IconButton(onClick = { state.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
-            IconButton(onClick = { state.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
+            // Cut O (v2 #17): sync feedback lives HERE, on the toolbar slot the user already
+            // associates with sync — for BOTH the manual Refresh and the passive poll/refocus
+            // pulls — never by repainting user buttons elsewhere. The spinner replaces the icon
+            // in a same-size box (no toolbar reflow); clicks during a run are single-flighted
+            // away in DesktopState.refresh(), so this needs no enabled-gate gymnastics.
+            if (state.syncBusy) {
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(
+                        Modifier.size(18.dp).semantics { contentDescription = "sync"; stateDescription = "syncing" },
+                        strokeWidth = 2.dp,
+                    )
+                }
+            } else {
+                IconButton(onClick = { state.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
+            }
             IconButton(onClick = { state.lock() }) { Icon(Icons.Default.Lock, "lock") }
         }
         Divider()
@@ -516,6 +636,20 @@ private fun Vault(state: DesktopState) {
         val current = detailId?.let { state.item(it) }
         when {
             editing != null -> Column(Modifier.fillMaxSize()) {
+                // (v2 #15): the idle window elapsed and only the editor's bounded grace is
+                // holding the lock off — say so, above the editor, so a user glancing back
+                // knows the clock is running and one keypress keeps their draft alive. When
+                // the grace expires the lock's reason line owns the post-mortem.
+                if (state.idleLockImminent) {
+                    Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            "Still there? The vault will lock soon and discard this editor's unsaved changes — any key or click keeps it open.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                        )
+                    }
+                }
                 // Review (N3): AttentionArea actions (accept/decline a transfer, re-seal)
                 // render ABOVE an open editor and their op() failures land in the GLOBAL
                 // error — which no editor surface composed (the editor's own bar is
@@ -1648,7 +1782,18 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
             OverwriteConfirmDialog(overwrite)
             doc.attachments.forEach { ref ->
                 AttachmentLine(ref) {
-                    TextButton(enabled = !state.busy, onClick = {
+                    // Cut O (v2 #17): while THIS file downloads, its action slot becomes a small
+                    // spinner — keyed on the in-flight ref id, so it lands on the row the user
+                    // clicked, not on every busy-gated control at once (the old "everything greys,
+                    // nothing points at the wait" shape read as a frozen app on slow links).
+                    if (state.downloadingAttachmentId == ref.id) {
+                        Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                            CircularProgressIndicator(
+                                Modifier.size(18.dp).semantics { contentDescription = "saving ${ref.name}"; stateDescription = "working" },
+                                strokeWidth = 2.dp,
+                            )
+                        }
+                    } else TextButton(enabled = !state.busy, onClick = {
                         val dialog = FileDialog(null as Frame?, "Save attachment", FileDialog.SAVE)
                         dialog.file = ref.name
                         dialog.isVisible = true
