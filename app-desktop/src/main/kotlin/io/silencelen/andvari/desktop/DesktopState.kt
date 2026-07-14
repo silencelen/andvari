@@ -10,7 +10,9 @@ import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.CopyDeniedException
+import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ItemChangedException
+import io.silencelen.andvari.core.client.KdfPolicyViolationException
 import io.silencelen.andvari.core.client.MoveGesture
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.UpgradeRequiredException
@@ -44,12 +46,15 @@ import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.MemberRecovery
+import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.PendingTransfer
+import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import io.silencelen.andvari.core.model.VaultMemberSummary
@@ -86,6 +91,13 @@ sealed interface DesktopScreen {
     // skippable by the app's own idle lock and the next unlock landed straight in the vault with the
     // member's self-recovery silently dead.
     data object RecoveryCapture : DesktopScreen
+    // Native self-service recovery (design 2026-07-12 §F.3, the web Recover.tsx mirror): the
+    // "forgot my master password" flow for a member holding their saved recovery phrase —
+    // verify (email + phrase → single-use ticket) → choose a new master password → commit.
+    // Unauthenticated (pre-session), reached from Unlock/Welcome; both /recovery/self routes are
+    // server-refused on the public break-glass origin. Confirm-binding §6 scope ruling: verify's
+    // password-hash check already binds the caller to the CURRENT piece — no pieceId here.
+    data object Recover : DesktopScreen
 }
 
 /**
@@ -193,6 +205,14 @@ class DesktopState(private val scope: CoroutineScope) {
         private set
     var updateAvailable by mutableStateOf<String?>(null)
         private set
+    // H2 (§M-D5): the QUIET update-channel state — unverified listing or a stale `signedAt`.
+    // Rendered as one muted line in Settings, never a banner/nag (a sig-stripping server must not
+    // be able to train the household on scary noise). Mutually exclusive with [updateAvailable].
+    var updateChannelNotice by mutableStateOf<String?>(null)
+        private set
+    // UI-audit #26: the Auto/Light/Dark override Main.kt's AndvariDesktopTheme consumes.
+    var themeMode by mutableStateOf(ThemeMode.fromStore(store.themeMode))
+        private set
     // Set when the server 426s this build (minVersion pin) — the UI shows a blocking
     // "update required" screen. Advisory: the gate is a nudge for honest clients.
     var upgradeRequired by mutableStateOf<String?>(null)
@@ -241,6 +261,22 @@ class DesktopState(private val scope: CoroutineScope) {
     // instead (this gate-scoped slice has no vault surface).
     var recoveryReplacedNotice by mutableStateOf<String?>(null)
         private set
+    // ---- native self-recovery (DesktopScreen.Recover — web Recover.tsx mirror) ----
+    // TRUE once phase-1 verify accepted (the reset step renders). The verify RESPONSE (ticket +
+    // wrapped-UVK/identity material — all server-issued ciphertext/public values) and the parsed
+    // raw phrase bytes live in the private fields below under §F.7 discipline: never persisted,
+    // never logged, zeroed at every exit (cancel, commit success, session teardown). The secret
+    // survives a FAILED commit on purpose (web parity — a network blip retries without retyping).
+    var recoverVerified by mutableStateOf(false)
+        private set
+    // Static curated copy ONLY (the web verifyErrorMessage/resetErrorMessage twins) — never an
+    // exception's own message, never anything interpolated near the phrase (§F.7).
+    var recoverError by mutableStateOf<String?>(null)
+    // Prefill for the email field when the flow is entered from the Unlock screen.
+    var recoverPrefillEmail by mutableStateOf("")
+        private set
+    private var recoverVerify: RecoveryVerifyResponse? = null
+    private var recoverSecret: ByteArray? = null
     // (v2 #15) pre-lock protection: TRUE while the vault screen has an item editor mounted —
     // mirrored in by the UI (the editor's draft is remember-scoped Compose state this holder
     // can't see). While set, maybeIdleLock defers by ONE bounded grace window instead of
@@ -428,11 +464,49 @@ class DesktopState(private val scope: CoroutineScope) {
                 if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
             }.onFailure { policyFetchFailed = true } // §3: never render the no-key lie off a failed probe
             probe.close()
-            runCatching { checkForUpdate(store.baseUrl) }.onSuccess { updateAvailable = it }
+            // UI-audit #24: checkForUpdate is a BLOCKING java.net.http call — it ran directly on
+            // this Compose-scope coroutine and froze the whole window for up to ~8 s at startup.
+            // Now Dispatchers.IO AND a sibling coroutine: the auth screen must never wait on the
+            // nag either (it used to gate `screen =` below even when it didn't freeze). The H2
+            // verify flow (signature + seq floor + signedAt) rides the same call; its results
+            // land in state whenever they arrive.
+            scope.launch {
+                runCatching { withContext(Dispatchers.IO) { checkForUpdate(store.baseUrl, store.lastAcceptedSeq) } }
+                    .onSuccess { applyUpdateCheck(it) }
+            }
             val session = store.load()
             screen = if (session != null && session.accessToken.isNotEmpty()) DesktopScreen.Unlock(session.email) else DesktopScreen.Welcome
             baseUrl = store.baseUrl
         }
+    }
+
+    /**
+     * H2 (design 2026-07-13-signed-updates §M): fold one verified-or-refused update check into UI
+     * state. Only a VERIFIED manifest may nag ([updateAvailable]) or advance the persisted
+     * anti-rollback floor (§D#5); everything unverifiable lands in the QUIET [updateChannelNotice]
+     * (§M-D5 — distinct from "up to date", never loud). Disabled (test-key build, §M-D3) shows
+     * nothing at all: a hard-off path must not read as a channel problem.
+     */
+    private fun applyUpdateCheck(result: UpdateCheck) {
+        when (result) {
+            is UpdateCheck.Available -> { updateAvailable = result.version; updateChannelNotice = null; ratchetAcceptedSeq(result.seq) }
+            is UpdateCheck.UpToDate -> { updateAvailable = null; updateChannelNotice = null; ratchetAcceptedSeq(result.seq) }
+            is UpdateCheck.Stale -> { updateAvailable = null; updateChannelNotice = UPDATE_STALE_NOTICE; ratchetAcceptedSeq(result.seq) }
+            is UpdateCheck.Unverified -> { updateAvailable = null; updateChannelNotice = UPDATE_UNVERIFIED_NOTICE }
+            is UpdateCheck.Disabled -> { updateAvailable = null; updateChannelNotice = null }
+        }
+    }
+
+    /** The floor only ever ratchets UP, and only off a verified manifest (§D#5). */
+    private fun ratchetAcceptedSeq(seq: Long) {
+        if (seq > store.lastAcceptedSeq) store.lastAcceptedSeq = seq
+    }
+
+    /** UI-audit #26: persist + publish the Auto/Light/Dark override. (Named choose…, not set… —
+     *  the property's own JVM setter already claims the setThemeMode signature.) */
+    fun chooseThemeMode(mode: ThemeMode) {
+        themeMode = mode
+        store.themeMode = mode.storeValue
     }
 
     fun updateServer(url: String) {
@@ -486,13 +560,18 @@ class DesktopState(private val scope: CoroutineScope) {
 
     fun clearError() { error = null }
     fun clearSaveError() { saveError = null }
+    fun clearRecoverError() { recoverError = null }
     /** Editor closed (cancel or success): the next editor session starts a fresh draft.
      *  NOT part of [clearSaveError] — dismissing the inline error must keep the draft id,
      *  or the very next retry re-mints and re-wedges on attachment_mismatch. */
     fun endEditorSession() { saveError = null; draftItemId = null }
     fun clearNotice() { notice = null }
 
-    fun signIn(email: String, password: String, totp: String? = null) = op {
+    // #23: sign-in failures map through the shared canon's sign-in ladder (401 → wrong email/
+    // password — widened to "…or one-time code" when a code was tried — H1 → the sign-in-context
+    // block sentence, `public_login_requires_totp` → the curated break-glass line), never the
+    // server's raw message.
+    fun signIn(email: String, password: String, totp: String? = null) = op(map = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }) {
         val a = newApi()
         try {
             val pre = a.prelogin(email)
@@ -504,8 +583,7 @@ class DesktopState(private val scope: CoroutineScope) {
                 when (e.code) {
                     // Server-TOTP is enrolled: reveal the code field and let the user retry.
                     "totp_required" -> { signInTotpRequired = true; busy = false; a.close(); return@op }
-                    "public_login_requires_totp" ->
-                        throw ApiException(e.status, e.code, "this account has no server-TOTP enrolled; public access is blocked")
+                    // (The op mapper turns `public_login_requires_totp` and friends into curated copy.)
                     else -> throw e
                 }
             }
@@ -530,7 +608,9 @@ class DesktopState(private val scope: CoroutineScope) {
         }
     }
 
-    fun unlock(email: String, password: String) = op {
+    // #23: unlock failures map through the canon's unlock ladder — a crypto throw here IS "Wrong
+    // master password." (the sole un-wrapped crypto step), 401 → session expired, IO → unreachable.
+    fun unlock(email: String, password: String) = op(map = HouseholdCopy::forUnlockError) {
         val session = store.load() ?: error("no session")
         val a = newApi(session.tokens())
         // Offline unlock (spec 02 §8): cached keys when the network is down; wipe on a
@@ -579,12 +659,12 @@ class DesktopState(private val scope: CoroutineScope) {
         enrollOp(invite, email, name, password, typedShortFp, hasSheet)
     }
 
-    private fun enrollOp(invite: String, email: String, name: String, password: String, typedShortFp: String, hasSheet: Boolean) = op {
+    private fun enrollOp(invite: String, email: String, name: String, password: String, typedShortFp: String, hasSheet: Boolean) = op(map = ::enrollError) {
         // §F.1 posture, re-derived at the STATE layer from the raw sheet declaration (the same
         // frame-stale-proofing as the strength/fingerprint re-asserts): sheet ⇒ the typed-sheet
         // ceremony seals org escrow; no sheet ⇒ WAIVED (per-member piece only — a backstop is
         // never sealed off a server-trusted fingerprint). The server enforces the INVITE's
-        // polarity either way (register-gate refusals land in [friendlyError]).
+        // polarity either way (register-gate refusals land in [enrollError]).
         val posture = enrollPosture(hasSheet)
         // §3 flag audit: this fallback fetch feeds THIS enroll directly (normally dead —
         // the submit gate needs the fingerprint, so policy is already loaded; the waived
@@ -608,10 +688,12 @@ class DesktopState(private val scope: CoroutineScope) {
         // the UI gate against the OLD server's fingerprint — spec 04 §2(3)'s attestation
         // must bind to the org being enrolled into (the resealEscrow pattern below).
         // REQUIRED-TYPED only: waived seals nothing, so there is no fingerprint to attest.
-        if (posture == EnrollPosture.RequiredTyped) {
-            check(Escrow.shortFormMatches(typedShortFp, pol.recoveryFingerprint)) {
-                "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 16 characters."
-            }
+        // (#23: an explicit error write, not check() — the curated sentence must reach the user
+        // itself, never ride an IllegalStateException's message through a generic mapper.)
+        if (posture == EnrollPosture.RequiredTyped && !Escrow.shortFormMatches(typedShortFp, pol.recoveryFingerprint)) {
+            busy = false
+            error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 16 characters."
+            return@op
         }
         val a = newApi()
         try {
@@ -887,6 +969,154 @@ class DesktopState(private val scope: CoroutineScope) {
         }
     }
 
+    // ---- native self-recovery (design §F.3 — the web Recover.tsx mirror; DesktopScreen.Recover) ----
+
+    /** Enter the forgot-master-password flow (from Unlock — which knows the email — or Welcome).
+     *  Kicks a policy re-probe when none is loaded: the reset step needs `policy.kdfParams`, and
+     *  a launch-time probe failure would otherwise dead-end the flow at that step. */
+    fun openRecover(prefillEmail: String = "") {
+        clearRecoverState()
+        recoverPrefillEmail = prefillEmail
+        screen = DesktopScreen.Recover
+        if (policy == null && !busy) retryPolicy()
+    }
+
+    /** Leave the flow (§F.7: zeroes the parsed phrase bytes) — back to Unlock when a stored
+     *  session exists, else Welcome. The UI busy-gates its Cancel affordances, so this never
+     *  races an in-flight verify/commit. */
+    fun cancelRecover() {
+        clearRecoverState()
+        val session = store.load()
+        screen = if (session != null && session.accessToken.isNotEmpty()) DesktopScreen.Unlock(session.email) else DesktopScreen.Welcome
+    }
+
+    /**
+     * Phase 1 — verify possession of the recovery phrase (web `submitVerify` parity). The typed
+     * phrase parses locally ([MemberRecovery.parseSecret] is TOTAL — malformed input is a static
+     * user error, not an exception); only the HKDF-derived `recoveryAuthKey` goes to the server,
+     * which proves possession without ever seeing the phrase and answers a uniform 401 across
+     * unknown-email / no-row / bad-key (anti-enumeration, §F.5). On success the raw secret bytes
+     * are stashed for the commit step under §F.7 discipline. Unauthenticated — rides a transient
+     * client, bounded like every recovery call (Cut O).
+     */
+    fun recoverVerifySubmit(email: String, phrase: String) {
+        if (busy) return
+        val secret = MemberRecovery.parseSecret(phrase)
+        if (secret == null || secret.isEmpty()) {
+            recoverError = "That doesn't look like a recovery phrase — check it and try again."
+            return
+        }
+        busy = true; recoverError = null
+        scope.launch {
+            val a = newApi()
+            try {
+                val authKey = withContext(Dispatchers.Default) { MemberRecovery.deriveAuthKey(createCryptoProvider(), secret) }
+                val resp = withTimeoutOrNull(RECOVERY_CALL_TIMEOUT_MS) { a.recoverySelfVerify(email.trim(), authKey) }
+                    ?: throw java.io.InterruptedIOException("recovery verify timed out")
+                if (screen != DesktopScreen.Recover) { secret.fill(0); return@launch } // left the flow — publish nothing
+                recoverSecret?.fill(0) // a re-verify replaces any earlier stash
+                recoverSecret = secret
+                recoverVerify = resp
+                recoverVerified = true
+            } catch (t: Throwable) {
+                secret.fill(0) // failed verify: the parsed bytes must not linger (§F.7)
+                if (screen == DesktopScreen.Recover) recoverError = recoverVerifyError(t)
+            } finally {
+                busy = false
+                a.close()
+            }
+        }
+    }
+
+    /**
+     * Phase 2 — commit the reset (web `submitReset` parity). Core [Account.recover] opens the
+     * SAME UVK from the phrase, runs the spec 01 §5 identity-pubkey HARD-FAIL (a substituted
+     * identity key aborts BEFORE commit — surfaced as the distinct tampering copy, never "wrong
+     * phrase"), then re-wraps under the new password (argon2id — off the UI thread). The commit
+     * revokes every session server-side, so on success the stored session/keys here are dead
+     * weight: drop them and land on Welcome with the sign-in-fresh notice. A FAILED commit keeps
+     * the stashed secret so a transient blip retries without retyping (web keeps its secretRef
+     * the same way); the single-use ticket path ("start again") exits via Cancel.
+     */
+    fun recoverCommitSubmit(newPassword: String) {
+        if (busy) return
+        val v = recoverVerify
+        val secret = recoverSecret
+        if (v == null || secret == null) {
+            recoverError = "Your recovery session expired — start again."
+            return
+        }
+        val pol = policy
+        if (pol == null) {
+            recoverError = "Couldn't reach the server for its settings — try again in a moment."
+            return
+        }
+        // F60 floor re-assert at the state layer (enroll parity — the UI gate can be a frame stale).
+        if (!Strength.meetsMasterPasswordFloor(newPassword)) {
+            recoverError = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols."
+            return
+        }
+        busy = true; recoverError = null
+        scope.launch {
+            val a = newApi()
+            try {
+                val commit = withContext(Dispatchers.Default) { Account.recover(secret, v, newPassword, pol.kdfParams) }
+                withTimeoutOrNull(RECOVERY_CALL_TIMEOUT_MS) { a.recoverySelfCommit(commit) }
+                    ?: throw java.io.InterruptedIOException("recovery commit timed out")
+                // Success. Sessions are revoked server-side; the persisted tokens + accountKeys
+                // (old KDF wrap) are stale — clear them so the next entry is an honest fresh
+                // sign-in instead of a doomed unlock. The ciphertext vault cache stays (spec 05
+                // T3 posture — the UVK is invariant; a fresh sign-in re-binds it).
+                clearRecoverState() // zeroes the secret (§F.7)
+                store.clear()
+                lockReason = null
+                screen = DesktopScreen.Welcome
+                notice = "Master password reset — sign in with your new password."
+            } catch (t: Throwable) {
+                if (screen == DesktopScreen.Recover) recoverError = recoverResetError(t)
+            } finally {
+                busy = false
+                a.close()
+            }
+        }
+    }
+
+    /** §F.7 teardown for the self-recovery slice: zero + drop the parsed phrase bytes and every
+     *  flow field. Called at entry, cancel, commit success, and (belt) session teardown. */
+    private fun clearRecoverState() {
+        recoverSecret?.fill(0)
+        recoverSecret = null
+        recoverVerify = null
+        recoverVerified = false
+        recoverError = null
+        recoverPrefillEmail = ""
+    }
+
+    /** Web Recover.tsx `verifyErrorMessage` twin — static curated copy only (§F.7); the uniform
+     *  401 never reveals which of email / phrase / no-recovery-row was wrong (§F.5). */
+    private fun recoverVerifyError(t: Throwable): String = when {
+        t is KdfPolicyViolationException -> HouseholdCopy.WEAK_KDF_ACTION // H1 (spec 05 T1)
+        t is ApiException && t.status == 401 -> "We couldn't verify that email and recovery phrase."
+        t is ApiException && t.code == "recovery_public_disabled" ->
+            "Account recovery isn't available from this public address — connect from inside (VPN/LAN) and try again."
+        t is ApiException -> HouseholdCopy.SERVER_PROBLEM
+        t is java.io.IOException -> HouseholdCopy.UNREACHABLE
+        else -> "Recovery failed. Please try again."
+    }
+
+    /** Web Recover.tsx `resetErrorMessage` twin. The identity-mismatch tampering signal (spec 01
+     *  §5) keeps its distinct warning — never softened into "wrong phrase" or retry copy. */
+    private fun recoverResetError(t: Throwable): String = when {
+        t is KdfPolicyViolationException -> HouseholdCopy.WEAK_KDF_ACTION // H1 (spec 05 T1)
+        t is CryptoException && t.message?.contains("identity key mismatch") == true -> HouseholdCopy.IDENTITY_MISMATCH
+        t is ApiException && (t.code == "invalid_ticket" || t.status == 401) -> "Your recovery session expired — start again."
+        t is ApiException && t.code == "recovery_account_not_active" ->
+            "This account is disabled — self-recovery isn't available. Ask your admin to recover it."
+        t is ApiException -> HouseholdCopy.SERVER_PROBLEM
+        t is java.io.IOException -> HouseholdCopy.UNREACHABLE
+        else -> "Recovery failed. Please try again."
+    }
+
     /**
      * F57: re-seal this account's UVK to the CURRENT org recovery key after a re-ceremony. The user
      * must have TYPED the new recovery fingerprint's short form from their PRINTED sheet (spec 04
@@ -930,8 +1160,10 @@ class DesktopState(private val scope: CoroutineScope) {
         } catch (t: Throwable) {
             // Route the failure to the EDITOR's error surface and stop: the editor stays
             // open (F71) and the global bar stays quiet — op's generic catch never sees it.
+            // #23: canon save copy (IO → "try saving again when connected", 409 → changed
+            // elsewhere, …) — never the exception's raw message beside the Save button.
             busy = false
-            saveError = t.message ?: "save failed"
+            saveError = HouseholdCopy.forSaveError(t)
             return@op
         } finally {
             saveProgress = null
@@ -1026,7 +1258,12 @@ class DesktopState(private val scope: CoroutineScope) {
                     // fresh attempt re-reads state (never a blind replay of a doomed gesture).
                     t is CopyDeniedException -> { moveGestures.remove(gKey); moveError = "You don't have permission to add items to that vault — nothing was moved." }
                     t is ItemChangedException -> { moveGestures.remove(gKey); moveError = "This item changed while moving — go back, review it, and try again." }
-                    t is ApiException && t.status == 403 -> { moveGestures.remove(gKey); moveError = t.message ?: "Move denied — nothing was moved." }
+                    // #23: a server 403 refusal maps through the canon ("You don't have permission
+                    // to do that."), never the wire's raw message. The MINTED 409 above (the
+                    // curated item-flavored vault_state_changed sentence) deliberately does NOT
+                    // route through forError — the shared map would swap it for the generic
+                    // vault-flavored row.
+                    t is ApiException && t.status == 403 -> { moveGestures.remove(gKey); moveError = HouseholdCopy.forError(t) }
                     // Transient — KEEP the gesture so Retry replays the same ids (no duplicate).
                     else -> moveError = "That didn't finish. Press Retry — it won't create a duplicate."
                 }
@@ -1208,7 +1445,7 @@ class DesktopState(private val scope: CoroutineScope) {
                 if (screen !is DesktopScreen.Sharing) notice = copiedNote // A-note
             } catch (t: Throwable) {
                 copyProgress = null; copyVaultId = null
-                error = friendlyError(t)
+                error = HouseholdCopy.forError(t) // #23
             } finally {
                 // Ownership check (belt on the single-flight guard): only this call's own
                 // marker may be cleared — a future re-entry path can never disarm a live copy.
@@ -1390,10 +1627,11 @@ class DesktopState(private val scope: CoroutineScope) {
                     t is UpgradeRequiredException ->
                         upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${store.baseUrl}/downloads."
                     // Offline blip: silent for the background poll (by design), an honest one-liner
-                    // for the toolbar Refresh the user just clicked.
+                    // for the toolbar Refresh the user just clicked (#23: the canon's SYNC_OFFLINE —
+                    // byte-equal to the sentence this site always showed).
                     t is java.io.IOException ->
-                        if (manual) notice = "Can't reach the server right now — showing what's synced on this device."
-                    else -> error = friendlyError(t)
+                        if (manual) notice = HouseholdCopy.SYNC_OFFLINE
+                    else -> error = HouseholdCopy.forSyncError(t)
                 }
                 refreshLifecycle() // A-funnel: even a denied/park cycle leaves notices to show
             }
@@ -1432,7 +1670,9 @@ class DesktopState(private val scope: CoroutineScope) {
         val bytes = try {
             file.inputStream().use { readBounded(it, CsvImport.MAX_BYTES) }
         } catch (t: Throwable) {
-            importError = "Couldn't read ${file.name}: ${t.message}"; return
+            // #23: local read failure → canon file copy (the bytes never left the device — never
+            // network copy, never the raw exception text).
+            importError = HouseholdCopy.forImportError(t); return
         }
         if (bytes == null) { importError = friendlyImport("too_large"); return }
         try {
@@ -1451,7 +1691,7 @@ class DesktopState(private val scope: CoroutineScope) {
         } catch (e: CsvImport.ImportException) {
             importError = friendlyImport(e.code)
         } catch (t: Throwable) {
-            importError = t.message ?: "could not read that file"
+            importError = HouseholdCopy.forImportError(t) // #23: canon copy, never t.message
         }
     }
 
@@ -1492,7 +1732,7 @@ class DesktopState(private val scope: CoroutineScope) {
                 importVaultId = vaultId
                 importProgress = null
             } catch (t: Throwable) {
-                importError = t.message ?: "could not re-check that file" // plan/vault unchanged — still a matched pair
+                importError = HouseholdCopy.forImportError(t) // #23; plan/vault unchanged — still a matched pair
             } finally {
                 importBusy = false
             }
@@ -2038,6 +2278,7 @@ class DesktopState(private val scope: CoroutineScope) {
         // clears it itself (B1 identity gates), and a blind reset would disarm the single-flight
         // guard under it.
         recoveryCaptureError = null; recoveryReplacedNotice = null; editorOpen = false; idleLockImminent = false; downloadingAttachmentId = null
+        clearRecoverState() // §F.7 belt: the self-recovery stash never outlives a session teardown
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
         backupPreflight = null; backupResult = null; csvPreflight = null
         // F19: drop any in-flight move state + memoized gesture ids/fileKeys on lock/sign-out.
@@ -2130,39 +2371,34 @@ class DesktopState(private val scope: CoroutineScope) {
         refreshLifecycle() // A-funnel: offers/notices delivered by the unlock sync show at once
     }
 
-    /** §11 friendlyError mappings (mirrors Android/web Sharing) — lifecycle codes get honest,
-     *  human copy; everything else keeps the raw message the app always showed. Wired into
-     *  [op]'s generic catch, deliberately upgrading ALL desktop ops (design §5). */
-    private fun friendlyError(t: Throwable): String {
-        // H1 (spec 05 T1): a hostile/misconfigured server sent a weakened master-password KDF — a
-        // distinct security block, never surfaced as a wrong-password or transport error.
-        if (t is io.silencelen.andvari.core.client.KdfPolicyViolationException) {
-            return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your administrator."
+    /**
+     * #23: the ENROLL surface's error map. Surface-specific refusal codes keep their per-client
+     * phrasing at the surface (the HouseholdCopy contract — web `enrollError` is the twin table;
+     * wording adapted to the desktop's sheet toggle where web says "reload"); everything else
+     * delegates to the shared canon. The H1 branch pins the SIGN-IN-context sentence (an enroll
+     * is a credential ceremony — byte-equal to what this screen always showed); the old desktop
+     * `friendlyError` duplicate of the canon's ten lifecycle rows is deleted in favor of
+     * [HouseholdCopy.forError] (see [op]).
+     */
+    private fun enrollError(t: Throwable): String {
+        if (t is ApiException) when (t.code) {
+            // §F.4 register-gate refusals (posture ≠ invite; reachable now the waived toggle
+            // exists). The invitee can't fix a mismatch — the admin re-issues the invite.
+            "recovery_required" -> return "This invite needs the admin backstop set up — use your printed recovery sheet (“My admin gave me a printed recovery sheet”), or ask your admin to re-send it as a member-only invite."
+            "escrow_not_allowed_when_waived" -> return "This invite is set to “member-only” (no admin backstop) — set up without the recovery-sheet step, or ask your admin for a new invite."
+            // Invite/register refusals (web enrollError rows) — these used to fall through as the
+            // server's raw message.
+            "invalid_invite" -> return "That invite code is not valid."
+            "invite_used" -> return "That invite has already been used. Already set up this account? Switch to Sign in."
+            "invite_expired" -> return "That invite has expired."
+            "email_taken" -> return "An account with that email already exists."
+            "invite_email_mismatch" -> return "This invite was created for a different email address — ask your admin for a new invite."
+            "escrow_fingerprint_mismatch" -> return "Recovery fingerprint mismatch — do not proceed; contact your admin."
         }
-        if (t is ApiException) {
-            when (t.code) {
-                "owner_must_transfer_or_delete" -> return "You own this vault, so you can't just leave it — make someone else the owner first, or delete it."
-                "vault_deleted" -> return "This vault was deleted. The owner can restore it for a few more days."
-                "vault_gone" -> return "The restore window has passed — this vault's data has been erased."
-                "vault_state_changed" -> return "This vault changed since you tried that — reload and try again."
-                "transfer_not_pending" -> return "This ownership offer is no longer active."
-                "not_transfer_target" -> return "This ownership offer isn't for you, or it couldn't be verified."
-                "stale_meta" -> return "This vault changed somewhere else — reload and try the rename again."
-                "not_a_member" -> return "They have to be a member of this vault first."
-                "user_inactive" -> return "That account has been disabled — ask your admin to re-enable it first."
-                "not_vault_owner" -> return "Only the vault's owner can do that."
-                // §F.4 register-gate refusals (posture ≠ invite; reachable now the waived toggle
-                // exists). The invitee can't fix a mismatch — the admin re-issues the invite (web
-                // enrollError parity, phrasing adapted to the desktop's sheet toggle).
-                "recovery_required" -> return "This invite needs the admin backstop set up — use your printed recovery sheet (“My admin gave me a printed recovery sheet”), or ask your admin to re-send it as a member-only invite."
-                "escrow_not_allowed_when_waived" -> return "This invite is set to “member-only” (no admin backstop) — set up without the recovery-sheet step, or ask your admin for a new invite."
-            }
-            if (t.status == 429) return "Too many requests — please wait a bit and try again."
-        }
-        return t.message ?: "something went wrong"
+        return if (t is KdfPolicyViolationException) HouseholdCopy.WEAK_KDF_SIGN_IN else HouseholdCopy.forError(t)
     }
 
-    private fun op(block: suspend () -> Unit) {
+    private fun op(map: (Throwable) -> String = HouseholdCopy::forError, block: suspend () -> Unit) {
         busy = true; error = null; notice = null
         scope.launch {
             try {
@@ -2173,7 +2409,12 @@ class DesktopState(private val scope: CoroutineScope) {
                 busy = false
                 upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${store.baseUrl}/downloads."
             } catch (t: Throwable) {
-                busy = false; error = friendlyError(t)
+                // #23: the shared household canon replaces the deleted desktop friendlyError —
+                // its ten vault-lifecycle rows live byte-equal in HouseholdCopy's code map, and
+                // the `t.message` fallback is gone for good (the canon NEVER returns raw wire
+                // text). Auth-shaped flows pass their context mapper ([HouseholdCopy.forSignInError]
+                // / forUnlockError / [enrollError]); everything else takes the general map.
+                busy = false; error = map(t)
             }
         }
     }
@@ -2209,5 +2450,12 @@ class DesktopState(private val scope: CoroutineScope) {
 
         /** A10's pinned pattern — the entities a LastPass in-page export mangles values with. */
         val HTML_ENTITY = Regex("&(amp|lt|gt|quot|#\\d+);")
+
+        // H2 §M-D5 quiet update-channel lines (one muted Settings sentence each — deliberately
+        // NOT error-toned, NOT a banner: a sig-stripping server must not get a scary lever).
+        const val UPDATE_UNVERIFIED_NOTICE =
+            "Updates: the server's update listing couldn't be verified, so no update will be offered from it. Your vault and sync are unaffected."
+        const val UPDATE_STALE_NOTICE =
+            "Updates: the server's update listing hasn't been re-signed in a while — if you're expecting an update, mention it to your admin."
     }
 }

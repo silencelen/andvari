@@ -81,10 +81,33 @@ private val AndvariType = Typography(
     titleLarge = TextStyle(fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, fontSize = 22.sp),
 )
 
+/**
+ * UI-audit #26: the user's theme override. Auto follows the OS via [isSystemInDarkTheme] — which
+ * on Linux desktops routinely reports light regardless of the actual desktop theme, hard-sticking
+ * those users in the weaker light scheme; Light/Dark force a side. Persisted as a plain string in
+ * DesktopSessionStore prefs ([fromStore] parses leniently so an unknown value degrades to Auto).
+ */
+enum class ThemeMode(val storeValue: String, val label: String) {
+    Auto("auto", "Auto"),
+    Light("light", "Light"),
+    Dark("dark", "Dark");
+
+    companion object {
+        fun fromStore(v: String): ThemeMode = entries.find { it.storeValue == v } ?: Auto
+    }
+}
+
 @Composable
-fun AndvariDesktopTheme(content: @Composable () -> Unit) {
+fun AndvariDesktopTheme(themeMode: ThemeMode = ThemeMode.Auto, content: @Composable () -> Unit) {
+    // #26: the override wraps — never replaces — the system signal; the scheme declarations
+    // above are untouched (they stay in web token-lockstep).
+    val dark = when (themeMode) {
+        ThemeMode.Light -> false
+        ThemeMode.Dark -> true
+        ThemeMode.Auto -> isSystemInDarkTheme()
+    }
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
+        colorScheme = if (dark) DarkColors else LightColors,
         typography = AndvariType,
         content = content,
     )
@@ -116,7 +139,7 @@ fun main() = application {
             window.addWindowFocusListener(focus)
             onDispose { window.removeWindowFocusListener(focus) }
         }
-        AndvariDesktopTheme {
+        AndvariDesktopTheme(state.themeMode) {
             Surface {
                 // Root pointer interceptor: PointerEventPass.Initial observes every pointer
                 // event (press/move/scroll) before children consume it — any of them resets
