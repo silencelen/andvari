@@ -45,6 +45,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
@@ -761,6 +762,12 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
             OutlinedButton(onClick = { vm.unlockWithBiometric(activity!!) }, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) {
                 Text("Use fingerprint / face")
             }
+        }
+        // Cut H (v2 #6): a forgotten master password stranded users here — the self-recovery
+        // flow lives in the web app (#recover); this signposts it instead of dead-ending.
+        val uriHandler = LocalUriHandler.current
+        TextButton(onClick = { runCatching { uriHandler.openUri("${ui.baseUrl}/#recover") } }) {
+            Text("Forgot your master password?")
         }
         // Cut D (v2 #3): sign-out clears the local vault cache, quick unlock, and any unsynced
         // edits — it must never be a one-tap action from a screen whose main button is right above.
@@ -2210,13 +2217,32 @@ private fun SecretField(label: String, value: String, onChange: (String) -> Unit
 
 @Composable
 private fun CopyRow(label: String, value: String, ctx: Context, clearSeconds: Int) {
+    // Cut J (v2 #10): copying is the core daily action, and it gave zero in-app feedback —
+    // worse, the auto-wipe (a real safety feature) was undisclosed, so a late paste read as
+    // a random failure. A short flash names both.
+    var copied by remember { mutableStateOf(false) }
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(value, Modifier.weight(1f), fontFamily = FontFamily.Monospace)
-            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds) }) { Text("Copy") }
+            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds); copied = true }) { Text(if (copied) "Copied ✓" else "Copy") }
+        }
+        if (copied) {
+            CopiedNote(clearSeconds) { copied = false }
         }
     }
+}
+
+/** Cut J: the shared "Copied — clears in Ns" disclosure line (polite live region, ~3.5 s). */
+@Composable
+private fun CopiedNote(clearSeconds: Int, onExpire: () -> Unit) {
+    Text(
+        if (clearSeconds > 0) "Copied — clears from the clipboard in ${clearSeconds}s" else "Copied",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+    )
+    LaunchedEffect(Unit) { delay(3500); onExpire() }
 }
 
 /** [display] lets the reveal show a formatted view (e.g. a grouped card number) while Copy
@@ -2224,12 +2250,16 @@ private fun CopyRow(label: String, value: String, ctx: Context, clearSeconds: In
 @Composable
 private fun SecretCopyRow(label: String, value: String, ctx: Context, clearSeconds: Int, display: String = value) {
     var show by remember { mutableStateOf(false) }
+    var copied by remember { mutableStateOf(false) }
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (show) display else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
             IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "Hide $label" else "Show $label") }
-            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds) }) { Text("Copy") }
+            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds); copied = true }) { Text(if (copied) "Copied ✓" else "Copy") }
+        }
+        if (copied) {
+            CopiedNote(clearSeconds) { copied = false }
         }
     }
 }

@@ -429,7 +429,7 @@ function actBtn(label: string, title: string, onClick: (btn: HTMLButtonElement) 
 }
 
 function flash(btn: HTMLElement): void {
-  announce("Copied"); // a11y 2d: the ✓ is visual-only + the button keeps its aria-label
+  announce("Copied — it clears from your clipboard soon"); // a11y 2d + Cut J (v2 #10): disclose the auto-wipe
   btn.textContent = "✓";
   btn.classList.add("did");
   window.setTimeout(() => {
@@ -744,6 +744,13 @@ el("lock").addEventListener("click", async () => {
 
 el("open-vault").addEventListener("click", () => {
   void chrome.tabs.create({ url: SERVER_URL });
+  window.close();
+});
+
+// Cut H (v2 #6): forgotten master password — the self-recovery flow lives in the web app
+// (#recover deep link); the locked popup was a dead end.
+el("forgot").addEventListener("click", () => {
+  void chrome.tabs.create({ url: `${SERVER_URL}/#recover` });
   window.close();
 });
 
