@@ -9,6 +9,8 @@ import type {
   InviteResponse,
 } from "../api/types";
 import { composeEnrollLink } from "../enroll/enrolllink";
+import { Busy } from "./Busy";
+import { UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
@@ -46,9 +48,13 @@ function errText(e: unknown): string {
       case "last_admin": return "That's the only active administrator — disabling it would lock everyone out of this console. Make another account an admin first.";
       case "no_such_user": return "That account no longer exists — the list has been refreshed.";
     }
-    return `${e.code}: ${e.message}`;
+    // #23 household voice: the raw server `message` is wire/debug detail — never render it.
+    // The CODE stays as a parenthetical breadcrumb (this is the admin surface).
+    return `Something went wrong — please try again. (${e.code})`;
   }
-  return "Request failed.";
+  // A fetch rejection (TypeError) is transport — errors.ts canon, never "request failed".
+  if (e instanceof TypeError) return UNREACHABLE;
+  return "Something went wrong — please try again.";
 }
 
 function shortId(id: string | null): string {
@@ -117,7 +123,7 @@ function UsersTab({ client }: { client: ApiClient }) {
       {err && <Msg kind="err">{err}</Msg>}
       <InviteForm client={client} onInvited={load} />
       {!users ? (
-        <p className="muted">loading…</p>
+        <p className="muted"><Busy>loading…</Busy></p>
       ) : (
         <div className="table-scroll">
           <table className="table">
@@ -127,7 +133,9 @@ function UsersTab({ client }: { client: ApiClient }) {
                 <th>Status</th>
                 <th>Created</th>
                 <th>Devices</th>
-                <th>Escrow</th>
+                {/* #23: the column shows the whole recovery posture (member-only included),
+                    and "escrow" is ops jargon — the member flow says "admin backstop". */}
+                <th>Recovery</th>
                 <th></th>
               </tr>
             </thead>
@@ -188,7 +196,7 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
       a.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (e) {
-      setEscrowMsg(e instanceof ApiError && e.code === "no_escrow" ? "no escrow on file" : "download failed");
+      setEscrowMsg(e instanceof ApiError && e.code === "no_escrow" ? "no backstop key on file" : "download failed — try again");
     } finally {
       setEscrowBusy(false);
     }
@@ -205,20 +213,25 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
         <td><button type="button" className="link" onClick={onToggleDevices}>{u.deviceCount} device{u.deviceCount === 1 ? "" : "s"} {expanded ? "▴" : "▾"}</button></td>
         {(() => {
           // §F.9 reconciliation: a null fingerprint is "waived (intended)" (member holds their own
-          // piece) or "no recovery / needs setup" (neither) — not just "—" — keyed on recoveryEnrolled.
-          const posture = escrowPostureLabel(u.escrowFingerprint, u.recoveryEnrolled);
+          // piece), a flagged anomaly (the v8 row says the backstop was REQUIRED), or
+          // "no recovery / needs setup" (neither path) — keyed on recoveryEnrolled + escrowPolicy.
+          const posture = escrowPostureLabel(u.escrowFingerprint, u.recoveryEnrolled, u.escrowPolicy);
           const cls = posture.tone === "good" ? "tone-good" : posture.tone === "bad" ? "tone-bad" : "muted";
           return (
             <td className="muted" title={u.escrowFingerprint ?? undefined}>
               <span className={cls}>{posture.label}</span>
               {u.escrowFingerprint && <div className="mono muted">{u.escrowFingerprint.slice(0, 12)}…</div>}
+              {/* Anomaly explanation stays VISIBLE (not a hover title) — a flag an admin
+                  must act on can't hide from touch screens. */}
+              {posture.detail && <div className="muted">{posture.detail}</div>}
             </td>
           );
         })()}
         <td>
           {u.escrowFingerprint && (
             <div style={{ marginBottom: u.status === "active" ? 6 : 0 }}>
-              <button type="button" className="ghost" disabled={escrowBusy} onClick={downloadEscrow}>{escrowBusy ? "Fetching…" : "Download escrow"}</button>
+              {/* #23: "escrow" is ops jargon — member flow + audit say "backstop key". */}
+              <button type="button" className="ghost" disabled={escrowBusy} onClick={downloadEscrow}>{escrowBusy ? <Busy>Fetching…</Busy> : "Download backstop key"}</button>
               {escrowMsg && <span className="muted" style={{ marginLeft: 8 }}>{escrowMsg}</span>}
             </div>
           )}
@@ -336,16 +349,40 @@ export function normalizeOrgFp(entry: string): string {
 }
 
 /** design §F.9 reconciliation: how a user's recovery posture renders in the admin list. Keyed on the
- *  fields the server ACTUALLY sends — `escrowFingerprint` (the org backstop) and `recoveryEnrolled`
- *  (whether the member has a self-service piece) — NOT the never-populated per-user `escrowPolicy`.
+ *  fields the server ACTUALLY sends — `escrowFingerprint` (the org backstop), `recoveryEnrolled`
+ *  (whether the member has a self-service piece), and since schema v8 the register-time
+ *  `escrowPolicy` persisted on the user row (§F.4):
  *   - escrow present            → "admin backstop" (good);
+ *   - none, but the row says the backstop was REQUIRED → a flagged anomaly (bad): register
+ *     refuses a required invite without an escrow blob, so a required member with none means
+ *     the blob was deleted or the posture tampered with AFTER signup — never "waived (intended)";
  *   - no escrow but a member piece → "waived (intended)" (muted — the member holds their own recovery);
  *   - neither                   → "no recovery / needs setup" (bad — genuinely unrecoverable until the
  *                                 vault-entry capture gate fires on their next unlock).
- *  Pure + exported so a refactor that re-reads a dead field trips a test. */
+ *  `escrowPolicy` null/undefined (old server, or a pre-v8 user row) keeps the legacy two-field
+ *  heuristic — graceful, byte-identical to the pre-v8 rendering. `detail` (anomalies only) is the
+ *  visible one-line explanation. Pure + exported so a refactor that re-reads a dead field or
+ *  softens the anomaly back into a waiver trips a test. */
 export type EscrowPostureTone = "good" | "muted" | "bad";
-export function escrowPostureLabel(escrowFingerprint: string | null, recoveryEnrolled?: boolean): { label: string; tone: EscrowPostureTone } {
+export function escrowPostureLabel(
+  escrowFingerprint: string | null,
+  recoveryEnrolled?: boolean,
+  escrowPolicy?: string | null,
+): { label: string; tone: EscrowPostureTone; detail?: string } {
   if (escrowFingerprint) return { label: "admin backstop", tone: "good" };
+  if (escrowPolicy === "required") {
+    return recoveryEnrolled
+      ? {
+          label: "backstop missing (was required)",
+          tone: "bad",
+          detail: "This member signed up with a required admin backstop, but no backstop key is on file — it may have been deleted. Only their own recovery phrase can rescue them now; investigate.",
+        }
+      : {
+          label: "no recovery — backstop missing",
+          tone: "bad",
+          detail: "This member signed up with a required admin backstop, but no backstop key or recovery phrase is on file — investigate before they're locked out for good.",
+        };
+  }
   if (recoveryEnrolled) return { label: "waived (intended)", tone: "muted" };
   return { label: "no recovery / needs setup", tone: "bad" };
 }
@@ -487,7 +524,7 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
             <span>email it</span>
           </label>
         )}
-        <button className="ghost" disabled={busy || !email.trim()}>{busy ? "Inviting…" : "Invite"}</button>
+        <button className="ghost" disabled={busy || !email.trim()}>{busy ? <Busy>Inviting…</Busy> : "Invite"}</button>
       </div>
       {qrAvailable && emailAvailable && sendEmail && (
         <div className="muted" style={{ marginTop: 8 }}>
@@ -617,7 +654,7 @@ function AuditTab({ client }: { client: ApiClient }) {
         <button className="ghost" disabled={busy}>Filter</button>
       </form>
       {!events ? (
-        <p className="muted">loading…</p>
+        <p className="muted"><Busy>loading…</Busy></p>
       ) : events.length === 0 ? (
         <div className="empty"><p>No audit events{typeFilter ? " of that type" : ""}.</p></div>
       ) : (
@@ -652,7 +689,7 @@ function AuditTab({ client }: { client: ApiClient }) {
           </div>
           {!exhausted && (
             <div style={{ textAlign: "center", margin: "14px 0" }}>
-              <button type="button" className="ghost" disabled={busy} onClick={loadMore}>{busy ? "Loading…" : "Load more"}</button>
+              <button type="button" className="ghost" disabled={busy} onClick={loadMore}>{busy ? <Busy>Loading…</Busy> : "Load more"}</button>
             </div>
           )}
         </>
@@ -676,7 +713,7 @@ function PolicyTab({ client }: { client: ApiClient }) {
     client.adminPolicy().then(setPolicy).catch((e) => setErr(errText(e)));
   }, [client]);
 
-  if (!policy) return err ? <Msg kind="err">{err}</Msg> : <p className="muted">loading…</p>;
+  if (!policy) return err ? <Msg kind="err">{err}</Msg> : <p className="muted"><Busy>loading…</Busy></p>;
 
   const patch = (p: Partial<ClientPolicy>) => setPolicy({ ...policy, ...p });
   const patchMin = (platform: string, v: string) => patch({ minVersion: { ...policy.minVersion, [platform]: v } });
@@ -748,7 +785,7 @@ function PolicyTab({ client }: { client: ApiClient }) {
       </Field>
 
       <div className="actions">
-        <button className="primary" disabled={busy}>{busy ? "Saving…" : "Save policy"}</button>
+        <button className="primary" disabled={busy}>{busy ? <Busy>Saving…</Busy> : "Save policy"}</button>
       </div>
     </form>
   );
@@ -765,20 +802,22 @@ function StatusTab({ client }: { client: ApiClient }) {
   }, [client]);
 
   if (err) return <Msg kind="err">{err}</Msg>;
-  if (!status) return <p className="muted">loading…</p>;
+  if (!status) return <p className="muted"><Busy>loading…</Busy></p>;
 
   const yes = (b: boolean) => (b ? <span className="tone-good">yes</span> : <span className="tone-bad">no</span>);
 
   return (
     <div className="sheet">
       <h2>Server status</h2>
+      {/* #23: "escrow"/"break-glass" are ops jargon — label with the member-flow words
+          (the wire fields underneath keep their spec names). */}
       <dl className="kv">
         <dt>Server version</dt><dd className="mono">{status.serverVersion}</dd>
         <dt>Server time</dt><dd>{fmtDate(status.serverTime)}</dd>
-        <dt>Escrow configured</dt><dd>{yes(status.escrowConfigured)}</dd>
+        <dt>Admin backstop configured</dt><dd>{yes(status.escrowConfigured)}</dd>
         <dt>Recovery fingerprint</dt><dd className="mono fingerprint">{status.recoveryFingerprint ? status.recoveryFingerprint.replace(/(.{4})/g, "$1 ").trim() : "—"}</dd>
-        <dt>Break-glass configured</dt><dd>{yes(status.breakGlassConfigured)}</dd>
-        <dt>Last public request</dt><dd>{status.lastPublicRequestAt ? fmtDate(status.lastPublicRequestAt) : "never"}</dd>
+        <dt>Outside (public) sign-in configured</dt><dd>{yes(status.breakGlassConfigured)}</dd>
+        <dt>Last request from outside</dt><dd>{status.lastPublicRequestAt ? fmtDate(status.lastPublicRequestAt) : "never"}</dd>
         <dt>Users</dt><dd>{status.userCount} ({status.totpEnrolledCount} with TOTP)</dd>
         <dt>Items</dt><dd>{status.itemCount}</dd>
         <dt>Attachments</dt><dd>{status.attachmentCount} · {humanSize(status.attachmentBytes)}</dd>

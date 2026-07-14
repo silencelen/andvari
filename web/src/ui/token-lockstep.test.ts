@@ -172,3 +172,34 @@ describe("token lockstep — one palette, five sources", () => {
     }
   });
 });
+
+/**
+ * UI-audit #26 (wave 2): the user theme override re-states each web palette in a
+ * `:root[data-theme=…]` block so `useTheme.ts` can force a theme via <html data-theme>.
+ * Two invariants keep this file's parsers (above, and contrast.test.ts) honest:
+ *  1. the override blocks are BYTE-TWINS of the two scheme blocks — a one-sided palette
+ *     edit may not ship a forced theme that drifts from Auto;
+ *  2. they sit BELOW the base `:root` block and the light-scheme media block, because
+ *     every parser here keys on the FIRST occurrence of those anchors.
+ */
+describe("web data-theme override blocks (UI-audit #26)", () => {
+  const lightAt = webCss.indexOf(':root[data-theme="light"]');
+  const darkAt = webCss.indexOf(':root[data-theme="dark"]');
+
+  it("both override blocks exist, below the two parser-keyed scheme blocks", () => {
+    const mediaLightRootAt = webCss.indexOf(":root", webCss.indexOf("prefers-color-scheme: light"));
+    expect(lightAt).toBeGreaterThan(mediaLightRootAt);
+    expect(darkAt).toBeGreaterThan(mediaLightRootAt);
+    // …and the base block stays the FIRST :root in the file (webCss.indexOf(":root")
+    // must not resolve to an override selector, which also contains ":root").
+    expect(webCss.indexOf(":root")).toBeLessThan(webCss.indexOf("prefers-color-scheme: light"));
+  });
+
+  it('[data-theme="light"] byte-matches the light-scheme media block', () => {
+    expect(cssBlock(webCss, lightAt)).toEqual(web.light);
+  });
+
+  it('[data-theme="dark"] byte-matches the base dark block', () => {
+    expect(cssBlock(webCss, darkAt)).toEqual(web.dark);
+  });
+});
