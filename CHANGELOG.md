@@ -1,5 +1,57 @@
 # andvari — changelog
 
+## 0.17.0 (2026-07-14) — recover on any device · your look · faster sync · quieter, kinder errors (web/server 0.17.0, schema v8; apps 0.17.0; browser extension 0.14.0)
+
+### Forgot your master password? Now you can fix it right on your phone or desktop
+
+- **The "forgot password" recovery flow works on the apps now, not just the web.** Type your email
+  and the recovery phrase you saved at signup, choose a new master password, and you're back in — no
+  admin, no computer needed. (The web has had this; the phone and desktop apps were catching up.)
+- **Setting up your recovery phrase is safe even when two of your devices do it at once.** If you open
+  the "save your recovery phrase" step on two devices around the same time, andvari now makes sure the
+  phrase you actually saved is the one that counts — you'll never be left holding a phrase that quietly
+  stopped working. If a device shows "this phrase was replaced," just save the fresh one it shows you.
+
+### Make andvari look the way you want
+
+- **Light, Dark, or match your device** — a new Appearance setting on the web. Linux desktop users in
+  particular are no longer stuck in the light theme.
+- **Things that take a moment now show they're working.** Unlocking, syncing, and long saves show a
+  gentle spinner instead of a frozen-looking screen — and if you've asked your device to reduce motion,
+  andvari honors that.
+- **The andvari mark shows up everywhere now.** The little rune in the browser extension and the apps is
+  drawn as a shape, so it no longer turns into an empty box on some phones and computers.
+
+### Errors that talk like a person
+
+- **No more "bad request" or raw error codes.** Across the phone and desktop apps, when something goes
+  wrong you'll get a plain-language sentence ("Can't reach the server — check you're on the home network
+  or VPN") instead of technical jargon or a wall of red text.
+- **Imported one-time codes (2FA) display again.** A login you brought in from another password manager
+  now shows its rotating code correctly instead of "invalid."
+- **Copying shows it worked.** Copying a one-time code now gives the same "copied ✓" confirmation the
+  other fields do.
+
+### Faster sharing, live
+
+- **Edit on the web, see it in the extension seconds later.** When someone changes a shared login, the
+  browser extension now picks it up almost immediately instead of waiting for its next check.
+
+### Cards are here
+
+- **You can now save credit/debit cards** (create a card item on the web; the apps light up their card
+  screens on their next update). Card details are encrypted exactly like your passwords — the server
+  never sees them.
+
+*Under the hood: this release closes the whole 2026-07 roadmap sweep — the cross-device recovery
+race is fixed with a server-minted piece binding (schema v8); the household error copy is one shared
+source the apps map to; the app + desktop update checks now verify a signed release manifest and fail
+closed if it can't be verified; the KDF (password-stretching) cost transparently upgrades itself after
+a full sign-in as the household raises it; and a batch of server hardening (request-body caps, offline
+importer determinism, recovery-tool safety) landed. Your master-password → vault-key chain is
+unchanged and the zero-knowledge guarantee holds. Admins: a member whose required admin-backstop key
+goes missing is now flagged in the member list instead of looking like an intentional waiver.*
+
 ## 0.16.0 (2026-07-12) — per-member recovery + escrow opt-out (web/server 0.16.0, schema v7; browser extension 0.12.0)
 
 ### Sign up with just the link — and hold your own recovery key
