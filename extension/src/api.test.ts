@@ -184,6 +184,22 @@ test("E1-9: refresh 401 → BOTH tokens cleared + notified (definitive death)", 
   assert.deepEqual(changes.at(-1), { access: null, refresh: null });
 });
 
+test("eventsTicket: POSTs /api/v1/events/ticket with the Bearer + client headers; returns the body", async () => {
+  let seen: { url: string; method: string; headers: Record<string, string> } | undefined;
+  globalThis.fetch = (async (url: string, init: { method: string; headers: Record<string, string> }) => {
+    seen = { url, method: init.method, headers: init.headers };
+    return jsonResp(200, { ticket: "tick-1", expiresInSeconds: 30 });
+  }) as unknown as typeof fetch;
+  const api = new AndvariApi("https://x", "1.2.3");
+  api.setTokens("a1", "r1");
+  const t = await api.eventsTicket();
+  assert.deepEqual(t, { ticket: "tick-1", expiresInSeconds: 30 });
+  assert.equal(seen!.url, "https://x/api/v1/events/ticket");
+  assert.equal(seen!.method, "POST");
+  assert.equal(seen!.headers["authorization"], "Bearer a1");
+  assert.equal(seen!.headers["X-Andvari-Client"], "extension/1.2.3");
+});
+
 test("E1-3: ApiError parses the server {error, message} body", async () => {
   const api = new AndvariApi("https://x", "1.2.3");
   globalThis.fetch = (async () => jsonResp(401, { error: "invalid_credentials", message: "authentication failed" })) as unknown as typeof fetch;

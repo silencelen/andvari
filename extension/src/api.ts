@@ -92,6 +92,13 @@ export interface ClientPolicyResponse {
   clipboardClearSeconds?: number;
 }
 
+/** Single-use /events WebSocket ticket (spec 03 §6). Field names mirror core Wire.kt
+ *  WsTicketResponse — the deviceId binding is server-side from the Bearer principal. */
+export interface WsTicketResponse {
+  ticket: string;
+  expiresInSeconds: number;
+}
+
 export class AndvariApi {
   private baseUrl: string;
   private accessToken: string | null = null;
@@ -257,6 +264,14 @@ export class AndvariApi {
    *  Check results[] — see MutationResult. */
   push(mutations: Mutation[]): Promise<PushResponse> {
     return this.json("POST", "/api/v1/sync/push", { mutations });
+  }
+
+  /** Mint a single-use ~30 s ticket for the /events dirty-bell WebSocket (spec 03 §6). Minted
+   *  fresh per connect attempt and NEVER persisted — the access token never rides a URL. Rides
+   *  json(), so the Bearer header, the single-flight 401→refresh→retry, and ApiError parsing
+   *  all apply. */
+  eventsTicket(): Promise<WsTicketResponse> {
+    return this.json("POST", "/api/v1/events/ticket");
   }
 }
 

@@ -18,6 +18,7 @@ import {
   wrapKey,
   type KdfParams,
 } from "./crypto";
+import { startEvents, type EventsHandle, type WsLike } from "./events";
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "./format";
 import { isNewerVersion } from "./version";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
@@ -39,7 +40,9 @@ import { resolveSaveAction, saveTargetFor } from "./savetarget";
  * Message protocol = src/messages.ts (THE CONTRACT). Secret egress is `reveal` only, gated on
  * host-match ∨ a one-shot popup fill grant ∨ an explicit user pick — see the contract's trust
  * model. Lock policy: chrome.alarms "autolock" re-armed by every message answered with a live
- * session (client-policy autoLockSeconds; 0 disables), "resync" refreshes items every 5 min.
+ * session (client-policy autoLockSeconds; 0 disables), "resync" refreshes items every 5 min —
+ * the alarm floor under the live dirty-bell WebSocket (events.ts), which nudges the same resync
+ * within ~1–2 s of a peer write while a session exists.
  *
  * Unlock flow (mirrors web Account.unlock): prelogin → Argon2id → login (authKey) → unwrap UVK
  * from accountKeys → sync → unwrap each vault key from its grant → decrypt items under the VK.
@@ -161,6 +164,9 @@ const grants = new Map<number, { itemId: string; expiresMs: number }>();
 /** In-flight write count — resync must not replace session.items out from under a landing put. */
 let writesInFlight = 0;
 let loadPromise: Promise<void> | null = null;
+/** Live dirty-bell socket handle (events.ts) — held ONLY while a session exists; locked or
+ *  logged out = no socket (doLock tears it down first thing). Dies with the SW; T1/T3 revive. */
+let events: EventsHandle | null = null;
 
 const api = new AndvariApi(SERVER_URL, chrome.runtime.getManifest().version);
 // Awaited on every pair mutation — the consumed refresh token must reach the snapshot BEFORE the
@@ -192,8 +198,10 @@ chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "autolock") void doLock("idle");
-  else if (alarm.name === "resync") void resync();
-  else if (alarm.name === UPDATE_ALARM) void checkForUpdate();
+  else if (alarm.name === "resync") {
+    void resync(); // the ≤5-min staleness floor…
+    void ensureSocket(true); // …and the guaranteed live-socket revival after SW death (T3)
+  } else if (alarm.name === UPDATE_ALARM) void checkForUpdate();
   else if (alarm.name === CLIPBOARD_CLEAR_ALARM) void clearClipboardBackstop();
 });
 
@@ -214,6 +222,10 @@ void (async () => {
   }
   void checkForUpdate();
 })();
+
+// T1: EVERY SW start (browser startup, install, popup/content-message/alarm wake) re-establishes
+// the live dirty-bell socket if a restorable session exists — no-op when locked or logged out.
+void ensureSocket();
 
 // Re-offer a pending save once the post-login navigation lands. Belt: the content script also
 // polls pendingSave on load; braces: this reaches SPAs that "complete" without a fresh script.
@@ -303,6 +315,8 @@ function persistTabs(): void {
  *  any stale one. The "clipboardclear" backstop alarm deliberately SURVIVES (a secret copied just
  *  before an idle lock still clears on schedule, E1-4). */
 async function doLock(reason: "idle" | "manual" = "manual"): Promise<void> {
+  events?.close(); // live socket + all its timers die FIRST — locked means no bell traffic at all
+  events = null;
   const secondsAtLock = autoLockSeconds; // capture before the reset below (web App.tsx:209 parity)
   session = null;
   autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
@@ -349,6 +363,47 @@ async function resync(): Promise<void> {
     persistSession();
   } catch {
     /* tolerated */
+  }
+}
+
+// ---- live change-push (dirty-bell WebSocket — design 2026-07-13-ext-live-sync.md) ----
+// A peer edit reaches this SW in ~1–2 s via the server's rev bell instead of the 5-min alarm.
+// The bell only NUDGES the existing resync() pull — no new decrypt path, no new secret egress —
+// and nothing here may ever call armAutoLock() (bells are not user activity, PASSIVE_MSGS law).
+
+/** Ticket-mint glue for events.ts. A definitive auth refusal folds to null (stop the cycle
+ *  quietly — the vault STAYS unlocked serving offline fills, exactly like a failing alarm sync;
+ *  a mint 401 must NEVER doLock, or laptop-asleep expiry would punish the user). Anything else
+ *  (offline, 5xx) stays a throw = transient → events.ts backs off. The ticket is single-use,
+ *  deviceId-bound server-side, and never persisted or logged. */
+async function mintTicket(): Promise<string | null> {
+  try {
+    return (await api.eventsTicket()).ticket;
+  } catch (e) {
+    if (e instanceof ApiError && (e.status === 401 || e.status === 403)) return null;
+    throw e;
+  }
+}
+
+/** Open (or prod) the live socket — ONLY while a session exists in the SW; locked or logged out
+ *  means no socket (doLock cleared the tokens, so no ticket could be minted anyway). Every
+ *  trigger funnels here: T1 SW-wake bootstrap (module scope), T2 unlock, T3 resync alarm —
+ *  `reset` collapses a pending backoff so those known-good moments reconnect immediately. */
+async function ensureSocket(reset = false): Promise<void> {
+  await ensureLoaded(); // session may not be hydrated yet on a fresh SW wake
+  if (!session) return;
+  if (!events || events.closed) {
+    events = startEvents({
+      wsUrl: SERVER_URL.replace(/^http/, "ws") + "/api/v1/events",
+      mintTicket,
+      // The DOM WebSocket satisfies WsLike at runtime; TS's strict property variance on the on*
+      // slots blocks the structural check — bridge it here, at the one real-socket seam.
+      makeSocket: (u) => new WebSocket(u) as WebSocket & WsLike,
+      onBell: () => void resync(), // debounced in events.ts; the EXISTING pull, nothing else
+      onRevoked: () => void doLock("manual"), // explicit server frame — web-parity sign-out
+    });
+  } else {
+    events.kick(reset);
   }
 }
 
@@ -635,6 +690,7 @@ async function unlock(email: string, password: string): Promise<Res<"unlock">> {
   await persistSession();
   void chrome.storage.session.remove(NKEY); // a fresh unlock clears the F26 idle-lock notice (E1-7)
   void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
+  void ensureSocket(true); // T2: live bell up within ~1 s of unlock
   armAutoLock();
 
   // E1-5: re-offer any save captured while locked the moment we unlock — otherwise the pending
