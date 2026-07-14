@@ -13,6 +13,7 @@ import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ItemChangedException
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
+import io.silencelen.andvari.core.client.KdfUpgrade
 import io.silencelen.andvari.core.client.MoveGesture
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.UpgradeRequiredException
@@ -45,14 +46,18 @@ import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.core.crypto.Ad
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.CryptoException
+import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
+import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
+import io.silencelen.andvari.core.model.PasswordChangeRequest
 import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.TotpSetupResponse
@@ -598,7 +603,13 @@ class DesktopState(private val scope: CoroutineScope) {
             // account's recovery piece was never durably CONFIRMED — an interrupted reveal or a
             // migration account. Route into the capture flow INSTEAD of the vault; the login authKey
             // just derived above is the fresh-reauth proof PUT /recovery/self-setup requires.
-            if (s.accountKeys.recoveryConfirmed != true) startRecoveryCapture(authKey) else toVault()
+            val gate = s.accountKeys.recoveryConfirmed != true
+            // F61 (spec 01 §7): a silent KDF re-key rides this ONLINE full-password sign-in, but NEVER
+            // under the capture gate — the detached re-key rotates the login verifier, which would
+            // strand the gate's stashed reauth proof (self-setup re-verifies it) in a permanent Retry
+            // loop; the rare upgrade defers to the next (confirmed) sign-in.
+            if (!gate) runKdfUpgrade(s.userId, password, s.accountKeys)
+            if (gate) startRecoveryCapture(authKey) else toVault()
         } catch (t: Throwable) {
             // Android-parity leak guard: any PRE-bind failure — incl. the H1 KdfPolicyViolationException
             // (not an ApiException), IdentityMismatch, or a network error — must close the transient
@@ -641,7 +652,16 @@ class DesktopState(private val scope: CoroutineScope) {
         // fires: accountKeys' kdfSalt/kdfParams are the same user-row values prelogin serves,
         // so this authKey verifies against the same server-side login verifier. One extra
         // argon2id pass (off the UI thread), paid only on the rare unconfirmed path.
-        if (freshKeys && keys.recoveryConfirmed != true) {
+        val gate = freshKeys && keys.recoveryConfirmed != true
+        // F61 (spec 01 §7): the silent KDF re-key is deliberately NOT fired on this returning-session
+        // unlock (web parity — Welcome.tsx). Desktop's mustChangePassword is an in-memory flag that
+        // resets to false on every app restart, so a re-key on the post-restart unlock path could
+        // silently make an admin-issued must-change temp password permanent (server changePassword
+        // clears mustChangePassword=0). The re-key rides ONLY the signIn path, where the login response
+        // carries the accurate flag; a mid-session org policy raise is picked up at the next full
+        // sign-in. (It also must never fire under the capture gate: rotating the login verifier would
+        // strand the gate's stashed reauth proof.)
+        if (gate) {
             val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams) }
             startRecoveryCapture(authKey)
         } else toVault()
@@ -2323,6 +2343,66 @@ class DesktopState(private val scope: CoroutineScope) {
 
     /** Enforce offlineCacheAllowed=false: drop BOTH the vault DB and the cached keys. */
     private fun purgeOfflineData(userId: String) { deleteCache(userId); store.clearAccountKeys() }
+
+    /**
+     * F61 KDF upgrade (spec 01 §7, design 2026-07-10 §4) — the desktop mirror of Android's
+     * AndvariViewModel.runKdfUpgrade + KdfReKey.maybeUpgrade (app-android is not shared, so the
+     * best-effort re-key is inlined here over the core [KdfUpgrade.shouldUpgrade] gate + core crypto).
+     * After a full-master-password unlock WITH server connectivity, if the org policy raised the
+     * Argon2id cost, transparently re-key with the password the client just verified (the SAME UVK,
+     * new KDF params). DETACHED on [Dispatchers.Default] (two Argon2id derivations — never the UI
+     * thread) and best-effort: ANY failure is swallowed, the check re-runs at the next online
+     * full-password unlock. ZK-preserving — only the derived authKey + re-wrapped UVK cross the wire,
+     * via the existing `PUT /account/password`. Callers MUST have excluded the offline case and the
+     * pending recovery-capture gate; [mustChangePassword] (A5), a missing live policy, and the
+     * [KdfUpgrade.shouldUpgrade] fence are re-checked here. NEVER on quick-unlock (desktop has none).
+     */
+    private fun runKdfUpgrade(userId: String, password: String, keys: io.silencelen.andvari.core.model.AccountKeys) {
+        // A5: never silently re-key a live admin recovery temp password — the server's changePassword
+        // clears mustChangePassword=0, so a re-key would erase the nudge. This is the in-memory F58
+        // flag: set from the login response and (like the F58 banner) surviving lock() within a run,
+        // so a returning unlock() inside the same session is guarded; it resets on app restart.
+        if (mustChangePassword) return
+        val pol = policy ?: return // live-fetch-only ([applyPolicy]) — never a stale persisted value
+        val a = api ?: return
+        val acct = account ?: return
+        if (!KdfUpgrade.shouldUpgrade(keys.kdfParams, pol.kdfParams)) return
+        scope.launch(Dispatchers.Default) {
+            runCatching {
+                val crypto = createCryptoProvider()
+                val newSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
+                val newParams = pol.kdfParams
+                val mkNew = Keys.masterKey(crypto, password, newSalt, newParams)
+                val authNew = Bytes.toB64(Keys.authKey(crypto, mkNew))
+                val wrapNew = Keys.wrapKey(crypto, mkNew)
+                // The UVK never changes across a KDF upgrade (spec 01 §4/§7) — re-wrap the SAME UVK
+                // under the new wrapKey. The egress copy is zeroed whatever happens.
+                val uvk = acct.uvkCopyForPlatformWrap()
+                val wrappedUvkNew = try {
+                    Envelope.sealB64(crypto, wrapNew, uvk, Ad.uvk(userId))
+                } finally {
+                    uvk.fill(0)
+                }
+                val currentAuth = Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, crypto)
+                a.changePassword(
+                    PasswordChangeRequest(
+                        currentAuthKey = currentAuth,
+                        newAuthKey = authNew,
+                        newKdfSalt = Bytes.toB64(newSalt),
+                        newKdfParams = newParams,
+                        newWrappedUvk = wrappedUvkNew,
+                    ),
+                )
+                // design §4 step 3: keep the offline cache in step, or the next offline unlock derives
+                // with stale params and fails. Only when the cache is allowed (persistAccountKeys' gate).
+                if (cacheAllowed()) {
+                    store.saveAccountKeys(
+                        keys.copy(kdfSalt = Bytes.toB64(newSalt), kdfParams = newParams, wrappedUvk = wrappedUvkNew),
+                    )
+                }
+            }
+        }
+    }
 
     private fun bind(a: AndvariApi, acct: Account) {
         touch() // spec 01 §8: the auto-lock timer resets on unlock

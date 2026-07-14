@@ -8,6 +8,7 @@ import { clearPendingEnroll, enrollPrefillFor, peekPendingEnroll, type EnrollPay
 import { enrollPosture, escrowGate, type EnrollPosture } from "../enroll/enrollposture";
 import { Account, IdentityMismatchError, deviceName } from "../vault/account";
 import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
+import { maybeKdfUpgrade } from "../vault/kdfupgrade";
 import { VaultStore } from "../vault/store";
 import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
 import { Field } from "./Field";
@@ -97,6 +98,14 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
         setCapture({ account, store, meta, currentAuthKey });
         return;
       }
+      // F61 (spec 01 §7): the silent KDF re-key is deliberately NOT fired on this returning-session
+      // unlock. The server's changePassword clears mustChangePassword=0, and this path CANNOT observe
+      // must-change — accountKeys carries no such flag and web does not persist it across a lock, so
+      // the meta above hardcodes false. An unguarded re-key here could therefore silently clear an
+      // admin-issued must-change temp password (a non-blocking banner the user can lock past). Android
+      // guards with its PERSISTED store.mustChangePassword; web has no equivalent on unlock, so the
+      // re-key rides ONLY the SignIn path (below), where the login response carries the accurate flag.
+      // A mid-session org policy raise is picked up at the next full sign-in.
       onReady(account, store, meta);
     } catch (e) {
       if (e instanceof KdfPolicyError) { setErr(WEAK_KDF_MESSAGE); return; } // H1 (spec 05 T1)
@@ -312,6 +321,13 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
         setCapture({ account, store, meta, currentAuthKey: authKey });
         return;
       }
+      // F61 (spec 01 §7, Android runKdfUpgrade parity): the SOLE web re-key site — a full-master-
+      // password sign-in WITH connectivity that was NOT routed to the capture gate. This path (unlike
+      // the returning-session unlock above) carries the login response's accurate `mustChangePassword`
+      // (meta.mustChangePassword ← s.mustChangePassword), so the silent re-key can safely honour A5.
+      // Detached + best-effort: never blocks/fails sign-in; maybeKdfUpgrade no-ops before any argon2id
+      // when already current or must-change. LIVE policy only (App.loadPolicy) — never a stale value.
+      if (policy) void maybeKdfUpgrade({ client, account, password, currentKdfSalt: s.accountKeys.kdfSalt, currentKdfParams: s.accountKeys.kdfParams, policyKdfParams: policy.kdfParams, mustChangePassword: meta.mustChangePassword });
       onReady(account, store, meta);
     } catch (e) {
       if (e instanceof ApiError && e.code === "totp_required") {
