@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { fromB64 } from "../crypto/bytes";
@@ -13,8 +13,8 @@ import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
 import { Field } from "./Field";
 import { Msg } from "./Msg";
 import { Recover } from "./Recover";
-import { confirmRegisteredRecovery, needsRecoveryCapture, setupAndCommitRecovery } from "./recovery-capture";
-import { installId, saveSession, type Session } from "./session";
+import { needsRecoveryCapture, settleRecoveryConfirm, setupAndCommitRecovery } from "./recovery-capture";
+import { clearSession, installId, saveSession, type Session } from "./session";
 import { BrandSigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength, masterPasswordHasNonAscii, meetsMasterPasswordFloor } from "./strength";
 
@@ -30,6 +30,13 @@ export interface LoginMeta {
   escrowStale: boolean;
   escrowFingerprint: string;
 }
+
+/** design 2026-07-13 piece-binding: the STATIC notice for a `409 recovery_piece_stale` confirm — the
+ *  phrase the user just typed back attests a piece a concurrent setup (another device's gate) rotated
+ *  away. Static copy only, never interpolated (§F.7); shared verbatim by the enroll reveal and the
+ *  vault-entry capture gate. */
+const RECOVERY_PIECE_STALE_NOTICE =
+  "This recovery phrase was replaced — a newer one was created, possibly from another device. A fresh phrase will be shown; discard any phrase you saved before it.";
 
 /** §F.9 handoff to the vault-entry capture gate: a fully-unlocked account whose vault entry is BLOCKED
  *  until it captures a recovery phrase (`recoveryConfirmed !== true`). `currentAuthKey` is the login
@@ -132,6 +139,7 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
             currentAuthKey={capture.currentAuthKey}
             clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
             onReady={onReady}
+            onSignOut={onForget}
           />
         </div>
       </div>
@@ -264,7 +272,9 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
   // BLOCKED here — the capture gate replaces the form until the phrase is saved.
   const [capture, setCapture] = useState<CaptureHandoff | null>(null);
   // Tell FreshStart to hide the tab bar while the capture gate holds (no navigation escape).
-  useEffect(() => {
+  // useLayoutEffect (A.5): the flag must land BEFORE paint — with useEffect the gate's first
+  // frame rendered with the tab bar still visible (a 1-frame escape-hatch flash).
+  useLayoutEffect(() => {
     onBlockingChange(capture !== null);
     return () => onBlockingChange(false);
   }, [capture, onBlockingChange]);
@@ -345,6 +355,17 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
         currentAuthKey={capture.currentAuthKey}
         clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
         onReady={onReady}
+        onSignOut={() => {
+          // Mirror App's signOut (unreachable from here): drop the persisted session + tokens and
+          // fall back to the sign-in form. Signing out of the gate is SAFE — the flag is still
+          // false, so the capture gate simply re-fires at the next sign-in.
+          clearSession();
+          client.setTokens(null);
+          setPassword("");
+          setTotp("");
+          setTotpNeeded(false);
+          setCapture(null);
+        }}
       />
     );
   }
@@ -409,18 +430,37 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   const [retrying, setRetrying] = useState(false);
 
   // §F.7 shown-once: the recovery secret bytes live ONLY in this ref, zeroed the instant the confirm
-  // passes. After register() succeeds we stash the ready session and render the un-skippable reveal
-  // gate BEFORE handing the account to the vault shell.
+  // passes. After register() succeeds we stash the ready session (plus the register-committed piece's
+  // `recoveryPieceId`, design 2026-07-13 — the bound confirm presents it) and render the un-skippable
+  // reveal gate BEFORE handing the account to the vault shell.
   const secretRef = useRef<Uint8Array | null>(null);
-  const [ready, setReady] = useState<{ account: Account; store: VaultStore; meta: LoginMeta } | null>(null);
+  const [ready, setReady] = useState<{ account: Account; store: VaultStore; meta: LoginMeta; pieceId: string | null } | null>(null);
+  // design 2026-07-13: the confirm answered 409 recovery_piece_stale — a concurrent setup (another
+  // device) rotated the register-committed piece away mid-reveal. The typed phrase is DEAD: surface
+  // the static notice, then proceed unconfirmed on acknowledgment (no reauth in hand to re-setup here;
+  // the vault-entry capture gate re-fires at the next unlock and heals).
+  const [pieceStale, setPieceStale] = useState(false);
+  // In-flight state for the awaited bound confirm (design 2026-07-13): once settlement starts we
+  // replace the reveal with explicit "Saving…" feedback (mirrors the capture gate's stage="confirming"),
+  // so a copied-reset timer firing mid-POST can't blank the reveal to a bare screen on the slow tunnel path.
+  const [settling, setSettling] = useState(false);
+  // One settlement per reveal (the confirm is now awaited, so the button outlives the first click).
+  const settlingRef = useRef(false);
+  const aliveRef = useRef(true);
 
   // §F.7: zero the raw recovery secret on unmount as well as on confirm (mirrors Recover.tsx's
   // cleanup) — if the reveal is interrupted (navigate away / lock), the secret never lingers in memory.
-  useEffect(() => () => { secretRef.current?.fill(0); secretRef.current = null; }, []);
-  // §F.7/§F.9: while the shown-once reveal is up, tell FreshStart to HIDE the Sign-in/Enroll tab bar so
-  // the user cannot navigate away from the reveal (unmounting it, losing the phrase) without confirming.
-  const revealing = ready !== null && secretRef.current !== null;
-  useEffect(() => { onBlockingChange(revealing); }, [revealing, onBlockingChange]);
+  // aliveRef re-arms across a StrictMode remount so a confirm settling after unmount can't call onReady.
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; secretRef.current?.fill(0); secretRef.current = null; };
+  }, []);
+  // §F.7/§F.9: while the shown-once reveal (or the stale-piece notice) is up, tell FreshStart to HIDE
+  // the Sign-in/Enroll tab bar so the user cannot navigate away from the reveal (unmounting it, losing
+  // the phrase) without confirming. useLayoutEffect (A.5): pre-paint, so the bar never flashes for a
+  // frame around the reveal mounting.
+  const revealing = ready !== null && (secretRef.current !== null || pieceStale || settling);
+  useLayoutEffect(() => { onBlockingChange(revealing); }, [revealing, onBlockingChange]);
 
   const retryPolicy = async () => {
     setRetrying(true);
@@ -497,7 +537,8 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       const store = new VaultStore(client, account);
       await store.sync().catch(() => {});
       // Do NOT go straight to the vault — render the un-skippable recovery-phrase reveal first (§F.7).
-      setReady({ account, store, meta: { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint } });
+      // `recoveryPieceId` is register-only (design 2026-07-13); an old server omits it ⇒ unbound confirm.
+      setReady({ account, store, meta: { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint }, pieceId: s.recoveryPieceId ?? null });
     } catch (e) {
       // Static error strings only — NEVER interpolate secret material.
       setErr(e instanceof KdfPolicyError ? WEAK_KDF_MESSAGE : e instanceof NetworkError ? UNREACHABLE : e instanceof ApiError ? enrollError(e.code) : "Enrollment failed.");
@@ -505,6 +546,38 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       setBusy(false);
     }
   };
+
+  // design 2026-07-13: the stale-confirm notice — un-skippable acknowledgment BEFORE vault landing, so
+  // the user never walks away believing the (dead) phrase they saved still works.
+  if (ready && pieceStale) {
+    return (
+      <div>
+        <Msg kind="err">{RECOVERY_PIECE_STALE_NOTICE}</Msg>
+        <button
+          type="button"
+          className="primary"
+          onClick={() => {
+            const r = ready;
+            setReady(null);
+            onReady(r.account, r.store, r.meta);
+          }}
+        >
+          I understand — continue
+        </button>
+      </div>
+    );
+  }
+
+  // design 2026-07-13: the awaited bound confirm is settling — show explicit feedback instead of the
+  // reveal (whose secret zero() nulls mid-flight), so the screen never blanks on the slow tunnel path.
+  // Ordered after the stale branch (a 409 during settle wins) and before the reveal.
+  if (ready && settling) {
+    return (
+      <div>
+        <p className="muted">Saving your confirmation…</p>
+      </div>
+    );
+  }
 
   // §F.7: the shown-once recovery-phrase reveal gates account usability — rendered after a successful
   // register, holding the secret in secretRef, and it won't hand the account to the vault until the
@@ -515,15 +588,24 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
         secretRef={secretRef}
         clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
         onConfirmed={() => {
+          if (settlingRef.current) return;
+          settlingRef.current = true;
+          setSettling(true);
           const r = ready;
-          secretRef.current?.fill(0);
-          secretRef.current = null;
-          setReady(null);
-          // §F.9: flip the server's recoveryConfirmed flag — the register-committed piece IS what was
-          // just shown + confirmed (NO regenerate — that would clobber the phrase the user saved).
-          // Best-effort: a failure only re-nudges via the vault-entry capture gate on the next unlock.
-          void confirmRegisteredRecovery(client).catch(() => {});
-          onReady(r.account, r.store, r.meta);
+          // §F.9 + design 2026-07-13: flip the server's recoveryConfirmed flag — the register-committed
+          // piece IS what was just shown + confirmed (NO regenerate — that would clobber the phrase the
+          // user saved) — now BOUND (register's recoveryPieceId) and AWAITED. Stale ⇒ the saved phrase
+          // was rotated away: static notice, proceed unconfirmed on acknowledgment. Any other failure
+          // proceeds as before — it only re-nudges via the vault-entry capture gate on the next unlock.
+          void settleRecoveryConfirm(client, r.pieceId, {
+            zero: () => { secretRef.current?.fill(0); secretRef.current = null; },
+            onStale: () => { if (aliveRef.current) setPieceStale(true); },
+            onProceed: () => {
+              if (!aliveRef.current) return;
+              setReady(null);
+              onReady(r.account, r.store, r.meta);
+            },
+          });
         }}
       />
     );
@@ -799,11 +881,15 @@ function RecoveryReveal({
  * some device, or a pre-flag migration account. On mount it regenerates + COMMITS a fresh piece
  * (setupAndCommitRecovery → PUT /recovery/self-setup, which does NOT flip the flag — it runs before
  * capture), hands the fresh secret to the SAME un-skippable {@link RecoveryReveal}, and only on the
- * type-back confirm flips `recoveryConfirmed` via /recovery/self/confirm before proceeding to the vault.
- * `currentAuthKey` is the login authKey the caller derived from the freshly-typed master password
- * (the server re-verifies it, like changePassword). Renders content only — callers wrap it in the
- * card appropriate to their context. A failed commit keeps the gate closed with a retry (never
- * proceeds to the vault, never leaves a live secret dangling — the secret is zeroed on failure).
+ * type-back confirm flips `recoveryConfirmed` via /recovery/self/confirm — BOUND to the committed
+ * piece's `pieceId` and AWAITED (design 2026-07-13) — before proceeding to the vault. A stale confirm
+ * (409: another device's gate rotated the piece mid-capture) shows the static replaced-phrase notice
+ * and re-runs setup + reveal; the gate stays closed. `currentAuthKey` is the login authKey the caller
+ * derived from the freshly-typed master password (the server re-verifies it, like changePassword).
+ * Renders content only — callers wrap it in the card appropriate to their context. A failed commit
+ * keeps the gate closed with a retry (never proceeds to the vault, never leaves a live secret
+ * dangling — the secret is zeroed on failure). `onSignOut` (A.5) is the gate's only escape — safe:
+ * the flag stays false, so the gate re-fires at the next sign-in.
  */
 function RecoveryCaptureGate({
   client,
@@ -813,6 +899,7 @@ function RecoveryCaptureGate({
   currentAuthKey,
   clipboardClearSeconds,
   onReady,
+  onSignOut,
 }: {
   client: ApiClient;
   account: Account;
@@ -821,21 +908,38 @@ function RecoveryCaptureGate({
   currentAuthKey: string;
   clipboardClearSeconds: number;
   onReady: (a: Account, s: VaultStore, m: LoginMeta) => void;
+  onSignOut: () => void;
 }) {
   const secretRef = useRef<Uint8Array | null>(null);
-  const [stage, setStage] = useState<"working" | "reveal" | "error">("working");
+  // design 2026-07-13: the server-minted id of the piece THIS gate committed + revealed — presented at
+  // confirm so it can never attest a piece a concurrent setup rotated away. Lives beside secretRef;
+  // the two are zeroed/cleared together (unmount, confirm, stale).
+  const pieceIdRef = useRef<string | null>(null);
+  const [stage, setStage] = useState<"working" | "reveal" | "confirming" | "error">("working");
+  // design 2026-07-13: a confirm answered 409 recovery_piece_stale — the static notice explains the
+  // fresh phrase the re-run is about to reveal. Sticky for the gate's lifetime (the old phrase stays dead).
+  const [pieceStale, setPieceStale] = useState(false);
   const [err, setErr] = useState("");
   const startedRef = useRef(false);
+  // One settlement per reveal (the confirm is awaited now, so the reveal outlives the first click).
+  const settlingRef = useRef(false);
+  const aliveRef = useRef(true);
 
-  // §F.7: zero the raw secret on unmount as well as on confirm.
-  useEffect(() => () => { secretRef.current?.fill(0); secretRef.current = null; }, []);
+  // §F.7: zero the raw secret (and clear its piece id — together) on unmount as well as on confirm.
+  // aliveRef re-arms across a StrictMode remount so a settlement landing after unmount can't onReady.
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; secretRef.current?.fill(0); secretRef.current = null; pieceIdRef.current = null; };
+  }, []);
 
   const run = useCallback(async () => {
     setStage("working");
     setErr("");
     try {
-      const secret = await net(setupAndCommitRecovery(client, account, currentAuthKey));
-      secretRef.current = secret;
+      const { recoverySecret, pieceId } = await net(setupAndCommitRecovery(client, account, currentAuthKey));
+      if (!aliveRef.current) { recoverySecret.fill(0); return; } // unmounted mid-flight — never leave the secret live
+      secretRef.current = recoverySecret;
+      pieceIdRef.current = pieceId;
       setStage("reveal");
     } catch (e) {
       // Static copy only — NEVER interpolate secret material (§F.7).
@@ -851,32 +955,53 @@ function RecoveryCaptureGate({
     void run();
   }, [run]);
 
-  if (stage === "reveal" && secretRef.current) {
-    return (
+  const body =
+    stage === "reveal" && secretRef.current ? (
       <RecoveryReveal
         secretRef={secretRef}
         clipboardClearSeconds={clipboardClearSeconds}
         onConfirmed={() => {
-          secretRef.current?.fill(0);
-          secretRef.current = null;
-          // §F.9 (round-3): flip the durable flag only AFTER the type-back capture — exactly like the enroll
-          // path — never at self-setup commit time. Best-effort: a failed confirm just re-fires the gate next
-          // entry (safe), it never marks an unseen/uncaptured phrase confirmed.
-          void confirmRegisteredRecovery(client).catch(() => {});
-          onReady(account, store, meta);
+          if (settlingRef.current) return;
+          settlingRef.current = true;
+          setStage("confirming");
+          // §F.9 (round-3) + design 2026-07-13: flip the durable flag only AFTER the type-back capture —
+          // never at self-setup commit time — now BOUND to the piece this gate revealed and AWAITED.
+          // Stale ⇒ the typed phrase attests a rotated-away piece: static notice + re-run (fresh
+          // setup/reveal; the gate stays closed). Any other failure proceeds unconfirmed — the flag
+          // stays 0, so the gate re-fires next entry (safe); it never marks an uncaptured phrase confirmed.
+          void settleRecoveryConfirm(client, pieceIdRef.current, {
+            zero: () => { secretRef.current?.fill(0); secretRef.current = null; pieceIdRef.current = null; },
+            onStale: () => {
+              if (!aliveRef.current) return;
+              settlingRef.current = false;
+              setPieceStale(true);
+              void run();
+            },
+            onProceed: () => { if (aliveRef.current) onReady(account, store, meta); },
+          });
         }}
       />
-    );
-  }
-  if (stage === "error") {
-    return (
+    ) : stage === "error" ? (
       <div>
         <Msg kind="err">{err}</Msg>
         <button type="button" className="primary" onClick={() => void run()}>Try again</button>
       </div>
+    ) : (
+      <p className="muted">{stage === "confirming" ? "Saving your confirmation…" : "Preparing your recovery phrase…"}</p>
     );
-  }
-  return <p className="muted">Preparing your recovery phrase…</p>;
+
+  return (
+    <div>
+      {pieceStale && <Msg kind="err">{RECOVERY_PIECE_STALE_NOTICE}</Msg>}
+      {body}
+      {/* A.5: the un-skippable gate still needs an escape that isn't "close the tab" — the same
+          affordance as the Unlock card. Safe: recoveryConfirmed stays false, so the gate re-fires
+          at the next sign-in (an un-captured phrase is replaced by the next run's fresh one). */}
+      <div style={{ textAlign: "center", marginTop: 16 }}>
+        <button type="button" className="link" onClick={onSignOut}>Sign out / use a different account</button>
+      </div>
+    </div>
+  );
 }
 
 // ---- helpers ----
@@ -927,7 +1052,7 @@ export function MasterPasswordHint({ password }: { password: string }) {
         strength: {STRENGTH_LABELS[score]}{ok ? " ✓" : " — needs at least “good”"}
       </span>
       {nonAscii && (
-        <span className="muted" style={{ display: "block", color: "var(--gold)" }}>
+        <span className="muted" style={{ display: "block", color: "var(--gold-text)" }}>
           contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it
         </span>
       )}

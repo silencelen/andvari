@@ -917,7 +917,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
               </div>
             </div>
           )}
-          {doc.login.totp && <TotpView uri={doc.login.totp} onCopy={(code) => copy("code", code)} />}
+          {doc.login.totp && <TotpView uri={doc.login.totp} flash={flash === "code"} clearSecs={clearSecs} onCopy={(code) => copy("code", code)} />}
           {doc.login.uris?.[0] && (
             <Field label="Website">
               <input readOnly value={doc.login.uris[0]} />
@@ -1328,14 +1328,17 @@ function SecretInput({ value, onChange, ariaLabel }: { value: string; onChange: 
   );
 }
 
-function TotpView({ uri, onCopy }: { uri: string; onCopy: (code: string) => void }) {
+function TotpView({ uri, flash, clearSecs, onCopy }: { uri: string; flash: boolean; clearSecs: number; onCopy: (code: string) => void }) {
   const [code, setCode] = useState("······");
   const [remaining, setRemaining] = useState(30);
   const [period, setPeriod] = useState(30);
   useEffect(() => {
     let cfg;
     try {
-      cfg = parseOtpauthUri(uri);
+      // The SHARED normalize first (crypto/totp.ts — A5, the editor's own save path): a bare-base32
+      // secret (imported / stored before the save-time normalize) renders its code instead of
+      // "invalid" forever. Already-normalized otpauth URIs pass through unchanged.
+      cfg = parseOtpauthUri(normalizeTotp(uri));
     } catch {
       setCode("invalid");
       return;
@@ -1352,7 +1355,9 @@ function TotpView({ uri, onCopy }: { uri: string; onCopy: (code: string) => void
   }, [uri]);
   return (
     <div className="field">
-      <label>One-time code</label>
+      {/* Same copy-flash pill as the password/card fields — TotpView owns the label, so the
+          Detail parent threads `flash` (=== "code") + clearSecs down instead of rendering it. */}
+      <label>One-time code {flash && <span className="copy-flash">copied ✓ · clears in {clearSecs}s</span>}</label>
       <div className="totp-wrap">
         {/* a11yweb-09: name the copy affordance + speak the code (the visible digits are the
             control's text but "123456, button" gives no hint it copies). */}
