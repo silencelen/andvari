@@ -28,6 +28,53 @@ deb GPG (ceremony 2026-07-14, `docs/runbooks/release-signing-keys.md`).
    wiring remains. Design: `docs/design/2026-07-13-signed-updates.md` §M (authoritative). Optional now
    that the installers are OS-signed.
 
+## Frontend/UI design audit 2026-07-12/13 — remediation campaign (~22 of 27 SHIPPED)
+
+First dedicated design/UX audit of all five surfaces (web · extension · android · desktop · server-email).
+Method + full findings + the merged prioritized backlog ("action plan v2", the SSOT for the item numbers
+below): **`docs/design/2026-07-12-frontend-ui-audit.{md,html}`** (run 1 = 131 verified findings; a *blind
+replication* found +69 substantive; ≈200 unique combined). Each cut = breaker (where risky) → build →
+find→refute review → per-module gate → commit; **web+server are DEPLOYED @ `3b76797`, natives are code-only
+pending a release**.
+
+**Shipped (git `6439dc1`..`3b76797`):**
+- **Foundation** — one design language was re-declared in 5 hand-synced token files; now light-theme AA +
+  focus tokens (v2 #1), the full Material3 color schemes on both Compose clients (#11), and a **token-lockstep
+  test** parsing all 5 sources so drift can't ship again (#12).
+- **Trust & data-loss** — one-tap-discard confirms on editor cancel / sign-out / version-restore (#3); the
+  desktop "un-skippable" recovery ceremony was silently skippable by the app's own idle lock (**silent total
+  loss**) — now a native §F.9 vault-entry gate keyed off the durable server `recoveryConfirmed` flag (#15); the
+  web editor dirty-guard + auto-lock pre-warning (#16); recovery capture-gate paste-block (#7).
+- **Secret hygiene & platform fit** — `KeyboardType.Password` on every secret field + web autocomplete (#4);
+  Android SDK-35 insets + IME-reachable Unlock (#5); desktop window max-width/min-size/decouple sync from the
+  user-op busy flag + HTTP timeouts (#9/#17); lazy vault lists (#19).
+- **Wayfinding & first-contact** — forgot-password signposts on every locked surface (#6); surfaced autofill +
+  vault-context (#20); the **invite email** is now branded, **names the inviter**, is posture-accurate about
+  recovery, and states its fuse — with `emailStatus` for debuggability (#2/#21); web/server hygiene:
+  favicon/theme-color, noscript/boot, robots, security headers (#8/#22).
+- **Feedback & a11y** — truthful clipboard/copy disclosure (#10); the extension autofill dropdown got
+  truthful fill-outcomes + full keyboard/listbox semantics (#14/#18); enroll accepts a pasted link (#13).
+
+**Remaining (all files now free; parallelizable by module):**
+- **#23** household voice + error-string sweep (all clients; Android just maps web's existing strings).
+- **#24 remainder** motion/progress layer on web+desktop (android unlock caption done) + `prefers-reduced-motion`
+  + the desktop synchronous update-check UI freeze (one-line `withContext`).
+- **#25** port the tofu-proof SVG runes to the extension + Compose (the mark renders as tofu on stock
+  macOS/iOS/Linux where anti-spoofing lives; web already solved it with SVG geometry).
+- **#26** user theme override (Auto/Light/Dark) — Linux desktop is hard-stuck in the light theme.
+- **#27** platform-fit roadmap (L, needs design): extension quick-unlock tier, desktop menu bar + Ctrl+L,
+  CMP screen-reader verification.
+
+**Cross-cut follow-ups (need their own passes, NOT UI cuts):**
+- **Cross-device `recoverySelfSetup` race** (server, silent-loss class, flagged by the #15 review):
+  `Service.kt recoverySelfSetup` rotates the recovery block without resetting `recoveryConfirmed` in the same
+  tx, so a 2nd device's mount-time setup after a 1st device's confirm can strand the 1st's phrase. **Needs a
+  breaker-before-build pass** (ZK recovery semantics) before touching.
+- **TOTP detail "invalid" forever** for a bare-base32 / imported secret (only the web editor normalizes) —
+  `Vault.tsx TotpView` should tolerate a raw secret or normalize at the store boundary.
+- **Native release** — cuts K/L/M(android)/O(desktop)/N(ext) are committed but not on any device: rebuild
+  APK/deb/MSI + extension zips (0.16.0 code; installers lag).
+
 ## v5 refinement cycle — batches B1–B8 SHIPPED (2026-07-07)
 
 A 14-lens recon (168 raw → 84 deduped findings) drove eight reviewed batches, all shipped
