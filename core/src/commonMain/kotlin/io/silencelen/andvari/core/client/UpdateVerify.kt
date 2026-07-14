@@ -22,7 +22,14 @@ object UpdateVerify {
      * pinned here — at which point remove the sentinel.
      */
     const val TEST_PUBKEY = "TEST_KEY_placeholder__pin_the_real_workstation_pubkey_here"
-    val PINNED: List<String> = listOf(TEST_PUBKEY)
+
+    /**
+     * The real workstation update-signing public key(s) (ceremony 2026-07-14 —
+     * `docs/runbooks/release-signing-keys.md`). A SET (§M-D7) so a future rotation can add the next
+     * key and overlap without bricking fielded clients. The private key lives only on the owner's
+     * workstation; each release's `/downloads/manifest.json` is signed there with `tools/update-signer`.
+     */
+    val PINNED: List<String> = listOf("e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI")
 
     /**
      * §M-D3 — the update path is HARD-DISABLED while only the placeholder is pinned. A build that

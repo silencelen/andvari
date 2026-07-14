@@ -34,18 +34,20 @@ class UpdateVerifyTest {
     }
 
     @Test
-    fun updateVerify_realPinnedKeyVerifies_testKeyOnlyIsDisabled() {
-        val pinnedReal = listOf(Bytes.toB64(pub))
+    fun updateVerify_realPinnedKeyVerifies_sentinelOnlyIsDisabled() {
+        val pinnedReal = listOf(Bytes.toB64(pub)) // the RFC-8032 key used as an explicit pin
         assertTrue(UpdateVerify.updatesEnabled(pinnedReal))
         assertTrue(UpdateVerify.verify(crypto, msg, sig, pinnedReal), "a real pinned key verifies a genuine sig")
-        // Tamper still rejected through the UpdateVerify path.
-        assertFalse(UpdateVerify.verify(crypto, msg + 0x00, sig, pinnedReal))
+        assertFalse(UpdateVerify.verify(crypto, msg + 0x00, sig, pinnedReal), "tamper rejected through the UpdateVerify path")
 
-        // §M-D3: the shipped default (test placeholder only) offers NO updates — even a genuine sig.
-        assertFalse(UpdateVerify.updatesEnabled(), "default (test-key only) must be disabled")
-        assertFalse(UpdateVerify.verify(crypto, msg, sig), "default must fail closed regardless of signature")
+        // §M-D3: a build pinning ONLY the placeholder sentinel offers NO updates — even a genuine sig.
+        assertFalse(UpdateVerify.updatesEnabled(listOf(UpdateVerify.TEST_PUBKEY)), "sentinel-only must be disabled")
+        assertFalse(UpdateVerify.verify(crypto, msg, sig, listOf(UpdateVerify.TEST_PUBKEY)), "sentinel-only fails closed")
 
-        // A key SET (§M-D7): a real key alongside the placeholder still verifies (rotation overlap).
+        // The SHIPPED default now pins the real workstation key (ceremony 2026-07-14) → updates enabled.
+        assertTrue(UpdateVerify.updatesEnabled(), "shipped default pins a real key")
+
+        // A key SET (§M-D7): a real key alongside the sentinel still verifies (rotation overlap).
         assertTrue(UpdateVerify.verify(crypto, msg, sig, listOf(UpdateVerify.TEST_PUBKEY, Bytes.toB64(pub))))
     }
 }
