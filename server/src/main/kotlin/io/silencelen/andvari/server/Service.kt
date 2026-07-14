@@ -163,21 +163,19 @@ class Service(
         val t = now()
         c.exec(
             """INSERT INTO users(userId,email,displayName,kdfSalt,kdfParams,verifier,wrappedUvk,identityPub,
-               encryptedIdentitySeed,isAdmin,status,mustChangePassword,createdAt)
-               VALUES(?,?,?,?,?,?,?,?,?,?, 'active', 0, ?)""",
+               encryptedIdentitySeed,isAdmin,status,mustChangePassword,createdAt,escrowPolicy)
+               VALUES(?,?,?,?,?,?,?,?,?,?, 'active', 0, ?, ?)""",
             userId, req.email.lowercase(), req.displayName, req.kdfSalt, encodeParams(req.kdfParams),
             ServerCrypto.hashVerifier(req.authKey), req.wrappedUvk, req.identityPub,
             req.encryptedIdentitySeed, invite.isAdmin, t,
+            // §F.4 posture reconciliation (v8): persist the ENFORCED polarity of the invite's
+            // escrowPolicy — exactly what the gate above applied, never the client body — so
+            // AdminUserSummary can surface a posture flip / missing-backstop drift later.
+            if (waived) "waived" else "required",
         )
         // Org escrow (the admin backstop) only when the invite required it; in the required branch
         // req.escrow is guaranteed non-null above, so this always inserts there and never when waived.
         if (!waived) req.escrow?.let { c.exec("INSERT INTO escrow(userId,sealed,fingerprint,updatedAt) VALUES(?,?,?,?)", userId, it.sealed, it.fingerprint, t) }
-        // The self-service member-recovery row: UVK ciphertext + a one-way hash of recoveryAuthKey
-        // (never the raw key — identical to how authKey → verifier works).
-        c.exec(
-            "INSERT INTO member_recovery(userId,recoveryWrappedUvk,recoveryVerifier,updatedAt) VALUES(?,?,?,?)",
-            userId, memberRecovery.recoveryWrappedUvk, ServerCrypto.hashVerifier(memberRecovery.recoveryAuthKey), t,
-        )
 
         val vaultRev = repo.nextRev(c, "vault", req.personalVault.vaultId, req.personalVault.vaultId)
         c.exec(
@@ -192,10 +190,20 @@ class Service(
         c.exec("UPDATE invites SET usedAt=? WHERE tokenHash=?", t, tokenHash)
 
         val session = issueSession(c, userId, req.device.platform, req.device.name)
+        // The self-service member-recovery row: UVK ciphertext + a one-way hash of recoveryAuthKey
+        // (never the raw key — identical to how authKey → verifier works). Inserted AFTER issueSession
+        // so it can stamp the minted session's deviceId as setupDeviceId, next to a fresh pieceId
+        // (piece-binding, design 2026-07-13 §2.3); the response carries the id so the enroll path's
+        // type-back confirm attests exactly THIS piece. recoveryConfirmed stays 0 (column default).
+        val pieceId = ServerCrypto.newToken()
+        c.exec(
+            "INSERT INTO member_recovery(userId,recoveryWrappedUvk,recoveryVerifier,updatedAt,pieceId,setupDeviceId) VALUES(?,?,?,?,?,?)",
+            userId, memberRecovery.recoveryWrappedUvk, ServerCrypto.hashVerifier(memberRecovery.recoveryAuthKey), t, pieceId, session.deviceId,
+        )
         // Meta = invite token-hash prefix, not the email (INFO-1): joins this row to its
         // invite_create without copying PII into the central log store.
         repo.auditOn(c, "register", userId, session.deviceId, ip, tokenHash.take(12))
-        session.toResponse(user(c, userId), invite.isAdmin, false)
+        session.toResponse(user(c, userId), invite.isAdmin, false, recoveryPieceId = pieceId)
     }
 
     // ---- login ----
@@ -386,40 +394,84 @@ class Service(
      * account. Requires a FRESH master-password reauth — verify currentAuthKey against the login
      * verifier exactly like changePassword — BEFORE storing anything. A quick-unlock/biometric session
      * has no password in hand, cannot produce a valid currentAuthKey, and is refused here (401); the
-     * client defers the setup nudge to the next full-password unlock.
+     * client defers the setup nudge to the next full-password unlock. Returns the fresh pieceId the
+     * route hands back as RecoverySelfSetupResponse (piece-binding, design 2026-07-13 §2.1).
      */
-    fun recoverySelfSetup(p: Principal, req: RecoverySelfSetupRequest, ip: String) {
+    fun recoverySelfSetup(p: Principal, req: RecoverySelfSetupRequest, ip: String): String {
         val u = repo.userById(p.userId) ?: throw Unauthorized()
         if (!ServerCrypto.verify(u.verifier, req.currentAuthKey)) {
             repo.audit("recovery_self_setup_fail", p.userId, p.deviceId, ip)
             throw Unauthorized()
         }
         val block = requireMemberRecovery(req.memberRecovery)
+        val pieceId = ServerCrypto.newToken()
         repo.db.tx { c ->
+            // Stamp pieceId + setupDeviceId on insert AND on-conflict update: every setup mints a fresh
+            // id for the piece it commits, and records which device committed it (the legacy-confirm scope).
             c.exec(
-                """INSERT INTO member_recovery(userId,recoveryWrappedUvk,recoveryVerifier,updatedAt) VALUES(?,?,?,?)
-                   ON CONFLICT(userId) DO UPDATE SET recoveryWrappedUvk=excluded.recoveryWrappedUvk, recoveryVerifier=excluded.recoveryVerifier, updatedAt=excluded.updatedAt""",
-                p.userId, block.recoveryWrappedUvk, ServerCrypto.hashVerifier(block.recoveryAuthKey), now(),
+                """INSERT INTO member_recovery(userId,recoveryWrappedUvk,recoveryVerifier,updatedAt,pieceId,setupDeviceId) VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(userId) DO UPDATE SET recoveryWrappedUvk=excluded.recoveryWrappedUvk, recoveryVerifier=excluded.recoveryVerifier, updatedAt=excluded.updatedAt, pieceId=excluded.pieceId, setupDeviceId=excluded.setupDeviceId""",
+                p.userId, block.recoveryWrappedUvk, ServerCrypto.hashVerifier(block.recoveryAuthKey), now(), pieceId, p.deviceId,
             )
-            // §F.9 (round-3 fix): self-setup COMMITS/rotates the piece but MUST NOT flip recoveryConfirmed.
-            // The block-path capture gate calls self-setup on MOUNT — before the user has seen or typed back
-            // the revealed phrase — so confirming here would mark an interrupted reveal "captured" and re-open
-            // the silent-total-loss hole. recoveryConfirmed means "user demonstrably captured" and is flipped
-            // ONLY by /recovery/self/confirm after the type-back (both the enroll path and the gate use it).
+            // §F.9 (round-3 fix): self-setup COMMITS/rotates the piece but MUST NOT flip recoveryConfirmed
+            // to 1. The block-path capture gate calls self-setup on MOUNT — before the user has seen or typed
+            // back the revealed phrase — so confirming here would mark an interrupted reveal "captured" and
+            // re-open the silent-total-loss hole. It goes the other way (design 2026-07-13 leg ii, reset-on-
+            // rotate): a setup ROTATES the piece, so any earlier confirmation attested a now-dead phrase —
+            // clear the flag to 0 in the SAME tx. recoveryConfirmed means "user demonstrably captured the
+            // CURRENT piece" and flips to 1 ONLY in /recovery/self/confirm after the type-back (§2.2).
+            c.exec("UPDATE users SET recoveryConfirmed=0 WHERE userId=?", p.userId)
             repo.auditOn(c, "recovery_self_setup", p.userId, p.deviceId, ip)
         }
+        return pieceId
     }
 
     /**
-     * §F.9 capture confirmation — the enroll happy-path. Authenticated (a session is sufficient); no key
-     * material moves, unlike self-setup which needs a fresh currentAuthKey — the recovery piece was already
-     * committed at register, and the user is merely confirming they SAVED it. Flips the durable, cross-device
-     * recoveryConfirmed flag to 1 so the client's first-vault-entry capture gate stops firing on every device.
-     * Idempotent. Audit `recovery_self_confirm`.
+     * §F.9 capture confirmation — the enroll happy-path and the vault-entry gate's type-back. Authenticated
+     * (a session is sufficient); no key material moves, unlike self-setup which needs a fresh currentAuthKey —
+     * the piece was already committed at register/setup, and the user is merely confirming they SAVED it.
+     * Flips the durable, cross-device recoveryConfirmed flag to 1 so the capture gate stops firing.
+     *
+     * Piece binding (design 2026-07-13 §2.2/§4): the whole decision — row read, comparison, flag write,
+     * audit — rides ONE tx so no setup can rotate the piece between decision and write (Db's single-
+     * connection lock totally serializes txs; the semantic binding, never an isolation level, is the fix).
+     *   R1 bound   — [pieceId] presented: accept iff it equals the CURRENT row's non-null pieceId.
+     *   R2 unbound — no body (fielded 0.15/0.16 natives): accept iff the row's setupDeviceId is NULL
+     *                (pre-v8 piece) or the caller's own device — a legacy confirm can never attest a
+     *                piece rotated in from another device.
+     *   R3         — no member_recovery row at all: refuse.
+     * A refused confirm throws 409 recovery_piece_stale AFTER the tx commits its audit row; the client
+     * discards the shown phrase and re-runs setup + reveal. Idempotent while the row is unrotated.
+     * Audits recovery_self_confirm / recovery_self_confirm_unbound / recovery_self_confirm_stale
+     * (meta: no_row / bound / unbound). The id is an opaque handle, not a credential — plain string
+     * equality is fine (constant-time compare is not load-bearing here).
      */
-    fun recoverySelfConfirm(p: Principal, ip: String) = repo.db.tx { c ->
-        repo.setRecoveryConfirmed(c, p.userId)
-        repo.auditOn(c, "recovery_self_confirm", p.userId, p.deviceId, ip)
+    fun recoverySelfConfirm(p: Principal, pieceId: String?, ip: String) {
+        val stale = repo.db.tx { c ->
+            val row = c.queryOne("SELECT pieceId, setupDeviceId FROM member_recovery WHERE userId=?", p.userId) { rs ->
+                rs.getString(1) to rs.getString(2) // (pieceId, setupDeviceId) — both NULL on a pre-v8 row
+            }
+            when {
+                row == null -> { // R3
+                    repo.auditOn(c, "recovery_self_confirm_stale", p.userId, p.deviceId, ip, "no_row"); true
+                }
+                pieceId != null -> // R1: bound (post-fix clients)
+                    if (row.first != null && pieceId == row.first) {
+                        repo.setRecoveryConfirmed(c, p.userId)
+                        repo.auditOn(c, "recovery_self_confirm", p.userId, p.deviceId, ip); false
+                    } else {
+                        repo.auditOn(c, "recovery_self_confirm_stale", p.userId, p.deviceId, ip, "bound"); true
+                    }
+                else -> // R2: unbound (fielded 0.15/0.16 natives)
+                    if (row.second == null || row.second == p.deviceId) {
+                        repo.setRecoveryConfirmed(c, p.userId)
+                        repo.auditOn(c, "recovery_self_confirm_unbound", p.userId, p.deviceId, ip); false
+                    } else {
+                        repo.auditOn(c, "recovery_self_confirm_stale", p.userId, p.deviceId, ip, "unbound"); true
+                    }
+            }
+        }
+        if (stale) throw Conflict("recovery_piece_stale")
     }
 
     /**
@@ -1260,10 +1312,12 @@ class Service(
     private fun user(c: Connection, userId: String): UserRow =
         c.queryOne("SELECT * FROM users WHERE userId=?", userId) { rs -> userRowPublic(rs) } ?: error("user vanished")
 
-    private fun IssuedSession.toResponse(u: UserRow, isAdmin: Boolean, mustChange: Boolean) = SessionResponse(
+    private fun IssuedSession.toResponse(u: UserRow, isAdmin: Boolean, mustChange: Boolean, recoveryPieceId: String? = null) = SessionResponse(
         userId = u.userId, deviceId = deviceId, accessToken = access, refreshToken = refresh,
         accountKeys = buildAccountKeys(u),
         isAdmin = isAdmin, mustChangePassword = mustChange, totpEnrolled = u.totpSecret != null,
+        // Piece-binding (design 2026-07-13 §1.3): ONLY register passes an id — login/refresh leave it null.
+        recoveryPieceId = recoveryPieceId,
     )
 
     companion object {

@@ -30,6 +30,11 @@ class AdminService(private val repo: Repo, private val config: Config) {
                 // surface a server-side policy flip on reconciliation.
                 escrowFingerprint = c.queryOne("SELECT fingerprint FROM escrow WHERE userId=?", userId) { r -> r.getString(1) },
                 recoveryEnrolled = c.queryOne("SELECT 1 FROM member_recovery WHERE userId=?", userId) { true } ?: false,
+                // The invite's escrow posture persisted at register (v8): 'required'|'waived'; NULL =
+                // pre-v8 account (legacy, posture unknown). Server column only — no client body ever
+                // sets it — so reconciliation can tell an intended waiver from a required member whose
+                // escrow blob went missing.
+                escrowPolicy = rs.getString("escrowPolicy"),
             )
         }
     }

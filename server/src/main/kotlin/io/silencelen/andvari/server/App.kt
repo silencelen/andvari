@@ -11,6 +11,7 @@ import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.contentLength
 import io.ktor.server.request.header
 import io.ktor.server.request.receive
+import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
@@ -38,7 +39,9 @@ import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.PreloginRequest
 import io.silencelen.andvari.core.model.PushRequest
 import io.silencelen.andvari.core.model.RecoveryCommitRequest
+import io.silencelen.andvari.core.model.RecoverySelfConfirmRequest
 import io.silencelen.andvari.core.model.RecoverySelfSetupRequest
+import io.silencelen.andvari.core.model.RecoverySelfSetupResponse
 import io.silencelen.andvari.core.model.RecoveryUpload
 import io.silencelen.andvari.core.model.RecoveryVerifyRequest
 import io.silencelen.andvari.core.model.RefreshRequest
@@ -623,11 +626,12 @@ fun Application.andvariModule(services: Services) {
         }
 
         // ---- per-member self-service recovery (design 2026-07-12 §F.3) ----
-        // Two-phase (verify → commit) + a setup/rotation path. ALL THREE refuse the public break-glass
-        // origin (like register, App.kt:332) and are per-IP fixed-window rate-limited at the public-login
-        // tightness (5/min) — a per-IP counter, never per-account, so a targeted account can't be locked
-        // out of its own recovery (§F.8). No enforceVersion: recovery must work even for a client the
-        // min-version pin would gate, and pre-recovery clients never call these paths.
+        // Two-phase (verify → commit) + a setup/rotation path. All FOUR (the confirm below included)
+        // refuse the public break-glass origin (like register, App.kt:332) and are per-IP fixed-window
+        // rate-limited at the public-login tightness (5/min) — a per-IP counter, never per-account, so a
+        // targeted account can't be locked out of its own recovery (§F.8). No enforceVersion: recovery
+        // must work even for a client the min-version pin would gate, and pre-recovery clients never
+        // call these paths.
         post("/api/v1/recovery/self/verify") {
             if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
             if (!limiter.allow("recovery_verify:${call.clientIp(config)}", 5, 60_000)) throw RateLimited()
@@ -644,17 +648,28 @@ fun Application.andvariModule(services: Services) {
             if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
             if (!limiter.allow("recovery_setup:${call.clientIp(config)}", 5, 60_000)) throw RateLimited()
             val p = requirePrincipal(call, service)
-            service.recoverySelfSetup(p, call.receive<RecoverySelfSetupRequest>(), call.clientIp(config))
-            call.respondText("ok")
+            val pieceId = service.recoverySelfSetup(p, call.receive<RecoverySelfSetupRequest>(), call.clientIp(config))
+            // Piece-binding (design 2026-07-13 §1.4): the response carries the fresh pieceId (was the
+            // text "ok" — no fielded client parses that body) so the capture gate's type-back confirm
+            // can bind to the piece THIS setup committed.
+            call.respond(RecoverySelfSetupResponse(pieceId))
         }
-        // §F.9 capture confirmation (enroll happy-path): authenticated, public-origin-refused, per-IP
-        // rate-limited like the other recovery routes. A session suffices (no key material moves — the
-        // register-committed piece is what was shown); it just flips the durable recoveryConfirmed flag.
+        // §F.9 capture confirmation (enroll happy-path + the gate's type-back): authenticated, public-
+        // origin-refused, per-IP rate-limited like the other recovery routes. A session suffices (no key
+        // material moves — the committed piece is what was shown); it flips the durable recoveryConfirmed
+        // flag ONLY when the confirm still names the CURRENT piece (design 2026-07-13 §2.2; stale ⇒
+        // 409 recovery_piece_stale via StatusPages' Conflict mapping). Body parse rule (§1.4, BINDING):
+        // blank/absent ⇒ pieceId=null (the fielded 0.15/0.16 body-less wire shape — R2 device-scoped
+        // acceptance); non-blank ⇒ RecoverySelfConfirmRequest, decode failure ⇒ 400 bad_request.
         post("/api/v1/recovery/self/confirm") {
             if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
             if (!limiter.allow("recovery_confirm:${call.clientIp(config)}", 5, 60_000)) throw RateLimited()
             val p = requirePrincipal(call, service)
-            service.recoverySelfConfirm(p, call.clientIp(config))
+            val text = call.receiveText()
+            val pieceId = if (text.isBlank()) null else runCatching {
+                json.decodeFromString(RecoverySelfConfirmRequest.serializer(), text).pieceId
+            }.getOrElse { throw BadRequest("bad_request") }
+            service.recoverySelfConfirm(p, pieceId, call.clientIp(config))
             call.respondText("ok")
         }
 

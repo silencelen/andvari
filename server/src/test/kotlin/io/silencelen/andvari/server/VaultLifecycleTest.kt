@@ -1018,7 +1018,7 @@ class VaultLifecycleTest : LifecycleTestSupport() {
 
         Db(dbFile.absolutePath).use { db ->
             db.read { c ->
-                assertEquals("7", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
+                assertEquals("8", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
                 // Pre-v4 rows read back NULL lifecycle state, transferSeq=0.
                 val v = c.queryOne("SELECT deletedAt, purgeAt, purgedAt, deleteId, transferSeq, pendingOfferId FROM vaults WHERE vaultId='v'") { rs ->
                     listOf(rs.getObject(1), rs.getObject(2), rs.getObject(3), rs.getObject(4), rs.getLong(5), rs.getObject(6))
@@ -1039,7 +1039,7 @@ class VaultLifecycleTest : LifecycleTestSupport() {
         }
         // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("7", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("8", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

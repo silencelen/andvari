@@ -341,7 +341,7 @@ class SharedVaultTest : P4TestSupport() {
                 val s = c.queryOne("SELECT sealedVk FROM grants WHERE userId='u'") { rs -> rs.getString(1) }
                 v to s
             }
-            assertEquals("7", version)
+            assertEquals("8", version)
             assertNull(sealed, "the pre-existing v2 grant reads back sealedVk=NULL")
             db.read { c ->
                 // v6 recovery migration landed: member_recovery table + invites.escrowPolicy default.
@@ -349,11 +349,14 @@ class SharedVaultTest : P4TestSupport() {
                 assertEquals("required", c.queryOne("SELECT escrowPolicy FROM invites WHERE tokenHash='th'") { it.getString(1) })
                 // v7 §F.9 migration landed: users.recoveryConfirmed, pre-existing user reads back 0 (nudged).
                 assertEquals(0, c.queryOne("SELECT recoveryConfirmed FROM users WHERE userId='u'") { it.getInt(1) })
+                // v8 migration landed (2026-07-13): users.escrowPolicy + member_recovery.pieceId/setupDeviceId.
+                assertNotNull(c.queryOne("SELECT name FROM pragma_table_info('users') WHERE name='escrowPolicy'") { it.getString(1) })
+                assertNotNull(c.queryOne("SELECT name FROM pragma_table_info('member_recovery') WHERE name='pieceId'") { it.getString(1) })
             }
         }
         // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("7", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("8", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

@@ -90,17 +90,23 @@ class UserRow(
 )
 
 /** The per-member self-service recovery row (design 2026-07-12 §F): UVK ciphertext + a one-way
- *  hash of recoveryAuthKey. Held server-side, opaque — the symmetric counterpart to `escrow`. */
+ *  hash of recoveryAuthKey. Held server-side, opaque — the symmetric counterpart to `escrow`.
+ *  pieceId/setupDeviceId (v8, design 2026-07-13) bind confirms to the CURRENT piece; NULL on
+ *  both = a pre-v8 row (drives the legacy acceptance branch in recoverySelfConfirm). */
 class MemberRecoveryRow(
     val userId: String,
     val recoveryWrappedUvk: String,
     val recoveryVerifier: String,
+    val pieceId: String?,
+    val setupDeviceId: String?,
 )
 
 private fun memberRecoveryRowOf(rs: ResultSet) = MemberRecoveryRow(
     userId = rs.getString("userId"),
     recoveryWrappedUvk = rs.getString("recoveryWrappedUvk"),
     recoveryVerifier = rs.getString("recoveryVerifier"),
+    pieceId = rs.getString("pieceId"),
+    setupDeviceId = rs.getString("setupDeviceId"),
 )
 
 fun userRowPublic(rs: ResultSet) = userRow(rs)
@@ -265,7 +271,7 @@ class Repo(val db: Db) {
 
     // member recovery (design 2026-07-12 §F) — the per-member self-service recovery row.
     fun memberRecoveryRow(userId: String): MemberRecoveryRow? =
-        db.read { it.queryOne("SELECT userId,recoveryWrappedUvk,recoveryVerifier FROM member_recovery WHERE userId=?", userId, map = ::memberRecoveryRowOf) }
+        db.read { it.queryOne("SELECT userId,recoveryWrappedUvk,recoveryVerifier,pieceId,setupDeviceId FROM member_recovery WHERE userId=?", userId, map = ::memberRecoveryRowOf) }
 
     /** True iff [userId] has a member_recovery row — drives AccountKeys.recoverySetupNeeded (the
      *  migration nudge, §F.2) and AdminUserSummary.recoveryEnrolled (posture reconciliation, §F.4). */
@@ -280,8 +286,10 @@ class Repo(val db: Db) {
         db.read { it.queryOne("SELECT recoveryConfirmed FROM users WHERE userId=?", userId) { rs -> rs.getInt(1) != 0 } ?: false }
 
     /** design §F.9: flip [userId]'s capture-confirmation flag to 1. Idempotent; takes the caller's
-     *  Connection so it commits atomically with the confirm/self-setup audit row (like clearPendingOffer).
-     *  Set by POST /recovery/self/confirm (enroll happy-path) and by recoverySelfSetup (explicit capture). */
+     *  Connection so it commits atomically with the confirm audit row (like clearPendingOffer).
+     *  Set ONLY by POST /recovery/self/confirm after the piece-binding check (design 2026-07-13 §2.2);
+     *  recoverySelfSetup CLEARS it to 0 in its own tx — a setup ROTATES the piece, so the flag always
+     *  describes the CURRENT piece (reset-on-rotate, leg ii). */
     fun setRecoveryConfirmed(c: Connection, userId: String) {
         c.exec("UPDATE users SET recoveryConfirmed=1 WHERE userId=?", userId)
     }
