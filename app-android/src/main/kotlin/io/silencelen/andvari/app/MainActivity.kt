@@ -18,6 +18,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
@@ -842,17 +844,25 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
         }
     }
 
-    val filtered = ui.items.filter {
+    // Cut K (v2 #19): remembered — this ran on EVERY recomposition (not just query/item
+    // changes), and the list below is now lazy so large vaults don't compose every row.
+    val filtered = remember(ui.items, query) {
         val q = query.trim().lowercase()
-        // F79 parity with web/desktop: name + username + EVERY uri + notes + card brand/••last4.
-        val d = it.doc
-        q.isEmpty() ||
-            d.name.lowercase().contains(q) ||
-            (d.notes ?: "").lowercase().contains(q) ||
-            (d.login?.username ?: "").lowercase().contains(q) ||
-            (d.login?.uris ?: emptyList()).any { u -> u.lowercase().contains(q) } ||
-            (d.type == "card" && CardDisplay.subtitle(d).lowercase().contains(q))
+        ui.items.filter {
+            // F79 parity with web/desktop: name + username + EVERY uri + notes + card brand/••last4.
+            val d = it.doc
+            q.isEmpty() ||
+                d.name.lowercase().contains(q) ||
+                (d.notes ?: "").lowercase().contains(q) ||
+                (d.login?.username ?: "").lowercase().contains(q) ||
+                (d.login?.uris ?: emptyList()).any { u -> u.lowercase().contains(q) } ||
+                (d.type == "card" && CardDisplay.subtitle(d).lowercase().contains(q))
+        }
     }
+    // Cut K (v2 #20): shared-vault name per item — items never showed WHICH vault they live
+    // in, so personal vs shared secrets were indistinguishable in the list (web/desktop have
+    // badges; this is the Android twin). Personal stays untagged.
+    val vaultTags = remember(ui.items) { vm.vaultInfos().filter { it.type != "personal" }.associate { it.vaultId to it.name } }
 
     Scaffold(
         topBar = {
@@ -896,19 +906,30 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                 // save finishing across an Activity recreation still closes the editor.
                 editorInitial != null -> ItemEditor(vm, ui, editorItemId, editorInitial, onSave = { doc, uploads, vId -> vm.saveItem(editorItemId, doc, uploads, vId) { vm.closeEditor() } }, onCancel = { vm.closeEditor() })
                 current != null -> ItemDetail(vm, ui, current, onEdit = { vm.openEditor(current.itemId) }, onDelete = { vm.deleteItem(current.itemId); detailId = null }, onBack = { detailId = null })
-                else -> Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
-                    OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
-                    ErrorBar(ui.error, vm::clearError)
-                    NoticeBar(ui.notice, vm::clearNotice)
-                    // P4/A7: the break-glass banners that used to render here (lifecycle notices,
-                    // incoming transfers, re-seal, needsUpdate, unopenable-vault) moved to the
-                    // global AttentionArea above the screen switch — rendered once, not duplicated
-                    // on the Vault list AND Sharing. ErrorBar/NoticeBar stay (screen-local op feedback).
-                    Spacer(Modifier.height(8.dp))
+                // Cut K (v2 #19): LazyColumn — the eager Column composed EVERY row on every
+                // keystroke (the 10k-scale freeze class the import dialogs cap against).
+                else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+                    item(key = "toolbar") {
+                        Column {
+                            OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
+                            ErrorBar(ui.error, vm::clearError)
+                            NoticeBar(ui.notice, vm::clearNotice)
+                            // P4/A7: the break-glass banners that used to render here (lifecycle notices,
+                            // incoming transfers, re-seal, needsUpdate, unopenable-vault) moved to the
+                            // global AttentionArea above the screen switch — rendered once, not duplicated
+                            // on the Vault list AND Sharing. ErrorBar/NoticeBar stay (screen-local op feedback).
+                            Spacer(Modifier.height(8.dp))
+                        }
+                    }
                     if (filtered.isEmpty()) {
-                        Centered { Spacer(Modifier.height(60.dp)); Text("ᛝ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary); Text(if (ui.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        item(key = "empty") {
+                            Centered { Spacer(Modifier.height(60.dp)); Text("ᛝ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary); Text(if (ui.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        }
                     } else {
-                        filtered.forEach { item -> VaultRow(item) { detailId = item.itemId }; Spacer(Modifier.height(8.dp)) }
+                        items(filtered, key = { it.itemId }) { item ->
+                            VaultRow(item, vaultTags[item.vaultId]) { detailId = item.itemId }
+                            Spacer(Modifier.height(8.dp))
+                        }
                     }
                 }
             }
@@ -1136,7 +1157,7 @@ private fun readBounded(input: java.io.InputStream, limit: Int): ByteArray? {
 }
 
 @Composable
-private fun VaultRow(item: VaultItem, onClick: () -> Unit) {
+private fun VaultRow(item: VaultItem, vaultTag: String? = null, onClick: () -> Unit) {
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
@@ -1154,6 +1175,11 @@ private fun VaultRow(item: VaultItem, onClick: () -> Unit) {
                     },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
                 )
+            }
+            // Cut K (v2 #20): the shared-vault tag (gold, like web's) — personal items stay untagged.
+            vaultTag?.let {
+                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, maxLines = 1)
+                Spacer(Modifier.width(8.dp))
             }
             Text(item.doc.type, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

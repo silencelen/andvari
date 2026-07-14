@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -471,7 +473,8 @@ private fun Vault(state: DesktopState) {
     var editing by remember { mutableStateOf<Pair<String?, ItemDoc>?>(null) }
     var detailId by remember { mutableStateOf<String?>(null) }
     var importFlow by remember { mutableStateOf(false) } // the universal import screen
-    val filtered = state.items.filter {
+    // Cut K (v2 #19): remembered — the predicate ran over EVERY item on every recomposition.
+    val filtered = remember(state.items, query) { state.items.filter {
         val q = query.trim().lowercase()
         // F79: name + username + EVERY uri + notes + a card's brand/••last4 (never secrets),
         // matching the web predicate — so a 2nd-website login, a note's body, and a card by
@@ -483,7 +486,7 @@ private fun Vault(state: DesktopState) {
             (d.login?.username ?: "").lowercase().contains(q) ||
             (d.login?.uris ?: emptyList()).any { u -> u.lowercase().contains(q) } ||
             (d.type == "card" && CardDisplay.subtitle(d).lowercase().contains(q))
-    }
+    } }
     // F81: decrypted names for held vaults OTHER than the personal one — the gold badge on
     // rows/detail. Each lookup decrypts vault metaBlobs, so build the map once per items-change
     // (sync/refresh replace `items`), never per row recomposition (search keystrokes recompose).
@@ -569,10 +572,19 @@ private fun Vault(state: DesktopState) {
                     Text(needsUpdateLine(state.needsUpdateCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(vertical = 4.dp))
                 }
                 Spacer(Modifier.height(8.dp))
-                Column(Modifier.verticalScroll(rememberScrollState())) {
+                // Cut K (v2 #19): LazyColumn — the eager Column composed EVERY row on every
+                // search keystroke (the 10k-scale freeze class).
+                LazyColumn(Modifier.weight(1f)) {
                     if (filtered.isEmpty()) {
-                        Center { Spacer(Modifier.height(48.dp)); Text("ᛝ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary); Text(if (state.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    } else filtered.forEach { item -> Row(item, vaultBadges[item.vaultId]) { detailId = item.itemId }; Spacer(Modifier.height(8.dp)) }
+                        item(key = "empty") {
+                            Center { Spacer(Modifier.height(48.dp)); Text("ᛝ", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary); Text(if (state.items.isEmpty()) "Your hoard is empty." else "Nothing matches.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        }
+                    } else {
+                        items(filtered, key = { it.itemId }) { item ->
+                            Row(item, vaultBadges[item.vaultId]) { detailId = item.itemId }
+                            Spacer(Modifier.height(8.dp))
+                        }
+                    }
                 }
             }
         }
