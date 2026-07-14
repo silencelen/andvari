@@ -49,6 +49,12 @@ import io.silencelen.andvari.core.model.PreloginResponse
 import io.silencelen.andvari.core.model.PushRequest
 import io.silencelen.andvari.core.model.PushResponse
 import io.silencelen.andvari.core.model.RefreshRequest
+import io.silencelen.andvari.core.model.RecoveryCommitRequest
+import io.silencelen.andvari.core.model.RecoverySelfConfirmRequest
+import io.silencelen.andvari.core.model.RecoverySelfSetupRequest
+import io.silencelen.andvari.core.model.RecoverySelfSetupResponse
+import io.silencelen.andvari.core.model.RecoveryVerifyRequest
+import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.SyncResponse
@@ -211,6 +217,54 @@ class AndvariApi(
      */
     suspend fun escrowSelf(upload: EscrowUpload) {
         val resp = request("PUT", "/api/v1/escrow/self", body = upload)
+        if (!resp.status.isSuccess()) throw errorFrom(resp)
+    }
+
+    // ---- per-member self-service recovery (design 2026-07-12 §F.3 + 2026-07-13 piece-binding) ----
+    // Shared surface for the native recovery screens + the vault-entry capture gate. Web keeps its own
+    // client.ts twins; these mirror them so android/desktop stop hand-rolling raw Ktor calls (which
+    // bypass the shared refresh/error path). verify/commit are unauthenticated (the forgot-password
+    // entry, pre-session); setup/confirm are authenticated. All four are server-refused on the public
+    // break-glass origin + per-IP rate-limited (spec 03 §12).
+
+    /** Phase 1 of forgot-master-password: prove possession of the recovery piece; returns the single-
+     *  use ticket + the wrapped UVK / identity material the client needs to derive the new session.
+     *  Unauthenticated; the uniform 401 covers unknown-email / no-row / bad-key (anti-enumeration). */
+    suspend fun recoverySelfVerify(email: String, recoveryAuthKey: String): RecoveryVerifyResponse =
+        call("POST", "/api/v1/recovery/self/verify", RecoveryVerifyRequest(email, recoveryAuthKey), auth = false)
+
+    /** Phase 2 of forgot-master-password: commit the reset (new verifier/wrappedUvk/kdf, sessions
+     *  revoked) against the single-use ticket from [recoverySelfVerify]. Unauthenticated. */
+    suspend fun recoverySelfCommit(req: RecoveryCommitRequest) {
+        val resp = request("POST", "/api/v1/recovery/self/commit", body = req, auth = false)
+        if (!resp.status.isSuccess()) throw errorFrom(resp)
+    }
+
+    /** Authenticated migration/rotation of the member-recovery piece (fresh currentAuthKey reauth).
+     *  Returns the opaque [RecoverySelfSetupResponse.pieceId] of the piece just committed; a pre-
+     *  binding server answers the text "ok", which we tolerate as `pieceId = null` (⇒ the caller's
+     *  confirm rides the legacy device-scoped path). Never throws on body shape alone at 2xx. */
+    suspend fun recoverySelfSetup(req: RecoverySelfSetupRequest): RecoverySelfSetupResponse {
+        val resp = request("PUT", "/api/v1/recovery/self-setup", body = req)
+        if (!resp.status.isSuccess()) throw errorFrom(resp)
+        return try {
+            json.decodeFromString(RecoverySelfSetupResponse.serializer(), resp.bodyAsText())
+        } catch (_: Exception) {
+            RecoverySelfSetupResponse(pieceId = null)
+        }
+    }
+
+    /** Flip the durable, cross-device `recoveryConfirmed` flag after the user demonstrably typed the
+     *  revealed phrase back. Send the [pieceId] you revealed (bound); a mismatch — a concurrent setup
+     *  rotated the piece away — throws `ApiException(409, "recovery_piece_stale")`, and the caller
+     *  MUST discard the shown phrase and re-run setup + reveal. `null` sends an empty body (the legacy
+     *  wire shape; the server device-scopes acceptance). */
+    suspend fun recoverySelfConfirm(pieceId: String?) {
+        val resp = if (pieceId != null) {
+            request("POST", "/api/v1/recovery/self/confirm", body = RecoverySelfConfirmRequest(pieceId))
+        } else {
+            request("POST", "/api/v1/recovery/self/confirm")
+        }
         if (!resp.status.isSuccess()) throw errorFrom(resp)
     }
 

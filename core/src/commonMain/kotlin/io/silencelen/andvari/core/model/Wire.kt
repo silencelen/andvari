@@ -107,6 +107,11 @@ data class SessionResponse(
     val isAdmin: Boolean,
     val mustChangePassword: Boolean = false,
     val totpEnrolled: Boolean = false,
+    // Piece-binding (design 2026-07-13): the opaque id of the recovery piece THIS register committed,
+    // presented by the enroll path's POST /recovery/self/confirm so the confirm attests the current
+    // piece. Populated ONLY by register; login/refresh MUST leave it null. Additive + defaulted so a
+    // fielded 0.15/0.16 client (ignoreUnknownKeys) and a rollback server both stay safe.
+    val recoveryPieceId: String? = null,
 )
 
 @Serializable
@@ -179,6 +184,26 @@ data class RecoveryCommitRequest(
  */
 @Serializable
 data class RecoverySelfSetupRequest(val currentAuthKey: String, val memberRecovery: MemberRecoveryBlock)
+
+/**
+ * `PUT /recovery/self-setup` success response (design 2026-07-13 piece-binding). Carries the fresh,
+ * opaque, server-minted `pieceId` of the piece this setup committed. The vault-entry capture gate
+ * threads it into the subsequent `POST /recovery/self/confirm` so the confirm can only flip
+ * `recoveryConfirmed` when it still names the CURRENT `member_recovery` row — closing the cross-device
+ * setup/confirm race. `pieceId` is nullable: a pre-binding server answered this route with the text
+ * `"ok"`, which [AndvariApi.recoverySelfSetup] tolerates as `pieceId = null` (legacy, unbound confirm).
+ */
+@Serializable
+data class RecoverySelfSetupResponse(val pieceId: String? = null)
+
+/**
+ * `POST /recovery/self/confirm` request body (design 2026-07-13 piece-binding). OPTIONAL: fielded
+ * pre-binding natives POST no body ⇒ the server treats it as `pieceId = null` (legacy, device-scoped
+ * acceptance). A post-binding client sends the `pieceId` it revealed; a mismatch (a concurrent setup
+ * rotated the piece away) is refused `409 recovery_piece_stale`. No key material rides this DTO.
+ */
+@Serializable
+data class RecoverySelfConfirmRequest(val pieceId: String? = null)
 
 // ---- sync ----
 
@@ -469,6 +494,12 @@ data class AdminUserSummary(
     // distinguish "waived (intended)" from "no recovery / needs setup" and catch a policy flip.
     // Additive + defaulted so older clients ignore it and a rollback server that omits it is safe.
     val recoveryEnrolled: Boolean = false,
+    // design §F.4 (2026-07-13): the invite's escrow posture persisted onto the user at register
+    // ("required" | "waived"), so the Admin UI can tell an intended waiver (no backstop by design)
+    // from a required-member whose escrow blob is missing (hostile policy flip / escrow deletion) —
+    // recoveryEnrolled + escrowFingerprint alone cannot. Nullable: pre-v8 users have no stored
+    // posture (⇒ "unknown", shown as legacy). Additive + defaulted (rollback-safe).
+    val escrowPolicy: String? = null,
 )
 
 // design §F.2: escrowPolicy is the admin's per-invite recovery posture — "required" (default; org

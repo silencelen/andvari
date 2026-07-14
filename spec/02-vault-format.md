@@ -218,17 +218,19 @@ spec violation.
 | mutations | (deviceId, mutationId) → resultJson, createdAt — idempotency replay cache; resultJson holds per-mutation status/rev, no vault content |
 | attachments | attachmentId, itemId, vaultId, ciphertext size, sha256(ciphertext), header, createdAt (filenames + file keys are inside item ciphertext) |
 | escrow | userId, sealed blob, fingerprint (of the recovery key), updatedAt |
-| member_recovery | userId, **recoveryWrappedUvk** (the UVK sealed under the member's recovery-secret-derived wrap key — ciphertext, opaque; AD `andvari/v1\|recovery-uvk\|{userId}`, §2), **recoveryVerifier** (one-way `crypto_pwhash_str(recoveryAuthKey)` — a DB leak is not a replayable recovery, exactly as the login verifier), updatedAt — the per-member self-service recovery row (spec 04 §per-member / design §F); ZK-clean, the symmetric counterpart to `escrow` |
+| member_recovery | userId, **recoveryWrappedUvk** (the UVK sealed under the member's recovery-secret-derived wrap key — ciphertext, opaque; AD `andvari/v1\|recovery-uvk\|{userId}`, §2), **recoveryVerifier** (one-way `crypto_pwhash_str(recoveryAuthKey)` — a DB leak is not a replayable recovery, exactly as the login verifier), **pieceId** (opaque random id of the current piece — rotation/confirm binding, spec 03 §12; not a secret), **setupDeviceId** (which device committed it — legacy-confirm scoping), updatedAt — the per-member self-service recovery row (spec 04 §per-member / design §F); ZK-clean, the symmetric counterpart to `escrow` |
 | audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, emails of existing users, or any decrypted content) |
 | policies | org policy JSON (min versions, KDF policy, lock timeouts…) |
 | hibp_cache | sha1-prefix → upstream HIBP range body + fetchedAt (public breach data, no user linkage stored) |
 | meta | key/value operational markers (schemaVersion, lastPublicRequestAt…) |
 
 Traffic analysis (who syncs when, item counts, sizes) is visible to the server by
-nature and accepted (spec 05). This table describes **schema v7 exactly** — adding any
+nature and accepted (spec 05). This table describes **schema v8 exactly** — adding any
 table or plaintext column requires updating it in the same change. (v6 = design 2026-07-12
 §F: the `member_recovery` table + the `invites.escrowPolicy` column. v7 = design 2026-07-12
-§F.9: the `users.recoveryConfirmed` capture-confirmation flag.)
+§F.9: the `users.recoveryConfirmed` capture-confirmation flag. v8 = design 2026-07-13:
+`users.escrowPolicy` (admin posture reconciliation) + `member_recovery.pieceId`/`setupDeviceId`
+(confirm piece-binding).)
 
 ## 6. Attachments
 
