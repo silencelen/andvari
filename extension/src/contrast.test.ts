@@ -86,6 +86,56 @@ test("7b: input::placeholder uses var(--ink-dim)", () => {
   assert.equal(m[1], "ink-dim", "placeholder should use --ink-dim for AA contrast");
 });
 
+// --- UI-audit Cut A: the classes the 7a/7b gates never covered — the ported --link token
+// (web AM-1, finally adopted here), the focus indicator (light was ~2.1:1), gold-as-text,
+// the button-gradient ink, and danger on its own tinted plate. Computed, not pinned prose. ---
+const UI_MIN = 3; // WCAG 1.4.11 non-text minimum
+for (const [theme, blk] of [
+  ["dark", dark],
+  ["light", light],
+] as const) {
+  const bg = token(blk, "bg");
+  const bgRaised = token(blk, "bg-raised");
+  const bgInput = token(blk, "bg-input");
+  const link = token(blk, "link");
+  const goldText = token(blk, "gold-text");
+  const focus = token(blk, "focus");
+  const hi = token(blk, "gold-hi");
+  const lo = token(blk, "gold-lo");
+  const btnInk = token(blk, "btn-ink");
+
+  test(`CutA ${theme}: --link ${link} + --gold-text ${goldText} clear AA on --bg and --bg-raised`, () => {
+    for (const [name, val] of [["--link", link], ["--gold-text", goldText]] as const) {
+      assert.ok(ratio(val, bg) >= AA, `${name} on --bg = ${ratio(val, bg).toFixed(2)}`);
+      assert.ok(ratio(val, bgRaised) >= AA, `${name} on --bg-raised = ${ratio(val, bgRaised).toFixed(2)}`);
+    }
+  });
+  test(`CutA ${theme}: --focus ${focus} ≥ ${UI_MIN}:1 on every input/row surface`, () => {
+    for (const [name, s] of [["--bg", bg], ["--bg-raised", bgRaised], ["--bg-input", bgInput]] as const) {
+      assert.ok(ratio(focus, s) >= UI_MIN, `--focus on ${name} = ${ratio(focus, s).toFixed(2)}`);
+    }
+  });
+  test(`CutA ${theme}: --btn-ink clears AA on BOTH gradient stops, and --gold-hi is the lighter stop`, () => {
+    assert.ok(ratio(btnInk, hi) >= AA, `on --gold-hi = ${ratio(btnInk, hi).toFixed(2)}`);
+    assert.ok(ratio(btnInk, lo) >= AA, `on --gold-lo = ${ratio(btnInk, lo).toFixed(2)}`);
+    assert.ok(luminance(hi) > luminance(lo), "gradient must be lit from above (hi lighter than lo)");
+  });
+}
+
+test("CutA dark: --danger clears AA on the composited .msg.err plate (hardcoded rgba literal)", () => {
+  const dangerDark = token(dark, "danger");
+  // Non-greedy: the FIRST rgba in the rule is the background plate (0.12), not the border's 0.3.
+  const m = /\.msg\.err\s*\{[^}]*?rgba\((\d+),\s*(\d+),\s*(\d+),\s*(0?\.\d+)\)/.exec(css);
+  assert.ok(m, ".msg.err plate rgba literal not found");
+  const a = Number(m![4]);
+  const base = token(dark, "bg-raised").replace("#", "");
+  const bc = [0, 2, 4].map((i) => parseInt(base.slice(i, i + 2), 16));
+  const plate = "#" + [Number(m![1]), Number(m![2]), Number(m![3])]
+    .map((c, i) => Math.round(c * a + bc[i]! * (1 - a)).toString(16).padStart(2, "0")).join("");
+  assert.ok(ratio(dangerDark, plate) >= AA, `--danger on plate = ${ratio(dangerDark, plate).toFixed(2)}`);
+  assert.equal(dangerDark, "#d97f6f", "dark --danger pinned to the lifted value (web lockstep)");
+});
+
 // --- Overlay (content-script) tokens: a THIRD independent copy of the palette (content-ui.ts's
 // UI_CSS), which the popup.css gate above never touched. Its --anv-ink-faint had drifted to the
 // pre-AA value while web+popup were bumped; gate it here so the injected overlay's faint/dim text
@@ -119,4 +169,17 @@ for (const [theme, blk] of [
     const r = ratio(dim, bg);
     assert.ok(r >= AA, `--anv-ink-dim on --anv-bg = ${r.toFixed(2)} (< ${AA})`);
   });
+
+  // Cut A: the overlay's action rows (.row.action) render gold TEXT — must ride the
+  // darkened gold-text token, and its danger follows the web lift in lockstep.
+  test(`overlay CutA ${theme}: --anv-gold-text clears AA on --anv-bg and --anv-bg-deep`, () => {
+    const gt = anv(blk, "gold-text");
+    assert.ok(ratio(gt, bg) >= AA, `--anv-gold-text on --anv-bg = ${ratio(gt, bg).toFixed(2)}`);
+    assert.ok(ratio(gt, bgDeep) >= AA, `--anv-gold-text on --anv-bg-deep = ${ratio(gt, bgDeep).toFixed(2)}`);
+  });
 }
+
+test("overlay CutA: .row.action uses --anv-gold-text and dark --anv-danger is the lifted value", () => {
+  assert.match(overlay, /\.row\.action\s*\{[^}]*var\(--anv-gold-text\)/, ".row.action must use --anv-gold-text");
+  assert.equal(anv(overlayDark, "danger"), "#d97f6f", "dark --anv-danger pinned (web lockstep)");
+});

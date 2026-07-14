@@ -160,7 +160,8 @@ private fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
     if (msg != null) Card(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = onDismiss) { Text("dismiss") }
+            // a11y (Cut B review): default primary on the filled-card tone is 3.77:1 in light.
+            TextButton(onClick = onDismiss, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant)) { Text("dismiss") }
         }
     }
 }
@@ -187,7 +188,11 @@ private fun ReSealCard(state: DesktopState) {
                     "Your household's recovery key changed — re-protect this account so it stays recoverable.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                TextButton(onClick = { open = true }) { Text("Re-protect →") }
+                // a11y (Cut B review): primary on tertiaryContainer is 3.75:1 in light (Android parity).
+                TextButton(
+                    onClick = { open = true },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
+                ) { Text("Re-protect →") }
             } else {
                 Text("Re-protect account", style = MaterialTheme.typography.titleSmall)
                 Text(
@@ -200,7 +205,10 @@ private fun ReSealCard(state: DesktopState) {
                 Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Primary("Re-protect account", ok && !state.busy, state.busy) { state.resealEscrow(entry) }
                     Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { open = false }) { Text("Later") }
+                    TextButton(
+                        onClick = { open = false },
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
+                    ) { Text("Later") }
                 }
             }
         }
@@ -384,7 +392,11 @@ private fun RecoverySetupScreen(state: DesktopState) {
             Column(Modifier.padding(16.dp)) {
                 SelectionContainer { Text(phrase, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyLarge) }
                 Spacer(Modifier.height(8.dp))
-                TextButton(onClick = { copyWithAutoClear(phrase, clipClear) }) { Text("Copy phrase") }
+                // a11y (Cut B review): primary on the surfaceVariant card is 3.77:1 in light.
+                TextButton(
+                    onClick = { copyWithAutoClear(phrase, clipClear) },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                ) { Text("Copy phrase") }
             }
         }
         Spacer(Modifier.height(20.dp))
@@ -915,7 +927,7 @@ private fun LifecycleNoticesBanner(notices: List<LifecycleNotice>, onDismiss: (S
                     // a11ydesk-01: the warn card is errorContainer → the dismiss label needs
                     // onErrorContainer too (default primary gold is ~4.1:1 there, below AA);
                     // twin of the ErrorBar dismiss fix.
-                    colors = if (warn) ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onErrorContainer) else ButtonDefaults.textButtonColors(),
+                    colors = ButtonDefaults.textButtonColors(contentColor = if (warn) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant),
                 ) { Text("Dismiss") }
             }
         }
@@ -1254,7 +1266,11 @@ private fun TransferControl(state: DesktopState, v: VaultInfo) {
                     "Ownership offer to $pendingName — expires ${fmtDay(pending.expiresAt)}",
                     Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                 )
-                TextButton(onClick = { state.cancelTransfer(v.vaultId) }, enabled = !state.busy) { Text("Cancel offer") }
+                TextButton(
+                    onClick = { state.cancelTransfer(v.vaultId) }, enabled = !state.busy,
+                    // a11y (Cut B review): primary on the surfaceVariant card is 3.77:1 in light.
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                ) { Text("Cancel offer") }
             }
         }
         return

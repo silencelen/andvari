@@ -21,7 +21,16 @@
   --gold: #d0a94a;
   --gold-bright: #e8c66a;
   --gold-deep: #8a6d28;
-  --danger: #cf6b5a;
+  /* UI-audit Cut A (web AM-1 finally ported): interactive/normal-size gold text darkens in
+     light mode for AA; dark equals --gold. Plus the focus token and tokenized button-gradient
+     stops (lighter stop always on top) — all in lockstep with web/src/ui/styles.css. */
+  --link: #d0a94a;
+  --gold-text: #d0a94a;
+  --focus: #d0a94a;
+  --gold-hi: #e8c66a;
+  --gold-lo: #d0a94a;
+  /* Cut A: lifted from #cf6b5a — danger text on its own tinted plates was 4.15:1 (web parity). */
+  --danger: #d97f6f;
   --ok: #7fa86a;
   --btn-ink: #1a1509;
   --glyph-hi: #8a6d28;
@@ -45,6 +54,11 @@
     --gold: #9a7420;
     --gold-bright: #7d5e14;
     --gold-deep: #c9a94a;
+    --link: #7d5e14;
+    --gold-text: #7d5e14;
+    --focus: #7d5e14;
+    --gold-hi: #8f6b16;
+    --gold-lo: #7d5e14;
     --danger: #b3402c;
     --ok: #4f7a3a;
     --btn-ink: #fdf9f0;
@@ -120,7 +134,9 @@ input {
   background: var(--bg-input); border: 1px solid var(--edge); border-radius: var(--radius);
   padding: 9px 11px; transition: border-color 0.15s, box-shadow 0.15s;
 }
-input:focus { outline: none; border-color: var(--gold-deep); box-shadow: 0 0 0 3px rgba(208, 169, 74, 0.14); }
+input:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px rgba(208, 169, 74, 0.14); }
+/* Cut A: buttons/links had no focus indicator at all; one ≥3:1 ring (web parity). */
+button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 /* a11y 7b: placeholders carried faint (≈2.8:1); bump to --ink-dim (≈6.3:1 dark, higher light).
    The real label fix is 1a (visually-hidden <label for=search>) — this covers the visible hint. */
 input::placeholder { color: var(--ink-dim); }
@@ -129,11 +145,11 @@ input.mono { font-family: var(--mono); font-size: 12.5px; }
 button.primary {
   width: 100%; font: inherit; font-weight: 600; font-size: 14px;
   color: var(--btn-ink); cursor: pointer; border: 0; border-radius: var(--radius); padding: 10px;
-  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  background: linear-gradient(180deg, var(--gold-hi), var(--gold-lo));
   box-shadow: 0 6px 18px -8px rgba(208, 169, 74, 0.6); transition: 0.15s;
 }
 button.primary:hover { filter: brightness(1.06); }
-button.primary:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
+button.primary:disabled { opacity: 0.55; cursor: not-allowed; filter: saturate(0.3); }
 
 button.ghost {
   font: inherit; font-size: 12.5px; color: var(--ink-dim); background: transparent;
@@ -155,7 +171,7 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
   background: rgba(208, 169, 74, 0.1); border: 1px solid rgba(208, 169, 74, 0.25);
 }
 .update-link { color: var(--gold-bright); font-weight: 600; text-decoration: underline; white-space: nowrap; }
-.update-link:hover { color: var(--gold); }
+.update-link:hover { color: var(--link); }
 
 /* Recovery-password nudge (E1-6) — a CRITICAL-DIRECT strip: a rescued member is on the
    admin-known temporary password. More urgent than the gold update note, so it borrows the
@@ -219,10 +235,10 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .item .name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .sub { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .fill-btn {
-  flex: none; font: inherit; font-size: 11.5px; font-weight: 600; color: var(--gold);
+  flex: none; font: inherit; font-size: 11.5px; font-weight: 600; color: var(--link);
   background: transparent; border: 1px solid var(--edge-strong); border-radius: 7px; padding: 4px 9px; cursor: pointer; transition: 0.14s;
 }
-.item .fill-btn:hover { color: var(--btn-ink); background: linear-gradient(180deg, var(--gold-bright), var(--gold)); border-color: transparent; }
+.item .fill-btn:hover { color: var(--btn-ink); background: linear-gradient(180deg, var(--gold-hi), var(--gold-lo)); border-color: transparent; }
 
 /* Copy affordances reveal on row hover (and keyboard focus); fixed min-width so the
    "✓" copied flash doesn't reflow the row. */
@@ -246,13 +262,13 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 /* Detail action buttons reuse the list pill, but stay visible (no hover-reveal here). */
 .detail .acts { display: flex; gap: 4px; flex: none; }
 .detail .fill-btn {
-  flex: none; font: inherit; font-size: 11.5px; font-weight: 600; color: var(--gold); min-width: 46px; text-align: center;
+  flex: none; font: inherit; font-size: 11.5px; font-weight: 600; color: var(--link); min-width: 46px; text-align: center;
   background: transparent; border: 1px solid var(--edge-strong); border-radius: 7px; padding: 4px 9px; cursor: pointer; transition: 0.14s;
 }
-.detail .fill-btn:hover { color: var(--btn-ink); background: linear-gradient(180deg, var(--gold-bright), var(--gold)); border-color: transparent; }
+.detail .fill-btn:hover { color: var(--btn-ink); background: linear-gradient(180deg, var(--gold-hi), var(--gold-lo)); border-color: transparent; }
 .detail .fill-btn.did, .detail .fill-btn.did:hover { color: var(--ok); border-color: var(--ok); background: transparent; }
 .detail .totp-chip { align-self: flex-start; }
-.site-link { display: block; font-family: var(--mono); font-size: 12px; color: var(--gold); text-decoration: none; padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-link { display: block; font-family: var(--mono); font-size: 12px; color: var(--link); text-decoration: none; padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .site-link:hover { text-decoration: underline; color: var(--gold-bright); }
 .detail-fill { width: 100%; margin-top: 4px; }
 
@@ -302,7 +318,7 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 }
 .foot-row { display: flex; align-items: center; gap: 10px; }
 #open-vault, #count { margin-left: auto; }
-.link { color: var(--gold); cursor: pointer; background: none; border: 0; font: inherit; font-size: 12.5px; padding: 0; }
+.link { color: var(--link); cursor: pointer; background: none; border: 0; font: inherit; font-size: 12.5px; padding: 0; }
 .link:hover { color: var(--gold-bright); text-decoration: underline; }
 .link.dim { color: var(--ink-faint); font-size: 11px; }
 .link.dim:hover { color: var(--ink-dim); }

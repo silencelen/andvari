@@ -414,7 +414,7 @@ private fun SaveCard(
                 LabeledValue("Password", "•••••••• (will be saved)")
                 if (error != null) {
                     Spacer(Modifier.height(12.dp))
-                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    Text(error, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall)
                 }
                 Spacer(Modifier.height(20.dp))
                 Button(onClick = onSave, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
@@ -456,7 +456,7 @@ private fun CardSaveCard(
                 LabeledValue("Card", plan.display)
                 if (error != null) {
                     Spacer(Modifier.height(12.dp))
-                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    Text(error, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall)
                 }
                 Spacer(Modifier.height(20.dp))
                 Button(onClick = onConfirm, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
@@ -491,7 +491,7 @@ private fun UnlockToSaveCard(
                     modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation(),
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                 )
-                if (error != null) { Spacer(Modifier.height(8.dp)); Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                if (error != null) { Spacer(Modifier.height(8.dp)); Text(error, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall) }
                 Spacer(Modifier.height(16.dp))
                 Button(onClick = { onUnlock(password) }, enabled = password.isNotBlank() && !busy, modifier = Modifier.fillMaxWidth()) {
                     if (busy) CircularProgressIndicator(Modifier.height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)

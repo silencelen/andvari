@@ -1,16 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Compose owns the visual theme; this is the boot/window theme. Dark treasury
-         charcoal so there's no white flash before Compose paints. -->
-    <style name="Theme.Andvari" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">#14120E</item>
-        <item name="android:statusBarColor">#14120E</item>
-        <item name="android:navigationBarColor">#14120E</item>
+    <!-- Compose owns the visual theme; this is the boot/window theme. UI-audit 2026-07
+         (Cut B): split into values/ (LIGHT) + values-night/ (dark) — before this the app
+         hardcoded dark #14120E for everyone, so light-theme users got permanently dark
+         system bars and a dark launch flash. windowBackground matches Compose's root
+         surface (#FBF8F1) so there is no first-frame seam. -->
+    <style name="Theme.Andvari" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FBF8F1</item>
+        <item name="android:statusBarColor">#FBF8F1</item>
+        <item name="android:navigationBarColor">#FBF8F1</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
     </style>
 
     <!-- Overlay theme for AutofillUnlockActivity: the target app stays visible behind a
-         dimmed, non-floating translucent window while the small unlock card is shown. -->
-    <style name="Theme.Andvari.Translucent" parent="Theme.Andvari">
+         dimmed, non-floating translucent window while the small unlock card is shown.
+         Implicit dot-parent (Theme.Andvari) resolves per-configuration, so no night twin
+         is needed. Bars are transparent over a DARKENED scrim in both themes — the
+         light-bar-icon flags are explicitly false (light icons on the dark scrim) so they
+         never inherit the light theme's windowLightStatusBar=true. -->
+    <style name="Theme.Andvari.Translucent">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowIsFloating">false</item>
@@ -18,5 +27,7 @@
         <item name="android:windowContentOverlay">@null</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>

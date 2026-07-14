@@ -248,7 +248,9 @@ private fun MustChangePasswordBanner(ui: UiState) {
             Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error)
             Spacer(Modifier.width(10.dp))
             Column {
-                Text("Temporary password in use", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error)
+                // a11y (Cut B, desktop a11ydesk-01 parity): on errorContainer, TEXT is onErrorContainer
+                // (error-on-errorContainer is 4.66:1 dark / 4.43:1 light — the light pair fails AA).
+                Text("Temporary password in use", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onErrorContainer)
                 Text(
                     "Your password was reset by recovery and the temporary one is still active. Open andvari in your web browser and set a new master password now.",
                     style = MaterialTheme.typography.bodySmall,
@@ -329,7 +331,7 @@ private fun UnopenableVaultWarning(count: Int) {
             Column {
                 Text(
                     if (count == 1) "Can't open this shared vault on this device" else "Can't open $count shared vaults on this device",
-                    style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onErrorContainer,
                 )
                 Text(
                     "Someone shared a vault with you, but this device can't unlock it — its key was sealed to a different device, or it needs a newer version of andvari. Open andvari on the device you first set up (or update this app); it'll appear here on its own once it can be opened.",
@@ -387,8 +389,10 @@ internal fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
     if (msg != null) {
         Card(Modifier.fillMaxWidth().padding(vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Assertive }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                TextButton(onClick = onDismiss) { Text("dismiss") }
+                // a11y (Cut B): onErrorContainer, mirroring desktop's a11ydesk-01 ErrorBar — `error`
+                // text on errorContainer fails AA in light (4.43:1); the dismiss button likewise.
+                Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = onDismiss, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onErrorContainer)) { Text("dismiss") }
             }
         }
     }
@@ -400,7 +404,8 @@ internal fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
         Card(Modifier.fillMaxWidth().padding(vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Polite }) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall)
-                TextButton(onClick = onDismiss) { Text("dismiss") }
+                // a11y (Cut B): primary on the default card tone is ~3.7:1 in light — use onSurfaceVariant.
+                TextButton(onClick = onDismiss, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant)) { Text("dismiss") }
             }
         }
     }
@@ -605,7 +610,11 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
                     Text(phrase, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyLarge)
                 }
                 Spacer(Modifier.height(8.dp))
-                TextButton(onClick = { copyToClipboard(ctx, "Recovery phrase", phrase, clipClear) }) { Text("Copy phrase") }
+                // a11y (Cut B): primary on the surfaceVariant card is 3.77:1 in light — use the pair's own ink.
+                TextButton(
+                    onClick = { copyToClipboard(ctx, "Recovery phrase", phrase, clipClear) },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                ) { Text("Copy phrase") }
             }
         }
         Spacer(Modifier.height(20.dp))
@@ -651,7 +660,11 @@ private fun ReSealCard(vm: AndvariViewModel, ui: UiState) {
                     "Your household's recovery key changed — re-protect this account so it stays recoverable.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                TextButton(onClick = { open = true }) { Text("Re-protect →") }
+                // a11y (Cut B): primary on tertiaryContainer is 3.75:1 in light — use the pair's own ink.
+                TextButton(
+                    onClick = { open = true },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
+                ) { Text("Re-protect →") }
             } else {
                 Text("Re-protect account", style = MaterialTheme.typography.titleSmall)
                 Text(
@@ -669,7 +682,10 @@ private fun ReSealCard(vm: AndvariViewModel, ui: UiState) {
                         "Re-protect account", enabled = ok && !ui.busy, busy = ui.busy,
                         modifier = Modifier.semantics { if (!ok) stateDescription = "Enter the 16 characters from your recovery sheet first" },
                     ) { vm.resealEscrow(entry) }
-                    TextButton(onClick = { open = false }) { Text("Later") }
+                    TextButton(
+                        onClick = { open = false },
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
+                    ) { Text("Later") }
                 }
             }
         }

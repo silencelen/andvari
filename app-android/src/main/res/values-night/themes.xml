@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark boot/window theme (the original treasury charcoal — no white flash before
+         Compose paints). The Translucent overlay style needs no night twin: its values/
+         definition already forces dark bar icons for the scrimmed overlay in both themes. -->
+    <style name="Theme.Andvari" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#14120E</item>
+        <item name="android:statusBarColor">#14120E</item>
+        <item name="android:navigationBarColor">#14120E</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>
