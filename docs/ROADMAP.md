@@ -4,6 +4,43 @@ Where andvari is, what gates real-secret migration, and where it goes next. Livi
 the SSOT for *state* is the memory file `andvari-password-manager-2026-07-05.md` + the
 git history. This is the SSOT for *direction*.
 
+## 0.17.0 campaign — 2026-07-14 (a wide multi-wave sweep; SHIPPED to the tree, DEPLOY per §ship)
+
+One orchestrated campaign closed most of the open 2026-07 queue in module-disjoint parallel waves
+(each cut: breaker where risky → build → find→refute review → per-module gate → commit). **Not yet
+deployed to CT122 / not yet a native release** at time of writing — see the deploy/ship steps.
+
+- **recovery-cut-2 + the cross-device recovery race** (design `2026-07-13-recovery-confirm-binding.md`,
+  schema **v8**): a confirm is now bound to a server-minted opaque `pieceId` and every setup clears
+  `recoveryConfirmed`, so two devices racing the capture gate can never leave the flag attesting an
+  uncaptured piece (silent-total-loss class, closed). Native **self-recovery screens** (android +
+  desktop forgot-password) shipped; natives route recovery through the shared core `AndvariApi` (no
+  more raw Ktor); native capture gate + waived toggle. `escrowPolicy` persisted onto the user +
+  surfaced on `AdminUserSummary` so a required-member-missing-escrow is a flagged anomaly.
+- **UI-audit action-plan #23–#26** (report `2026-07-12-frontend-ui-audit.md`): household-voice error
+  copy (shared core `HouseholdCopy`, natives mapped off it) · motion/progress layer + `prefers-reduced-motion`
+  · Auto/Light/Dark theme override (Linux desktop no longer stuck light) · tofu-proof SVG runes on ext
+  + Compose · desktop startup update-check unfreeze · the TOTP-display + copy-flash + forgot-password
+  web fixes. (**#27 platform-fit stays design-only** — `docs/design/2026-07-13-platform-fit.md`.)
+- **MV3 live-sync** (design `2026-07-13-ext-live-sync.md`): the extension holds an unlock-scoped
+  WebSocket so a peer edit lands in ~1–2 s, with the 5-min poll retained as backstop.
+- **Hardening 3b**: global request-body cap (closes the 8 MiB unauth-buffer pentest finding; attachment
+  + WS + item-restore exemptions) · recovery-cli refuses a server-URL arg + dated sheet · cross-impl
+  importer determinism (metaV keep-newer + BOM/digit parity, twin-tested).
+- **H2 client manifest-verify** (design `2026-07-13-signed-updates.md` §M): desktop `Platform.kt` +
+  extension `background.ts` now fetch raw bytes + `.sig`, verify Ed25519 against the pinned key BEFORE
+  parse, seq-ratchet + staleness, **fail-closed-quiet** — this closes open H2 item 2 below.
+- **KDF auto-upgrade parity** (spec01-f61): web + desktop now silent-re-key toward the org's KDF cost
+  after a full sign-in (android already did), fired sign-in-only to never clear a must-change temp pw.
+- **Card creation flipped live** (Option A; 0.2.x MSI retired).
+
+**Deferred / follow-ups (documented, not dropped):** native admin-fingerprint-confirm (needs a native
+admin surface) · web forced-theme cold-load FOUC (cosmetic; a same-origin boot script) · surface the
+extension's fail-closed-quiet update state in the popup (§M-D4b) · the determinism metaV-regression
+warning is console-only (a user-facing banner needs a UI pass) · a cross-device `recoverySelfSetup`
+race noted earlier is superseded by the piece-binding above. **web-offline durable cache** = breaker-
+vetted DESIGN only this session (`docs/design/2026-07-13-web-offline-cache.md`), build next.
+
 ## Security pentest 2026-07-13 — remediation status + open H2 items
 
 Whole-fleet adversarial pentest (`docs/pentest/2026-07-13-comprehensive-pentest.md`): **0 crit / 2
@@ -18,15 +55,14 @@ deb GPG (ceremony 2026-07-14, `docs/runbooks/release-signing-keys.md`).
    is publishing to the **Chrome Web Store (unlisted)** + **Firefox AMO (self-distribution signing)**.
    The 0.13.0 zips are built + ready; step-by-step + listing copy + privacy policy in
    `docs/runbooks/extension-store-publishing.md`. This is the only platform with NO installer signing.
-2. **Client manifest-verify wiring — secondary / defense-in-depth.** The pinned update-signing pubkey
-   + a signed `/downloads` manifest, so clients also reject a *fabricated* update nag or a
-   downgrade-steer. Remaining build: desktop `Platform.kt` (raw `ofByteArray` fetch + `.sig` +
-   `UpdateVerify.verify` + `seq`/`signedAt` + fail-closed-quiet) + extension `background.ts`
-   (`arrayBuffer` + `tweetnacl.sign` verify) + a manifest `seq`/`signedAt`/`sig` model; then a
-   per-release `update-signer sign` on the workstation + a one-time client rebuild. Foundation
-   (`core UpdateVerify` + `tools/update-signer`, pubkey pinned) is BUILT + tested — only the client
-   wiring remains. Design: `docs/design/2026-07-13-signed-updates.md` §M (authoritative). Optional now
-   that the installers are OS-signed.
+2. ~~**Client manifest-verify wiring — secondary / defense-in-depth.**~~ **DONE 2026-07-14 (0.17.0
+   campaign).** Desktop `Platform.kt` + extension `background.ts` now fetch the manifest as raw bytes +
+   its detached `.sig`, verify Ed25519 against the pinned key (single-sourced to `core UpdateVerify.PINNED`)
+   BEFORE parse, enforce `seq`-ratchet + a `signedAt` staleness window, and **fail closed quiet** (never
+   a fabricated nag). Design `docs/design/2026-07-13-signed-updates.md` §M. **Remaining ops (owner):** a
+   per-release `update-signer sign` on the workstation to produce `/downloads/manifest.json.sig` +
+   `seq`/`signedAt` fields — until then the clients correctly fail-closed-quiet (no nag). Small follow-on:
+   surface that quiet/unverified state in the extension popup (§M-D4b).
 
 ## Frontend/UI design audit 2026-07-12/13 — remediation campaign (~22 of 27 SHIPPED)
 

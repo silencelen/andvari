@@ -1,6 +1,7 @@
 # Recovery-confirm piece binding — BINDING build contract (2026-07-13)
 
-**Status:** BINDING. Three parallel lanes (server, web, natives) implement EXACTLY this.
+**Status:** SHIPPED 2026-07-14 (0.17.0 campaign, schema v8) — server piece-binding + native/web
+clients + spec diffs landed, find→refute reviewed, gates green. (Was: BINDING, three parallel lanes.)
 **Fixes:** the cross-device self-service-recovery race (silent-total-loss class for waived members).
 **Verified at HEAD `6e0d638`.** Amends design `2026-07-12-auth-secret-recovery-review.md` §F.3/§F.9;
 where this doc and §F differ, THIS doc wins for the confirm/setup binding only. All §F crypto,

@@ -1,6 +1,6 @@
 # Extension live change-push (WebSocket dirty-bell) — BUILD CONTRACT
 
-2026-07-13 · Status: BINDING (one builder implements exactly this; deviations require a contract rev)
+2026-07-13 · Status: SHIPPED 2026-07-14 (0.17.0, extension 0.14.0) — implemented, find→refute reviewed, gates green. (Was: BINDING.)
 Base: HEAD `6e0d638`. Scope: `extension/` only + read-only references. **Zero server changes.**
 
 ## 0. Objective
