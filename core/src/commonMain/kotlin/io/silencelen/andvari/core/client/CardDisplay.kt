@@ -17,14 +17,15 @@ import io.silencelen.andvari.core.client.autofill.CardNormalize
 object CardDisplay {
     /**
      * Option A rollout gate (design 2026-07-09, "the one owner decision") for the NATIVE
-     * clients: card CREATION stays dark until the fielded 0.2.x desktop MSI is retired —
-     * that client rebuilds docs field-by-field, so any card it can touch becomes ghost
-     * rows + denied writes. Flipping this to true (one line) enables the create entry
-     * points; everything else — render/edit/detail/history/trash of EXISTING cards —
-     * ships live regardless. Test-pinned to false (like web's CARD_CREATE_ENABLED and the
-     * extension's fv pin) so the flip is always deliberate, never an accident.
+     * clients: card CREATION was held dark until the fielded 0.2.x desktop MSI was retired —
+     * that client rebuilds docs field-by-field, so any card it could touch became ghost
+     * rows + denied writes. That trigger has now fired (0.2.x MSI retired; fleet manifest
+     * windows=0.16.0), so this is flipped true and the create entry points are live;
+     * everything else — render/edit/detail/history/trash of EXISTING cards — shipped live
+     * regardless. Still test-pinned (now to true; like web's CARD_CREATE_ENABLED and the
+     * extension's fv pin) so any change to card-create visibility stays deliberate.
      */
-    const val CREATE_ENABLED: Boolean = false
+    const val CREATE_ENABLED: Boolean = true
 
     /** Human-readable brand ("Visa"), null for unknown/absent — callers pick their own fallback. */
     fun brandLabel(brand: String?): String? = when (brand) {

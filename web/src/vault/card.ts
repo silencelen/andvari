@@ -14,14 +14,15 @@
 import type { CardData, ItemDoc } from "../api/types";
 
 /**
- * Option A rollout gate (design 2026-07-09, "the one owner decision"): card CREATION stays
- * dark until the fielded 0.2.x desktop MSI is retired — that client rebuilds docs
- * field-by-field, so any card it can touch becomes ghost rows + denied writes. Flipping
- * this to true (one line) + redeploy enables the "+ Card" button; everything else —
- * render/edit/detail/history/trash of EXISTING cards — ships live regardless. Test-pinned
- * to false (like the extension's fv pin) so the flip is always deliberate, never an accident.
+ * Option A rollout gate (design 2026-07-09, "the one owner decision"): card CREATION was
+ * held dark until the fielded 0.2.x desktop MSI was retired — that client rebuilds docs
+ * field-by-field, so any card it could touch became ghost rows + denied writes. That
+ * trigger has now fired (0.2.x MSI retired; fleet manifest windows=0.16.0), so this is
+ * flipped true and a redeploy lights the "+ Card" button; everything else —
+ * render/edit/detail/history/trash of EXISTING cards — shipped live regardless. Still
+ * test-pinned (now to true) so any change to card-create visibility stays deliberate.
  */
-export const CARD_CREATE_ENABLED: boolean = false;
+export const CARD_CREATE_ENABLED: boolean = true;
 
 /** Canonical expiry: [expMonth] "01".."12" zero-padded, [expYear] 4-digit. */
 export interface Expiry {

@@ -145,10 +145,11 @@ describe("display helpers", () => {
 });
 
 describe("rollout gate", () => {
-  // The Option A dark gate (like the extension's fv pin): flipped DELIBERATELY at the
-  // release that retires the 0.2.x MSI — never by accident. Editing this assertion is
-  // the conscious act that enables card creation.
-  it("pins CARD_CREATE_ENABLED === false", () => {
-    expect(CARD_CREATE_ENABLED).toBe(false);
+  // The Option A gate (like the extension's fv pin): flipped DELIBERATELY at the release
+  // that retires the 0.2.x MSI — never by accident. That trigger has now fired (0.2.x MSI
+  // retired; fleet manifest windows=0.16.0), so card creation is live and this pins the
+  // enabled state; a flip back to dark would likewise have to be a conscious edit.
+  it("pins CARD_CREATE_ENABLED === true", () => {
+    expect(CARD_CREATE_ENABLED).toBe(true);
   });
 });
