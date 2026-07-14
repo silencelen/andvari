@@ -220,7 +220,11 @@ fun AndvariApp(vm: AndvariViewModel) {
             // P4/A7 (design 2026-07-10): break-glass notices live HERE, above the screen switch,
             // so they render ONCE on every screen — no longer duplicated on both the Vault list
             // AND Sharing. Critical items stay direct; only two genuinely-FYI items collapse.
-            AttentionArea(vm, ui)
+            // §F.9 (desktop Ui parity): the two recovery gate screens get NO attention area — the
+            // shown-once reveal must not compete with re-seal/transfer cards (a migration account
+            // entering the capture gate can carry several), and every card keeps working after
+            // the gate lands the vault.
+            if (ui.screen !is Screen.RecoverySetup && ui.screen !is Screen.RecoveryCapture) AttentionArea(vm, ui)
             // One-time quick-unlock enrollment offer, only over the vault list (design §3/§8).
             if (ui.quickUnlockOffer && ui.screen is Screen.Vault) QuickUnlockOfferCard(vm)
             // Cut L (v2 #20): autofill — the product's core daily value — was never offered;
@@ -237,6 +241,7 @@ fun AndvariApp(vm: AndvariViewModel) {
                     is Screen.Trash -> TrashScreen(vm, ui)
                     is Screen.AutofillStatus -> AutofillStatusScreen(vm, ui)
                     is Screen.RecoverySetup -> RecoverySetupScreen(vm, ui)
+                    is Screen.RecoveryCapture -> RecoveryCaptureScreen(vm, ui)
                 }
             }
         }
@@ -502,11 +507,19 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
     // spec 04 §2(3): the user TYPES the first 16 sheet chars; the short form is public
     // (first 16 of a served fingerprint), so rememberSaveable is fold-safe AND safe.
     var shortFp by rememberSaveable { mutableStateOf("") }
+    // §F.1 posture (client-derived, web parity): android has NO enroll-link channel (the invite
+    // token is typed), so linkRfp is always null — WAIVED by default (frictionless, no admin
+    // backstop), required-typed when the member declares a printed sheet. Both flags are
+    // non-secret and fold-safe.
+    var hasSheet by rememberSaveable { mutableStateOf(false) }
+    var waivedAck by rememberSaveable { mutableStateOf(false) }
+    val posture = enrollPosture(linkRfp = null, memberHasSheet = hasSheet)
     val fp = ui.policy?.recoveryFingerprint ?: ""
     val shortOk = Escrow.shortFormMatches(shortFp, fp)
-    // One shared gate (core EnrollCeremony, jvm-tested): F60 floor + typed ceremony —
-    // the two legs this form historically under-enforced (length>=8, display+checkbox).
-    val ready = EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, fp)
+    // One shared gate per posture (enrollReady): the core EnrollCeremony legs for required-typed
+    // (F60 floor + typed ceremony — the two legs this form historically under-enforced), or the
+    // §F.4 no-backstop acknowledgment for waived.
+    val ready = enrollReady(posture, invite, email, password, confirm, shortFp, fpOk, waivedAck, fp)
     Column(Modifier.fillMaxWidth()) {
         Field("Invite token", invite, { invite = it }, mono = true)
         Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
@@ -526,11 +539,31 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
         SecretField("Confirm password", confirm) { confirm = it }
         // Routed through InlineError so its Polite liveRegion announces the mismatch (a11yand-01).
         InlineError(if (confirm.isNotEmpty() && confirm != password) "passwords don't match" else null)
-        // N2 §3/B4 (design 2026-07-10): four honest states, in web's pinned order
+        // §F.1 posture UI (web FingerprintProvenance parity): waived renders NO fingerprint UI at
+        // all — there is no org pubkey to substitute — only the stark posture acknowledgment.
+        // required-typed keeps the N2 §3/B4 four honest states, in web's pinned order
         // (Welcome.tsx) — fingerprint present wins over everything, then a FAILED probe
         // (retryable), then probe-in-flight, and only a SUCCESSFUL fetch that returned an
         // empty fingerprint may claim the ceremony isn't done.
         when {
+            // (0) WAIVED (§F.4): the posture-specific acknowledgment — visually distinct from the
+            // backstop ceremony (error-toned; the one irreversible fact of this posture).
+            posture == EnrollPosture.Waived -> {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "There is NO admin backstop. Only your recovery phrase can restore this account. Lose both your master password and this phrase and this account is gone forever.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Row(
+                    Modifier.padding(top = 8.dp)
+                        .toggleable(value = waivedAck, role = Role.Checkbox, onValueChange = { waivedAck = it }),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(waivedAck, onCheckedChange = null)
+                    Text("I understand: without my master password AND my recovery phrase, this account cannot be recovered by anyone.", style = MaterialTheme.typography.bodySmall)
+                }
+            }
             // (1) Fingerprint known → the enroll ceremony, exactly as before.
             fp.isNotEmpty() -> {
                 Spacer(Modifier.height(8.dp))
@@ -557,15 +590,6 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                     Checkbox(fpOk, onCheckedChange = null, enabled = shortOk)
                     Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
                 }
-                // Cut M (v2 #13): an EMAILED invite is the waived posture — there IS no sheet
-                // for that enrollee, and native enroll is required-only (enrollOp's
-                // TODO(recovery-cut-2)) — so signpost the browser flow instead of dead-ending.
-                Text(
-                    "Invited by email, with no sheet? Open your invite link in a browser instead — you'll set up your own recovery phrase there.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
             }
             // (2) The policy probe FAILED — don't claim the ceremony isn't done (it may well
             // be). Web-parity copy (errors.ts POLICY_UNAVAILABLE) + a Retry that re-probes.
@@ -581,10 +605,21 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                 Text("Checking the server…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
             }
             // (4) Policy loaded and the fingerprint is genuinely empty → the recovery key
-            // really isn't configured on this server yet.
+            // really isn't configured on this server yet (waived enrollment still works — the
+            // flip below is the way through).
             else -> {
-                Text("This server has no recovery key configured yet — enrollment is disabled until the escrow ceremony is done.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
+                Text("This server has no recovery key configured yet — the admin backstop can't be set up.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
             }
+        }
+        // §F.1 posture flip (web FingerprintProvenance parity): each posture offers the way into
+        // the other — waived is the default (an emailed invitee has no sheet), the typed-sheet
+        // ceremony is one declaration away. Deliberately OUTSIDE the fp-state `when`, so the flip
+        // is never hostage to a policy fetch.
+        TextButton(onClick = { hasSheet = posture == EnrollPosture.Waived }) {
+            Text(
+                if (posture == EnrollPosture.Waived) "My admin gave me a printed recovery sheet (add the admin backstop)"
+                else "I don't have a recovery sheet — set up without an admin backstop",
+            )
         }
         Spacer(Modifier.height(12.dp))
         // The onClick RE-EVALUATES the gate from the same live reads it submits: the
@@ -593,22 +628,47 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
         // class; web enforces at submit for the same reason). Busy is re-checked in
         // the ViewModel, where the read is live.
         PrimaryButton("Create vault", enabled = ready && !ui.busy, busy = ui.busy) {
-            if (EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, fp)) {
-                vm.enroll(invite.trim(), email.trim(), name.trim(), password)
+            val postureNow = enrollPosture(linkRfp = null, memberHasSheet = hasSheet)
+            if (enrollReady(postureNow, invite, email, password, confirm, shortFp, fpOk, waivedAck, fp)) {
+                vm.enroll(invite.trim(), email.trim(), name.trim(), password, waived = postureNow == EnrollPosture.Waived)
             }
         }
     }
 }
 
+/** The enroll submit gate per §F.1 posture: the core ceremony legs (EnrollCeremony, jvm-tested)
+ *  for required-typed, or the invite/email/password legs + the §F.4 no-backstop acknowledgment
+ *  for waived. required-affirm is unreachable here (no enroll-link channel) and falls to the
+ *  ceremony branch, which fails closed without a typed sheet. */
+private fun enrollReady(
+    posture: EnrollPosture,
+    invite: String,
+    email: String,
+    password: String,
+    confirm: String,
+    shortFp: String,
+    fpOk: Boolean,
+    waivedAck: Boolean,
+    fp: String,
+): Boolean =
+    if (posture == EnrollPosture.Waived) {
+        invite.isNotBlank() && email.isNotBlank() && Strength.meetsMasterPasswordFloor(password) && password == confirm && waivedAck
+    } else {
+        EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, fp)
+    }
+
 /**
  * Shown-once self-service recovery phrase (design 2026-07-12 §F.4/§F.7). The per-member recovery
- * piece is MANDATORY and was already committed in register(), but a member who never SEES it is
- * silently unrecoverable — so this un-skippable gate reveals the base64url phrase ONCE and makes
- * the user TYPE IT BACK (constant-time [MemberRecovery.confirmMatches] in the VM) before the vault
- * opens. Shown-once discipline: the phrase is never persisted (FLAG_SECURE blocks screenshots /
- * Recents / casting app-wide, MainActivity), never logged, and is dropped the instant the confirm
- * passes. There is NO skip/back affordance — the silent-total-loss guard, mirroring the enroll
- * ceremony's fpConfirmed gate.
+ * piece is MANDATORY and was already committed — in register() (enroll path) or by the §F.9
+ * capture gate's self-setup ([RecoveryCaptureScreen] hands off here) — but a member who never
+ * SEES it is silently unrecoverable — so this un-skippable gate reveals the base64url phrase ONCE
+ * and makes the user TYPE IT BACK (constant-time [MemberRecovery.confirmMatches] in the VM) before
+ * the vault opens. Shown-once discipline: the phrase is never persisted (FLAG_SECURE blocks
+ * screenshots / Recents / casting app-wide, MainActivity), never logged, and is dropped the
+ * instant the confirm resolves. There is NO skip/back affordance — the silent-total-loss guard,
+ * mirroring the enroll ceremony's fpConfirmed gate. On the capture-gate path the confirm is BOUND
+ * + AWAITED in the VM (piece-binding design 2026-07-13 §3) — the button spins under `busy` and a
+ * stale verdict routes back through [RecoveryCaptureScreen] with the replaced-phrase notice.
  *
  * Cut M (v2 #7): the fastest path through this gate used to be Copy → paste → confirm — "saved"
  * while the phrase only ever lived on a clipboard the app itself wipes after the policy window.
@@ -618,14 +678,15 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
  *
  * TODO(recovery-cut-2): the native self-recovery flow (POST /recovery/self/verify + commit) — a member using this
  * phrase to reset a forgotten master password — and the native admin fingerprint-confirm-for-QR
- * are deferred; web covers self-recovery for this cut. This screen only SHOWS the piece at signup.
+ * are deferred; web covers self-recovery for this cut. This screen only SHOWS a piece (at signup,
+ * or a fresh one via the §F.9 capture gate) — it never consumes one.
  */
 @Composable
 private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
     val ctx = LocalContext.current
-    // Defensive: recoveryPhrase is set atomically with this screen in enrollOp and cleared with the
-    // move to Vault in confirmRecoverySaved(), so a null here is only the one-frame transition —
-    // render nothing rather than a blank form; the next state emission lands the vault.
+    // Defensive: recoveryPhrase is set atomically with this screen (enrollOp / runRecoveryCapture)
+    // and cleared with the move away (toVault / the stale re-route), so a null here is only the
+    // one-frame transition — render nothing rather than a blank form; the next emission lands.
     val phrase = ui.recoveryPhrase ?: return
     var typedBack by remember { mutableStateOf("") }
     var mismatch by remember { mutableStateOf(false) }
@@ -639,10 +700,19 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
     Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState())) {
         Text("Save your recovery phrase", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
+        if (ui.recoveryReplacedNotice) {
+            // Piece-binding §3: the STATIC replaced-phrase notice (never interpolated, §F.7) — the
+            // previous reveal's confirm came back stale; THIS fresh phrase is the one that counts.
+            Text(
+                RECOVERY_PHRASE_REPLACED_NOTICE,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+        }
         // Posture copy (§F.4): waived = NO admin backstop (stark, error-toned); required = the
-        // household admin can also help. Native enroll is required-only today (recoverySetupWaived
-        // is always false), but both strings ship so the waived toggle (TODO(recovery-cut-2)) is
-        // a one-line flip.
+        // household admin can also help. enrollOp sets the flag from the client-derived §F.1
+        // posture; the capture gate always uses the required copy (posture unknowable at unlock).
         Text(
             if (ui.recoverySetupWaived)
                 "There is NO admin backstop for this account. Only this recovery phrase can restore it. If you lose BOTH your master password AND this phrase, this account is gone forever — no one can recover it. Write it down and keep it somewhere safe and offline."
@@ -667,10 +737,12 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
         }
         Spacer(Modifier.height(20.dp))
         Text("Type it back to confirm you saved it", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        // NOT a SecretField and NOT autofill-savable — a recovery phrase must never be offered to
-        // a password manager (§F.7). `mono` kills IME autocorrect; the typed value is its OWN state,
-        // never bound to the secret. A mistype fails the confirm and is discarded — never a KDF input.
-        Field("Type your recovery phrase", typedBack, { typedBack = it; mismatch = false }, mono = true)
+        // NOT a SecretField (no masking — §F.7: a recovery phrase must never be masked-then-
+        // password-managed) but KeyboardType.Password so the IME's suggestion strip and personal
+        // dictionary never learn it (Cut E precedent: masking and IME secrecy are independent).
+        // `mono` kills autocorrect; the typed value is its OWN state, never bound to the secret.
+        // A mistype fails the confirm and is discarded — never a KDF input.
+        Field("Type your recovery phrase", typedBack, { typedBack = it; mismatch = false }, mono = true, keyboard = KeyboardType.Password)
         // Cut M (v2 #7): guidance is the paste deterrent (see the header note) — the hint
         // names what the type-back is FOR, so the clipboard shortcut reads as self-defeating.
         Text(
@@ -689,6 +761,66 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
         Spacer(Modifier.height(16.dp))
         PrimaryButton("I've saved it — open my vault", enabled = typedBack.isNotBlank() && !ui.busy, busy = ui.busy) {
             if (!vm.confirmRecoverySaved(typedBack)) mismatch = true
+        }
+    }
+}
+
+/**
+ * §F.9 vault-entry capture gate — the working/error half (desktop RecoveryCaptureScreen / web
+ * RecoveryCaptureGate parity). Reached from unlock/sign-in when the server reports
+ * recoveryConfirmed=false: the VM is committing a FRESH per-member piece (PUT /recovery/self-setup);
+ * on success the flow lands in the same un-skippable [RecoverySetupScreen] reveal, on failure this
+ * shows the error + Retry and NEVER proceeds to the vault (no skip affordance — the whole point is
+ * that the "un-skippable" gate was skippable via idle lock / process death). Offline unlocks never
+ * reach this screen (the VM skips the gate when accountKeys came from the offline cache), so vault
+ * access without a network is preserved. Also re-entered by a stale bound confirm (piece-binding
+ * design 2026-07-13 §3) — then the static replaced-phrase notice explains the re-run.
+ */
+@Composable
+private fun RecoveryCaptureScreen(vm: AndvariViewModel, ui: UiState) {
+    Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState())) {
+        Text("Finish protecting your account", style = MaterialTheme.typography.headlineSmall)
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "Your recovery phrase was never confirmed as saved — if you forgot your master password " +
+                "today, that phrase couldn't help you. A fresh phrase is being prepared now; you'll " +
+                "write it down and type it back before the vault opens.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        if (ui.recoveryReplacedNotice) {
+            // Piece-binding §3: the STATIC replaced-phrase notice (never interpolated, §F.7) — the
+            // confirm was refused recovery_piece_stale (another device rotated the piece mid-gate).
+            Text(
+                RECOVERY_PHRASE_REPLACED_NOTICE,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        } else {
+            // Honesty over comfort: the self-setup ROTATES the stored piece, so a phrase written
+            // down during an interrupted reveal (saved but never typed back) stops working the
+            // moment the commit lands. Saying so beats a member trusting a dead phrase.
+            Text(
+                "If you wrote down a phrase before and never finished confirming it, it's replaced by the new one.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.height(20.dp))
+        val err = ui.recoveryCaptureError
+        if (err != null) {
+            // Static copy from the VM only — never interpolate near secret material (§F.7).
+            Text(err, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            Spacer(Modifier.height(12.dp))
+            PrimaryButton("Try again", enabled = !ui.busy, busy = ui.busy) { vm.retryRecoveryCapture() }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+                Text("Preparing your recovery phrase…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
