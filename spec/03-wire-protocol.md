@@ -2,7 +2,8 @@
 
 HTTPS JSON API under `/api/v1`. Base URL: `https://andvari.taila2dff2.ts.net`
 (tailnet) or the break-glass public hostname. All binary fields base64url unpadded.
-Server rejects requests > 1 MiB except attachment uploads (streamed, quota-checked).
+Server rejects request bodies > 256 KiB (sync push: > 8 MiB — a CSV import batch
+arrives as one body) except attachment uploads (streamed, quota-checked).
 
 ## 1. Client identification & version pinning
 

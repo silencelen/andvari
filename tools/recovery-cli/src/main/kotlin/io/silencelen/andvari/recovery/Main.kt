@@ -13,13 +13,15 @@ import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.RecoveryUpload
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.time.LocalDate
 
 /**
  * andvari recovery-cli — OFFLINE escrow ceremony + recovery (spec 04).
  * Runs on an air-gapped machine. No network I/O anywhere (verified by test:
- * no HTTP classes on the classpath). The org recovery private seed lives only in
- * memory during a command and on the printed sheet / USB — never on disk here,
- * never on the server, never in git/PBS/B2.
+ * no HTTP classes on the classpath), and a server-URL argument anywhere on the
+ * command line is refused outright (spec 04 §5). The org recovery private seed
+ * lives only in memory during a command and on the printed sheet / USB — never
+ * on disk here, never on the server, never in git/PBS/B2.
  *
  * Commands:
  *   keygen                              generate the org recovery keypair + printable sheet
@@ -35,6 +37,11 @@ private val crypto = createCryptoProvider()
 private val json = Json { prettyPrint = true }
 
 fun main(args: Array<String>) {
+    // spec 04 §5: this tool is OFFLINE — no command takes a server address, so a server
+    // URL among the args means a confused (or hostile) invocation. Refuse before dispatch.
+    serverUrlArg(args)?.let {
+        die("refusing to run: argument '$it' looks like an andvari server URL — recovery-cli is offline-only and never contacts a server (spec 04 §5)")
+    }
     try {
         when (args.getOrNull(0)) {
             "keygen" -> keygen()
@@ -63,40 +70,63 @@ fun main(args: Array<String>) {
     }
 }
 
+/**
+ * spec 04 §5 guard: any URL-ish argument — a scheme, or a bare andvari server hostname
+ * (the tailnet name or the public break-glass host, spec 03) — marks the invocation as
+ * confused/hostile. Legitimate arguments are subcommands, base64url blobs, and local
+ * file paths, none of which contain "://" or those hostnames.
+ */
+internal fun serverUrlArg(args: Array<String>): String? = args.firstOrNull { arg ->
+    val a = arg.lowercase()
+    "://" in a || ".ts.net" in a || "andvari.monahanhosting" in a
+}
+
 private fun keygen() {
-    val seed = crypto.randomBytes(32)
+    print(keygenSheet(crypto.randomBytes(32)))
+}
+
+/**
+ * The printable recovery sheet (spec 04 §1): seed (base64url + QR), pubkey, fingerprints,
+ * generation date, env snippet, and next steps including the recovery one-liner. A pure
+ * text builder so tests can pin the sheet's required fields without capturing stdout.
+ */
+internal fun keygenSheet(seed: ByteArray, generatedOn: LocalDate = LocalDate.now()): String = buildString {
     val kp = crypto.boxKeypairFromSeed(seed)
     val fp = Escrow.fingerprint(crypto, kp.publicKey)
     val short = Escrow.shortFingerprint(crypto, kp.publicKey)
 
-    println("=".repeat(64))
-    println("  andvari ORG RECOVERY KEY — PRINT THIS SHEET x2, COPY SEED TO USB")
-    println("  The private seed below can decrypt EVERY escrowed vault.")
-    println("  Store the two sheets + USB in separate secure places. Never photograph")
-    println("  to a networked device, never type into the server or any online machine.")
-    println("=".repeat(64))
-    println()
-    println("Recovery seed (base64url) — SECRET:")
-    println("    ${Bytes.toB64(seed)}")
-    println()
-    println("Public key (base64url) — pin in server config ANDVARI_RECOVERY_PUBKEY:")
-    println("    ${Bytes.toB64(kp.publicKey)}")
-    println()
-    println("Fingerprint (ANDVARI_RECOVERY_FINGERPRINT):")
-    println("    $fp")
-    println("Short fingerprint (say this aloud when confirming at enrollment):")
-    println("    $short")
-    println()
-    println("Seed QR (scan back to verify the print is readable):")
-    println(qr(Bytes.toB64(seed)))
-    println()
-    println("Config snippet for /etc/andvari/andvari.env:")
-    println("    ANDVARI_RECOVERY_PUBKEY=${Bytes.toB64(kp.publicKey)}")
-    println("    ANDVARI_RECOVERY_FINGERPRINT=$fp")
-    println()
-    println("Next: (1) pin the pubkey+fingerprint in server config, (2) run")
-    println("      'canary make <pubkey>' and store the sealed blob server-side, then")
-    println("      'canary verify <sealed>' FROM THE PRINTED SEED before any real account.")
+    appendLine("=".repeat(64))
+    appendLine("  andvari ORG RECOVERY KEY — PRINT THIS SHEET x2, COPY SEED TO USB")
+    appendLine("  The private seed below can decrypt EVERY escrowed vault.")
+    appendLine("  Store the two sheets + USB in separate secure places. Never photograph")
+    appendLine("  to a networked device, never type into the server or any online machine.")
+    appendLine("=".repeat(64))
+    appendLine()
+    appendLine("Generated: $generatedOn") // spec 04 §1: the sheet carries its generation date
+    appendLine()
+    appendLine("Recovery seed (base64url) — SECRET:")
+    appendLine("    ${Bytes.toB64(seed)}")
+    appendLine()
+    appendLine("Public key (base64url) — pin in server config ANDVARI_RECOVERY_PUBKEY:")
+    appendLine("    ${Bytes.toB64(kp.publicKey)}")
+    appendLine()
+    appendLine("Fingerprint (ANDVARI_RECOVERY_FINGERPRINT):")
+    appendLine("    $fp")
+    appendLine("Short fingerprint (say this aloud when confirming at enrollment):")
+    appendLine("    $short")
+    appendLine()
+    appendLine("Seed QR (scan back to verify the print is readable):")
+    appendLine(qr(Bytes.toB64(seed)))
+    appendLine()
+    appendLine("Config snippet for /etc/andvari/andvari.env:")
+    appendLine("    ANDVARI_RECOVERY_PUBKEY=${Bytes.toB64(kp.publicKey)}")
+    appendLine("    ANDVARI_RECOVERY_FINGERPRINT=$fp")
+    appendLine()
+    appendLine("Next: (1) pin the pubkey+fingerprint in server config, (2) run")
+    appendLine("      'canary make <pubkey>' and store the sealed blob server-side, then")
+    appendLine("      'canary verify <sealed>' FROM THE PRINTED SEED before any real account.")
+    appendLine()
+    appendLine("Recovery (when a member is locked out): run 'recovery-cli recover' and follow prompts.")
 }
 
 private fun fingerprint(pubB64: String) {
