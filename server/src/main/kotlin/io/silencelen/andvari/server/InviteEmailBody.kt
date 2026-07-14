@@ -4,28 +4,62 @@ package io.silencelen.andvari.server
  * The invite email is every household member's FIRST contact with andvari, and the UI audit
  * (2026-07) flagged the old unbranded plaintext link as phishing-indistinguishable. Both transports
  * (SMTP MimeMultipart, Graph HTML body) now render from this ONE source: a branded, inline-styled
- * treasury card with an explicit anti-phishing inoculation line and posture-NEUTRAL recovery copy
- * (the old "you'll need the printed recovery sheet" was wrong for the default emailed/waived flow,
- * which produces the member's own on-device phrase instead of a sheet).
+ * treasury card with an explicit anti-phishing inoculation line and posture-ACCURATE recovery copy
+ * (item #2): the invite's own escrowPolicy is threaded in, so a waived invitee is told they'll make
+ * their OWN recovery code (never sent hunting for a printed sheet), a required invitee is told about
+ * the household sheet ceremony, the inviter is NAMED (anti-phishing: "Jacob invited you" beats
+ * "someone"), and the ~1-hour fuse is stated concretely from the invite's real expiresAt.
  *
  * The enrollLink is server-generated (an EnrollLink payload), never user input, so it is inserted
- * verbatim; it is a scheme+host+base64url fragment with no HTML-significant characters.
+ * verbatim; it is a scheme+host+base64url fragment with no HTML-significant characters. The inviter
+ * name IS member-typed free text — sanitized here (controls stripped, length-capped, HTML-escaped
+ * in html()) so it can't smuggle header/markup primitives into either transport.
  */
 object InviteEmailBody {
     const val SUBJECT = "You're invited to andvari"
 
+    /** Inviter displayName is member-typed free text: strip every control char (the header/markup
+     *  injection primitives), cap the length, and fall back to the old neutral phrase when it
+     *  sanitizes away (blank name / no row). NOT HTML-escaped here — html() does that. */
+    private fun inviterPhrase(inviterName: String?): String {
+        val clean = inviterName?.filter { !it.isISOControl() }?.trim()?.take(64)
+        return if (clean.isNullOrEmpty()) "Someone in your household" else clean
+    }
+
+    /** The fuse in whole minutes (ceil, floor 1), computed at RENDER time so the copy stays honest
+     *  even if the off-thread send lags the mint by a little. */
+    private fun fusePhrase(expiresAt: Long): String {
+        val mins = (((expiresAt - now()).coerceAtLeast(0) + 59_999) / 60_000).coerceAtLeast(1)
+        return if (mins == 1L) "1 minute" else "$mins minutes"
+    }
+
+    /** Posture-accurate recovery copy (item #2): every invitee makes their own recovery code at
+     *  setup; only a required-escrow invitee ALSO faces the printed-sheet check (§F.1 typed-sheet
+     *  ceremony for emailed links) — never point a waived invitee at a sheet that doesn't exist. */
+    private fun recoveryCopy(escrowWaived: Boolean): String =
+        if (escrowWaived) {
+            "During setup you'll create a recovery code of your own — it's your way back into your hoard if you ever forget your master password, so save it somewhere safe."
+        } else {
+            "During setup you'll create a recovery code of your own, and you'll be asked to confirm a short code from your household's printed recovery sheet — your household admin has it, so keep them handy."
+        }
+
+    private fun htmlEscape(s: String): String = s
+        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace("\"", "&quot;").replace("'", "&#39;")
+
     /** Plain-text alternative (SMTP multipart) + the graceful degradation for text-only clients. */
-    fun text(enrollLink: String): String = """
+    fun text(enrollLink: String, inviterName: String?, escrowWaived: Boolean, expiresAt: Long): String = """
         You've been invited to andvari — your household's password manager.
 
-        Someone in your household set up an invite for you. Open this link on the same
-        network as the app to create your account:
+        ${inviterPhrase(inviterName)} set up this invite for you. Open this link on the
+        same network as the app to create your account:
 
         $enrollLink
 
-        This link is a one-time key: it expires within the hour and can't be reused once
-        opened. If your household admin gave you a recovery sheet or code, keep it handy to
-        finish setting up.
+        This link is a one-time key: it expires in about ${fusePhrase(expiresAt)} and
+        can't be reused once opened.
+
+        ${recoveryCopy(escrowWaived)}
 
         andvari will never ask for your master password by email or link. If you weren't
         expecting this invite, you can safely ignore it.
@@ -34,8 +68,9 @@ object InviteEmailBody {
     /** Branded HTML (inline styles only — email clients strip <style>/external CSS; no images, so
      *  nothing to block). Warm-paper card + gold wordmark; the link appears as a button AND as
      *  copyable text for clients that suppress the button. */
-    fun html(enrollLink: String): String {
+    fun html(enrollLink: String, inviterName: String?, escrowWaived: Boolean, expiresAt: Long): String {
         val sans = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+        val inviter = htmlEscape(inviterPhrase(inviterName))
         return """
             <!doctype html>
             <html lang="en">
@@ -49,13 +84,13 @@ object InviteEmailBody {
                       </td></tr>
                       <tr><td style="padding:14px 32px 0;">
                         <h1 style="font-family:Georgia,'Times New Roman',serif;font-size:21px;font-weight:normal;color:#2c2517;margin:8px 0 10px;">You've been invited</h1>
-                        <p style="font-family:$sans;font-size:15px;line-height:1.6;color:#42392a;margin:0 0 18px;">Someone in your household set up an invite for you to join <b>andvari</b>, your household's password manager. Open the link below <b>on the same network as the app</b> to create your account.</p>
+                        <p style="font-family:$sans;font-size:15px;line-height:1.6;color:#42392a;margin:0 0 18px;"><b>$inviter</b> set up an invite for you to join <b>andvari</b>, your household's password manager. Open the link below <b>on the same network as the app</b> to create your account.</p>
                       </td></tr>
                       <tr><td align="center" style="padding:2px 32px 18px;">
                         <a href="$enrollLink" style="display:inline-block;background:#9a7420;color:#fdf9f0;text-decoration:none;font-family:$sans;font-size:15px;font-weight:600;padding:13px 30px;border-radius:10px;">Set up your account</a>
                       </td></tr>
                       <tr><td style="padding:0 32px 6px;">
-                        <p style="font-family:$sans;font-size:13px;line-height:1.6;color:#6b6047;margin:0 0 14px;">This link is a <b>one-time key</b> — it expires within the hour and can't be reused once opened. If your household admin gave you a recovery sheet or code, keep it handy to finish setting up.</p>
+                        <p style="font-family:$sans;font-size:13px;line-height:1.6;color:#6b6047;margin:0 0 14px;">This link is a <b>one-time key</b> — it expires in about <b>${fusePhrase(expiresAt)}</b> and can't be reused once opened. ${recoveryCopy(escrowWaived)}</p>
                         <p style="font-family:$sans;font-size:13px;line-height:1.55;color:#42392a;margin:0 0 6px;padding:11px 14px;background:#f4efe4;border-left:3px solid #9a7420;border-radius:6px;">andvari will never ask for your master password by email or link. If you weren't expecting this invite, you can safely ignore it.</p>
                       </td></tr>
                       <tr><td style="padding:16px 32px 26px;border-top:1px solid #e0d8c5;">
