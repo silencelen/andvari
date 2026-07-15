@@ -363,8 +363,10 @@ ANY future platform quick-unlock as written.
 
 ### 8.3 Web
 
-None in v1 (unchanged). Session-memory only; a reload re-prompts for the master
-password.
+None in v1 (unchanged): keys are session-memory only, and a reload always
+re-prompts for the full master password. (The durable web offline cache — spec 02
+§8.1, 2026-07-14 — persists ciphertext + wire metadata only; it stores nothing that
+opens the vault without the master password and is NOT a quick unlock.)
 
 ### Auto-lock (policy `autoLockSeconds`)
 

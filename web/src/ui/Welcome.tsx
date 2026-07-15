@@ -14,10 +14,20 @@ import { NullCache, openVaultCache } from "../vault/idbcache";
 import { unlockExistingSession } from "./unlock";
 import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
 import { Field } from "./Field";
+import { fmtDate } from "./format";
 import { Msg } from "./Msg";
 import { Recover } from "./Recover";
 import { needsRecoveryCapture, settleRecoveryConfirm, setupAndCommitRecovery } from "./recovery-capture";
-import { clearSession, installId, saveSession, webCacheEnabled, wipeVaultCache, type Session } from "./session";
+import {
+  clearSession,
+  ensureCachePersistenceRequested,
+  installId,
+  offlineCopyStamp,
+  saveSession,
+  webCacheEnabled,
+  wipeVaultCache,
+  type Session,
+} from "./session";
 import { BrandSigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength, masterPasswordHasNonAscii, meetsMasterPasswordFloor } from "./strength";
 
@@ -78,6 +88,19 @@ export function Welcome({ client, policy, policyError, policyErrorMessage, onRet
   return <FreshStart client={client} policy={policy} policyError={policyError} policyErrorMessage={policyErrorMessage} onRetryPolicy={onRetryPolicy} notice={notice} onReady={onReady} />;
 }
 
+/** design 2026-07-13-web-offline-cache §E.3.4: the Unlock-card transparency line — a borrowed-machine
+ *  user SEES that this device holds a durable (encrypted) copy, and how fresh it is. Rendered only
+ *  when a cache actually exists (offlineCopyStamp — a non-creating probe); null hides it entirely.
+ *  Exported for the static-render test (the line must show ONLY with a cache). */
+export function OfflineCopyUnlockLine({ stamp }: { stamp: { lastSyncAt: number | null } | null }) {
+  if (!stamp) return null;
+  return (
+    <p className="muted" style={{ textAlign: "center", marginTop: 0 }}>
+      Offline copy on this device — last synced {stamp.lastSyncAt !== null ? fmtDate(stamp.lastSyncAt) : "not yet"}
+    </p>
+  );
+}
+
 /** Reload or F26 lock with an existing session: master password re-derives keys. */
 function Unlock({ client, policy, session, notice, onReady, onForget }: { client: ApiClient; policy: ClientPolicy | null; session: Session; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForget: (notice?: string) => void }) {
   const [password, setPassword] = useState("");
@@ -86,6 +109,18 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
   // §F.9: an unlock that succeeds but whose account has not durably CONFIRMED its recovery piece is
   // BLOCKED here — the capture gate takes over the card until the phrase is saved.
   const [capture, setCapture] = useState<CaptureHandoff | null>(null);
+  // §E.3.4: does this device hold a durable offline copy for THIS account? Loaded async (IDB probe);
+  // null (no cache / probe failed / still loading) renders nothing — the line never blocks unlock.
+  const [copyStamp, setCopyStamp] = useState<{ lastSyncAt: number | null } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void offlineCopyStamp(session.userId).then((s) => {
+      if (alive) setCopyStamp(s);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [session.userId]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -144,6 +179,8 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
           <h1>Welcome back</h1>
           <p>{session.email}</p>
         </div>
+        {/* §E.3.4 transparency: a durable offline copy exists on this device — say so, with freshness. */}
+        <OfflineCopyUnlockLine stamp={copyStamp} />
         {/* F26: why the user is here ("Locked after N minutes of inactivity.", …). The
             SPOKEN announce rides App's persistent Announcer (this box is silent-but-visible). */}
         {notice && !err && <Msg kind="info">{notice}</Msg>}
@@ -292,6 +329,9 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
       // no-op on a fresh/just-wiped DB, and the first sync populates the row envelopes. Fresh sign-in
       // itself stays online-only (§C.2) — no offline fallback on this path.
       const cache = webCacheEnabled() ? await openVaultCache(s.userId) : new NullCache();
+      // §B.5 (S5): first durable enable on this device asks for eviction protection (once,
+      // marker-deduped) — offline WRITES stay dark until persist() has been requested.
+      if (cache.durable) ensureCachePersistenceRequested();
       await cache.setAccountKeys(s.accountKeys);
       const store = new VaultStore(client, account, cache);
       await store.hydrate();

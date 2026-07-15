@@ -324,12 +324,15 @@ sweep → up-to-date cursor no-ops, stale cursor 410s then converges via `since=
   "(conflict copy)" item — new itemId, fresh envelope — then clears the flag with a
   normal push.
 
-## 8. Client offline cache (native clients)
+## 8. Client offline cache
 
 Native clients (Android/desktop) MAY persist, per account, in a local SQLite DB
 (`vault-<userId>.db`), so the working set + sync cursor + outbound queue survive
-process death. **Every persisted field is a subset of the §5 server-visible table —
-the client-at-rest surface is ⊆ the server-at-rest surface by construction:**
+process death. The web client MAY persist the same set in IndexedDB — the deltas are
+enumerated in §8.1 (2026-07-14 amendment; this section previously closed with "the
+web client keeps no at-rest cache in v1"). **Every persisted field is a subset of
+the §5 server-visible table — the client-at-rest surface is ⊆ the server-at-rest
+surface by construction:**
 
 - the sync cursor (a rev number);
 - item rows exactly as received on the wire (ids, revs, timestamps, flags,
@@ -361,4 +364,43 @@ and relaunch drop all key material.
   connectivity (spec 05 T3).
 - Native cache files SHOULD be excluded from OS cloud backup (Android
   `dataExtractionRules`/`fullBackupContent`) so no cloud copy of the ciphertext DB or
-  token store exists. The **web** client keeps no at-rest cache in v1 (spec 01 §8).
+  token store exists. (The web client cannot make this exclusion — §8.1.)
+
+### 8.1 Web client (IndexedDB — 2026-07-14 amendment)
+
+The web client MAY persist the SAME per-account set (the list above verbatim, plus
+the `lastSyncAt` stamp, the spec 03 §4 lifecycle safety state — holding area,
+consumed delete-ids, verified transfer floors — and the last-known policy bits) in a
+per-account IndexedDB database (`andvari-vault-<userId>`); as built, the policy bits
+live device-locally in localStorage (see the origin-gated bullet below) — the DB's
+`kv:policy` slot is reserved, with no production writer yet. Design, schema, and
+consistency rules: `docs/design/2026-07-13-web-offline-cache.md`. The MUST NOT
+list, the `offlineCacheAllowed` rule, the sign-out/definitive-rejection wipe rule,
+retained-on-lock, the no-extra-encryption-in-v1 posture, and the offline-unlock
+freshness posture above apply to the web cache **verbatim**. Web-specific deltas:
+
+- **accountKeys co-location.** The cached `accountKeys` live in the SAME DB as the
+  envelopes (natives keep them beside, not inside, the vault DB) — one artifact, one
+  wipe. Consequence: the 410-resync `clear()` is an ENUMERATED contract that resets
+  the items/grants/vaults stores and the cursor ONLY, and MUST preserve
+  accountKeys/queue/holding/floors (design §D.1) — a naive clear would break offline
+  unlock after any resync-then-lock.
+- **Eviction + durable writes.** IndexedDB is best-effort storage the browser may
+  evict. The client requests `navigator.storage.persist()` once at first enable, and
+  the offline-WRITE queued-success path is offered ONLY while
+  `navigator.storage.persisted()` is true (refuse-not-degrade: an evicted queue is
+  unrecoverable user data; server-derived rows are refetchable, so their eviction is
+  availability loss only).
+- **No OS-backup exclusion.** The browser profile cannot be excluded from OS backup
+  (no web analog of `dataExtractionRules`); OS backups may then hold the ciphertext
+  DB — ⊆ the spec 05 T7 backup-theft surface, accepted.
+- **Origin-gated default + per-device controls.** The cache defaults ON on private
+  origins (tailnet/LAN/localhost), OFF on the public break-glass origin (explicit
+  per-device opt-in only). A per-device settings toggle ("Keep an offline copy on
+  this device") opts out — turning it off wipes immediately; the Unlock screen shows
+  a transparency line whenever a durable copy exists on the device. The last-known
+  `offlineCacheAllowed` policy bit is persisted device-locally and honored on
+  OFFLINE boot (native persisted-policy parity), so a device that last saw `false`
+  refuses to re-create a cache until a later successful fetch says otherwise.
+- **No quick unlock** (spec 01 §8.3 unchanged): the cache stores ciphertext + wire
+  metadata only and never changes what a reload demands — the full master password.

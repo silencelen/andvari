@@ -1,6 +1,6 @@
 # andvari — Web durable offline cache (encrypted IndexedDB)
 
-**Status: DESIGN RATIFIED pending owner review — BUILD NEXT SESSION (breaker-vetted 2026-07-13).**
+**Status: BUILT S1-S5 (2026-07-14) — S6 (live e2e + docs polish) pending; NOT YET DEPLOYED.**
 Roadmap item B (design review 2026-07-12 §B.5/§D.2: the owner model says *every* client holds a
 usable local copy it can decrypt; today that is native-only by deliberate spec choice, `spec/02 §8`
 closing note). This doc closes the gap for **web**. The breaker found **no BLOCKER**; two
@@ -216,9 +216,17 @@ transaction** spanning all stores (IDB txs are multi-store within a DB): grants,
 (wire rows; tombstone ⇒ delete), holding-area moves, consumedDeleteIds, transferSeq, queue
 re-enqueues of parked mutations, **cursor last**. This is `SyncEngine.applyPull`'s
 `cache.atomically` twin with a simplification: web buffers ops and commits at the end, so a failed
-commit leaves disk at the OLD cursor with OLD rows — coherent (A1), and the next pull re-delivers
-the same delta idempotently. In-memory-ahead-of-disk after a failed commit is safe for the same
-reason; no `evictDecrypted+hydrate` rollback dance needed.
+commit leaves disk at the OLD cursor with OLD rows — coherent (A1).
+**CORRECTED (S2 review, docs cut S5) — the draft's failed-commit heal was wrong.** The draft
+claimed "the next pull re-delivers the same delta idempotently"; it does NOT: `sync()` →
+`pullOnce()` pulls from the MEMORY cursor, and the strict-delta server sends `rev > since` exactly once, so a failed
+commit's delta is never re-fetched for disk within the session. The heal AS BUILT is two-part:
+(1) a **contiguity guard** — a later delta commit is REFUSED while `diskCursor < since` (disk
+stays coherent-stale; it never stamps a cursor over a gap the server will not re-send); and
+(2) **hydrate resumes from the DISK cursor**, so the next session's first pull re-fetches the
+whole gap. In-memory-ahead-of-disk after a failed commit is therefore safe for the session
+(memory applied the delta) and self-heals at the next hydrate; no `evictDecrypted+hydrate`
+rollback dance needed.
 **410 resync**: fetch-replacement-first (already in code), then ONE tx: clear items/grants/vaults +
 reset cursor + apply the full snapshot. `clear()` is an ENUMERATED contract (breaker #2): it
 deletes the `items`/`grants`/`vaults` stores and resets **`kv:cursor` only** — it MUST NOT touch
@@ -234,9 +242,13 @@ regression test.
 disk at an old cursor while the in-memory session advances — coherent (A1 holds; IDB multi-store
 txs abort atomically) but stale on every future hydrate. Disk `lastSyncAt` freezes with it, so the
 E.3.4 "last synced <t>" stamp stays honest — but do not run indefinitely against a frozen cache:
-after **3 consecutive** failed commit txs, treat it as a §B.4 coherence failure — attempt
+after **3 consecutive non-landing commits**, treat it as a §B.4 coherence failure — attempt
 `wipe()`, demote to `NullCache` for the rest of the session, and show "offline copy unavailable —
-storage error" in the settings row.
+storage error" in the settings row. **Non-landing, not just throwing (S2 as-built):** landing is
+VERIFIED by reading the cursor back after the commit, so the demotion tally also counts the
+SILENT failure shapes idbcache's own throw-counter never sees — a force-closed cache resolving
+writes as caught no-ops (§D.2a), and a rejecting cursor read-back. A contiguity-guard REFUSE
+(§D.1 correction above — disk behind but coherent) neither counts nor resets the streak.
 
 **D.2 Write point 2 — post-push ack.** (a) `save()`'s local apply already holds the exact sealed
 `ItemUpload` + `newItemRev` from the push response — persist that as a wire row in the same breath
@@ -318,7 +330,11 @@ envelopes are retried every hydrate (upgrade / later-opened grant — core comme
 **D.6 Offline regression guards.** The F31 trio in `syncOnce` (410-partial, rev-below-cursor,
 unsolicited-full) runs BEFORE the commit tx, so nothing rejected ever touches disk. New: the cursor
 now SURVIVES restarts, so the guards finally protect across sessions (today a reload resets to 0
-and a rollback-serving server gets a free pass) — a strict posture improvement worth a test.
+and a rollback-serving server gets a free pass) — a strict posture improvement worth a test. The
+§D.1 contiguity guard is the durable half of the same posture: disk never stamps a cursor over
+rows it did not apply, and hydrate-from-disk-cursor re-pulls any gap a failed commit left behind
+(the corrected heal — see the §D.1 CORRECTION; the draft's "next pull re-delivers idempotently"
+premise is retired).
 
 ## E. Threat-model deltas (argued, not waved at)
 
@@ -364,8 +380,11 @@ email in someone else's profile. Controls, layered:
    honors it: re-evaluated on every successful policy fetch; last-known value persisted and honored
    on offline boot — Android `Session` parity).
 2. **Per-device opt-out** — "Keep an offline copy on this device" toggle; turning it OFF wipes
-   immediately (DB + accountKeys) and pins a `andvari.cacheOptOut.<userId>` localStorage marker so
-   the next unlock doesn't silently re-create it.
+   immediately (DB + accountKeys) and pins the `andvari.cacheOptOut` localStorage marker so
+   the next unlock doesn't silently re-create it. (S5 as-built: the marker is per-DEVICE, not
+   per-user — the toggle's sentence is about THIS device, and S3 shipped the gate reading the
+   unsuffixed key; the public origin's symmetric opt-IN is `andvari.cacheOptIn`, and the
+   last-known org bit is `andvari.orgCacheOff`.)
 3. **RECOMMENDED DEFAULT: ON for the private tailnet origin, OFF (offer, not silent) for the
    break-glass public origin.** Reasoning: the owner model *wants* every client durable, and a
    tailnet-reachable browser is by construction an enrolled personal device; the public
@@ -410,11 +429,15 @@ guarded close).
 
 ## F. Rollout
 
-**F.1 Gating.** Ship dark behind a per-device flag (`andvari.webCache.enabled` localStorage,
-default per E.3.3) + the org policy bit. No server changes, no wire changes, no spec-03 impact.
-Spec diffs in the docs cut: `spec/02 §8` (drop "The web client keeps no at-rest cache in v1"; add a
-web subsection pointing at this doc), `spec/05` T3/T6/T8 amendments (E.1/E.2), `spec/01 §8` note
-unchanged (still no web quick-unlock).
+**F.1 Gating.** Ship GATED, not dark: ON by default on private origins (tailnet/LAN/localhost,
+E.3.3), opt-in-only on the public break-glass origin (as built S3/S5: the computed
+`webCacheEnabled()` predicate — org bit `andvari.orgCacheOff` > opt-out `andvari.cacheOptOut` >
+origin default per E.3.3 > public-origin opt-in `andvari.cacheOptIn`; the draft's single
+`andvari.webCache.enabled` flag was superseded) + the org policy bit. No server changes, no wire
+changes, no spec-03 impact. Spec diffs in the docs cut (LANDED, S5 2026-07-14): `spec/02 §8`
+(dropped "The web client keeps no at-rest cache in v1"; added the §8.1 web subsection pointing at
+this doc), `spec/05` T3/T6/T8 amendments (E.1/E.2), `spec/01 §8.3` note clarified (still no web
+quick-unlock — the cache is not one).
 
 **F.2 Blocked-offline actions (enumerated — everything else works from the cache):** fresh sign-in
 (C.2); recovery capture + all recovery flows (the capture itself is online-only — but an

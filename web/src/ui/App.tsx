@@ -20,6 +20,7 @@ import {
   writePersistedAutoLockSeconds,
 } from "./useAutoLock";
 import {
+  applyOrgOfflineCachePolicy,
   clearSession,
   defaultBaseUrl,
   loadSession,
@@ -66,9 +67,20 @@ export function App() {
 
   const loadPolicy = useCallback(async () => {
     try {
-      setPolicy(await clientRef.current!.clientPolicy());
+      const p = await clientRef.current!.clientPolicy();
+      setPolicy(p);
       setPolicyError(false);
       setPolicyErrorMessage(undefined);
+      // §E.4 policy row (design 2026-07-13-web-offline-cache / spec 02 §8): EVERY successful
+      // ClientPolicy fetch re-evaluates offlineCacheAllowed. false ⇒ force-wipe this account's
+      // cache DB (queue included — server-initiated, cannot be blocked) + pin the last-known bit
+      // so an OFFLINE boot keeps honoring it; true ⇒ clear the pin. The pin write inside is
+      // synchronous (webCacheEnabled consults it immediately); only the wipe is fire-and-forget
+      // (deleteDatabase self-completes via the sibling versionchange, idbcache §D.5.3). This runs
+      // at boot and at every unlock (onUnlocked → loadPolicy), the spec's re-evaluation points.
+      if (p && typeof p === "object") {
+        void applyOrgOfflineCachePolicy(p.offlineCacheAllowed !== false, loadSession()?.userId ?? null);
+      }
     } catch (e) {
       setPolicy(null);
       setPolicyError(true);
