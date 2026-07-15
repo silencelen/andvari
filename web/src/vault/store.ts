@@ -25,6 +25,7 @@ import {
 import { randomBytes, sha256 } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
 import { ITEM_FORMAT_VERSION, type Account } from "./account";
+import { type HeldVaultRecord, NullCache, type PullBatch, type VaultCache } from "./idbcache";
 
 export interface VaultItem {
   itemId: string;
@@ -181,6 +182,18 @@ export class SyncIntegrityError extends Error {
   }
 }
 
+/** §D.5: a cache commit waits at most this long for the cross-tab Web Lock before
+ *  proceeding UNLOCKED (client.ts's refresh-lock posture — availability over strictness;
+ *  the §D.5.1 cursor check keeps even unlocked commits convergent, breaker #7). */
+const CACHE_LOCK_WAIT_MS = 10_000;
+
+/** AbortSignal.timeout where available (twin of client.ts's module-local helper). */
+function timeoutSignal(ms: number): AbortSignal | undefined {
+  return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+    ? AbortSignal.timeout(ms)
+    : undefined;
+}
+
 /**
  * Client sync store: pulls deltas since a cursor, decrypts, materializes conflict
  * copies (spec 03 §5 — the CLIENT does this, the server can't re-encrypt), and pushes
@@ -227,15 +240,54 @@ export class VaultStore {
    *  revoked, or a resync no longer re-delivers it. */
   private undecryptableGrants = new Set<string>();
 
+  // ---- durable offline cache (design 2026-07-13 §D) ----
+  /** §D.1: the in-flight pull's buffered cache ops. Helpers reached from the pull
+   *  (moveToHolding, hardDropLocal, applyTransferState) record their durable twin here
+   *  via recordPullOp; called outside a pull they record nothing (the next successful
+   *  pull trues disk up). Only the CURRENT pull's buffer is ever committed, exactly
+   *  once, at the end of a fully-applied pull — if an apply throws mid-way the buffer
+   *  is orphaned uncommitted (disk keeps the old cursor, A1) and the next syncOnce
+   *  starts a fresh one. */
+  private pullOps: Array<(b: PullBatch) => void> | null = null;
+  /** §D.1 stuck-cache breaker fired this session: 3 consecutive failed commit txs →
+   *  wipe + demote to NullCache. The S5 settings row reads [cacheDemoted] to show
+   *  "offline copy unavailable — storage error". */
+  private _cacheDemoted = false;
+  /** §D.1 stuck-cache tally (store-local): consecutive pull commits that did NOT land
+   *  on disk — a thrown commit tx, a rejecting cursor read, or a silent no-op (a
+   *  force-closed cache resolves writes without writing, §D.2a) — so demotion fires
+   *  even for failure shapes idbcache's own throw-counter never sees. Reset by a
+   *  landed commit or a legitimate §D.5.1 already-newer skip; a contiguity REFUSE
+   *  (disk behind but coherent) neither counts nor resets. */
+  private cacheFailStreak = 0;
+
   /** Wall-clock time of the last SUCCESSFUL sync, or null before the first one —
    *  the export flow's "vault as of last sync <time>" banner reads this (spec 07). */
   get lastSyncAt(): number | null {
     return this._lastSyncAt;
   }
 
+  /** True while a DURABLE cache is attached — false on NullCache (per-device opt-out,
+   *  unsupported IndexedDB, or post-demotion). The §B.5 cache-less signal for the UI. */
+  get cacheDurable(): boolean {
+    return this.cache.durable;
+  }
+
+  /** §D.1: the stuck-cache breaker fired this session (cache wiped + demoted). */
+  get cacheDemoted(): boolean {
+    return this._cacheDemoted;
+  }
+
   constructor(
     private api: ApiClient,
     private account: Account,
+    /** §D: the durable offline cache. Defaults to the no-op NullCache so existing
+     *  callers keep today's memory-only behavior; S3 wires `openVaultCache(userId)`
+     *  here at unlock. Deliberately NOT readonly — the §D.1 stuck-cache demotion swaps
+     *  in a NullCache mid-session, keeping ONE code shape (every cache touch below goes
+     *  through `this.cache` unconditionally; NullCache no-ops). The cross-tab lock name
+     *  derives from `account.userId` (§D.5). */
+    private cache: VaultCache = new NullCache(),
   ) {}
 
   list(): VaultItem[] {
@@ -354,6 +406,18 @@ export class VaultStore {
       throw new SyncIntegrityError("unsolicited full snapshot — possible rollback; local state kept");
     }
 
+    // §D.1: from here on, every in-memory apply buffers its durable twin into `ops`; the
+    // whole pull then commits as ONE cache transaction at the end (cursor last). The F31
+    // guards above ran BEFORE this buffer exists, so nothing rejected ever touches disk
+    // (§D.6). If the apply throws mid-way the buffer is simply never committed — disk
+    // stays at the OLD cursor with OLD rows (coherent, A1). Memory then runs AHEAD of
+    // disk, and since pulls are driven by the MEMORY cursor the lost delta is never
+    // re-fetched this session — commitPull's contiguity guard therefore refuses every
+    // later delta (disk never claims a rev whose rows it lacks) until the next session
+    // hydrates from the DISK cursor and its first pull re-fetches the whole gap.
+    const ops: Array<(b: PullBatch) => void> = [];
+    this.pullOps = ops;
+
     if (resyncing) {
       // resync-from-0 re-delivers everything — reset so nothing double-counts.
       this.cursor = 0;
@@ -366,6 +430,12 @@ export class VaultStore {
       // below re-populate it. (addedNoticed is left intact: since=0 never fires an added notice.)
       this.undecryptableGrants.clear();
     }
+    // A full snapshot replaces the row stores wholesale: the §D.1 ENUMERATED clear (items/
+    // grants/vaults + kv:cursor ONLY — queue/held/replay-floors/accountKeys survive, breaker
+    // #2) rides the SAME tx as the snapshot apply, so stale rows the snapshot no longer
+    // delivers can't linger and a failed commit strands neither half. Covers the 410 resync
+    // AND the since=0 first pull (where memory is empty but disk might not be).
+    if (resp.full) ops.push((b) => b.clear());
 
     // EVERY grant goes through addGrant: the role update always applies (a role change
     // re-delivers the grant while the VK is already held); the key-open only runs when
@@ -375,6 +445,10 @@ export class VaultStore {
     const reinstated = new Set<string>();
     const newlyAdded = new Set<string>(); // F20: grants for vaults not held before this pull
     for (const grant of resp.grants) {
+      // §D.1: persist EVERY delivered grant row (wire/ciphertext — native parity), even one
+      // this device can't open: it must survive restarts so hydrate re-attempts the open and
+      // the F20 warning recomputes (§D.4) instead of the vault silently vanishing from disk.
+      ops.push((b) => b.upsertGrant(grant));
       const heldBefore = this.account.hasVault(grant.vaultId); // BEFORE addGrant opens the key
       try {
         this.account.addGrant(grant);
@@ -396,6 +470,7 @@ export class VaultStore {
       // the newer local blob (rev/lifecycle fields still apply).
       const vault = this.keepNewerMeta(delivered);
       this.vaultsById.set(vault.vaultId, vault);
+      ops.push((b) => b.upsertVault(vault)); // the merged keepNewerMeta row — disk mirrors memory
       // Discover the personal vault so save()/encrypt default to it.
       if (vault.type === "personal" && this.account.hasVault(vault.vaultId)) {
         this.account.setPersonalVault(vault.vaultId);
@@ -408,7 +483,9 @@ export class VaultStore {
         try {
           const key = await this.account.lifecycleKeyFor(vault.vaultId);
           if (verifyProof(vault.restoreProof, await restoreProof(key, vault.vaultId, vault.deleteId))) {
-            this.consumedDeleteIds.add(vault.deleteId);
+            const consumed = vault.deleteId;
+            this.consumedDeleteIds.add(consumed);
+            ops.push((b) => b.addConsumedDeleteId(consumed)); // replay floor — durable (§D.1)
           }
         } catch {
           /* no key / bad proof — leave unconsumed */
@@ -440,52 +517,12 @@ export class VaultStore {
 
     const conflictsToMaterialize: WireItem[] = [];
     for (const item of resp.items) {
-      if (!this.account.hasVault(item.vaultId)) {
-        // spec 07 §2.4: an item whose vault VK we cannot open is SKIPPED but ENUMERATED into
-        // skipped.undecryptable (mirroring the Kotlin ExportPlanner), never silently omitted from a
-        // backup. A tombstone ends the enumeration. (A grant that OPENS mid-session does not
-        // re-deliver these unchanged items, so they stay enumerated-as-skipped until the next full
-        // sync reloads + clears them below — over-reporting, which for a BACKUP is safe: an item
-        // named as "skipped" beats a silent omission, which is spec 07 §2.4's whole point.)
-        if (item.deleted) this.missingVkById.delete(item.itemId);
-        else this.missingVkById.set(item.itemId, { itemId: item.itemId, vaultId: item.vaultId, formatVersion: item.formatVersion });
-        continue;
-      }
-      // The vault VK is held now — clear any prior missing-VK enumeration for this item. This one
-      // line covers became-decryptable (below), held-but-newer-fv (the catch), and held-tombstone,
-      // and prevents a missing-VK→held-newer-fv item being counted in BOTH maps (double-count).
-      this.missingVkById.delete(item.itemId);
-      if (item.deleted) {
-        this.itemsById.delete(item.itemId);
-        this.undecryptableById.delete(item.itemId); // a tombstone ends the enumeration too
-        continue;
-      }
-      try {
-        const doc = this.account.decryptItem(item);
-        this.itemsById.set(item.itemId, {
-          itemId: item.itemId,
-          vaultId: item.vaultId,
-          rev: item.rev,
-          updatedAt: item.updatedAt,
-          formatVersion: item.formatVersion,
-          doc,
-        });
-        this.undecryptableById.delete(item.itemId); // became decryptable (e.g. rewritten at v1)
-        if (item.conflict) conflictsToMaterialize.push(item);
-      } catch {
-        // Undecryptable under a HELD key (formatVersion > supported — decryptItem
-        // fails closed BEFORE opening the envelope, so capture the wire field here —
-        // or a corrupt/mismatched blob). Stays out of the visible list, but its
-        // identity is RETAINED so a backup can enumerate it (spec 07 §2.4) instead of
-        // silently omitting a credential. The newer rev supersedes any older
-        // plaintext we held (Kotlin's upsertItem(wire, null) drops the decrypted twin).
-        this.itemsById.delete(item.itemId);
-        this.undecryptableById.set(item.itemId, {
-          itemId: item.itemId,
-          vaultId: item.vaultId,
-          formatVersion: item.formatVersion,
-        });
-      }
+      // §D.1 disk twin first: tombstone ⇒ delete, else the WIRE row — persisted even when
+      // the VK is missing or the decrypt fails (everything at rest is ciphertext; hydrate
+      // re-runs the same tri-state below, retrying undecryptables — §D.4).
+      if (item.deleted) ops.push((b) => b.deleteItem(item.itemId));
+      else ops.push((b) => b.upsertItem(item));
+      this.applyWireItem(item, conflictsToMaterialize);
     }
 
     this.cursor = resp.rev;
@@ -498,7 +535,12 @@ export class VaultStore {
       const held = this.holding.get(vaultId);
       if (!held) continue;
       this.holding.delete(vaultId);
-      if (held.deleteId) this.consumedDeleteIds.add(held.deleteId);
+      ops.push((b) => b.removeHeld(vaultId)); // §D.1 holding-area move, disk twin
+      if (held.deleteId) {
+        const consumed = held.deleteId;
+        this.consumedDeleteIds.add(consumed);
+        ops.push((b) => b.addConsumedDeleteId(consumed));
+      }
       // Belt: rehydrate any held ciphertext item the backfill did not re-deliver.
       for (const wi of held.items) {
         if (this.itemsById.has(wi.itemId)) continue;
@@ -511,6 +553,7 @@ export class VaultStore {
             formatVersion: wi.formatVersion,
             doc: this.account.decryptItem(wi),
           });
+          ops.push((b) => b.upsertItem(wi)); // back into the live rows on disk too
         } catch {
           /* superseded by backfill or undecryptable — skip */
         }
@@ -539,14 +582,298 @@ export class VaultStore {
     }
 
     // Materialize a visible conflict copy for each flagged item, then clear the flag.
+    // This MUST NOT throw (F21 posture, same as the removedGrants loop above): it PUSHES,
+    // and a failed push (network drop, a denied-role race) aborting the pull this late —
+    // after the in-memory cursor advanced — would orphan the whole cache commit below.
+    // Copy semantics on a failed push are unchanged from when this loop threw: the flag
+    // stays set server-side and the copy waits for a later edit/device.
     for (const item of conflictsToMaterialize) {
       // A reader must not materialize — its push would be denied (spec 03 §5); the
       // flag waits for a writer/owner on some device.
       if (this.account.roleFor(item.vaultId) === "reader") continue;
-      await this.materializeConflict(item);
+      try {
+        await this.materializeConflict(item);
+      } catch (e) {
+        console.warn(`conflict materialization failed for ${item.itemId} (non-fatal; pull continues)`, e);
+      }
     }
 
-    this._lastSyncAt = Date.now();
+    const syncedAt = Date.now();
+    this._lastSyncAt = syncedAt;
+    // §D.1 ordering: the cursor is the LAST write of the tx (nothing on disk ever claims a
+    // rev its rows don't have), plus the lastSyncAt stamp hydrate restores (§D.4).
+    ops.push((b) => {
+      b.setCursor(resp.rev);
+      b.setLastSyncAt(syncedAt);
+    });
+    this.pullOps = null;
+    // In-memory apply is COMPLETE and authoritative from here — the disk commit mirrors it
+    // and is allowed to fail (in-memory-ahead-of-disk is safe, §D.1); it never rolls back
+    // memory and never fails the sync the caller already observed. `since` (captured at
+    // the top, BEFORE the resync reset) rides along for the contiguity guard: this
+    // response is a delta over (since, resp.rev] and may only land on a disk whose
+    // cursor is ≥ since.
+    await this.commitPull(ops, resp.rev, since, resyncing, resp.full);
+  }
+
+  /**
+   * The tri-state apply of ONE wire row into the in-memory maps — decryptable
+   * (itemsById) / held-key-undecryptable (undecryptableById) / missing-VK
+   * (missingVkById), with a tombstone ending every enumeration. Shared by the pull
+   * loop and §D.4 hydrate so the two can NEVER diverge; `conflicts` collects flagged
+   * rows for materialization on the pull path only (hydrate is offline by contract —
+   * materializing pushes).
+   */
+  private applyWireItem(item: WireItem, conflicts?: WireItem[]): void {
+    if (!this.account.hasVault(item.vaultId)) {
+      // spec 07 §2.4: an item whose vault VK we cannot open is SKIPPED but ENUMERATED into
+      // skipped.undecryptable (mirroring the Kotlin ExportPlanner), never silently omitted from a
+      // backup. A tombstone ends the enumeration. (A grant that OPENS mid-session does not
+      // re-deliver these unchanged items, so they stay enumerated-as-skipped until the next full
+      // sync reloads + clears them below — over-reporting, which for a BACKUP is safe: an item
+      // named as "skipped" beats a silent omission, which is spec 07 §2.4's whole point.)
+      if (item.deleted) this.missingVkById.delete(item.itemId);
+      else this.missingVkById.set(item.itemId, { itemId: item.itemId, vaultId: item.vaultId, formatVersion: item.formatVersion });
+      return;
+    }
+    // The vault VK is held now — clear any prior missing-VK enumeration for this item. This one
+    // line covers became-decryptable (below), held-but-newer-fv (the catch), and held-tombstone,
+    // and prevents a missing-VK→held-newer-fv item being counted in BOTH maps (double-count).
+    this.missingVkById.delete(item.itemId);
+    if (item.deleted) {
+      this.itemsById.delete(item.itemId);
+      this.undecryptableById.delete(item.itemId); // a tombstone ends the enumeration too
+      return;
+    }
+    try {
+      const doc = this.account.decryptItem(item);
+      this.itemsById.set(item.itemId, {
+        itemId: item.itemId,
+        vaultId: item.vaultId,
+        rev: item.rev,
+        updatedAt: item.updatedAt,
+        formatVersion: item.formatVersion,
+        doc,
+      });
+      this.undecryptableById.delete(item.itemId); // became decryptable (e.g. rewritten at v1)
+      if (item.conflict) conflicts?.push(item);
+    } catch {
+      // Undecryptable under a HELD key (formatVersion > supported — decryptItem
+      // fails closed BEFORE opening the envelope, so capture the wire field here —
+      // or a corrupt/mismatched blob). Stays out of the visible list, but its
+      // identity is RETAINED so a backup can enumerate it (spec 07 §2.4) instead of
+      // silently omitting a credential. The newer rev supersedes any older
+      // plaintext we held (Kotlin's upsertItem(wire, null) drops the decrypted twin).
+      this.itemsById.delete(item.itemId);
+      this.undecryptableById.set(item.itemId, {
+        itemId: item.itemId,
+        vaultId: item.vaultId,
+        formatVersion: item.formatVersion,
+      });
+    }
+  }
+
+  /**
+   * §D.4 hydrate: rebuild the in-memory working set from the durable cache with NO
+   * server call — called once post-unlock, BEFORE the first sync (S3 wires it into the
+   * unlock flow; on NullCache every enumerator is empty, so this is a cold start and
+   * the store behaves exactly as today). Grants re-open best-effort (the role applies
+   * unconditionally inside addGrant; failures repopulate the F20 warning set), the
+   * personal vault is rediscovered from its row, envelopes re-run the EXACT pull
+   * tri-state via applyWireItem — undecryptable ones are RETRIED every hydrate (an app
+   * upgrade or later-opened grant may make them readable, core parity) — the holding
+   * area returns with its display name re-derived from the retained grant (the
+   * persisted record carries no plaintext name, A2), the replay floors
+   * (consumedDeleteIds / lastVerifiedTransferSeq) and S4's durably staged denials
+   * reload, and the cursor (§D.6: the F31 rollback guards now protect ACROSS restarts)
+   * plus the "vault as of last sync <t>" stamp restore.
+   */
+  async hydrate(): Promise<void> {
+    // Grants first: keys must open before vault names or items can decrypt.
+    for (const grant of await this.cache.grants()) {
+      try {
+        this.account.addGrant(grant);
+        this.grantWireByVault.set(grant.vaultId, grant);
+        this.undecryptableGrants.delete(grant.vaultId);
+      } catch {
+        // F20 recompute: the same persistent "can't open this shared vault" warning a
+        // pull maintains; cleared when a later pull delivers an openable grant.
+        this.undecryptableGrants.add(grant.vaultId);
+      }
+    }
+    for (const vault of await this.cache.vaults()) {
+      this.vaultsById.set(vault.vaultId, vault);
+      // Discover the personal vault so save()/encrypt default to it (pull parity).
+      if (vault.type === "personal" && this.account.hasVault(vault.vaultId)) {
+        this.account.setPersonalVault(vault.vaultId);
+      }
+    }
+    for (const item of await this.cache.envelopes()) this.applyWireItem(item);
+    for (const rec of await this.cache.heldVaults()) {
+      this.holding.set(rec.vault.vaultId, { ...rec, cachedName: this.peekHeldName(rec) });
+    }
+    for (const id of await this.cache.consumedDeleteIds()) this.consumedDeleteIds.add(id);
+    for (const t of await this.cache.transferSeqs()) this.lastTransferSeqSeen.set(t.vaultId, t.seq);
+    // S4's durable queue stages denials; reload them into the F21 pre-park staging so a
+    // removal arriving on the next pull can fold them into the holding record. Empty
+    // until S4 writes them — reading now keeps hydrate's shape stable.
+    for (const m of await this.cache.stagedDenied()) {
+      const staged = this.preParkedByVault.get(m.vaultId) ?? [];
+      staged.push(m);
+      this.preParkedByVault.set(m.vaultId, staged);
+    }
+    this.cursor = await this.cache.cursor();
+    this._lastSyncAt = await this.cache.lastSyncAt();
+  }
+
+  /**
+   * A held vault's display name, re-derived from its RETAINED grant without retaining
+   * the key (core `peekVaultName` parity; invariant A2 — the persisted HeldVaultRecord
+   * has no plaintext name): open the grant, decrypt the metaBlob, then forget the key
+   * again so a held vault never reads as live. Placeholder when the grant won't open.
+   */
+  private peekHeldName(rec: HeldVaultRecord): string {
+    const vaultId = rec.vault.vaultId;
+    const hadKey = this.account.hasVault(vaultId); // never true for a genuinely held vault — belt
+    try {
+      if (!hadKey && rec.grant) this.account.addGrant(rec.grant);
+      return this.account.decryptVaultName(vaultId, rec.vault.metaBlob);
+    } catch {
+      return "(vault)";
+    } finally {
+      if (!hadKey) this.account.removeVault(vaultId);
+    }
+  }
+
+  /** §D.1: buffer one cache op into the current pull's one-tx commit — records nothing
+   *  outside a pull (the next successful pull's rows true disk up instead). */
+  private recordPullOp(op: (b: PullBatch) => void): void {
+    this.pullOps?.push(op);
+  }
+
+  /**
+   * §D.1/§D.5: commit ONE pull's buffered ops as a single atomic cache transaction,
+   * serialized across tabs by the `andvari-cache-<userId>` Web Lock. Two guards run
+   * INSIDE the lock, against the stored cursor read via cache.cursor() just before the
+   * tx (the S1 PullBatch is write-only):
+   *  - §D.5.1 cursor-skip — a sibling tab already committed rev ≥ ours (and this isn't
+   *    a 410 resync, whose clear+rewrite must always land): SKIP. The sibling applied
+   *    the same server rows contiguously, so nothing is lost; this tab's memory keeps
+   *    ITS OWN cursor at resp.rev, so its next pull re-fetches the gap and rows hidden
+   *    by the skipped commit reappear (breaker #7 convergence — the durable twin of
+   *    the F31 monotonic-cursor guard).
+   *  - contiguity guard — a DELTA whose base (`since`) is ahead of the disk cursor
+   *    would stamp a cursor whose (disk, since] rows disk lacks: rows a strict-delta
+   *    server never re-sends once the cursor passes them, so tombstoned items would
+   *    resurrect and revoked grants stay live on every later hydrate. REFUSE it: disk
+   *    keeps its old coherent cursor+rows, memory is NOT rolled back
+   *    (in-memory-ahead-of-disk is safe, §D.1), and it self-heals because hydrate
+   *    resumes from the DISK cursor — the next session's first pull re-fetches the
+   *    whole gap. A `full` snapshot (410 resync / since=0) is a self-contained
+   *    clear+rewrite — always exempt.
+   * A commit that ran is then VERIFIED to have landed (the re-read cursor reached
+   * rev): a force-closed cache resolves every write as a silent guarded no-op (§D.2a),
+   * which must count as a failure, not a success. 3 consecutive non-landing commits —
+   * thrown tx, rejecting cursor read, or silent no-op ([cacheFailStreak]) — wipe +
+   * demote to NullCache (§D.1 stuck cache); a deliberate contiguity REFUSE is
+   * disk-behind-but-coherent, not a storage failure, and neither advances nor resets
+   * the streak.
+   */
+  private async commitPull(
+    ops: Array<(b: PullBatch) => void>,
+    rev: number,
+    since: number,
+    resyncing: boolean,
+    full: boolean,
+  ): Promise<void> {
+    if (!this.cache.durable) {
+      // NullCache (opt-out, unsupported IndexedDB, post-demotion): keep the ONE code
+      // shape — the buffering closures still run against the no-op batch — but none of
+      // the guards or fail-streak accounting below means anything for a cache that
+      // persists nothing.
+      await this.cache.applyPull((b) => {
+        for (const op of ops) op(b);
+      });
+      return;
+    }
+    let outcome: "landed" | "skipped" | "refused" | "failed" = "failed"; // a throw anywhere below leaves "failed"
+    try {
+      await this.withCacheLock(async () => {
+        // The disk-cursor read here and the applyPull commit below are separate IDB txs; the
+        // andvari-cache Web Lock serializes them across tabs. On the degraded UNLOCKED path
+        // (no navigator.locks / lock-wait timeout, §D.5) this read↔commit is non-atomic, so a
+        // sibling could in principle regress the disk cursor between them and this commit would
+        // stamp a cursor over a gap (review, LOW). Unreachable against andvari: the server's rev
+        // is monotonic (Repo.kt currentRev), so a resync snapshot's rev is always >= any
+        // concurrent delta's base — no gap can form. Accepted best-effort residual (§D.5); it
+        // would need a Byzantine server serving inconsistent revs across connections.
+        const disk = await this.cache.cursor(); // a rejecting read is itself a non-landing — nothing below could be trusted
+        if (!resyncing && disk >= rev) {
+          outcome = "skipped"; // §D.5.1 cursor-skip — a sibling already committed these rows
+          return;
+        }
+        if (!full && disk < since) {
+          // Contiguity REFUSE (doc above). disk=0 is the exception: a disk WITH rows
+          // always has a nonzero cursor (A1), so a 0 read under a nonzero delta base is
+          // a cache that has landed NOTHING — most likely force-closed, its reads
+          // falling back to 0 (§D.2a) — and counts as a non-landing so a dead cache
+          // still reaches demotion instead of hiding behind the refuse forever.
+          outcome = disk === 0 ? "failed" : "refused";
+          console.warn(
+            `pull commit refused: disk cursor ${disk} is behind this delta's base ${since} — committing would stamp a gap the server never re-sends; disk keeps its coherent state and the next session re-pulls from it`,
+          );
+          return;
+        }
+        await this.cache.applyPull((b) => {
+          for (const op of ops) op(b); // pure synchronous buffering — no awaits in here
+        });
+        // Landing verification: applyPull resolving is not proof — a force-closed cache
+        // no-ops silently (§D.2a). Only the cursor actually reaching rev is.
+        outcome = (await this.cache.cursor()) >= rev ? "landed" : "failed";
+      });
+    } catch (e) {
+      console.warn("pull applied in memory but its offline-cache commit failed — disk keeps the old cursor (coherent; the next session re-pulls the gap from it)", e);
+    }
+    if (outcome === "failed") this.cacheFailStreak++;
+    else if (outcome !== "refused") this.cacheFailStreak = 0; // landed/skipped — demonstrably live
+    // §D.1 stuck cache (breaker #6): a PERSISTENTLY non-landing cache must not silently
+    // freeze disk at an old cursor forever — treat 3 straight non-landings as a §B.4
+    // coherence failure: attempt the wipe, run cache-less for the rest of the session.
+    if (this.cacheFailStreak >= 3 && !this._cacheDemoted) {
+      this._cacheDemoted = true;
+      const stuck = this.cache;
+      this.cache = new NullCache(); // ONE code shape — everything below keeps working
+      console.warn("offline cache demoted after 3 consecutive non-landing commits — wiping (§D.1); offline copy unavailable this session");
+      await stuck.wipe(); // an ATTEMPT — wipe() never rejects (idbcache contract)
+    }
+  }
+
+  /**
+   * §D.5 rule 1: serialize cache commits across tabs with a Web Lock, mirroring
+   * client.ts's refreshExclusive ("andvari-refresh") posture — bounded wait, and where
+   * Web Locks are missing (older browsers, non-window contexts) or the wait times out,
+   * proceed UNLOCKED: per-tab single-flight still holds and the §D.5.1 cursor check
+   * keeps unlocked commits convergent.
+   */
+  private async withCacheLock<T>(fn: () => Promise<T>): Promise<T> {
+    const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+    if (!locks?.request) return fn();
+    // `granted` disambiguates a rejected lock WAIT from a failure of fn itself:
+    // post-grant errors must propagate untouched (client.ts pattern).
+    let granted = false;
+    try {
+      return (await locks.request(
+        `andvari-cache-${this.account.userId}`,
+        { signal: timeoutSignal(CACHE_LOCK_WAIT_MS) },
+        () => {
+          granted = true;
+          return fn();
+        },
+      )) as T;
+    } catch (e) {
+      if (granted) throw e; // fn's own failure — not a lock problem
+      return fn(); // the wait timed out / locks glitched — proceed unlocked
+    }
   }
 
   /**
@@ -752,7 +1079,7 @@ export class VaultStore {
     const parked = [...(this.holding.get(vaultId)?.parked ?? []), ...staged];
     // Verified deletes expunge at purgeAt (the server erases then); everything else at +30d.
     const expungeAt = verifiedDelete && reason === "deleted" && info?.purgeAt ? info.purgeAt : Date.now() + 30 * 86_400_000;
-    this.holding.set(vaultId, {
+    const record: HeldVault = {
       vault: this.vaultsById.get(vaultId) ?? { vaultId, type: "shared", rev: 0, metaBlob: "", createdAt: 0 },
       grant: this.grantWireByVault.get(vaultId) ?? null,
       items,
@@ -763,7 +1090,11 @@ export class VaultStore {
       deleteId: info?.deleteId ?? undefined,
       parked,
       expungeAt,
-    });
+    };
+    this.holding.set(vaultId, record);
+    // §D.1 holding-area move, disk twin: putHeld strips the plaintext cachedName at the
+    // boundary (A2); hardDropLocal below records the live-row drop in the same tx.
+    this.recordPullOp((b) => b.putHeld(record));
     this.hardDropLocal(vaultId);
     return parked.length;
   }
@@ -778,6 +1109,11 @@ export class VaultStore {
     this.incomingByVault.delete(vaultId);
     this.undecryptableGrants.delete(vaultId); // F20: access gone → the "can't open" warning is moot
     this.account.removeVault(vaultId);
+    // §D.1: inside a pull, mirror the drop to disk (grant + vault row + items — the
+    // removedGrants purge, spec 03 §4). Outside one (a local action's failed-reconcile
+    // fallback) this records nothing; the next successful pull's removedGrants entry
+    // reaches here again with a recording buffer and trues disk up.
+    this.recordPullOp((b) => b.dropVault(vaultId));
   }
 
   /**
@@ -829,6 +1165,7 @@ export class VaultStore {
         // not suppress the notice when the genuine wrapHash arrives on a later pull, nor
         // (via a fabricated huge seq) mute all future incoming offers this session.
         this.lastTransferSeqSeen.set(vaultId, lt.seq);
+        this.recordPullOp((b) => b.setLastVerifiedTransferSeq(vaultId, lt.seq)); // durable floor (§D.1)
         // A verified completion supersedes any earlier unverified-sighting warning for this
         // vault — the anomaly resolved (e.g. wrapHash arrived on a later pull).
         this.noticeList = this.noticeList.filter((x) => !(x.vaultId === vaultId && x.kind === "transfer-anomaly"));
@@ -966,15 +1303,39 @@ export class VaultStore {
     // pull that started BEFORE our push and does not contain it — then reconcile,
     // letting the next successful sync (and the connectivity dot) surface whatever
     // made a failed reconcile fail (offline, or an F31 integrity rejection).
+    const committedAt = Date.now();
+    const committedRev = pushResp.results[0]?.newItemRev ?? (existing?.rev ?? 0) + 1;
     this.itemsById.set(id, {
       itemId: id,
       vaultId: targetVaultId,
-      rev: pushResp.results[0]?.newItemRev ?? (existing?.rev ?? 0) + 1,
-      updatedAt: Date.now(),
+      rev: committedRev,
+      updatedAt: committedAt,
       formatVersion: m.item!.formatVersion, // the fv this write actually sealed at
       doc,
     });
     this.undecryptableById.delete(id); // it decrypts by construction — we wrote it
+    // §D.2a: the committed sealed envelope (the exact ItemUpload the server holds) is in
+    // hand — persist it as a WIRE row in the same breath as the local apply, so it
+    // survives a crash BEFORE the reconcile pull re-delivers it. Guarded: a cache
+    // failure (quota, or losing the race with a concurrent sign-out's wipe — the
+    // guarded-close no-op) must never fail a save the server already committed; the
+    // row re-syncs at next login. (S4 moves this ack-persist into flushQueue.)
+    try {
+      await this.cache.upsertItem({
+        itemId: id,
+        vaultId: targetVaultId,
+        rev: committedRev,
+        createdAt: 0, // unknown at push time — the reconcile pull's row carries the real one
+        updatedAt: committedAt,
+        deleted: false,
+        conflict: false,
+        formatVersion: m.item!.formatVersion,
+        attachmentIds: m.item!.attachmentIds,
+        blob: m.item!.blob,
+      });
+    } catch (e) {
+      console.warn("save committed server-side but its offline-cache write failed (harmless — the row re-syncs)", e);
+    }
     try {
       await this.sync();
     } catch (e) {
@@ -1137,6 +1498,13 @@ export class VaultStore {
     const existing = this.itemsById.get(itemId);
     if (!existing) return;
     await this.push([this.deleteMutation(itemId, existing.vaultId, existing.rev)]);
+    // §D.2a twin of save(): the delete is committed server-side — mirror it to disk in
+    // the same breath, guarded (a failed cache write is harmless; the tombstone re-syncs).
+    try {
+      await this.cache.deleteItem(itemId);
+    } catch (e) {
+      console.warn("remove committed server-side but its offline-cache delete failed (harmless — the tombstone re-syncs)", e);
+    }
     // Past this point the delete is COMMITTED server-side. A failed reconcile must not
     // resurface the item locally or make remove() report failure (the UI would then tell
     // the user "nothing was removed" about an item that is gone fleet-wide) — drop it
