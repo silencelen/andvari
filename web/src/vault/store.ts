@@ -25,7 +25,7 @@ import {
 import { randomBytes, sha256 } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
 import { ITEM_FORMAT_VERSION, type Account } from "./account";
-import { type HeldVaultRecord, NullCache, type PullBatch, type VaultCache } from "./idbcache";
+import { type HeldVaultRecord, NullCache, type PullBatch, type QueuedPreEdit, type VaultCache } from "./idbcache";
 
 export interface VaultItem {
   itemId: string;
@@ -86,11 +86,32 @@ export interface LifecycleNotice {
   id: string;
   vaultId: string;
   vaultName: string;
-  kind: "deleted" | "removed" | "left" | "anomaly" | "restored" | "added" | "transfer-complete" | "transfer-anomaly";
+  kind:
+    | "deleted"
+    | "removed"
+    | "left"
+    | "anomaly"
+    | "restored"
+    | "added"
+    | "transfer-complete"
+    | "transfer-anomaly"
+    | "replay-denied"
+    | "write-refused";
   /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
   purgeAt?: number;
-  /** verified delete: N of the member's edits parked for replay on restore (F21). */
+  /** verified delete: N of the member's edits parked for replay on restore (F21).
+   *  Doubles as the count for "replay-denied" (recovered edits refused on the restored
+   *  vault) and "write-refused" (offline edits genuinely denied at classification). */
   parkedCount?: number;
+  /** write-refused only (M3 — the copy must not claim a restore that didn't happen):
+   *  how many of the refused edits were actually REVERTED to their last synced value
+   *  (a pre-edit snapshot existed and was still safe to apply) ... */
+  revertedCount?: number;
+  /** ... and how many targeted an item the SERVER itself deleted meanwhile (M1 — the
+   *  denied local delete is moot; nothing is restored, the item stays removed). The
+   *  remainder (parkedCount − reverted − removed) had no applicable snapshot: the
+   *  banner hedges ("may be out of date") instead of claiming a revert. */
+  removedCount?: number;
   /** transfer-complete: who now owns the vault, and whether that is us. */
   newOwnerUserId?: string;
   becameMine?: boolean;
@@ -168,6 +189,47 @@ export interface PendingUpload {
 }
 
 /**
+ * §D.3 / breaker #3: a denied mutation awaiting its park-vs-genuine verdict, tagged with
+ * the pull-start epoch at staging time — the web twin of core `SyncEngine.StagedDenial`.
+ * `surfaceStagedDenials` may classify it ONLY once a pull that STARTED after `stagedBefore`
+ * has completed, so a verdict can never come from a stale snapshot that predates the denial
+ * (e.g. a save's `sync()` that JOINED an older in-flight pull). A too-fresh entry stays
+ * durably staged (the queue row's `staged` flag) for the next cycle.
+ */
+interface StagedDenial {
+  mutation: Mutation;
+  stagedBefore: number;
+  /** Core `StagedDenial.wasReplay` twin: this edit was itself a reinstate replay (F21), so a
+   *  GENUINE denial of it surfaces as the calm "replay-denied" notice, never a thrown sync
+   *  failure — the member's role may simply have changed across the grace. Not durable: a
+   *  restart reloads it as false (core LC-1 hydrate note) — that costs a harsher notice at
+   *  worst, never the edit. */
+  wasReplay?: boolean;
+}
+
+/**
+ * C2 (2026-07-14 review): the pre-edit truth captured at enqueue time, keyed by mutationId.
+ * save()/remove() apply OPTIMISTICALLY (memory + disk envelope) before the verdict exists;
+ * if the write is later classified a GENUINE denial, surfaceStagedDenials restores exactly
+ * this snapshot — a delta server never re-delivers an unchanged row, so without it the
+ * refused value (or a refused local delete) would sit in memory and on disk forever.
+ * M2 (2026-07-14 re-review): this map is the FAST PATH; each snapshot also rides its queue
+ * row durably (QueuedPreEdit, sealed — A2) and hydrate restores it, so the ORDINARY restart
+ * flow (edit offline → close → reopen → reconnect → denied) reverts exactly too. A snapshot
+ * that can't be restored (pre-M2 row, undecryptable seal) keeps the old posture: the
+ * "write-refused" notice still fires, and the stale optimistic row heals at the next full
+ * resync. `pre === null` marks a NEW item with no prior (revert = delete it). For op "put",
+ * the optimistic (rev, updatedAt) pair gates the revert so a fresher server row that landed
+ * meanwhile is never regressed.
+ */
+interface PreEditSnapshot {
+  pre: VaultItem | null;
+  op: "put" | "delete";
+  optimisticRev: number;
+  optimisticUpdatedAt: number;
+}
+
+/**
  * F31 (spec 05 T1 / core `rev_regression` parity): the server's sync response failed a
  * rollback guard — nothing was applied and the cursor did not move. Typed so callers'
  * existing catch paths (Vault's syncNow flips the offline dot) absorb it without
@@ -223,8 +285,12 @@ export class VaultStore {
   private noticeList: LifecycleNotice[] = [];
   /** Vaults this device just deleted/left — drop them cleanly on the reconcile pull (no banner). */
   private suppressDrop = new Set<string>();
-  /** Edits denied because their vault went in-grace, staged for the holding area (F21). */
-  private preParkedByVault = new Map<string, Mutation[]>();
+  /** Denied edits awaiting their park-vs-genuine verdict, keyed by vault (F21 / breaker #3).
+   *  In-memory INDEX only — the DURABLE truth is the queue row's staged-denied flag
+   *  (cache.markStagedDenied), reloaded here by hydrate after a restart. Each entry carries
+   *  the pull-start epoch it was staged at, so surfaceStagedDenials only classifies it
+   *  against a pull that STARTED later (the core SyncEngine epoch guard, carried explicitly). */
+  private preParkedByVault = new Map<string, StagedDenial[]>();
   /** The last wire grant seen per vault — retained so a held vault's grant blob survives (§6). */
   private grantWireByVault = new Map<string, WireGrant>();
   /** Verified incoming ownership offers TO us, recomputed every pull from vault rows. */
@@ -246,7 +312,7 @@ export class VaultStore {
    *  via recordPullOp; called outside a pull they record nothing (the next successful
    *  pull trues disk up). Only the CURRENT pull's buffer is ever committed, exactly
    *  once, at the end of a fully-applied pull — if an apply throws mid-way the buffer
-   *  is orphaned uncommitted (disk keeps the old cursor, A1) and the next syncOnce
+   *  is orphaned uncommitted (disk keeps the old cursor, A1) and the next pullOnce
    *  starts a fresh one. */
   private pullOps: Array<(b: PullBatch) => void> | null = null;
   /** §D.1 stuck-cache breaker fired this session: 3 consecutive failed commit txs →
@@ -260,6 +326,45 @@ export class VaultStore {
    *  landed commit or a legitimate §D.5.1 already-newer skip; a contiguity REFUSE
    *  (disk behind but coherent) neither counts nor resets. */
   private cacheFailStreak = 0;
+
+  // ---- durable offline WRITES: queue + epoch guard (design 2026-07-13 §D.3, slice S4) ----
+  /** §D.3 flush single-flight: concurrent flushQueue() callers coalesce onto ONE drain so
+   *  the queue is never double-pushed. Separate from the pull's single-flight so a save's
+   *  flush can stage a denial WHILE an older pull is still in flight — exactly the case the
+   *  epoch counters below classify correctly. */
+  private flushInFlight: Promise<void> | null = null;
+  /** Core SyncEngine.pullStartCounter twin: the monotonic id handed to each pull as it STARTS. */
+  private pullStartCounter = 0;
+  /** Core SyncEngine.freshestCompletedPullStart twin: the largest start-id among COMPLETED
+   *  pulls — "a pull started at X has finished". surfaceStagedDenials classifies a staged
+   *  denial ONLY once this exceeds the denial's stagedBefore. */
+  private freshestCompletedPullStart = 0;
+  /** §D.3 UI affordance: itemIds with an UNSYNCED (pending, not-yet-flushed) queue row — the
+   *  editor/list renders a "pending sync" mark for these. Maintained in memory alongside the
+   *  durable queue (repopulated from cache.pending() on hydrate). */
+  private pendingSyncItemIds = new Set<string>();
+  /** Core `replayedMutationIds` twin (C1): mutationIds re-enqueued by a reinstate replay —
+   *  flushChunk tags their denial `wasReplay` so it drains into a calm notice, never a throw. */
+  private replayedMutationIds = new Set<string>();
+  /** C2: pre-edit snapshots for in-flight/queued mutations (see PreEditSnapshot). Entries are
+   *  dropped on every settle path — applied/conflict, parked (fold or late-arrival), genuine
+   *  drop, and the refuse-not-degrade unwind — so the map never outlives its queue rows.
+   *  (Rows a SIBLING tab settles never report back here — the L2 prune at sync end sweeps
+   *  entries whose durable row is gone.) */
+  private preEditByMutation = new Map<string, PreEditSnapshot>();
+  /** M1 (2026-07-14 re-review): itemIds whose SERVER tombstone this session has applied
+   *  (any pull — the epoch guard can defer a denial's classification past the pull that
+   *  delivered the tombstone). Gates revertDeniedMutation's op:"delete" branch: a
+   *  genuinely-denied local delete racing another member's ACCEPTED delete must NOT
+   *  resurrect the item from its snapshot — the delta server never re-delivers a
+   *  rev-passed tombstone, so the resurrected credential would show live forever.
+   *  An id leaves the set when a LIVE row for it arrives (undelete/restore). In-memory
+   *  only: across a restart the set starts empty, but the classifying pull after a
+   *  restart re-runs applyWireItem on any tombstone it delivers, repopulating it for
+   *  exactly the rows that need it (a tombstone consumed AND classified-past entirely
+   *  before the restart is the accepted residual — it requires a joined-pull deferral
+   *  plus an immediate shutdown, and costs what every pre-M1 build did). */
+  private serverTombstoned = new Set<string>();
 
   /** Wall-clock time of the last SUCCESSFUL sync, or null before the first one —
    *  the export flow's "vault as of last sync <time>" banner reads this (spec 07). */
@@ -276,6 +381,20 @@ export class VaultStore {
   /** §D.1: the stuck-cache breaker fired this session (cache wiped + demoted). */
   get cacheDemoted(): boolean {
     return this._cacheDemoted;
+  }
+
+  /** §D.3 UI affordance: this item has an UNSYNCED (queued, not-yet-flushed) offline edit —
+   *  the editor/list renders a "pending sync" mark instead of claiming the write is live. */
+  hasPendingSync(itemId: string): boolean {
+    return this.pendingSyncItemIds.has(itemId);
+  }
+
+  /** §E.4 (breaker #9): total unsynced queue rows (pending + staged-denied) this wipe would
+   *  destroy — App.signOut BLOCKS on a confirm carrying this count before a user sign-out,
+   *  and surfaces it on a definitive-401 wipe it cannot block. */
+  async queuedMutationCount(): Promise<number> {
+    const [pending, staged] = await Promise.all([this.cache.pending(), this.cache.stagedDenied()]);
+    return pending.length + staged.length;
   }
 
   constructor(
@@ -346,22 +465,72 @@ export class VaultStore {
   private syncInFlight: Promise<void> | null = null;
 
   /**
+   * §D.3 reconnect order (breaker #3, core SyncEngine.sync parity): flushQueue → pull →
+   * surfaceStagedDenials, IN THAT ORDER. Flush runs BEFORE pull so a removedGrants entry
+   * arriving in the same cycle can park a just-denied offline edit (F21); surface runs
+   * AFTER pull so a denial is classified against a snapshot that postdates it. EVERY caller
+   * — the WS bell, the F29 offline poll, Sync-now, a save()/remove(), and the lifecycle
+   * reconciles — runs this whole cycle. A genuine (still-live-vault) denial is re-thrown by
+   * surfaceStagedDenials so the Editor's failure UX is unchanged.
+   */
+  async sync(): Promise<void> {
+    await this.flushQueue();
+    await this.pull();
+    try {
+      await this.surfaceStagedDenials();
+    } finally {
+      // L2: even when surface re-throws a genuine denial, sweep C2 snapshots whose queue
+      // row a SIBLING tab already settled (their results never reach this tab's maps).
+      await this.prunePreEditSnapshots();
+    }
+  }
+
+  /**
+   * L2 (2026-07-14 re-review): drop pre-edit snapshots whose queue row no longer exists in
+   * ANY durable state — settled by a sibling tab's drain (this tab never sees the applied/
+   * denied result for rows another tab pushed, so its C2 entries would leak per-session).
+   * Durable caches only: NullCache persists no rows at all, so its in-flight snapshots must
+   * not be swept (its queue is also tab-private — nothing can settle elsewhere). Candidates
+   * are captured BEFORE the row reads so an entry set mid-prune is never swept: set AFTER
+   * the capture ⇒ not a candidate; set before ⇒ its enqueue (awaited earlier still) is
+   * visible to the later reads. Best-effort hygiene — never fails the sync.
+   */
+  private async prunePreEditSnapshots(): Promise<void> {
+    if (!this.cache.durable || this.preEditByMutation.size === 0) return;
+    const candidates = [...this.preEditByMutation.keys()];
+    try {
+      const [pending, staged] = await Promise.all([this.cache.pending(), this.cache.stagedDenied()]);
+      const live = new Set([...pending, ...staged].map((m) => m.mutationId));
+      for (const id of candidates) if (!live.has(id)) this.preEditByMutation.delete(id);
+    } catch {
+      /* a failed read skips one sweep — the next sync retries */
+    }
+  }
+
+  /**
    * Pull everything new since the cursor. Handles 410 (resync from 0).
    *
    * SINGLE-FLIGHT: concurrent callers (WS bell, socket reopen, the offline poll, the
    * Sync-now button, save/remove reconciles) all join the ONE in-flight pull —
    * overlapping pulls could apply an older response after a newer one and move the
    * cursor backwards, the very corruption the rollback guards below exist to reject.
+   * Kept SEPARATE from flushQueue's single-flight so a save's flush can stage a denial
+   * while an older pull is still in flight — the epoch counters classify it correctly.
    */
-  sync(): Promise<void> {
-    this.syncInFlight ??= this.syncOnce().finally(() => {
+  private pull(): Promise<void> {
+    this.syncInFlight ??= this.pullOnce().finally(() => {
       this.syncInFlight = null;
     });
     return this.syncInFlight;
   }
 
-  private async syncOnce(): Promise<void> {
+  private async pullOnce(): Promise<void> {
     const since = this.cursor;
+    // Epoch guard (breaker #3, core SyncEngine.pull #0 belt): stamp the START of this pull
+    // BEFORE anything is fetched. surfaceStagedDenials only classifies a denial once a pull
+    // whose start-id exceeds the denial's stagedBefore has completed — i.e. the verdict
+    // always comes from a snapshot fetched AFTER the denial was staged.
+    const myStart = ++this.pullStartCounter;
     // Capture the vaults we HOLD THE KEY FOR before applying this pull, with their decrypted
     // names (spec 03 §11: notices fire ONLY for locally-held vaults, and the pre-purge name
     // drives the copy). Nothing here fires on a since=0 / fresh-device pull — the set is empty.
@@ -529,8 +698,9 @@ export class VaultStore {
 
     // Reinstate (spec 03 §11): a live grant re-arrived for a held vault (restore / re-add) —
     // the vault + its items are back in the live set via the ordinary backfill above; here we
-    // clear the holding record, replay parked mutations, mark the deleteId consumed, and notice
-    // it. Runs AFTER items apply so replay sees current state.
+    // clear the holding record, re-enqueue parked mutations for replay, mark the deleteId
+    // consumed, and notice it. Runs AFTER items apply so replay sees current state.
+    const replayMutations: Mutation[] = [];
     for (const vaultId of reinstated) {
       const held = this.holding.get(vaultId);
       if (!held) continue;
@@ -558,12 +728,21 @@ export class VaultStore {
           /* superseded by backfill or undecryptable — skip */
         }
       }
+      // C1 (core SyncEngine.applyPull reinstate / LC-1 parity): the parked mutations RE-ENTER
+      // the durable queue INSIDE this pull's one-tx commit — crash-safe, with their ORIGINAL
+      // mutationIds (server dedup + the never-re-push-denied rule make replay converge). The
+      // retired direct `push([m])` replay threw on a denied result AND on any transport/5xx
+      // failure AFTER holding.delete/removeHeld above had already run, destroying the parked
+      // edit from memory and disk. Queued rows instead ride the ordinary flushQueue (invoked
+      // post-commit below): a transport failure leaves them durably queued — offline replay
+      // failure ≠ pull failure — and a re-denial re-stages through flushChunk →
+      // surfaceStagedDenials (re-parked if the vault is held again; the calm `wasReplay`
+      // notice on a live vault), never a loss.
       for (const m of held.parked) {
-        try {
-          await this.push([m]);
-        } catch (e) {
-          console.warn(`parked mutation replay failed for restored vault ${vaultId}`, e);
-        }
+        ops.push((b) => b.enqueue(m));
+        this.replayedMutationIds.add(m.mutationId); // a denial of these is a calm notice, not a throw
+        this.pendingSyncItemIds.add(m.itemId); // queued again — the affordance mark returns until it flushes
+        replayMutations.push(m);
       }
       this.pushNotice({ id: crypto.randomUUID(), vaultId, vaultName: held.cachedName, kind: "restored" });
     }
@@ -607,6 +786,13 @@ export class VaultStore {
       b.setLastSyncAt(syncedAt);
     });
     this.pullOps = null;
+    // Epoch guard: this pull has COMPLETED its (authoritative) in-memory apply — advance the
+    // freshest-completed marker so surfaceStagedDenials may now classify any denial staged
+    // BEFORE this pull started (stagedBefore < myStart). A pull that threw above never
+    // reaches here, so a denial it might have classified stays durably staged for the next
+    // cycle. Set from the in-memory apply (not the best-effort disk commit below) — the
+    // snapshot this pull observed is what a verdict is drawn against.
+    if (myStart > this.freshestCompletedPullStart) this.freshestCompletedPullStart = myStart;
     // In-memory apply is COMPLETE and authoritative from here — the disk commit mirrors it
     // and is allowed to fail (in-memory-ahead-of-disk is safe, §D.1); it never rolls back
     // memory and never fails the sync the caller already observed. `since` (captured at
@@ -614,6 +800,217 @@ export class VaultStore {
     // response is a delta over (since, resp.rev] and may only land on a disk whose
     // cursor is ≥ since.
     await this.commitPull(ops, resp.rev, since, resyncing, resp.full);
+
+    // C1: flush the reinstate replays through the ordinary queue path (core pull()'s
+    // `runCatching { flushQueue() }`). Runs AFTER the commit so the drain reads the rows the
+    // tx just landed. Any failure is contained: the rows stay durably queued for the next
+    // sync (and if the commit itself did not land, the held record is still on disk — the
+    // next session re-runs the reinstate idempotently). Their denials stage with
+    // stagedBefore = this pull's start, so surfaceStagedDenials classifies them only against
+    // a LATER pull — native semantics.
+    if (replayMutations.length > 0) {
+      try {
+        if (this.cache.durable) {
+          await this.flushQueue();
+        } else {
+          // NullCache: the buffered enqueue was a no-op — send the in-memory copies directly
+          // through the same result-settling path (memory-only stores keep replay-on-restore;
+          // a transport loss here is the pre-cache posture, nothing durable exists to keep).
+          const displaced: { item: WireItem; winnerRev: number }[] = [];
+          for (let i = 0; i < replayMutations.length; i += VaultStore.SERVER_BATCH_MAX) {
+            await this.flushChunk(replayMutations.slice(i, i + VaultStore.SERVER_BATCH_MAX), displaced);
+          }
+          for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
+        }
+      } catch (e) {
+        console.warn("reinstate replay flush failed — the replayed edits stay queued for the next sync", e);
+      }
+    }
+  }
+
+  /**
+   * §D.3 durable-queue drain (core SyncEngine.flushQueue twin). Sends queued mutations in
+   * server-cap batches with their STABLE mutationIds (server dedup makes a retry idempotent,
+   * D4). A `denied` result is durably STAGED (cache.markStagedDenied — cache.pending() then
+   * stops returning it, so it is never blindly re-pushed) and indexed in preParkedByVault
+   * with the CURRENT pull-start epoch: the reconnect-order pull that follows either folds it
+   * into the holding area (its vault went in-grace → PARKED for restore replay, F21) or
+   * surfaceStagedDenials concludes a genuine permission denial. NEVER throws for a denied
+   * result — a denied flush must not abort the pull that delivers removedGrants. A transport
+   * failure (api.push rejects) DOES propagate: the rows stay durably queued for the next
+   * flush, and save()/remove() turn it into the success-as-QUEUED return (persist-gated).
+   * Single-flight (flushInFlight) so concurrent callers never double-push the same rows.
+   */
+  private flushQueue(): Promise<void> {
+    // §D.5 (C3): the drain runs under the SAME cross-tab Web Lock as the pull commit — the
+    // design serializes "each pull-apply commit AND queue flush". Two tabs draining at once
+    // would each push the same rows (server dedup absorbs that) but could each materialize
+    // the displaced conflict value, duplicating the copy. Lock-wait timeout degrades to an
+    // unlocked drain (availability posture, same as commitPull). Never nested: commitPull's
+    // lock is released before the C1 replay flush runs, and the drain never pulls.
+    this.flushInFlight ??= this.withCacheLock(() => this.flushQueueOnce()).finally(() => {
+      this.flushInFlight = null;
+    });
+    return this.flushInFlight;
+  }
+
+  private async flushQueueOnce(): Promise<void> {
+    const displaced: { item: WireItem; winnerRev: number }[] = []; // PDD-1: (losing serverItem, winner rev)
+    for (;;) {
+      const chunk = (await this.cache.pending()).slice(0, VaultStore.SERVER_BATCH_MAX);
+      if (chunk.length === 0) break;
+      const progressed = await this.flushChunk(chunk, displaced); // rejects offline → propagates
+      if (!progressed) break; // defensive: the server returns one result per mutation
+    }
+    for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
+  }
+
+  /**
+   * Push ONE batch and settle each row's queue fate (the shared core of the queue drain and
+   * of save()/remove()'s immediate send — the latter passes the just-created mutation so a
+   * NullCache, whose enqueue is a no-op, still sends it). Returns whether any row settled
+   * (the drain loop's no-progress guard). NEVER throws for a `denied` result (it stages);
+   * a transport reject from api.push DOES propagate — the caller turns it into queued /
+   * push-or-throw. Collects displaced conflict values into `displaced` (materialized by the
+   * caller after the drain). On a NullCache, markStagedDenied/dequeue are no-ops, but the
+   * in-memory preParkedByVault staging still drives surfaceStagedDenials the same way.
+   */
+  private async flushChunk(chunk: Mutation[], displaced: { item: WireItem; winnerRev: number }[]): Promise<boolean> {
+    const resp = await this.api.push(chunk); // rejects offline → propagates; rows stay queued
+    const byId = new Map(resp.results.map((r) => [r.mutationId, r]));
+    let progressed = false;
+    for (const m of chunk) {
+      const r = byId.get(m.mutationId);
+      if (!r) continue;
+      // C1: settled either way — a reinstate-replayed row's denial gets the calm-notice tag
+      // (core flushQueue's `replayedMutationIds.remove` shape).
+      const wasReplay = this.replayedMutationIds.delete(m.mutationId);
+      if (r.status === "denied") {
+        // Stage durably + index with the epoch (stagedBefore = the last pull that STARTED).
+        // The reconnect pull that follows either parks it (vault in-grace, F21) or
+        // surfaceStagedDenials classifies it a genuine denial. Dedup the index (a concurrent
+        // flush racing a save's direct send could stage the same mutationId twice — the SAME
+        // mutationId is idempotent server-side, D4).
+        await this.cache.markStagedDenied(m.mutationId);
+        const staged = this.preParkedByVault.get(m.vaultId) ?? [];
+        if (!staged.some((s) => s.mutation.mutationId === m.mutationId)) {
+          staged.push({ mutation: m, stagedBefore: this.pullStartCounter, wasReplay });
+          this.preParkedByVault.set(m.vaultId, staged);
+        }
+        this.pendingSyncItemIds.delete(m.itemId); // no longer "pending sync" — it is staged-denied
+      } else {
+        // PDD-1: a conflicting PUT keeps OUR value live (LWW) and returns the DISPLACED
+        // (losing) version — materialize the copy from THAT after the drain (the pull side
+        // sees only the winner). Guard op==="put": a losing DELETE's serverItem is the
+        // SURVIVING winner, not a displaced value — copying it would spawn a spurious dup.
+        if (r.status === "conflict" && m.op === "put" && r.serverItem && r.newItemRev != null) {
+          displaced.push({ item: r.serverItem, winnerRev: r.newItemRev });
+        }
+        await this.cache.dequeue(m.mutationId); // applied / duplicate / handled conflict — definitive
+        this.pendingSyncItemIds.delete(m.itemId);
+        this.preEditByMutation.delete(m.mutationId); // committed — the C2 snapshot is obsolete
+      }
+      progressed = true;
+    }
+    return progressed;
+  }
+
+  /**
+   * §D.3 denial classification (core SyncEngine.surfaceStagedDenials twin), run AFTER the
+   * pull in every sync() cycle. A staged denial whose vault landed in the holding area was
+   * already PARKED (folded by moveToHolding, or a late arrival for an already-held vault is
+   * folded here); anything else on a still-LIVE vault is a genuine denial: a REPLAYED one
+   * (C1) drains into the calm "replay-denied" notice, a first-hand one REVERTS its optimistic
+   * apply from the C2 snapshot, mints the durable "write-refused" notice, is durably dropped,
+   * and is then re-thrown so the Editor's failure UX is unchanged.
+   * EPOCH GUARD (breaker #3): an entry may be classified ONLY once a pull that STARTED after
+   * it was staged has COMPLETED (freshestCompletedPullStart > stagedBefore) — a verdict must
+   * never be drawn from a stale snapshot that predates the denial (a save's sync() that
+   * JOINED an older in-flight pull). A too-fresh entry stays durably staged for the next cycle.
+   */
+  private async surfaceStagedDenials(): Promise<void> {
+    if (this.preParkedByVault.size === 0) return;
+    let genuine = 0;
+    for (const [vaultId, entries] of [...this.preParkedByVault]) {
+      const ripe = entries.filter((e) => this.freshestCompletedPullStart > e.stagedBefore);
+      const tooFresh = entries.filter((e) => !(this.freshestCompletedPullStart > e.stagedBefore));
+      if (ripe.length === 0) continue; // nothing yet classified against a post-staging pull
+      const held = this.holding.get(vaultId);
+      if (held) {
+        // Late arrival for an already-held vault: PARK it (survives the next restore) and
+        // drop its queue row — both in ONE tx so a crash can't double-load it (once via
+        // stagedDenied→preParkedByVault, once via held.parked; the S2 double-load note).
+        for (const e of ripe) {
+          if (!held.parked.some((m) => m.mutationId === e.mutation.mutationId)) held.parked.push(e.mutation);
+          this.pendingSyncItemIds.delete(e.mutation.itemId);
+          this.preEditByMutation.delete(e.mutation.mutationId); // parked — restore replay owns it now
+        }
+        try {
+          await this.cache.applyPull((b) => {
+            b.putHeld(held);
+            for (const e of ripe) b.dequeue(e.mutation.mutationId);
+          });
+        } catch (err) {
+          console.warn(`surfaceStagedDenials: persisting parked-into-holding for ${vaultId} failed (in-memory kept; next sync retries)`, err);
+        }
+      } else {
+        // Vault is LIVE → a genuine refusal (spec 03 §5), classified against a fresh snapshot.
+        // C1 (core LC-1): a reinstate-REPLAYED edit refused here — the member's role changed
+        // across the grace — drains into the calm "replay-denied" notice, never a thrown sync
+        // failure (core drainReplayDenied); only first-hand denials escalate to the caller.
+        const replays = ripe.filter((e) => e.wasReplay);
+        const firstHand = ripe.filter((e) => !e.wasReplay);
+        if (replays.length > 0) {
+          this.pushNotice({
+            id: crypto.randomUUID(),
+            vaultId,
+            vaultName: this.liveVaultName(vaultId),
+            kind: "replay-denied",
+            parkedCount: replays.length,
+          });
+        }
+        if (firstHand.length > 0) {
+          genuine += firstHand.length;
+          // C2: the S4 optimistic apply must not outlive its refusal — restore the pre-edit
+          // truth (memory AND disk) from the enqueue-time snapshot BEFORE the durable drop
+          // (a delta server never re-delivers the unchanged row). REVERSE staging order so
+          // chained edits of one item unwind back to the true pre-edit value; each revert is
+          // guarded so a fresher server row is never regressed. Then a DURABLE notice: the
+          // throw below often lands in a background sync() the UI swallows — the user must
+          // learn of the refusal from the banner, not the throw. M3: the notice carries what
+          // ACTUALLY happened (reverted / removed-by-server / kept) so its copy never claims
+          // a restore that didn't run.
+          let reverted = 0;
+          let removed = 0;
+          for (const e of [...firstHand].reverse()) {
+            const outcome = await this.revertDeniedMutation(e.mutation);
+            if (outcome === "reverted") reverted++;
+            else if (outcome === "removed") removed++;
+          }
+          this.pushNotice({
+            id: crypto.randomUUID(),
+            vaultId,
+            vaultName: this.liveVaultName(vaultId),
+            kind: "write-refused",
+            parkedCount: firstHand.length,
+            revertedCount: reverted,
+            removedCount: removed,
+          });
+        }
+        for (const e of ripe) {
+          try {
+            await this.cache.dequeue(e.mutation.mutationId);
+          } catch {
+            /* best-effort durable drop — the row is excluded from pending() by its staged flag anyway */
+          }
+          this.pendingSyncItemIds.delete(e.mutation.itemId);
+          this.preEditByMutation.delete(e.mutation.mutationId);
+        }
+      }
+      if (tooFresh.length === 0) this.preParkedByVault.delete(vaultId);
+      else this.preParkedByVault.set(vaultId, tooFresh);
+    }
+    if (genuine > 0) throw new ApiError(403, "denied", `write denied for ${genuine} mutation(s)`);
   }
 
   /**
@@ -625,6 +1022,14 @@ export class VaultStore {
    * materializing pushes).
    */
   private applyWireItem(item: WireItem, conflicts?: WireItem[]): void {
+    // M1: record every SERVER tombstone this session applies (and un-record on a live
+    // row — an undelete/restore re-delivers one) so a denied local delete of the same
+    // item never resurrects it from its C2 snapshot. Kept OUTSIDE the tri-state below:
+    // a tombstone is authoritative whether or not we hold the vault key. (Hydrate also
+    // runs through here but only ever sees live rows — tombstones delete their disk
+    // envelope rather than persist, so this set is populated by pulls alone.)
+    if (item.deleted) this.serverTombstoned.add(item.itemId);
+    else this.serverTombstoned.delete(item.itemId);
     if (!this.account.hasVault(item.vaultId)) {
       // spec 07 §2.4: an item whose vault VK we cannot open is SKIPPED but ENUMERATED into
       // skipped.undecryptable (mirroring the Kotlin ExportPlanner), never silently omitted from a
@@ -715,13 +1120,58 @@ export class VaultStore {
     for (const id of await this.cache.consumedDeleteIds()) this.consumedDeleteIds.add(id);
     for (const t of await this.cache.transferSeqs()) this.lastTransferSeqSeen.set(t.vaultId, t.seq);
     // S4's durable queue stages denials; reload them into the F21 pre-park staging so a
-    // removal arriving on the next pull can fold them into the holding record. Empty
-    // until S4 writes them — reading now keeps hydrate's shape stable.
+    // removal arriving on the next pull can fold them into the holding record. stagedBefore=0
+    // (core SyncEngine.hydrate LC-1 parity): the FIRST completed pull after this restart —
+    // whose start-id is ≥1 — is fresh enough to classify them.
     for (const m of await this.cache.stagedDenied()) {
       const staged = this.preParkedByVault.get(m.vaultId) ?? [];
-      staged.push(m);
+      staged.push({ mutation: m, stagedBefore: 0 });
       this.preParkedByVault.set(m.vaultId, staged);
     }
+    // M2 (2026-07-14 re-review): rebuild the C2 pre-edit snapshots from their durable
+    // queue-row twins (pending AND staged rows — either may yet be classified a genuine
+    // denial), so the ORDINARY restart flow — edit offline → close → reopen → reconnect →
+    // denied — still reverts exactly instead of leaving the refused value on display
+    // forever. Grants loaded above, so the sealed snapshot decrypts here; one that won't
+    // open (rotated VK, lost grant) is skipped and that denial keeps the pre-M2 posture
+    // (notice without revert). Rows enqueued before M2 carry no snapshot — same fallback.
+    for (const r of await this.cache.queuedPreEdits()) {
+      try {
+        const p = r.preEdit;
+        this.preEditByMutation.set(r.mutationId, {
+          op: p.op,
+          optimisticRev: p.optimisticRev,
+          optimisticUpdatedAt: p.optimisticUpdatedAt,
+          pre:
+            p.pre === null
+              ? null
+              : {
+                  itemId: r.itemId,
+                  vaultId: r.vaultId,
+                  rev: p.pre.rev,
+                  updatedAt: p.pre.updatedAt,
+                  formatVersion: p.pre.formatVersion,
+                  doc: this.account.decryptItem({
+                    itemId: r.itemId,
+                    vaultId: r.vaultId,
+                    rev: p.pre.rev,
+                    createdAt: 0,
+                    updatedAt: p.pre.updatedAt,
+                    deleted: false,
+                    conflict: false,
+                    formatVersion: p.pre.formatVersion,
+                    attachmentIds: p.pre.attachmentIds,
+                    blob: p.pre.blob,
+                  }),
+                },
+        });
+      } catch {
+        /* undecryptable snapshot — this denial reverts nothing (pre-M2 posture) */
+      }
+    }
+    // §D.3 UI affordance: un-flushed (pending, not staged-denied) offline edits made before
+    // the restart still show a "pending sync" mark; the first flushQueue sends them.
+    for (const m of await this.cache.pending()) this.pendingSyncItemIds.add(m.itemId);
     this.cursor = await this.cache.cursor();
     this._lastSyncAt = await this.cache.lastSyncAt();
   }
@@ -1073,9 +1523,14 @@ export class VaultStore {
         blob: upload.blob,
       });
     }
-    // Fold in any edits that were denied while this vault was going in-grace (F21).
-    const staged = this.preParkedByVault.get(vaultId) ?? [];
+    // Fold in any edits that were denied while this vault was going in-grace (F21). Their
+    // durable queue rows are dequeued BY EXPLICIT mutationId below, in the SAME pull tx as
+    // putHeld, so they live ONLY in held.parked from here — no double-load on a later hydrate
+    // (the S2 fix, now id-scoped).
+    const stagedEntries = this.preParkedByVault.get(vaultId) ?? [];
     this.preParkedByVault.delete(vaultId);
+    const staged = stagedEntries.map((s) => s.mutation);
+    for (const s of stagedEntries) this.preEditByMutation.delete(s.mutation.mutationId); // parked — replay owns them
     const parked = [...(this.holding.get(vaultId)?.parked ?? []), ...staged];
     // Verified deletes expunge at purgeAt (the server erases then); everything else at +30d.
     const expungeAt = verifiedDelete && reason === "deleted" && info?.purgeAt ? info.purgeAt : Date.now() + 30 * 86_400_000;
@@ -1095,11 +1550,23 @@ export class VaultStore {
     // §D.1 holding-area move, disk twin: putHeld strips the plaintext cachedName at the
     // boundary (A2); hardDropLocal below records the live-row drop in the same tx.
     this.recordPullOp((b) => b.putHeld(record));
+    // C4: drop EXACTLY the queue rows this fold moved into held.parked — never a vault-wide
+    // dropPending, which at commit time would also erase a row staged AFTER the fold-read
+    // above but before the tx lands (the pull awaits between here and commitPull, so a
+    // concurrent save can interleave). Such a late row survives, is denied on its own flush,
+    // and folds into held.parked on a later cycle instead of being silently destroyed.
+    const foldedIds = staged.map((m) => m.mutationId);
+    if (foldedIds.length > 0) {
+      this.recordPullOp((b) => {
+        for (const id of foldedIds) b.dequeue(id);
+      });
+    }
     this.hardDropLocal(vaultId);
     return parked.length;
   }
 
-  /** Drop a vault from the LIVE view: its items, undecryptables, vault row, wire grant, key. */
+  /** Drop a vault from the LIVE view: its items, undecryptables, vault row, wire grant, key,
+   *  AND its queued mutations. */
   private hardDropLocal(vaultId: string): void {
     for (const it of [...this.itemsById.values()]) if (it.vaultId === vaultId) this.itemsById.delete(it.itemId);
     for (const it of [...this.undecryptableById.values()]) if (it.vaultId === vaultId) this.undecryptableById.delete(it.itemId);
@@ -1110,9 +1577,15 @@ export class VaultStore {
     this.undecryptableGrants.delete(vaultId); // F20: access gone → the "can't open" warning is moot
     this.account.removeVault(vaultId);
     // §D.1: inside a pull, mirror the drop to disk (grant + vault row + items — the
-    // removedGrants purge, spec 03 §4). Outside one (a local action's failed-reconcile
-    // fallback) this records nothing; the next successful pull's removedGrants entry
-    // reaches here again with a recording buffer and trues disk up.
+    // removedGrants purge, spec 03 §4). C4: queue rows are NOT dropped vault-wide here — a
+    // commit-time dropPending also erased rows staged AFTER moveToHolding's fold-read but
+    // before the tx landed, silently destroying a parkable edit. moveToHolding dequeues
+    // EXACTLY the rows it folded (same tx as putHeld — the S2 double-load fix, id-scoped);
+    // any row left behind for a never-held (hard-dropped) vault drains through its own
+    // flush → denied → surfaceStagedDenials (spec 03 §4 accepts losing a revoked member's
+    // queue — but through classification, never via a racing erase). Outside a pull this
+    // records nothing; the next successful pull's removedGrants entry reaches here again
+    // with a recording buffer and trues disk up.
     this.recordPullOp((b) => b.dropVault(vaultId));
   }
 
@@ -1193,33 +1666,6 @@ export class VaultStore {
     }
   }
 
-  /**
-   * F21: an edit was denied. Stage it, reconcile, and see whether the vault went in-grace: if
-   * so it is PARKED in the holding area for replay on restore (swallow — the notice explains);
-   * otherwise it is a real permission denial and the original error is rethrown.
-   */
-  private async parkOrRethrowDeniedEdit(vaultId: string, mutation: Mutation, err: ApiError): Promise<void> {
-    const staged = this.preParkedByVault.get(vaultId) ?? [];
-    staged.push(mutation);
-    this.preParkedByVault.set(vaultId, staged);
-    try {
-      await this.sync();
-      if (!this.holding.has(vaultId)) {
-        // The awaited sync may have JOINED a pull that started BEFORE the denial and whose
-        // snapshot predates the vault delete. One fresh sync — which necessarily STARTS
-        // after the denial, so its snapshot includes whatever caused it — settles the
-        // question before we conclude this was a genuine permission denial.
-        await this.sync();
-      }
-    } catch {
-      /* offline — fall through to un-stage + rethrow (the edit failed cleanly) */
-    }
-    if (this.holding.has(vaultId)) return; // parked into the holding area — no hard failure
-    this.preParkedByVault.set(vaultId, (this.preParkedByVault.get(vaultId) ?? []).filter((x) => x !== mutation));
-    if ((this.preParkedByVault.get(vaultId) ?? []).length === 0) this.preParkedByVault.delete(vaultId);
-    throw err;
-  }
-
   private pushNotice(n: LifecycleNotice): void {
     // Collapse a repeat notice for the same vault+kind (idempotent re-pulls).
     this.noticeList = this.noticeList.filter((x) => !(x.vaultId === n.vaultId && x.kind === n.kind));
@@ -1249,12 +1695,177 @@ export class VaultStore {
   }
 
   /**
-   * Create or update an item; returns after the server confirms + local state updates.
-   * New attachment blobs upload FIRST (spec 02 §6: blob before the item that
-   * references it), so the itemId is fixed before any upload starts.
+   * §B.5/§D.3 persist-gate (breaker #1, LOAD-BEARING): the success-as-QUEUED offline-write
+   * return is offered ONLY while durable persistence is granted. A NullCache (opt-out /
+   * unsupported / demoted) has nothing durable to queue into, and a best-effort IndexedDB
+   * bucket the browser may EVICT between enqueue and flush is unrecoverable user data — so an
+   * offline save on either keeps today's push-or-throw (refuse-not-degrade). Feature-detect
+   * navigator.storage.persisted(); any absence/exception reads as NOT persisted.
+   */
+  private async offlineQueueAllowed(): Promise<boolean> {
+    if (!this.cache.durable) return false;
+    try {
+      const s = typeof navigator !== "undefined" ? navigator.storage : undefined;
+      return typeof s?.persisted === "function" ? (await s.persisted()) === true : false;
+    } catch {
+      return false; // refuse-not-degrade
+    }
+  }
+
+  /** §D.2a/§D.3: persist an item's optimistic WIRE envelope so a queued offline edit — or a
+   *  committed edit whose reconcile pull failed — survives a restart (the queue row carries
+   *  the mutation, not the item row; hydrate reads envelopes). The reconcile pull overwrites
+   *  it with the true server row once flushed. Guarded: a cache write must never fail a save. */
+  private async persistEnvelope(id: string, vaultId: string, updatedAt: number, rev: number, m: Mutation): Promise<void> {
+    try {
+      await this.cache.upsertItem({
+        itemId: id,
+        vaultId,
+        rev,
+        createdAt: 0, // unknown until the reconcile pull's row carries the real one
+        updatedAt,
+        deleted: false,
+        conflict: false,
+        formatVersion: m.item!.formatVersion,
+        attachmentIds: m.item!.attachmentIds,
+        blob: m.item!.blob,
+      });
+    } catch (e) {
+      console.warn("offline-cache envelope persist failed (harmless — the row re-syncs / re-flushes)", e);
+    }
+  }
+
+  /** M2: seal a mutation's pre-edit truth into its queue row's durable snapshot — the
+   *  ciphertext twin (A2: nothing decrypted at rest) of the in-memory PreEditSnapshot,
+   *  re-sealed here because the pre-edit envelope on disk is about to be overwritten by
+   *  the optimistic apply. Best-effort: a failed seal degrades to NO durable snapshot
+   *  (the pre-M2 posture — notice without revert after a restart), never a failed save. */
+  private durablePreEdit(pre: VaultItem | null, op: "put" | "delete", optimisticRev: number, optimisticUpdatedAt: number): QueuedPreEdit | undefined {
+    try {
+      if (!pre) return { op, pre: null, optimisticRev, optimisticUpdatedAt };
+      const up = this.account.encryptItem(pre.vaultId, pre.itemId, pre.doc);
+      return {
+        op,
+        pre: {
+          rev: pre.rev,
+          updatedAt: pre.updatedAt,
+          formatVersion: up.formatVersion, // the AD-bound fv of THIS seal — what hydrate must decrypt against
+          attachmentIds: pre.doc.attachments?.map((a) => a.id) ?? [],
+          blob: up.blob,
+        },
+        optimisticRev,
+        optimisticUpdatedAt,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** A live vault's display name for notice copy (best-effort — "(vault)" when the row or
+   *  key is missing or the blob won't open). */
+  private liveVaultName(vaultId: string): string {
+    const v = this.vaultsById.get(vaultId);
+    if (!v || !this.account.hasVault(vaultId)) return "(vault)";
+    try {
+      return this.account.decryptVaultName(vaultId, v.metaBlob) || "(vault)";
+    } catch {
+      return "(vault)";
+    }
+  }
+
+  /**
+   * C2 (b): undo ONE genuinely-denied mutation's optimistic apply from its enqueue-time
+   * snapshot — memory and (best-effort) disk. Guarded four ways so a revert can never
+   * destroy fresher state: (i) no snapshot (a pre-M2 row, or its durable seal wouldn't
+   * open at hydrate) ⇒ leave the row — the "write-refused" notice still fires and the
+   * next full resync trues it up; (ii) the vault left the live view ⇒ nothing to restore
+   * into; (iii) M1: a SERVER tombstone for this item has been applied (another member's
+   * delete was ACCEPTED while ours was denied) ⇒ the item is genuinely gone — restoring
+   * the snapshot would resurrect a deleted credential forever (the delta server never
+   * re-delivers a rev-passed tombstone), so DROP the snapshot and keep it deleted;
+   * (iv) for a put, revert ONLY while OUR optimistic (rev, updatedAt) is still the live
+   * value — for a delete, ONLY while the item is still locally deleted (a fresh server
+   * row, e.g. edit-beats-delete, supersedes).
+   * Returns what happened so the write-refused notice can tell the truth (M3):
+   * "reverted" (snapshot restored), "removed" (the M1 tombstone case — stays deleted),
+   * or "kept" (no snapshot / fresher state won — nothing was touched).
+   */
+  private async revertDeniedMutation(m: Mutation): Promise<"reverted" | "removed" | "kept"> {
+    const snap = this.preEditByMutation.get(m.mutationId);
+    if (!snap) return "kept";
+    if (!this.vaultsById.has(m.vaultId)) return "kept";
+    const cur = this.itemsById.get(m.itemId);
+    if (snap.op === "delete") {
+      if (this.serverTombstoned.has(m.itemId)) return "removed"; // M1: deleted server-side — never resurrect
+      if (cur || !snap.pre) return "kept";
+      await this.revertOptimisticSave(m.itemId, snap.pre); // restore the pre-delete item live
+      return "reverted";
+    }
+    if (!cur || cur.rev !== snap.optimisticRev || cur.updatedAt !== snap.optimisticUpdatedAt) return "kept";
+    await this.revertOptimisticSave(m.itemId, snap.pre ?? undefined);
+    return "reverted";
+  }
+
+  /** C2 (d): m still awaits its epoch-guarded verdict — staged, but every completed pull so
+   *  far STARTED before the staging, so surfaceStagedDenials declined to classify it. */
+  private mutationStillStaged(m: Mutation): boolean {
+    return (this.preParkedByVault.get(m.vaultId) ?? []).some((e) => e.mutation.mutationId === m.mutationId);
+  }
+
+  /** Undo the optimistic apply of a save that turned out to be a GENUINE denial or a
+   *  refuse-not-degrade offline reject: restore the pre-edit value (existing) or drop a new
+   *  item that never landed, in memory and (best-effort) on disk. */
+  private async revertOptimisticSave(id: string, existing: VaultItem | undefined): Promise<void> {
+    this.pendingSyncItemIds.delete(id);
+    if (existing) {
+      this.itemsById.set(id, existing);
+      // L1: an itemId lives in exactly ONE of the three tri-state maps — a pull may have
+      // parked this id as undecryptable/missing-VK meanwhile, and re-entering the live map
+      // without clearing the others would double-enumerate it in backups.
+      this.undecryptableById.delete(id);
+      this.missingVkById.delete(id);
+      try {
+        const up = this.account.encryptItem(existing.vaultId, id, existing.doc); // re-seal the pre-edit value
+        await this.cache.upsertItem({
+          itemId: id,
+          vaultId: existing.vaultId,
+          rev: existing.rev,
+          createdAt: 0,
+          updatedAt: existing.updatedAt,
+          deleted: false,
+          conflict: false,
+          formatVersion: up.formatVersion,
+          attachmentIds: existing.doc.attachments?.map((a) => a.id) ?? [],
+          blob: up.blob,
+        });
+      } catch {
+        /* best-effort — the next successful pull re-delivers the true row */
+      }
+    } else {
+      this.itemsById.delete(id);
+      try {
+        await this.cache.deleteItem(id);
+      } catch {
+        /* best-effort orphan drop */
+      }
+    }
+  }
+
+  /**
+   * Create or update an item. New attachment blobs upload FIRST (spec 02 §6: blob before the
+   * item that references it), so the itemId is fixed before any upload starts.
    *
-   * An EXISTING item always stays in its own vault (the server enforces
-   * `vault_mismatch`); a new item goes to [vaultId] when given, else the personal vault.
+   * §D.3 durable offline writes (slice S4): the mutation is ENQUEUED durably with its stable
+   * mutationId (a retry converges on server dedup — D4), applied optimistically, then flushed.
+   *  - flush + reconcile succeed ⇒ committed (the Editor clears normally);
+   *  - the vault went in-grace ⇒ the edit is PARKED for restore replay (F21), no failure;
+   *  - a GENUINE permission denial ⇒ re-thrown (the Editor's failure UX is unchanged);
+   *  - OFFLINE ⇒ success-as-QUEUED — but ONLY while durable persistence is granted
+   *    (breaker #1 persist-gate); otherwise, and for a save carrying `newFiles`, today's
+   *    push-or-throw stands (attachments are online-only; we cache no blob bytes).
+   *
+   * An EXISTING item always stays in its own vault (the server enforces `vault_mismatch`);
+   * a new item goes to [vaultId] when given, else the personal vault.
    */
   async save(
     itemId: string | null,
@@ -1273,6 +1884,11 @@ export class VaultStore {
     const targetVaultId = existing?.vaultId ?? vaultId ?? this.account.personalVaultId;
     const id = itemId ?? this.account.newItemId();
 
+    // Scope guard (§D.3): a save carrying new attachment blobs is ONLINE-ONLY in v1 — the
+    // blobs upload FIRST (spec 02 §6) and we cache no attachment bytes, so such a save can
+    // never be replayed from the queue and MUST NOT return success-as-QUEUED. The uploads
+    // below throw on a dead network (before the mutation is even minted), so an offline
+    // attachment save fails loudly — refusing to queue.
     let done = 0;
     for (const file of newFiles) {
       const ref = doc.attachments?.find((a) => a.id === file.id);
@@ -1284,63 +1900,80 @@ export class VaultStore {
     }
 
     const m = this.putMutation(id, targetVaultId, doc, existing?.rev ?? 0);
-    let pushResp: PushResponse;
+    const mayQueue = newFiles.length === 0 && (await this.offlineQueueAllowed());
+
+    const committedAt = Date.now();
+    const optimisticRev = (existing?.rev ?? 0) + 1; // the reconcile pull trues the rev up
+    // Enqueue durably BEFORE the send (D4: a retry converges on server dedup — the fresh-
+    // mutationId non-idempotent retry is gone). On NullCache this is a no-op (mayQueue already
+    // false there), so the direct flushChunk branch below sends m instead. M2: the pre-edit
+    // snapshot rides the row (sealed, local-only) so a denial classified only after a restart
+    // still reverts — hydrate reloads it into preEditByMutation.
+    await this.cache.enqueue(m, this.durablePreEdit(existing ?? null, "put", optimisticRev, committedAt));
+    // Optimistic apply — memory AND disk — so the item renders immediately with a "pending
+    // sync" mark and survives a restart (the queue row carries the mutation, not the envelope).
+    // C2 (a): the pre-edit truth, keyed by mutationId — if this write is later classified a
+    // GENUINE denial, surfaceStagedDenials restores exactly this (memory + disk) so the
+    // refused value cannot outlive its refusal.
+    this.preEditByMutation.set(m.mutationId, { pre: existing ?? null, op: "put", optimisticRev, optimisticUpdatedAt: committedAt });
+    this.itemsById.set(id, { itemId: id, vaultId: targetVaultId, rev: optimisticRev, updatedAt: committedAt, formatVersion: m.item!.formatVersion, doc });
+    this.undecryptableById.delete(id); // it decrypts by construction — we wrote it
+    this.pendingSyncItemIds.add(id);
+    await this.persistEnvelope(id, targetVaultId, committedAt, optimisticRev, m);
+
+    // SEND m (breaker #3 ONE denial path; C3 FIFO): on a DURABLE cache the send goes through
+    // flushQueue itself — the drain is FIFO over the WHOLE queue (older offline edits of the
+    // same item flush BEFORE m, so LWW can never enthrone a stale draft and demote this
+    // newest edit to a conflict copy), single-flighted, and §D.5 lock-wrapped. Only the
+    // NullCache path (enqueue is a no-op) sends m directly via flushChunk. Either way a
+    // `denied` result is STAGED (not thrown) and an OFFLINE reject propagates.
+    const displaced: { item: WireItem; winnerRev: number }[] = [];
     try {
-      pushResp = await this.push([m]);
+      if (this.cache.durable) {
+        await this.flushQueue(); // materializes its own displaced conflicts internally
+      } else {
+        await this.flushChunk([m], displaced);
+      }
     } catch (e) {
-      // F21: an edit denied because its vault just went in-grace (an owner's accidental
-      // delete) is PARKED for replay on restore, not surfaced as a hard failure. A genuine
-      // permission denial (reader, still-live vault) rethrows unchanged.
-      if (e instanceof ApiError && e.code === "denied") return this.parkOrRethrowDeniedEdit(targetVaultId, m, e);
+      // m was NOT sent (transport reject). success-as-QUEUED only while durable persistence is
+      // granted AND this is transport (never an ApiError — the server ANSWERED for those);
+      // otherwise refuse-not-degrade → drop the row, undo the optimistic apply, rethrow.
+      if (mayQueue && !(e instanceof ApiError)) return; // the item keeps its optimistic apply + pending-sync mark
+      await this.cache.dequeue(m.mutationId);
+      this.preEditByMutation.delete(m.mutationId);
+      await this.revertOptimisticSave(id, existing);
       throw e;
     }
-    // Past this point the put is COMMITTED server-side (mirror remove()): a failed or
-    // rejected reconcile pull must NOT fail the save — the Editor would then claim
-    // "Save failed — nothing was changed" about a write the server already holds, and
-    // a user retry would commit it a SECOND time (putMutation mints a fresh
-    // mutationId, so the retry is not idempotent). Apply the confirmed write locally
-    // FIRST — sync() is single-flight, so the reconcile below may legitimately join a
-    // pull that started BEFORE our push and does not contain it — then reconcile,
-    // letting the next successful sync (and the connectivity dot) surface whatever
-    // made a failed reconcile fail (offline, or an F31 integrity rejection).
-    const committedAt = Date.now();
-    const committedRev = pushResp.results[0]?.newItemRev ?? (existing?.rev ?? 0) + 1;
-    this.itemsById.set(id, {
-      itemId: id,
-      vaultId: targetVaultId,
-      rev: committedRev,
-      updatedAt: committedAt,
-      formatVersion: m.item!.formatVersion, // the fv this write actually sealed at
-      doc,
-    });
-    this.undecryptableById.delete(id); // it decrypts by construction — we wrote it
-    // §D.2a: the committed sealed envelope (the exact ItemUpload the server holds) is in
-    // hand — persist it as a WIRE row in the same breath as the local apply, so it
-    // survives a crash BEFORE the reconcile pull re-delivers it. Guarded: a cache
-    // failure (quota, or losing the race with a concurrent sign-out's wipe — the
-    // guarded-close no-op) must never fail a save the server already committed; the
-    // row re-syncs at next login. (S4 moves this ack-persist into flushQueue.)
-    try {
-      await this.cache.upsertItem({
-        itemId: id,
-        vaultId: targetVaultId,
-        rev: committedRev,
-        createdAt: 0, // unknown at push time — the reconcile pull's row carries the real one
-        updatedAt: committedAt,
-        deleted: false,
-        conflict: false,
-        formatVersion: m.item!.formatVersion,
-        attachmentIds: m.item!.attachmentIds,
-        blob: m.item!.blob,
-      });
-    } catch (e) {
-      console.warn("save committed server-side but its offline-cache write failed (harmless — the row re-syncs)", e);
-    }
+    for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
+
+    // m settled (applied → dequeued; or denied → staged) — or, if this call joined a drain
+    // already past its row, it is still pending and the sync()'s own flushQueue sends it.
+    // Reconcile (§D.3 order: flushQueue → pull → surfaceStagedDenials classifies m's staged
+    // denial, epoch-guarded). A genuine denial throws here; an offline reconcile does not.
     try {
       await this.sync();
+      // C2 (d): the reconcile's pull may have JOINED an older in-flight pull whose snapshot
+      // predates m's denial — the epoch guard then leaves m staged-too-fresh, and returning
+      // now would claim SUCCESS for a denied write. Run ONE more cycle so a pull that
+      // STARTED after the staging classifies it (park, or the genuine throw below). Should a
+      // wedged pull defer it yet again, the C2 drain-path revert + "write-refused" notice
+      // still surface it on a later sync — deferred, never silent.
+      if (this.mutationStillStaged(m)) await this.sync();
     } catch (e) {
+      if (e instanceof ApiError && e.code === "denied") {
+        // GENUINE permission denial — surfaceStagedDenials dropped the row durably AND
+        // restored the pre-edit truth from the C2 snapshot (precisely: only where OUR
+        // optimistic apply was still live). Rethrow — the Editor's failure UX is unchanged.
+        throw e;
+      }
+      // The reconcile PULL failed but m was already applied/parked — a failed reconcile must
+      // NOT fail the save (the Editor would wrongly claim "nothing was changed" about a live
+      // write, and a retry would double-commit). Keep the apply; a later sync trues up.
+      this.pendingSyncItemIds.delete(id);
       console.warn("save committed but the reconcile pull failed — local apply kept; a later sync trues up", e);
+      return;
     }
+    this.pendingSyncItemIds.delete(id); // applied/parked — no longer awaiting a first flush
   }
 
   /**
@@ -1494,25 +2127,85 @@ export class VaultStore {
     return decryptAttachment(fromB64(ref.fileKey), bytes.subarray(0, HEADER_BYTES), bytes.subarray(HEADER_BYTES));
   }
 
+  /**
+   * §D.3 durable delete (save()'s twin): enqueue the delete durably, drop the item
+   * optimistically, then flush + reconcile. OFFLINE ⇒ success-as-QUEUED while persistence is
+   * granted (breaker #1), else push-or-throw; a GENUINE denial (a reader) re-thrown and the
+   * item restored; a committed delete whose reconcile pull fails stays removed (the item is
+   * gone fleet-wide — the UI must never claim "nothing was removed").
+   */
   async remove(itemId: string): Promise<void> {
     const existing = this.itemsById.get(itemId);
     if (!existing) return;
-    await this.push([this.deleteMutation(itemId, existing.vaultId, existing.rev)]);
-    // §D.2a twin of save(): the delete is committed server-side — mirror it to disk in
-    // the same breath, guarded (a failed cache write is harmless; the tombstone re-syncs).
+    const m = this.deleteMutation(itemId, existing.vaultId, existing.rev);
+    const mayQueue = await this.offlineQueueAllowed();
+    // Durable, stable mutationId (idempotent retry); no-op on NullCache. M2: the pre-delete
+    // snapshot rides the row (sealed, local-only) so a post-restart denial still restores.
+    await this.cache.enqueue(m, this.durablePreEdit(existing, "delete", 0, 0));
+    // C2 (a): the pre-delete truth — a GENUINE denial restores the item live (memory + disk)
+    // instead of leaving it locally-deleted forever while it stays live server-side.
+    this.preEditByMutation.set(m.mutationId, { pre: existing, op: "delete", optimisticRev: 0, optimisticUpdatedAt: 0 });
+    // Optimistic apply: drop from the live view + the on-disk envelope (guarded).
+    this.itemsById.delete(itemId);
+    this.pendingSyncItemIds.add(itemId);
     try {
       await this.cache.deleteItem(itemId);
     } catch (e) {
-      console.warn("remove committed server-side but its offline-cache delete failed (harmless — the tombstone re-syncs)", e);
+      console.warn("remove: optimistic offline-cache delete failed (harmless — a later sync trues up)", e);
     }
-    // Past this point the delete is COMMITTED server-side. A failed reconcile must not
-    // resurface the item locally or make remove() report failure (the UI would then tell
-    // the user "nothing was removed" about an item that is gone fleet-wide) — drop it
-    // from the working set now and let the next successful sync true everything up.
+    // C3 FIFO: durable cache ⇒ the send rides flushQueue (older queued rows drain first,
+    // single-flighted, lock-wrapped); direct flushChunk only on NullCache (no-op enqueue).
+    const displaced: { item: WireItem; winnerRev: number }[] = [];
+    try {
+      if (this.cache.durable) {
+        await this.flushQueue();
+      } else {
+        await this.flushChunk([m], displaced); // send the delete; denied → staged; offline → throws
+      }
+    } catch (e) {
+      // Never sent (offline). Persist-gated ⇒ success-as-QUEUED (the item stays removed, the
+      // delete flushes on reconnect). Otherwise refuse-not-degrade: drop the queued delete,
+      // RESTORE the item to the live view, rethrow (today's push-or-throw).
+      if (mayQueue && !(e instanceof ApiError)) return;
+      await this.cache.dequeue(m.mutationId);
+      this.preEditByMutation.delete(m.mutationId);
+      await this.restoreRemoved(itemId, existing);
+      throw e;
+    }
+    for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
     try {
       await this.sync();
+      // C2 (d): epoch-deferral — see save(). One more cycle so a joined stale pull can't
+      // turn a denied delete into a silent success.
+      if (this.mutationStillStaged(m)) await this.sync();
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "denied") {
+        // GENUINE denial (a reader's delete) — the row was dropped durably and the item
+        // restored live from the C2 snapshot inside surfaceStagedDenials. Rethrow.
+        throw e;
+      }
+      // COMMITTED server-side; only the reconcile pull failed — the item is gone fleet-wide,
+      // keep it removed (the UI must never resurface it or report failure).
+      this.pendingSyncItemIds.delete(itemId);
+      console.warn("remove committed but the reconcile pull failed — item kept removed; a later sync trues up", e);
+      return;
+    }
+    this.pendingSyncItemIds.delete(itemId);
+  }
+
+  /** Undo a remove()'s optimistic drop (a genuine denial or a refuse-not-degrade offline
+   *  reject): restore the item to the live view + re-seal its pre-delete envelope on disk. */
+  private async restoreRemoved(itemId: string, existing: VaultItem): Promise<void> {
+    this.pendingSyncItemIds.delete(itemId);
+    this.itemsById.set(itemId, existing);
+    // L1: tri-state mutual exclusion — same rule as revertOptimisticSave above.
+    this.undecryptableById.delete(itemId);
+    this.missingVkById.delete(itemId);
+    try {
+      const up = this.account.encryptItem(existing.vaultId, itemId, existing.doc);
+      await this.cache.upsertItem({ itemId, vaultId: existing.vaultId, rev: existing.rev, createdAt: 0, updatedAt: existing.updatedAt, deleted: false, conflict: false, formatVersion: up.formatVersion, attachmentIds: existing.doc.attachments?.map((a) => a.id) ?? [], blob: up.blob });
     } catch {
-      this.itemsById.delete(itemId);
+      /* best-effort — the next successful pull re-delivers the true row */
     }
   }
 

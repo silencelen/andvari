@@ -320,9 +320,12 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
 
   it("a 410 resync's in-tx clear replaces the row stores but PRESERVES accountKeys, the queue, and holding (breaker #2)", async () => {
     const { s, api, cache, store } = await seeded();
-    // Pre-seed the safety state a resync must never touch (S3/S4 write these for real).
+    // Pre-seed the safety state a resync must never touch (S3/S4 write these for real). The
+    // queued row is STAGED-DENIED so the pre-pull flushQueue (S4) leaves it alone — proving
+    // clear() preserves the queue STORE, not merely that an unsent row got flushed away.
     expect(await cache.setAccountKeys(s.member.keys)).toBe(true);
-    await cache.enqueue({ mutationId: "m-queued", op: "put", itemId: "i-q", vaultId: s.vaultId, baseItemRev: 0 });
+    await cache.enqueue({ mutationId: "m-queued", op: "put", itemId: "i-q", vaultId: "v-other", baseItemRev: 0 });
+    await cache.markStagedDenied("m-queued");
     await cache.putHeld({
       vault: { vaultId: "held-v", type: "shared", rev: 1, metaBlob: "", createdAt: 0 },
       grant: null,
@@ -351,7 +354,7 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     expect(await cache.cursor()).toBe(9);
     expect((await cache.envelopes()).map((r) => r.itemId)).toEqual([s.itemId]); // stale row gone — cleared in the SAME tx
     expect(await cache.accountKeys()).toEqual(s.member.keys); // §D.1 enumerated clear: untouched
-    expect((await cache.pending()).map((m) => m.mutationId)).toEqual(["m-queued"]);
+    expect((await cache.stagedDenied()).map((m) => m.mutationId)).toEqual(["m-queued"]); // queue store preserved
     expect((await cache.heldVaults()).map((h) => h.vault.vaultId)).toEqual(["held-v"]);
   });
 
@@ -460,21 +463,10 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     expect(store2.list().some((i) => i.vaultId === s.vaultId)).toBe(false); // held ≠ live
   });
 
-  it("hydrate restores the replay floors: a consumed deleteId defuses a replayed tombstone; staged denials pre-park (F21)", async () => {
+  it("hydrate restores consumedDeleteIds: a replayed tombstone bearing a consumed deleteId keeps the vault live", async () => {
     const { s, cache } = await seeded();
-    // Safety state as S3/S4 will persist it.
     const consumedId = crypto.randomUUID();
     await cache.addConsumedDeleteId(consumedId);
-    const stagedMut: Mutation = {
-      mutationId: "m-staged",
-      op: "put",
-      itemId: s.itemId,
-      vaultId: s.vaultId,
-      baseItemRev: 4,
-      item: { formatVersion: 1, attachmentIds: [], blob: s.item.blob! },
-    };
-    await cache.enqueue(stagedMut);
-    await cache.markStagedDenied("m-staged");
 
     const fresh = await relock(s.member);
     const api2 = new FakeApi();
@@ -496,8 +488,30 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     expect(store2.get(s.itemId)).toBeDefined();
     expect(store2.heldVaults()).toHaveLength(0);
     expect(store2.notices()).toHaveLength(0);
+  });
 
-    // A REAL verified delete now folds the hydrated staged denial into the holding record.
+  it("hydrate restores staged denials: a real verified delete folds them into the holding record (F21, across a restart)", async () => {
+    const { s, cache } = await seeded();
+    // A durably staged-denied offline edit (S4 persists these; here the fixture stands in).
+    const stagedMut: Mutation = {
+      mutationId: "m-staged",
+      op: "put",
+      itemId: s.itemId,
+      vaultId: s.vaultId,
+      baseItemRev: 4,
+      item: { formatVersion: 1, attachmentIds: [], blob: s.item.blob! },
+    };
+    await cache.enqueue(stagedMut);
+    await cache.markStagedDenied("m-staged");
+
+    const fresh = await relock(s.member);
+    const api2 = new FakeApi();
+    const store2 = new VaultStore(api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    await store2.hydrate();
+
+    // The vault's REAL verified delete arrives (its grace period): the reconnect pull folds the
+    // hydrated staged denial into the holding record for restore replay (F21) — so
+    // surfaceStagedDenials finds it already parked and never surfaces it as a genuine denial.
     const key = await s.owner.account.lifecycleKeyFor(s.vaultId);
     const deleteId = crypto.randomUUID();
     api2.queue.push({
@@ -509,8 +523,10 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
       removedGrants: [s.vaultId],
       removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: await deleteProof(key, s.vaultId, deleteId), purgeAt: Date.now() + 7 * 86_400_000 }],
     });
-    await store2.sync();
+    await store2.sync(); // must NOT throw — the denial is parked, not a genuine refusal
     expect(store2.notices().find((n) => n.vaultId === s.vaultId)?.parkedCount).toBe(1);
+    // The staged queue row was dropped in the same tx it folded into held.parked (no double-load).
+    expect(await (await openVaultCache(fresh.userId)).stagedDenied()).toEqual([]);
   });
 
   it("hydrate restores lastVerifiedTransferSeq — a replayed offer at the already-seen seq stays hidden", async () => {
@@ -568,7 +584,7 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     expect(api.sinceLog.at(-1)).toBe(6);
   });
 
-  it("the pull commit runs inside the andvari-cache-<userId> Web Lock where Web Locks exist (§D.5)", async () => {
+  it("the queue flush AND the pull commit each run inside the andvari-cache-<userId> Web Lock where Web Locks exist (§D.5)", async () => {
     const s = await scenario();
     const cache = (await openVaultCache(s.member.account.userId)) as IdbVaultCache;
     const api = new FakeApi();
@@ -589,7 +605,9 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     } finally {
       vi.unstubAllGlobals();
     }
-    expect(requested).toEqual([`andvari-cache-${s.member.account.userId}`]);
+    // §D.5 serializes "each pull-apply commit AND queue flush": sync() = flushQueue (lock)
+    // → pull commit (lock) — two sequential acquisitions of the same per-user name.
+    expect(requested).toEqual([`andvari-cache-${s.member.account.userId}`, `andvari-cache-${s.member.account.userId}`]);
     expect(await cache.cursor()).toBe(5); // the commit ran (inside the lock)
   });
 

@@ -7,6 +7,7 @@ import {
   IdbVaultCache,
   NullCache,
   openVaultCache,
+  type QueuedPreEdit,
   vaultDbName,
 } from "./idbcache";
 
@@ -243,6 +244,46 @@ describe("idbcache: VaultCache contract (core VaultCacheContractTest twin)", () 
     await c.dequeue("2"); // dequeue removes rows in ANY state
     expect(await c.stagedDenied()).toEqual([]);
     expect((await c.pending()).map((m) => m.mutationId)).toEqual(["1"]);
+  });
+
+  it("M2 preEdit snapshots: additive round-trip — pre-M2 rows read undefined; mark preserves; re-enqueue sheds; dequeue drops", async () => {
+    const c = await open();
+    // Rows written WITHOUT a snapshot (every pre-M2 row — schemaless, no migration) read
+    // back with none, and their queue lifecycle is untouched.
+    await c.enqueue(mut("old"));
+    expect(await c.queuedPreEdits()).toEqual([]);
+    expect((await c.pending()).map((m) => m.mutationId)).toEqual(["old"]);
+
+    // A snapshot rides its row and round-trips every field — and is NEVER part of the
+    // mutation pending() returns (local-only, nothing new goes to the server).
+    const pe: QueuedPreEdit = {
+      op: "put",
+      pre: { rev: 4, updatedAt: 2000, formatVersion: 1, attachmentIds: ["att-x"], blob: "sealed-pre" },
+      optimisticRev: 5,
+      optimisticUpdatedAt: 3000,
+    };
+    await c.enqueue(mut("m1"), pe);
+    expect(await c.queuedPreEdits()).toEqual([{ mutationId: "m1", itemId: "item-m1", vaultId: "v1", preEdit: pe }]);
+    expect((await c.pending()).find((m) => m.mutationId === "m1")).toEqual(mut("m1"));
+
+    // Staging the denial PRESERVES the snapshot — the post-restart classification reverts from it.
+    await c.markStagedDenied("m1");
+    expect((await c.stagedDenied()).map((m) => m.mutationId)).toEqual(["m1"]);
+    expect((await c.queuedPreEdits()).find((r) => r.mutationId === "m1")?.preEdit).toEqual(pe);
+
+    // pre: null (a NEW item — revert = drop it) round-trips too.
+    const peNew: QueuedPreEdit = { op: "put", pre: null, optimisticRev: 1, optimisticUpdatedAt: 3000 };
+    await c.enqueue(mut("m2", "v2"), peNew);
+    expect((await c.queuedPreEdits()).find((r) => r.mutationId === "m2")?.preEdit).toEqual(peNew);
+
+    // INSERT OR REPLACE without a snapshot (the reinstate-replay enqueue) sheds the old one.
+    await c.enqueue(mut("m1"));
+    expect((await c.queuedPreEdits()).map((r) => r.mutationId)).toEqual(["m2"]);
+
+    // dequeue drops the row and its snapshot together.
+    await c.dequeue("m2");
+    expect(await c.queuedPreEdits()).toEqual([]);
+    expect((await c.pending()).map((m) => m.mutationId)).toEqual(["old", "m1"]);
   });
 
   it("clear resets rows and cursor but preserves the queue (core parity)", async () => {
@@ -709,8 +750,9 @@ describe("idbcache: NullCache (opt-out / unsupported / demoted path)", () => {
     expect(await n.vaults()).toEqual([]);
     await n.dropVault("v1");
     await n.clear();
-    await n.enqueue(mut("1"));
+    await n.enqueue(mut("1"), { op: "put", pre: null, optimisticRev: 1, optimisticUpdatedAt: 1 });
     expect(await n.pending()).toEqual([]);
+    expect(await n.queuedPreEdits()).toEqual([]);
     await n.markStagedDenied("1");
     expect(await n.stagedDenied()).toEqual([]);
     await n.dequeue("1");

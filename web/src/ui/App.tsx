@@ -24,6 +24,7 @@ import {
   defaultBaseUrl,
   loadSession,
   makeClient,
+  pendingSyncCount,
   SESSION_STORAGE_KEY,
   wipeVaultCache,
   type Session,
@@ -119,12 +120,31 @@ export function App() {
   // queue + cached accountKeys). A LOCK does NOT come here, so the cache is RETAINED on lock.
   // Read the userId BEFORE clearSession removes the session; wipe is fire-and-forget (the
   // deleteDatabase self-completes via the sibling connection's versionchange, idbcache §D.5.3).
-  const signOut = useCallback((notice?: string) => {
+  //
+  // breaker #9 (§E.4) — the wipe destroys the whole outbound queue, so unsynced offline edits
+  // are lost with it. `kind` decides how that loss is handled:
+  //  - "user"    (the Sign-out button): BLOCK on an explicit confirm carrying the count;
+  //  - "expired" (definitive-401 / WS session-end): cannot be blocked (spec 02 §8), but the
+  //               count is SURFACED in the notice so the loss is never silent;
+  //  - "revoked" (server WS revoked frame): silent-drop (spec 03 §4 accepts it).
+  const signOut = useCallback(async (notice?: string, kind: "user" | "expired" | "revoked" = "user") => {
     const uid = loadSession()?.userId ?? null;
+    const unsynced = uid ? await pendingSyncCount(uid) : 0;
+    if (kind === "user" && unsynced > 0) {
+      const ok =
+        typeof window !== "undefined" && typeof window.confirm === "function"
+          ? window.confirm(`${unsynced} unsynced ${unsynced === 1 ? "change" : "changes"} will be permanently lost if you sign out on this device. Sign out anyway?`)
+          : true;
+      if (!ok) return; // aborted — session, tokens, and cache are untouched
+    }
+    const lostCount =
+      kind === "expired" && unsynced > 0
+        ? `${notice ? notice + " " : ""}${unsynced} offline ${unsynced === 1 ? "change" : "changes"} could not be synced — this session expired before reconnecting.`
+        : notice;
     clearSession();
     clientRef.current?.setTokens(null);
     if (uid) void wipeVaultCache(uid);
-    setPhase({ kind: "welcome", notice });
+    setPhase({ kind: "welcome", notice: lostCount });
   }, []);
 
   // F26/F27 lock propagation channel: locking KEEPS the persisted session, so the
@@ -163,7 +183,9 @@ export function App() {
   // there would be a false alarm.
   const onRevoked = useCallback(
     (kind: SessionEndKind) =>
-      signOut(kind === "revoked" ? "This device's access was revoked." : "Your session ended — sign in again."),
+      kind === "revoked"
+        ? void signOut("This device's access was revoked.", "revoked") // server-initiated: silent-drop
+        : void signOut("Your session ended — sign in again.", "expired"), // expiry: surface the lost count
     [signOut],
   );
 
@@ -318,9 +340,11 @@ export function App() {
       mode={phase.kind === "unlock" ? { unlock: phase.session } : { fresh: true }}
       notice={phase.notice}
       onReady={onUnlocked}
-      // §E.4: a definitive-401 from the Unlock card arrives here with the "session expired"
-      // notice, routing through signOut (which wipes) — not Welcome's copy-only path.
-      onForget={signOut}
+      // §E.4: the Unlock card's "Sign out / use a different account" calls onForget() with NO
+      // notice → a USER sign-out (blocking confirm if the queue is non-empty, breaker #9); a
+      // definitive-401 calls onForget("Session expired…") → an EXPIRED wipe (surfaces the count,
+      // cannot block). Both route through signOut, the one wipe choke point.
+      onForget={(notice?: string) => void signOut(notice, notice ? "expired" : "user")}
     />
   );
 }

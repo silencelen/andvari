@@ -208,11 +208,16 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   const syncNow = useCallback(async () => {
     try {
       await store.sync();
-      setItems(store.list());
-      setNotices(store.notices());
       setSyncOk(true);
     } catch {
       setSyncOk(false);
+    } finally {
+      // Refresh on BOTH arms: a genuine offline-write denial THROWS out of sync() only
+      // AFTER the pull applied and the store reverted the refused rows + minted the durable
+      // "write-refused" notice — those must render even though this background catch
+      // swallows the throw (the notice, not the throw, is the user-facing surface).
+      setItems(store.list());
+      setNotices(store.notices());
     }
   }, [store]);
 
@@ -364,6 +369,12 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         <div className="name">{it.doc.name || "(untitled)"}</div>
         <div className="sub">{it.doc.type === "login" ? it.doc.login?.username || it.doc.login?.uris?.[0] || "login" : it.doc.type === "card" ? cardSubtitle(it.doc) : "secure note"}</div>
       </span>
+      {/* §D.3 (S4): an offline edit queued but not yet synced — the row reads as "saved here,
+          will sync when you reconnect", never as lost. Cleared by the reconnect flush
+          (syncNow/refresh re-render this row). */}
+      {store.hasPendingSync(it.itemId) && (
+        <span className="tag" title="Saved on this device — waiting to sync when you reconnect" aria-label="Pending sync" style={{ color: "var(--muted-strong, #8a7a5c)" }}>pending sync</span>
+      )}
       {it.vaultId !== account.personalVaultId && (
         <span className="tag" style={{ color: "var(--gold-text)" }}>{vaultNameById.get(it.vaultId) ?? "shared"}</span>
       )}
@@ -662,6 +673,42 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
       return { warn: false, body: `You left “${name}”.` };
     case "restored":
       return { warn: false, body: `“${name}” was restored.` };
+    case "replay-denied":
+      // C1 (core LC-1): recovered (F21-parked) edits replayed after a restore, refused on the
+      // now-live vault — the member's role likely changed across the grace. Calm, never an error.
+      return {
+        warn: false,
+        body:
+          n.parkedCount === 1
+            ? `A recovered edit to “${name}” couldn't be applied — your access may have changed while it was deleted.`
+            : `${n.parkedCount ?? 0} recovered edits to “${name}” couldn't be applied — your access may have changed while it was deleted.`,
+      };
+    case "write-refused": {
+      // C2/M3: offline/queued changes genuinely denied at classification. The store restores
+      // each refused item to its last synced value WHEN IT CAN (revertedCount) — the copy must
+      // not claim a restore that didn't happen: an item the server itself deleted meanwhile
+      // stays removed (removedCount, M1), and one with no usable snapshot may keep showing the
+      // refused value until the vault next fully refreshes. This banner is the durable surface
+      // (the sync() throw behind it is often swallowed by a background sync).
+      const total = n.parkedCount ?? 0;
+      const one = total === 1;
+      const lead = one
+        ? `An offline change to “${name}” was refused — you no longer have permission.`
+        : `${total} offline changes to “${name}” were refused — you no longer have permission.`;
+      let tail: string;
+      if (total > 0 && (n.revertedCount ?? 0) === total) {
+        tail = one ? "The item was restored to its last synced value." : "The items were restored to their last synced values.";
+      } else if (total > 0 && (n.removedCount ?? 0) === total) {
+        tail = one
+          ? "That item was already deleted by someone else in your household, so it stays removed."
+          : "Those items were already deleted by someone else in your household, so they stay removed.";
+      } else {
+        tail = one
+          ? "The item couldn't be restored here and may be out of date until the vault next refreshes."
+          : "Some items couldn't be restored here and may be out of date until the vault next refreshes.";
+      }
+      return { warn: true, body: `${lead} ${tail}` };
+    }
     case "added":
       return { warn: false, body: `You were added to “${name}”.` };
     case "transfer-complete":
