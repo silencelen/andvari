@@ -1,10 +1,11 @@
 # andvari — Web durable offline cache (encrypted IndexedDB)
 
-**Status: BUILT + VERIFIED S1–S6 (2026-07-15) — unit suite (592 web tests + tsc) and live e2e green
-(PHASE C: A2 ciphertext-only tripwire, offline unlock round-trip, torn-cache resync-to-byte-identical,
-persist-gated queued-save flush). Web-only — no wire/schema/version change. Committed on `main`;
-NOT YET DEPLOYED (awaiting explicit owner deploy OK for CT122 — this is a real at-rest change for
-tailnet browsers, gated OFF on the public break-glass origin).**
+**Status: SHIPPED — DEPLOYED to CT122 2026-07-15 (explicit owner OK; snapshot-first, served==built
+byte-verified through CF, healthz + register_public_disabled re-confirmed, offline-cache markers
+present in the served bundle). Unit suite (592 web tests + tsc) and live e2e green (PHASE C: A2
+ciphertext-only tripwire, offline unlock round-trip, torn-cache resync-to-byte-identical,
+persist-gated queued-save flush). Web-only — no wire/schema/version change. ON by default on
+private/tailnet origins, opt-in-only on the public break-glass origin.**
 Roadmap item B (design review 2026-07-12 §B.5/§D.2: the owner model says *every* client holds a
 usable local copy it can decrypt; today that is native-only by deliberate spec choice, `spec/02 §8`
 closing note). This doc closes the gap for **web**. The breaker found **no BLOCKER**; two

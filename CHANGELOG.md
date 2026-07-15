@@ -1,9 +1,9 @@
 # andvari — changelog
 
-## Unreleased — Web: your vault, available offline (encrypted local copy)
+## 2026-07-15 — Web: your vault, available offline (encrypted local copy)
 
-*Web only. No app, server, or protocol change — the web client version stays 0.17.0. Built and
-verified; not yet deployed.*
+*Web only. No app, server, or protocol change — the web client version stays 0.17.0. Deployed to
+the household server 2026-07-15 (byte-verified).*
 
 ### Your passwords, even with no connection
 
