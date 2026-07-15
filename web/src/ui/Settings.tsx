@@ -13,6 +13,7 @@ import { fmtDate } from "./format";
 import { Announcer, Msg } from "./Msg";
 import { QrSvg } from "./QrSvg";
 import { MasterPasswordHint } from "./Welcome";
+import { refreshCachedAccountKeys } from "./session";
 import { meetsMasterPasswordFloor } from "./strength";
 import { useThemePref, type ThemePref } from "./useTheme";
 import { ViewHeader } from "./ViewHeader";
@@ -285,6 +286,12 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Props) {
       const currentAuthKey = await Account.deriveAuthKey(current, keys.kdfSalt, keys.kdfParams);
       const change = await account.buildPasswordChange(next, policy?.kdfParams ?? keys.kdfParams);
       await client.changePassword({ currentAuthKey, ...change });
+      // §D.2c/§E.4 (S3-2): the durable offline cache still holds the OLD kdfSalt/kdfParams/wrappedUvk,
+      // so an offline unlock would reject the NEW password while the OLD (possibly compromised) one
+      // still opens the cached vault until the next online unlock (the spec 05 T3 window). Refresh it
+      // with the post-change accountKeys. Best-effort + gated (never creates a cache where caching is
+      // off) — see session.refreshCachedAccountKeys; a cache failure never fails the committed change.
+      await refreshCachedAccountKeys(client, account.userId);
       setCurrent("");
       setNext("");
       setConfirm("");

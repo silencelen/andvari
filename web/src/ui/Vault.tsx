@@ -106,6 +106,10 @@ interface Props {
   escrowStale: boolean;
   /** F57: the CURRENT org recovery fingerprint (re-seal target + short-form verify anchor). */
   escrowFingerprint: string;
+  /** §C6 (design 2026-07-13-web-offline-cache): this session came in via an OFFLINE unlock whose
+   *  cached `recoveryConfirmed !== true` — show a persistent, NON-blocking reminder (never blocks;
+   *  the online capture gate still hard-blocks the next time this device reconnects). */
+  offlineRecoveryReminder: boolean;
   /** F26: locks — keeps the persisted session; the user gets the Unlock card. */
   onLock: () => void;
   /** F26: the session died server-side — full sign-out, not a lock. `kind` says
@@ -113,7 +117,7 @@ interface Props {
   onRevoked: (kind: SessionEndKind) => void;
 }
 
-export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowFingerprint, onLock, onRevoked }: Props) {
+export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowFingerprint, offlineRecoveryReminder, onLock, onRevoked }: Props) {
   const [view, setView] = useState<View>("vault");
   const [items, setItems] = useState<VaultItem[]>(store.list());
   // Lifecycle notices (spec 03 §11) — the banner reflects the store's list after every sync.
@@ -409,6 +413,18 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       )}
 
       {escrowStale && escrowFingerprint && <ReSealBanner account={account} client={client} escrowFingerprint={escrowFingerprint} />}
+
+      {/* §C6 (design 2026-07-13-web-offline-cache): an OFFLINE unlock with cached
+          recoveryConfirmed !== true PROCEEDS with this persistent, non-dismissable REMINDER —
+          deliberately reminder-not-error copy (the vault + account are fine; it also covers a
+          cached flag left stale-false by a confirm on another device). It never blocks; the
+          ONLINE capture gate (Welcome) still hard-blocks the next time this device reconnects,
+          so the nag can't be ridden indefinitely. Same non-dismissable idiom as mustChange. */}
+      {offlineRecoveryReminder && (
+        <div className="banner">
+          <span>Finish setting up your recovery phrase next time you're online.</span>
+        </div>
+      )}
 
       <NoticesBanner notices={notices} onDismiss={dismissNotice} />
 
