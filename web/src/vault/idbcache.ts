@@ -31,9 +31,16 @@ import { assertServerKdfParams } from "../crypto/keys";
  *    after any resync-then-lock.
  *  - §D.1 applyPull(fn) — the one-tx commit seam: `fn` synchronously BUFFERS
  *    ops, then everything commits in ONE IndexedDB transaction spanning all
- *    stores. A failed commit leaves the OLD cursor+rows (coherent, A1 — the
- *    next pull re-delivers the same delta idempotently) and counts one
- *    stuck-cache strike (breaker #6); `consecutiveCommitFailures()` exposes
+ *    stores. A failed commit leaves the OLD cursor+rows intact (coherent, A1):
+ *    memory then runs ahead of disk, and because pulls are driven by the memory
+ *    cursor the strict-delta server never re-sends that delta within the
+ *    session — so the heal is two-part (S2/S4 as-built): store.ts's CONTIGUITY
+ *    GUARD refuses any later delta whose base is ahead of the disk cursor (disk
+ *    stays coherent-stale, never stamping a cursor over a gap the server won't
+ *    re-send), and hydrate resumes from the DISK cursor so the next session's
+ *    first pull re-fetches the whole gap (the server re-delivers every change
+ *    with rev > since). Each failed commit counts one stuck-cache strike
+ *    (breaker #6); `consecutiveCommitFailures()` exposes
  *    the count. After 3, S2 treats it as a §B.4 coherence failure (attempt
  *    `wipe()`, demote to NullCache for the session) — the ORCHESTRATION is
  *    S2's; S1 exposes the counter + wipe(). The counter is scoped to applyPull

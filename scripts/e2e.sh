@@ -63,4 +63,8 @@ echo "==> PHASE B: replay same mutationId (idempotent) + continue"
 (cd "$REPO_DIR/web" && ANDVARI_E2E="$BASE" ANDVARI_E2E_PHASE=b ANDVARI_E2E_STATE="$STATE" \
   ANDVARI_E2E_BOOTSTRAP="$BOOTSTRAP" npx vitest run src/e2e/live.e2e.test.ts 2>&1) | tail -15
 
-echo "==> E2E PASSED: WebSocket propagation + crash-durable idempotency"
+echo "==> PHASE C: offline durable-cache drills (fake-indexeddb + the SAME surviving server/db)"
+(cd "$REPO_DIR/web" && ANDVARI_E2E="$BASE" ANDVARI_E2E_PHASE=c ANDVARI_E2E_STATE="$STATE" \
+  ANDVARI_E2E_BOOTSTRAP="$BOOTSTRAP" npx vitest run src/e2e/live.e2e.test.ts 2>&1) | tail -15
+
+echo "==> E2E PASSED: WebSocket propagation + crash-durable idempotency + offline-cache drills"

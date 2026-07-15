@@ -1,5 +1,27 @@
 # andvari — changelog
 
+## Unreleased — Web: your vault, available offline (encrypted local copy)
+
+*Web only. No app, server, or protocol change — the web client version stays 0.17.0. Built and
+verified; not yet deployed.*
+
+### Your passwords, even with no connection
+
+- **The web app now keeps an encrypted copy of your vault right in your browser**, so you can unlock
+  and read your logins even when you're offline or the server is unreachable. The copy is stored the
+  same way everything else is — encrypted end to end. Your passwords never sit on the device in
+  readable form (a live end-to-end test seeds a canary and proves it's absent from every stored byte).
+- **Edits you make offline are saved and sent when you reconnect.** A save made with no connection is
+  held safely and pushed the moment you're back — and only when your browser has granted andvari
+  durable storage, so nothing is queued somewhere it could be silently evicted.
+- **It's on by default only where it's safe.** On your home network / VPN (tailnet, LAN, localhost)
+  the offline copy is on; on the public break-glass web address it's off unless you turn it on. A new
+  **Offline copy** card in Settings lets you turn it off and wipe the local copy at any time, and it
+  tells you if you still have unsynced edits before you do. Signing out, an account change, or an
+  admin turning the feature off wipes the local copy immediately.
+- **If the local copy is ever damaged, andvari throws it away and re-fetches — it never trusts a
+  half-copy.** A torn or tampered cache is discarded whole and rebuilt from the server.
+
 ## 0.17.0 (2026-07-14) — recover on any device · your look · faster sync · quieter, kinder errors (web/server 0.17.0, schema v8; apps 0.17.0; browser extension 0.14.0)
 
 ### Forgot your master password? Now you can fix it right on your phone or desktop

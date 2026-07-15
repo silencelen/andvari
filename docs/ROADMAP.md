@@ -38,8 +38,12 @@ deployed to CT122 / not yet a native release** at time of writing — see the de
 admin surface) · web forced-theme cold-load FOUC (cosmetic; a same-origin boot script) · surface the
 extension's fail-closed-quiet update state in the popup (§M-D4b) · the determinism metaV-regression
 warning is console-only (a user-facing banner needs a UI pass) · a cross-device `recoverySelfSetup`
-race noted earlier is superseded by the piece-binding above. **web-offline durable cache** = breaker-
-vetted DESIGN only this session (`docs/design/2026-07-13-web-offline-cache.md`), build next.
+race noted earlier is superseded by the piece-binding above. **web-offline durable cache** = BUILT +
+VERIFIED (S1–S6, 2026-07-15; `docs/design/2026-07-13-web-offline-cache.md`) — encrypted IndexedDB
+twin of the native cache, offline unlock + reads, durable persist-gated write queue; unit suite + live
+e2e (`scripts/e2e.sh` PHASE C: A2 ciphertext-only, offline unlock, torn-cache resync, queued flush)
+green; web-only, no wire/schema/version change; committed on `main`, **awaiting owner deploy OK for
+CT122** (ON by default for private/tailnet origins, opt-in-only on the public break-glass origin).
 
 ## Security pentest 2026-07-13 — remediation status + open H2 items
 
