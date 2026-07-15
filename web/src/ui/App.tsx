@@ -25,6 +25,7 @@ import {
   loadSession,
   makeClient,
   SESSION_STORAGE_KEY,
+  wipeVaultCache,
   type Session,
 } from "./session";
 
@@ -111,9 +112,18 @@ export function App() {
   // F26: sign-out (and server-side revocation) is the DESTRUCTIVE path — the persisted
   // session is removed and the next visit is a full email+password sign-in. A mere
   // LOCK is not this; see lock() below.
+  //
+  // §E.4 (design 2026-07-13-web-offline-cache): this is the ONE wipe choke point for the
+  // offline cache — user sign-out, `onRevoked` (WS revoked/expired), and the definitive-401
+  // routed here from Welcome's Unlock card all destroy this account's cache DB (envelopes +
+  // queue + cached accountKeys). A LOCK does NOT come here, so the cache is RETAINED on lock.
+  // Read the userId BEFORE clearSession removes the session; wipe is fire-and-forget (the
+  // deleteDatabase self-completes via the sibling connection's versionchange, idbcache §D.5.3).
   const signOut = useCallback((notice?: string) => {
+    const uid = loadSession()?.userId ?? null;
     clearSession();
     clientRef.current?.setTokens(null);
+    if (uid) void wipeVaultCache(uid);
     setPhase({ kind: "welcome", notice });
   }, []);
 
@@ -291,6 +301,7 @@ export function App() {
         mustChangePassword={phase.meta.mustChangePassword}
         escrowStale={phase.meta.escrowStale}
         escrowFingerprint={phase.meta.escrowFingerprint}
+        offlineRecoveryReminder={phase.meta.offlineRecoveryReminder ?? false}
         onLock={onManualLock}
         onRevoked={onRevoked}
       />
@@ -307,7 +318,9 @@ export function App() {
       mode={phase.kind === "unlock" ? { unlock: phase.session } : { fresh: true }}
       notice={phase.notice}
       onReady={onUnlocked}
-      onForget={() => signOut()}
+      // §E.4: a definitive-401 from the Unlock card arrives here with the "session expired"
+      // notice, routing through signOut (which wipes) — not Welcome's copy-only path.
+      onForget={signOut}
     />
   );
 }

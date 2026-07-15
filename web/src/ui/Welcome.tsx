@@ -10,12 +10,14 @@ import { Account, IdentityMismatchError, deviceName } from "../vault/account";
 import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import { maybeKdfUpgrade } from "../vault/kdfupgrade";
 import { VaultStore } from "../vault/store";
+import { NullCache, openVaultCache } from "../vault/idbcache";
+import { unlockExistingSession } from "./unlock";
 import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
 import { Field } from "./Field";
 import { Msg } from "./Msg";
 import { Recover } from "./Recover";
 import { needsRecoveryCapture, settleRecoveryConfirm, setupAndCommitRecovery } from "./recovery-capture";
-import { clearSession, installId, saveSession, type Session } from "./session";
+import { clearSession, installId, saveSession, webCacheEnabled, wipeVaultCache, type Session } from "./session";
 import { BrandSigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength, masterPasswordHasNonAscii, meetsMasterPasswordFloor } from "./strength";
 
@@ -30,6 +32,11 @@ export interface LoginMeta {
   // fingerprint (the re-seal target + the value the user verifies against the new sheet).
   escrowStale: boolean;
   escrowFingerprint: string;
+  /** design 2026-07-13-web-offline-cache §C6: set ONLY by an OFFLINE unlock whose cached
+   *  `recoveryConfirmed !== true`. The vault shows a persistent, NON-blocking reminder banner
+   *  (never "broken" copy). An online unlock never sets it — the online capture gate hard-blocks
+   *  instead — so the nag can't be ridden indefinitely by any device that ever reconnects. */
+  offlineRecoveryReminder?: boolean;
 }
 
 /** design 2026-07-13 piece-binding: the STATIC notice for a `409 recovery_piece_stale` confirm — the
@@ -59,7 +66,9 @@ interface Props {
   /** F26: one-line reason this screen is showing ("Locked.", revoked, …) — rendered on the card. */
   notice?: string;
   onReady: (account: Account, store: VaultStore, meta: LoginMeta) => void;
-  onForget: () => void;
+  /** Leave this card. An optional notice rides through to App.signOut so the definitive-401
+   *  ("Session expired…") can wipe (§E.4) AND surface its reason on the next Welcome screen. */
+  onForget: (notice?: string) => void;
 }
 
 export function Welcome({ client, policy, policyError, policyErrorMessage, onRetryPolicy, mode, notice, onReady, onForget }: Props) {
@@ -70,7 +79,7 @@ export function Welcome({ client, policy, policyError, policyErrorMessage, onRet
 }
 
 /** Reload or F26 lock with an existing session: master password re-derives keys. */
-function Unlock({ client, policy, session, notice, onReady, onForget }: { client: ApiClient; policy: ClientPolicy | null; session: Session; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForget: () => void }) {
+function Unlock({ client, policy, session, notice, onReady, onForget }: { client: ApiClient; policy: ClientPolicy | null; session: Session; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForget: (notice?: string) => void }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -83,48 +92,20 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
     setBusy(true);
     setErr("");
     try {
-      // net() tags transport failures so a VPN drop / server restart can't be mistaken for
-      // a bad password. Account.unlock is the only crypto step and is left un-wrapped, so a
-      // throw from it (and only it) is unambiguously "wrong master password".
-      const keys = await net(client.accountKeys());
-      const account = await Account.unlock(session.userId, password, keys);
-      const store = new VaultStore(client, account);
-      await net(store.sync()); // rediscovers the personal vault id
-      const meta: LoginMeta = { isAdmin: session.isAdmin, mustChangePassword: false, escrowStale: keys.escrowStale ?? false, escrowFingerprint: keys.escrowFingerprint };
-      if (needsRecoveryCapture(keys)) {
-        // The master password is in hand — derive the login authKey (the server re-verifies it at
-        // self-setup) and BLOCK on the capture gate rather than going straight to the vault.
-        const currentAuthKey = await Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams);
-        setCapture({ account, store, meta, currentAuthKey });
-        return;
-      }
-      // F61 (spec 01 §7): the silent KDF re-key is deliberately NOT fired on this returning-session
-      // unlock. The server's changePassword clears mustChangePassword=0, and this path CANNOT observe
-      // must-change — accountKeys carries no such flag and web does not persist it across a lock, so
-      // the meta above hardcodes false. An unguarded re-key here could therefore silently clear an
-      // admin-issued must-change temp password (a non-blocking banner the user can lock past). Android
-      // guards with its PERSISTED store.mustChangePassword; web has no equivalent on unlock, so the
-      // re-key rides ONLY the SignIn path (below), where the login response carries the accurate flag.
-      // A mid-session org policy raise is picked up at the next full sign-in.
-      onReady(account, store, meta);
-    } catch (e) {
-      if (e instanceof KdfPolicyError) { setErr(WEAK_KDF_MESSAGE); return; } // H1 (spec 05 T1)
-      // Only a throw from Account.unlock (the sole un-wrapped, non-ApiError step) may be
-      // blamed on the password — EXCEPT its IdentityMismatchError (F31/spec 01 §5),
-      // which is a tampering signal and must never be softened into "wrong password".
-      // A server that responded with an error is a server problem — the user's
-      // password may be perfectly fine.
-      setErr(
-        e instanceof IdentityMismatchError
-          ? e.message
-          : e instanceof NetworkError
-            ? UNREACHABLE
-            : e instanceof ApiError && e.status === 401
-              ? "Session expired — sign in again."
-              : e instanceof ApiError
-                ? "The server had a problem answering — your password may be fine. Try again in a moment."
-                : "Wrong master password.",
-      );
+      // design 2026-07-13-web-offline-cache §C: online-first with an offline fallback. The whole
+      // flow (net()-tagged server call, cache creation + re-cache, the C3/C4 gates, hydrate, the
+      // first sync, and the C6-nag decision) lives in the total {@link unlockExistingSession} seam
+      // so the node-env tests can drive it without a DOM; this handler only maps the outcome.
+      // F61: the silent KDF re-key is deliberately NOT fired on this returning-session unlock — it
+      // cannot observe must-change (accountKeys carries no flag, web doesn't persist it across a
+      // lock), so the re-key rides ONLY the SignIn path below. That posture is unchanged here.
+      const r = await unlockExistingSession(client, session, password);
+      if (r.kind === "ready") return onReady(r.account, r.store, r.meta);
+      if (r.kind === "capture") return setCapture({ account: r.account, store: r.store, meta: r.meta, currentAuthKey: r.currentAuthKey });
+      // §E.4: a definitive-401 is routed through App.signOut (via onForget) so the cache is WIPED —
+      // not Welcome's old copy-only path — while still surfacing the "session expired" reason.
+      if (r.kind === "expired") return onForget("Session expired — sign in again.");
+      setErr(r.message);
     } finally {
       setBusy(false);
     }
@@ -148,7 +129,7 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
             currentAuthKey={capture.currentAuthKey}
             clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
             onReady={onReady}
-            onSignOut={onForget}
+            onSignOut={() => onForget()}
           />
         </div>
       </div>
@@ -172,7 +153,7 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
         </Field>
         <button className="primary" disabled={busy || !password}>{busy ? "Unsealing…" : "Unlock"}</button>
         <div style={{ textAlign: "center", marginTop: 16 }}>
-          <button type="button" className="link" onClick={onForget}>Sign out / use a different account</button>
+          <button type="button" className="link" onClick={() => onForget()}>Sign out / use a different account</button>
         </div>
       </form>
     </div>
@@ -304,7 +285,16 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
         }),
       );
       const account = await Account.unlock(s.userId, password, s.accountKeys);
-      const store = new VaultStore(client, account);
+      // §D.2c login-response re-cache write point (design 2026-07-13-web-offline-cache): seed the
+      // durable offline cache so a later returning-session unlock can go OFFLINE. §F.1/§E.3.3 dark-ship
+      // gate: durable on a PRIVATE origin, cache-less NullCache on the PUBLIC break-glass origin (or an
+      // opted-out / unsupported device), so seeding here is deploy-safe everywhere. hydrate is a cold
+      // no-op on a fresh/just-wiped DB, and the first sync populates the row envelopes. Fresh sign-in
+      // itself stays online-only (§C.2) — no offline fallback on this path.
+      const cache = webCacheEnabled() ? await openVaultCache(s.userId) : new NullCache();
+      await cache.setAccountKeys(s.accountKeys);
+      const store = new VaultStore(client, account, cache);
+      await store.hydrate();
       await net(store.sync()); // discovers the personal vault id from grants
       saveSession({
         baseUrl: client.baseUrl,
@@ -375,8 +365,15 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
           // Mirror App's signOut (unreachable from here): drop the persisted session + tokens and
           // fall back to the sign-in form. Signing out of the gate is SAFE — the flag is still
           // false, so the capture gate simply re-fires at the next sign-in.
+          // §E.4 (S3-1): SignIn.submit already SEEDED the durable cache (openVaultCache +
+          // setAccountKeys) BEFORE this gate mounted, so — unlike App.signOut, the choke point this
+          // path can't reach — the wipe MUST happen here too, or a sign-out on a shared machine leaves
+          // crackable ciphertext + the user's email in someone else's profile forever. Read the userId
+          // before clearSession, then wipe (fire-and-forget; deleteDatabase self-completes, §D.5.3).
+          const uid = capture.account.userId;
           clearSession();
           client.setTokens(null);
+          void wipeVaultCache(uid);
           setPassword("");
           setTotp("");
           setTotpNeeded(false);

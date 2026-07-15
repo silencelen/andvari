@@ -1,4 +1,6 @@
 import { ApiClient, type Tokens } from "../api/client";
+import { idbSupported, openVaultCache } from "../vault/idbcache";
+import { isPrivateOrigin } from "./origin";
 
 /**
  * Non-secret session metadata persisted across reloads. Tokens are here too (MVP);
@@ -36,6 +38,79 @@ export function saveSession(s: Session): void {
 
 export function clearSession(): void {
   localStorage.removeItem(KEY);
+}
+
+/**
+ * §E.4 wipe-by-userId — the durable offline cache is one DB per account
+ * (`andvari-vault-<userId>`), so a sign-out / server revocation / definitive-401 deletes
+ * exactly that account's DB (envelopes + queue + holding AND the cached accountKeys — the one
+ * artifact that removes offline-unlock material). Routed through App.signOut, the ONE wipe
+ * choke point (design §E.4). Opens then wipes (deleteDatabase); safe + a no-op on a NullCache /
+ * unsupported IndexedDB, and never rejects (idbcache's wipe() contract). A LOCK deliberately
+ * does NOT call this — locking is a key-drop, and the cache is retained (spec 05 T3).
+ *
+ * A sibling connection (this tab's own live store, or another tab) self-closes on the
+ * deleteDatabase versionchange (idbcache §D.5.3), so the wipe completes promptly.
+ */
+export async function wipeVaultCache(userId: string): Promise<void> {
+  const cache = await openVaultCache(userId);
+  await cache.wipe();
+}
+
+/** design 2026-07-13-web-offline-cache §E.3.2: the per-device opt-out marker. READ-ONLY in S1–S3
+ *  (nothing writes it yet); the S5 settings toggle writes it. Its mere presence forces the cache OFF. */
+const CACHE_OPT_OUT_KEY = "andvari.cacheOptOut";
+
+/**
+ * design 2026-07-13-web-offline-cache §F.1/§E.3.3 — the durable-offline-cache GATING PREDICATE (the
+ * "dark-ship gate"). The two openVaultCache call sites that stand up a durable cache — the
+ * returning-session unlock (unlock.ts) and the SignIn seed (Welcome.tsx) — consult this and fall back
+ * to a cache-less NullCache when it is false, so S1–S3 deploy SAFE: the public break-glass origin keeps
+ * today's no-at-rest-cache behavior by default. True iff, in order:
+ *   1. IndexedDB is usable at all (Firefox private windows etc. refuse — idbSupported), AND
+ *   2. this device has NOT opted out (the "andvari.cacheOptOut" marker is absent — S5 writes it), AND
+ *   3. the origin default is ON: a PRIVATE origin (tailnet *.ts.net / LAN RFC1918 / localhost, via
+ *      isPrivateOrigin) defaults the cache ON; the PUBLIC origin (andvari.monahanhosting.com — anything
+ *      else) defaults it OFF. A tailnet/LAN browser is an enrolled personal device by construction; the
+ *      public origin exists for borrowed/emergency machines (CF Access + TOTP), so caching there is
+ *      opt-in only.
+ * NOTE for S5: the settings toggle that WRITES the opt-out marker, the org offlineCacheAllowed
+ * policy-wipe, and the Unlock transparency line remain S5 — this predicate is the seam they build on.
+ */
+export function webCacheEnabled(): boolean {
+  if (!idbSupported()) return false;
+  try {
+    if (localStorage.getItem(CACHE_OPT_OUT_KEY) !== null) return false;
+  } catch {
+    // localStorage unreachable (rare / non-window context) — fall through to the origin default.
+  }
+  const origin = typeof window !== "undefined" && window.location ? window.location.origin : "";
+  return isPrivateOrigin(origin);
+}
+
+/**
+ * §D.2c/§E.4 (S3-2): refresh the durable offline cache's accountKeys after a master-password change.
+ * Without this the cache keeps the OLD kdfSalt/kdfParams/wrappedUvk, so an offline unlock rejects the
+ * NEW password while the OLD (possibly compromised) password still opens the cached vault until the
+ * next online unlock — exactly the spec 05 T3 stale-wrap window (§D.2c lists "after changePassword"
+ * as a re-cache write point). floorGood passes on the fresh payload, so setAccountKeys overwrites
+ * unconditionally. Gated on webCacheEnabled() so it never CREATES a cache on an origin/device where
+ * caching is off (§E.3.3 — the public origin must not gain an at-rest artifact from a password change).
+ * Best-effort: any cache failure is swallowed — the change already committed server-side, and the next
+ * online unlock re-caches.
+ */
+export async function refreshCachedAccountKeys(client: Pick<ApiClient, "accountKeys">, userId: string): Promise<void> {
+  if (!webCacheEnabled()) return;
+  try {
+    const cache = await openVaultCache(userId);
+    try {
+      await cache.setAccountKeys(await client.accountKeys());
+    } finally {
+      cache.close();
+    }
+  } catch {
+    /* best-effort — a cache failure must never fail a password change that already committed */
+  }
 }
 
 export function defaultBaseUrl(): string {
