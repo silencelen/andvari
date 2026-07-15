@@ -57,6 +57,28 @@ export async function wipeVaultCache(userId: string): Promise<void> {
   await cache.wipe();
 }
 
+/**
+ * §E.4 / breaker #9: how many UNSYNCED offline edits (pending + staged-denied queue rows) a
+ * wipe of this account's cache would destroy. App.signOut reads it to BLOCK a user sign-out
+ * on a confirm ("N unsynced changes will be lost") and to surface the count on a definitive-
+ * 401 wipe it cannot block. Opens read-only then closes; 0 on a NullCache / unsupported IDB /
+ * any error (a count failure must never wedge sign-out). The store owns the live count while a
+ * vault is open (VaultStore.queuedMutationCount); this is the choke-point path where it is not.
+ */
+export async function pendingSyncCount(userId: string): Promise<number> {
+  try {
+    const cache = await openVaultCache(userId);
+    try {
+      const [pending, staged] = await Promise.all([cache.pending(), cache.stagedDenied()]);
+      return pending.length + staged.length;
+    } finally {
+      cache.close();
+    }
+  } catch {
+    return 0;
+  }
+}
+
 /** design 2026-07-13-web-offline-cache §E.3.2: the per-device opt-out marker. READ-ONLY in S1–S3
  *  (nothing writes it yet); the S5 settings toggle writes it. Its mere presence forces the cache OFF. */
 const CACHE_OPT_OUT_KEY = "andvari.cacheOptOut";

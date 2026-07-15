@@ -114,6 +114,27 @@ export interface CachePolicy {
 }
 
 /**
+ * S4 M2 (2026-07-14 re-review): the OPTIONAL durable twin of store.ts's in-memory
+ * pre-edit snapshot, riding its mutation's queue row so a denial classified only
+ * AFTER a restart can still revert the optimistic apply (the ordinary flow: edit
+ * offline → close the browser → reopen → reconnect → denied — a delta server never
+ * re-delivers the unchanged row, so without this the refused value displays forever).
+ * LOCAL-ONLY: never part of `mutation`, never pushed. Ciphertext-only at rest (A2):
+ * `pre` carries the pre-edit envelope RE-SEALED at enqueue time (`null` = the
+ * mutation created the item; revert = drop it). ADDITIVE, no migration: IDB rows are
+ * schemaless, so rows written before this field read back with `preEdit` undefined
+ * and keep the pre-M2 behavior (write-refused notice, no revert).
+ */
+export interface QueuedPreEdit {
+  op: "put" | "delete";
+  /** The sealed pre-edit envelope (itemId/vaultId live on the queue row's mutation). */
+  pre: { rev: number; updatedAt: number; formatVersion: number; attachmentIds: string[]; blob: string } | null;
+  /** For op "put": the optimistic (rev, updatedAt) pair that gates the revert. */
+  optimisticRev: number;
+  optimisticUpdatedAt: number;
+}
+
+/**
  * The buffered-op surface `applyPull(fn)` hands to its callback (§D.1). Calls
  * only RECORD ops; nothing touches IndexedDB until fn returns, then every
  * recorded op executes in issue order inside ONE transaction over all stores
@@ -184,10 +205,16 @@ export interface VaultCache {
 
   /** Durable outbound queue (S4 consumes; stores exist from v1). Re-enqueueing
    *  an existing mutationId returns the row to the pushable state at the queue
-   *  TAIL (SqliteVaultCache INSERT OR REPLACE parity). */
-  enqueue(mutation: Mutation): Promise<void>;
+   *  TAIL (SqliteVaultCache INSERT OR REPLACE parity). `preEdit` (M2, additive)
+   *  optionally rides the row LOCALLY — see QueuedPreEdit; a re-enqueue without
+   *  one clears any prior snapshot (fresh row, replay parity). */
+  enqueue(mutation: Mutation, preEdit?: QueuedPreEdit): Promise<void>;
   /** FIFO, EXCLUDING staged-denied rows — never re-push a denied mutation. */
   pending(): Promise<Mutation[]>;
+  /** M2 (additive): every queue row's durable pre-edit snapshot (pending AND
+   *  staged-denied — either may be classified a genuine denial after a restart),
+   *  keyed by the row's mutation. Rows without one are omitted. */
+  queuedPreEdits(): Promise<{ mutationId: string; itemId: string; vaultId: string; preEdit: QueuedPreEdit }[]>;
   /** Remove a queue row (any state — pending or staged-denied). */
   dequeue(mutationId: string): Promise<void>;
   /** Drop queued mutations targeting vaultId, staged or not (spec 03 §4). */
@@ -242,6 +269,9 @@ interface QueueRow {
   vaultId: string;
   staged: 0 | 1;
   mutation: Mutation;
+  /** M2 (additive, LOCAL-ONLY — never pushed): the durable pre-edit snapshot.
+   *  Absent on rows written before the field existed (schemaless — no migration). */
+  preEdit?: QueuedPreEdit;
 }
 
 type HeldRow = HeldVaultRecord & { vaultId: string };
@@ -390,14 +420,18 @@ async function dropVaultIn(tx: IDBTransaction, vaultId: string): Promise<void> {
   tx.objectStore(STORE_VAULTS).delete(vaultId);
 }
 
-async function enqueueIn(tx: IDBTransaction, mutation: Mutation): Promise<void> {
+async function enqueueIn(tx: IDBTransaction, mutation: Mutation, preEdit?: QueuedPreEdit): Promise<void> {
   // INSERT OR REPLACE parity: a re-enqueue (reinstate replay) deletes the old
   // row and adds a fresh one — staged resets to 0 (pushable) and the row moves
-  // to the queue tail with a new monotonic seq, exactly like SQLite.
+  // to the queue tail with a new monotonic seq, exactly like SQLite. A fresh
+  // row also carries only the CALLER's preEdit (a replay enqueue passes none —
+  // parked mutations shed their snapshot when they were parked).
   const store = tx.objectStore(STORE_QUEUE);
   const existing = await req(store.index("mutationId").getKey(mutation.mutationId));
   if (existing !== undefined) store.delete(existing);
-  store.add({ mutationId: mutation.mutationId, vaultId: mutation.vaultId, staged: 0, mutation } satisfies QueueRow);
+  const row: QueueRow = { mutationId: mutation.mutationId, vaultId: mutation.vaultId, staged: 0, mutation };
+  if (preEdit !== undefined) row.preEdit = preEdit;
+  store.add(row);
 }
 
 async function dequeueIn(tx: IDBTransaction, mutationId: string): Promise<void> {
@@ -678,14 +712,23 @@ export class IdbVaultCache implements VaultCache {
 
   // -- outbound queue --
 
-  enqueue(mutation: Mutation): Promise<void> {
-    return this.write([STORE_QUEUE], (tx) => enqueueIn(tx, mutation));
+  enqueue(mutation: Mutation, preEdit?: QueuedPreEdit): Promise<void> {
+    return this.write([STORE_QUEUE], (tx) => enqueueIn(tx, mutation, preEdit));
   }
 
   pending(): Promise<Mutation[]> {
     return this.read([STORE_QUEUE], [], async (tx) => {
       const rows = (await req(tx.objectStore(STORE_QUEUE).getAll())) as QueueRow[]; // primary-key (seq) order = FIFO
       return rows.filter((r) => r.staged === 0).map((r) => r.mutation);
+    });
+  }
+
+  queuedPreEdits(): Promise<{ mutationId: string; itemId: string; vaultId: string; preEdit: QueuedPreEdit }[]> {
+    return this.read([STORE_QUEUE], [], async (tx) => {
+      const rows = (await req(tx.objectStore(STORE_QUEUE).getAll())) as QueueRow[];
+      return rows
+        .filter((r) => r.preEdit != null) // pre-M2 rows read back undefined — omitted, no migration
+        .map((r) => ({ mutationId: r.mutationId, itemId: r.mutation.itemId, vaultId: r.vaultId, preEdit: r.preEdit! }));
     });
   }
 
@@ -892,8 +935,11 @@ export class NullCache implements VaultCache {
     return 0;
   }
 
-  async enqueue(_mutation: Mutation): Promise<void> {}
+  async enqueue(_mutation: Mutation, _preEdit?: QueuedPreEdit): Promise<void> {}
   async pending(): Promise<Mutation[]> {
+    return [];
+  }
+  async queuedPreEdits(): Promise<{ mutationId: string; itemId: string; vaultId: string; preEdit: QueuedPreEdit }[]> {
     return [];
   }
   async dequeue(_mutationId: string): Promise<void> {}
