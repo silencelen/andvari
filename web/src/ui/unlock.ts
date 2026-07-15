@@ -6,7 +6,7 @@ import { NullCache, openVaultCache, type VaultCache } from "../vault/idbcache";
 import { SyncIntegrityError, VaultStore } from "../vault/store";
 import { NetworkError, UNREACHABLE, net } from "./errors";
 import { needsRecoveryCapture } from "./recovery-capture";
-import { webCacheEnabled, type Session } from "./session";
+import { ensureCachePersistenceRequested, webCacheEnabled, type Session } from "./session";
 import type { LoginMeta } from "./Welcome";
 
 /**
@@ -89,6 +89,11 @@ export async function unlockExistingSession(
     // Cache creation is the §F.1/§E.3.3 gated factory (durable on a private origin, NullCache on the
     // public break-glass origin / opted-out / unsupported — idbSupported() is folded into the gate).
     let cache = await openCache(userId);
+    // §B.5 (S5): a DURABLE cache standing up requests eviction protection once per device —
+    // until persist() has been REQUESTED, navigator.storage.persisted() stays false and S4's
+    // offline-write QUEUED path stays dark (store.offlineQueueAllowed). Fire-and-forget +
+    // marker-deduped; a NullCache never asks (nothing durable to protect).
+    if (cache.durable) ensureCachePersistenceRequested();
     let keys: AccountKeys;
     let offline: boolean;
     if (onlineKeys) {

@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type ApiClient } from "../api/client";
 import type { AccountKeys, Mutation, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
 import { toB64 } from "../crypto/bytes";
@@ -415,5 +415,56 @@ describe("§B.4(iii) runtime cache-failure resilience (S3-4b — never brick the
     });
     const r = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password, async () => brokenRead);
     expect(r.kind).toBe("ready"); // skip-hydrate + proceed in-memory, never bricked
+  });
+});
+
+describe("§B.5 (S5) — persist() requested at cache-enable", () => {
+  /** Map-backed localStorage: the once-marker needs a store; the suite's other describes run
+   *  without one (webCacheEnabled falls through), so it is stubbed ONLY here. */
+  function fakeStorage(): Storage {
+    const m = new Map<string, string>();
+    return {
+      get length() {
+        return m.size;
+      },
+      clear: () => m.clear(),
+      getItem: (k: string) => m.get(k) ?? null,
+      key: (i: number) => [...m.keys()][i] ?? null,
+      removeItem: (k: string) => void m.delete(k),
+      setItem: (k: string, v: string) => void m.set(k, v),
+    } as Storage;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a DURABLE unlock (private origin, default gate) requests navigator.storage.persist() exactly once", async () => {
+    setOrigin(PRIVATE_ORIGIN);
+    const persist = vi.fn(async () => true);
+    vi.stubGlobal("navigator", { storage: { persist, persisted: async () => true } });
+    vi.stubGlobal("localStorage", fakeStorage());
+
+    const client = fakeClient({ accountKeys: async () => confirmed() });
+    const r1 = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password);
+    expect(r1.kind).toBe("ready");
+    expect(persist).toHaveBeenCalledTimes(1); // the S4 queue path lights up from here (offlineQueueAllowed)
+
+    // A second unlock on the same device never re-nags (the request marker dedupes).
+    const r2 = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password);
+    expect(r2.kind).toBe("ready");
+    expect(persist).toHaveBeenCalledTimes(1);
+  });
+
+  it("a NullCache unlock (public break-glass origin) never requests persist()", async () => {
+    setOrigin(PUBLIC_ORIGIN);
+    const persist = vi.fn(async () => true);
+    vi.stubGlobal("navigator", { storage: { persist, persisted: async () => true } });
+    vi.stubGlobal("localStorage", fakeStorage());
+
+    const client = fakeClient({ accountKeys: async () => confirmed() });
+    const r = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password);
+    expect(r.kind).toBe("ready");
+    expect(persist).not.toHaveBeenCalled(); // nothing durable to protect — and no doorhanger on borrowed machines
   });
 });

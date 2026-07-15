@@ -474,6 +474,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           <Settings
             client={client}
             account={account}
+            store={store}
             policy={policy}
             onPasswordChanged={() => setMustChange(false)}
             /* IA P3: backing up from Settings flips to the vault view first so the ExportPanel

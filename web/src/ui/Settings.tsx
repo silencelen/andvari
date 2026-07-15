@@ -5,15 +5,23 @@ import type { ClientPolicy, TotpSetupResponse, TotpStatus } from "../api/types";
 import { backupNudge, readLastExportAt } from "../export/plan";
 import { qrModules } from "../vendor/qrcode-generator";
 import { Account } from "../vault/account";
+import type { VaultStore } from "../vault/store";
 import { Busy } from "./Busy";
 import { DevicesCard } from "./Devices";
 import { UNREACHABLE } from "./errors";
 import { Field } from "./Field";
-import { fmtDate } from "./format";
+import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
+import { isPrivateOrigin } from "./origin";
 import { QrSvg } from "./QrSvg";
 import { MasterPasswordHint } from "./Welcome";
-import { refreshCachedAccountKeys } from "./session";
+import {
+  orgOfflineCacheDisallowed,
+  refreshCachedAccountKeys,
+  setOfflineCopyEnabled,
+  webCacheEnabled,
+  wipeVaultCache,
+} from "./session";
 import { meetsMasterPasswordFloor } from "./strength";
 import { useThemePref, type ThemePref } from "./useTheme";
 import { ViewHeader } from "./ViewHeader";
@@ -21,6 +29,10 @@ import { ViewHeader } from "./ViewHeader";
 interface Props {
   client: ApiClient;
   account: Account;
+  /** design 2026-07-13-web-offline-cache §E.3.4: the Offline-copy card reads the live cache state
+   *  (cacheDurable/cacheDemoted/lastSyncAt/queuedMutationCount) from the store — the store owns the
+   *  live truth while a vault is open (session.pendingSyncCount is the signed-out choke-point twin). */
+  store: VaultStore;
   policy: ClientPolicy | null;
   onPasswordChanged: () => void;
   // IA P3: backups are actionable from here now (the card used to only point at the toolbar).
@@ -30,7 +42,7 @@ interface Props {
   onCsv?: () => void;
 }
 
-export function Settings({ client, account, policy, onPasswordChanged, onBackup, onCsv }: Props) {
+export function Settings({ client, account, store, policy, onPasswordChanged, onBackup, onCsv }: Props) {
   // IA P2: the install hub (a whole feature) was Settings' last card and dominated it — its own
   // sub-page now, reached from a link, symmetric with how the natives reach Autofill status.
   const [sub, setSub] = useState<"main" | "devices">("main");
@@ -47,6 +59,7 @@ export function Settings({ client, account, policy, onPasswordChanged, onBackup,
       <ViewHeader title="Settings" />
       <IdentityCard account={account} />
       <BackupCard account={account} onBackup={onBackup} onCsv={onCsv} />
+      <OfflineCopyCard store={store} userId={account.userId} />
       <TotpCard client={client} />
       <PasswordCard client={client} account={account} policy={policy} onPasswordChanged={onPasswordChanged} />
       <AppearanceCard />
@@ -81,6 +94,270 @@ function BackupCard({ account, onBackup, onCsv }: { account: Account; onBackup?:
         </div>
       )}
     </div>
+  );
+}
+
+// ---- offline copy (design 2026-07-13-web-offline-cache §E.3/§B.5 — device-local, never server) ----
+
+/** Everything the Offline-copy card renders, assembled once per (re-)load. Pure data so the
+ *  card body is a static function of it (the repo's node-env test posture — see offline-copy-card.test.ts). */
+export interface OfflineCopyModel {
+  /** isPrivateOrigin(location.origin) — the card is HIDDEN on the public break-glass origin unless opted in. */
+  privateOrigin: boolean;
+  /** webCacheEnabled() — the §F.1 gate: on/off for THIS device + origin. */
+  enabled: boolean;
+  /** §E.4: org policy pins the cache off (last-known bit) — explains the missing toggle. */
+  orgDisallowed: boolean;
+  /** store.cacheDurable — a durable cache is attached to the LIVE session. */
+  durable: boolean;
+  /** store.cacheDemoted — the §D.1 stuck-cache breaker fired (storage error) this session. */
+  demoted: boolean;
+  /** store.lastSyncAt — the freshness stamp (§E.3.4). */
+  lastSyncAt: number | null;
+  /** navigator.storage.persisted() — eviction protection (§B.5); null = unknown/unsupported. */
+  persisted: boolean | null;
+  /** navigator.storage.estimate().usage — DISPLAY ONLY (§B.5: never enforced), origin-wide; null = unsupported. */
+  usageBytes: number | null;
+  /** store.queuedMutationCount() — unsynced offline edits a wipe would destroy (breaker #9). */
+  queued: number;
+}
+
+/** Assemble the card's model from the frozen store surface + navigator.storage (both display-only
+ *  best-effort: any probe failure degrades to "unknown", never a broken card). Exported for tests. */
+export async function offlineCopyModel(
+  store: Pick<VaultStore, "cacheDurable" | "cacheDemoted" | "lastSyncAt" | "queuedMutationCount">,
+): Promise<OfflineCopyModel> {
+  const origin = typeof window !== "undefined" && window.location ? window.location.origin : "";
+  let persisted: boolean | null = null;
+  let usageBytes: number | null = null;
+  try {
+    const s = typeof navigator !== "undefined" ? navigator.storage : undefined;
+    if (typeof s?.persisted === "function") persisted = (await s.persisted()) === true;
+    if (typeof s?.estimate === "function") {
+      const e = await s.estimate();
+      usageBytes = typeof e?.usage === "number" ? e.usage : null;
+    }
+  } catch {
+    /* display-only — unknown is an honest answer */
+  }
+  let queued = 0;
+  try {
+    queued = await store.queuedMutationCount();
+  } catch {
+    /* a count failure must never break the card (session.pendingSyncCount posture) */
+  }
+  return {
+    privateOrigin: isPrivateOrigin(origin),
+    enabled: webCacheEnabled(),
+    orgDisallowed: orgOfflineCacheDisallowed(),
+    durable: store.cacheDurable,
+    demoted: store.cacheDemoted,
+    lastSyncAt: store.lastSyncAt,
+    persisted,
+    usageBytes,
+    queued,
+  };
+}
+
+/**
+ * The card body — a pure function of the model (exported for the static-render tests). States:
+ *  - public origin + not opted in ⇒ renders NOTHING (§E.3.3: the break-glass origin never
+ *    advertises the feature; controls appear only once a copy was opted into);
+ *  - org-disallowed ⇒ the policy explanation, no toggle (the wipe already ran, §E.4);
+ *  - demoted ⇒ the §D.1 "offline copy unavailable — storage error" row;
+ *  - enabled+durable ⇒ last-synced / eviction-protection / size / queued rows + wipe-now;
+ *  - enabled but not (yet) durable ⇒ "ready after your next unlock" (toggle just flipped ON,
+ *    or this session's unlock degraded cache-less).
+ */
+export function OfflineCopyBody({
+  model,
+  busy,
+  notice,
+  onToggle,
+  onWipe,
+}: {
+  model: OfflineCopyModel;
+  busy: boolean;
+  notice: string;
+  onToggle: (enabled: boolean) => void;
+  onWipe: () => void;
+}) {
+  if (!model.privateOrigin && !model.enabled) return null; // hidden on the public break-glass origin unless opted in
+  return (
+    <div className="sheet">
+      <h2>Offline copy</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        An encrypted copy of your vault kept in this browser, so you can open it even when the
+        server can't be reached. Everything in it stays sealed — only your master password can
+        open it, and your password itself is never stored.
+      </p>
+      {notice && <Msg kind="info">{notice}</Msg>}
+      {/* BL-1 idiom: toggle/wipe results are async info — announce off a persistent region. */}
+      <Announcer text={notice} />
+      {model.orgDisallowed ? (
+        <p className="muted">
+          Offline copies are turned off by your household's policy — this device keeps none.
+        </p>
+      ) : (
+        <>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={model.enabled}
+              disabled={busy}
+              onChange={(e) => onToggle(e.target.checked)}
+            />
+            <span>Keep an offline copy on this device</span>
+          </label>
+          {model.demoted && (
+            <Msg kind="err">
+              Offline copy unavailable — storage error. This browser couldn't keep the copy up to
+              date, so it was removed for this session; it will be re-created at your next unlock.
+            </Msg>
+          )}
+          {model.enabled && !model.demoted && !model.durable && (
+            <p className="muted">
+              Your offline copy will be ready after your next unlock or sign-in on this device.
+            </p>
+          )}
+          {model.enabled && model.durable && (
+            <>
+              <div className="field">
+                <label>Last synced</label>
+                <div>{model.lastSyncAt !== null ? fmtDate(model.lastSyncAt) : "not yet"}</div>
+              </div>
+              <div className="field">
+                <label>Protected from eviction</label>
+                <div>
+                  {model.persisted === null
+                    ? "unknown (this browser doesn't say)"
+                    : model.persisted
+                      ? "yes"
+                      : "best-effort — the browser may clear it under storage pressure"}
+                </div>
+              </div>
+              {model.usageBytes !== null && (
+                <div className="field">
+                  <label>Storage used (all of andvari in this browser, approximate)</label>
+                  <div>{humanSize(model.usageBytes)}</div>
+                </div>
+              )}
+              {model.queued > 0 && (
+                <div className="field">
+                  <label>Waiting to sync</label>
+                  <div>{model.queued === 1 ? "1 change waiting to sync" : `${model.queued} changes waiting to sync`}</div>
+                </div>
+              )}
+              <div className="actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  style={{ color: "var(--danger)" }}
+                  disabled={busy}
+                  onClick={onWipe}
+                >
+                  {busy ? <Busy>Working…</Busy> : "Remove the offline copy now"}
+                </button>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * breaker #9 posture: destroying the cache destroys the QUEUE — a user erasing their own unsynced
+ * edits gets a blocking confirm (same styling contract as App.signOut). The count is RE-READ at
+ * click time from the live store — it reads the SHARED per-account DB, so edits another tab queued
+ * after this card mounted are counted too. Gating on the mount-time model would stale-zero those
+ * and skip the confirm, silently destroying that tab's unsynced edits (S5 review F2 — App.signOut
+ * already re-reads pendingSyncCount at click time; this is its in-vault twin). A failing re-read
+ * falls back to the mount-time count: a stale confirm beats a skipped one, and a count failure
+ * must never wedge the control. Exported for tests; `ask` defaults to window.confirm, and
+ * confirm-less environments proceed (the historical non-browser fall-through).
+ */
+export async function confirmQueueLoss(
+  store: Pick<VaultStore, "queuedMutationCount">,
+  mountCount: number,
+  ask?: (message: string) => boolean,
+): Promise<boolean> {
+  let queued = mountCount;
+  try {
+    queued = await store.queuedMutationCount();
+  } catch {
+    /* count unreadable — the mount-time count still gates */
+  }
+  if (queued === 0) return true;
+  const confirm =
+    ask ?? (typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm.bind(window) : null);
+  if (!confirm) return true;
+  return confirm(
+    `${queued} unsynced ${queued === 1 ? "change" : "changes"} on this device will be permanently lost. Continue?`,
+  );
+}
+
+function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string }) {
+  const [model, setModel] = useState<OfflineCopyModel | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+
+  // (Re-)assemble the model; guarded so a slow probe never lands state on an unmounted card.
+  useEffect(() => {
+    let alive = true;
+    void offlineCopyModel(store).then((m) => {
+      if (alive) setModel(m);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [store]);
+
+  if (!model) return null; // first probe still in flight — the card appears fully formed
+
+  const refresh = async () => setModel(await offlineCopyModel(store));
+
+  const toggle = async (enabled: boolean) => {
+    if (!enabled && !(await confirmQueueLoss(store, model.queued))) return;
+    setBusy(true);
+    setNotice("");
+    try {
+      await setOfflineCopyEnabled(userId, enabled);
+      setNotice(
+        enabled
+          ? "Offline copy turned on — it will be created at your next unlock or sign-in."
+          : "Offline copy removed from this device.",
+      );
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const wipe = async () => {
+    if (!(await confirmQueueLoss(store, model.queued))) return;
+    setBusy(true);
+    setNotice("");
+    try {
+      await wipeVaultCache(userId);
+      setNotice(
+        "Offline copy removed. It will be re-created at your next unlock — turn the toggle off to keep this device clean.",
+      );
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <OfflineCopyBody
+      model={model}
+      busy={busy}
+      notice={notice}
+      onToggle={(e) => void toggle(e)}
+      onWipe={() => void wipe()}
+    />
   );
 }
 
@@ -264,7 +541,7 @@ function TotpCard({ client }: { client: ApiClient }) {
 
 // ---- master password change (spec 01 §6 — UVK never rotates) ----
 
-function PasswordCard({ client, account, policy, onPasswordChanged }: Props) {
+function PasswordCard({ client, account, policy, onPasswordChanged }: Pick<Props, "client" | "account" | "policy" | "onPasswordChanged">) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
