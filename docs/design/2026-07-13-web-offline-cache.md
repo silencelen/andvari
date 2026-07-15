@@ -1,6 +1,10 @@
 # andvari — Web durable offline cache (encrypted IndexedDB)
 
-**Status: BUILT S1-S5 (2026-07-14) — S6 (live e2e + docs polish) pending; NOT YET DEPLOYED.**
+**Status: BUILT + VERIFIED S1–S6 (2026-07-15) — unit suite (592 web tests + tsc) and live e2e green
+(PHASE C: A2 ciphertext-only tripwire, offline unlock round-trip, torn-cache resync-to-byte-identical,
+persist-gated queued-save flush). Web-only — no wire/schema/version change. Committed on `main`;
+NOT YET DEPLOYED (awaiting explicit owner deploy OK for CT122 — this is a real at-rest change for
+tailnet browsers, gated OFF on the public break-glass origin).**
 Roadmap item B (design review 2026-07-12 §B.5/§D.2: the owner model says *every* client holds a
 usable local copy it can decrypt; today that is native-only by deliberate spec choice, `spec/02 §8`
 closing note). This doc closes the gap for **web**. The breaker found **no BLOCKER**; two
@@ -508,6 +512,14 @@ lanes (S1 is dependency-free; S2/S3 touch disjoint files after S1's interface fr
 **Ship gate (breaker verdict):** S1–S3 are clear on findings 5–8 as folded; **S4 must not ship
 without findings 1 (persist()-gate) and 3 (denial unification) — both are load-bearing in
 §B.5/§D.3 above.**
+
+**Build status (2026-07-15):** all six slices built, reviewed (two find→refute reviewers +
+re-review per slice — each caught a real security/data-loss defect the green suite masked), and
+committed on `main` (S1 `41c68c0` → S6). S4's two load-bearing findings (persist()-gate + denial
+unification) are implemented. Verified by the unit suite + `scripts/e2e.sh` PHASE C (live server +
+real crypto + fake-indexeddb; the A2 scan is non-vacuous — sentinel present in the decrypted item,
+absent from every stored value/key raw + base64url-decoded). Web-only; no `ANDVARI_CLIENT_VERSION`
+bump. Ships as a unit on the next CT122 web deploy (owner-gated).
 
 ## I. Breaker verdicts and dispositions (2026-07-13)
 
