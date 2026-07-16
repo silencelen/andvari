@@ -1,13 +1,12 @@
 import type { AttachmentRef } from "../api/types";
 import type { VaultInfo, VaultItem } from "../vault/store";
-import { isPrivateOrigin } from "../ui/origin";
 import { MAX_TOTAL_ATTACHMENT_PLAINTEXT } from "./export";
 
 /**
  * Pure UI-adjacent export logic (spec 07): filename minting, item ordering, the
- * moment-of-truth preflight summary, the §2.5 attachment plan, break-glass origin
- * detection, and the lastExportAt bookkeeping. Kept DOM-free so it unit-tests in the
- * node vitest environment (no jsdom setup exists for panels).
+ * moment-of-truth preflight summary, the §2.5 attachment plan, and the lastExportAt
+ * bookkeeping. Kept DOM-free so it unit-tests in the node vitest environment (no jsdom
+ * setup exists for panels).
  */
 
 // ---- filenames (spec 07 §1/§2.6) ----
@@ -20,18 +19,9 @@ export function exportFilename(kind: "backup" | "csv", date: Date = new Date()):
   return kind === "backup" ? `andvari-backup-${y}-${m}-${d}.andvari` : `andvari-export-${y}-${m}-${d}.csv`;
 }
 
-// ---- break-glass origin suppression (spec 07 intro — SHOULD, T6/T11 posture) ----
-
-/**
- * Where both export entry points are shown: private origins only — the break-glass
- * page already holds the decrypted vault; hiding the buttons just avoids advertising
- * bulk-extraction on the least-trusted surface. Delegates to the shared predicate in
- * ui/origin.ts (also used by the Settings devices hub); kept under its export-flavored
- * name so call sites and tests keep reading in export vocabulary.
- */
-export function isExportOriginAllowed(origin: string): boolean {
-  return isPrivateOrigin(origin);
-}
+// The break-glass export suppression (isExportOriginAllowed) is DELETED with ui/origin.ts
+// (design 2026-07-15 §5.4.2): it was SHOULD-level advertising — the page already holds the
+// decrypted vault — and origin is no longer a posture signal. Export renders whenever unlocked.
 
 // ---- ordering + preflight ----
 

@@ -184,29 +184,39 @@ describe("pre-lock warning (Cut M v2 #16)", () => {
 });
 
 /**
- * spec 01 §8 policy fallback (native SessionStore parity): a transient policy-fetch
- * failure right after login must NOT silently disable the lock — the last
- * successfully fetched value takes over; a genuinely fetched 0 stays authoritative.
+ * spec 01 §8 policy fallback (native SessionStore parity) + the §2.3 clamp (design 2026-07-15,
+ * B1-1): a transient policy-fetch failure right after login must NOT silently disable the lock,
+ * and neither may the SERVER — every resolved window clamps into (0, AUTO_LOCK_MAX_SECONDS=900].
+ * The old "a fetched 0 is authoritative (disabled)" rule is deliberately REVOKED: 0/absent means
+ * "never lock", the lax direction, and clamps to the ceiling instead. (The deeper hostile-server
+ * cases live in policy-monotonicity.test.ts.)
  */
 describe("resolveAutoLockSeconds", () => {
-  it("uses AND persists a successfully fetched value — including 0 (disabled)", () => {
+  it("uses AND persists a successfully fetched in-range value", () => {
     expect(resolveAutoLockSeconds(60, null)).toEqual({ seconds: 60, persist: 60 });
     expect(resolveAutoLockSeconds(60, 300)).toEqual({ seconds: 60, persist: 60 }); // fetch beats fallback
-    // A genuine policy of 0 disables the lock and OVERWRITES a stale non-zero
-    // fallback — the fallback must never resurrect the old 60.
-    expect(resolveAutoLockSeconds(0, 60)).toEqual({ seconds: 0, persist: 0 });
+    expect(resolveAutoLockSeconds(900, null)).toEqual({ seconds: 900, persist: 900 }); // the ceiling itself passes
+  });
+
+  it("a fetched 0 / oversized value clamps — a server can never disable the lock (B1-1)", () => {
+    expect(resolveAutoLockSeconds(0, 60)).toEqual({ seconds: 900, persist: 900 }); // "never lock" ⇒ ceiling
+    expect(resolveAutoLockSeconds(86_400, null)).toEqual({ seconds: 900, persist: 900 }); // oversized ⇒ ceiling
   });
 
   it("falls back to the persisted value on a failed fetch, leaving storage untouched", () => {
     expect(resolveAutoLockSeconds(null, 60)).toEqual({ seconds: 60, persist: null });
-    expect(resolveAutoLockSeconds(null, 0)).toEqual({ seconds: 0, persist: null });
-    expect(resolveAutoLockSeconds(null, null)).toEqual({ seconds: 0, persist: null }); // nothing known → disabled
+    // Stale pre-clamp persisted values (0 = old "disabled", oversized) clamp on READ too.
+    expect(resolveAutoLockSeconds(null, 0)).toEqual({ seconds: 900, persist: null });
+    expect(resolveAutoLockSeconds(null, 86_400)).toEqual({ seconds: 900, persist: null });
+    // Nothing known → the ceiling, never disabled (a 404ing policy route must not win what a
+    // declared 0 can't).
+    expect(resolveAutoLockSeconds(null, null)).toEqual({ seconds: 900, persist: null });
   });
 
-  it("never arms a broken timer on garbage", () => {
-    expect(resolveAutoLockSeconds(Number.NaN, 60)).toEqual({ seconds: 60, persist: null });
-    expect(resolveAutoLockSeconds(-5, 60)).toEqual({ seconds: 0, persist: 0 }); // negative fetch = disabled
-    expect(resolveAutoLockSeconds(null, Number.NaN)).toEqual({ seconds: 0, persist: null });
+  it("never arms a broken timer on garbage — garbage clamps to the ceiling, not to disabled", () => {
+    expect(resolveAutoLockSeconds(Number.NaN, 60)).toEqual({ seconds: 60, persist: null }); // malformed fetch → fallback path
+    expect(resolveAutoLockSeconds(-5, 60)).toEqual({ seconds: 900, persist: 900 }); // negative fetch = "never lock" lie ⇒ ceiling
+    expect(resolveAutoLockSeconds(null, Number.NaN)).toEqual({ seconds: 900, persist: null });
   });
 });
 
@@ -221,8 +231,8 @@ describe("persisted auto-lock fallback storage", () => {
       expect(readPersistedAutoLockSeconds("u1")).toBeNull();
       writePersistedAutoLockSeconds("u1", 300);
       expect(readPersistedAutoLockSeconds("u1")).toBe(300);
-      writePersistedAutoLockSeconds("u1", 0); // fetched 0 overwrites the stale 300
-      expect(readPersistedAutoLockSeconds("u1")).toBe(0);
+      writePersistedAutoLockSeconds("u1", 0); // storage layer stays dumb — 0 round-trips…
+      expect(readPersistedAutoLockSeconds("u1")).toBe(0); // …and resolveAutoLockSeconds clamps it on use (B1-1)
       expect(readPersistedAutoLockSeconds("u2")).toBeNull(); // per-user keying
       backing.set("andvari.autoLockSeconds.u3", "garbage");
       expect(readPersistedAutoLockSeconds("u3")).toBeNull();

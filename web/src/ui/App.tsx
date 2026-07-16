@@ -23,11 +23,15 @@ import {
 import {
   applyOrgOfflineCachePolicy,
   clearSession,
+  declineCacheNudge,
   defaultBaseUrl,
   loadSession,
   makeClient,
+  migrateCacheConsentOnce,
   pendingSyncCount,
   SESSION_STORAGE_KEY,
+  setOfflineCopyEnabled,
+  shouldOfferCacheNudge,
   wipeVaultCache,
   type Session,
 } from "./session";
@@ -44,6 +48,12 @@ const UPGRADE_NOTICE = "This tab is running an older version — reload to updat
 // Cut M (v2 #16): pre-lock warning copy — the listed gestures are exactly the activity
 // events useAutoLock tracks (pointer/key/touch), so doing any of them keeps the vault open.
 const LOCK_WARNING_NOTICE = "Still there? Locking soon — click, tap, or press a key to stay unlocked.";
+// B2-11 origin-move nudge copy (design 2026-07-15 §5.4.1). The offer stays up until answered
+// (no dismiss-X: an unanswered nudge simply re-fires at the next unlock; a marker is written
+// only by an actual answer, so it can never nag a device that has said yes or no).
+const CACHE_NUDGE_OFFER =
+  "Keep an encrypted offline copy of your vault on this device? You could open your vault even when the server can't be reached.";
+const CACHE_NUDGE_ACCEPTED = "Offline copy turned on — it will be created at your next unlock or sign-in.";
 
 export function App() {
   // UI-audit #26: apply the persisted theme preference before first paint, so every
@@ -95,6 +105,11 @@ export function App() {
     (async () => {
       await initSodium();
       const session = loadSession();
+      // §5.4.1 continuity (design 2026-07-15): one-time boot reconciliation of the pre-pivot
+      // default-ON cache into an explicit per-user opt-in — BEFORE the policy fetch and any
+      // unlock consult the consent-keyed gate, so an existing member's offline copy survives
+      // the flip without a beat where the gate reads "no consent".
+      await migrateCacheConsentOnce(session?.userId ?? null);
       const client = makeClient(session, baseUrl);
       // The one client lives for the whole tab (sign-in/lock reuse it), so registering
       // here covers every phase. Never auto-reload on 426 — an open editor may hold
@@ -115,8 +130,28 @@ export function App() {
     })();
   }, [baseUrl, loadPolicy]);
 
+  // B2-11 (design 2026-07-15 §5.4.1): the one-time offline-copy nudge — armed at unlock for the
+  // unlocking user when policy allows and no per-device marker exists (shouldOfferCacheNudge).
+  // "offered" renders the question; "accepted" a one-line confirmation (creation happens at the
+  // next unlock — the same contract as the settings toggle). Answering writes the marker
+  // (opt-in / device opt-out), so the nudge never re-fires once answered; phase-gating below
+  // hides it outside the vault, and the next unlock re-evaluates from the markers.
+  const [cacheNudge, setCacheNudge] = useState<{ userId: string; state: "offered" | "accepted" } | null>(null);
+  const onCacheNudgeKeep = useCallback(() => {
+    setCacheNudge((n) => {
+      if (!n || n.state !== "offered") return n;
+      void setOfflineCopyEnabled(n.userId, true); // clears any opt-out, pins the opt-in, asks persist()
+      return { ...n, state: "accepted" };
+    });
+  }, []);
+  const onCacheNudgeDecline = useCallback(() => {
+    declineCacheNudge(); // pins the device-wide opt-out — never asked again on this (origin, device)
+    setCacheNudge(null);
+  }, []);
+
   const onUnlocked = (account: Account, store: VaultStore, meta: LoginMeta) => {
     setPhase({ kind: "vault", account, store, meta });
+    setCacheNudge(shouldOfferCacheNudge(account.userId) ? { userId: account.userId, state: "offered" } : null);
     // Refresh policy at unlock so the auto-lock/clipboard windows reflect the CURRENT
     // org policy — via loadPolicy so a success also clears a stale policyError from a
     // failed boot-time fetch (otherwise Enroll later shows a false "couldn't reach").
@@ -258,8 +293,11 @@ export function App() {
   // The window comes from the CURRENT policy when one was fetched; when the fetch
   // failed (policy null — e.g. a transient 5xx right after login) the last
   // successfully fetched value persisted for this user takes over, so a fetch failure
-  // never silently disables the lock (native SessionStore parity). A fetched 0 is
-  // authoritative: it disables the lock AND overwrites any stale non-zero fallback.
+  // never silently disables the lock (native SessionStore parity). §2.3 clamp (B1-1,
+  // design 2026-07-15): every resolved window lands in (0, AUTO_LOCK_MAX_SECONDS] —
+  // a fetched/persisted 0 or oversized value clamps (resolveAutoLockSeconds), so no
+  // server can disable the lock; only the vaultUserId===null "nothing unlocked" state
+  // passes 0 (timer off).
   const vaultUserId = phase.kind === "vault" ? phase.account.userId : null;
   const fetchedAutoLock = policy ? policy.autoLockSeconds ?? 0 : null;
   useEffect(() => {
@@ -282,6 +320,10 @@ export function App() {
   // nothing — the server serves the web bundle, so the one Reload click IS the update.
   // BL-1: the current lock/sign-out/enroll reason line (welcome + unlock phases carry it).
   const phaseNotice = phase.kind === "welcome" || phase.kind === "unlock" ? phase.notice : undefined;
+  // B2-11: the nudge shows only in the vault phase, and a belt against the org forbidding
+  // caching between the unlock-time check and a fresh policy landing (§E.4 pin wins anyway).
+  const cacheNudgeVisible = phase.kind === "vault" && cacheNudge !== null && policy?.offlineCacheAllowed !== false;
+  const cacheNudgeText = cacheNudgeVisible ? (cacheNudge.state === "offered" ? CACHE_NUDGE_OFFER : CACHE_NUDGE_ACCEPTED) : "";
   const withUpgradeBar = (content: JSX.Element): JSX.Element => (
     <>
       {/* BL-1: PERSISTENT polite announcers — always mounted (present + empty at first
@@ -293,6 +335,7 @@ export function App() {
       <Announcer text={upgradeStale ? UPGRADE_NOTICE : ""} />
       <Announcer text={phaseNotice ?? ""} />
       <Announcer text={lockWarning ? LOCK_WARNING_NOTICE : ""} />
+      <Announcer text={cacheNudgeText} />
       {upgradeStale && (
         <div className="banner">
           <span>{UPGRADE_NOTICE}</span>
@@ -305,6 +348,22 @@ export function App() {
       {lockWarning && (
         <div className="banner">
           <span>{LOCK_WARNING_NOTICE}</span>
+        </div>
+      )}
+      {/* B2-11 one-time offline-copy nudge (design 2026-07-15 §5.4.1): answered with a marker
+          either way, so it fires at most once per (origin, device) — one tap re-gains offline
+          access after an origin move instead of it silently vanishing. */}
+      {cacheNudgeVisible && cacheNudge.state === "offered" && (
+        <div className="banner">
+          <span>{CACHE_NUDGE_OFFER}</span>
+          <button className="link" onClick={onCacheNudgeKeep}>Keep a copy</button>
+          <button className="link" onClick={onCacheNudgeDecline}>Not on this device</button>
+        </div>
+      )}
+      {cacheNudgeVisible && cacheNudge.state === "accepted" && (
+        <div className="banner">
+          <span>{CACHE_NUDGE_ACCEPTED}</span>
+          <button className="link" onClick={() => setCacheNudge(null)}>OK</button>
         </div>
       )}
       {content}

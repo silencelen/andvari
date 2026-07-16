@@ -20,13 +20,13 @@ import {
   type VaultStore,
 } from "../vault/store";
 import { ImportError, type ImportFormat, type ImportPlan, type ImportReport, type Parsed, type ParsedRow, parseCsvImport, planImport, rowOrdinalsByLine } from "../import/csv";
-import { isExportOriginAllowed } from "../export/plan";
 import { Admin } from "./Admin";
 import { ExportPanel, type ExportMode } from "./ExportPanel";
 import { Field } from "./Field";
 import { humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
 import { Health } from "./Health";
+import { clampClipboardClearSeconds } from "./policyclamp";
 import { Settings } from "./Settings";
 import { Sharing } from "./Sharing";
 import { EmptySigil } from "./Sigil";
@@ -159,15 +159,9 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     [],
   );
 
-  // spec 07 (SHOULD): sessions arriving via the break-glass PUBLIC origin hide both
-  // export entry points (T6/T11 posture — don't advertise bulk extraction on the
-  // least-trusted surface). The client is served same-origin by the server, so the
-  // page origin IS the server origin; see isExportOriginAllowed for the honest-cheap
-  // tailnet/LAN/localhost check.
-  const exportAllowed = useMemo(
-    () => typeof window !== "undefined" && isExportOriginAllowed(window.location.origin),
-    [],
-  );
+  // The break-glass export suppression is GONE (design 2026-07-15 §5.4.2 — origin.ts deleted):
+  // export renders whenever the vault is unlocked. It was SHOULD-level advertising only — this
+  // page already holds the decrypted vault — and origin is no longer a posture signal.
 
   // F76: any open layer makes Back close it instead of leaving the vault. Topmost-first order
   // mirrors how the layers stack (editor/import/export over a view; detail over the list).
@@ -479,12 +473,12 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             onPasswordChanged={() => setMustChange(false)}
             /* IA P3: backing up from Settings flips to the vault view first so the ExportPanel
                layer renders (the view axis wins over exportMode in this switch), mirroring
-               Sharing's "Back up first". Undefined on the public origin → the buttons hide. */
-            onBackup={exportAllowed ? () => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setSharingSettingsVaultId(null); setExportMode("backup"); } : undefined}
-            onCsv={exportAllowed ? () => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setSharingSettingsVaultId(null); setExportMode("csv"); } : undefined}
+               Sharing's "Back up first". Always offered while unlocked (§5.4.2). */
+            onBackup={() => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setSharingSettingsVaultId(null); setExportMode("backup"); }}
+            onCsv={() => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setSharingSettingsVaultId(null); setExportMode("csv"); }}
           />
         ) : view === "admin" && isAdmin ? (
-          <Admin client={client} />
+          <Admin client={client} policy={policy} />
         ) : exportMode ? (
           <ExportPanel
             mode={exportMode}
@@ -532,14 +526,12 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                   Everything downstream (row/detail/editor for EXISTING cards) renders regardless. */}
               {CARD_CREATE_ENABLED && <button className="ghost" onClick={() => startNew("card")}>+ Card</button>}
               <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setExportMode(null); setImportOpen(true); }}>Import</button>
-              {/* Hidden on the public break-glass origin (spec 07 — see exportAllowed). The two
-                  export destinations live under one menu so the toolbar can't crush the search box. */}
-              {exportAllowed && (
-                <ExportMenu
-                  onBackup={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("backup"); }}
-                  onCsv={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("csv"); }}
-                />
-              )}
+              {/* The two export destinations live under one menu so the toolbar can't crush the
+                  search box. Rendered whenever unlocked (§5.4.2 — the origin gate is gone). */}
+              <ExportMenu
+                onBackup={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("backup"); }}
+                onCsv={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("csv"); }}
+              />
               {/* IA P1: Health — an occasional tool, moved off the nav to a toolbar icon.
                   (The toolbar only shows on the vault view, so these icons only ever navigate
                   AWAY — there's no active state to reflect.) */}
@@ -920,13 +912,16 @@ function useCopy(clearSeconds: number) {
     if (flashTimer.current) window.clearTimeout(flashTimer.current);
     flashTimer.current = window.setTimeout(() => setFlash((f) => (f === label ? null : f)), 2600);
     if (wipeTimer.current) window.clearTimeout(wipeTimer.current);
-    wipeTimer.current = window.setTimeout(() => navigator.clipboard.writeText("").catch(() => {}), Math.max(1, clearSeconds) * 1000);
+    // Clamped into [1, CLIPBOARD_CLEAR_MAX_SECONDS] (design 2026-07-15 §2.3, B1-1) at the timer
+    // itself — belt to the caller-side clamp; no useCopy consumer can pin the clipboard.
+    wipeTimer.current = window.setTimeout(() => navigator.clipboard.writeText("").catch(() => {}), clampClipboardClearSeconds(clearSeconds) * 1000);
   };
   return { flash, copy };
 }
 
 function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets, onEdit, onDelete, onMoved, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; moveTargets: VaultInfo[]; onEdit: () => void; onDelete: () => Promise<void>; onMoved: () => void; onBack: () => void }) {
-  const clearSecs = Math.max(1, policy?.clipboardClearSeconds ?? 30);
+  // §2.3 clamp (B1-1): a server-declared clipboard window is honored only inside [1, 300 s].
+  const clearSecs = clampClipboardClearSeconds(policy?.clipboardClearSeconds ?? 30);
   const { flash, copy } = useCopy(clearSecs);
   const [deleting, setDeleting] = useState(false);
   const [delBusy, setDelBusy] = useState(false);

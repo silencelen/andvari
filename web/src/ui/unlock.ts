@@ -36,14 +36,14 @@ const SERVER_PROBLEM = "The server had a problem answering — your password may
 const WRONG_PASSWORD = "Wrong master password.";
 
 /**
- * The default cache factory — the §F.1/§E.3.3 dark-ship gate (session.webCacheEnabled) decides
- * durable-vs-none: on a PRIVATE origin (tailnet/LAN/localhost, IndexedDB supported, not opted-out) it
- * opens the real per-account IndexedDB cache; on the PUBLIC break-glass origin — or an opted-out /
- * unsupported device — it returns today's cache-less NullCache, so S3 deploys safe everywhere. Injected
- * via the openCache parameter in tests.
+ * The default cache factory — the §F.1 dark-ship gate (session.webCacheEnabled) decides
+ * durable-vs-none. Origin plays no part anymore (design 2026-07-15 §5.4.1): with this user's
+ * per-device opt-in (and IndexedDB support, no opt-out, org policy allowing) it opens the real
+ * per-account IndexedDB cache; without consent — any origin — it returns the cache-less NullCache.
+ * Injected via the openCache parameter in tests.
  */
 async function gatedOpenCache(userId: string): Promise<VaultCache> {
-  return webCacheEnabled() ? openVaultCache(userId) : new NullCache();
+  return webCacheEnabled(userId) ? openVaultCache(userId) : new NullCache();
 }
 
 export type UnlockResult =

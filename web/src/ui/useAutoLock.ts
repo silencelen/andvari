@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState } from "react";
+import { clampAutoLockSeconds } from "./policyclamp";
 
 /**
  * Inactivity auto-lock (spec 01 §8, policy `autoLockSeconds`): after `timeoutSeconds`
  * with NO user interaction the vault locks via the same path as the manual Lock
  * button. "Activity" is pointer/key/touch only — background sync does not extend the
- * window. 0 (or a missing policy) disables the timer entirely.
+ * window.
+ *
+ * 0 disables the timer MECHANISM (createAutoLock/useAutoLock) — App passes 0 while no
+ * vault is open. But POLICY resolution ({@link resolveAutoLockSeconds}) can no longer
+ * produce 0: design 2026-07-15 §2.3 (B1-1) clamps the server-declared value into
+ * `(0, AUTO_LOCK_MAX_SECONDS]`, so a hostile server's 0/absent/oversized window can
+ * never disable the lock — only the client's own "nothing unlocked" state can.
  *
  * Clock choice: wall clock (Date.now) — time asleep/suspended must count as idle, so a
  * laptop that wakes past the window locks on the first check. `performance.now()`
@@ -102,21 +109,27 @@ const AUTOLOCK_KEY_PREFIX = "andvari.autoLockSeconds.";
  * right after login, an offline start — never silently disables the idle lock. This
  * is the web twin's pure resolution core (unit-tested): [fetched] is the CURRENT
  * fetch's value (`null` = the fetch failed and no policy object exists), [persisted]
- * the stored per-user fallback. A successful fetch is authoritative — INCLUDING a
- * genuine 0 ("disabled"), which must overwrite a stale non-zero fallback and never be
- * resurrected by it. Returns the seconds to arm the timer with, plus what to persist
- * (`null` = leave storage untouched — a failed fetch must not clobber the fallback).
+ * the stored per-user fallback. Returns the seconds to arm the timer with, plus what
+ * to persist (`null` = leave storage untouched — a failed fetch must not clobber the
+ * fallback).
+ *
+ * design 2026-07-15 §2.3 (B1-1, supersedes the old "a fetched 0 is authoritative"
+ * rule): every resolved value is CLAMPED into `(0, AUTO_LOCK_MAX_SECONDS]` — a
+ * server-supplied 0/absent that would mean "never lock" clamps to the ceiling, an
+ * oversized window clamps down, and the no-fetch-no-fallback cold case arms the
+ * ceiling instead of disabling (a server that 404s the policy route must not win what
+ * a declared 0 can't). Stale persisted values from the pre-clamp era (0, oversized)
+ * are clamped on READ too, so they can't resurrect a disabled lock.
  */
 export function resolveAutoLockSeconds(
   fetched: number | null,
   persisted: number | null,
 ): { seconds: number; persist: number | null } {
   if (fetched !== null && Number.isFinite(fetched)) {
-    const v = Math.max(0, fetched);
+    const v = clampAutoLockSeconds(fetched);
     return { seconds: v, persist: v };
   }
-  const fallback = persisted !== null && Number.isFinite(persisted) ? Math.max(0, persisted) : 0;
-  return { seconds: fallback, persist: null };
+  return { seconds: clampAutoLockSeconds(persisted), persist: null };
 }
 
 /** Last successfully fetched value for [userId], or null when none is stored (or

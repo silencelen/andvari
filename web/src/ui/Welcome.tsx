@@ -30,6 +30,7 @@ import {
   type Session,
 } from "./session";
 import { BrandSigil } from "./Sigil";
+import { clampClipboardClearSeconds } from "./policyclamp";
 import { STRENGTH_LABELS, estimateStrength, masterPasswordHasNonAscii, meetsMasterPasswordFloor } from "./strength";
 import { useAutoLock } from "./useAutoLock";
 
@@ -346,12 +347,13 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
       );
       const account = await Account.unlock(s.userId, password, s.accountKeys);
       // §D.2c login-response re-cache write point (design 2026-07-13-web-offline-cache): seed the
-      // durable offline cache so a later returning-session unlock can go OFFLINE. §F.1/§E.3.3 dark-ship
-      // gate: durable on a PRIVATE origin, cache-less NullCache on the PUBLIC break-glass origin (or an
-      // opted-out / unsupported device), so seeding here is deploy-safe everywhere. hydrate is a cold
-      // no-op on a fresh/just-wiped DB, and the first sync populates the row envelopes. Fresh sign-in
-      // itself stays online-only (§C.2) — no offline fallback on this path.
-      const cache = webCacheEnabled() ? await openVaultCache(s.userId) : new NullCache();
+      // durable offline cache so a later returning-session unlock can go OFFLINE. §F.1 dark-ship
+      // gate, consent-keyed (design 2026-07-15 §5.4.1): durable only with this user's per-device
+      // opt-in — cache-less NullCache otherwise, on EVERY origin — so seeding here is deploy-safe
+      // everywhere. hydrate is a cold no-op on a fresh/just-wiped DB, and the first sync populates
+      // the row envelopes. Fresh sign-in itself stays online-only (§C.2) — no offline fallback on
+      // this path.
+      const cache = webCacheEnabled(s.userId) ? await openVaultCache(s.userId) : new NullCache();
       // §B.5 (S5): first durable enable on this device asks for eviction protection (once,
       // marker-deduped) — offline WRITES stay dark until persist() has been requested.
       if (cache.durable) ensureCachePersistenceRequested();
@@ -913,8 +915,10 @@ function RecoveryReveal({
       await navigator.clipboard.writeText(phrase);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1200);
-      // SECRET clipboard-clear (Vault.useCopy parity): wipe after the policy window.
-      window.setTimeout(() => navigator.clipboard.writeText("").catch(() => {}), Math.max(1, clipboardClearSeconds) * 1000);
+      // SECRET clipboard-clear (Vault.useCopy parity): wipe after the policy window, CLAMPED into
+      // [1, CLIPBOARD_CLEAR_MAX_SECONDS] (design 2026-07-15 §2.3, B1-1) — a hostile server value
+      // can never pin a recovery phrase on the clipboard past the ceiling.
+      window.setTimeout(() => navigator.clipboard.writeText("").catch(() => {}), clampClipboardClearSeconds(clipboardClearSeconds) * 1000);
     } catch {
       /* clipboard denied — the phrase is on screen to copy by hand */
     }

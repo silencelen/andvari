@@ -1,6 +1,5 @@
 import { ApiClient, type Tokens } from "../api/client";
 import { idbSupported, openVaultCache, vaultDbName } from "../vault/idbcache";
-import { isPrivateOrigin } from "./origin";
 
 /**
  * Non-secret session metadata persisted across reloads. Tokens are here too (MVP);
@@ -79,14 +78,22 @@ export async function pendingSyncCount(userId: string): Promise<number> {
   }
 }
 
-/** design 2026-07-13-web-offline-cache §E.3.2: the per-device opt-out marker. Written by the S5
- *  settings toggle ({@link setOfflineCopyEnabled}); its mere presence forces the cache OFF. */
+/** design 2026-07-13-web-offline-cache §E.3.2: the per-device opt-out marker (device-wide — "this
+ *  browser keeps no offline copies, for anyone"). Written by the S5 settings toggle
+ *  ({@link setOfflineCopyEnabled}) and by declining the one-time nudge ({@link declineCacheNudge});
+ *  its mere presence forces the cache OFF and suppresses the nudge. */
 const CACHE_OPT_OUT_KEY = "andvari.cacheOptOut";
-/** §E.3.3: the per-device opt-IN marker for the PUBLIC break-glass origin, where the cache defaults
- *  OFF. Written by the settings toggle when flipped ON there; ignored wherever an opt-out or the org
- *  policy bit says no. (S5 ships the gate + marker; the public origin has no in-settings entry point
- *  yet — the card is hidden there until opted in — so the writer today is a future one-tap prompt.) */
-const CACHE_OPT_IN_KEY = "andvari.cacheOptIn";
+/** design 2026-07-15-multi-tenant-endpoints §5.4.1: the per-(device, user) opt-IN marker. The
+ *  durable cache now defaults OFF on EVERY origin (the origin heuristic is deleted — walk-up
+ *  browsers are the T3 case everywhere) and turns on only via this explicit consent, written by
+ *  the settings toggle, the one-time post-unlock nudge (B2-11), or the continuity boot migration
+ *  ({@link migrateCacheConsentOnce}). Per-user so one member's consent on a shared browser never
+ *  mints an at-rest artifact for another; localStorage is origin-partitioned, so the marker is
+ *  (origin, device, user)-scoped by construction. */
+const cacheOptInKey = (userId: string): string => `andvari.cacheOptIn.${userId}`;
+/** §5.4.1 continuity: the one-time boot-migration flag — the pre-pivot cache (private-origin
+ *  default-ON, no marker) has been reconciled into an explicit opt-in on this device. */
+const CACHE_CONSENT_MIGRATED_KEY = "andvari.cacheConsentMigrated";
 /** §E.4 policy row: the LAST-KNOWN `offlineCacheAllowed === false` pin, written on every successful
  *  ClientPolicy fetch ({@link applyOrgOfflineCachePolicy}) and honored on OFFLINE boot — a device that
  *  saw the org forbid caching keeps refusing to create one until a later fetch says otherwise
@@ -121,30 +128,32 @@ function lsRemove(key: string): void {
 }
 
 /**
- * design 2026-07-13-web-offline-cache §F.1/§E.3.3 — the durable-offline-cache GATING PREDICATE (the
- * "dark-ship gate"). The two openVaultCache call sites that stand up a durable cache — the
- * returning-session unlock (unlock.ts) and the SignIn seed (Welcome.tsx) — consult this and fall back
- * to a cache-less NullCache when it is false, so the public break-glass origin keeps
- * today's no-at-rest-cache behavior by default. True iff, in order:
+ * design 2026-07-13-web-offline-cache §F.1 / 2026-07-15-multi-tenant-endpoints §5.4.1 — the
+ * durable-offline-cache GATING PREDICATE (the "dark-ship gate"). The two openVaultCache call sites
+ * that stand up a durable cache — the returning-session unlock (unlock.ts) and the SignIn seed
+ * (Welcome.tsx) — consult this and fall back to a cache-less NullCache when it is false.
+ *
+ * The origin heuristic is GONE (origin.ts deleted): origin is just an address, and every origin
+ * gets the same formula —
+ *
+ *     idbUsable && !orgCacheOff && !deviceOptOut && deviceOptIn(userId)
+ *
  *   1. IndexedDB is usable at all (Firefox private windows etc. refuse — idbSupported), AND
  *   2. the ORG allows it: the last-known `offlineCacheAllowed === false` pin is absent (§E.4 policy
  *      row — written on every successful policy fetch, honored on offline boot; false ⇒ NEVER cache,
  *      beating every device-level choice), AND
- *   3. this device has NOT opted out (the "andvari.cacheOptOut" marker is absent — the S5 settings
- *      toggle writes it), AND
- *   4. the origin default is ON: a PRIVATE origin (tailnet *.ts.net / LAN RFC1918 / localhost, via
- *      isPrivateOrigin) defaults the cache ON; the PUBLIC origin (andvari.monahanhosting.com — anything
- *      else) defaults it OFF and enables only via the explicit per-device opt-IN marker. A tailnet/LAN
- *      browser is an enrolled personal device by construction; the public origin exists for
- *      borrowed/emergency machines (CF Access + TOTP), so caching there is opt-in only.
+ *   3. this device has NOT opted out (the "andvari.cacheOptOut" marker is absent), AND
+ *   4. THIS user explicitly opted in on this device (settings toggle / one-time nudge / continuity
+ *      migration). Default OFF everywhere: a walk-up browser is the T3 case on any origin, and
+ *      `offlineCacheAllowed=true` from a (possibly hostile) server is necessary but NEVER sufficient
+ *      (§2.3 trust table — a server may make the client safer, never laxer). Browser IndexedDB is
+ *      origin-partitioned, so (origin, user) isolation holds by construction.
  */
-export function webCacheEnabled(): boolean {
+export function webCacheEnabled(userId: string): boolean {
   if (!idbSupported()) return false;
   if (lsGet(ORG_CACHE_OFF_KEY) !== null) return false; // org policy: false ⇒ never cache (§E.4)
   if (lsGet(CACHE_OPT_OUT_KEY) !== null) return false; // per-device opt-out (§E.3.2)
-  const origin = typeof window !== "undefined" && window.location ? window.location.origin : "";
-  if (isPrivateOrigin(origin)) return true;
-  return lsGet(CACHE_OPT_IN_KEY) !== null; // public origin: explicit opt-in only (§E.3.3)
+  return lsGet(cacheOptInKey(userId)) !== null; // explicit per-(device, user) opt-in only (§5.4.1)
 }
 
 /** §E.4: the org policy currently pins the cache OFF on this device (last-known bit — see
@@ -187,27 +196,83 @@ export function ensureCachePersistenceRequested(): void {
 }
 
 /**
- * §E.3.2 the per-device "Keep an offline copy on this device" toggle (settings card).
+ * §E.3.2 the per-device "Keep an offline copy on this device" toggle (settings card) — also the
+ * accept path of the one-time nudge (B2-11).
  *  - OFF: pin the opt-out marker FIRST (the gate closes synchronously, so a concurrent unlock can't
- *    re-create mid-wipe), drop any public-origin opt-in, then WIPE this account's cache DB —
- *    envelopes + queue + holding + cached accountKeys (§E.4 "opt-out toggled off" row; the queue is
- *    destroyed with it, so the CALLER gates on a confirm when unsynced edits exist, breaker #9).
- *  - ON: clear the opt-out; on the PUBLIC origin additionally pin the explicit opt-in (§E.3.3 — the
- *    private-origin default is already ON); then request eviction protection (§B.5 — an explicit
- *    gesture, so this bypasses the once-marker dedup). The cache itself is (re-)created by the next
- *    unlock / sign-in seed — this session's store keeps its current cache shape.
+ *    re-create mid-wipe), drop THIS user's opt-in, then WIPE this account's cache DB — envelopes +
+ *    queue + holding + cached accountKeys (§E.4 "opt-out toggled off" row; the queue is destroyed
+ *    with it, so the CALLER gates on a confirm when unsynced edits exist, breaker #9).
+ *  - ON: clear the opt-out and pin this user's explicit opt-in UNCONDITIONALLY — every origin is
+ *    opt-in now (design 2026-07-15 §5.4.1; the old `!isPrivateOrigin` guard is gone with origin.ts);
+ *    then request eviction protection (§B.5 — an explicit gesture, so this bypasses the once-marker
+ *    dedup). The cache itself is (re-)created by the next unlock / sign-in seed — this session's
+ *    store keeps its current cache shape.
  */
 export async function setOfflineCopyEnabled(userId: string, enabled: boolean): Promise<void> {
   if (!enabled) {
     lsSet(CACHE_OPT_OUT_KEY, String(Date.now()));
-    lsRemove(CACHE_OPT_IN_KEY);
+    lsRemove(cacheOptInKey(userId));
     await wipeVaultCache(userId);
     return;
   }
   lsRemove(CACHE_OPT_OUT_KEY);
-  const origin = typeof window !== "undefined" && window.location ? window.location.origin : "";
-  if (!isPrivateOrigin(origin)) lsSet(CACHE_OPT_IN_KEY, String(Date.now()));
+  lsSet(cacheOptInKey(userId), String(Date.now()));
   await requestCachePersistence();
+}
+
+/**
+ * design 2026-07-15-multi-tenant-endpoints §5.4.1 CONTINUITY — the one-time boot migration. The
+ * pre-pivot gate defaulted the cache ON on private origins with NO marker written; the new gate
+ * requires an explicit per-user opt-in, so without this every existing private-origin member would
+ * silently lose offline access at the flip. Rule (design wording): an existing cache DB with no
+ * opt-out marker writes the opt-in marker — the member's standing cache IS the evidence of the old
+ * default's consent, so it is adopted, not destroyed.
+ *
+ * Runs at App boot, BEFORE the first policy fetch / unlock (both consult the gate). One-shot
+ * **per user** (`CACHE_CONSENT_MIGRATED_KEY.<userId>`) — NOT per device (review 2026-07-16): a
+ * device-wide flag let the first account on a shared browser burn the one shot, so a second
+ * pre-pivot account silently lost its standing cache. The flag is only written once a signed-in
+ * user is actually evaluated — a signed-out boot has no cache to reconcile (sign-out wipes it,
+ * §E.4) and must not burn the shot for the user who signs in later. The DB probe is
+ * {@link offlineCopyStamp}: non-creating end-to-end, and an empty husk (no keys, no stamp) reads
+ * as "no cache" — a contentless DB grandfathers nothing.
+ */
+export async function migrateCacheConsentOnce(userId: string | null): Promise<void> {
+  if (!userId) return; // nothing to evaluate — leave the one shot for a signed-in boot
+  const migratedKey = `${CACHE_CONSENT_MIGRATED_KEY}.${userId}`; // PER-USER — matches the per-user opt-in/nudge markers
+  if (lsGet(migratedKey) !== null) return;
+  lsSet(migratedKey, String(Date.now()));
+  lsRemove("andvari.cacheOptIn"); // the legacy device-wide opt-in key (pre-pivot, writer unreachable)
+  if (lsGet(CACHE_OPT_OUT_KEY) !== null) return; // an explicit opt-out always wins (§5.4.1)
+  if ((await offlineCopyStamp(userId)) === null) return; // no standing cache — the new default (OFF) stands
+  lsSet(cacheOptInKey(userId), String(Date.now()));
+}
+
+/**
+ * design 2026-07-15-multi-tenant-endpoints §5.4.1 / B2-11 — the ORIGIN-MOVE NUDGE predicate: the
+ * one-time "keep an encrypted offline copy on this device?" prompt fires on first unlock at ANY
+ * (origin, device) where policy allows and no per-device marker exists. localStorage (and the cache
+ * DB) are origin-partitioned, so a member following the household to a new origin lands with a
+ * fresh marker namespace — the nudge fires once there and one tap ({@link setOfflineCopyEnabled}
+ * ON) re-gains offline access instead of it silently vanishing. True iff the gate is OFF purely
+ * for LACK OF AN ANSWER: IndexedDB usable, org policy allows (no §E.4 pin), no device opt-out
+ * (a prior "no" — from the toggle or a declined nudge — is never re-asked), and no opt-in for
+ * THIS user yet. Answering writes a marker either way, so it can never fire twice for the same
+ * (origin, device, user).
+ */
+export function shouldOfferCacheNudge(userId: string): boolean {
+  if (!idbSupported()) return false;
+  if (lsGet(ORG_CACHE_OFF_KEY) !== null) return false; // policy forbids — never advertise it
+  if (lsGet(CACHE_OPT_OUT_KEY) !== null) return false; // this device already said no
+  return lsGet(cacheOptInKey(userId)) === null; // unanswered ⇒ ask once
+}
+
+/** B2-11 decline path: "not on this device" pins the device-wide opt-out — the same marker the
+ *  settings toggle's OFF writes — so the nudge never re-fires here and the gate stays closed. No
+ *  wipe: the nudge only fires where the gate was already off, so no cache DB exists to remove
+ *  (and the settings card remains the way back — toggle ON clears the marker). */
+export function declineCacheNudge(): void {
+  lsSet(CACHE_OPT_OUT_KEY, String(Date.now()));
 }
 
 /**
@@ -318,13 +383,13 @@ function openIfExists(name: string): Promise<IDBDatabase | null> {
  * NEW password while the OLD (possibly compromised) password still opens the cached vault until the
  * next online unlock — exactly the spec 05 T3 stale-wrap window (§D.2c lists "after changePassword"
  * as a re-cache write point). floorGood passes on the fresh payload, so setAccountKeys overwrites
- * unconditionally. Gated on webCacheEnabled() so it never CREATES a cache on an origin/device where
- * caching is off (§E.3.3 — the public origin must not gain an at-rest artifact from a password change).
- * Best-effort: any cache failure is swallowed — the change already committed server-side, and the next
- * online unlock re-caches.
+ * unconditionally. Gated on webCacheEnabled(userId) so it never CREATES a cache on a device where
+ * caching is off (§5.4.1 — a non-consented device must not gain an at-rest artifact from a password
+ * change). Best-effort: any cache failure is swallowed — the change already committed server-side,
+ * and the next online unlock re-caches.
  */
 export async function refreshCachedAccountKeys(client: Pick<ApiClient, "accountKeys">, userId: string): Promise<void> {
-  if (!webCacheEnabled()) return;
+  if (!webCacheEnabled(userId)) return;
   try {
     const cache = await openVaultCache(userId);
     try {
