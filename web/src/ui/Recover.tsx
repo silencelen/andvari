@@ -9,6 +9,13 @@ import { Field } from "./Field";
 import { Msg } from "./Msg";
 import { BrandSigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength, meetsMasterPasswordFloor } from "./strength";
+import { useAutoLock } from "./useAutoLock";
+
+/** CR-02 (compliance 2026-07-15): the reset step holds a UVK-equivalent recovery secret (TM-R9) in
+ *  memory outside the vault phase, where App's auto-lock never arms. A fixed conservative idle cap
+ *  (KH-22 / TM-T4) bounds a walked-away device; activity resets it. Kept in sync with Welcome's. */
+const REVEAL_TIMEOUT_S = 300; // 5 minutes idle
+const REVEAL_TIMEOUT_NOTICE = "Timed out for your security. Sign in again — a fresh recovery phrase will be shown.";
 
 /**
  * Per-member SELF-service recovery (design 2026-07-12 §F.3) — the "I forgot my master password" path
@@ -31,12 +38,15 @@ export function Recover({
   policy,
   onDone,
   onCancel,
+  onTimedOut,
 }: {
   client: ApiClient;
   policy: ClientPolicy | null;
   /** Recovery committed — bounce back to Sign in with a success notice (sessions were revoked). */
   onDone: (notice: string) => void;
   onCancel: () => void;
+  /** CR-02: idle-timeout while the recovery secret is live — zero it and bounce to Sign in with a notice. */
+  onTimedOut: (notice: string) => void;
 }) {
   const [step, setStep] = useState<"verify" | "reset">("verify");
   const [email, setEmail] = useState("");
@@ -55,6 +65,15 @@ export function Recover({
   };
   // Zero the secret if the component unmounts mid-flow (navigate away / lock).
   useEffect(() => clearSecret, []);
+
+  // CR-02: the "reset" step holds the raw recovery secret (secretRef) while the user picks a new
+  // password. Bound that window by the idle auto-lock — on expiry zero the secret and bounce to
+  // Sign in with the notice (disabled with timeout 0 during "verify", where no secret is held yet;
+  // activity resets it so an actively-typing user is never interrupted).
+  useAutoLock(step === "reset" ? REVEAL_TIMEOUT_S : 0, () => {
+    clearSecret();
+    onTimedOut(REVEAL_TIMEOUT_NOTICE);
+  });
 
   const submitVerify = async (e: React.FormEvent) => {
     e.preventDefault();

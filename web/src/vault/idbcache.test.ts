@@ -207,7 +207,8 @@ describe("idbcache: VaultCache contract (core VaultCacheContractTest twin)", () 
 
   it("queue keeps FIFO order across interleaved enqueue/dequeue", async () => {
     const c = await open();
-    await c.enqueue(mut("1"));
+    // CR-01: an open cache VERIFIES the row landed and reports true (the setAccountKeys pattern).
+    expect(await c.enqueue(mut("1"))).toBe(true);
     await c.enqueue(mut("2"));
     await c.enqueue(mut("3"));
     expect((await c.pending()).map((m) => m.mutationId)).toEqual(["1", "2", "3"]);
@@ -688,7 +689,9 @@ describe("idbcache: wipe (§E.4) and guarded close (§D.2a)", () => {
     await expect(c.upsertItem(wire("a", "v1", 1))).resolves.toBeUndefined();
     await expect(c.applyPull((b) => b.setCursor(99))).resolves.toBeUndefined();
     await expect(c.clear()).resolves.toBeUndefined();
-    await expect(c.enqueue(mut("q"))).resolves.toBeUndefined();
+    // CR-01: a closed handle black-holes the write — enqueue must report FALSE (not a silent
+    // resolve), so the store demotes and does the real send instead of reporting queued-success.
+    expect(await c.enqueue(mut("q"))).toBe(false);
     expect(await c.setAccountKeys(keys())).toBe(false);
     expect(c.consecutiveCommitFailures()).toBe(0);
     expect(await c.cursor()).toBe(0); // read fallback, not the stored 7
@@ -708,6 +711,23 @@ describe("idbcache: wipe (§E.4) and guarded close (§D.2a)", () => {
     const fresh = await open();
     expect(await fresh.cursor()).toBe(0);
     fresh.close();
+  });
+
+  it("onClosed fires when a sibling deleteDatabase closes this connection — the store's demote hook (CR-01)", async () => {
+    const c1 = await open();
+    let closedFired = 0;
+    c1.onClosed = () => {
+      closedFired++;
+    };
+    const c2 = await open();
+    await c2.wipe(); // deleteDatabase → versionchange on c1 → self-close + onClosed
+    // enqueue() into the now-closed handle reports FALSE (black-hole guard), never a silent land.
+    expect(await c1.enqueue(mut("q"))).toBe(false);
+    expect(closedFired).toBeGreaterThanOrEqual(1); // the store would have demoted off this dead handle
+    // The programmatic close() path does NOT re-fire onClosed (no reentrancy for the store).
+    const before = closedFired;
+    c1.close();
+    expect(closedFired).toBe(before);
   });
 
   it("a deleteDatabase racing the OPEN window (openDb→verifyOwner→constructor) still settles — versionchange bound at openDb, not late (review regression)", async () => {

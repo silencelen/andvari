@@ -214,8 +214,13 @@ export interface VaultCache {
    *  an existing mutationId returns the row to the pushable state at the queue
    *  TAIL (SqliteVaultCache INSERT OR REPLACE parity). `preEdit` (M2, additive)
    *  optionally rides the row LOCALLY — see QueuedPreEdit; a re-enqueue without
-   *  one clears any prior snapshot (fresh row, replay parity). */
-  enqueue(mutation: Mutation, preEdit?: QueuedPreEdit): Promise<void>;
+   *  one clears any prior snapshot (fresh row, replay parity).
+   *  CR-01 (compliance 2026-07-15): resolves TRUE iff the row VERIFIABLY landed
+   *  (the mutationId re-read inside the same tx after the write, the setAccountKeys
+   *  pattern). A closed/force-wiped cache resolves every write as a guarded no-op
+   *  (§D.2a) — it now reports FALSE so the caller can refuse the queue and do the
+   *  real send, never report a black-holed write as success. */
+  enqueue(mutation: Mutation, preEdit?: QueuedPreEdit): Promise<boolean>;
   /** FIFO, EXCLUDING staged-denied rows — never re-push a denied mutation. */
   pending(): Promise<Mutation[]>;
   /** M2 (additive): every queue row's durable pre-edit snapshot (pending AND
@@ -261,6 +266,15 @@ export interface VaultCache {
   /** Close the connection; every later call resolves as a caught no-op (§D.2a).
    *  Sync so the sign-out storage listener can call it before phase change (§D.5.3). */
   close(): void;
+
+  /** CR-01 (compliance 2026-07-15): fired ONCE when the connection closes out from
+   *  under the live store — the browser force-closes it (eviction/corruption →
+   *  `onclose`) or a sibling tab / session-level wipe deletes the DB
+   *  (`deleteDatabase` → `versionchange`). VaultStore points this at its
+   *  `demoteCache()` so a closed cache can never linger with `durable=true` and
+   *  silently swallow offline writes. NOT fired by the programmatic `close()`
+   *  (the store already owns that path); NullCache never fires it. */
+  onClosed?: () => void;
 }
 
 // ---- small IDB plumbing ------------------------------------------------------
@@ -463,6 +477,7 @@ async function markStagedDeniedIn(tx: IDBTransaction, mutationId: string): Promi
 
 export class IdbVaultCache implements VaultCache {
   readonly durable = true;
+  onClosed?: () => void;
   private closed = false;
   private pullFailures = 0;
 
@@ -473,11 +488,17 @@ export class IdbVaultCache implements VaultCache {
   ) {
     // §D.5.3: a sibling tab's wipe() (deleteDatabase) fires versionchange here —
     // self-close so the wipe completes promptly; §D.2a turns our in-flight and
-    // later calls into caught no-ops.
-    this.db.onversionchange = () => this.close();
-    // Browser-forced close (eviction, corruption): same guarded posture.
+    // later calls into caught no-ops. CR-01: also notify the live store (onClosed)
+    // so it demotes off this now-dead handle instead of letting durable=true linger
+    // and black-hole the next save()/remove().
+    this.db.onversionchange = () => {
+      this.close();
+      this.onClosed?.();
+    };
+    // Browser-forced close (eviction, corruption): same guarded posture + notify.
     this.db.onclose = () => {
       this.closed = true;
+      this.onClosed?.();
     };
   }
 
@@ -719,8 +740,19 @@ export class IdbVaultCache implements VaultCache {
 
   // -- outbound queue --
 
-  enqueue(mutation: Mutation, preEdit?: QueuedPreEdit): Promise<void> {
-    return this.write([STORE_QUEUE], (tx) => enqueueIn(tx, mutation, preEdit));
+  async enqueue(mutation: Mutation, preEdit?: QueuedPreEdit): Promise<boolean> {
+    if (this.closed) return false; // §D.2a: a closed handle black-holes writes — report it (CR-01)
+    let landed = false;
+    await this.write([STORE_QUEUE], async (tx) => {
+      await enqueueIn(tx, mutation, preEdit);
+      // CR-01 VERIFIABILITY (the setAccountKeys pattern): re-read the mutationId INSIDE this tx.
+      // A force-close/versionchange abort resolves write() as a caught no-op with `landed` never
+      // set; a genuine commit failure re-throws (fail-loud, not silent). Only a row actually
+      // present after the write earns `true` — never a black-holed enqueue reported as success.
+      const key = await req(tx.objectStore(STORE_QUEUE).index("mutationId").getKey(mutation.mutationId));
+      landed = key !== undefined;
+    });
+    return landed && !this.closed;
   }
 
   pending(): Promise<Mutation[]> {
@@ -942,7 +974,9 @@ export class NullCache implements VaultCache {
     return 0;
   }
 
-  async enqueue(_mutation: Mutation, _preEdit?: QueuedPreEdit): Promise<void> {}
+  async enqueue(_mutation: Mutation, _preEdit?: QueuedPreEdit): Promise<boolean> {
+    return false; // nothing persisted — honest (setAccountKeys parity); the caller does the real send
+  }
   async pending(): Promise<Mutation[]> {
     return [];
   }

@@ -282,6 +282,48 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     expect(await cache.pending()).toHaveLength(0);
   });
 
+  // ---- CR-01: in-session cache close must never black-hole a write (breaker-level) ----
+
+  it("a force-closed cache mid-session does the REAL send while ONLINE — never a silent black hole (CR-01)", async () => {
+    const { api, cache, store } = await seeded("writer");
+    stubPersisted(true); // the durable-queue path is armed — exactly when the black hole opens
+    // Force-close the LIVE handle mid-session (a sibling-tab wipe / browser eviction: durable stays
+    // true, every write no-ops §D.2a). Programmatic close does NOT fire onClosed, so the store still
+    // sees durable=true — the precise CR-01 precondition where enqueue would black-hole yet succeed.
+    cache.close();
+    expect(store.cacheDurable).toBe(true);
+
+    await expect(store.save(null, { type: "note", name: "post-close online" })).resolves.toBeUndefined();
+    // The write actually reached the server via the direct flushChunk fallback — not a black hole.
+    expect(api.pushes.flat().some((m) => m.op === "put")).toBe(true);
+    expect(store.list().some((i) => i.doc.name === "post-close online")).toBe(true);
+    // …and the store demoted off the dead handle, so subsequent writes route correctly too.
+    expect(store.cacheDurable).toBe(false);
+  });
+
+  it("a force-closed cache mid-session while OFFLINE refuses (throws) — never a silent success (CR-01)", async () => {
+    const { api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    cache.close();
+    api.offline = true; // the direct send transport-fails; with no durable queue it must REFUSE
+
+    await expect(store.save(null, { type: "note", name: "post-close offline" })).rejects.toThrow();
+    expect(store.list().some((i) => i.doc.name === "post-close offline")).toBe(false); // optimistic apply reverted
+    expect(await cache.pending()).toHaveLength(0); // nothing durably queued into the dead handle
+    expect(store.cacheDurable).toBe(false); // demoted
+  });
+
+  it("remove() with a force-closed cache does the REAL delete online — never a silent black hole (CR-01)", async () => {
+    const { s, api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    cache.close();
+
+    await expect(store.remove(s.itemId)).resolves.toBeUndefined();
+    expect(api.pushes.flat().some((m) => m.op === "delete")).toBe(true); // the delete really shipped
+    expect(store.get(s.itemId)).toBeUndefined(); // stays removed (it is gone server-side)
+    expect(store.cacheDurable).toBe(false);
+  });
+
   // ---- breaker #3 epoch guard ----
 
   it("a denial staged while an earlier pull is IN FLIGHT is NOT classified by that pull — only by one that STARTED after it (breaker #3)", async () => {
