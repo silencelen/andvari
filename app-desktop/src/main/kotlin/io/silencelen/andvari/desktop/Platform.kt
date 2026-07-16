@@ -5,6 +5,7 @@ import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import java.awt.Desktop
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.net.URI
@@ -70,6 +71,20 @@ private data class PlatformBuild(val version: String = "", val url: String = "",
 
 /** Where to download an update — surfaced to the user next to the banner. */
 fun downloadsUrl(baseUrl: String): String = "$baseUrl/downloads"
+
+/**
+ * design 2026-07-13 platform-fit §2, Help ▸ Open web vault: open [url] in the OS default browser.
+ * Fails GRACEFULLY — Desktop is unsupported on headless/no-browser Linux and Desktop.browse THROWS
+ * there — returning false instead of crashing the menu action (the web-vault URL is also always
+ * visible in Settings → Server). Returns true only on a dispatched browse.
+ */
+fun openInBrowser(url: String): Boolean = runCatching {
+    if (!Desktop.isDesktopSupported()) return false
+    val desktop = Desktop.getDesktop()
+    if (!desktop.isSupported(Desktop.Action.BROWSE)) return false
+    desktop.browse(URI(url))
+    true
+}.getOrDefault(false)
 
 /**
  * The outcome of one update check (H2, design 2026-07-13-signed-updates §M). Everything that is

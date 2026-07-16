@@ -15,6 +15,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.KeyShortcut
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
@@ -22,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.MenuBar
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
@@ -124,9 +131,43 @@ fun main() = application {
         state = rememberWindowState(width = 480.dp, height = 720.dp),
         // Every hardware key press counts as user activity for the inactivity auto-lock
         // (spec 01 §8). Window-level preview sees keys regardless of what has focus; never
-        // consumes.
-        onPreviewKeyEvent = { state.touch(); false },
+        // consumes — EXCEPT Ctrl+L (design 2026-07-13 platform-fit §2), the panic lock. This is
+        // the ONE authoritative shortcut handler: it consumes the KeyDown so the 'l' never reaches
+        // a focused text field, and the menu's KeyShortcut(Key.L, ctrl) is accelerator TEXT only
+        // (its onClick calls the same idempotent panicLock()). Every other key still falls through.
+        onPreviewKeyEvent = {
+            state.touch()
+            if (it.type == KeyEventType.KeyDown && it.isCtrlPressed && it.key == Key.L) {
+                state.panicLock(); true
+            } else false
+        },
     ) {
+        // design 2026-07-13 platform-fit §2: the desktop command surface. Renders a native/AWT menu
+        // on both target formats (Msi + Deb). Shortcuts are DECLARED here for their accelerator text
+        // (the discoverability win); handling stays in onPreviewKeyEvent above (Ctrl+L) or the AWT
+        // accelerator itself (Ctrl+R/Ctrl+Q) — every onClick calls an idempotent function, so a
+        // double-dispatch is harmless.
+        MenuBar {
+            Menu("Vault") {
+                Item("Sync now", shortcut = KeyShortcut(Key.R, ctrl = true), enabled = state.menuSignedIn) { state.refresh() }
+                Item("Import passwords…", enabled = state.onVaultScreen) { state.requestImport() }
+                Separator()
+                Item("Lock", shortcut = KeyShortcut(Key.L, ctrl = true), enabled = state.menuSignedIn) { state.panicLock() }
+                // §2 security note: Sign out is destructive and MUST route through a confirm dialog.
+                // The only sign-out confirm today is local `remember` state inside the (locked)
+                // Unlock screen — there is NO signed-in-reachable confirm (that's the audit's separate
+                // "un-confirmed sign-out" finding, not this wave). Per the contract: ship DISABLED
+                // rather than a bare state.signOut() (AWT native menu items can't carry a tooltip).
+                Item("Sign out…", enabled = false) {}
+                Separator()
+                Item("Quit", shortcut = KeyShortcut(Key.Q, ctrl = true)) { exitApplication() }
+            }
+            Menu("Help") {
+                Item("Open web vault") { openInBrowser(state.baseUrl) }
+                Item("Check for updates") { state.checkForUpdatesNow() }
+                Item("About andvari") { state.requestAbout() }
+            }
+        }
         // Cut I (v2 #9): a hard floor — below ~480×600 the auth card and vault toolbar
         // truncate into unusability; AWT minimumSize is the only enforcement point.
         LaunchedEffect(Unit) { window.minimumSize = java.awt.Dimension(480, 600) }

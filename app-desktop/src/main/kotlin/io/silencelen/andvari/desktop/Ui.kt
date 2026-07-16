@@ -171,7 +171,40 @@ fun DesktopApp(state: DesktopState) {
             }
         }
     }
+    // design 2026-07-13 platform-fit §2: Help ▸ About andvari — a Dialog, so it overlays every
+    // screen regardless of placement in the tree; the menu toggles state.aboutRequested.
+    if (state.aboutRequested) AboutDialog(state)
     }
+}
+
+/**
+ * design 2026-07-13 platform-fit §2: the About dialog. The app displayed its version NOWHERE before
+ * this — shows the build version, the wire platform tag, and the configured server. Open-question
+ * default: it surfaces an already-known available update inline (updateAvailable is non-null) but
+ * makes NO network call of its own (Help ▸ Check for updates does that).
+ */
+@Composable
+private fun AboutDialog(state: DesktopState) {
+    AlertDialog(
+        onDismissRequest = { state.dismissAbout() },
+        title = { Text("About andvari") },
+        text = {
+            Column {
+                Text("andvari — the keeper of the hoard", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(12.dp))
+                Text("Version $DESKTOP_VERSION", style = MaterialTheme.typography.bodySmall)
+                Text("Platform: ${state.platformLabel}", style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(4.dp))
+                Text("Server", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(state.baseUrl, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                state.updateAvailable?.let {
+                    Spacer(Modifier.height(12.dp))
+                    Text("Version $it is available.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { state.dismissAbout() }) { Text("Close") } },
+    )
 }
 
 @Composable
@@ -847,6 +880,12 @@ private fun Vault(state: DesktopState) {
     DisposableEffect(editorMounted) {
         state.noteEditorOpen(editorMounted)
         onDispose { state.noteEditorOpen(false) }
+    }
+    // design 2026-07-13 platform-fit §2: the Vault menu's "Import passwords…" can't reach this
+    // screen-local `importFlow`, so it sets state.importRequested — consume it once here into the
+    // very same flow the toolbar FileUpload icon opens. (The menu item enables only on this screen.)
+    LaunchedEffect(state.importRequested) {
+        if (state.importRequested) { importFlow = true; state.consumeImportRequested() }
     }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
