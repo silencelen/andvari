@@ -70,10 +70,29 @@ object QuickUnlock {
     private const val GCM_TAG_BITS = 128
     private const val KEYSTORE = "AndroidKeyStore"
 
-    private fun alias(userId: String) = "andvari-qu-$userId"
-    private fun blobFile(dir: File, userId: String) = File(dir, "quick-unlock-$userId.json")
+    /**
+     * (origin, userId)-scoped Keystore alias — design 2026-07-15 §4.2's exact scheme. Per-origin
+     * because Keystore is device-global and the SAME userId can exist at two fronts of one
+     * instance (tailnet vs public origin): a single per-user alias would collide across their
+     * namespaces and let one origin's wipe destroy the other's key.
+     */
+    private fun alias(originKey: String, userId: String) = "andvari.$originKey.$userId.qk"
+
+    /** The pre-namespacing global alias. Aliases can't be renamed and the key is hardware-bound,
+     *  so the §4.2 adoption one-shot moves the BLOB but must keep honoring the key it was sealed
+     *  under: [readBlob] accepts this form when the blob records it, and [wipe] deletes it only
+     *  together with the blob that owns it — never from another namespace's wipe. */
+    private fun legacyAlias(userId: String) = "andvari-qu-$userId"
+
+    /** Blob lives inside the (origin, userId) namespace dir (§4.2); the filename's userId
+     *  fragment is path-safe-laundered (server-supplied value). */
+    private fun blobFile(dir: File, originKey: String, userId: String) =
+        File(OriginNamespace.dir(dir, originKey, userId), "quick-unlock-${OriginNamespace.pathSafe(userId)}.json")
+
     /** AAD binds the blob to the account: a blob copied to another profile/user won't open,
-     *  and any file tamper fails the GCM tag. */
+     *  and any file tamper fails the GCM tag. Deliberately UNCHANGED by the §4.2 namespacing
+     *  (origin binding comes from the blob's location + per-origin alias) so adopted legacy
+     *  blobs keep decrypting. */
     private fun aad(userId: String): ByteArray = "andvari/v1|quick-unlock|$userId".encodeToByteArray()
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -124,8 +143,8 @@ object QuickUnlock {
         BiometricManager.from(context)
             .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
 
-    /** True when a well-formed blob of a known version exists for this user. */
-    fun isEnrolled(dir: File, userId: String): Boolean = readBlob(dir, userId) != null
+    /** True when a well-formed blob of a known version exists for this (origin, user). */
+    fun isEnrolled(dir: File, originKey: String, userId: String): Boolean = readBlob(dir, originKey, userId) != null
 
     /**
      * A1/A2 freshness: within 30 days of the last REAL full-password unlock, evaluated against a
@@ -205,14 +224,30 @@ object QuickUnlock {
 
     // ---- wipe ----
 
-    /** Destroy the blob file and the Keystore key. Idempotent, NEVER throws (called from
-     *  fail-closed paths and process-blind autofill rails). File-dir form so callers that hold
-     *  only `noBackupFilesDir` (the ViewModel) can invoke it without a Context. */
-    fun wipe(dir: File, userId: String) {
-        runCatching { blobFile(dir, userId).delete() }
+    /**
+     * Destroy the blob file and its Keystore key(s) for ONE (origin, userId) namespace.
+     * Idempotent, NEVER throws (called from fail-closed paths and process-blind autofill
+     * rails). File-dir form so callers that hold only `noBackupFilesDir` (the ViewModel) can
+     * invoke it without a Context.
+     *
+     * §4.2 scoping (security-load-bearing): deletes the namespace's OWN alias plus — only when
+     * THIS namespace's blob records it — the legacy global alias. The blob's recorded alias is
+     * read loosely (raw JSON, no version gate: a corrupt-but-parseable blob must still take its
+     * key down with it) but accepted ONLY if it is one of the two forms this namespace may
+     * legitimately reference; wiping origin B must never delete the legacy alias origin A's
+     * adopted blob still rides (cross-namespace destruction, the exact bug §4.2 kills).
+     */
+    fun wipe(dir: File, originKey: String, userId: String) {
+        val f = blobFile(dir, originKey, userId)
+        val recorded = runCatching { json.decodeFromString(Blob.serializer(), f.readText()).alias }
+            .getOrNull()
+            ?.takeIf { it == alias(originKey, userId) || it == legacyAlias(userId) }
+        runCatching { f.delete() }
         runCatching {
             val ks = KeyStore.getInstance(KEYSTORE).apply { load(null) }
-            if (ks.containsAlias(alias(userId))) ks.deleteEntry(alias(userId))
+            for (a in setOfNotNull(alias(originKey, userId), recorded)) {
+                if (ks.containsAlias(a)) ks.deleteEntry(a)
+            }
         }
     }
 
@@ -225,10 +260,10 @@ object QuickUnlock {
      * place, never mints `now` (that would silently reset the 30-day clock with no password
      * typed). The caller is responsible for the A1 provenance/`mustChangePassword` (A5) gates.
      */
-    suspend fun enroll(activity: FragmentActivity, dir: File, userId: String, account: Account): Enroll {
+    suspend fun enroll(activity: FragmentActivity, dir: File, originKey: String, userId: String, account: Account): Enroll {
         if (!hasStrongBiometric(activity)) return Enroll.Failed("No usable fingerprint or face on this device.")
         val key = try {
-            generateKey(userId)
+            generateKey(originKey, userId)
         } catch (t: Throwable) {
             return Enroll.Failed(null) // never echo a KeyStore message (may reflect input)
         }
@@ -236,9 +271,9 @@ object QuickUnlock {
         try {
             cipher.init(Cipher.ENCRYPT_MODE, key)
         } catch (e: KeyPermanentlyInvalidatedException) {
-            wipe(dir, userId); return Enroll.Failed(null)
+            wipe(dir, originKey, userId); return Enroll.Failed(null)
         } catch (t: Throwable) {
-            wipe(dir, userId); return Enroll.Failed(null)
+            wipe(dir, originKey, userId); return Enroll.Failed(null)
         }
         val outcome = authenticate(activity, cipher, title = "Enable quick unlock")
         return when (outcome) {
@@ -250,18 +285,24 @@ object QuickUnlock {
                     outcome.cipher.updateAAD(aad(userId))
                     val ct = outcome.cipher.doFinal(uvk)
                     val iv = outcome.cipher.iv
-                    writeBlob(dir, userId, Blob(BLOB_V, alias(userId), b64(iv), b64(ct), System.currentTimeMillis()))
+                    // New enrollments always mint the per-origin alias (§4.2). A superseded
+                    // legacy alias (re-enroll over an adopted blob) is deliberately NOT deleted
+                    // here: the SAME userId can exist at two fronts of one instance, and this
+                    // origin cannot know whether another namespace's adopted blob still rides
+                    // it — an orphaned auth-per-use key with no blob is inert; a cross-namespace
+                    // delete would not be. Only [wipe] of the OWNING namespace removes it.
+                    writeBlob(dir, originKey, userId, Blob(BLOB_V, alias(originKey, userId), b64(iv), b64(ct), System.currentTimeMillis()))
                     Enroll.Ok
                 } catch (t: Throwable) {
-                    wipe(dir, userId); Enroll.Failed(null)
+                    wipe(dir, originKey, userId); Enroll.Failed(null)
                 } finally {
                     uvk.fill(0)
                 }
             }
-            is Auth.Cancelled -> { wipe(dir, userId); Enroll.Cancelled } // remove the orphan key
-            is Auth.PermanentLockout -> { wipe(dir, userId); Enroll.Failed("Too many attempts — try again later.") }
-            is Auth.TempLockout -> { wipe(dir, userId); Enroll.Failed("Too many attempts — try again in a moment.") }
-            is Auth.Error -> { wipe(dir, userId); Enroll.Failed(null) }
+            is Auth.Cancelled -> { wipe(dir, originKey, userId); Enroll.Cancelled } // remove the orphan key
+            is Auth.PermanentLockout -> { wipe(dir, originKey, userId); Enroll.Failed("Too many attempts — try again later.") }
+            is Auth.TempLockout -> { wipe(dir, originKey, userId); Enroll.Failed("Too many attempts — try again in a moment.") }
+            is Auth.Error -> { wipe(dir, originKey, userId); Enroll.Failed(null) }
         }
     }
 
@@ -272,13 +313,16 @@ object QuickUnlock {
      * §8.1 table. `KeyPermanentlyInvalidatedException` is caught at BOTH `Cipher.init` and
      * `doFinal` (A9 — the surface varies by OEM/API) and converges on the same wipe outcome.
      */
-    suspend fun recoverUvk(activity: FragmentActivity, dir: File, userId: String): Recover {
-        val blob = readBlob(dir, userId) ?: run { wipe(dir, userId); return Recover.Wiped("Quick unlock needs to be set up again.") }
+    suspend fun recoverUvk(activity: FragmentActivity, dir: File, originKey: String, userId: String): Recover {
+        val blob = readBlob(dir, originKey, userId) ?: run { wipe(dir, originKey, userId); return Recover.Wiped("Quick unlock needs to be set up again.") }
         val key = try {
-            loadKey(userId)
+            // The blob's RECORDED alias (readBlob already vetted it against the two forms this
+            // namespace may reference) — an adopted legacy blob keeps opening under its
+            // hardware-bound legacy key (§4.2 adoption continuity).
+            loadKey(blob.alias)
         } catch (t: Throwable) {
-            wipe(dir, userId); return Recover.Wiped("Quick unlock needs to be set up again.")
-        } ?: run { wipe(dir, userId); return Recover.Wiped("Quick unlock needs to be set up again.") }
+            wipe(dir, originKey, userId); return Recover.Wiped("Quick unlock needs to be set up again.")
+        } ?: run { wipe(dir, originKey, userId); return Recover.Wiped("Quick unlock needs to be set up again.") }
 
         // Review 2026-07-10 [1]: android.util.Base64.decode THROWS on a malformed field, and
         // readBlob validates only JSON/v/alias. An uncaught throw here would kill the AUTOFILL
@@ -290,15 +334,15 @@ object QuickUnlock {
             iv = fromB64(blob.iv)
             ct = fromB64(blob.ct)
         } catch (t: Throwable) {
-            wipe(dir, userId); return Recover.Wiped("Quick unlock needs to be set up again.")
+            wipe(dir, originKey, userId); return Recover.Wiped("Quick unlock needs to be set up again.")
         }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         try {
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
         } catch (e: KeyPermanentlyInvalidatedException) { // A9 (surface 1/2)
-            wipe(dir, userId); return Recover.Wiped("Your biometrics changed — enter your master password.")
+            wipe(dir, originKey, userId); return Recover.Wiped("Your biometrics changed — enter your master password.")
         } catch (t: Throwable) {
-            wipe(dir, userId); return Recover.Wiped("Quick unlock needs to be set up again.")
+            wipe(dir, originKey, userId); return Recover.Wiped("Quick unlock needs to be set up again.")
         }
 
         return when (val outcome = authenticate(activity, cipher, title = "Unlock andvari")) {
@@ -306,9 +350,9 @@ object QuickUnlock {
                 outcome.cipher.updateAAD(aad(userId))
                 Recover.Ok(outcome.cipher.doFinal(ct))
             } catch (e: KeyPermanentlyInvalidatedException) { // A9 (surface 2/2)
-                wipe(dir, userId); Recover.Wiped("Your biometrics changed — enter your master password.")
+                wipe(dir, originKey, userId); Recover.Wiped("Your biometrics changed — enter your master password.")
             } catch (t: Throwable) { // GCM tag / AAD mismatch (tamper) → wipe
-                wipe(dir, userId); Recover.Wiped("Quick unlock needs to be set up again.")
+                wipe(dir, originKey, userId); Recover.Wiped("Quick unlock needs to be set up again.")
             }
             // A8: NO lockout — temporary OR permanent — ever wipes a VALID enrollment. Falling
             // back to the password leaves the blob intact. Wiping here would be attacker- and
@@ -381,19 +425,19 @@ object QuickUnlock {
 
     // ---- Keystore key ----
 
-    private fun generateKey(userId: String): SecretKey {
+    private fun generateKey(originKey: String, userId: String): SecretKey {
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
         // Prefer StrongBox; fall back to the TEE when the SoC lacks it (StrongBoxUnavailableException).
         try {
-            gen.init(keySpec(userId, strongBox = true)); return gen.generateKey()
+            gen.init(keySpec(originKey, userId, strongBox = true)); return gen.generateKey()
         } catch (e: StrongBoxUnavailableException) {
-            gen.init(keySpec(userId, strongBox = false)); return gen.generateKey()
+            gen.init(keySpec(originKey, userId, strongBox = false)); return gen.generateKey()
         }
     }
 
-    private fun keySpec(userId: String, strongBox: Boolean): KeyGenParameterSpec {
+    private fun keySpec(originKey: String, userId: String, strongBox: Boolean): KeyGenParameterSpec {
         val b = KeyGenParameterSpec.Builder(
-            alias(userId),
+            alias(originKey, userId),
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
         )
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -413,24 +457,29 @@ object QuickUnlock {
         return b.build()
     }
 
-    private fun loadKey(userId: String): SecretKey? {
+    private fun loadKey(alias: String): SecretKey? {
         val ks = KeyStore.getInstance(KEYSTORE).apply { load(null) }
-        return ks.getKey(alias(userId), null) as? SecretKey
+        return ks.getKey(alias, null) as? SecretKey
     }
 
     // ---- blob file I/O ----
 
-    private fun readBlob(dir: File, userId: String): Blob? {
-        val f = blobFile(dir, userId)
+    /** A blob is valid for a namespace only if its recorded alias is one of the two forms that
+     *  namespace may reference: its own per-origin alias, or — adoption continuity, §4.2 — the
+     *  legacy global alias. Anything else (unknown version, foreign alias) reads as absent →
+     *  the caller's wipe + fail-to-password path. */
+    private fun readBlob(dir: File, originKey: String, userId: String): Blob? {
+        val f = blobFile(dir, originKey, userId)
         if (!f.exists()) return null
         return runCatching { json.decodeFromString(Blob.serializer(), f.readText()) }
             .getOrNull()
-            ?.takeIf { it.v == BLOB_V && it.alias == alias(userId) }
+            ?.takeIf { it.v == BLOB_V && (it.alias == alias(originKey, userId) || it.alias == legacyAlias(userId)) }
     }
 
-    private fun writeBlob(dir: File, userId: String, blob: Blob) {
-        val f = blobFile(dir, userId)
-        val tmp = File(dir, "quick-unlock-$userId.json.tmp")
+    private fun writeBlob(dir: File, originKey: String, userId: String, blob: Blob) {
+        val f = blobFile(dir, originKey, userId)
+        f.parentFile?.mkdirs() // first write into a fresh (origin, user) namespace creates it
+        val tmp = File(f.parentFile, f.name + ".tmp")
         tmp.writeText(json.encodeToString(Blob.serializer(), blob))
         if (!tmp.renameTo(f)) { // atomic swap; fall back to overwrite if rename is unsupported
             f.writeText(json.encodeToString(Blob.serializer(), blob))
@@ -448,29 +497,42 @@ object QuickUnlock {
  * still valid) and a revocation purge (a definitive 401 — the session is dead). Both destroy the
  * quick-unlock blob (spec 01 §8.1 clearing events), so this is the one place that stays in step
  * with [QuickUnlock.wipe].
+ *
+ * §4.2 (design 2026-07-15, breaker B2-3 — security-load-bearing): every purge takes an
+ * EXPLICIT [originKey] and destroys ONLY that (origin, userId) namespace. Callers pass the key
+ * of the origin whose verdict they are enforcing — for a policy probe, the origin that was
+ * PROBED (captured beside the probe, before any await). Before this, these purges were
+ * origin-blind and global: merely probing a server whose policy said `offlineCacheAllowed=false`
+ * destroyed the home server's offline data and account keys.
  */
 object OfflineData {
-    /** Delete the durable vault cache DB (+ its wal/shm) for a user. */
-    fun deleteVaultCache(noBackupDir: File, userId: String) {
-        for (suffix in listOf("", "-wal", "-shm")) File(noBackupDir, "vault-$userId.db$suffix").delete()
+    /** Delete the durable vault cache DB (+ its wal/shm) for one (origin, user). */
+    fun deleteVaultCache(noBackupDir: File, originKey: String, userId: String) {
+        val dir = OriginNamespace.dir(noBackupDir, originKey, userId)
+        val safeUid = OriginNamespace.pathSafe(userId)
+        for (suffix in listOf("", "-wal", "-shm")) File(dir, "vault-$safeUid.db$suffix").delete()
     }
 
-    /** `offlineCacheAllowed=false`: drop the cache DB, cached accountKeys and the quick-unlock
-     *  secret — but KEEP the session (tokens still valid; this is not a revocation). */
-    fun purgeCacheForbidden(noBackupDir: File, store: SessionStore, userId: String) {
-        deleteVaultCache(noBackupDir, userId)
-        store.clearAccountKeys()
-        QuickUnlock.wipe(noBackupDir, userId)
-        store.clearFullPasswordStamp(userId)
+    /** `offlineCacheAllowed=false` DECLARED BY [originKey]'s server: drop that namespace's cache
+     *  DB, cached accountKeys and quick-unlock secret — but KEEP the session (tokens still
+     *  valid; this is not a revocation). Other origins' namespaces are untouched (§4.2). */
+    fun purgeCacheForbidden(noBackupDir: File, store: SessionStore, originKey: String, userId: String) {
+        deleteVaultCache(noBackupDir, originKey, userId)
+        store.clearAccountKeys(originKey)
+        QuickUnlock.wipe(noBackupDir, originKey, userId)
+        store.clearFullPasswordStamp(originKey, userId)
     }
 
-    /** Definitive server rejection (device revoked): everything [purgeCacheForbidden] does, plus
-     *  `store.clear()` — the persisted session/tokens/F58 flag are dead. */
-    fun purgeRevoked(noBackupDir: File, store: SessionStore, userId: String) {
-        deleteVaultCache(noBackupDir, userId)
-        QuickUnlock.wipe(noBackupDir, userId)
-        store.clearFullPasswordStamp(userId)
-        store.clear() // also removes accountKeys
+    /** Definitive server rejection (device revoked) FROM [originKey]'s server: everything
+     *  [purgeCacheForbidden] does, plus `store.clear()` — the persisted session/tokens/F58 flag
+     *  are dead. Callers always pass the CURRENT origin's key (the 401 came from the session's
+     *  own server), which is also the namespace `store.clear()` scopes its removals to. */
+    fun purgeRevoked(noBackupDir: File, store: SessionStore, originKey: String, userId: String) {
+        deleteVaultCache(noBackupDir, originKey, userId)
+        QuickUnlock.wipe(noBackupDir, originKey, userId)
+        store.clearFullPasswordStamp(originKey, userId)
+        store.clearAccountKeys(originKey) // store.clear() scopes to the CURRENT origin — be explicit for this one
+        store.clear() // session identity/tokens/F58 (global) + current-origin accountKeys/offer flag
     }
 }
 

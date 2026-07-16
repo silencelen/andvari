@@ -47,6 +47,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
@@ -62,6 +63,7 @@ import io.silencelen.andvari.core.client.BackupResult
 import io.silencelen.andvari.core.client.CsvPreflight
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
+import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
 import io.silencelen.andvari.core.crypto.Escrow
@@ -120,8 +122,9 @@ class MainActivity : FragmentActivity() {
                 else window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
             }
         }
-        // One-time: bump an old LAN-default server URL to the tailnet HTTPS default.
-        SessionStore(applicationContext).migrateDefaultOnce()
+        // The one-time default-URL migration + §4.2 namespace adoption now run in
+        // SessionStore's init (ordering is load-bearing and the autofill entry points build
+        // their own stores) — the vm factory's SessionStore construction below triggers them.
         vm.start()
         // Foreground sync cadence (spec 03 §6): sync immediately on EVERY ON_RESUME
         // (onForeground also enforces the idle auto-lock first — a backgrounded app must
@@ -457,23 +460,65 @@ internal fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
 @Composable
 fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
     var tab by rememberSaveable { mutableStateOf(0) }
+    // design 2026-07-15 §2.1/§7.1: the server-declared signupMode drives which front-door UI
+    // renders (a TRUSTED UI hint, §2.3 — register stays invite-gated server-side regardless):
+    //  - "closed"      → sign-in only, no enroll UI at all (break-glass twin / sign-in-only instance);
+    //  - "landing"     → invite-only + the stranger nudge over the enroll tab;
+    //  - anything else → today's invite-only two-tab welcome (incl. policy==null: §2.3's
+    //                    conservative default while the probe is in flight / failed).
+    // The ServerField below stays in every mode (§7.1: natives keep the server field).
+    val signupMode = effectiveSignupMode(ui.policy?.signupMode)
+    val showEnroll = signupMode != "closed"
+    val effTab = if (showEnroll) tab else 0 // a remembered Enroll selection can't outlive a closed flip
     Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(40.dp))
         Sigil()
         Spacer(Modifier.height(24.dp))
-        TabRow(selectedTabIndex = tab) {
-            Tab(tab == 0, { tab = 0 }, text = { Text("Sign in") })
-            Tab(tab == 1, { tab = 1 }, text = { Text("Enroll") })
+        if (showEnroll) {
+            TabRow(selectedTabIndex = effTab) {
+                Tab(effTab == 0, { tab = 0 }, text = { Text("Sign in") })
+                Tab(effTab == 1, { tab = 1 }, text = { Text("Enroll") })
+            }
+            Spacer(Modifier.height(20.dp))
         }
-        Spacer(Modifier.height(20.dp))
         ErrorBar(ui.error, vm::clearError)
         // Success landings that end HERE need a voice too — chiefly the recover flow's
         // "Master password reset — sign in with your new password." (sessions were revoked).
         NoticeBar(ui.notice, vm::clearNotice)
-        if (tab == 0) SignInForm(vm, ui) else EnrollForm(vm, ui)
+        if (effTab == 0) {
+            SignInForm(vm, ui)
+        } else {
+            if (signupMode == "landing") LandingNudge(ui.policy?.selfHostDocsUrl)
+            EnrollForm(vm, ui)
+        }
         Spacer(Modifier.height(24.dp))
         ServerField(ui.baseUrl, vm::setBaseUrl)
     }
+}
+
+/**
+ * §7.1 stranger landing — a client RENDERING of declared policy, not a server flow: the server
+ * still enforces the invite gate on register, and `POST /auth/prelogin` keeps its fake-salt
+ * anti-enumeration, so this adds no account oracle. §2.3: `selfHostDocsUrl` is DECORATIVE —
+ * rendered as a raw https URL only (R8 rule: never a display name, never verified identity);
+ * anything non-https from a hostile or misconfigured server is simply not rendered.
+ */
+@Composable
+private fun LandingNudge(selfHostDocsUrl: String?) {
+    Text(
+        "This is a private, invite-only server. Have an invite? Paste it below. " +
+            "Want your own? andvari is self-hostable — run your own server.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    val url = selfHostDocsUrl?.trim()?.takeIf { it.startsWith("https://") }
+    if (url != null) {
+        val uriHandler = LocalUriHandler.current
+        TextButton(onClick = { runCatching { uriHandler.openUri(url) } }) {
+            Text(url, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
+        }
+    }
+    Spacer(Modifier.height(8.dp))
 }
 
 @Composable
@@ -494,8 +539,21 @@ private fun SignInForm(vm: AndvariViewModel, ui: UiState) {
         }
         Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
         SecretField("Master password", password) { password = it }
-        if (ui.loginTotpRequired) {
+        // design 2026-07-15 §2.3/§2.6: `policy.totpRequired` is a TRUSTED UI HINT — PRE-SHOW the
+        // code field so an enrolled user isn't bounced through a failed submit. It never gates
+        // submission: on a totpRequired instance a not-yet-enrolled user signs in password-only
+        // (the §2.6 restricted-session matrix), so only the REACTIVE server error
+        // (ui.loginTotpRequired) makes the 6-digit code mandatory — the authoritative path.
+        val showTotp = ui.loginTotpRequired || ui.policy?.totpRequired == true
+        if (showTotp) {
             Field("One-time code", totp, { totp = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number)
+            if (!ui.loginTotpRequired) {
+                Text(
+                    "If you use an authenticator app with this server, enter its code — otherwise leave blank.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         Spacer(Modifier.height(12.dp))
         val ready = email.isNotBlank() && password.isNotBlank() && (!ui.loginTotpRequired || totp.length == 6)
@@ -704,8 +762,10 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
     var typedBack by remember { mutableStateOf("") }
     var mismatch by remember { mutableStateOf(false) }
     // A "copy phrase" button is a SECRET clipboard write (EXTRA_IS_SENSITIVE + auto-clear after
-    // the policy window), never the non-secret setup-material exemption (§F.7).
-    val clipClear = maxOf(1, ui.policy?.clipboardClearSeconds ?: 30)
+    // the policy window), never the non-secret setup-material exemption (§F.7). Clamped into
+    // [1, CLIPBOARD_CLEAR_MAX_SECONDS] (design 2026-07-15 §2.3/B1-1): a hostile server's policy
+    // must not pin a secret on the clipboard for hours.
+    val clipClear = (ui.policy?.clipboardClearSeconds ?: 30).coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS)
     // Cut M (v2 #7): 4-char groups for transcription — a 43-char unbroken run defeats
     // write-it-down. Visual only: displayForm's contract says confirmMatches strips
     // whitespace, so a grouped type-back still passes; Copy carries the bare phrase.
@@ -1585,10 +1645,12 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(16.dp))
-        // Vault-secret copies clear after the org policy window, clamped to >=1 s exactly
-        // like web's useCopy (Math.max(1, n)): a policy of 0 still clears — never "keep
-        // forever" for secrets. 30 s fallback while the policy hasn't loaded (matches web).
-        val clipClear = maxOf(1, ui.policy?.clipboardClearSeconds ?: 30)
+        // Vault-secret copies clear after the org policy window, clamped into
+        // [1, CLIPBOARD_CLEAR_MAX_SECONDS] (design 2026-07-15 §2.3/B1-1): a policy of 0 still
+        // clears — never "keep forever" for secrets — and an oversized value from a hostile
+        // server can't pin the clipboard past the core ceiling. 30 s fallback while the policy
+        // hasn't loaded (matches web).
+        val clipClear = (ui.policy?.clipboardClearSeconds ?: 30).coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS)
         doc.login?.let { login ->
             login.username?.takeIf { it.isNotBlank() }?.let { CopyRow("Username", it, ctx, clipClear) }
             login.password?.takeIf { it.isNotBlank() }?.let { SecretCopyRow("Password", it, ctx, clipClear) }
