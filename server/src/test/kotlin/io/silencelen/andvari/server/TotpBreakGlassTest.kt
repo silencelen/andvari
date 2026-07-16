@@ -30,20 +30,27 @@ class TotpBreakGlassTest : P4TestSupport() {
 
     private val publicHost = "public.test"
 
+    // §2.5 flattened the login bucket to 5/min per IP (origin-independent), so multi-login tests
+    // stamp a distinct forwarded IP per attempt (testApplication's peer is loopback → XFF trusted).
+    private var ipCounter = 0
+    private fun nextIp() = "198.51.100.${++ipCounter}"
+
     /** A login as seen from the public (break-glass) origin: the Host header carries the public hostname. */
     private suspend fun HttpClient.publicLogin(vc: VirtualClient, code: String? = null): HttpResponse =
         post("/api/v1/auth/login") {
             contentType(ContentType.Application.Json)
             header("X-Andvari-Client", "test/1.0.0")
             header(HttpHeaders.Host, publicHost)
+            header("X-Forwarded-For", nextIp())
             setBody(LoginRequest(vc.email, vc.authKey, DeviceInfo("test", "break-glass"), totp = code))
         }
 
-    private suspend fun HttpClient.internalLogin(vc: VirtualClient): HttpResponse =
+    private suspend fun HttpClient.internalLogin(vc: VirtualClient, code: String? = null): HttpResponse =
         post("/api/v1/auth/login") {
             contentType(ContentType.Application.Json)
             header("X-Andvari-Client", "test/1.0.0")
-            setBody(LoginRequest(vc.email, vc.authKey, DeviceInfo("test", "lan")))
+            header("X-Forwarded-For", nextIp())
+            setBody(LoginRequest(vc.email, vc.authKey, DeviceInfo("test", "lan"), totp = code))
         }
 
     /** A 6-digit code that is provably not valid for any step near now. */
@@ -129,8 +136,13 @@ class TotpBreakGlassTest : P4TestSupport() {
         // REPLAY: a code that already logged in must fail the second time.
         assertEquals(HttpStatusCode.Unauthorized, client.publicLogin(vc, nextCode).status)
 
-        // Non-public login still needs no TOTP even when enrolled.
+        // §2.6 row 1 (multi-tenant design 2026-07-15): an ENROLLED secret is now verified on EVERY
+        // origin — an internal login without a code gets the reactive 401 totp_required, exactly like
+        // the public origin. (The success-with-code internal path is locked in
+        // MultiTenantEndpointTest.enrolledTotp_enforcedOnEveryOrigin — both valid window steps are
+        // already consumed at this point in THIS test.)
         val internal = client.internalLogin(vc)
-        assertEquals(HttpStatusCode.OK, internal.status, internal.bodyAsText())
+        assertEquals(HttpStatusCode.Unauthorized, internal.status, internal.bodyAsText())
+        assertEquals("totp_required", errorOf(internal))
     }
 }

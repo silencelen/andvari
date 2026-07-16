@@ -5,8 +5,20 @@ import io.ktor.server.plugins.origin
 import io.ktor.server.request.header
 import io.silencelen.andvari.core.model.ClientPolicy
 
-/** The authenticated caller, resolved from a Bearer access token. */
-data class Principal(val userId: String, val deviceId: String, val sessionId: String, val isAdmin: Boolean)
+/**
+ * The authenticated caller, resolved from a Bearer access token. [mustEnrollTotp] marks a
+ * RESTRICTED session (design 2026-07-15 §2.6: instance `totpRequired` + user not TOTP-enrolled):
+ * requirePrincipal answers 403 totp_enrollment_required on every route except TOTP setup/confirm +
+ * logout until enrollment completes. Computed from live DB state at authenticate() time, so
+ * confirming TOTP lifts the restriction on the SAME session, tokens unchanged.
+ */
+data class Principal(
+    val userId: String,
+    val deviceId: String,
+    val sessionId: String,
+    val isAdmin: Boolean,
+    val mustEnrollTotp: Boolean = false,
+)
 
 class UpgradeRequired(val platform: String, val minVersion: String) : Exception()
 class Unauthorized(val reason: String = "invalid_credentials") : Exception()
@@ -105,13 +117,21 @@ internal fun isIpLiteral(s: String): Boolean {
 }
 
 /**
- * True when the request arrived via the configured public (break-glass) hostname.
- * The public path is hardened separately (spec 03 §7); in P1 the tunnel is not even
- * deployed, so this is defensive.
+ * True when the request arrived via the configured public (break-glass) hostname. EXACT host
+ * equality after stripping any `:port` suffix (design 2026-07-15 §7.2 hygiene): the old substring
+ * `contains` let a crafted Host header (`evil-<public>`, `<public>.evil.com`) select — or dodge —
+ * the public régime at will. Unset env ⇒ never public: single-origin instances get today's private
+ * régime verbatim, and the whole break-glass bundle stays in the code, inert.
  */
 fun ApplicationCall.isPublicOrigin(config: Config): Boolean {
-    val host = request.header("Host") ?: request.origin.serverHost
-    return config.publicHostname != null && host.contains(config.publicHostname, ignoreCase = true)
+    val public = config.publicHostname?.takeIf { it.isNotBlank() } ?: return false
+    // `host[:port]` → host. A bracketed IPv6 literal degrades to a never-matching token ("["…),
+    // which is correct here by construction: publicHostname is a DNS name, never an IP literal.
+    // Strip :port AND a trailing FQDN root dot ("pubhost." == "pubhost") — else a proxied request with a
+    // trailing-dot Host would exact-mismatch and be served the PRIVATE régime over the public tunnel
+    // (review 2026-07-16 F1 — the old host.contains() matched the trailing-dot form).
+    val host = (request.header("Host") ?: request.origin.serverHost).trim().substringBefore(':').removeSuffix(".")
+    return host.equals(public, ignoreCase = true)
 }
 
 /** semver compare a<b → -1; only numeric major.minor.patch (pre-release ignored). */

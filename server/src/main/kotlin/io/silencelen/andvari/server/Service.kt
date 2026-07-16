@@ -93,15 +93,56 @@ class Service(
     // restart drops pending tickets and the member re-verifies — no spec 02 §5 surface added.
     private val recoveryTickets = WsTicketStore(RECOVERY_TICKET_TTL_MS)
 
-    fun policy(): ClientPolicy {
+    // §2.5 email-keyed exponential backoff (B1-3) for LOGIN ONLY, on top of the route's per-IP bucket
+    // (passwords are botnet-guessable at ~30-40 bits). Recovery deliberately has NO per-account backoff:
+    // §F.8 "do NOT regress" forbids it (a targeted last-resort-recovery lockout DoS), and the 256-bit
+    // recovery secret makes the per-IP 5/min alone computationally sufficient (review 2026-07-16 D1).
+    internal val loginBackoff = EmailBackoff()
+
+    /**
+     * The declared per-instance policy (design 2026-07-15 §2.2): the admin-stored policy plus the
+     * OPERATOR env overlay, resolved per-origin. The instance stance (signupMode, totpRequired,
+     * instanceName/canonicalOrigin/selfHostDocsUrl) belongs to the operator env, never the in-app
+     * admin — a compromised admin session must not open the front door or disable instance TOTP.
+     * [publicOrigin] = the caller arrived via the break-glass twin origin, which ALWAYS answers
+     * signupMode="closed" (sign-in only; the client renders no invite/enroll UI) — the per-origin
+     * duality folded into declared policy so clients never sniff hostnames. offlineCacheAllowed
+     * stays admin-settable (household knob) under the env floor, tighten-only: the env can forbid,
+     * never force-allow.
+     */
+    fun policy(publicOrigin: Boolean = false): ClientPolicy {
         val stored = repo.policyJson()?.let { json.decodeFromString(ClientPolicy.serializer(), it) } ?: ClientPolicy()
-        return stored.copy(recoveryFingerprint = config.recoveryFingerprint, serverTime = now())
+        return stored.copy(
+            recoveryFingerprint = config.recoveryFingerprint,
+            serverTime = now(),
+            signupMode = if (publicOrigin) "closed" else config.signupMode,
+            totpRequired = config.totpRequired,
+            instanceName = config.instanceName,
+            canonicalOrigin = config.canonicalOrigin,
+            selfHostDocsUrl = config.selfHostDocsUrl, // Config already defaults it to <canonicalOrigin>/selfhost
+            offlineCacheAllowed = stored.offlineCacheAllowed && config.offlineCacheAllowedFloor,
+        )
     }
 
     fun setPolicy(p: ClientPolicy, byUserId: String? = null, ip: String? = null) = repo.db.tx { c ->
-        // The audit row rides the SAME tx as the policy write (INFO-5): no crash window
+        // Strip EVERY read-time overlay field back to its wire default before persisting (§2.2 —
+        // widened from the original serverTime-only strip): policy() re-overlays them from config on
+        // every read, so an old admin client PUTting back the whole object it GOT (overlay values
+        // included) round-trips losslessly and can never persist — let alone clobber — operator
+        // stance. offlineCacheAllowed is NOT stripped: it is the admin-settable knob (floor applies
+        // at read). The audit row rides the SAME tx as the policy write (INFO-5): no crash window
         // where the org policy changed with no policy_update row.
-        repo.setPolicyJsonOn(c, json.encodeToString(ClientPolicy.serializer(), p.copy(serverTime = 0)))
+        val d = ClientPolicy()
+        val stored = p.copy(
+            serverTime = d.serverTime,
+            recoveryFingerprint = d.recoveryFingerprint,
+            signupMode = d.signupMode,
+            totpRequired = d.totpRequired,
+            instanceName = d.instanceName,
+            canonicalOrigin = d.canonicalOrigin,
+            selfHostDocsUrl = d.selfHostDocsUrl,
+        )
+        repo.setPolicyJsonOn(c, json.encodeToString(ClientPolicy.serializer(), stored))
         repo.auditOn(c, "policy_update", byUserId, null, ip)
     }
 
@@ -203,33 +244,56 @@ class Service(
         // Meta = invite token-hash prefix, not the email (INFO-1): joins this row to its
         // invite_create without copying PII into the central log store.
         repo.auditOn(c, "register", userId, session.deviceId, ip, tokenHash.take(12))
-        session.toResponse(user(c, userId), invite.isAdmin, false, recoveryPieceId = pieceId)
+        // §2.6: a fresh register is never TOTP-enrolled, so under instance totpRequired its session
+        // is restricted from the first request — say so in the response (authenticate() enforces the
+        // same condition regardless, so the response only mirrors what the routes will do).
+        session.toResponse(user(c, userId), invite.isAdmin, false, recoveryPieceId = pieceId, mustEnrollTotp = config.totpRequired)
     }
 
     // ---- login ----
     // Verify OUTSIDE any tx (so a failure's audit persists in its own tx); only the
     // success path opens a write tx to issue the session.
+    //
+    // TOTP is per-instance policy (design 2026-07-15 §2.6):
+    //   enrolled?  totpRequired  publicOrigin  →  result
+    //   yes        any           any              TOTP verified, ALWAYS (origin-independent)
+    //   no         false         no               password-only login (reference default)
+    //   no         false         yes              403 public_login_requires_totp (break-glass unchanged)
+    //   no         true          no               login OK → RESTRICTED session (mustEnrollTotp=true)
+    //   no         true          yes              403 public_login_requires_totp (no restricted hatch
+    //                                             on the emergency origin)
     fun login(req: LoginRequest, ip: String, publicOrigin: Boolean = false): SessionResponse {
+        // §2.5: per-account exponential backoff keyed on the NORMALIZED submitted email — existing
+        // account or not (the prelogin fake-salt anti-enumeration discipline: a throttle that only
+        // guarded real accounts would itself be an account oracle). Checked before verifier work;
+        // a blocked attempt neither reveals anything nor extends the lock.
+        if (loginBackoff.blocked(req.email)) throw RateLimited()
         val user = repo.userByEmail(req.email)
         if (user == null || user.status != "active") {
             ServerCrypto.verify(DUMMY_VERIFIER, req.authKey) // uniform cost
+            loginBackoff.fail(req.email)
             throw Unauthorized()
         }
         if (!ServerCrypto.verify(user.verifier, req.authKey)) {
             repo.audit("login_fail", user.userId, null, ip)
+            loginBackoff.fail(req.email)
             throw Unauthorized()
         }
-        // Break-glass hardening (spec 03 §2): via the public origin, server-TOTP is
-        // mandatory — an account without it enrolled cannot log in publicly at all.
-        if (publicOrigin) {
-            val secret = user.totpSecret ?: run {
-                repo.audit("login_fail_totp", user.userId, null, ip, "not_enrolled")
-                throw Forbidden("public_login_requires_totp")
+        var mustEnrollTotp = false
+        val secret = user.totpSecret
+        if (secret != null) {
+            // §2.6 row 1: an ENROLLED secret is verified on EVERY origin. (The old code checked it
+            // only via the public origin — the latent gap this closes: a tailnet login never
+            // challenged an enrolled second factor.) Missing/wrong/replayed codes count toward the
+            // email backoff: the code is guessing surface exactly like the password.
+            val code = req.totp ?: run {
+                loginBackoff.fail(req.email)
+                throw Unauthorized("totp_required")
             }
-            val code = req.totp ?: throw Unauthorized("totp_required")
             val step = verifyTotpCode(secret, code, user.totpLastStep)
             if (step == null) {
                 repo.audit("login_fail", user.userId, null, ip, "totp")
+                loginBackoff.fail(req.email)
                 throw Unauthorized()
             }
             // Guarded consume: the WHERE clause makes step acceptance atomic, so two
@@ -239,13 +303,27 @@ class Service(
             }
             if (consumed != 1) {
                 repo.audit("login_fail", user.userId, null, ip, "totp_replay")
+                loginBackoff.fail(req.email)
                 throw Unauthorized()
             }
+        } else if (publicOrigin) {
+            // Rows 3+5 (spec 03 §2, unchanged): via the public break-glass origin an account without
+            // TOTP enrolled cannot log in at all — regardless of totpRequired, there is no
+            // restricted-session hatch on the emergency origin. Not a backoff failure: the password
+            // above was CORRECT; this is a policy refusal, not guessing surface.
+            repo.audit("login_fail_totp", user.userId, null, ip, "not_enrolled")
+            throw Forbidden("public_login_requires_totp")
+        } else if (config.totpRequired) {
+            // Row 4: instance requires TOTP, user not yet enrolled → the login SUCCEEDS into a
+            // RESTRICTED session. requirePrincipal answers 403 totp_enrollment_required on every
+            // authed route except TOTP setup/confirm + logout until enrollment completes (§2.6).
+            mustEnrollTotp = true
         }
+        loginBackoff.success(req.email) // §2.5: reset the consecutive-failure state
         return repo.db.tx { c ->
             val session = issueSession(c, user.userId, req.device.platform, req.device.name)
             repo.auditOn(c, "login", user.userId, session.deviceId, ip)
-            session.toResponse(user, user.isAdmin, user.mustChangePassword)
+            session.toResponse(user, user.isAdmin, user.mustChangePassword, mustEnrollTotp = mustEnrollTotp)
         }
     }
 
@@ -342,6 +420,12 @@ class Service(
      * match.
      */
     fun recoverySelfVerify(req: RecoveryVerifyRequest, ip: String): RecoveryVerifyResponse {
+        // Recovery keeps ONLY the route's per-IP 5/min fixed window (App.kt) — NO per-account counter.
+        // §F.8 forbids a per-account backoff here (it would be a targeted lockout of the last-resort
+        // recovery path), and the recovery secret is 256-bit CSPRNG (MemberRecovery), so per-IP alone
+        // already makes online guessing computationally unreachable (review 2026-07-16 D1; corrects the
+        // design §2.5.3/B1-6 amendment, which wrongly copied login's backoff here). §F.5's uniform 401
+        // across unknown-email / no-row / wrong-secret keeps this from being an account oracle.
         val user = repo.userByEmail(req.email)?.takeIf { it.status == "active" }
         val row = user?.let { repo.memberRecoveryRow(it.userId) }
         if (user == null || row == null) {
@@ -576,7 +660,14 @@ class Service(
         if (s.revokedAt != null || s.accessExpiresAt < now()) return null
         val u = repo.userById(s.userId) ?: return null
         if (u.status != "active") return null
-        return Principal(s.userId, s.deviceId, s.sessionId, u.isAdmin)
+        return Principal(
+            s.userId, s.deviceId, s.sessionId, u.isAdmin,
+            // §2.6 restricted session, computed from LIVE state (env stance + enrollment row) so
+            // (a) confirming TOTP via the allowlisted routes lifts the restriction on this same
+            // session, and (b) flipping ANDVARI_TOTP_REQUIRED on restricts every un-enrolled
+            // session at its next request — no session column, no migration.
+            mustEnrollTotp = config.totpRequired && u.totpSecret == null,
+        )
     }
 
     /**
@@ -1312,12 +1403,15 @@ class Service(
     private fun user(c: Connection, userId: String): UserRow =
         c.queryOne("SELECT * FROM users WHERE userId=?", userId) { rs -> userRowPublic(rs) } ?: error("user vanished")
 
-    private fun IssuedSession.toResponse(u: UserRow, isAdmin: Boolean, mustChange: Boolean, recoveryPieceId: String? = null) = SessionResponse(
+    private fun IssuedSession.toResponse(u: UserRow, isAdmin: Boolean, mustChange: Boolean, recoveryPieceId: String? = null, mustEnrollTotp: Boolean = false) = SessionResponse(
         userId = u.userId, deviceId = deviceId, accessToken = access, refreshToken = refresh,
         accountKeys = buildAccountKeys(u),
         isAdmin = isAdmin, mustChangePassword = mustChange, totpEnrolled = u.totpSecret != null,
         // Piece-binding (design 2026-07-13 §1.3): ONLY register passes an id — login/refresh leave it null.
         recoveryPieceId = recoveryPieceId,
+        // §2.6 restricted-session marker: the client's cue to route into TOTP enrollment. The
+        // authoritative enforcement is server-side (requirePrincipal), keyed off the same state.
+        mustEnrollTotp = mustEnrollTotp,
     )
 
     companion object {

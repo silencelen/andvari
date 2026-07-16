@@ -194,7 +194,7 @@ fun buildServices(config: Config, notifier: Notifier): Services {
     }
     val anyEmailEnv = !config.smtpHost.isNullOrBlank() || !config.graphClientId.isNullOrBlank() || !config.graphTenantId.isNullOrBlank()
     if (email == null && anyEmailEnv) {
-        System.err.println("[andvari] email-invite is OFF — ${config.inviteBaseUrlIssue() ?: "email transport config incomplete (a full SMTP or Graph set)"}")
+        System.err.println("[andvari] email-invite is OFF — ${config.canonicalOriginIssue() ?: "email transport config incomplete (a full SMTP or Graph set)"}")
     }
     return Services(repo, service, AdminService(repo, config), HibpRelay(repo, http), notifier, config, metrics, janitor, email)
 }
@@ -335,7 +335,9 @@ fun Application.andvariModule(services: Services) {
         // RFC1918/loopback LAN dev path is never pinned to HTTPS (an HSTS pin there would brick dev).
         // This header alone is insufficient without the CF "Always Use HTTPS" redirect (ops), but it
         // closes the header half in-code so a first-visit-over-TLS client won't downgrade thereafter.
-        if (context.isPublicOrigin(config)) {
+        // §7.2 re-home: ANDVARI_FORCE_HSTS=1 opts a single-origin TLS instance in (the reference
+        // instance sets it once ANDVARI_PUBLIC_HOSTNAME is retired) — default off, dev unchanged.
+        if (context.isPublicOrigin(config) || config.forceHsts) {
             context.response.headers.append("Strict-Transport-Security", "max-age=31536000; includeSubDomains", false)
         }
     }
@@ -417,8 +419,13 @@ fun Application.andvariModule(services: Services) {
         }
 
         get("/api/v1/client-policy") {
-            val p = service.policy()
-            call.respond(p)
+            // §2.2: fetched pre-login by all four clients on boot/unlock/switch/landing — the
+            // most-hammered anonymous route on a public instance, so it gets a per-IP bucket
+            // (generous: a legitimate client re-fetches a handful of times a minute at worst).
+            if (!limiter.allow("client_policy:${call.clientIp(config)}", 60, 60_000)) throw RateLimited()
+            // Per-origin overlay (§2.2): the break-glass twin origin always answers
+            // signupMode="closed" — same isPublicOrigin authority the login route uses.
+            call.respond(service.policy(call.isPublicOrigin(config)))
         }
 
         // Org recovery PUBLIC key (base64url) — public; the client confirms its
@@ -467,8 +474,11 @@ fun Application.andvariModule(services: Services) {
         }
         post("/api/v1/auth/login") {
             val publicOrigin = call.isPublicOrigin(config)
-            // Public origin is rate-limited harder (spec 03 §8: 5/min vs 10/min).
-            if (!limiter.allow("login:${call.clientIp(config)}", if (publicOrigin) 5 else 10, 60_000)) throw RateLimited()
+            // §2.5 (B1-3): ONE flat per-IP bucket, decoupled from origin — the old private-origin
+            // relaxation to 10/min is revoked (unsetting ANDVARI_PUBLIC_HOSTNAME must not loosen
+            // online-guessing resistance). ANDVARI_LOGIN_RATE_PER_MIN tunes it (default 5); the
+            // email-keyed exponential backoff inside Service.login is the per-account half.
+            if (!limiter.allow("login:${call.clientIp(config)}", config.loginRatePerMin, 60_000)) throw RateLimited()
             enforceVersion(call, service)
             val req = call.receive<LoginRequest>()
             call.respond(service.login(req, call.clientIp(config), publicOrigin))
@@ -789,9 +799,11 @@ fun Application.andvariModule(services: Services) {
             // A3: send the enroll link AFTER the tx committed (createInvite returned), off the request
             // path, best-effort, in the APPLICATION scope so it survives the response — a slow/failed
             // relay never stalls the SQLite writer or the HTTP reply. The link is composed from the
-            // server-owned base URL (never a client-supplied URL); a null (ill-formed) skips the email.
+            // server-owned canonical origin (§3: ANDVARI_CANONICAL_ORIGIN, with the deprecated
+            // ANDVARI_INVITE_BASE_URL as fallback alias — never a client-supplied URL); a null
+            // (ill-formed) skips the email.
             val emailSender = services.email
-            val base = config.inviteBaseUrl
+            val base = config.canonicalOrigin
             // #21: each branch reports its own emailStatus (see InviteCreateResponse) so a mint-but-
             // no-email outcome is visible to the admin, not indistinguishable from a send.
             val emailStatus = when {
@@ -893,7 +905,12 @@ fun Application.andvariModule(services: Services) {
             // fallback takes the token's own session device — so a single-device revoke can target it.
             val auth = call.request.queryParameters["ticket"]?.let { services.wsTickets.redeem(it) }
                 ?: call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ")?.trim()
-                    ?.let { service.authenticate(it) }?.let { EventsTicketStore.Redeemed(it.userId, it.deviceId) }
+                    ?.let { service.authenticate(it) }
+                    // §2.6: the Bearer upgrade path bypasses requirePrincipal, so it mirrors the
+                    // restricted-session refusal here (the ticket path is covered upstream — a
+                    // restricted session can't mint a ticket in the first place).
+                    ?.takeIf { !it.mustEnrollTotp }
+                    ?.let { EventsTicketStore.Redeemed(it.userId, it.deviceId) }
             if (auth == null) {
                 close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "unauthorized"))
                 return@webSocket
@@ -922,6 +939,27 @@ fun Application.andvariModule(services: Services) {
             } finally {
                 services.notifier.unregister(auth.userId, this)
             }
+        }
+
+        // ---- self-host docs (design 2026-07-15 §8.1, B2-4) ----
+        // A REAL route registered BEFORE the SPA fallback below (whose {path...} catch-all would
+        // otherwise swallow /selfhost into index.html; exact paths also beat the catch-all in ktor
+        // routing — both the order and the specificity protect it). Serves a bundled HTML render of
+        // docs/self-hosting.md plus the deploy artifacts as downloads, baked into the jar by
+        // server/build.gradle.kts processResources from files the DOCS/DEPLOY lane owns
+        // (docs/self-hosting.md + deploy/{docker-compose.yml,andvari.env.template,bringup.sh}).
+        // Registered unconditionally (webDir or not) so `selfHostDocsUrl` resolves on EVERY instance.
+        get("/selfhost") {
+            call.response.headers.append("Content-Security-Policy", SelfHost.CSP, false)
+            call.respondText(SelfHost.pageHtml(), ContentType.Text.Html)
+        }
+        get("/selfhost/{file}") {
+            // Fixed-name allowlist inside SelfHost.artifact — no path input reaches the classpath
+            // lookup (and ktor single-segment params never match a slash anyway).
+            val name = call.parameters["file"] ?: return@get call.respond(HttpStatusCode.NotFound, "not found")
+            val body = SelfHost.artifact(name) ?: return@get call.respond(HttpStatusCode.NotFound, "not found")
+            call.response.headers.append("Content-Disposition", "attachment; filename=\"$name\"", false)
+            call.respondBytes(body, ContentType.Text.Plain)
         }
 
         // ---- static web (served with a self-only CSP) ----
@@ -978,10 +1016,29 @@ private suspend fun RoutingContext.sharingPrincipal(config: Config, service: Ser
     return p
 }
 
+/**
+ * §2.6: the ONLY authenticated routes a TOTP-enrollment-RESTRICTED session may reach — the setup +
+ * confirm pair that lifts the restriction, and logout. Everything else (status GET and disable
+ * included) answers 403 totp_enrollment_required until enrollment completes.
+ */
+private val TOTP_ENROLL_ALLOWED_PATHS = setOf(
+    "/api/v1/account/totp/setup",
+    "/api/v1/account/totp/confirm",
+    "/api/v1/auth/logout",
+)
+
 private fun requirePrincipal(call: io.ktor.server.application.ApplicationCall, service: Service): Principal {
     val token = call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ")?.trim()
         ?: throw Unauthorized("missing_token")
-    return service.authenticate(token) ?: throw Unauthorized()
+    val p = service.authenticate(token) ?: throw Unauthorized()
+    // §2.6 restricted session (instance totpRequired + user not enrolled): the SINGLE enforcement
+    // point — every requirePrincipal route inherits it. The /events WS upgrade is the one authed
+    // path not built on requirePrincipal: its ticket path can't be reached (minting a ticket goes
+    // through here) and its Bearer fallback mirrors this check in-route.
+    if (p.mustEnrollTotp && call.request.path() !in TOTP_ENROLL_ALLOWED_PATHS) {
+        throw Forbidden("totp_enrollment_required")
+    }
+    return p
 }
 
 private fun requireAdmin(call: io.ktor.server.application.ApplicationCall, service: Service): Principal {
