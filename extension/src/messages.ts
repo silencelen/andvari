@@ -165,6 +165,11 @@ export type Req =
   | { type: "disableQuickUnlock" }
   /** Popup: the one-time post-unlock offer card was dismissed (durable, storage.local — breaker B7). */
   | { type: "dismissQuickUnlockOffer" }
+  /** Options page ONLY: the explicit "Remove data for this server" action (design §4.2/B2-7 — the
+   *  ONLY destructive per-origin path; a server switch PRESERVES the old origin's namespace). Purges
+   *  exactly `origin`'s namespaced keys (quick-unlock/PIN co-key + cached channel state) everywhere,
+   *  touching no other origin. `origin` is a raw/canonical origin string; the SW re-canonicalizes it. */
+  | { type: "purgeServerData"; origin: string }
   | { type: "ping" }
   /** Content: logins whose uris match `host` (state-aware). */
   | { type: "matches"; host: string }
@@ -312,7 +317,9 @@ export type Res<T extends Req["type"]> = T extends "status"
                                             ? { ok: boolean; outcome?: CardFillOutcome; code?: CardFillFailCode; error?: string }
                                             : T extends "revealCardForFill"
                                               ? { ok: boolean; fields?: CardFillFields; error?: string }
-                                              : never;
+                                              : T extends "purgeServerData"
+                                                ? { ok: boolean }
+                                                : never;
 
 /** SW → content (chrome.tabs.sendMessage): fill this item now (popup-granted). The
  *  content script performs its normal `reveal` round-trip with its own host — the SW

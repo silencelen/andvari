@@ -121,6 +121,26 @@ body {
 .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 .dot.off { background: var(--ink-faint); }
 
+/* Persistent origin display (design §5.1): the raw server origin, middle-truncated in JS, taking the
+   flexible middle of the header and pushing the dot to the edge. Monospaced so a homograph can't hide
+   in a proportional font; focusable so keyboard users reach the full value (title/aria-label). */
+.server-origin {
+  flex: 1 1 auto; min-width: 0; text-align: right; margin: 0 9px;
+  font-family: var(--mono); font-size: 11px; color: var(--ink-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: ltr;
+}
+.server-origin:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+
+/* Firefox first-run route strip — the must-change-strip idiom, gold rather than danger (setup, not
+   error): a full-width actionable banner that opens Options where the grant gesture happens. */
+.host-grant-cta {
+  display: block; width: 100%; text-align: left; font: inherit; font-size: 12.5px; font-weight: 600;
+  color: var(--gold-text); cursor: pointer;
+  background: rgba(208, 169, 74, 0.12); border: 0; border-bottom: 1px solid var(--edge);
+  padding: 10px 16px;
+}
+.host-grant-cta:hover { background: rgba(208, 169, 74, 0.2); }
+
 /* ---- locked view: mini auth card (web card-hero idiom) ---- */
 .locked { padding: 20px 16px 16px; }
 .hero { text-align: center; margin-bottom: 16px; }

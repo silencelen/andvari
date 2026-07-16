@@ -16,6 +16,7 @@ await esbuild.build({
     background: "src/background.ts",
     content: "src/content.ts",
     popup: "src/popup.ts",
+    options: "src/options.ts", // wave-3 endpoint switcher (options_ui in both manifests)
     offscreen: "src/offscreen.ts", // Chrome clipboard-clear backstop document (E1-4); inert on Firefox
     "kdf-worker": "src/kdf-worker.ts",
   },
@@ -32,7 +33,8 @@ await esbuild.build({
 const firefox = process.env.TARGET === "firefox";
 cpSync(firefox ? "manifest.firefox.json" : "manifest.json", "dist/manifest.json");
 cpSync("popup.html", "dist/popup.html");
-cpSync("popup.css", "dist/popup.css"); // the ported treasury theme; popup.html <link>s it
+cpSync("options.html", "dist/options.html"); // wave-3 options_ui page; <link>s popup.css for the theme
+cpSync("popup.css", "dist/popup.css"); // the ported treasury theme; popup.html + options.html <link> it
 cpSync("offscreen.html", "dist/offscreen.html"); // Chrome clipboard-clear backstop (E1-4); loads dist/offscreen.js
 cpSync("icons", "dist/icons", { recursive: true }); // both manifests reference icons/icon{16,32,48,128}.png
 cpSync("INSTALL.txt", "dist/INSTALL.txt"); // tester-facing steps travel inside the zip

@@ -44,6 +44,8 @@ import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carrie
 import { resolveSaveAction, saveTargetFor } from "./savetarget";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
+import { armGate, withRedeemInFlight } from "./locksequence";
+import { applyServerSwitch, purgeServerDataFor } from "./serverswitch";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -613,14 +615,28 @@ chrome.storage.onChanged.addListener((changes, area) => {
  *  wave-3 "remove data for this server" action (purgeOriginNamespace). */
 async function applyServerChange(): Promise<void> {
   await ensureLoaded();
-  const next = await getServerUrl();
-  if (next === serverUrl) return;
-  redeemGen++; // an in-flight PIN redeem belongs to the old origin — it discards itself (owns() guard)
-  if (session) await doLock("manual"); // still under the OLD originKey: the stash lands in the old namespace
-  serverUrl = next;
-  currentOriginKey = originKeyFor(next);
-  api = makeApi(next);
-  await registerAutofillScripts();
+  // The §4.1 origin-clean swap ORDER (bump redeemGen → lock-under-OLD → adopt new origin → swap in a
+  // FRESH api for it → re-register autofill) lives in the serverswitch leaf, so serverswitch.test.ts
+  // drives it with a real AndvariApi and proves no Authorization header crosses the change (B1-5).
+  // background wires the chrome-coupled dependencies; the no-op-when-unchanged check is inside the leaf.
+  await applyServerSwitch<AndvariApi>({
+    nextUrl: await getServerUrl(),
+    currentUrl: serverUrl,
+    hasSession: session !== null,
+    bumpRedeemGen: () => {
+      redeemGen++; // an in-flight PIN redeem belongs to the old origin — it discards itself (owns() guard)
+    },
+    lock: () => doLock("manual"), // still under the OLD originKey: the stash lands in the old namespace
+    makeApi,
+    installApi: (a) => {
+      api = a;
+    },
+    setOrigin: (u) => {
+      serverUrl = u;
+      currentOriginKey = originKeyFor(u);
+    },
+    registerAutofill: registerAutofillScripts,
+  });
 }
 
 /** Wave-3 hook (§4.2): the ONLY destructive per-origin path. The options page's explicit "remove
@@ -758,9 +774,22 @@ function persistTabs(): void {
  *  a PIN. `signout` (an explicit user action / revocation) NEVER arms and full-wipes the blob + co-key.
  *  When quick unlock is not enrolled, an idle/manual lock stays byte-identical to today's full erase. */
 async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise<void> {
-  await serverReady; // the arm/wipe below must land in the CURRENT origin's namespace (§4.2)
+  // D3: armGate AWAITS ensureLoaded (hydrates the persisted token pair) BEFORE it samples api.getTokens()
+  // for the arm decision, returning both the sampled pair (the armed branch stashes it) and the verdict.
+  // An idle-autolock alarm can fire into a COLD SW whose `api` holds no tokens yet; sampling before
+  // hydration would see {access:null} and WIPE the enrolled quick-unlock instead of arming it — so the
+  // ordering lives in the locksequence leaf (locksequence.test.ts pins that reverting to a non-hydrating
+  // load re-wipes). ensureLoaded awaits serverReady first, so the arm/wipe lands in the CURRENT origin's
+  // namespace (§4.2), and it is idempotent — every other doLock caller (applyServerChange, handle(),
+  // onRevoked) already ran it. It restores session too, but every write below is a CLEAR (session=null,
+  // tabs.clear, SKEY remove), so a briefly-rehydrated session is immediately re-locked — never resurrected.
+  const { tokens: toks, attempt: attemptArm } = await armGate({
+    hydrate: ensureLoaded,
+    readTokens: () => api.getTokens(),
+    isSignout: reason === "signout",
+    compartmentTrusted: quCompartmentTrusted,
+  });
   redeemGen++; // any lock invalidates an in-flight quick-unlock redeem (owns() guard, breaker A5⊕B4)
-  const toks = api.getTokens(); // capture the live pair BEFORE clearing — the armed branch stashes it
   events?.close(); // live socket + all its timers die FIRST — locked means no bell traffic at all
   events = null;
   const secondsAtLock = autoLockSeconds; // capture before the reset below (web App.tsx:209 parity)
@@ -771,17 +800,19 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   grants.clear();
   cardGrants.clear();
 
-  // Arm decision. `signout` skips arming and forces a full wipe; idle/manual attempt to arm — but ONLY
-  // when the storage.session compartment is trusted-only (breaker A9⊕B5: without that guarantee we must
-  // NOT retain a crackable UVK blob + a live refresh token, so we fall back to today's full erase + wipe).
-  // arm() fails CLOSED to "declined" if reading the flag throws (breaker B3). On "armed" the record now
-  // holds the token stash; "not-enrolled" leaves nothing (byte-identical to today); SKEY+TKEY are erased
-  // below in ALL cases so a locked SW reports locked.
-  if (reason !== "signout" && toks.access && quCompartmentTrusted) {
+  // Arm decision (attemptArm, computed by armGate above). `signout` skips arming and forces a full wipe;
+  // idle/manual attempt to arm — but ONLY when the storage.session compartment is trusted-only (breaker
+  // A9⊕B5: without that guarantee we must NOT retain a crackable UVK blob + a live refresh token, so we
+  // fall back to today's full erase + wipe). arm() fails CLOSED to "declined" if reading the flag throws
+  // (breaker B3). On "armed" the record now holds the token stash; "not-enrolled" leaves nothing
+  // (byte-identical to today); SKEY+TKEY are erased below in ALL cases so a locked SW reports locked.
+  if (attemptArm) {
     // .catch → "declined": arm() must NEVER throw past the [SKEY,TKEY] erase below (review F1 — an
     // unexpected throw, e.g. a malformed record, would otherwise skip the erase and leave the just-
     // locked session snapshot on disk, rehydratable into an unlocked vault on the next SW wake).
-    const armed = await quickUnlock.arm({ access: toks.access, refresh: toks.refresh }).catch(() => "declined" as const);
+    // toks.access is non-null here (attemptArm ⇒ shouldAttemptArm required it); the `!` restates that
+    // the extracted gate can't narrow across the armGate call the way an inline `&& toks.access` would.
+    const armed = await quickUnlock.arm({ access: toks.access!, refresh: toks.refresh }).catch(() => "declined" as const);
     if (armed === "declined") {
       await quickUnlock.wipe(); // stale/ineligible/fail-closed → erase the residue
     }
@@ -1061,6 +1092,13 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return disableQuickUnlock();
     case "dismissQuickUnlockOffer":
       return dismissQuickUnlockOffer();
+    case "purgeServerData":
+      // §4.2/B2-7 — the ONLY destructive per-origin path (the options page's explicit "Remove data for
+      // this server"). The popup-only sender guard + canonicalize + originKey derivation live in the
+      // serverswitch leaf (serverswitch.test.ts drives them, incl. the tab-sender rejection): a sender
+      // WITH a tab is a content script ⇒ refused (parity with revealCardField / fillCardFromPopup);
+      // a non-origin string yields no key ⇒ no-op; safe for the current origin, never touches another's.
+      return purgeServerDataFor(msg.origin, sender.tab !== undefined, purgeOriginNamespace) satisfies Promise<Res<"purgeServerData">>;
     case "scheduleClipboardClear":
       return scheduleClipboardClear();
     case "matches": {
@@ -1370,78 +1408,92 @@ async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
   if (gen !== redeemGen || session) return { ok: false, code: "aborted" };
 
   api.setTokens(begin.tokens.access, begin.tokens.refresh);
-  redeemInFlight = true; // token mutations now land in QKEY.lockedTokens (persistTokens), not a session
+  // withRedeemInFlight sets redeemInFlight for the server dance and GUARANTEES it clears on EVERY exit
+  // (success / owns()-abort return / throw) — a mid-redeem switch/lock that bumps redeemGen and aborts
+  // here can never STRAND the flag true (which would later misroute a full unlock's initial setTokens
+  // into the QKEY locked-token stash). While set, api token mutations route to that stash (persistTokens).
+  // The inner try/catch stays INSIDE the body so the catch runs with the flag still set (unchanged); the
+  // `if (!session) setTokens(null,null)` cleanup sits in the OUTER finally so it runs AFTER the flag is
+  // cleared — the exact order the prior single finally used. locksequence.test.ts pins the guaranteed clear.
   try {
-    // A3⊕B2: forced rotation is the FIRST server contact. It is also the account-state read that
-    // catches a rescue (which revokes all sessions, spec 03) — a revoked/rotated refresh → 401.
-    const rot = await api.forceRefresh();
-    if (gen !== redeemGen) return { ok: false, code: "aborted" };
-    if (rot === "revoked") {
-      await doSignOut(); // definitive-401 → FULL wipe (blob + co-key + tokens) → full sign-in
-      return { ok: false, code: "revoked" };
-    }
-    if (rot === "transient") {
-      api.setTokens(null, null); // offline / 5xx — blob KEPT; the master password needs the network too
-      return { ok: false, code: "network" };
-    }
+    return await withRedeemInFlight(
+      (v) => {
+        redeemInFlight = v; // true → token mutations land in QKEY.lockedTokens (persistTokens), not a session
+      },
+      async (): Promise<Res<"unlockWithPin">> => {
+        try {
+          // A3⊕B2: forced rotation is the FIRST server contact. It is also the account-state read that
+          // catches a rescue (which revokes all sessions, spec 03) — a revoked/rotated refresh → 401.
+          const rot = await api.forceRefresh();
+          if (gen !== redeemGen) return { ok: false, code: "aborted" };
+          if (rot === "revoked") {
+            await doSignOut(); // definitive-401 → FULL wipe (blob + co-key + tokens) → full sign-in
+            return { ok: false, code: "revoked" };
+          }
+          if (rot === "transient") {
+            api.setTokens(null, null); // offline / 5xx — blob KEPT; the master password needs the network too
+            return { ok: false, code: "network" };
+          }
 
-    const keys = await api.getAccountKeys();
-    assertServerKdfParams(keys.kdfParams); // breaker B6: re-assert the H1 master-KDF floor on redeem
-    // The seed open throwing = stale/foreign UVK (→ wipe); the compare failing = IdentityMismatchError
-    // (→ HARD FAIL, blob KEPT). Same strictness as the full unlock (verifyServerIdentity).
-    const identity = boxKeypairFromSeed(open(begin.uvk, fromB64(keys.encryptedIdentitySeed), adIdkey(begin.userId)));
-    verifyServerIdentity(identity.publicKey, keys.identityPub);
+          const keys = await api.getAccountKeys();
+          assertServerKdfParams(keys.kdfParams); // breaker B6: re-assert the H1 master-KDF floor on redeem
+          // The seed open throwing = stale/foreign UVK (→ wipe); the compare failing = IdentityMismatchError
+          // (→ HARD FAIL, blob KEPT). Same strictness as the full unlock (verifyServerIdentity).
+          const identity = boxKeypairFromSeed(open(begin.uvk, fromB64(keys.encryptedIdentitySeed), adIdkey(begin.userId)));
+          verifyServerIdentity(identity.publicKey, keys.identityPub);
 
-    const sync = await api.sync(0);
-    await fetchPolicyInto(); // breaker B6: re-fetch autoLockSeconds — done BEFORE the final owns-check so
-    if (gen !== redeemGen) return { ok: false, code: "aborted" }; // no network await follows the session build
-    const vaultKeys = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
-    const items = decryptItems(sync, vaultKeys);
-    const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
-    // Provenance QUICK + the COPIED stamp (breaker A4). mustChangePassword is false by construction —
-    // a rescue would have revoked the session and the forced refresh above would have 401'd (breaker B6).
-    session = {
-      userId: begin.userId,
-      email: begin.email,
-      items,
-      vaultKeys,
-      personalVaultId,
-      mustChangePassword: false,
-      uvk: begin.uvk, // UVK retained in memory (breaker B1) so a re-enroll from this QUICK session works
-      provenance: "QUICK",
-      lastFullUnlockAt: begin.blob.lastFullUnlockAt,
-    };
-    redeemInFlight = false; // a session exists now → persistTokens routes to the full snapshot again
-    // From here only LOCAL storage awaits remain (no doLock is UI-reachable during a redeem — the popup
-    // shows the locked PIN screen, whose Lock/Sign-out buttons are unlocked-only; the gen checks above
-    // are defense-in-depth). completeRedeem clears the token stash and keeps the blob for the next lock.
-    await persistSession();
-    await quickUnlock.completeRedeem(autoLockSeconds);
-    void chrome.storage.session.remove(NKEY);
-    void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
-    void ensureSocket(true);
-    armAutoLock();
-    reofferPendingSaves();
-    return { ok: true };
-  } catch (e) {
-    if (e instanceof IdentityMismatchError) return { ok: false, code: "identity_mismatch" }; // blob KEPT (evidence)
-    if (e instanceof KdfPolicyError) {
-      await doSignOut(); // the server tried to weaken the master KDF on redeem — wipe, force full sign-in
-      return { ok: false, code: "kdf_policy" };
-    }
-    if (e instanceof ApiError) {
-      if (e.status === 401 || e.status === 403) {
-        await doSignOut(); // definitive-401 survived the inner refresh → FULL wipe
-        return { ok: false, code: "revoked" };
-      }
-      return { ok: false, code: "server_error" }; // transient server — blob kept
-    }
-    if (e instanceof TypeError) return { ok: false, code: "network" }; // fetch rejection — blob kept
-    // Generic Error — encryptedIdentitySeed would not open under the recovered UVK: stale/foreign UVK.
-    await quickUnlock.wipe();
-    return { ok: false, code: "stale_uvk" };
+          const sync = await api.sync(0);
+          await fetchPolicyInto(); // breaker B6: re-fetch autoLockSeconds — done BEFORE the final owns-check so
+          if (gen !== redeemGen) return { ok: false, code: "aborted" }; // no network await follows the session build
+          const vaultKeys = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
+          const items = decryptItems(sync, vaultKeys);
+          const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
+          // Provenance QUICK + the COPIED stamp (breaker A4). mustChangePassword is false by construction —
+          // a rescue would have revoked the session and the forced refresh above would have 401'd (breaker B6).
+          session = {
+            userId: begin.userId,
+            email: begin.email,
+            items,
+            vaultKeys,
+            personalVaultId,
+            mustChangePassword: false,
+            uvk: begin.uvk, // UVK retained in memory (breaker B1) so a re-enroll from this QUICK session works
+            provenance: "QUICK",
+            lastFullUnlockAt: begin.blob.lastFullUnlockAt,
+          };
+          redeemInFlight = false; // a session exists now → persistTokens routes to the full snapshot again
+          // From here only LOCAL storage awaits remain (no doLock is UI-reachable during a redeem — the popup
+          // shows the locked PIN screen, whose Lock/Sign-out buttons are unlocked-only; the gen checks above
+          // are defense-in-depth). completeRedeem clears the token stash and keeps the blob for the next lock.
+          await persistSession();
+          await quickUnlock.completeRedeem(autoLockSeconds);
+          void chrome.storage.session.remove(NKEY);
+          void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
+          void ensureSocket(true);
+          armAutoLock();
+          reofferPendingSaves();
+          return { ok: true };
+        } catch (e) {
+          if (e instanceof IdentityMismatchError) return { ok: false, code: "identity_mismatch" }; // blob KEPT (evidence)
+          if (e instanceof KdfPolicyError) {
+            await doSignOut(); // the server tried to weaken the master KDF on redeem — wipe, force full sign-in
+            return { ok: false, code: "kdf_policy" };
+          }
+          if (e instanceof ApiError) {
+            if (e.status === 401 || e.status === 403) {
+              await doSignOut(); // definitive-401 survived the inner refresh → FULL wipe
+              return { ok: false, code: "revoked" };
+            }
+            return { ok: false, code: "server_error" }; // transient server — blob kept
+          }
+          if (e instanceof TypeError) return { ok: false, code: "network" }; // fetch rejection — blob kept
+          // Generic Error — encryptedIdentitySeed would not open under the recovered UVK: stale/foreign UVK.
+          await quickUnlock.wipe();
+          return { ok: false, code: "stale_uvk" };
+        }
+      },
+    );
   } finally {
-    redeemInFlight = false;
     if (!session) api.setTokens(null, null); // a failed redeem must never leave tokens live in the api while locked
   }
 }

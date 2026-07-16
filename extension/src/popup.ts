@@ -8,7 +8,8 @@
  */
 import { CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
-import { getServerUrl, originMatchPattern } from "./serverurl";
+import { getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
+import { shouldRouteToOptions } from "./grantflow";
 import { displaySite, safeSiteUrl } from "./siteurl";
 
 const FLASH_MS = 1200;
@@ -1004,22 +1005,46 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-/** Wave-3 hook (design §5.1): Firefox MV3 grants NO host permissions at install (optional-by-
- *  default), so a first run may lack the grant for the configured origin — every fetch then fails
- *  as "unreachable". DETECTION ONLY for now, parked on <body data-missing-host-grant>; the wave-3
- *  options page owns the routing (popup → options → permissions.request under the user gesture,
- *  which also makes the dynamic autofill registration effective — background.permissions.onAdded). */
-async function detectMissingHostGrant(): Promise<void> {
-  try {
-    const pattern = originMatchPattern(await getServerUrl());
-    if (!pattern) return;
-    const granted = await chrome.permissions.contains({ origins: [pattern] });
-    document.body.dataset.missingHostGrant = granted ? "false" : "true";
-  } catch {
-    /* permissions API unavailable — leave the attribute unset (no detection, no false alarm) */
-  }
+/** Persistent anti-phishing origin display (design §5.1): render the RAW configured origin in the
+ *  header, middle-truncated to fit, with the FULL origin on title + aria-label (hover/focus). Read
+ *  fresh from storage.local every open — never cached — so it always reflects the real switch target. */
+async function renderServerOrigin(): Promise<void> {
+  const origin = await getServerUrl();
+  const node = el("server-origin");
+  node.textContent = middleTruncateOrigin(origin);
+  node.title = origin;
+  node.setAttribute("aria-label", `Connected server: ${origin}`);
 }
 
+/** Wave-3 route (design §5.1): Firefox MV3 grants NO host permissions at install (optional-by-
+ *  default), so a first run lacks the grant for the configured origin — every fetch then fails as
+ *  "unreachable". Detect the missing grant and ROUTE to the options page (the only place a
+ *  permissions.request can run under a user gesture, which also lights up the dynamic autofill
+ *  registration via background.permissions.onAdded). `granted===false` (not null/unknown) is the
+ *  only trigger, so a permissions-API-less engine never shows a false route (grantflow decision). */
+async function detectMissingHostGrant(): Promise<void> {
+  let granted: boolean | null = null;
+  try {
+    const pattern = originMatchPattern(await getServerUrl());
+    if (pattern) granted = await chrome.permissions.contains({ origins: [pattern] });
+  } catch {
+    /* permissions API unavailable — granted stays null (no detection, no false route) */
+  }
+  document.body.dataset.missingHostGrant = granted === false ? "true" : "false";
+  if (shouldRouteToOptions(granted)) el("host-grant-cta").hidden = false;
+}
+
+el("host-grant-cta").addEventListener("click", () => {
+  try {
+    chrome.runtime.openOptionsPage();
+  } catch {
+    /* openOptionsPage unavailable — fall back to a tab on the options page */
+    void chrome.tabs.create({ url: chrome.runtime.getURL("options.html") });
+  }
+  window.close();
+});
+
+void renderServerOrigin();
 void refresh();
 void renderUpdate();
 // Passive connectivity dot — quiet ping on open, result only in the header dot.
