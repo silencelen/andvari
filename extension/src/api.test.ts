@@ -200,6 +200,68 @@ test("eventsTicket: POSTs /api/v1/events/ticket with the Bearer + client headers
   assert.equal(seen!.headers["X-Andvari-Client"], "extension/1.2.3");
 });
 
+test("quick-unlock: getAccountKeys GETs /account/keys with the Bearer + client headers", async () => {
+  let seen: { url: string; method: string; headers: Record<string, string> } | undefined;
+  const keys = { kdfSalt: "s", kdfParams: { v: 1, alg: "argon2id13", ops: 3, memBytes: 67_108_864 }, wrappedUvk: "w", encryptedIdentitySeed: "e", identityPub: "p" };
+  globalThis.fetch = (async (url: string, init: { method: string; headers: Record<string, string> }) => {
+    seen = { url, method: init.method, headers: init.headers };
+    return jsonResp(200, keys);
+  }) as unknown as typeof fetch;
+  const api = new AndvariApi("https://x", "1.2.3");
+  api.setTokens("a1", "r1");
+  assert.deepEqual(await api.getAccountKeys(), keys);
+  assert.equal(seen!.url, "https://x/api/v1/account/keys");
+  assert.equal(seen!.method, "GET");
+  assert.equal(seen!.headers["authorization"], "Bearer a1");
+  assert.equal(seen!.headers["X-Andvari-Client"], "extension/1.2.3");
+});
+
+test("forceRefresh: rotated → new pair held; consumed (refresh:null) persisted BEFORE the POST (AM1)", async () => {
+  const observed: (string | null)[] = [];
+  const api = new AndvariApi("https://x", "1.2.3");
+  api.onTokensChanged = () => void observed.push(api.getTokens().refresh);
+  globalThis.fetch = (async (url: string, init: { body: string }) => {
+    if (url.includes("/refresh")) {
+      assert.deepEqual(observed, [null], "the consumed refresh:null state was persisted before the POST");
+      assert.equal(JSON.parse(init.body).refreshToken, "r1", "the POST spends the ORIGINAL refresh token");
+      return jsonResp(200, { accessToken: "a2", refreshToken: "r2" });
+    }
+    throw new Error("unexpected " + url);
+  }) as unknown as typeof fetch;
+  api.setTokens("a1", "r1");
+  assert.equal(await api.forceRefresh(), "rotated");
+  assert.deepEqual(api.getTokens(), { access: "a2", refresh: "r2" });
+  assert.deepEqual(observed, [null, "r2"]);
+});
+
+test("forceRefresh: a definitive 401 → 'revoked' + BOTH tokens cleared (drives the full-wipe path)", async () => {
+  const api = new AndvariApi("https://x", "1.2.3");
+  globalThis.fetch = (async () => jsonResp(401, { error: "invalid_grant" })) as unknown as typeof fetch;
+  api.setTokens("a1", "r1");
+  assert.equal(await api.forceRefresh(), "revoked");
+  assert.deepEqual(api.getTokens(), { access: null, refresh: null });
+});
+
+test("forceRefresh: a 503 → 'transient' + the refresh token RESTORED (blob kept, master pw this time)", async () => {
+  const api = new AndvariApi("https://x", "1.2.3");
+  globalThis.fetch = (async () => jsonResp(503, { error: "unavailable" })) as unknown as typeof fetch;
+  api.setTokens("a1", "r1");
+  assert.equal(await api.forceRefresh(), "transient");
+  assert.equal(api.getTokens().refresh, "r1", "the pair is restored so it isn't dead-ended");
+});
+
+test("forceRefresh: a network throw → 'transient' + restored; a missing refresh token → 'revoked'", async () => {
+  const api = new AndvariApi("https://x", "1.2.3");
+  globalThis.fetch = (async () => {
+    throw new TypeError("Failed to fetch");
+  }) as unknown as typeof fetch;
+  api.setTokens("a1", "r1");
+  assert.equal(await api.forceRefresh(), "transient");
+  assert.equal(api.getTokens().refresh, "r1");
+  api.setTokens("a1", null);
+  assert.equal(await api.forceRefresh(), "revoked", "no refresh token ⇒ cannot rotate ⇒ definitive");
+});
+
 test("E1-3: ApiError parses the server {error, message} body", async () => {
   const api = new AndvariApi("https://x", "1.2.3");
   globalThis.fetch = (async () => jsonResp(401, { error: "invalid_credentials", message: "authentication failed" })) as unknown as typeof fetch;

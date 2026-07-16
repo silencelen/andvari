@@ -255,6 +255,58 @@ export class AndvariApi {
     });
   }
 
+  /** The account's wrapped keys (spec 03 — same bundle the login response carries). The extension's
+   *  quick-unlock redeem (spec 01 §8.4) consumes this with the tokens it already holds instead of a
+   *  fresh login: unwrap encryptedIdentitySeed under the recovered UVK + hard-compare identityPub.
+   *  Rides json(), so the Bearer header, the 401→refresh→retry, and ApiError parsing all apply. */
+  getAccountKeys(): Promise<AccountKeys> {
+    return this.json("GET", "/api/v1/account/keys");
+  }
+
+  /**
+   * Force a token rotation as an explicit first server contact (quick-unlock redeem, spec 01 §8.4 /
+   * breaker A3⊕B2). Unlike the 401-driven tryRefresh this POSTs unconditionally, and it reports a
+   * THREE-state outcome so the caller can route revocation to a full wipe: `revoked` = the refresh
+   * token is definitively dead (revoked/rotated elsewhere → device revoked, password changed
+   * elsewhere) ⇒ wipe the blob+tokens, full sign-in; `transient` = offline/5xx ⇒ keep the blob, try
+   * the master password this time; `rotated` = a fresh pair is now held. AM1 parity: the consumed
+   * refresh token is persisted (refresh:null) via onTokensChanged BEFORE the POST, so a mid-refresh
+   * SW death never resurrects a spent token. A missing refresh token is treated as `revoked`.
+   */
+  async forceRefresh(): Promise<"rotated" | "revoked" | "transient"> {
+    const rt = this.refreshToken;
+    if (!rt) return "revoked";
+    this.refreshToken = null; // consume + persist the consumed state before the POST (AM1)
+    await this.onTokensChanged?.();
+    try {
+      const resp = await fetch(this.baseUrl + "/api/v1/auth/refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json", "X-Andvari-Client": this.clientHeader },
+        body: JSON.stringify({ refreshToken: rt }),
+      });
+      if (!resp.ok) {
+        if (resp.status === 401 || resp.status === 403) {
+          this.accessToken = null;
+          this.refreshToken = null;
+          await this.onTokensChanged?.();
+          return "revoked";
+        }
+        this.refreshToken = rt; // 5xx / 429 / proxy — transient: restore so the pair isn't dead-ended
+        await this.onTokensChanged?.();
+        return "transient";
+      }
+      const s = (await resp.json()) as { accessToken: string; refreshToken: string };
+      this.accessToken = s.accessToken;
+      this.refreshToken = s.refreshToken;
+      await this.onTokensChanged?.();
+      return "rotated";
+    } catch {
+      this.refreshToken = rt; // transport failure — transient-keep (same as a 5xx)
+      await this.onTokensChanged?.();
+      return "transient";
+    }
+  }
+
   /** Full snapshot when since=0: vaults/grants/items as deltas over the global rev. */
   sync(since = 0): Promise<SyncResponse> {
     return this.json("GET", `/api/v1/sync?since=${since}`);

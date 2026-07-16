@@ -28,6 +28,7 @@ import type {
   CardFillFields,
   CardFillOutcome,
   CardItem,
+  EnrollCode,
   FillOutcome,
   MatchItem,
   PendingSave,
@@ -41,6 +42,7 @@ import { currentCode } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor } from "./savetarget";
+import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -66,6 +68,12 @@ const SERVER_URL = "https://andvari.taila2dff2.ts.net";
 const SKEY = "session"; // storage.session: SessionSnapshot
 const TKEY = "tabs"; //    storage.session: Record<tabId, TabState>
 const NKEY = "lockNotice"; // storage.session: { kind:"idle"; seconds } — F26 reason line (E1-7)
+// Extension quick-unlock Tier B (spec 01 §8.4). QKEY is a DISTINCT storage.session key (breaker B3):
+// ensureLoaded MUST NOT hydrate `session` from it, so a locked-armed record leaves every `!session`
+// gate reporting fully locked. DKEY is the durable, NON-secret offer-card dismissed-once flag (breaker
+// B7). The non-extractable co-key lives in IndexedDB (below) — wiped on every QKEY wipe (breaker A1).
+const QKEY = "quickUnlock"; // storage.session: QuRecord (blob + attempt counter + locked-token stash)
+const DKEY = "quOfferDismissed"; // storage.local (non-secret): the offer card was dismissed once
 const UKEY = "updateInfo"; // storage.local (non-secret): UpdateInfo while a newer build is live
 const ULAST = "updateCheckedAt"; // storage.local: epoch ms of the last COMPLETED update fetch
 const USEQ = "updateAcceptedSeq"; // storage.local: highest signed-manifest seq ever accepted (§B anti-rollback)
@@ -148,9 +156,21 @@ interface Session {
   personalVaultId: string;
   /** Rescue-issued temporary password in effect (E1-6) — surfaced in `status` for the popup nudge. */
   mustChangePassword: boolean;
+  /** UVK custody, MEMORY-ONLY (breaker B1) — retained for the unlocked lifetime so quick-unlock enroll
+   *  can wrap it; NEVER written to storage.session/local. Absent on a snapshot-restored session (SW was
+   *  evicted) → enroll must trigger a fresh full unlock. */
+  uvk?: Uint8Array;
+  /** How this session was opened. `enroll` COPIES the surviving full-password stamp regardless, but the
+   *  provenance makes the "never mint `now` from a QUICK session" invariant (breaker A4) explicit. */
+  provenance: "PASSWORD" | "QUICK";
+  /** The last full-master-password unlock time. A quick unlock carries the blob's COPIED stamp (never
+   *  `now`), so re-enrolling from a QUICK session cannot extend the 24 h quick-unlock window (breaker A4). */
+  lastFullUnlockAt: number;
 }
 
-/** What survives SW death (JSON-safe: keys as b64 — Uint8Array doesn't cross chrome.storage). */
+/** What survives SW death (JSON-safe: keys as b64 — Uint8Array doesn't cross chrome.storage). The UVK
+ *  is deliberately NOT here (breaker B1 — memory-only custody); provenance + lastFullUnlockAt ride so
+ *  the quick-unlock 24 h-window invariant (breaker A4) survives a wake. */
 interface SessionSnapshot {
   access: string;
   refresh: string | null;
@@ -160,6 +180,8 @@ interface SessionSnapshot {
   autoLockSeconds: number;
   clipboardClearSeconds: number;
   mustChangePassword: boolean;
+  provenance: "PASSWORD" | "QUICK";
+  lastFullUnlockAt: number;
   vaultKeys: Record<string, string>;
   items: DecryptedItem[];
 }
@@ -202,9 +224,136 @@ let events: EventsHandle | null = null;
 
 const api = new AndvariApi(SERVER_URL, chrome.runtime.getManifest().version);
 // Awaited on every pair mutation — the consumed refresh token must reach the snapshot BEFORE the
-// refresh POST (a stale persisted pair resurrected on SW wake = revoked device). persistSession
-// returns its storage.set promise so doRefresh can await it.
-api.onTokensChanged = () => persistSession();
+// refresh POST (a stale persisted pair resurrected on SW wake = revoked device). While unlocked it
+// lands in the full SessionSnapshot; DURING a quick-unlock redeem (session still null) it lands in the
+// locked-token stash so a mid-refresh SW death never resurrects a spent token (breaker A5, AM1 parity).
+api.onTokensChanged = () => persistTokens();
+
+// ---- quick-unlock Tier B engine (spec 01 §8.4) ----
+// The non-extractable co-key (breaker A1) persists in IndexedDB — a service worker CAN open IDB, and
+// IDB round-trips a non-extractable CryptoKey via structured clone without ever exposing its bytes.
+const IDB_NAME = "andvari-qu";
+const IDB_STORE = "cokey";
+const IDB_KEY = "k_nonexp";
+
+function idbOpen(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error ?? new Error("idb open failed"));
+  });
+}
+function idbRun<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBRequest | null): Promise<T> {
+  return idbOpen().then(
+    (db) =>
+      new Promise<T>((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, mode);
+        let result: T;
+        const r = fn(tx.objectStore(IDB_STORE));
+        if (r) r.onsuccess = () => (result = r.result as T);
+        tx.oncomplete = () => {
+          db.close();
+          resolve(result);
+        };
+        tx.onerror = () => {
+          db.close();
+          reject(tx.error ?? new Error("idb tx failed"));
+        };
+        tx.onabort = () => {
+          db.close();
+          reject(tx.error ?? new Error("idb tx aborted"));
+        };
+      }),
+  );
+}
+
+const quCoKey: QuCoKey = {
+  async generate() {
+    const k = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, /* extractable */ false, ["encrypt", "decrypt"]);
+    await idbRun<void>("readwrite", (s) => s.put(k, IDB_KEY));
+    return k;
+  },
+  async get() {
+    try {
+      return (await idbRun<CryptoKey | undefined>("readonly", (s) => s.get(IDB_KEY))) ?? null;
+    } catch {
+      return null; // IDB unavailable / co-key gone → treated as a corrupt blob at redeem
+    }
+  },
+  async delete() {
+    try {
+      await idbRun<void>("readwrite", (s) => s.delete(IDB_KEY));
+    } catch {
+      /* nothing to delete / IDB unavailable */
+    }
+  },
+};
+
+/** The DISTINCT storage.session record slot (breaker B3). `remove` deletes the key DIRECTLY (breaker
+ *  A7/A10/B7) — never via persistSession, which early-returns when session===null. */
+const quStore: QuStore = {
+  async read() {
+    const got = await chrome.storage.session.get(QKEY);
+    return (got[QKEY] as QuRecord | undefined) ?? null;
+  },
+  write: (rec) => chrome.storage.session.set({ [QKEY]: rec }),
+  remove: () => chrome.storage.session.remove(QKEY),
+};
+
+/** One-shot enroll bench (breaker B8). Pure-JS Argon2id is ~linear in memBytes at fixed ops (and 64 MiB
+ *  is multi-second), so a 4-candidate scan would cost ~15 s. Instead: measure ONE derive at the FLOOR
+ *  (32 MiB / ops 2), then scale memory linearly toward the ~1 s target, capped at 64 MiB and never below
+ *  the floor. So a fast machine gets stronger params (toward 64 MiB) while a slow one uses the honest
+ *  floor (accepting > 1 s rather than dropping below 32 MiB). Enroll-time only; the result is re-checked
+ *  by assertPinKdfParams before it is ever persisted (2 derives total: this measure + the real K_pin). */
+async function benchPinParams(): Promise<KdfParams> {
+  const targetMs = 1000;
+  const CAP_MEM_BYTES = 67_108_864; // 64 MiB — the master floor; never pick PIN params stronger than that
+  const STEP = 16 * 1024 * 1024; // round memory to a 16 MiB step
+  const floor: KdfParams = { v: 1, alg: "argon2id13", ops: PIN_KDF_MIN_OPS, memBytes: PIN_KDF_MIN_MEM_BYTES };
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const t0 = Date.now();
+  try {
+    await deriveMasterKeyAsync("andvari-quick-unlock-bench", floor, salt);
+  } catch {
+    return floor; // couldn't even bench the floor — use it (never go below)
+  }
+  const floorMs = Math.max(1, Date.now() - t0);
+  if (floorMs >= targetMs) return floor; // even the floor is at/over the target — use the floor
+  // time ∝ memBytes at fixed ops → the memory that lands ~targetMs, capped + floored + step-rounded.
+  const budget = Math.floor((PIN_KDF_MIN_MEM_BYTES * targetMs) / floorMs);
+  const memBytes = Math.max(PIN_KDF_MIN_MEM_BYTES, Math.min(CAP_MEM_BYTES, Math.floor(budget / STEP) * STEP));
+  return { v: 1, alg: "argon2id13", ops: PIN_KDF_MIN_OPS, memBytes };
+}
+
+const quickUnlock = new QuickUnlock({
+  store: quStore,
+  coKey: quCoKey,
+  deriveKPin: (pin, params, salt) => deriveMasterKeyAsync(pin, params, salt),
+  benchPinParams,
+  now: () => Date.now(),
+  randomBytes: (n) => crypto.getRandomValues(new Uint8Array(n)),
+});
+
+/** True only while a quick-unlock redeem is between its forced refresh and the session rebuild — the
+ *  window where api token mutations must land in the locked-token stash, not the (absent) session. */
+let redeemInFlight = false;
+/** Single-flight for the quick-unlock redeem (mirrors AndvariApi.refreshInFlight) — two racing popups
+ *  submitting a PIN must not each start a redeem and double-spend the attempt counter (breaker A5⊕B4). */
+let pinUnlockInFlight: Promise<Res<"unlockWithPin">> | null = null;
+/** owns() generation (breaker A5⊕B4): bumped by every lock / sign-out / full unlock. A redeem that
+ *  reads a different value after its async KDF/network discards itself rather than clobber new state. */
+let redeemGen = 0;
+
+/** onTokensChanged custodian. Unlocked → the full SessionSnapshot. Mid-redeem (session still null) →
+ *  the quick-unlock locked-token stash (breaker A5/AM1). Otherwise (locked, not redeeming) → nothing:
+ *  there is no live session to attach a stray mutation to. */
+function persistTokens(): Promise<void> {
+  if (session) return persistSession();
+  if (redeemInFlight) return quickUnlock.setLockedTokens(api.getTokens());
+  return Promise.resolve();
+}
 // A 426 min-version pin (spec 03 §1) surfaces via checkForUpdate → the existing update banner is
 // the download surface. checkForUpdate hits the static /downloads route (not api.ts), so it can
 // never itself 426 — no re-entry loop (AM4).
@@ -214,11 +363,22 @@ api.onUpgradeRequired = () => void checkForUpdate(true);
 
 void chrome.action.setBadgeBackgroundColor({ color: BADGE_BG });
 void chrome.action.setBadgeTextColor({ color: BADGE_INK });
+// A9⊕B5: storage.session TRUSTED_CONTEXTS is a HARD precondition for quick unlock — the armed record
+// is a crackable UVK blob + a LIVE refresh token, so content scripts MUST NOT be able to read it. Both
+// Chrome and Firefox MV3 DEFAULT storage.session to TRUSTED_CONTEXTS (content scripts excluded); this
+// call re-affirms it. `quCompartmentTrusted` explicitly gates arm below; enroll is IMPLICITLY gated
+// (it requires an unlocked `session`, which only exists when storage.session does — the same condition
+// that makes quCompartmentTrusted true), and if we can neither call setAccessLevel NOR even see
+// storage.session we refuse to arm and fall back to full erase — NEVER a storage.local fallback for the
+// blob (that is the rejected durable Tier C, breaker A9).
+let quCompartmentTrusted = false;
 try {
-  // Explicit though it IS the default: the snapshot is readable from trusted contexts only.
   void chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+  quCompartmentTrusted = true;
 } catch {
-  /* not implemented on this browser — the default is trusted-only anyway */
+  // setAccessLevel unimplemented here — the documented default for storage.session is still
+  // TRUSTED_CONTEXTS on both engines, so the compartment is trusted-only as long as it EXISTS.
+  quCompartmentTrusted = typeof chrome.storage.session?.get === "function";
 }
 
 chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
@@ -301,6 +461,10 @@ function ensureLoaded(): Promise<void> {
         // mustChangePassword joined the snapshot in 0.10.0 — a ≤0.9.0 snapshot lacks it; false is
         // the safe default (a real rescue re-nudges on the next fresh login anyway).
         mustChangePassword: snap.mustChangePassword ?? false,
+        // uvk is intentionally absent here (breaker B1 — never persisted): a snapshot-restored session
+        // has no UVK, so enroll on it must trigger a fresh full unlock.
+        provenance: snap.provenance ?? "PASSWORD",
+        lastFullUnlockAt: typeof snap.lastFullUnlockAt === "number" ? snap.lastFullUnlockAt : 0,
         vaultKeys: new Map(Object.entries(snap.vaultKeys).map(([id, b]) => [id, fromB64(b)])),
         // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
@@ -333,6 +497,8 @@ function persistSession(): Promise<void> {
     autoLockSeconds,
     clipboardClearSeconds,
     mustChangePassword: session.mustChangePassword,
+    provenance: session.provenance,
+    lastFullUnlockAt: session.lastFullUnlockAt,
     vaultKeys: Object.fromEntries([...session.vaultKeys].map(([id, vk]) => [id, toB64(vk)])),
     items: session.items,
   };
@@ -343,24 +509,52 @@ function persistTabs(): void {
   void chrome.storage.session.set({ [TKEY]: Object.fromEntries([...tabs].map(([id, st]) => [String(id), st])) });
 }
 
-/** Full lock: memory + storage.session (pending saves hold plaintext passwords — they lock too).
- *  `reason` records WHY for the F26 unlock-form line (E1-7): idle → write a notice; manual → clear
- *  any stale one. The "clipboardclear" backstop alarm deliberately SURVIVES (a secret copied just
- *  before an idle lock still clears on schedule, E1-4). */
-async function doLock(reason: "idle" | "manual" = "manual"): Promise<void> {
+/** Lock: drop in-memory vault material + the full storage.session snapshot (pending saves hold
+ *  plaintext passwords — they lock too). `reason` records WHY for the F26 unlock-form line (E1-7).
+ *  The "clipboardclear" backstop alarm deliberately SURVIVES (a secret copied just before an idle lock
+ *  still clears on schedule, E1-4).
+ *
+ *  Quick-unlock Tier B (spec 01 §8.4): an idle/manual lock ARMS if a fresh, non-exhausted blob exists —
+ *  it stashes the token pair (breaker B3 armed branch) and KEEPS the slim `{blob, counter, tokens}`
+ *  record under the DISTINCT QKEY, erasing everything else exactly as today, so the next unlock can be
+ *  a PIN. `signout` (an explicit user action / revocation) NEVER arms and full-wipes the blob + co-key.
+ *  When quick unlock is not enrolled, an idle/manual lock stays byte-identical to today's full erase. */
+async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise<void> {
+  redeemGen++; // any lock invalidates an in-flight quick-unlock redeem (owns() guard, breaker A5⊕B4)
+  const toks = api.getTokens(); // capture the live pair BEFORE clearing — the armed branch stashes it
   events?.close(); // live socket + all its timers die FIRST — locked means no bell traffic at all
   events = null;
   const secondsAtLock = autoLockSeconds; // capture before the reset below (web App.tsx:209 parity)
-  session = null;
+  session = null; // in-memory vault material — INCLUDING the memory-only uvk (breaker B1) — is dropped
   autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
   clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
   tabs.clear();
   grants.clear();
   cardGrants.clear();
-  api.setTokens(null, null);
-  await chrome.storage.session.remove([SKEY, TKEY]);
+
+  // Arm decision. `signout` skips arming and forces a full wipe; idle/manual attempt to arm — but ONLY
+  // when the storage.session compartment is trusted-only (breaker A9⊕B5: without that guarantee we must
+  // NOT retain a crackable UVK blob + a live refresh token, so we fall back to today's full erase + wipe).
+  // arm() fails CLOSED to "declined" if reading the flag throws (breaker B3). On "armed" the record now
+  // holds the token stash; "not-enrolled" leaves nothing (byte-identical to today); SKEY+TKEY are erased
+  // below in ALL cases so a locked SW reports locked.
+  if (reason !== "signout" && toks.access && quCompartmentTrusted) {
+    // .catch → "declined": arm() must NEVER throw past the [SKEY,TKEY] erase below (review F1 — an
+    // unexpected throw, e.g. a malformed record, would otherwise skip the erase and leave the just-
+    // locked session snapshot on disk, rehydratable into an unlocked vault on the next SW wake).
+    const armed = await quickUnlock.arm({ access: toks.access, refresh: toks.refresh }).catch(() => "declined" as const);
+    if (armed === "declined") {
+      await quickUnlock.wipe(); // stale/ineligible/fail-closed → erase the residue
+    }
+  } else {
+    // signout, no live token, OR an untrusted compartment → full wipe (never leave standing material).
+    await quickUnlock.wipe();
+  }
+
+  api.setTokens(null, null); // the api forgets the pair; while armed it lives ONLY in QKEY.lockedTokens
+  await chrome.storage.session.remove([SKEY, TKEY]); // full vault snapshot always erased — locked reports locked
   // Write the reason AFTER the [SKEY,TKEY] remove so it survives it (a notice only from the idle
-  // path — web parity); manual lock renders no reason line. storage.session clears on browser exit.
+  // path — web parity); manual/signout renders no reason line. storage.session clears on browser exit.
   if (reason === "idle") {
     await chrome.storage.session.set({ [NKEY]: { kind: "idle", seconds: secondsAtLock } });
   } else {
@@ -376,6 +570,13 @@ async function doLock(reason: "idle" | "manual" = "manual"): Promise<void> {
   } catch {
     /* tab enumeration unavailable — badges refresh on each page's next pageInfo */
   }
+}
+
+/** Explicit sign-out / definitive revocation → a FULL wipe of the quick-unlock blob + co-key + tokens,
+ *  never the armed-retaining lock (breaker A3⊕B2). Routed here from onRevoked, the popup "Sign out"
+ *  action, and every definitive-401 during a quick-unlock redeem. */
+function doSignOut(): Promise<void> {
+  return doLock("signout");
 }
 
 /** Re-arm the policy idle lock. chrome.alarms floors at ~30 s; 0 = policy-disabled (web parity). */
@@ -434,7 +635,9 @@ async function ensureSocket(reset = false): Promise<void> {
       // slots blocks the structural check — bridge it here, at the one real-socket seam.
       makeSocket: (u) => new WebSocket(u) as WebSocket & WsLike,
       onBell: () => void resync(), // debounced in events.ts; the EXISTING pull, nothing else
-      onRevoked: () => void doLock("manual"), // explicit server frame — web-parity sign-out
+      // Explicit server revocation frame — a FULL sign-out (wipes the quick-unlock blob + co-key too),
+      // never the armed-retaining lock: revocation is wipe-class in every path (breaker A3⊕B2).
+      onRevoked: () => void doSignOut(),
     });
   } else {
     events.kick(reset);
@@ -583,20 +786,35 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     case "status": {
       // The F26 reason line only matters while locked (it sits above the unlock form).
       const lockNotice = session ? null : await readLockNotice();
+      // Quick-unlock sub-state (spec 01 §8.4) — `armed` drives the LOCKED popup's PIN field vs the
+      // master-password field; `enrolled`/`offerDismissed` drive the unlocked Settings toggle + offer.
       return {
         unlocked: session !== null,
         count: loginItems().length,
         email: session?.email ?? null,
         mustChangePassword: session?.mustChangePassword ?? false,
         lockNotice,
+        quickUnlock: await quStateForStatus(),
       } satisfies Res<"status">;
     }
     case "lock": {
       await doLock("manual");
       return { ok: true } satisfies Res<"lock">;
     }
+    case "signOut": {
+      await doSignOut(); // explicit full sign-out — wipes the quick-unlock blob + co-key too (breaker A3⊕B2)
+      return { ok: true } satisfies Res<"signOut">;
+    }
     case "unlock":
       return unlockWithMapping(msg.email, msg.password);
+    case "unlockWithPin":
+      return unlockWithPin(msg.pin);
+    case "enrollQuickUnlock":
+      return enrollQuickUnlock(msg.pin);
+    case "disableQuickUnlock":
+      return disableQuickUnlock();
+    case "dismissQuickUnlockOffer":
+      return dismissQuickUnlockOffer();
     case "scheduleClipboardClear":
       return scheduleClipboardClear();
     case "matches": {
@@ -713,39 +931,28 @@ function deriveMasterKeyAsync(password: string, params: KdfParams, salt: Uint8Ar
   });
 }
 
-async function unlock(email: string, password: string): Promise<Res<"unlock">> {
-  const pre = await api.prelogin(email);
-  assertServerKdfParams(pre.kdfParams); // H1 (spec 05 T1): refuse a weakened/absurd KDF before deriving (also blocks a 4 GiB SW OOM)
-  const mk = await deriveMasterKeyAsync(password, pre.kdfParams, fromB64(pre.kdfSalt));
-  const s = await api.login(email, toB64(authKey(mk)));
-  api.setTokens(s.accessToken, s.refreshToken);
-
-  const uvk = open(wrapKey(mk), fromB64(s.accountKeys.wrappedUvk), adUvk(s.userId));
-  // Identity keypair — for member (shared-vault) grants sealed to us.
-  const identity = boxKeypairFromSeed(open(uvk, fromB64(s.accountKeys.encryptedIdentitySeed), adIdkey(s.userId)));
-
-  // spec 01 §5 (web account.ts:157-174 / core parity): the seed-derived identity key is the one the
-  // server cannot forge — a server-sent identityPub that doesn't equal it is a substitution attempt.
-  // Hard-fail with a DISTINCT sentinel BEFORE any vault material is synced/decrypted/persisted,
-  // including when the field is malformed (garbage where the identity key belongs IS the tampering
-  // this names). No ctEquals in extension crypto.ts; a length + byte loop is fine (the comparand is
-  // server-supplied, so timing is not load-bearing).
+/** spec 01 §5 (web account.ts / core parity): the seed-derived identity key is the one the server
+ *  cannot forge — a server-sent identityPub that doesn't equal it is a substitution attempt. Hard-fail
+ *  with a DISTINCT sentinel (E1-1), including when the field is malformed (garbage where the identity
+ *  key belongs IS the tampering this names). No ctEquals in extension crypto.ts; a length + byte loop
+ *  is fine (the comparand is server-supplied, so timing is not load-bearing). Shared by the full unlock
+ *  AND the quick-unlock redeem — the redeem re-verifies exactly as strictly (design §1 fail-closed table). */
+function verifyServerIdentity(localPub: Uint8Array, identityPubB64: string): void {
   let serverIdentityPub: Uint8Array | null = null;
   try {
-    serverIdentityPub = fromB64(s.accountKeys.identityPub);
+    serverIdentityPub = fromB64(identityPubB64);
   } catch {
     /* undecodable → treated as a mismatch below */
   }
-  if (
-    serverIdentityPub === null ||
-    serverIdentityPub.length !== identity.publicKey.length ||
-    !identity.publicKey.every((b, i) => b === serverIdentityPub![i])
-  ) {
+  if (serverIdentityPub === null || serverIdentityPub.length !== localPub.length || !localPub.every((b, i) => b === serverIdentityPub![i])) {
     throw new IdentityMismatchError();
   }
+}
 
-  const sync = await api.sync(0);
-
+/** Open every grant we hold a key for (owner via UVK, member via the identity-sealed box). Shared by
+ *  the full unlock and the quick-unlock redeem — the redeem holding the UVK + identity again is what
+ *  lets a brand-new shared-vault grant open on a quick unlock (design §1). */
+function buildVaultKeys(sync: SyncResponse, uvk: Uint8Array, identity: { publicKey: Uint8Array; privateKey: Uint8Array }, userId: string): Map<string, Uint8Array> {
   const vaultKeys = new Map<string, Uint8Array>();
   for (const g of sync.grants) {
     try {
@@ -758,7 +965,7 @@ async function unlock(email: string, password: string): Promise<Res<"unlock">> {
         if (p.v !== 1 || p.vaultId !== g.vaultId) continue; // reject a reseated/forged grant
         vk = fromB64(p.vk);
       } else if (g.wrappedVk) {
-        vk = open(uvk, fromB64(g.wrappedVk), adVk(g.vaultId, s.userId)); // owner / personal
+        vk = open(uvk, fromB64(g.wrappedVk), adVk(g.vaultId, userId)); // owner / personal
       } else {
         continue;
       }
@@ -767,21 +974,18 @@ async function unlock(email: string, password: string): Promise<Res<"unlock">> {
       /* wrong key / not ours — skip */
     }
   }
+  return vaultKeys;
+}
 
-  const items = decryptItems(sync, vaultKeys);
-  // The personal vault (save target) = the type="personal" vault we hold a key for (web store.ts parity).
-  const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
-  session = { userId: s.userId, email, items, vaultKeys, personalVaultId, mustChangePassword: s.mustChangePassword ?? false };
-
-  // Policy fetch — a failed fetch must never mean "no idle lock at all" (web resolveAutoLockSeconds
-  // falls back to a persisted value; here the conservative defaults stand in). Also captures the
-  // clipboard-clear window (E1-4): finite ≥ 0 else default 30.
+/** Policy fetch — a failed fetch must never mean "no idle lock at all" (web resolveAutoLockSeconds
+ *  falls back to a persisted value; here the conservative defaults stand in). Also captures the
+ *  clipboard-clear window (E1-4): finite ≥ 0 else default 30. Shared by unlock + redeem (breaker B6
+ *  re-fetches autoLockSeconds on a quick unlock). */
+async function fetchPolicyInto(): Promise<void> {
   try {
     const p = await api.clientPolicy();
     autoLockSeconds =
-      typeof p.autoLockSeconds === "number" && Number.isFinite(p.autoLockSeconds)
-        ? Math.max(0, p.autoLockSeconds)
-        : DEFAULT_AUTOLOCK_SECONDS;
+      typeof p.autoLockSeconds === "number" && Number.isFinite(p.autoLockSeconds) ? Math.max(0, p.autoLockSeconds) : DEFAULT_AUTOLOCK_SECONDS;
     clipboardClearSeconds =
       typeof p.clipboardClearSeconds === "number" && Number.isFinite(p.clipboardClearSeconds) && p.clipboardClearSeconds >= 0
         ? p.clipboardClearSeconds
@@ -790,16 +994,11 @@ async function unlock(email: string, password: string): Promise<Res<"unlock">> {
     autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
     clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
   }
+}
 
-  await persistSession();
-  void chrome.storage.session.remove(NKEY); // a fresh unlock clears the F26 idle-lock notice (E1-7)
-  void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
-  void ensureSocket(true); // T2: live bell up within ~1 s of unlock
-  armAutoLock();
-
-  // E1-5: re-offer any save captured while locked the moment we unlock — otherwise the pending
-  // stays invisible until a navigation (its only other re-offer paths). Same uninjected-tab
-  // try/catch as the tabs.onUpdated listener.
+/** E1-5: re-offer any save captured while locked the moment we unlock — otherwise the pending stays
+ *  invisible until a navigation. Same uninjected-tab try/catch as the tabs.onUpdated listener. */
+function reofferPendingSaves(): void {
   for (const [tabId, st] of tabs) {
     if (!st.pending) continue;
     const m: TabMsg = { type: "offerPendingSave", pending: publicPending(st.pending) };
@@ -807,6 +1006,52 @@ async function unlock(email: string, password: string): Promise<Res<"unlock">> {
       /* content not injected in that tab — its own pendingSave poll covers it */
     });
   }
+}
+
+async function unlock(email: string, password: string): Promise<Res<"unlock">> {
+  redeemGen++; // a full unlock supersedes any in-flight quick-unlock redeem (owns() guard)
+  const pre = await api.prelogin(email);
+  assertServerKdfParams(pre.kdfParams); // H1 (spec 05 T1): refuse a weakened/absurd KDF before deriving (also blocks a 4 GiB SW OOM)
+  const mk = await deriveMasterKeyAsync(password, pre.kdfParams, fromB64(pre.kdfSalt));
+  const s = await api.login(email, toB64(authKey(mk)));
+  api.setTokens(s.accessToken, s.refreshToken);
+
+  const uvk = open(wrapKey(mk), fromB64(s.accountKeys.wrappedUvk), adUvk(s.userId));
+  // Identity keypair — for member (shared-vault) grants sealed to us.
+  const identity = boxKeypairFromSeed(open(uvk, fromB64(s.accountKeys.encryptedIdentitySeed), adIdkey(s.userId)));
+  verifyServerIdentity(identity.publicKey, s.accountKeys.identityPub); // before ANY vault material is synced/persisted
+
+  const sync = await api.sync(0);
+  const vaultKeys = buildVaultKeys(sync, uvk, identity, s.userId);
+  const items = decryptItems(sync, vaultKeys);
+  // The personal vault (save target) = the type="personal" vault we hold a key for (web store.ts parity).
+  const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
+  // uvk RETAINED in memory (breaker B1) so enroll can wrap it; provenance PASSWORD + a fresh
+  // lastFullUnlockAt stamp — the only place that mints `now` (breaker A4).
+  session = {
+    userId: s.userId,
+    email,
+    items,
+    vaultKeys,
+    personalVaultId,
+    mustChangePassword: s.mustChangePassword ?? false,
+    uvk,
+    provenance: "PASSWORD",
+    lastFullUnlockAt: Date.now(),
+  };
+
+  await fetchPolicyInto();
+  // breaker A6 + A11: a full unlock as a DIFFERENT user strands any prior quick-unlock blob → wipe;
+  // a surviving same-user blob gets its 24 h window re-stamped to now (the fail-closed "a successful
+  // full unlock re-stamps" rule) and its attempt budget refreshed to full.
+  await quickUnlock.onFullUnlock(s.userId, session.lastFullUnlockAt);
+
+  await persistSession();
+  void chrome.storage.session.remove(NKEY); // a fresh unlock clears the F26 idle-lock notice (E1-7)
+  void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
+  void ensureSocket(true); // T2: live bell up within ~1 s of unlock
+  armAutoLock();
+  reofferPendingSaves();
   return { ok: true };
 }
 
@@ -831,6 +1076,161 @@ function mapUnlockError(e: unknown): UnlockCode {
   }
   if (e instanceof TypeError) return "network"; // fetch rejection (web errors.ts:26-33 convention)
   return "unknown";
+}
+
+// ---- quick-unlock Tier B: enroll / redeem / disable / status (spec 01 §8.4) ----
+
+/** Enroll a PIN over the in-memory UVK. Gated: unlocked, uvk present (breaker B1 — a snapshot-restored
+ *  session has none → a fresh full unlock is required first), and NOT mustChangePassword (breaker A4 /
+ *  §8.1-A5 — never let a rescue-issued temp password's UVK get armed). `enroll` COPIES the session's
+ *  surviving full-password stamp (breaker A4) — a QUICK session carries the ORIGINAL stamp, so it can
+ *  never mint a fresh 24 h window. The blob double-wraps the UVK under Argon2id(PIN) ⊕ a fresh
+ *  non-extractable co-key (breaker A1). */
+async function enrollQuickUnlock(pin: string): Promise<Res<"enrollQuickUnlock">> {
+  if (!session) return { ok: false, code: "locked" };
+  if (session.mustChangePassword) return { ok: false, code: "must_change_password" };
+  if (!session.uvk) return { ok: false, code: "need_full_unlock" };
+  const r = await quickUnlock.enroll({
+    uvk: session.uvk,
+    userId: session.userId,
+    email: session.email,
+    pin,
+    lastFullUnlockAt: session.lastFullUnlockAt, // COPIED — never Date.now() from a QUICK session (breaker A4)
+    autoLockSeconds,
+  });
+  if (!r.ok) return { ok: false, code: r.code as EnrollCode, reason: r.reason };
+  return { ok: true };
+}
+
+/** Quick-unlock redeem (spec 01 §8.4). Single-flight (breaker A5). The engine's beginRedeem does the
+ *  reserve-then-open; this does the server dance: forced refresh FIRST (breaker A3⊕B2), re-assert the
+ *  master-KDF floor + re-verify identity + re-fetch policy (breaker B6), then sync + rebuild + persist. */
+function unlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
+  pinUnlockInFlight ??= doUnlockWithPin(pin).finally(() => {
+    pinUnlockInFlight = null;
+  });
+  return pinUnlockInFlight;
+}
+
+async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
+  await ensureLoaded();
+  if (session) return { ok: true }; // already unlocked (a race) — nothing to redeem
+  const gen = redeemGen;
+  const begin = await quickUnlock.beginRedeem(pin);
+  if (!begin.ok) {
+    return begin.code === "wrong_pin"
+      ? { ok: false, code: "wrong_pin", attemptsRemaining: begin.attemptsRemaining }
+      : { ok: false, code: begin.code };
+  }
+  // owns() guard: a lock / sign-out / full unlock intervened during the PIN KDF → discard silently.
+  if (gen !== redeemGen || session) return { ok: false, code: "aborted" };
+
+  api.setTokens(begin.tokens.access, begin.tokens.refresh);
+  redeemInFlight = true; // token mutations now land in QKEY.lockedTokens (persistTokens), not a session
+  try {
+    // A3⊕B2: forced rotation is the FIRST server contact. It is also the account-state read that
+    // catches a rescue (which revokes all sessions, spec 03) — a revoked/rotated refresh → 401.
+    const rot = await api.forceRefresh();
+    if (gen !== redeemGen) return { ok: false, code: "aborted" };
+    if (rot === "revoked") {
+      await doSignOut(); // definitive-401 → FULL wipe (blob + co-key + tokens) → full sign-in
+      return { ok: false, code: "revoked" };
+    }
+    if (rot === "transient") {
+      api.setTokens(null, null); // offline / 5xx — blob KEPT; the master password needs the network too
+      return { ok: false, code: "network" };
+    }
+
+    const keys = await api.getAccountKeys();
+    assertServerKdfParams(keys.kdfParams); // breaker B6: re-assert the H1 master-KDF floor on redeem
+    // The seed open throwing = stale/foreign UVK (→ wipe); the compare failing = IdentityMismatchError
+    // (→ HARD FAIL, blob KEPT). Same strictness as the full unlock (verifyServerIdentity).
+    const identity = boxKeypairFromSeed(open(begin.uvk, fromB64(keys.encryptedIdentitySeed), adIdkey(begin.userId)));
+    verifyServerIdentity(identity.publicKey, keys.identityPub);
+
+    const sync = await api.sync(0);
+    await fetchPolicyInto(); // breaker B6: re-fetch autoLockSeconds — done BEFORE the final owns-check so
+    if (gen !== redeemGen) return { ok: false, code: "aborted" }; // no network await follows the session build
+    const vaultKeys = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
+    const items = decryptItems(sync, vaultKeys);
+    const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
+    // Provenance QUICK + the COPIED stamp (breaker A4). mustChangePassword is false by construction —
+    // a rescue would have revoked the session and the forced refresh above would have 401'd (breaker B6).
+    session = {
+      userId: begin.userId,
+      email: begin.email,
+      items,
+      vaultKeys,
+      personalVaultId,
+      mustChangePassword: false,
+      uvk: begin.uvk, // UVK retained in memory (breaker B1) so a re-enroll from this QUICK session works
+      provenance: "QUICK",
+      lastFullUnlockAt: begin.blob.lastFullUnlockAt,
+    };
+    redeemInFlight = false; // a session exists now → persistTokens routes to the full snapshot again
+    // From here only LOCAL storage awaits remain (no doLock is UI-reachable during a redeem — the popup
+    // shows the locked PIN screen, whose Lock/Sign-out buttons are unlocked-only; the gen checks above
+    // are defense-in-depth). completeRedeem clears the token stash and keeps the blob for the next lock.
+    await persistSession();
+    await quickUnlock.completeRedeem(autoLockSeconds);
+    void chrome.storage.session.remove(NKEY);
+    void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
+    void ensureSocket(true);
+    armAutoLock();
+    reofferPendingSaves();
+    return { ok: true };
+  } catch (e) {
+    if (e instanceof IdentityMismatchError) return { ok: false, code: "identity_mismatch" }; // blob KEPT (evidence)
+    if (e instanceof KdfPolicyError) {
+      await doSignOut(); // the server tried to weaken the master KDF on redeem — wipe, force full sign-in
+      return { ok: false, code: "kdf_policy" };
+    }
+    if (e instanceof ApiError) {
+      if (e.status === 401 || e.status === 403) {
+        await doSignOut(); // definitive-401 survived the inner refresh → FULL wipe
+        return { ok: false, code: "revoked" };
+      }
+      return { ok: false, code: "server_error" }; // transient server — blob kept
+    }
+    if (e instanceof TypeError) return { ok: false, code: "network" }; // fetch rejection — blob kept
+    // Generic Error — encryptedIdentitySeed would not open under the recovered UVK: stale/foreign UVK.
+    await quickUnlock.wipe();
+    return { ok: false, code: "stale_uvk" };
+  } finally {
+    redeemInFlight = false;
+    if (!session) api.setTokens(null, null); // a failed redeem must never leave tokens live in the api while locked
+  }
+}
+
+/** Disable quick unlock — a full wipe, NO auth gate (breaker A6 / §8.1 parity: reducing standing secret
+ *  material is never gated). */
+async function disableQuickUnlock(): Promise<Res<"disableQuickUnlock">> {
+  await quickUnlock.wipe();
+  return { ok: true };
+}
+
+/** The quick-unlock sub-state the popup needs in BOTH views (folded into `status`): `armed`
+ *  (locked-armed → show the PIN field), `enrolled` + `offerDismissed` (unlocked → Settings toggle +
+ *  the one-time offer card). Every read is fail-closed. */
+async function quStateForStatus(): Promise<{ enrolled: boolean; armed: boolean; attemptsRemaining: number; offerDismissed: boolean }> {
+  const st = await quickUnlock.status();
+  let offerDismissed = false;
+  try {
+    offerDismissed = (await chrome.storage.local.get(DKEY))[DKEY] === true;
+  } catch {
+    /* storage.local unavailable — treat as not-dismissed (the offer is best-effort chrome) */
+  }
+  return { enrolled: st.enrolled, armed: st.armed, attemptsRemaining: st.attemptsRemaining, offerDismissed };
+}
+
+/** Remember the offer card was dismissed once (breaker B7 — durable, storage.local, NON-secret). */
+async function dismissQuickUnlockOffer(): Promise<Res<"dismissQuickUnlockOffer">> {
+  try {
+    await chrome.storage.local.set({ [DKEY]: true });
+  } catch {
+    /* best-effort */
+  }
+  return { ok: true };
 }
 
 /** The F26 idle-lock reason, read from its own storage.session key (E1-7). Not part of the session

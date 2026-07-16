@@ -69,6 +69,11 @@ function ad(...parts: string[]): Uint8Array {
 export const adUvk = (userId: string): Uint8Array => ad("uvk", userId);
 export const adVk = (vaultId: string, userId: string): Uint8Array => ad("vk", vaultId, userId);
 export const adIdkey = (userId: string): Uint8Array => ad("idkey", userId);
+/** Extension quick-unlock (Tier B, spec 01 §8.4) AAD: "andvari/v1|ext-quick-unlock|<userId>".
+ *  Binds a PIN-wrapped UVK blob to its account (a blob copied to another userId cannot open, and
+ *  a tampered blob fails the tag). Distinct token from Android's `quick-unlock` (§8.1) — the two
+ *  platforms never share a blob. Applied to BOTH double-wrap layers (PIN + non-extractable co-key). */
+export const adQuickUnlock = (userId: string): Uint8Array => ad("ext-quick-unlock", userId);
 export const adItem = (vaultId: string, itemId: string, formatVersion: number): Uint8Array =>
   ad("item", vaultId, itemId, String(formatVersion));
 

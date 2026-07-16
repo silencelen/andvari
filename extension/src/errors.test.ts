@@ -3,7 +3,18 @@
 // is cross-client copy drift and must be a deliberate, twin-side change.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { CARD_COPY_FAILED, CLIPBOARD_FAILED, fillErrorCopy, lockNoticeCopy, revealErrorCopy, saveErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors.ts";
+import {
+  CARD_COPY_FAILED,
+  CLIPBOARD_FAILED,
+  enrollErrorCopy,
+  fillErrorCopy,
+  lockNoticeCopy,
+  pinUnlockErrorCopy,
+  revealErrorCopy,
+  saveErrorCopy,
+  UNREACHABLE,
+  unlockErrorCopy,
+} from "./errors.ts";
 
 test("UNREACHABLE is the canonical web sentence", () => {
   // Byte-equal to web/src/ui/errors.ts UNREACHABLE (em dash U+2014, ASCII apostrophes).
@@ -53,6 +64,39 @@ test("reveal-seam failures (#23): every code renders verb-neutral copy, never SW
   assert.equal(revealErrorCopy("locked"), "andvari locked before it could release that login — unlock and try again.");
   assert.equal(revealErrorCopy("not_allowed"), "andvari wouldn't release that login — reopen the popup and try again.");
   assert.equal(revealErrorCopy(undefined), "Could not release that login — try again."); // SW mid-restart
+});
+
+test("quick-unlock redeem: wrong_pin is a generic no-oracle line carrying the remaining attempts", () => {
+  // breaker A1/A2: no partial-correctness signal, no wrong-PIN-vs-corrupt-blob distinction.
+  assert.equal(pinUnlockErrorCopy("wrong_pin", 4), "That PIN didn't match — 4 tries left, or use your master password.");
+  assert.equal(pinUnlockErrorCopy("wrong_pin", 1), "That PIN didn't match — 1 try left, or use your master password."); // singular
+  assert.equal(pinUnlockErrorCopy("wrong_pin", 0), "That PIN didn't match — 0 tries left, or use your master password.");
+});
+
+test("quick-unlock redeem: wiped-blob / revoked / hard-fault outcomes route to the right copy", () => {
+  assert.equal(pinUnlockErrorCopy("expired"), "It's been a while since you signed in — enter your master password to continue.");
+  assert.equal(pinUnlockErrorCopy("exhausted"), "Too many wrong PINs — quick unlock is off. Unlock with your master password.");
+  assert.equal(pinUnlockErrorCopy("corrupt"), "Quick unlock needs to be set up again — unlock with your master password.");
+  assert.equal(pinUnlockErrorCopy("stale_uvk"), "Quick unlock needs to be set up again — unlock with your master password.");
+  assert.equal(pinUnlockErrorCopy("revoked"), "Your session ended — sign in again with your master password.");
+  // Hard security faults keep their exact sentences — NEVER softened (parity with the unlock ladder).
+  assert.equal(pinUnlockErrorCopy("identity_mismatch"), unlockErrorCopy("identity_mismatch"));
+  assert.equal(pinUnlockErrorCopy("kdf_policy"), unlockErrorCopy("kdf_policy"));
+  assert.equal(pinUnlockErrorCopy("network"), UNREACHABLE);
+  assert.equal(pinUnlockErrorCopy("server_error"), "The server had a problem answering — try again in a moment.");
+  // not_armed / aborted (benign races) + an absent code fall to the master password quietly.
+  assert.equal(pinUnlockErrorCopy("aborted"), "Couldn't quick-unlock — unlock with your master password.");
+  assert.equal(pinUnlockErrorCopy(undefined), "Couldn't quick-unlock — unlock with your master password.");
+});
+
+test("quick-unlock enroll: the entropy-floor nudges (breaker A2⊕B8) + the gate refusals", () => {
+  assert.equal(enrollErrorCopy("weak_pin", "too_short"), "Use at least 6 characters for your PIN.");
+  assert.equal(enrollErrorCopy("weak_pin", "digits_need_length"), "An all-number PIN needs at least 10 digits — or add a letter to a shorter one.");
+  assert.equal(enrollErrorCopy("weak_pin", "trivial"), "That PIN is too easy to guess — avoid sequences and repeats.");
+  assert.equal(enrollErrorCopy("locked"), "Unlock andvari first to set up quick unlock.");
+  assert.equal(enrollErrorCopy("must_change_password"), "Set a new master password in the web vault before turning on quick unlock.");
+  assert.equal(enrollErrorCopy("need_full_unlock"), "Enter your master password once more to set up quick unlock.");
+  assert.equal(enrollErrorCopy(undefined), "Couldn't turn on quick unlock — try again.");
 });
 
 test("card + clipboard copy failures (#23): honest retryable sentences, never raw exception text", () => {
