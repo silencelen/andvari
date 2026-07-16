@@ -34,7 +34,11 @@ compose.desktop {
             // startup: java.net.http (ktor Java HTTP engine), java.sql (sqlite-jdbc),
             // jdk.unsupported (JNA/lazysodium sun.misc.Unsafe). List from
             // `gradlew :app-desktop:suggestRuntimeModules`. Applies to BOTH .msi and .deb.
-            modules("java.instrument", "java.management", "java.net.http", "java.sql", "jdk.unsupported")
+            // jdk.accessibility (design 2026-07-13 platform-fit §3): without it the minimized
+            // runtime image CANNOT load the Java Access Bridge, so Windows screen-reader support is
+            // broken at the packaging layer even after the user runs `jabswitch /enable`. Shipping a
+            // runtime that can't load the bridge is strictly wrong; see docs/accessibility.md.
+            modules("java.instrument", "java.management", "java.net.http", "java.sql", "jdk.unsupported", "jdk.accessibility")
             windows {
                 // STABLE across releases → re-running a newer installer upgrades in
                 // place instead of installing a second copy. NEVER change this.

@@ -218,6 +218,17 @@ class DesktopState(private val scope: CoroutineScope) {
     // UI-audit #26: the Auto/Light/Dark override Main.kt's AndvariDesktopTheme consumes.
     var themeMode by mutableStateOf(ThemeMode.fromStore(store.themeMode))
         private set
+    // design 2026-07-13 platform-fit §2 (menu bar): the Vault menu's "Import passwords…" routes
+    // through this — the real import flow is a Vault-screen-local `remember` flag the menu can't
+    // reach, so the menu sets this and the Vault screen consumes it once ([consumeImportRequested]).
+    // The menu item only ENABLES on the Vault screen, so it can only be set while that screen is
+    // mounted to observe it; cleared on lock/sign-out as a belt-and-suspenders reset.
+    var importRequested by mutableStateOf(false)
+        private set
+    // design 2026-07-13 platform-fit §2 (menu bar): Help ▸ About andvari visibility. The menu sets
+    // it; the About dialog (Ui.kt) renders + dismisses. Pure display — no secret/wire/spec surface.
+    var aboutRequested by mutableStateOf(false)
+        private set
     // Set when the server 426s this build (minVersion pin) — the UI shows a blocking
     // "update required" screen. Advisory: the gate is a nudge for honest clients.
     var upgradeRequired by mutableStateOf<String?>(null)
@@ -512,6 +523,50 @@ class DesktopState(private val scope: CoroutineScope) {
     fun chooseThemeMode(mode: ThemeMode) {
         themeMode = mode
         store.themeMode = mode.storeValue
+    }
+
+    /** design §2 menu bar: the "signed in" gate for Sync now / Lock. Derived from the OBSERVABLE
+     *  [screen] (account itself is a plain field, not Compose state, so a menu `enabled =` reading
+     *  it would never recompose) — true on exactly the post-unlock screens where a live session is
+     *  bound. Lock/Sync are both idempotent no-ops when nothing is bound, so this is a
+     *  discoverability gate, not a safety one. */
+    val menuSignedIn: Boolean
+        get() = screen.let {
+            it is DesktopScreen.Vault || it is DesktopScreen.Sharing || it is DesktopScreen.Settings ||
+                it is DesktopScreen.Trash || it is DesktopScreen.RecoverySetup || it is DesktopScreen.RecoveryCapture
+        }
+
+    /** design §2 menu bar: Import passwords… enables only on the Vault screen (open-question
+     *  default: disabled outside Vault, no hidden navigation). Observable via [screen]. */
+    val onVaultScreen: Boolean get() = screen is DesktopScreen.Vault
+
+    /** design §2 menu bar: the Vault menu's Import passwords… — the menu can't reach the Vault
+     *  screen's local import flag, so set the hoisted request the Vault screen consumes. */
+    fun requestImport() { importRequested = true }
+
+    /** design §2: the Vault screen consumes the menu's import request exactly once (LaunchedEffect
+     *  keyed on [importRequested]) into the same flow the toolbar icon opens. */
+    fun consumeImportRequested() { importRequested = false }
+
+    fun requestAbout() { aboutRequested = true }
+    fun dismissAbout() { aboutRequested = false }
+
+    /** design §2 About dialog: the wire platform tag (windows/linux) for display — the same value
+     *  [newApi] sends as the X-Andvari-Client platform. */
+    val platformLabel: String get() = desktopPlatform()
+
+    /**
+     * design 2026-07-13 platform-fit §2, Help ▸ Check for updates: re-run the SAME signed update
+     * check [start] runs — on Dispatchers.IO (the UI-audit #24 frozen-startup finding: the blocking
+     * java.net.http fetch must never touch the Compose thread) — and fold the verified-or-quiet
+     * result into state via [applyUpdateCheck] (surfaces `updateAvailable` as the normal notice /
+     * the quiet Settings channel line). Nag-only, no installer is fetched (§M-D1).
+     */
+    fun checkForUpdatesNow() {
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { checkForUpdate(store.baseUrl, store.lastAcceptedSeq) } }
+                .onSuccess { applyUpdateCheck(it) }
+        }
     }
 
     fun updateServer(url: String) {
@@ -2247,7 +2302,28 @@ class DesktopState(private val scope: CoroutineScope) {
         // to Welcome), and clearing it would strand enroll in "Checking the server…" with no
         // Retry and no probe.
         if (policy != null) policyFetchFailed = false
+        importRequested = false // §2: a pending menu import request must not survive into re-unlock
         screen = DesktopScreen.Unlock(store.load()?.email ?: ""); items = emptyList(); needsUpdateCount = 0
+    }
+
+    /**
+     * design 2026-07-13 platform-fit §2 — Ctrl+L / menu-bar panic lock. No-op unless a session is
+     * bound ([account] != null: from Welcome/Unlock/Loading the key does nothing, so a locked app
+     * never navigates); otherwise IDENTICAL to the ungated Vault-toolbar Lock button ([lock]) — it
+     * fires unconditionally, discarding an open editor's draft (explicit user intent outranks the
+     * draft; the idle-lock's editor grace deliberately does NOT apply) and is safe mid-recovery-gate
+     * (the v2 #15 capture-gate invariant: the next unlock re-enters the gate with a fresh phrase, and
+     * lock() zeroes pendingRecoverySecret §F.7). When an editor was open the reason line reuses
+     * maybeIdleLock()'s "the editor's unsaved changes were discarded" wording (minus the false
+     * "after inactivity" lead — this is a deliberate command, not a timeout).
+     *
+     * Idempotent: a second Ctrl+L (or the menu accelerator double-firing alongside onPreviewKeyEvent)
+     * lands here with account == null and returns — the design's "one authoritative shortcut site"
+     * rests on exactly this no-op.
+     */
+    fun panicLock() {
+        if (account == null) return
+        lock(if (editorOpen) "Locked — the editor's unsaved changes were discarded." else "Locked.")
     }
 
     fun signOut() {
@@ -2279,6 +2355,7 @@ class DesktopState(private val scope: CoroutineScope) {
             session?.userId?.let { deleteCache(it) }
             store.clear()
             clearSecondary(); signInTotpRequired = false
+            importRequested = false // §2: drop any pending menu import request with the session
             mustChangePassword = false // F58: sign-out drops the account; the flag re-arrives at the next sign-in
             lockReason = null // §6: user-initiated sign-out — the Welcome screen owes no explanation
             // §3 reset block (review MED, Android parity): a null-policy probe failure is

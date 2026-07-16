@@ -41,3 +41,12 @@ bash scripts/verify.sh   # the ship gate: 4-way client version-lockstep check, t
 
 The two crypto implementations (Kotlin `core/`, TypeScript `web/src/crypto`) must pass
 the **same** vector files; `verify.sh` is the gate for every ship.
+
+## Accessibility
+
+Screen-reader support differs by client — see **[`docs/accessibility.md`](docs/accessibility.md)**
+for the dated, CMP-version-pinned support matrix. Short version: **the web vault is the
+accessible path**; the Linux desktop app does not currently expose an accessibility tree, and
+Windows requires the Java Access Bridge (`jabswitch /enable`). This page should also be linked
+from the downloads page. (The desktop app does have full keyboard access, including `Ctrl+L` to
+lock and a native menu bar.)
