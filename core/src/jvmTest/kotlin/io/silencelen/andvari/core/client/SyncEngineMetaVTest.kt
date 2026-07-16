@@ -201,4 +201,30 @@ class SyncEngineMetaVTest {
             assertEquals("Clean", meta.getValue("name").jsonPrimitive.content)
         }
     }
+
+    @Test
+    fun crossImplMetaVVectors_parseIdenticallyToWeb() {
+        val s = seeded()
+        // spec 02 §4 PINNED metaV parse — these MUST read identically on Kotlin and web
+        // (web store.metav.test.ts runs the SAME table). The written counter is parsed+1, so the
+        // written value directly reveals what each raw token parsed to. `2.0`, `2e3` and a >2^63
+        // literal used to read 0 on Kotlin (raw toLongOrNull) but their numeric value on web — the
+        // exact fleet fork this pins shut (Account.parseMetaV now reads the token as a Double under
+        // the 2^53 safe-integer ceiling, matching web's Number.isSafeInteger). token → PARSED value:
+        val vectors = listOf(
+            "2" to 2L, //                       plain integer
+            "2.0" to 2L, //                     integral double literal (was 0 on Kotlin)
+            "2e3" to 2000L, //                  exponent form (was 0 on Kotlin)
+            "-1" to 0L, //                      negative → 0
+            "1.5" to 0L, //                     fractional → 0
+            "99999999999999999999" to 0L, //    > 2^63 and > 2^53 → 0 on BOTH
+            "\"2\"" to 0L, //                   JSON string → 0 (not a counter)
+        )
+        for ((token, parsed) in vectors) {
+            val rebuilt = s.member.buildRenameMeta(s.vaultId, s.craftMeta(token), "Vec")
+            val meta = s.member.decryptVaultMeta(s.vaultId, rebuilt)
+            assertEquals(parsed + 1, meta.getValue("metaV").jsonPrimitive.long, "metaV token $token must parse to $parsed")
+            assertEquals("Vec", meta.getValue("name").jsonPrimitive.content)
+        }
+    }
 }

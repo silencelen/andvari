@@ -32,6 +32,20 @@ object UpdateVerify {
     val PINNED: List<String> = listOf("e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI")
 
     /**
+     * §M-D4(a) — compile-time anti-rollback FLOOR: the lowest signed-manifest `seq` a FRESH desktop
+     * install (or one whose persisted desktop `lastAcceptedSeq` was wiped) will accept. Desktop
+     * `Platform.checkForUpdate` floors the caller's stored seq at this
+     * (`maxOf(storedSeq, MIN_SEQ)`), shrinking the fresh-install window a T1 server could use to
+     * steer a client to a validly-signed-but-older (known-vuln) manifest below the floor.
+     *
+     * 0 for now: NO signed manifest is published to `/downloads` yet (H2 signing is owner-pending),
+     * so 0 admits the first real release (`seq` 1) while flooring any wiped state at ≥ 0. Bump to the
+     * first published manifest's `seq` at the first signed release. Mirrors the extension's
+     * `updateverify.ts MIN_SEQ = 0` (a DIFFERENT lane owns the extension) — keep the two in lockstep.
+     */
+    const val MIN_SEQ: Long = 0
+
+    /**
      * §M-D3 — the update path is HARD-DISABLED while only the placeholder is pinned. A build that
      * cannot verify a genuine release must offer NO updates at all (fail-closed), never fall through
      * to a test-key-signed manifest (which would be forgeable by anyone holding the test seed).

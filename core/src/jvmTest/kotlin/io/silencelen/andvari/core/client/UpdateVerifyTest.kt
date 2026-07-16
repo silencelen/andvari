@@ -3,6 +3,7 @@ package io.silencelen.andvari.core.client
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -49,5 +50,22 @@ class UpdateVerifyTest {
 
         // A key SET (§M-D7): a real key alongside the sentinel still verifies (rotation overlap).
         assertTrue(UpdateVerify.verify(crypto, msg, sig, listOf(UpdateVerify.TEST_PUBKEY, Bytes.toB64(pub))))
+    }
+
+    @Test
+    fun minSeq_isTheCompileTimeAntiRollbackFloor_lockstepWithExtension() {
+        // §M-D4(a): the desktop anti-rollback floor (consumed by Platform.checkForUpdate as
+        // maxOf(storedSeq, MIN_SEQ)). Kept in LOCKSTEP with the extension's updateverify.ts
+        // `MIN_SEQ = 0` (a different lane owns the extension) — 0 admits the first real release
+        // (seq 1) while flooring any wiped/fresh state at ≥ 0. Bump BOTH constants together.
+        assertEquals(0L, UpdateVerify.MIN_SEQ, "MIN_SEQ must mirror extension updateverify.ts MIN_SEQ = 0")
+        assertTrue(UpdateVerify.MIN_SEQ >= 0L, "the floor is never negative")
+
+        // The floor semantics Platform.checkForUpdate applies: a fresh install (0) or a wiped/garbage
+        // negative stored seq must never evaluate BELOW MIN_SEQ, so a validly-signed-but-older
+        // manifest can't steer a downgrade beneath the floor; a real advance stays above it.
+        assertEquals(UpdateVerify.MIN_SEQ, maxOf(0L, UpdateVerify.MIN_SEQ), "fresh install floors at MIN_SEQ")
+        assertEquals(UpdateVerify.MIN_SEQ, maxOf(-5L, UpdateVerify.MIN_SEQ), "a wiped/negative stored seq floors at MIN_SEQ")
+        assertEquals(42L, maxOf(42L, UpdateVerify.MIN_SEQ), "a real advanced seq stays above the floor")
     }
 }

@@ -547,16 +547,16 @@ class SyncEngine(
         }.getOrDefault(delivered)
     }
 
-    /** The row's plaintext `metaV` (spec 02 §4): it counts ONLY when it is an integral,
-     *  non-negative JSON number, else 0 — a string-encoded/fractional/negative value must
-     *  read identically on every client (the same read [Account.buildRenameMeta] uses), or
-     *  one impl pins while another applies, forking the fleet in exactly the adversarial
-     *  anti-replay path this guard exists for. Web twin: store.ts metaVOf. */
+    /** The row's plaintext `metaV` (spec 02 §4): counts ONLY as a non-negative integer ≤ 2^53
+     *  (JS Number.MAX_SAFE_INTEGER), else 0 — via the SINGLE [Account.parseMetaV] rule that must
+     *  read identically on every client (the same read [Account.buildRenameMeta] uses), or one
+     *  impl pins while another applies, forking the fleet in exactly the adversarial anti-replay
+     *  path this guard exists for. Web twin: store.ts metaVOf (Number.isSafeInteger). */
     private fun metaV(v: WireVault): Long {
         val meta = account.decryptVaultMeta(v.vaultId, v.metaBlob)
         val p = meta["metaV"] as? kotlinx.serialization.json.JsonPrimitive ?: return 0L
         if (p.isString) return 0L // "999999" is not a counter
-        return p.content.toLongOrNull()?.takeIf { it >= 0 } ?: 0L // fractional/exponent/negative → 0
+        return Account.parseMetaV(p.content)
     }
 
     /**

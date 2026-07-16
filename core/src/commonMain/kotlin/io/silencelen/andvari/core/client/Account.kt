@@ -221,6 +221,26 @@ class Account private constructor(
         // device rows and audit entries agree with the minVersion gate's view of the client.
         fun deviceInfo(name: String, platform: String = "android"): DeviceInfo = DeviceInfo(platform, name)
 
+        /** 2^53 − 1 = JS Number.MAX_SAFE_INTEGER — the [parseMetaV] ceiling (see below). */
+        const val METAV_MAX: Long = 9007199254740991L
+
+        /**
+         * spec 02 §4 metaV parse — the ONE rule every client applies ([SyncEngine.metaV],
+         * [buildRenameMeta], and the web twins store.ts metaVOf + account.ts buildRenameMeta).
+         * [content] is the RAW JSON *number* token; callers reject a string-typed primitive FIRST
+         * ("2" is not a counter). It counts iff it parses to a finite, integral, non-negative Double
+         * ≤ [METAV_MAX] → its Long value; else 0. This matches web MATHEMATICALLY: web reads the
+         * JSON.parse'd number under Number.isSafeInteger, so `2.0`→2, `2e3`→2000, and a >2^63 literal
+         * (e.g. 99999999999999999999, which overflows the safe-integer ceiling) → 0 on BOTH. Closes
+         * the fleet fork where the old raw-token toLongOrNull read those three as 0 on Kotlin while
+         * web read their numeric value — a divergence in exactly this adversarial anti-replay guard.
+         */
+        fun parseMetaV(content: String): Long {
+            val d = content.toDoubleOrNull() ?: return 0L
+            if (!d.isFinite() || d < 0.0 || d > METAV_MAX.toDouble() || d != kotlin.math.floor(d)) return 0L
+            return d.toLong()
+        }
+
         /** Derive the login authKey a fresh device sends after prelogin. */
         fun deriveAuthKey(password: String, kdfSaltB64: String, params: KdfParams, crypto: CryptoProvider = createCryptoProvider()): String {
             val mk = Keys.masterKey(crypto, password, Bytes.fromB64(kdfSaltB64), params)
@@ -252,6 +272,11 @@ class Account private constructor(
             recoveryFingerprint: String?,
             deviceName: String,
             crypto: CryptoProvider = createCryptoProvider(),
+            // Must match the AndvariApi wire tag ("android" | "windows" | "linux") — the [deviceInfo]
+            // invariant — so the device row + audit entry agree with the X-Andvari-Client header this
+            // session sends. Defaulted for source compat; desktop passes desktopPlatform(). Appended
+            // LAST so every existing positional caller keeps compiling.
+            platform: String = "android",
         ): EnrollResult {
             val userId = uuid(crypto)
             val personalVaultId = uuid(crypto)
@@ -299,7 +324,7 @@ class Account private constructor(
                     wrappedVk = Envelope.sealB64(crypto, uvk, vk, Ad.vk(personalVaultId, userId)),
                     metaBlob = Envelope.sealB64(crypto, vk, """{"name":"Personal"}""".encodeToByteArray(), Ad.vaultMeta(personalVaultId)),
                 ),
-                device = DeviceInfo("android", deviceName),
+                device = DeviceInfo(platform, deviceName),
             )
             val account = Account(
                 crypto, userId, uvk, identity.publicKey, identity.privateKey, personalVaultId,
@@ -542,10 +567,10 @@ class Account private constructor(
      */
     fun buildRenameMeta(vaultId: String, metaBlob: String, newName: String): String {
         val meta = decryptVaultMeta(vaultId, metaBlob)
-        // spec 02 §4: metaV counts ONLY when it is an integral, non-negative JSON number,
-        // else 0 — the SAME rule SyncEngine.metaV applies, so write and apply agree.
+        // spec 02 §4: metaV via the SINGLE [parseMetaV] rule SyncEngine.metaV also applies, so
+        // write and apply agree on every client (a string primitive is not a counter → 0).
         val metaV = (meta["metaV"] as? kotlinx.serialization.json.JsonPrimitive)
-            ?.takeIf { !it.isString }?.content?.toLongOrNull()?.takeIf { it >= 0 } ?: 0L
+            ?.takeIf { !it.isString }?.let { parseMetaV(it.content) } ?: 0L
         val next = buildJsonObject {
             for ((k, v) in meta) if (k != "name" && k != "metaV") put(k, v)
             put("name", newName)

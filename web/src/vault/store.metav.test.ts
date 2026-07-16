@@ -221,4 +221,29 @@ describe("keepNewerMeta (spec 02 §4 warn-and-keep-newer)", () => {
       expect(meta.name).toBe("Clean");
     }
   });
+
+  it("cross-impl metaV vectors parse identically to Kotlin (2.0/2e3/>2^63 no longer diverge)", async () => {
+    const s = await seeded();
+    // spec 02 §4 PINNED metaV parse — these MUST read identically on web and Kotlin (core
+    // SyncEngineMetaVTest runs the SAME table). The written counter is parsed+1, so it directly
+    // reveals what each raw token parsed to. `2.0`, `2e3` and a >2^63 literal used to read their
+    // numeric value on web but 0 on Kotlin (raw toLongOrNull) — the fleet fork this pins shut. The
+    // safe-integer cap (Number.isSafeInteger) makes the >2^63 literal read 0 here, matching Kotlin.
+    // token → expected PARSED value (before the +1 bump)
+    const vectors: [string, number][] = [
+      ["2", 2], // plain integer
+      ["2.0", 2], // integral double literal
+      ["2e3", 2000], // exponent form
+      ["-1", 0], // negative → 0
+      ["1.5", 0], // fractional → 0
+      ["99999999999999999999", 0], // > 2^63 and > 2^53 → 0 on BOTH
+      ['"2"', 0], // JSON string → 0 (not a counter)
+    ];
+    for (const [token, parsed] of vectors) {
+      const rebuilt = s.member.buildRenameMeta(s.vaultId, craftMeta(s, token), "Vec");
+      const meta = s.member.decryptVaultMeta(s.vaultId, rebuilt);
+      expect(meta.metaV, `metaV token ${token} must parse to ${parsed}`).toBe(parsed + 1);
+      expect(meta.name).toBe("Vec");
+    }
+  });
 });
