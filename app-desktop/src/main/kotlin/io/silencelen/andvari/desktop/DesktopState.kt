@@ -140,6 +140,94 @@ internal fun clampAutoLockSeconds(v: Int): Int =
 internal fun clampClipboardClearSeconds(v: Int): Int =
     v.coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS)
 
+/** §4.3 anti-phishing trust-gate variant: BASELINE for a manual ServerField repoint, ENROLLMENT for
+ *  an invite-driven repoint (adds the new-account/password-reuse note, B2-8). */
+enum class TrustGateVariant { Baseline, Enrollment }
+
+/**
+ * §4.3 anti-phishing trust-gate display model — computed as a PURE function of the raw origin the
+ * client will actually dial + the [variant]. Kept OUT of the composable so the security-critical
+ * render DECISIONS (punycode of a non-ASCII host, the plain-http caution, baseline-vs-enrollment
+ * copy) are unit-testable without a Compose harness. The composable renders exactly these fields —
+ * it invents no copy, and it NEVER substitutes a display name for the raw origin: `instanceName`
+ * arrives only after connecting and invite payloads carry only `o`, so attacker-supplied branding
+ * is never rendered as verified (§4.3 / spec/05 R8).
+ */
+data class TrustGateModel(
+    val rawOrigin: String,
+    // [rawOrigin] with a non-ASCII host rendered in punycode (xn--…) — the dominant line shows THIS,
+    // so deceptive lookalike glyphs are never the thing the user eyeballs as the destination.
+    val displayOrigin: String,
+    val internationalized: Boolean,
+    val plainHttp: Boolean,
+    val enrollment: Boolean,
+) {
+    val lead: String get() = "Connect to a different server?"
+    val body: String get() =
+        "This server will store your encrypted vault and see your account activity " +
+            "(email, sign-ins, item counts). Only continue if you trust it."
+    // Enrollment variant ADD (B2-8) — verbatim; the password-reuse warning is load-bearing.
+    val enrollmentNote: String? get() = if (enrollment)
+        "Your invite was issued by this server. Enrolling creates a NEW account there — it does not " +
+            "move any existing vault. Choose a master password you don't use anywhere else." else null
+    val internationalCaution: String? get() = if (internationalized)
+        "This address uses international characters, shown above in their ASCII (punycode) form. " +
+            "Lookalike letters are a common phishing trick — confirm it matches exactly what you were given." else null
+    val httpCaution: String? get() = if (plainHttp)
+        "This is an unencrypted http:// connection — traffic to this server can be read on the " +
+            "network. Only continue on a network you trust." else null
+}
+
+/** The reg-name/IP host of a stored-baseUrl-shaped origin (`scheme://host[:port]`), tolerant of a
+ *  non-ASCII host (which `java.net.URI` may refuse to parse) and IPv6 brackets. Empty when there is
+ *  no authority. */
+private fun trustGateHost(origin: String): String {
+    // `substringAfterLast('@')` drops any userinfo (defense-in-depth: manual input is already
+    // canonicalized by canonicalServerOrigin, but a raw origin reaching here must still resolve to the
+    // REAL host, never `real.host@evil.example`'s reassuring userinfo prefix).
+    val authority = origin.trim().substringAfter("://", "").substringBefore('/').substringAfterLast('@')
+    if (authority.isEmpty()) return ""
+    return if (authority.startsWith("[")) authority.substring(1).substringBefore(']') // IPv6 literal
+    else authority.substringBefore(':')
+}
+
+/** §4.3 IDN defense: build the [TrustGateModel] for [origin]. A non-ASCII host is punycoded for the
+ *  dominant display + flagged; an `http://` origin is flagged for the plain-transport caution. */
+internal fun trustGateModel(origin: String, variant: TrustGateVariant): TrustGateModel {
+    val trimmed = origin.trim()
+    val plainHttp = trimmed.startsWith("http://", ignoreCase = true)
+    val host = trustGateHost(trimmed)
+    val nonAscii = host.isNotEmpty() && host.any { it.code > 0x7f }
+    val display = if (nonAscii) {
+        // §4.3 IDN defense — fail CLOSED: punycode the host; if IDN.toASCII can't (throws → null),
+        // escape its non-ASCII code points rather than rendering the raw homograph the punycode display
+        // exists to defeat. Either way the `internationalized` caution still fires below.
+        val puny = runCatching { java.net.IDN.toASCII(host) }.getOrNull()
+        val safeHost = puny ?: host.map { if (it.code > 0x7f) "\\u%04x".format(it.code) else it.toString() }.joinToString("")
+        if (trimmed.contains("://"))
+            trimmed.substringBefore("://") + "://" + trimmed.substringAfter("://").replaceFirst(host, safeHost)
+        else safeHost
+    } else trimmed
+    return TrustGateModel(
+        rawOrigin = trimmed,
+        displayOrigin = display,
+        internationalized = nonAscii,
+        plainHttp = plainHttp,
+        enrollment = variant == TrustGateVariant.Enrollment,
+    )
+}
+
+/** §4.3 (B2-9) launch-time reconcile decision for a persisted pending-switch marker. The switch is
+ *  "already committed" (a crash between the `store.baseUrl` commit and the marker clear) iff the
+ *  marker's origin canonicalizes to the committed default; otherwise it never committed and the
+ *  user must reconcile (Finish/Discard). Pure + canonical-origin-keyed so a trailing-slash/case
+ *  difference can't force a spurious Reconcile. */
+enum class PendingReconcileDecision { AlreadyCommitted, Reconcile }
+
+internal fun pendingReconcileDecision(markerOrigin: String, committedBaseUrl: String): PendingReconcileDecision =
+    if (originKey(markerOrigin) == originKey(committedBaseUrl)) PendingReconcileDecision.AlreadyCommitted
+    else PendingReconcileDecision.Reconcile
+
 /** F74: the Settings server-TOTP status fetch as an honest tri-state — Failed must STOP
  *  the spinner and offer Retry, instead of spinning forever beside its own error (the old
  *  shape used totpStatus==null for both "checking" and "check failed"). */
@@ -150,8 +238,13 @@ enum class TotpLoad { Pending, Ready, Failed }
  * :core client (Account + AndvariApi[java engine] + SyncEngine) and exposes Compose
  * state. Mirrors the Android AndvariViewModel.
  */
-class DesktopState(private val scope: CoroutineScope) {
-    private val store = DesktopSessionStore()
+class DesktopState(
+    private val scope: CoroutineScope,
+    // Injectable for tests only (the §4.1/§4.3 switch state-machine — token drop, pending
+    // commit/revert, marker reconcile — is driven against a temp-dir store); production uses the
+    // default ~/.andvari-desktop store.
+    private val store: DesktopSessionStore = DesktopSessionStore(),
+) {
 
     init {
         // One-time: bump an old LAN-default server URL to the tailnet default before any
@@ -240,7 +333,36 @@ class DesktopState(private val scope: CoroutineScope) {
         private set
     var notice by mutableStateOf<String?>(null)
         private set
+    // The origin the app is CURRENTLY operating against — the server every request dials and every
+    // §4.2 namespace read keys off. Normally EQUAL to the persisted default (store.baseUrl); it
+    // diverges ONLY during an invite-driven pending switch (dials the pending origin while the
+    // persisted default stays on the prior server until enrollment SUCCEEDS — §4.1 rule 3) and
+    // transiently through a committed manual switch. Kept a plain observable (read off the UI
+    // thread by newApi/originKey is fine — mutableStateOf reads are snapshot-safe).
     var baseUrl by mutableStateOf(store.baseUrl)
+        private set
+    // §4.1 rule 3 / §4.4 Desktop: an invite-driven repoint held PENDING (uncommitted) — the app
+    // dials [PendingServer.origin] once [pendingConnected] flips, but store.baseUrl stays on the
+    // prior server until enrollment succeeds. Non-null ⇒ the Welcome UI locks out sign-in (B2-6)
+    // and the enroll pane renders the Trust Gate / ceremony against the pending origin.
+    var pendingServer by mutableStateOf<PendingServer?>(null)
+        private set
+    // Two-stage pending: false ⇒ the Trust Gate (enrollment variant) is showing and NOTHING has
+    // switched yet (the gate IS the gesture); true ⇒ Connect was pressed, [baseUrl] now dials the
+    // pending origin, and the escrow-fingerprint ceremony renders against ITS policy.
+    var pendingConnected by mutableStateOf(false)
+        private set
+    // The persisted default captured when the pending switch was armed — the origin "Cancel and
+    // return to <…>" reverts to (store.baseUrl, which a pending switch never moves).
+    var pendingReturnOrigin by mutableStateOf<String?>(null)
+        private set
+    // §4.3 (B2-9): a launch-time reconcile is owed for this crash-window marker (an uncommitted
+    // invite switch found at start). Drives the Finish/Discard prompt; null once resolved.
+    var pendingReconcile by mutableStateOf<PendingServer?>(null)
+        private set
+    // §4.3: a MANUAL ServerField repoint awaiting its baseline Trust Gate confirmation. Non-null ⇒
+    // the gate dialog is up for this target; Connect commits (the gate is the gesture), Cancel drops it.
+    var manualSwitchTarget by mutableStateOf<String?>(null)
         private set
     var updateAvailable by mutableStateOf<String?>(null)
         private set
@@ -501,13 +623,17 @@ class DesktopState(private val scope: CoroutineScope) {
     }
 
     private fun newApi(tokens: Tokens? = null) =
-        AndvariApi(store.baseUrl, newHttpClient(), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
+        AndvariApi(baseUrl, newHttpClient(), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
 
     fun start() {
         scope.launch {
+            // §4.3 (B2-9): reconcile a crash-window pending marker BEFORE trusting the stored
+            // session or probing — an uncommitted invite switch must offer Finish/Discard, never
+            // silently boot the unverified origin (store.baseUrl, the prior default, is intact).
+            reconcilePendingMarker()
             // §4.2: pin the PROBED origin's key before any await — a policy verdict may only
             // ever touch the declaring origin's own namespace, even if baseUrl moves mid-probe.
-            val probedKey = originKey(store.baseUrl)
+            val probedKey = originKey(baseUrl)
             val probe = newApi()
             runCatching { probe.clientPolicy() }.onSuccess { p ->
                 policyFetchFailed = false
@@ -526,7 +652,7 @@ class DesktopState(private val scope: CoroutineScope) {
             // verify flow (signature + seq floor + signedAt) rides the same call; its results
             // land in state whenever they arrive.
             scope.launch {
-                runCatching { withContext(Dispatchers.IO) { checkForUpdate(store.baseUrl, store.lastAcceptedSeq) } }
+                runCatching { withContext(Dispatchers.IO) { checkForUpdate(baseUrl, store.lastAcceptedSeq) } }
                     .onSuccess { applyUpdateCheck(it) }
             }
             val session = store.load()
@@ -603,23 +729,39 @@ class DesktopState(private val scope: CoroutineScope) {
      */
     fun checkForUpdatesNow() {
         scope.launch {
-            runCatching { withContext(Dispatchers.IO) { checkForUpdate(store.baseUrl, store.lastAcceptedSeq) } }
+            runCatching { withContext(Dispatchers.IO) { checkForUpdate(baseUrl, store.lastAcceptedSeq) } }
                 .onSuccess { applyUpdateCheck(it) }
         }
     }
 
+    /**
+     * COMMIT a switch to [url] and re-probe — the manual-repoint executor (the baseline Trust Gate's
+     * Connect, §4.4 Desktop: "manual ServerField gets the gate too, commit-on-confirm"; the gate IS
+     * the gesture, §4.1 rule 3). Drops tokens + in-memory session/unlock and rebuilds BEFORE dialing
+     * the new origin (§4.1 rule 1, B1-5) — no bearer token may cross a baseUrl change.
+     */
     fun updateServer(url: String) {
-        store.baseUrl = url.trim().removeSuffix("/")
-        baseUrl = store.baseUrl
+        val clean = url.trim().removeSuffix("/")
+        // §4.1 rule 1: token isolation FIRST, before any request to the new origin.
+        clearSessionForSwitch()
+        store.baseUrl = clean // manual repoint commits the persisted default at the gate
+        baseUrl = clean
         // B5: a deliberate URL change must re-probe — the OLD server's policy (recovery
         // fingerprint, pins) must not drive the enroll gate until restart. Null the stale
-        // policy first (renders the neutral probe-in-flight state, never the no-key text),
-        // then mirror Android setBaseUrl: apply + purge-on-forbid on success, flag on failure.
+        // policy first (renders the neutral probe-in-flight state, never the no-key text).
         policy = null
         policyFetchFailed = false
         // §4.2: the key of the origin THIS probe interrogates (baseUrl was just committed above).
-        // Captured before the await so a fast follow-up switch can't re-aim the purge.
-        val probedKey = originKey(store.baseUrl)
+        probePolicy(originKey(baseUrl))
+    }
+
+    /**
+     * The enroll-feeding policy probe (start / updateServer / trust-gate Connect / Retry all run
+     * it) — fetch the CURRENT origin's [ClientPolicy], apply it under the §2.3 clamps, and purge a
+     * forbidding origin's OWN namespace (§4.2, B2-3: never another origin's). [probedKey] is pinned
+     * by the caller BEFORE any await so a fast follow-up switch can't re-aim the purge.
+     */
+    private fun probePolicy(probedKey: String) {
         scope.launch {
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
@@ -627,9 +769,6 @@ class DesktopState(private val scope: CoroutineScope) {
                     .onSuccess { p ->
                         policyFetchFailed = false
                         applyPolicy(p, probedKey)
-                        // Same policy enforcement as start(): a forbidding server purges the cache
-                        // — its OWN origin's namespace only (§4.2, B2-3): probing a hostile/locked-
-                        // down server must never wipe the home server's offline data or keys.
                         if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(probedKey, it.userId) }
                     }
                     .onFailure { policyFetchFailed = true }
@@ -639,12 +778,161 @@ class DesktopState(private val scope: CoroutineScope) {
         }
     }
 
+    /**
+     * §4.1 rule 1 (B1-5) token isolation — tear down any live session and DROP the persisted
+     * access+refresh tokens before the app dials a new origin, so no bearer token ever crosses a
+     * baseUrl change. Preserves every origin's at-rest namespace (B2-7): a switch is NOT a sign-out,
+     * so [DesktopSessionStore.clearSession] touches session.json only, never any account-keys/cache
+     * namespace (a round trip A→B→A keeps A's offline material). Also scrubs the in-memory
+     * session/unlock-derived state so nothing bleeds into the new origin.
+     */
+    private fun clearSessionForSwitch() {
+        engine?.close(); api?.close(); api = null; account = null; engine = null
+        store.clearSession() // persisted tokens only — no namespace touched (B2-7)
+        clearVaultClipboard()
+        pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
+        pendingPieceId = null; pendingCaptureAuthKey = null
+        signInTotpRequired = false; mustChangePassword = false
+        escrowStale = false; escrowFingerprint = ""
+        clearSecondary()
+    }
+
+    // ---- §4.3 / §4.4 endpoint-switch + anti-phishing trust gate ----
+
+    /**
+     * §4.4 Desktop: a pasted invite link targeting a DIFFERENT origin arms a PENDING switch — hold
+     * [origin] behind the Trust Gate (enrollment variant) without touching tokens, the persisted
+     * default, or the live policy (Cancel must return to the prior server unchanged). The gate's
+     * Connect ([trustGateConnect]) is the gesture that actually dials [origin].
+     */
+    fun beginEnrollSwitch(origin: String, email: String?) {
+        val clean = origin.trim().removeSuffix("/")
+        if (clean.isBlank()) return
+        pendingReturnOrigin = store.baseUrl // the persisted default we revert to on Cancel/failure
+        pendingServer = PendingServer(clean, email?.trim()?.ifBlank { null }, System.currentTimeMillis())
+        pendingConnected = false
+        error = null
+    }
+
+    /**
+     * §4.4 Desktop: the enrollment Trust Gate's Connect. Drops tokens (§4.1 rule 1) BEFORE dialing
+     * the pending origin, points the RUNTIME origin ([baseUrl]) at it, and probes ITS policy so the
+     * escrow-fingerprint ceremony renders against that server. The persisted default (store.baseUrl)
+     * stays on the prior server — it commits only on enroll SUCCESS ([commitPendingSwitch]).
+     */
+    fun trustGateConnect() {
+        val pend = pendingServer ?: return
+        if (pendingConnected) return
+        clearSessionForSwitch() // §4.1 rule 1: token isolation before the first request to the new origin
+        baseUrl = pend.origin // dial the pending origin — RUNTIME only; store.baseUrl unchanged (uncommitted)
+        pendingConnected = true
+        policy = null
+        policyFetchFailed = false
+        probePolicy(originKey(pend.origin))
+    }
+
+    /**
+     * §4.4 Desktop: "Cancel/failure reverts and re-probes the prior server." Clears the crash marker
+     * and pending state and, if the switch had dialed the pending origin, drops tokens, reverts the
+     * runtime origin to the persisted default (never moved), and re-probes it. A no-op once the
+     * switch has committed (pendingServer already null) — so an enroll failure AFTER register
+     * success does NOT wrongly revert a committed account.
+     */
+    private fun revertPendingSwitch() {
+        store.clearPendingServer()
+        val hadDialed = pendingConnected && baseUrl != store.baseUrl
+        pendingServer = null; pendingConnected = false; pendingReturnOrigin = null
+        if (hadDialed) {
+            clearSessionForSwitch() // drop anything scoped to the abandoned origin before re-dialing
+            baseUrl = store.baseUrl
+            policy = null; policyFetchFailed = false
+            probePolicy(originKey(baseUrl))
+        }
+    }
+
+    /** §4.4 Desktop: the user's "Cancel and return to <prior origin>" affordance (Trust Gate Cancel
+     *  or the pending-Welcome return button). */
+    fun cancelPendingSwitch() {
+        if (pendingServer == null) return
+        error = null
+        revertPendingSwitch()
+    }
+
+    /**
+     * §4.1 rule 3 / §4.4 Desktop: enrollment SUCCEEDED at the pending origin ⇒ COMMIT it as the
+     * persisted default and drop the crash marker + pending state. Ordering is load-bearing (see
+     * [reconcilePendingMarker]): store.baseUrl is committed to the origin we enrolled at FIRST, so
+     * it and the session about to be saved stay consistent, then the marker clears. Called from the
+     * enroll-success path (and shared with its test) — never from Connect, so no switch commits
+     * without a successful register.
+     */
+    internal fun commitPendingSwitch() {
+        store.baseUrl = baseUrl
+        store.clearPendingServer()
+        pendingServer = null; pendingConnected = false; pendingReturnOrigin = null
+    }
+
+    /** §4.4 Desktop: a manual ServerField edit arms the BASELINE Trust Gate for [url] (no switch
+     *  yet — the gate's Connect commits). Ignores a blank/no-op target. */
+    fun beginManualSwitch(url: String) {
+        // §4.4 (review 2026-07-16 MEDIUM): a raw ServerField string can carry userinfo/path that spoofs
+        // the gate — `https://real.host@evil.example` displays a reassuring host while dialing evil.example
+        // (→ authKey phishing on the next sign-in). canonicalServerOrigin REJECTS those and returns the bare
+        // origin, so the gate only ever shows + dials a canonical, non-spoofable form.
+        val canon = canonicalServerOrigin(url)
+        if (canon == null) {
+            error = "Enter a server address like https://example.org — no username, path, or query."
+            return
+        }
+        if (canon == baseUrl) return // no-op re-entry of the current origin
+        error = null
+        manualSwitchTarget = canon
+    }
+
+    /** §4.4 Desktop: the manual baseline gate's Connect — commit + re-probe via [updateServer] (which
+     *  carries the §4.1 token drop). The gate IS the gesture (§4.1 rule 3). */
+    fun manualSwitchConnect() {
+        val target = manualSwitchTarget ?: return
+        manualSwitchTarget = null
+        updateServer(target)
+    }
+
+    fun manualSwitchCancel() { manualSwitchTarget = null }
+
+    /** §4.3 (B2-9): at launch, decide whether a persisted pending marker needs reconciliation. An
+     *  already-committed straggler is dropped silently; an uncommitted switch raises the Finish/
+     *  Discard prompt. store.baseUrl (the prior default) is intact, so nothing has dialed the
+     *  unverified origin. */
+    internal fun reconcilePendingMarker() {
+        val marker = store.loadPendingServer() ?: return
+        when (pendingReconcileDecision(marker.origin, store.baseUrl)) {
+            PendingReconcileDecision.AlreadyCommitted -> store.clearPendingServer()
+            PendingReconcileDecision.Reconcile -> pendingReconcile = marker
+        }
+    }
+
+    /** §4.3: "Finish setting up at <origin>" — re-show the raw-origin gate (baseline) then repoint.
+     *  A committed switch lands on the origin's Welcome (Sign in if register already succeeded
+     *  pre-crash, else Enroll), resolving the consumed-single-use-invite strand. */
+    fun finishPendingReconcile() {
+        val marker = pendingReconcile ?: return
+        pendingReconcile = null
+        store.clearPendingServer() // the deliberate repoint supersedes the marker
+        manualSwitchTarget = marker.origin
+    }
+
+    /** §4.3: "Discard" — revert (keep the prior default, never moved) + clear the marker. */
+    fun discardPendingReconcile() {
+        pendingReconcile = null
+        store.clearPendingServer()
+    }
+
     /** §3 Retry: re-run the enroll-feeding policy probe by hand — the enroll screen's
      *  Retry button after a failed fetch. Runs under [busy] (the existing button idiom). */
     fun retryPolicy() {
         if (busy) return
         busy = true
-        val probedKey = originKey(store.baseUrl) // §4.2: see start()/updateServer
+        val probedKey = originKey(baseUrl) // §4.2: see start()/updateServer
         scope.launch {
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
@@ -678,7 +966,7 @@ class DesktopState(private val scope: CoroutineScope) {
     fun answerCacheConsent(granted: Boolean) {
         if (busy) return // S2 re-assert: never race an in-flight op with an engine rebind
         cacheConsentPrompt = false
-        store.setCacheConsent(originKey(store.baseUrl), granted)
+        store.setCacheConsent(originKey(baseUrl), granted)
         if (!granted) return
         val a = api ?: return
         val acct = account ?: return
@@ -729,7 +1017,7 @@ class DesktopState(private val scope: CoroutineScope) {
                 }
             }
             val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys) }
-            store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            store.save(DesktopSession(baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.userId, s.accountKeys)
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
@@ -768,7 +1056,7 @@ class DesktopState(private val scope: CoroutineScope) {
         // offline vault access behind an unreachable server. The flag re-gates next online unlock.
         var freshKeys = true
         // §4.2: this unlock's namespace = the CURRENT origin (the one the session dials).
-        val nsKey = originKey(store.baseUrl)
+        val nsKey = originKey(baseUrl)
         val keys = try {
             a.accountKeys().also { persistAccountKeys(session.userId, it) }
         } catch (e: java.io.IOException) {
@@ -879,8 +1167,20 @@ class DesktopState(private val scope: CoroutineScope) {
                     platform = desktopPlatform(),
                 )
             }
+            // §4.3 (B2-9): persist the crash-window marker BEFORE the irreversible register — a
+            // crash between register success and the deferred store.baseUrl commit reconciles at
+            // next launch instead of stranding the user on an orphaned account. Written for EVERY
+            // enroll (a same-origin enroll's marker just resolves AlreadyCommitted at next launch —
+            // marker.origin == store.baseUrl — and clears silently). email is the pre-fill only.
+            store.setPendingServer(PendingServer(baseUrl, email, System.currentTimeMillis()))
             val s = a.register(req)
-            store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            // §4.1 rule 3 / §4.4 Desktop: register SUCCEEDED ⇒ ENROLL SUCCESS. Commit the persisted
+            // default to the origin we enrolled at (baseUrl) and drop the marker + pending state,
+            // BEFORE saving the session — so store.baseUrl and the saved session stay consistent
+            // (see reconcilePendingMarker) and a pending invite switch commits ONLY here, never on
+            // Connect. A same-origin enroll's commit is a no-op (baseUrl already == store.baseUrl).
+            commitPendingSwitch()
+            store.save(DesktopSession(baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.userId, s.accountKeys)
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
@@ -901,6 +1201,12 @@ class DesktopState(private val scope: CoroutineScope) {
             // Leak guard (Android-parity): a pre-bind failure — incl. the H1 KdfPolicyViolationException
             // from register() — must close the transient client. After bind(), `api === a` (session-owned).
             if (api !== a) a.close()
+            // §4.4 Desktop: "Cancel/failure reverts and re-probes the prior server." A pre-register
+            // (or register-reject) failure of a PENDING invite switch reverts to the prior origin +
+            // clears the marker; a failure AFTER register success is a no-op here (commitPendingSwitch
+            // already cleared the pending), so a committed account is never yanked back. A same-origin
+            // enroll's revert just drops its (already-current) marker without re-dialing.
+            revertPendingSwitch()
             throw t
         }
     }
@@ -1795,7 +2101,7 @@ class DesktopState(private val scope: CoroutineScope) {
                     // A 426 mid-poll is not a per-sync error — this build is too old for the
                     // server's pin (op()-parity; the old manual refresh via op{} already did this).
                     t is UpgradeRequiredException ->
-                        upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${store.baseUrl}/downloads."
+                        upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${baseUrl}/downloads."
                     // Offline blip: silent for the background poll (by design), an honest one-liner
                     // for the toolbar Refresh the user just clicked (#23: the canon's SYNC_OFFLINE —
                     // byte-equal to the sentence this site always showed).
@@ -2215,7 +2521,7 @@ class DesktopState(private val scope: CoroutineScope) {
             }
             val payload = BackupPayload(
                 exportedAt = System.currentTimeMillis(), // call-site clock; core takes it as data
-                origin = store.baseUrl,
+                origin = baseUrl,
                 userId = acct.userId,
                 identityFingerprint = acct.identityFingerprintShort(),
                 vaults = lines.map { BackupVault(it.vaultId, it.type, it.name, it.role) },
@@ -2450,7 +2756,7 @@ class DesktopState(private val scope: CoroutineScope) {
             // §4.2: explicit sign-out removes the CURRENT origin's cache for this user — other
             // origins' namespaces are out of this gesture's reach (B2-7: wipe only on explicit
             // remove or that origin's own policy-forbid).
-            session?.userId?.let { store.deleteCacheDb(originKey(store.baseUrl), it) }
+            session?.userId?.let { store.deleteCacheDb(originKey(baseUrl), it) }
             store.clear()
             clearSecondary(); signInTotpRequired = false
             importRequested = false // §2: drop any pending menu import request with the session
@@ -2497,7 +2803,7 @@ class DesktopState(private val scope: CoroutineScope) {
      *  origin's persisted fallback (spec 02 §8; per-origin per §4.2 — origin A's stance never
      *  governs origin B's cold start). */
     private fun orgCacheAllowed(): Boolean =
-        policy?.offlineCacheAllowed ?: store.orgCacheAllowed(originKey(store.baseUrl))
+        policy?.offlineCacheAllowed ?: store.orgCacheAllowed(originKey(baseUrl))
 
     /**
      * §5.3 (B1-4): may anything land at rest for the CURRENT origin? Org allowance (tighten-only,
@@ -2506,7 +2812,7 @@ class DesktopState(private val scope: CoroutineScope) {
      * both legs must independently say yes.
      */
     private fun durableCacheEnabled(): Boolean =
-        orgCacheAllowed() && store.cacheConsent(originKey(store.baseUrl)) == true
+        orgCacheAllowed() && store.cacheConsent(originKey(baseUrl)) == true
 
     /**
      * Record a freshly-fetched policy in UI state + the persisted offline fallbacks. THE one
@@ -2516,7 +2822,7 @@ class DesktopState(private val scope: CoroutineScope) {
      * [key] names the PROBED origin (§4.2) — async callers capture it before awaiting the fetch
      * so a mid-flight switch can't cross-write another origin's fallbacks.
      */
-    private fun applyPolicy(p: ClientPolicy, key: String = originKey(store.baseUrl)) {
+    private fun applyPolicy(p: ClientPolicy, key: String = originKey(baseUrl)) {
         policy = p.copy(
             autoLockSeconds = clampAutoLockSeconds(p.autoLockSeconds),
             clipboardClearSeconds = clampClipboardClearSeconds(p.clipboardClearSeconds),
@@ -2528,7 +2834,7 @@ class DesktopState(private val scope: CoroutineScope) {
     /** Persist accountKeys for offline unlock ONLY when the org allows AND this device consented
      *  (spec 02 §8 + §5.3) — into the CURRENT origin's namespace (§4.2). */
     private fun persistAccountKeys(userId: String, keys: io.silencelen.andvari.core.model.AccountKeys) {
-        val key = originKey(store.baseUrl)
+        val key = originKey(baseUrl)
         if (durableCacheEnabled()) store.saveAccountKeys(key, userId, keys) else store.clearAccountKeys(key, userId)
     }
 
@@ -2594,7 +2900,7 @@ class DesktopState(private val scope: CoroutineScope) {
                 // per-device consent, §5.3) and the same per-origin home (§4.2).
                 if (durableCacheEnabled()) {
                     store.saveAccountKeys(
-                        originKey(store.baseUrl), userId,
+                        originKey(baseUrl), userId,
                         keys.copy(kdfSalt = Bytes.toB64(newSalt), kdfParams = newParams, wrappedUvk = wrappedUvkNew),
                     )
                 }
@@ -2606,7 +2912,7 @@ class DesktopState(private val scope: CoroutineScope) {
         touch() // spec 01 §8: the auto-lock timer resets on unlock
         engine?.close()
         api = a; account = acct
-        val key = originKey(store.baseUrl) // §4.2: this session's namespace = the current origin
+        val key = originKey(baseUrl) // §4.2: this session's namespace = the current origin
         // §5.3 (B1-4): at-rest cache needs BOTH the org's allowance and this device's per-origin
         // consent (default OFF — null means the one-time prompt hasn't been answered).
         val allowed = (policy?.offlineCacheAllowed ?: store.orgCacheAllowed(key)) && store.cacheConsent(key) == true
@@ -2656,7 +2962,7 @@ class DesktopState(private val scope: CoroutineScope) {
         // this (device, origin) never answered AND the org doesn't forbid the cache (a forbid
         // leaves nothing to consent to). Continuity installs were adopted consent=ON (§4.2
         // one-shot) and never see it.
-        if (store.cacheConsent(originKey(store.baseUrl)) == null && orgCacheAllowed()) cacheConsentPrompt = true
+        if (store.cacheConsent(originKey(baseUrl)) == null && orgCacheAllowed()) cacheConsentPrompt = true
         refreshLifecycle() // A-funnel: offers/notices delivered by the unlock sync show at once
     }
 
@@ -2696,7 +3002,7 @@ class DesktopState(private val scope: CoroutineScope) {
                 // A 426 is not a per-action error — this desktop build is too old for the
                 // server's pin. Surface the blocking upgrade screen instead of a toast.
                 busy = false
-                upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${store.baseUrl}/downloads."
+                upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${baseUrl}/downloads."
             } catch (t: Throwable) {
                 // #23: the shared household canon replaces the deleted desktop friendlyError —
                 // its ten vault-lifecycle rows live byte-equal in HouseholdCopy's code map, and
