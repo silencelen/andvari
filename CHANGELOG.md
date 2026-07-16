@@ -1,6 +1,49 @@
 # andvari — changelog
 
-## 2026-07-15 — Web: your vault, available offline (encrypted local copy)
+## Unreleased — point andvari at any server (endpoint-agnostic pivot)
+
+*In progress — the 2026-07-15 multi-tenant/self-host design
+(`docs/design/2026-07-15-multi-tenant-endpoints.md`), landing over the next release train.
+No version bump yet.*
+
+### Heads-up for the household: your authenticator code now counts everywhere
+
+- **If your account has an authenticator (TOTP) set up, andvari will ask for the code on
+  every sign-in — including at home over the tailnet**, not just on the public emergency
+  address. Until now an enrolled code was only ever checked on the public address; that gap
+  is closed. Nothing changes for accounts that never set one up (unless your server turns on
+  "require authenticator", in which case you'll be walked through enrolling one at your next
+  sign-in before anything else).
+
+### One andvari, any server
+
+- **The apps, extension, and web client no longer assume the household server.** They ship
+  preconfigured for `andvari.monahanhosting.com` and can be pointed at ANY andvari server —
+  yours, a friend's, or your own self-hosted one — from Settings, or simply by opening an
+  invite link, which now carries its server's address.
+- **"Is this address safe?" is no longer guessed from how the address looks.** The old rule
+  ("home-network-looking addresses are trusted") is gone. Instead every server *declares*
+  its policy (sign-up mode, authenticator stance, offline-copy allowance, timers) and your
+  client applies it under one hard rule: **a server can make your client safer, never
+  laxer.** A hostile server cannot switch off your auto-lock, keep secrets on your
+  clipboard, or force an offline copy onto your device.
+- **Switching servers shows you the raw address first** — a plain, prominent
+  `https://example.org`-style confirmation (with warnings for lookalike international
+  characters and plain-http) before your client talks to anywhere new. Keeping an encrypted
+  offline copy on web and desktop becomes an explicit per-device choice; Android keeps its
+  current behavior.
+- **Self-hosting becomes a first-class path:** a public container image plus a one-command
+  `deploy/bringup.sh` stand up your own instance — see `docs/self-hosting.md` (also served
+  by every instance at `/selfhost`).
+- **The built-in app/desktop/extension update check is being retired by design** — with many
+  independent servers, a single owner-signed update feed no longer makes sense. Updates come
+  from the store / OS installer and the `/downloads` page; the check stays silently off
+  (no nagging), and per-instance signed updates are future work.
+- **Operators upgrading an existing instance:** emailed invite links must now be `https://`
+  for any non-local host (they carry a bearer credential). If your invite/canonical origin
+  (`ANDVARI_CANONICAL_ORIGIN`, or the deprecated `ANDVARI_INVITE_BASE_URL`) is a plain
+  `http://` public address, email invites turn **off** after this upgrade — switch it to
+  `https://` (loopback/LAN dev origins are unaffected).
 
 *Web only. No app, server, or protocol change — the web client version stays 0.17.0. Deployed to
 the household server 2026-07-15 (byte-verified).*

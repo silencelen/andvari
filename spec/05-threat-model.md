@@ -18,15 +18,15 @@ blob double-wrapped under a non-extractable WebCrypto co-key, spec 01 §8.4) is
 |---|---|---|
 | T1 | **Server compromise (CT 122 root)** — reads DB, blobs, memory, logs | Sees only spec 02 §5 plaintext + traffic patterns. No item content, no keys, no master passwords (authKey is one-way; verifier re-hashed). CAN: serve stale data, drop writes, swap ciphertexts *between* slots — blocked by AD binding; roll back the DB — mitigated by client caches noticing rev regression (clients warn, never delete local newer state). CAN corrupt/deny service → availability handled by offline caches + PBS. |
 | T2 | **Passive network (tailnet/LAN/CF)** | TLS everywhere (tailscale serve / cloudflared terminate; LAN fallback is plain HTTP to .2.122 and is OFF by default in clients — enabling it is an explicit per-device choice, VLAN-2-internal only). |
-| T3 | **Stolen/lost device, locked** | At-rest cache is ciphertext (the native offline cache persists only §5-table ciphertext + metadata in SQLite, and the **web client persists the same set in per-account IndexedDB inside the browser profile** — spec 02 §8/§8.1; keys only in memory or hardware-wrapped quick-unlock per spec 01 §8). Offline unlock accepts the master password current at last online contact; **remote device revocation / password change take effect only at next connectivity** (then the client wipes the cache + cached accountKeys). Local data remains ciphertext without the master password; a stolen locked device with a known-old master password can read the last-synced cached vault until it reconnects — an accepted narrowing in exchange for offline availability. Web deltas (spec 02 §8.1): the browser profile cannot be excluded from OS backup, so OS backups may carry the ciphertext DB (⊆ T7); the cache is origin-gated (public break-glass origin: opt-in only) with a per-device opt-out that wipes immediately, and the Unlock screen discloses an existing copy ("Offline copy on this device — last synced <t>") so a borrowed-machine user can see and remove it. |
-| T4 | **Stolen device, UNLOCKED with vault open** | Out of scope: an open vault is an open vault. The window is bounded by the inactivity auto-lock (`autoLockSeconds`, enforced by all three clients incl. the Android autofill path — spec 01 §8 "Auto-lock") + policy clipboard clearing (min 1 s clamp). |
+| T3 | **Stolen/lost device, locked** | At-rest cache is ciphertext (the native offline cache persists only §5-table ciphertext + metadata in SQLite, and the **web client persists the same set in per-account IndexedDB inside the browser profile** — spec 02 §8/§8.1; keys only in memory or hardware-wrapped quick-unlock per spec 01 §8). Offline unlock accepts the master password current at last online contact; **remote device revocation / password change take effect only at next connectivity** (then the client wipes the cache + cached accountKeys). Local data remains ciphertext without the master password; a stolen locked device with a known-old master password can read the last-synced cached vault until it reconnects — an accepted narrowing in exchange for offline availability. Web deltas (spec 02 §8.1): the browser profile cannot be excluded from OS backup, so OS backups may carry the ciphertext DB (⊆ T7); the Unlock screen discloses an existing copy ("Offline copy on this device — last synced <t>") so a borrowed-machine user can see and remove it. **Durable-cache consent record (2026-07-15 pivot, B1-4 — the origin gate is replaced by declared policy + per-device consent):** **web** persists at rest only after an explicit per-device opt-in, default OFF on *every* origin (the walk-up browser is the T3 case; a one-time boot migration keeps existing private-origin users' caches). **Desktop** likewise moves to per-device consent default OFF — desktops are routinely shared/portable/work machines, closer to web's borrowed-machine case than to a phone; an existing install that already holds a cache adopts consent=ON during the namespacing one-shot so nobody's offline access silently vanishes. **Android stays policy-driven default-ON — the exemption justified on the record:** installing an APK on one's own phone *is* the device-consent act, and the cache is at-rest encrypted, gated by the hardware quick-unlock co-key (A7-android), bounded by the 7-day staleness ceiling, protected by the KDF cache-read floor (T8), and purged on policy-`false`. In every case `offlineCacheAllowed=false` remains a forbid + wipe of that origin's own namespace (R11). |
+| T4 | **Stolen device, UNLOCKED with vault open** | Out of scope: an open vault is an open vault. The window is bounded by the inactivity auto-lock (`autoLockSeconds`, enforced by all three clients incl. the Android autofill path — spec 01 §8 "Auto-lock") + policy clipboard clearing. **Both timers are clamped on the client since the 2026-07-15 pivot (B1-1):** effective auto-lock ∈ `[floor, 900 s]` and clipboard-clear ∈ `[1 s, 300 s]` — a server-supplied 0/absent/oversized value clamps into range, so a hostile or misconfigured server can neither disable auto-lock nor pin secrets on the clipboard (spec 03 §1.1; core `ClientPolicyClamps` constants with byte-pinned web/ext mirrors, clamp-down tested on all four clients). |
 | T5 | **Malware on a client device** | Out of scope (keylogger gets the master password). This is the boundary every password manager shares. |
-| T6 | **Malicious/compromised web origin** (server serving hostile JS) | Accepted gap of the web client: page-load-time trust. Mitigations: CSP `default-src 'self'`, immutable versioned bundles, no third-party origins, no CDN; native apps are the trust anchor; break-glass public mode additionally forces CF Access + server-TOTP. High-value operations (escrow ceremony) never run in the web client. The durable web cache (spec 02 §8.1) sharpens T6's **timing**, not its ceiling: hostile same-origin script can now exfiltrate persistent ciphertext + the wrapped accountKeys from a LOCKED/idle tab — an offline-cracking surface, floored by T8's KDF math and client-enforced at cache read (a planted weak-KDF payload refuses offline unlock) — where previously it had to wait for the next unlock. That next unlock still hands hostile JS the master password itself, which strictly dominates ciphertext theft; controls unchanged. |
+| T6 | **Malicious/compromised web origin** (server serving hostile JS) | Accepted gap of the web client: page-load-time trust. Mitigations: CSP `default-src 'self'`, immutable versioned bundles, no third-party origins, no CDN; native apps are the trust anchor; break-glass public mode additionally forces CF Access + server-TOTP. High-value operations (escrow ceremony) never run in the web client. The durable web cache (spec 02 §8.1) sharpens T6's **timing**, not its ceiling: hostile same-origin script can now exfiltrate persistent ciphertext + the wrapped accountKeys from a LOCKED/idle tab — an offline-cracking surface, floored by T8's KDF math and client-enforced at cache read (a planted weak-KDF payload refuses offline unlock) — where previously it had to wait for the next unlock. That next unlock still hands hostile JS the master password itself, which strictly dominates ciphertext theft; controls unchanged. **Correction on the record (2026-07-15, B1-2):** a web cross-origin enroll affordance would enable **full existing-account compromise**, not merely exposure of a new vault — an actionable "switch to this server" prompt escorts the user onto attacker-controlled origin, where post-navigation JS (this row's page-load trust) phishes the plaintext master password and replays it against the victim's REAL server. Both link composers mint authority == `payload.o`, so genuine web links land same-origin by construction; a web-visible mismatch's only real-world trigger is a crafted URL. The web client therefore REJECTS a mismatched invite link terminally — origin rendered as plain text, no link, no button, no continue affordance (design 2026-07-15 §4.4 / B2-2). |
 | T7 | **B2 / PBS / backup theft** | Backups contain only what T1 sees (ciphertext + metadata). Neutralized by design. |
 | T8 | **DB leak → offline cracking** | authKey verifier is argon2id-hashed server-side; vault security rests on Argon2id(master password) at ≥64 MiB — weak master passwords remain the user's risk (policy enforces minimum strength at enrollment). The client offline caches (native SQLite / web IndexedDB, spec 02 §8/§8.1) widen **where** this sentence applies — a stolen device, a browser-profile leak, or an OS backup of one is the same offline-cracking surface as a server DB leak — not its math: the identical H1 floor is enforced server-side, client-side at every unlock, and at cache READ (a cached sub-floor `kdfParams` payload refuses offline unlock outright, so the cache can never become a floor bypass). |
 | T9 | **Recovery-sheet thief** | Holds A4 ⇒ can decrypt every escrowed UVK **given the sealed blobs** (needs server data too). Physical security of the two sheets + USB is the control; annual drill verifies presence. Compromise response: re-ceremony + full re-escrow + item re-key (manual runbook). |
 | T10 | **Malicious server during enrollment** (pubkey substitution) | Blocked by triple pinning + human fingerprint check (spec 04 §2). **Per-member recovery (spec 04 §6):** `waived` members carry no org escrow ⇒ no pubkey to substitute ⇒ T10 N/A to them; for `required` members the fingerprint reaches the invitee out-of-band via the **client-composed** in-person QR (or the typed-sheet fallback), never a server-stamped pin (`rfp=null` on the server-composed emailed link — spec 04 §6.5). The symmetric member-recovery blob has no pubkey and is T10-immune by construction. |
-| T11 | **User enumeration / credential stuffing** | Deterministic fake prelogin salts, uniform 401s, per-IP rate limits (no per-account keys on any auth endpoint — per-account login limiting is a deferred hardening item; the per-account buckets that do exist are listed in spec 03 §8), public-origin lockdown (TOTP + tighter limits + registration disabled). |
+| T11 | **User enumeration / credential stuffing** | Deterministic fake prelogin salts, uniform 401s, per-IP rate limits, and — since the 2026-07-15 pivot — **email-keyed exponential backoff on LOGIN only** (5 consecutive failures → `2^(n-5)` s capped 900 s, applied **uniformly to existing and unknown emails** so throttling is not an account oracle). `/recovery/self/*` deliberately keeps **per-IP fixed-window only, NO per-account backoff** (§F.8: never lock a victim out of last-resort recovery; the 256-bit recovery secret makes per-IP sufficient — review 2026-07-16 D1). Break-glass twin-origin lockdown (TOTP + register/refresh disabled) applies only where that opt-in origin is configured; login rate is a flat 5/min per IP on every origin (R12). |
 
 ## Accepted risks (signed off by owner at hardening gate)
 R1 JVM/JS cannot guarantee secret zeroization (GC copies) — industry-standard gap.
@@ -78,6 +78,21 @@ safe). A required-backstop invite that needs a genuine org pubkey uses the
 client-composed in-person QR (fingerprint out-of-band via the admin's screen) or the
 typed-sheet fallback; a missing `rfp` fails safe to typed-sheet, never to server
 auto-trust. No new server capability beyond the existing R8 email relay.
+**R8 delta (endpoint-agnostic pivot 2026-07-15):** R8's containment claim — that an
+emailed link is private-origin-only and a leaked inbox still can't reach the enroll
+origin (also asserted in `docs/design/2026-07-12-email-invite.md`) — is **superseded on
+single-origin instances**, which are now the DEFAULT topology (`ANDVARI_PUBLIC_HOSTNAME`
+unset — the reference instance and the self-host default): emailed invites legitimately
+carry the public canonical origin (`ANDVARI_CANONICAL_ORIGIN`, replacing the deprecated
+`ANDVARI_INVITE_BASE_URL`), so the invite token in a leaked inbox CAN reach `register`.
+This is a deliberate, accepted trade; compensating controls: the forced ≤60-min TTL,
+single-use token, invite-row-bound escrow policy (read server-side, never from the
+client body), register rate limits, **https now required for the minting origin on
+non-local hosts** (with private-origin containment gone, transport secrecy is the
+remaining control on the bearer link), and `signupMode` gating — a leaked token still
+only creates the one account the admin intended, redeemable solely at its issuing
+server (invite-ROW gate). Dual-origin deployments keep the old A5 guard verbatim:
+emailed links must never point at the break-glass twin origin.
 **R9 (per-member recovery piece — a member holds a UVK-equivalent secret, spec 01 §2.1 /
 spec 04 §6).** The generated `recoverySecret` wraps that member's own UVK, so possession
 of the piece is UVK-equivalent **for that one account** (never the fleet). Two faces:
@@ -88,8 +103,10 @@ by the admin escrow backstop (R3), so their loss is recoverable. (2) **THEFT** �
 is the self-held analogue of the org recovery-sheet thief (T9): whoever holds it can, *with
 server data*, decrypt/reset that one account. Controls: physical/digital custody of the
 member's sheet/QR (same class as T9's sheet custody); and the online reset is gated by the
-phase-1 **verifier** (a thief still needs the piece), the **per-IP rate-limit**, and the
-**single-use replay-bound ticket** (spec 03 §12), so the stolen piece alone is not a remote
+phase-1 **verifier** (a thief still needs the piece), the **per-IP rate-limit** (per-IP
+fixed-window ONLY — deliberately NO per-account backoff, §F.8: a targeted flood can never
+lock a victim out of their own recovery; the 256-bit recovery secret makes per-IP
+sufficient), and the **single-use replay-bound ticket** (spec 03 §12), so the stolen piece alone is not a remote
 reset/lockout oracle. The recovery unlock **preserves the identity-pubkey hard-fail
 linchpin** (spec 01 §5): `recover()` routes through the shared UVK-unlock tail, so a server
 substituting an identity pubkey is caught during recovery exactly as on every normal unlock
@@ -99,6 +116,62 @@ the admin UI distinguishes "waived (intended)" from "escrow missing/failed"
 (`escrowFingerprint == null` on a `required` invite), so a hostile-server policy flip is
 *visible* on reconciliation but not *prevented* (acceptable under T1 for the household
 model; spec 04 §6.5).
+**R10 (hostile endpoint / endpoint-agnostic operation — 2026-07-15 pivot,
+`docs/design/2026-07-15-multi-tenant-endpoints.md`).** Clients are endpoint-agnostic: any
+client may be pointed at ANY server, including a hostile one, at any time — including
+mid-enrollment, since the invite carries its issuing server's origin. What holds the line:
+(1) **The policy-trust boundary** (spec 03 §1.1) — the client-side hostname trust
+heuristic (`*.ts.net`/RFC1918 ⇒ trusted) is deleted; device posture derives from
+server-declared policy fetched from an unauthenticated endpoint on an untrusted server,
+applied under the invariant *trusted-as-declared iff the field governs the server's own
+behavior; client-floor-only iff it touches the device's at-rest posture, factor floors, or
+timer windows; decorative otherwise — a hostile server may make a client safer, never
+laxer* (see R11 for the monotonicity consequences). (2) **Origin-clean switching** — a
+`serverUrl` change drops access+refresh tokens before the first request to the new origin
+(no `Authorization` header ever crosses a baseUrl change — test-gated on all four
+clients); native/extension data is namespaced by `(origin, userId)` so a foreign origin's
+policy can neither read nor wipe another origin's material; the raw-origin anti-phishing
+trust gate (punycode-rendered IDN, plain-http caution, no server-supplied branding)
+precedes every switch; while an invite-driven switch is pending, sign-in is hidden so a
+hostile pending server cannot harvest an offline-crackable authKey digest of the user's
+REAL master password; web gets no cross-origin affordance at all (T6 correction above).
+(3) **Blast radius is stated conditionally (B2-8):** enrolling at a hostile server exposes
+what the user gives THAT server — a new vault there plus the email/activity metadata of
+one account; it does not move or expose any existing vault **provided the master password
+is unique**, which is why the enrollment trust-gate copy instructs "choose a master
+password you don't use anywhere else" (reuse would hand the hostile server a crackable
+digest of the real one). (4) **Recovery endpoints** (`/recovery/self/*`), LAN-only in
+practice before the pivot, are **internet-reachable on single-origin instances**: kept at
+per-IP 5/min with **NO per-account backoff** (§F.8 — never lock a victim out of last-resort
+recovery; the 256-bit recovery secret makes per-IP sufficient, review 2026-07-16 D1), and a
+build-time confirmation asserts the recovery secret's ≥128-bit (verified 256-bit) entropy and
+a constant-time verify comparison; the residual —
+reachability itself — is accepted (the phase-1 verifier gate and single-use replay-bound
+ticket stand, R9). Decorative fields (`instanceName`, `canonicalOrigin`,
+`selfHostDocsUrl`, `recoveryFingerprint`) are never rendered as verified identity; the
+human-anchored escrow fingerprint ceremony remains the only cryptographic anchor (T10).
+**R11 (policy monotonicity — forbid-only fields and clamped timers).** Clients treat
+`offlineCacheAllowed` as **forbid-only**: `false` ⇒ prohibition + immediate wipe of the
+declaring origin's own namespace (never another origin's); `true` is **necessary but
+never sufficient** — at-rest persistence additionally requires per-device consent on web
+and desktop (Android's default-ON exemption is on the record in T3), so a hostile
+`offlineCacheAllowed=true` alone can never switch a device to durable storage. Oversized
+or absent `autoLockSeconds`/`clipboardClearSeconds` clamp into the client-side ceilings
+(T4/B1-1). `kdfParams` floors — including the cache-read sub-floor (T8) — are unchanged
+and remain the backstop that makes even a consent-granted cache non-catastrophic under a
+weak-params-planting server. A monotonicity test suite asserts a hostile policy object
+can never leave any client laxer than its floors/ceilings.
+**R12 (online guessing with TOTP optional — B1-3/B1-6).** With mandatory TOTP retired
+from the reference instance (`totpRequired` is per-instance, default false), online
+password guessing is resisted by: the flat per-IP login limit
+(`ANDVARI_LOGIN_RATE_PER_MIN`, default 5/min — the old private-origin 10/min relaxation
+is **revoked**, spec 03 §8), the email-keyed exponential backoff (5 consecutive failures
+→ `2^(n-5)` s capped 900 s, uniform across existing and unknown emails, reset on
+success — per-IP alone is botnet-bypassable), and the zxcvbn ≥ 3 master-password floor at
+enrollment. An **accepted, compensated risk**; enrolled TOTP is now verified on EVERY
+origin (closing the latent gap that an enrolled secret was only ever checked on the
+public origin). Residual: distributed low-rate guessing below both rate keys — bounded by
+the password-strength floor (T8's math applies online too, one attempt at a time).
 
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 

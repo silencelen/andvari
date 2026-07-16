@@ -1,0 +1,21 @@
+# Keep the image build context lean + deterministic. The Dockerfile COPYs an
+# explicit file list; this additionally keeps heavy/secret paths out of the
+# context entirely.
+.git
+.gradle
+.idea
+**/build
+**/node_modules
+web/dist
+dist
+local.properties
+*.keystore
+*.jks
+*.apk
+*.msi
+*.deb
+deploy/data
+deploy/andvari.env
+deploy/.env
+extension/store-assets
+audit-*

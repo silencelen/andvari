@@ -134,7 +134,7 @@ v1 rules). Plaintext = UTF-8 JSON:
 {
   "v": 1,
   "exportedAt": 1751850000000,          // unix ms — the AUTHENTICATED creation time
-  "origin": "https://andvari.taila2dff2.ts.net",  // advisory
+  "origin": "https://andvari.example.com",        // advisory
   "userId": "…", "identityFingerprint": "…",      // advisory (restore preview)
   "vaults": [ { "vaultId": "…", "type": "personal|shared", "name": "…", "role": "…" } ],
   "items": [ { "itemId": "…", "vaultId": "…", "formatVersion": 1,
