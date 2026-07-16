@@ -4,6 +4,39 @@ Where andvari is, what gates real-secret migration, and where it goes next. Livi
 the SSOT for *state* is the memory file `andvari-password-manager-2026-07-05.md` + the
 git history. This is the SSOT for *direction*.
 
+## Public-release trust & attestation campaign — 2026-07-16 (design drafted; ORCHESTRATOR PICKUP)
+
+The outward-facing trust layer for the public flip: what proves to a stranger that the crypto
+does what we say and that any server operator sees exactly spec 02 §5 and nothing more. Design:
+**`docs/design/2026-07-16-trust-attestation-strategy.md`** (DRAFT for owner ratification, 4
+announced-default owner forks: F1 license = GPLv3 clients + AGPLv3 server · F2 = publish full
+history · F3 = GitHub Releases canonical for client artifacts, `/downloads` = household mirror
+[needs reconciling w/ pivot B2-4] · F4 = publish sanitized audit reports). Companions it does
+NOT re-decide: the multi-tenant pivot (`2026-07-15-multi-tenant-endpoints.md`, owner-locked) and
+the secret scan (`docs/assess/2026-07-16-public-release-secret-scan.md`, SAFE-AFTER-TREE-FIXES —
+its §4 MUSTs + the pivot's tailnet-scrub gates block the flip itself).
+
+Lanes for the orchestrator (each with stated gates in the design doc):
+- **W1 whitepaper** — assemble from specs 00–07 post-genericization; embeds the §5 table, the
+  R3/R4/T6 caveats, and the PCI/SOC-2 non-applicability statements.
+- **W2 wire-egress harness (flagship)** — proxy-instrumented all-flows run asserting every
+  outbound field against the spec 02 §5 whitelist, fail-closed on unknowns; in `tools/` + CI;
+  self-hosters can run it against their own endpoint. Non-vacuity gate: RED on a planted leak.
+- **W3 repo security tooling** (at flip) — CodeQL, Dependabot, secret scanning + push
+  protection, SECURITY.md + security.txt + VDP/GHSA, OpenSSF Scorecard, per-release SBOM.
+- **W4 artifact provenance** — Actions release builds w/ SLSA attestations + signed sha256SUMS
+  over the existing GPG/Authenticode chain; reproducibility = long-tail, MSI stays manual.
+- **W5 fuzzing/differential** — Jazzer on import/vault/wire/backup parsers; Kotlin↔TS↔@noble
+  differential fuzz off the shared vector corpus; ClusterFuzzLite.
+- **W6 external audit path** (owner-gated, post-flip) — OSTIF application once public; scoped
+  Cure53-class engagement (~$15–50k, specs 01/02/04 + core + client crypto twins + dynamic ZK
+  verification) when real external users exist; report published verbatim.
+- **W7 posture-doc publication** — sanitized pentest/compliance reports after identifier scrub
+  + finding closure.
+
+Sequencing: W1 (after the pivot §10 DOCS sweep) + W2/W5 can build pre-flip; W3/W4 + F1/F2
+execute at the flip; W6/W7 post-flip.
+
 ## 0.17.0 campaign — 2026-07-14 (a wide multi-wave sweep; SHIPPED to the tree, DEPLOY per §ship)
 
 One orchestrated campaign closed most of the open 2026-07 queue in module-disjoint parallel waves
