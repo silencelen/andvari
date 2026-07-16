@@ -26,7 +26,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Deb)
             packageName = "andvari"
-            packageVersion = "0.17.0"
+            packageVersion = "0.18.0"
             description = "andvari password manager"
             vendor = "silencelen"
             // JDK modules the jlink runtime image must include — Compose's default set is
