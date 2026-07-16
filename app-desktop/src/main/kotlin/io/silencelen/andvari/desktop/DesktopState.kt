@@ -247,15 +247,13 @@ class DesktopState(
 ) {
 
     init {
-        // One-time: bump an old LAN-default server URL to the tailnet default before any
-        // state reads it (mirrors Android's MainActivity.migrateDefaultOnce).
+        // Wave-4 v2: bump an old LAN|tailnet default server URL to the public default before any state
+        // reads it (mirrors Android). MUST run before adoptNamespacesOnce.
         store.migrateDefaultOnce()
-        // §4.2 adoption one-shot — MUST stay AFTER migrateDefaultOnce so the legacy unscoped
-        // layout adopts under the key of the URL the app will actually dial. WAVE-4 COUPLING
-        // (design §4.2/§6.2 — flagged, don't guess): the wave-4 default swap ships
-        // migrateDefaultOnce v2, which must keep this position AND carry namespaces this build
-        // already adopted under the tailnet key across the tailnet→public rewrite — see the
-        // full note on DesktopSessionStore.adoptNamespacesOnce.
+        // §4.2 adoption one-shot — MUST stay AFTER migrateDefaultOnce so the legacy unscoped layout
+        // adopts under the key of the URL the app will actually dial (now the PUBLIC default).
+        // migrateDefaultOnce also carries an already-adopted legacy namespace to the public key as §6.2
+        // defense-in-depth (see DesktopSessionStore.carryLegacyNamespaceToPublic).
         store.adoptNamespacesOnce()
         // Inactivity auto-lock watcher (spec 01 §8, 1 s resolution) + the spec 03 §6 poll
         // (every 5 min while unlocked). Both live on the window's scope: they die with it.

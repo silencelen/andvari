@@ -31,8 +31,8 @@ class OriginNamespaceTest {
     @Test
     fun originKeyPinnedVectors() {
         assertEquals("e1fd6516bf573c7f", originKey("https://andvari.monahanhosting.com"))
-        assertEquals("edfce5729b02fa19", originKey("https://andvari.taila2dff2.ts.net"))
-        assertEquals("63572e635897bbf3", originKey("http://192.168.2.122:8080"))
+        assertEquals("45858d4d141c5edd", originKey("https://vault.example.net"))
+        assertEquals("4e629db6dc46b0f6", originKey("http://192.168.1.9:8080"))
         assertEquals("50d7a905e3046b88", originKey("https://example.org"))
         assertEquals("3e1098e31ab128b1", originKey("https://example.org:8443"))
     }
@@ -85,17 +85,17 @@ class OriginNamespaceTest {
     @Test
     fun adoptionMovesLegacyLayoutAndAdoptsConsent() {
         val store = DesktopSessionStore(root)
-        store.baseUrl = "https://andvari.taila2dff2.ts.net"
+        store.baseUrl = "https://andvari.example.net"
         // legacy unscoped layout: a vault DB set + the single accountKeys cache + the session
         // naming its user
         File(root, "vault-u1.db").writeText("db")
         File(root, "vault-u1.db-wal").writeText("wal")
         File(root, "account-keys.json").writeText("{}")
-        store.save(DesktopSession("https://andvari.taila2dff2.ts.net", "u1", "a@b.c", "at", "rt"))
+        store.save(DesktopSession("https://andvari.example.net", "u1", "a@b.c", "at", "rt"))
 
         store.adoptNamespacesOnce()
 
-        val key = originKey("https://andvari.taila2dff2.ts.net")
+        val key = originKey("https://andvari.example.net")
         assertTrue(File(root, "ns/$key/u1/vault-u1.db").exists())
         assertTrue(File(root, "ns/$key/u1/vault-u1.db-wal").exists())
         assertTrue(File(root, "ns/$key/u1/account-keys.json").exists())
@@ -123,11 +123,11 @@ class OriginNamespaceTest {
         // A legacy prefs.json carrying the old GLOBAL fallbacks (cacheAllowed=false must survive
         // as the adopted origin's stance — a pre-namespacing forbid keeps governing its origin).
         File(root, "prefs.json").also { it.parentFile.mkdirs() }.writeText(
-            """{"baseUrl":"https://andvari.taila2dff2.ts.net","cacheAllowed":false,"autoLockSeconds":120}""",
+            """{"baseUrl":"https://andvari.example.net","cacheAllowed":false,"autoLockSeconds":120}""",
         )
         val store = DesktopSessionStore(root)
         store.adoptNamespacesOnce()
-        val key = originKey("https://andvari.taila2dff2.ts.net")
+        val key = originKey("https://andvari.example.net")
         assertFalse(store.orgCacheAllowed(key))
         assertEquals(120, store.originAutoLockSeconds(key))
         // and a NEVER-probed origin defaults conservative (§2.3 fetch-failure posture: cache OFF)
@@ -188,5 +188,54 @@ class OriginNamespaceTest {
         assertNull(store.cacheConsent("k2"))
         assertFalse(store.orgCacheAllowed("k2"))
         assertEquals(0, store.originAutoLockSeconds("k2"))
+    }
+
+    // §6 migrateDefaultOnce v2: EITHER historical shipped default (LAN or tailnet) rewrites ONCE to the
+    // public default; a deliberate custom URL is untouched; the one-shot flag blocks a second rewrite.
+    @Test
+    fun migrateDefaultRewritesLegacyDefaultsToPublicOnce() {
+        var n = 0
+        fun freshStore(initial: String): DesktopSessionStore =
+            DesktopSessionStore(File(root, "mig${n++}").also { it.mkdirs() }).also { it.baseUrl = initial }
+
+        // both historical shipped defaults collapse to the public default
+        freshStore("http://192.168.2.122:8080").let { it.migrateDefaultOnce(); assertEquals(DesktopSessionStore.DEFAULT_BASE_URL, it.baseUrl) }
+        freshStore("https://andvari.taila2dff2.ts.net").let { it.migrateDefaultOnce(); assertEquals(DesktopSessionStore.DEFAULT_BASE_URL, it.baseUrl) }
+        // a deliberately-set custom URL (a self-hoster's) is NEVER rewritten
+        freshStore("https://my.self-host.example").let { it.migrateDefaultOnce(); assertEquals("https://my.self-host.example", it.baseUrl) }
+        // one-shot: after the migration burns its flag, re-setting a legacy-looking URL is not rewritten
+        freshStore("http://192.168.2.122:8080").let {
+            it.migrateDefaultOnce() // rewrites → public, sets baseUrlMigratedPublic
+            it.baseUrl = "http://192.168.2.122:8080" // user re-enters a legacy-looking URL by hand
+            it.migrateDefaultOnce() // flag already set → no-op
+            assertEquals("http://192.168.2.122:8080", it.baseUrl)
+        }
+    }
+
+    // §6.2 carry (review 2026-07-16): a dev/test device that ran an INTERMEDIATE namespacing build under
+    // the tailnet default has its cache under the TAILNET key with nsAdoptedOnce=true. The W4 swap must
+    // move that namespace to the PUBLIC key, else the offline cache + the durable outbound mutation queue
+    // strand under the old key (permanent loss of unsynced edits). Fires only when public-ns is absent.
+    @Test
+    fun migrateCarriesAStrandedLegacyNamespaceToPublic() {
+        val store = DesktopSessionStore(File(root, "carry").also { it.mkdirs() })
+        store.baseUrl = "https://andvari.taila2dff2.ts.net" // persisted tailnet default (a W2/W3 device)
+        val tailnetKey = originKey("https://andvari.taila2dff2.ts.net")
+        // a prior namespacing build already adopted this install's data under the tailnet key
+        store.cacheDbFile(tailnetKey, "u1").also { it.parentFile.mkdirs(); it.writeText("CACHE+QUEUE") }
+        store.setCacheConsent(tailnetKey, true)
+        store.adoptNamespacesOnce() // sets nsAdoptedOnce=true (no UNSCOPED data at root; the scoped db stays)
+        assertTrue(store.cacheDbFile(tailnetKey, "u1").exists()) // precondition: data under the tailnet key
+
+        store.migrateDefaultOnce() // rewrite tailnet→public + CARRY
+
+        val publicKey = originKey(DesktopSessionStore.DEFAULT_BASE_URL)
+        assertEquals("CACHE+QUEUE", store.cacheDbFile(publicKey, "u1").readText()) // carried, contents intact
+        assertFalse(store.cacheDbFile(tailnetKey, "u1").exists()) // MOVED, not copied — no stale duplicate
+        assertEquals(true, store.cacheConsent(publicKey)) // the per-origin prefs entry came along
+        // a fresh install (public-ns already present / no legacy ns) is untouched by the carry
+        val fresh = DesktopSessionStore(File(root, "fresh").also { it.mkdirs() })
+        fresh.migrateDefaultOnce() // baseUrl defaults to public → no rewrite, no carry, no crash
+        assertNull(fresh.cacheConsent(publicKey))
     }
 }
