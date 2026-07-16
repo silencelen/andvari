@@ -281,6 +281,19 @@ fun Application.andvariModule(services: Services) {
                 is ResyncRequired -> call.respond(HttpStatusCode.Gone, ApiError("resync_required", "cursor predates retained history"))
                 is RateLimited -> call.respond(HttpStatusCode.TooManyRequests, ApiError("rate_limited", "slow down"))
                 is PayloadTooLarge -> call.respond(HttpStatusCode.PayloadTooLarge, ApiError(cause.reason, "quota exceeded"))
+                // PT-L11 (CR-04): Ktor's own malformed-input throwables (a bad/empty JSON body on any
+                // receive route — incl. unauthenticated /auth/*) are CLIENT errors → 400, not a 500 with
+                // "unhandled" log spam. In Ktor 3.0.3 these are disjoint hierarchies
+                // (ContentTransformationException : IOException, BadRequestException : Exception — the
+                // latter is what convertBody wraps a bad JSON body as).
+                // Deliberately NO blanket `is IllegalArgumentException -> 400`: kotlinx
+                // SerializationException and NumberFormatException BOTH extend IllegalArgumentException, so a
+                // corrupt/rolled-back SERVER-persisted row (policy, kdfParams, attachmentIds, idempotency
+                // resultJson) must stay a LOGGED 500, never a silent 400 (server review 2026-07-15 F1).
+                // Genuine client-input arg errors already throw the house BadRequest (matched above) or are
+                // validated in-route (e.g. the Hibp prefix check).
+                is io.ktor.server.plugins.ContentTransformationException -> call.respond(HttpStatusCode.BadRequest, ApiError("bad_request", "malformed request body"))
+                is io.ktor.server.plugins.BadRequestException -> call.respond(HttpStatusCode.BadRequest, ApiError("bad_request", "bad request"))
                 else -> {
                     call.application.environment.log.error("unhandled", cause)
                     call.respond(HttpStatusCode.InternalServerError, ApiError("internal", "internal error"))
@@ -317,6 +330,14 @@ fun Application.andvariModule(services: Services) {
         context.response.headers.append("Referrer-Policy", "no-referrer", false)
         context.response.headers.append("Permissions-Policy", "camera=(), microphone=(), geolocation=()", false)
         context.response.headers.append("X-Robots-Tag", "noindex, nofollow", false)
+        // CR-17 (ASVS V9.1/V14.4): HSTS on the public break-glass origin — the one origin designed
+        // for hostile networks, TLS-terminated at Cloudflare. GATED to isPublicOrigin so the plain-http
+        // RFC1918/loopback LAN dev path is never pinned to HTTPS (an HSTS pin there would brick dev).
+        // This header alone is insufficient without the CF "Always Use HTTPS" redirect (ops), but it
+        // closes the header half in-code so a first-visit-over-TLS client won't downgrade thereafter.
+        if (context.isPublicOrigin(config)) {
+            context.response.headers.append("Strict-Transport-Security", "max-age=31536000; includeSubDomains", false)
+        }
     }
 
     // Request-body cap, layer 1 (spec 03; pentest M4): a declared Content-Length over the
@@ -375,9 +396,13 @@ fun Application.andvariModule(services: Services) {
         }
 
         get("/metrics") {
-            // Loopback-only; Alloy scrapes locally. Shares peerIsLoopback() with clientIp()
-            // so the two peer gates can't drift. Never trusts forwarded headers.
-            if (!call.peerIsLoopback()) {
+            // Loopback-only for a GENUINE local Alloy scrape (CR-18). peerIsLoopback() alone is
+            // insufficient: both front-ends (tailscale-serve, cloudflared) terminate TLS on
+            // 127.0.0.1, so every PROXIED request — the whole tailnet, and the public break-glass
+            // tunnel — also presents a loopback peer. Additionally require the ABSENCE of any
+            // reverse-proxy forwarding header: a real local scrape carries none, a proxied request
+            // always carries at least one. Header-presence only — clientIp() trust is untouched.
+            if (!call.peerIsLoopback() || call.hasForwardedHeader(config.trustedIpHeaders)) {
                 call.respond(HttpStatusCode.Forbidden, "metrics are loopback-only")
             } else {
                 call.respondText(services.metricsScrape())
@@ -739,6 +764,9 @@ fun Application.andvariModule(services: Services) {
         get("/api/v1/hibp/range/{prefix}") {
             requirePrincipal(call, service)
             val prefix = call.parameters["prefix"] ?: throw BadRequest("no_prefix")
+            // PT-L11 (CR-04): validate the k-anonymity prefix in-route → a clean 400 (bad_prefix)
+            // instead of Hibp.range()'s require() throwing IllegalArgumentException down to StatusPages.
+            if (prefix.length != 5 || !prefix.all { it in "0123456789abcdefABCDEF" }) throw BadRequest("bad_prefix")
             call.respondText(withContext(Dispatchers.IO) { services.hibp.range(prefix) })
         }
 
@@ -866,15 +894,28 @@ fun Application.andvariModule(services: Services) {
             val auth = call.request.queryParameters["ticket"]?.let { services.wsTickets.redeem(it) }
                 ?: call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ")?.trim()
                     ?.let { service.authenticate(it) }?.let { EventsTicketStore.Redeemed(it.userId, it.deviceId) }
-            // M8: re-check revocation at (re)connect — the ticket path (EventsTicketStore.redeem) only
-            // checks TTL, so a device revoked inside its 30 s ticket window must be refused here, not
-            // left registered and receiving dirty-bells. (The Bearer path already re-checked in authenticate.)
-            if (auth == null || !service.deviceHasLiveSession(auth.deviceId)) {
+            if (auth == null) {
                 close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "unauthorized"))
                 return@webSocket
             }
+            // M8 / CR-05: re-check revocation at (re)connect — the ticket path only checks TTL, so a
+            // device revoked inside its 30 s ticket window must be refused here. REGISTER FIRST, then
+            // re-check, to close the check-then-register TOCTOU: a concurrent revoke commits its DB row
+            // BEFORE its notifier fan-out (App.kt device-revoke route), so either (a) that commit lands
+            // before this recheck's read → we see the dead session and self-close, or (b) it lands after
+            // register() → the fan-out's snapshot includes this conn and closes it. Either interleaving
+            // tears the socket down; the old order (check, then register after the fan-out) left it live.
             services.notifier.register(auth.userId, auth.deviceId, this)
             try {
+                // Recheck revocation INSIDE the try (F2, server review 2026-07-15): deviceHasLiveSession is a
+                // db.read that can throw (wedged/closing DB); if it threw before this try we'd exit with the
+                // conn registered but the finally un-run → a leaked Notifier entry until restart. The
+                // register-first ordering above still closes the TOCTOU; return@webSocket here still runs the
+                // finally, and a double-unregister is an idempotent removeIf.
+                if (!service.deviceHasLiveSession(auth.deviceId)) {
+                    close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "unauthorized"))
+                    return@webSocket
+                }
                 for (frame in incoming) {
                     if (frame is Frame.Text && frame.readText() == "ping") outgoing.send(Frame.Text("pong"))
                 }
