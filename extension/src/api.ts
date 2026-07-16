@@ -114,9 +114,27 @@ export interface ClientPolicyResponse {
  *  `web/src/policy-clamps.test.ts`; bump all three together. The fields are CLIENT-FLOOR-ONLY: a
  *  hostile server may make the client safer, never laxer — a 0/absent/oversized `autoLockSeconds`
  *  clamps to the ceiling, so a server cannot disable auto-lock or pin the clipboard for hours.
- *  Wave 1 defines the constants only; call-site clamping (background.ts policy consumers) is wave-2 work. */
+ *  Applied by the clamp helpers below at the background.ts policy consumers (wave 2). */
 export const AUTO_LOCK_MAX_SECONDS = 900;
 export const CLIPBOARD_CLEAR_MAX_SECONDS = 300;
+
+/** §2.3/B1-1 idle-lock clamp. Absent/non-finite → the caller's default (itself ceiling-bounded);
+ *  0/negative — the "never lock" attempt — clamps to the CEILING, never to "disabled": a server
+ *  cannot switch the idle lock off. Anything above the ceiling clamps down; in-range passes as-is
+ *  (a server may always tighten). Chrome-free + pure, so the node suite pins every branch. */
+export function clampAutoLockSeconds(v: unknown, fallback: number): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return Math.min(fallback, AUTO_LOCK_MAX_SECONDS);
+  if (v <= 0) return AUTO_LOCK_MAX_SECONDS;
+  return Math.min(v, AUTO_LOCK_MAX_SECONDS);
+}
+
+/** §2.3/B1-1 clipboard-clear clamp into [1, CLIPBOARD_CLEAR_MAX_SECONDS]: a 0 (never clear) or an
+ *  hours-long window from a hostile server both clamp into range; absent/non-finite → the caller's
+ *  default, same-bounded. */
+export function clampClipboardClearSeconds(v: unknown, fallback: number): number {
+  const pick = typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  return Math.min(Math.max(pick, 1), CLIPBOARD_CLEAR_MAX_SECONDS);
+}
 
 /** Single-use /events WebSocket ticket (spec 03 §6). Field names mirror core Wire.kt
  *  WsTicketResponse — the deviceId binding is server-side from the Bearer principal. */

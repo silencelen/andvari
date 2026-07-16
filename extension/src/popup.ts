@@ -8,9 +8,9 @@
  */
 import { CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
+import { getServerUrl, originMatchPattern } from "./serverurl";
 import { displaySite, safeSiteUrl } from "./siteurl";
 
-const SERVER_URL = "https://andvari.taila2dff2.ts.net";
 const FLASH_MS = 1200;
 const TOTP_PERIOD_S = 30; // ring denominator (web Vault parity)
 
@@ -960,24 +960,29 @@ el("lock").addEventListener("click", async () => {
   await refresh();
 });
 
-el("open-vault").addEventListener("click", () => {
-  void chrome.tabs.create({ url: SERVER_URL });
+/** Open a page on the configured server (design §5.1 — the origin is read fresh from
+ *  storage.local via serverurl.ts on every click, never cached in the popup). window.close() only
+ *  AFTER tabs.create resolves: a closed popup's pending promise continuations never run. */
+async function openServerPage(path = ""): Promise<void> {
+  const base = await getServerUrl();
+  try {
+    await chrome.tabs.create({ url: base + path });
+  } catch {
+    /* tab creation refused — leave the popup open rather than silently doing nothing */
+    return;
+  }
   window.close();
-});
+}
+
+el("open-vault").addEventListener("click", () => void openServerPage());
 
 // Cut H (v2 #6): forgotten master password — the self-recovery flow lives in the web app
 // (#recover deep link); the locked popup was a dead end.
-el("forgot").addEventListener("click", () => {
-  void chrome.tabs.create({ url: `${SERVER_URL}/#recover` });
-  window.close();
-});
+el("forgot").addEventListener("click", () => void openServerPage("/#recover"));
 
 // E1-6: the rescue-nudge strip IS the affordance — the extension can't change the master
 // password itself, so clicking anywhere on it opens the web vault (same action as open-vault).
-el("must-change").addEventListener("click", () => {
-  void chrome.tabs.create({ url: SERVER_URL });
-  window.close();
-});
+el("must-change").addEventListener("click", () => void openServerPage());
 
 el("ping").addEventListener("click", async () => {
   showMsg("info", "…");
@@ -999,7 +1004,24 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+/** Wave-3 hook (design §5.1): Firefox MV3 grants NO host permissions at install (optional-by-
+ *  default), so a first run may lack the grant for the configured origin — every fetch then fails
+ *  as "unreachable". DETECTION ONLY for now, parked on <body data-missing-host-grant>; the wave-3
+ *  options page owns the routing (popup → options → permissions.request under the user gesture,
+ *  which also makes the dynamic autofill registration effective — background.permissions.onAdded). */
+async function detectMissingHostGrant(): Promise<void> {
+  try {
+    const pattern = originMatchPattern(await getServerUrl());
+    if (!pattern) return;
+    const granted = await chrome.permissions.contains({ origins: [pattern] });
+    document.body.dataset.missingHostGrant = granted ? "false" : "true";
+  } catch {
+    /* permissions API unavailable — leave the attribute unset (no detection, no false alarm) */
+  }
+}
+
 void refresh();
 void renderUpdate();
 // Passive connectivity dot — quiet ping on open, result only in the header dot.
 void ask({ type: "ping" }).then((r) => setConn(r?.ok === true));
+void detectMissingHostGrant();
