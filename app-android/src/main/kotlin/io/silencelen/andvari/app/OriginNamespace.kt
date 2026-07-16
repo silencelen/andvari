@@ -38,6 +38,30 @@ object OriginNamespace {
         return if (port == -1 || isDefault) "$scheme://$host" else "$scheme://$host:$port"
     }
 
+    /**
+     * Strict validate + canonicalize a USER-TYPED server address for the manual switch (design §4.4;
+     * review 2026-07-16). A userinfo/path-bearing input is a bearer-credential PHISHING vector —
+     * `https://real.host@evil.example` would let the Trust Gate show a reassuring host while the HTTP
+     * stack dials `evil.example`, and a manual switch commits immediately, so the next sign-in leaks an
+     * offline-crackable authKey of the real master password (the B2-6 threat). REJECT anything that is
+     * not a bare http(s) origin — any userinfo, any path beyond "/", any query/fragment — returning null
+     * so the caller refuses it. On success returns the canonical `scheme://host[:port]` the gate shows
+     * AND dials. Mirrors the desktop [canonicalServerOrigin] + extension canonicalizeServerUrl.
+     */
+    fun canonicalServerOrigin(input: String): String? {
+        val trimmed = input.trim().trimEnd('/')
+        val uri = runCatching { java.net.URI(trimmed) }.getOrNull() ?: return null
+        val scheme = uri.scheme?.lowercase() ?: return null
+        if (scheme != "https" && scheme != "http") return null
+        if (uri.userInfo != null) return null // `user[:pass]@` — the phishing vector; refuse outright
+        val host = uri.host?.lowercase()
+        if (host.isNullOrEmpty()) return null
+        if (!uri.rawPath.isNullOrEmpty() && uri.rawPath != "/") return null // no path
+        if (uri.rawQuery != null || uri.rawFragment != null) return null // no query/fragment
+        val isDefault = (scheme == "https" && uri.port == 443) || (scheme == "http" && uri.port == 80)
+        return if (uri.port == -1 || isDefault) "$scheme://$host" else "$scheme://$host:${uri.port}"
+    }
+
     /** `hex(sha256(canonical origin)).take(16)` — stable, path-safe, collision-negligible. */
     fun originKey(url: String): String = sha256Hex16(canonicalOrigin(url))
 
