@@ -1,8 +1,12 @@
 package io.silencelen.andvari.recovery
 
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.PrintStream
 import java.time.LocalDate
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -51,5 +55,35 @@ class CliHardeningTest {
         val sheet = keygenSheet(ByteArray(32) { 2 })
         val after = LocalDate.now() // straddling midnight must not flake the nightly run
         assertTrue("Generated: $before" in sheet || "Generated: $after" in sheet)
+    }
+
+    /**
+     * PT-L10 (CR-13): the org recovery seed must never be echoed to the terminal. Under the
+     * gradle test JVM no console is attached, so [readSecret] takes the piped stdin fallback —
+     * assert it reads the line WITHOUT echoing the seed to stdout (scrollback) and prompts on
+     * stderr so a redirected stdout (`recover ... > bundle.json`) stays clean.
+     */
+    @Test
+    fun readSecret_pipedFallback_readsStdinWithoutEchoingToStdout() {
+        val origIn = System.`in`
+        val origOut = System.out
+        val origErr = System.err
+        val out = ByteArrayOutputStream()
+        val err = ByteArrayOutputStream()
+        val secret: String
+        try {
+            System.setIn(ByteArrayInputStream("MY-SECRET-SEED-B64\n".toByteArray()))
+            System.setOut(PrintStream(out))
+            System.setErr(PrintStream(err))
+            secret = readSecret("Paste the recovery seed from the PRINTED SHEET (base64url): ")
+        } finally {
+            System.setIn(origIn)
+            System.setOut(origOut)
+            System.setErr(origErr)
+        }
+        assertEquals("MY-SECRET-SEED-B64", secret, "piped fallback must return the seed line")
+        assertEquals("", out.toString(), "the seed read must write NOTHING to stdout (no scrollback echo)")
+        assertFalse("MY-SECRET-SEED-B64" in out.toString(), "the seed must never reach stdout")
+        assertTrue("Paste the recovery seed" in err.toString(), "the prompt must go to stderr, not stdout")
     }
 }

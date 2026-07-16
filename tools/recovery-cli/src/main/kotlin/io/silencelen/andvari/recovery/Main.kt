@@ -144,7 +144,7 @@ private fun canaryMake(pubB64: String) {
 }
 
 private fun canaryVerify(sealedB64: String) {
-    val seedB64 = prompt("Paste the recovery seed from the PRINTED SHEET (base64url): ")
+    val seedB64 = readSecret("Paste the recovery seed from the PRINTED SHEET (base64url): ")
     val seed = Bytes.fromB64(seedB64.trim())
     val kp = crypto.boxKeypairFromSeed(seed)
     val payload = Escrow.open(crypto, kp.publicKey, kp.privateKey, Bytes.fromB64(sealedB64))
@@ -181,7 +181,7 @@ private fun verifyDump(seedFile: String, dumpFile: String) {
 }
 
 private fun recover(sealedBlobB64: String) {
-    val seedB64 = prompt("Paste the recovery seed from the PRINTED SHEET (base64url): ")
+    val seedB64 = readSecret("Paste the recovery seed from the PRINTED SHEET (base64url): ")
     val seed = Bytes.fromB64(seedB64.trim())
     val kp = crypto.boxKeypairFromSeed(seed)
     val payload = Escrow.open(crypto, kp.publicKey, kp.privateKey, Bytes.fromB64(sealedBlobB64))
@@ -261,9 +261,29 @@ private fun qr(text: String): String {
     return sb.toString()
 }
 
-private fun prompt(message: String): String {
-    print(message)
-    System.out.flush()
+/**
+ * No-echo read of a SECRET — here the org recovery seed, which can decrypt EVERY escrowed
+ * UVK and lives only in offline/printed-sheet custody (ER-1). No-echo via the console when a
+ * real terminal is attached to BOTH stdin and stdout (the char[] is zeroed after copying it
+ * out); otherwise a plaintext line from stdin for piped drills/scripts, with the prompt on
+ * stderr so a redirected stdout (`recover ... > bundle.json`) never captures the prompt.
+ * PT-L10 caveat (JDK 17): `System.console()` is null when EITHER stream is not a tty — so
+ * TYPING the seed while stdout is redirected takes this fallback and the TERMINAL echoes it to
+ * scrollback. We warn loudly on stderr; the fully-safe paths are: pipe the seed via stdin, or
+ * don't redirect stdout. Mirrors backup-cli's readPassphrase.
+ */
+internal fun readSecret(message: String): String {
+    System.console()?.let { console ->
+        val chars = console.readPassword(message) ?: die("no input")
+        return String(chars).also { chars.fill(' ') }
+    }
+    System.err.println(
+        "WARNING: no secure console (stdout is redirected or not a terminal). If you TYPE the " +
+            "seed here it WILL appear in your terminal scrollback. Pipe it via stdin instead, or " +
+            "re-run without redirecting stdout.",
+    )
+    System.err.print(message)
+    System.err.flush()
     return readlnOrNull() ?: die("no input")
 }
 

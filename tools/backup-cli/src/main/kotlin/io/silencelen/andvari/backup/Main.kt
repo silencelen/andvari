@@ -19,8 +19,9 @@ import java.time.Instant
  *                                       section's tag; summary table; exit 0 iff all good,
  *                                       1 with the spec error code otherwise
  *   dump    <file.andvari> [--secrets]  authenticated payload as pretty JSON on stdout.
- *                                       passwords/TOTP/fileKeys are REDACTED ("•••") by
- *                                       default; --secrets prints them IN THE CLEAR
+ *                                       every password, TOTP seed, fileKey, card number,
+ *                                       CVV and note body is REDACTED ("•••") by default;
+ *                                       --secrets prints them IN THE CLEAR
  *   extract <file.andvari> <outDir>     write each embedded attachment to
  *                                       outDir/<itemName>-<attachmentName> (never overwrites)
  *
@@ -47,7 +48,7 @@ fun main(args: Array<String>) {
                   dump    <file.andvari> [--secrets]  payload as pretty JSON (secrets redacted as •••)
                   extract <file.andvari> <outDir>     write embedded attachments out (never overwrites)
 
-                --secrets prints every password, TOTP seed and fileKey IN THE CLEAR on stdout.
+                --secrets prints every ${Redact.secretsDescription} IN THE CLEAR on stdout.
                 Only use it on a trusted machine, only when actually recovering values — the
                 default redacted dump is the one that is safe to scroll, share, or attach.
                 """.trimIndent(),
@@ -111,7 +112,7 @@ private fun dump(path: String, secrets: Boolean) {
     val opened = Backup.open(crypto, readPassphrase(), file)
     // Banner on stderr so stdout stays pure JSON (pipeable to jq/less).
     if (secrets) {
-        System.err.println("WARNING: --secrets — every password, TOTP seed and fileKey follows IN THE CLEAR.")
+        System.err.println("WARNING: --secrets — every ${Redact.secretsDescription} follows IN THE CLEAR.")
     } else {
         System.err.println("(secrets redacted as ${Redact.MASK}; --secrets prints them raw — recovery only)")
     }
@@ -139,15 +140,23 @@ private fun readBackupFile(path: String): ByteArray {
 }
 
 /**
- * No-echo when a real console is attached; otherwise (piped stdin — scripts, drills)
- * a plaintext line exactly like recovery-cli's seed prompts. The prompt goes to stderr
- * so `dump ... > payload.json` never captures it.
+ * No-echo when a real console is attached to BOTH stdin and stdout; otherwise (piped stdin —
+ * scripts/drills — OR, on JDK 17 where `System.console()` is null unless both streams are ttys,
+ * a redirected stdout) a plaintext line from stdin, with the prompt on stderr so `dump ... >
+ * payload.json` never captures the prompt. Caveat: TYPING the passphrase while stdout is
+ * redirected takes this fallback and the terminal echoes it — we warn loudly (parity with
+ * recovery-cli's readSecret).
  */
 private fun readPassphrase(): String {
     System.console()?.let { console ->
         val chars = console.readPassword("Backup passphrase: ") ?: die("no input")
         return String(chars).also { chars.fill(' ') }
     }
+    System.err.println(
+        "WARNING: no secure console (stdout is redirected or not a terminal). If you TYPE the " +
+            "passphrase here it WILL appear in your terminal scrollback. Pipe it via stdin instead, " +
+            "or re-run without redirecting stdout.",
+    )
     System.err.print("Backup passphrase: ")
     System.err.flush()
     return readlnOrNull() ?: die("no input")

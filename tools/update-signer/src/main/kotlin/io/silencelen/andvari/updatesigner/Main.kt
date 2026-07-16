@@ -5,6 +5,9 @@ import com.goterl.lazysodium.SodiumJava
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 import kotlin.system.exitProcess
 
 /**
@@ -46,17 +49,53 @@ private fun flag(args: Array<String>, name: String): String? {
     return if (i >= 0 && i + 1 < args.size) args[i + 1] else null
 }
 
-private fun keygen(outPath: String) {
+internal fun keygen(outPath: String) {
     val pk = ByteArray(32)
     val sk = ByteArray(64) // libsodium Ed25519 secret key = seed(32) || pubkey(32)
     check(ls.cryptoSignKeypair(pk, sk)) { "crypto_sign_keypair failed" }
-    val out = File(outPath)
-    out.writeText(Bytes.toB64(sk))
-    runCatching {
-        out.setReadable(false, false); out.setReadable(true, true)
-        out.setWritable(false, false); out.setWritable(true, true)
+
+    // ASVS V14 restrictive-permission secret storage (CR-19 / same class the repo's own PT-L9
+    // flagged). Never leave the H2 signing root world-readable for even a moment, and never
+    // clobber an existing key silently (it would destroy the only copy of the private key).
+    val path = File(outPath).toPath()
+    if (Files.exists(path)) {
+        error("refusing to overwrite existing key file $path — this would destroy the current signing key; move it aside first")
     }
-    System.err.println("private key → ${out.absolutePath} (0600) — KEEP SAFE; never on a server or in git.")
+    val posix = path.fileSystem.supportedFileAttributeViews().contains("posix")
+    val ownerOnly = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
+    // ATOMIC create-then-VERIFY-then-write: the file exists with owner-only 0600 perms AND we
+    // confirm them BEFORE any secret byte lands. `supportedFileAttributeViews().contains("posix")`
+    // is a property of the JVM's default provider, NOT of the mount — on a FAT/exFAT/CIFS mount (a
+    // plausible offline-key USB) createFile silently yields the mount-default (world-readable) perms
+    // with no exception, so we re-read and refuse if 0600 didn't take, deleting the empty file so no
+    // secret is ever written to a readable location. createFile also throws if the path already
+    // exists (race-safe O_EXCL — also refuses a dangling-symlink outPath).
+    if (posix) {
+        Files.createFile(path, PosixFilePermissions.asFileAttribute(ownerOnly))
+        val got = Files.getPosixFilePermissions(path)
+        if (got != ownerOnly) {
+            Files.deleteIfExists(path)
+            error("cannot enforce owner-only (0600) perms on $path (got $got) — refusing to write the signing key to a world-readable location (a FAT/exFAT/CIFS mount? write it to a POSIX filesystem)")
+        }
+    } else {
+        Files.createFile(path)
+        System.err.println("WARNING: non-POSIX filesystem — cannot set owner-only (0600) permissions on $path at create time; secure it yourself (this key can forge update manifests).")
+    }
+    Files.write(path, Bytes.toB64(sk).toByteArray(Charsets.UTF_8))
+
+    // Belt-and-braces re-check after write (a chmod under us is out of scope but cheap to catch); if
+    // it somehow reads back non-0600 now, DELETE the secret-bearing file — never just warn.
+    if (posix) {
+        val perms = Files.getPosixFilePermissions(path)
+        if (perms != ownerOnly) {
+            Files.deleteIfExists(path)
+            error("could not keep $path at 0600 (got $perms) — deleted it; refusing to leave the signing key readable")
+        }
+        System.err.println("private key → ${path.toAbsolutePath()} (0600) — KEEP SAFE; never on a server or in git.")
+    } else {
+        System.err.println("private key → ${path.toAbsolutePath()} — KEEP SAFE; never on a server or in git.")
+    }
+
     println("ANDVARI_UPDATE_PUBKEY=${Bytes.toB64(pk)}")
     System.err.println("→ send that ANDVARI_UPDATE_PUBKEY line back to pin it in core UpdateVerify.PINNED.")
 }

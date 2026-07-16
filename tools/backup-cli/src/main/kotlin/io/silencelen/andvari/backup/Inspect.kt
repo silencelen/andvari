@@ -177,6 +177,38 @@ object Redact {
     val SECRET_KEYS = setOf("password", "totp", "fileKey", "number", "securityCode", "notes")
     const val MASK = "•••"
 
+    /**
+     * Human phrase for each masked JSON key, in a stable order — the CLI's `--secrets`
+     * help/warning text ([secretsDescription]) derives from THIS so it can never again drift
+     * from what actually masks (PT-M6 residual / CR-16: the strings once enumerated only
+     * password/TOTP/fileKey while the redactor also masks card PAN/CVV and note bodies). The
+     * `init` block below asserts these keys cover [SECRET_KEYS] EXACTLY, so adding a masked
+     * key without a label fails fast (test + first run) instead of silently under-stating.
+     */
+    private val SECRET_LABELS: List<Pair<String, String>> = listOf(
+        "password" to "password",
+        "totp" to "TOTP seed",
+        "fileKey" to "fileKey",
+        "number" to "card number",
+        "securityCode" to "security code",
+        "notes" to "note body",
+    )
+
+    /** e.g. "password, TOTP seed, fileKey, card number, security code and note body". */
+    val secretsDescription: String = SECRET_LABELS.map { it.second }.let { labels ->
+        when (labels.size) {
+            0 -> ""
+            1 -> labels[0]
+            else -> labels.dropLast(1).joinToString(", ") + " and " + labels.last()
+        }
+    }
+
+    init {
+        require(SECRET_LABELS.map { it.first }.toSet() == SECRET_KEYS) {
+            "Redact.SECRET_LABELS must describe exactly SECRET_KEYS — add a label when the masked set changes"
+        }
+    }
+
     fun tree(element: JsonElement): JsonElement = when (element) {
         is JsonObject -> JsonObject(
             element.entries.associate { (key, value) ->
