@@ -1,0 +1,4 @@
+# selfhost test fixture — the real file is deploy/docker-compose.yml (docs/deploy lane)
+services:
+  andvari:
+    image: ghcr.io/silencelen/andvari:latest
