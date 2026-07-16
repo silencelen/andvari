@@ -45,27 +45,70 @@
         <span class="brand"><span class="a-mark">and</span>vari</span>
         <p>the keeper of the hoard</p>
       </div>
-      <div class="field">
-        <label for="email">Email</label>
-        <input id="email" type="email" autocomplete="off" autocapitalize="off" spellcheck="false" />
+
+      <!-- Quick unlock Tier B (spec 01 §8.4): shown ONLY when the SW reports an armed, redeemable blob.
+           This PIN entry lives EXCLUSIVELY in the popup (chrome-extension://) — never a page/content DOM
+           (breaker B7). The anti-phish line is the standing reminder that a web page asking for it is a
+           scam. "Use your master password instead" falls back to the full form. -->
+      <section id="qu-locked" class="qu-block" hidden>
+        <div class="field">
+          <label for="qu-pin">Quick unlock PIN</label>
+          <input id="qu-pin" type="password" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        </div>
+        <button id="qu-unlock" class="primary">Unlock</button>
+        <p class="qu-antiphish" role="note">andvari only ever asks for your PIN here, in this popup — never on a web page.</p>
+        <p style="margin: 10px 0 0; text-align: center;">
+          <button id="qu-use-master" class="link dim">Use your master password instead</button>
+        </p>
+      </section>
+
+      <!-- The full master-password form. Hidden while an armed PIN entry is showing (the toggle above). -->
+      <div id="qu-master-form">
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" type="email" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="password">Master password</label>
+          <input id="password" type="password" autocomplete="off" />
+        </div>
+        <button id="unlock" class="primary">Unlock</button>
+        <div id="kdf" class="kdf" hidden>
+          <div class="bar"></div>
+          <div class="cap">about 6 seconds</div>
+        </div>
+        <!-- Cut H (v2 #6): the locked popup was a dead end for a forgotten master password —
+             self-recovery lives in the web app; this signposts it. -->
+        <p style="margin: 10px 0 0; text-align: center;">
+          <button id="forgot" class="link dim">Forgot your master password?</button>
+        </p>
       </div>
-      <div class="field">
-        <label for="password">Master password</label>
-        <input id="password" type="password" autocomplete="off" />
-      </div>
-      <button id="unlock" class="primary">Unlock</button>
-      <div id="kdf" class="kdf" hidden>
-        <div class="bar"></div>
-        <div class="cap">about 6 seconds</div>
-      </div>
-      <!-- Cut H (v2 #6): the locked popup was a dead end for a forgotten master password —
-           self-recovery lives in the web app; this signposts it. -->
-      <p style="margin: 10px 0 0; text-align: center;">
-        <button id="forgot" class="link dim">Forgot your master password?</button>
-      </p>
     </section>
 
     <section id="unlocked" class="unlocked" hidden>
+      <!-- Quick-unlock one-time offer card (spec 01 §8.4; dismissed-once via storage.local — breaker B7).
+           Shown after unlock only when NOT enrolled and NOT previously dismissed. -->
+      <div id="qu-offer" class="qu-offer" role="note" hidden>
+        <p>Skip the master password next time — set a quick-unlock PIN for this browser.</p>
+        <div class="qu-acts">
+          <button id="qu-offer-setup" class="ghost sm">Set up quick unlock</button>
+          <button id="qu-offer-dismiss" class="link dim">Not now</button>
+        </div>
+      </div>
+
+      <!-- Inline enroll form (popup-only PIN entry — breaker B7). Revealed from the offer or Settings row. -->
+      <section id="qu-enroll" class="qu-block" hidden>
+        <div class="field">
+          <label for="qu-new-pin">Choose a quick-unlock PIN</label>
+          <input id="qu-new-pin" type="password" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        </div>
+        <p class="qu-antiphish" role="note">A word beats six digits. andvari only asks for this PIN here in the popup — never on a web page.</p>
+        <div class="qu-acts">
+          <button id="qu-enroll-save" class="primary sm">Turn on quick unlock</button>
+          <button id="qu-enroll-cancel" class="link dim">Cancel</button>
+        </div>
+      </section>
+
       <div class="toolbar">
         <!-- a11y 1a: placeholder is not a programmatic name — a real (off-screen) label is. -->
         <label for="search" class="visually-hidden">Search the hoard</label>
@@ -110,8 +153,17 @@
     <span id="copy-live" class="visually-hidden" aria-live="polite"></span>
 
     <footer class="pop-foot">
+      <!-- Quick-unlock Settings row (unlocked only): reflects on/off and toggles it. Turning OFF is a
+           full wipe with NO auth gate (§8.1 parity — reducing standing secret material is never gated). -->
+      <div id="qu-settings" class="foot-row qu-settings" hidden>
+        <span id="qu-settings-state" class="muted"></span>
+        <button id="qu-toggle" class="link"></button>
+      </div>
       <div class="foot-row">
         <button id="lock" class="ghost" hidden>Lock</button>
+        <!-- Sign out is DISTINCT from Lock: Lock may keep an armed quick-unlock blob; Sign out wipes it
+             (+ the co-key + retained tokens) and forgets the session entirely (spec 01 §8.4). -->
+        <button id="sign-out" class="ghost" hidden>Sign out</button>
         <button id="open-vault" class="link">Open web vault</button>
       </div>
       <div class="foot-row">

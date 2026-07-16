@@ -124,10 +124,47 @@ export type UnlockCode =
  *  SW error string, which used to leak "locked"/"save failed (conflict)" into the banner). */
 export type SaveErrorCode = "locked" | "conflict" | "failed";
 
+/** Extension quick-unlock Tier B (spec 01 §8.4). Redeem-failure code — mapped to copy by the popup.
+ *  `wrong_pin` carries the remaining attempts; `expired` = past the 24 h window (blob kept, use the
+ *  master password); `exhausted`/`corrupt`/`stale_uvk` = the blob was wiped (re-enroll after a full
+ *  unlock); `revoked`/`kdf_policy` = a full wipe + full sign-in; `not_armed`/`aborted` = a benign race. */
+export type PinUnlockCode =
+  | "wrong_pin"
+  | "expired"
+  | "exhausted"
+  | "not_armed"
+  | "corrupt"
+  | "stale_uvk"
+  | "revoked"
+  | "network"
+  | "server_error"
+  | "identity_mismatch"
+  | "kdf_policy"
+  | "aborted";
+
+/** Why the PIN entropy floor rejected an enrollment PIN (breaker A2⊕B8) — the popup renders a nudge. */
+export type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
+
+/** Quick-unlock enrollment-failure code. `weak_pin` additionally carries a `reason`. */
+export type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin";
+
 export type Req =
   | { type: "status" }
   | { type: "unlock"; email: string; password: string }
   | { type: "lock" }
+  /** Explicit full sign-out (a new popup action) — clears everything INCLUDING the quick-unlock blob
+   *  + co-key + retained tokens (spec 01 §8.4; distinct from `lock`, which may arm quick unlock). */
+  | { type: "signOut" }
+  /** Popup: redeem an armed quick-unlock with the PIN (spec 01 §8.4). Renders ONLY in the popup
+   *  (chrome-extension://), never a page — breaker B7. */
+  | { type: "unlockWithPin"; pin: string }
+  /** Popup: enroll a quick-unlock PIN over the in-memory UVK (only while unlocked; refused while
+   *  mustChangePassword). Never carries key material — the SW holds the UVK (breaker B1). */
+  | { type: "enrollQuickUnlock"; pin: string }
+  /** Popup: turn quick unlock off — a full wipe, no auth gate (§8.1 parity). */
+  | { type: "disableQuickUnlock" }
+  /** Popup: the one-time post-unlock offer card was dismissed (durable, storage.local — breaker B7). */
+  | { type: "dismissQuickUnlockOffer" }
   | { type: "ping" }
   /** Content: logins whose uris match `host` (state-aware). */
   | { type: "matches"; host: string }
@@ -201,12 +238,26 @@ export type Res<T extends Req["type"]> = T extends "status"
       /** Why the last lock happened, for the F26 reason line above the unlock form (E1-7);
        *  null unless the most recent lock was an idle autolock. */
       lockNotice: { kind: "idle"; seconds: number } | null;
+      /** Quick-unlock Tier B sub-state (spec 01 §8.4). `armed` = locked-armed + redeemable (the popup
+       *  shows the PIN field on the locked screen); `enrolled` + `offerDismissed` drive the unlocked
+       *  Settings toggle + the one-time offer card; `attemptsRemaining` for the "N tries left" copy. */
+      quickUnlock: { enrolled: boolean; armed: boolean; attemptsRemaining: number; offerDismissed: boolean };
     }
   : T extends "unlock"
     ? { ok: boolean; code?: UnlockCode; error?: string }
     : T extends "lock"
       ? { ok: true }
-      : T extends "ping"
+      : T extends "signOut"
+        ? { ok: true }
+        : T extends "unlockWithPin"
+          ? { ok: boolean; code?: PinUnlockCode; attemptsRemaining?: number }
+          : T extends "enrollQuickUnlock"
+            ? { ok: boolean; code?: EnrollCode; reason?: PinWeakReason }
+            : T extends "disableQuickUnlock"
+              ? { ok: true }
+              : T extends "dismissQuickUnlockOffer"
+                ? { ok: true }
+                : T extends "ping"
         ? { ok: boolean; serverTime?: number; error?: string }
         : T extends "matches"
           ? { locked: boolean; matches: MatchItem[] }

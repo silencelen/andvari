@@ -40,7 +40,8 @@ wrapKey = HKDF-SHA-256(ikm = MK, salt = empty, info = "andvari/v1/wrap", L = 32)
 RFC 5869, full extract-then-expand. `salt = empty` means the RFC's default
 (HashLen zero bytes). Info strings are the literal ASCII bytes shown. MK never leaves
 the KDF step; authKey and wrapKey MUST NOT be persisted (only re-derived) — with no
-exception: quick-unlock (§8) persists a hardware-wrapped UVK, never these.
+exception: quick-unlock (§8) persists a wrapped **UVK** — **(Android) hardware-wrapped**
+(§8.1) or **(extension) PIN-wrapped, session-scoped** (§8.4) — never authKey/wrapKey/MK.
 
 ### 2.1 Per-member recovery secret split (spec 04 §6)
 
@@ -215,13 +216,18 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
 ## 8. Quick unlock (platform-local, never server-visible)
 
 Quick unlock wraps the **UVK** — never the master password, MK, or a derived
-authKey/wrapKey — in platform hardware. It is strictly device-local: the server is
+authKey/wrapKey — under a **platform-local wrapping factor**: platform hardware
+where the platform offers it (**Android**, §8.1), or a **PIN + a non-extractable
+session-scoped co-key** where it does not (**the browser extension** under MV3,
+§8.4). It is strictly device-local: the server is
 never told quick-unlock exists, never sees the wrapped blob, and the wire protocol
 is unchanged. Quick unlock never weakens the server story: the server still only
 ever sees authKey. A quick unlock yields exactly the capability a full-password
 unlock yields **except** knowledge of the password itself — so it can never perform
 the §7 password change / KDF upgrade, and it MUST NOT count as a full-password
-unlock anywhere the spec distinguishes the two.
+unlock anywhere the spec distinguishes the two. Each platform subsection states its
+own wrapping factor and its honest at-rest exposure; there is **no single "platform
+hardware" guarantee across platforms** (the extension has none — §8.4).
 
 ### 8.1 Android (NORMATIVE, v1)
 
@@ -366,7 +372,126 @@ ANY future platform quick-unlock as written.
 None in v1 (unchanged): keys are session-memory only, and a reload always
 re-prompts for the full master password. (The durable web offline cache — spec 02
 §8.1, 2026-07-14 — persists ciphertext + wire metadata only; it stores nothing that
-opens the vault without the master password and is NOT a quick unlock.)
+opens the vault without the master password and is NOT a quick unlock.) **This "Web:
+none" stance stands unchanged**: the browser *extension* is a distinct platform
+(§8.4) with its own client token (`X-Andvari-Client: extension/x.y.z`, spec 03 §1)
+and its own compartment (`chrome.storage.session`), and §8.4 governs it — a page in
+a browser tab (the web client) still gets no quick unlock.
+
+### 8.4 Extension (NORMATIVE, v1; design 2026-07-13-platform-fit §1, house 2-breaker pass)
+
+The MV3 browser extension has **no platform hardware** to wrap the UVK — under MV3
+there is no second key-storage compartment: the service-worker memory dies in ~30 s,
+and `chrome.storage.session` / `.local` are readable by the same principal. So a
+naïve session-key wrap (key beside ciphertext) would be pure UI theater — *worse*
+than today's honest erase-on-lock. Quick unlock here is therefore a **PIN-wrapped,
+session-scoped UVK double-wrapped under a non-extractable co-key**, and it is a real
+but **narrower** weakening than Android's, stated honestly below.
+
+**Why a PIN is acceptable here when §8.1 rejects `DEVICE_CREDENTIAL` / screen-PIN
+authenticators.** §8.1 rejects a screen PIN as the *sole* factor because there it
+would *replace* a strong biometric bound to hardware. Here there is no hardware to
+replace; the PIN is not offered as an equal of the master password but as a
+*second, weaker* factor guarding a *session-scoped* secret, and it is only
+acceptable because of two mandatory properties this section requires:
+
+- **(A1) A non-extractable session co-key.** The UVK is DOUBLE-wrapped:
+  `ct = AEAD(K_pin, AEAD(K_nonexp, UVK))`, where `K_nonexp` is a
+  `crypto.subtle.generateKey({name:"AES-GCM", length:256}, /*extractable*/false, …)`
+  key held in IndexedDB. A PIN-only wrap is offline-crackable (a 6-digit PIN is
+  GPU-*minutes*, not years) and is **rejected**. The co-key never leaves the browser
+  and only ever unwraps this one session-scoped blob, so it is *not* a standalone
+  durable vault opener; it MUST be deleted on **every** blob wipe (below).
+- **(A2) An enforced entropy floor** (not copy-only): PIN ≥ 6 chars; an **all-digit
+  PIN MUST be ≥ 10 digits** (a 6–8 char PIN MUST carry ≥ 1 non-digit); trivial
+  sequences/repeats are blocked. Argon2id over the PIN is the *only* defense against
+  a stolen blob (there is no hardware rate-limiter), so the floor is load-bearing.
+
+**Eligibility & enrollment.** Per-install, per-account, **opt-in**, offered only
+while unlocked (the UVK is in service-worker memory — memory-only custody, never
+persisted). Enrollment is **refused while `mustChangePassword=true`** (never arm a
+rescue-issued temp password's UVK — §8.1-A5 parity). Enrollment **COPIES the
+surviving full-password `lastFullUnlockAt`** into the blob and MUST NOT mint `now`
+from a quick-unlocked session (a quick-unlocked session carries the *original*
+stamp), so re-enrolling can never extend the freshness window (Android A1 parity).
+`offlineCacheAllowed` does **NOT** gate Tier B: a `storage.session` blob is
+memory-backed and browser-session-scoped — not durable, not at-rest — and lives in
+the same compartment that already holds raw `vaultKeys` while unlocked; that bit
+gates only durable at-rest openers (a future Tier C — durable `storage.local` under
+WebAuthn/PRF — WOULD be gated, and is explicitly out of scope here).
+
+**Construction.** `K_pin = Argon2id(PIN, salt, pinParams)`; `pinParams` are chosen
+at enroll by a one-shot bench targeting **≤ 1 s** on that machine, **floored at
+mem ≥ 32 MiB, ops ≥ 2** (raised toward 64 MiB where the bench allows) and recorded
+in the blob. On use they are re-checked by a **dedicated `assertPinKdfParams`** with
+a **floor AND a ceiling (≤ 1 GiB, ≤ 10 ops; reject non-finite/omitted)** — distinct
+from the server-KDF assertion whose floor is the 64 MiB *master* floor; a blob
+carrying sub-range params is treated as **corrupt → wipe** (a planted 4 GiB would
+OOM the worker). Both AEAD layers bind the AAD
+`UTF-8("andvari/v1|ext-quick-unlock|{userId}")` (per-account — a blob copied to
+another account cannot open, and a tamper fails the tag). The blob + a sibling
+attempt counter (starts 5) live under a **distinct `chrome.storage.session` key**,
+NOT the session snapshot: `ensureLoaded` MUST NOT hydrate the live session from it,
+so while locked-armed every `!session` gate still reports **fully locked**.
+
+**Compartment precondition (hard).** The blob is a crackable UVK **plus a live
+refresh token**, so `chrome.storage.session`'s `TRUSTED_CONTEXTS` access level is a
+**hard precondition**: if `setAccessLevel` throws and content scripts cannot be
+guaranteed excluded, the client MUST NOT arm and MUST NOT retain tokens (it falls
+back to today's full erase). A `storage.local` fallback for the blob is **forbidden**
+(that is the rejected durable Tier C).
+
+**Locked-but-authenticated state.** When armed, `doLock()` keeps a slim
+`{access, refresh, userId, email, blob, counter}` record under the distinct key and
+destroys everything else exactly as today (vaultKeys, items, tabs, **pending saves —
+they hold plaintext page passwords and MUST still die at lock**, grants, badges);
+when not armed it stays byte-identical to today's full erase. This retains the
+refresh token across lock — new *client-side* state, not new server exposure
+(today's `doLock` already leaves the refresh token valid server-side, merely
+forgetting it).
+
+**Use** (new `unlockWithPin`, single-flight): `open(K_pin, …) → AEAD(K_nonexp)⁻¹ →
+UVK`, then a **forced `POST /auth/refresh` rotation as the FIRST server contact** (a
+revoked/rotated refresh → definitive 401 → wipe → full sign-in; this is also the
+account-state read that makes a rescue — which revokes all sessions, spec 03 — take
+effect), then `GET /account/keys` → open `encryptedIdentitySeed` under the UVK →
+**the same seed-derived `identityPub` hard-compare as the password path (§5)** →
+`sync(0)` → rebuild vault keys/items. The attempt is **RESERVED (counter decremented
++ persisted) BEFORE the AEAD attempt**, so a service-worker eviction or a racing
+popup can never gift a free guess; a verified open resets the counter to 5.
+`mustChangePassword` and `autoLockSeconds` are **re-derived on redeem** (via the
+forced refresh / policy fetch), so a stale flag cannot let a temp-password UVK be
+used; the master-KDF floor is re-asserted from the fetched `kdfParams`.
+
+**Fail-closed rules (normative; wrong-PIN = full unlock, no oracle):**
+
+| Event | Action |
+|---|---|
+| AEAD open fails (wrong PIN, tampered/corrupt blob, wrong co-key, unknown `v`, sub-range `pinParams` — **indistinguishable by design**) | decrement (already reserved); generic "That PIN didn't match — N tries left." No partial-correctness signal; the PIN never touches the wire, so there is **no remote oracle at all** |
+| Attempts exhausted (5) | **wipe** blob + counter + co-key; master password only; re-enroll after a full unlock |
+| Sub-range `pinParams` / missing co-key | **wipe** (corrupt/orphaned); master password |
+| `encryptedIdentitySeed` won't open under the recovered UVK | **wipe** (stale/foreign UVK); master password |
+| Seed-derived identityPub ≠ server identityPub | **HARD FAIL** (§5 security fault); blob **KEPT** (evidence; Android parity) |
+| Definitive 401 on the forced refresh / `account/keys` / `sync` (revoked or password-changed elsewhere) | **full wipe** blob + counter + co-key + tokens → full sign-in (never the armed-retaining lock) |
+| Network failure | master password this time; blob **KEPT** (the full path needs the network too) |
+| `> 24 h` since `lastFullUnlockAt`, or a future stamp | master password; blob **KEPT**; a full unlock re-stamps |
+| Browser exit | `storage.session` evaporates — blob, counter, tokens all gone (the natural ceiling) |
+| Sign-out / disable in Settings / policy revocation | **wipe**; disable needs no auth gate (reducing standing secret material is never gated — §8.1 parity) |
+
+**Periodic-full-password rule.** The Android 30-day durable-blob rule collapses here
+to **min(browser session, 24 h)** since `lastFullUnlockAt`: `storage.session` cannot
+outlive the browser, and the extension has no §7 re-key path (it never calls
+`PUT /account/password`), so the rule serves muscle memory and bounds the locked-state
+token-retention window. Clock handling is `Date.now()` with **fail-closed-on-future-stamp**;
+the §8.1 cross-boot server-anchor machinery is NOT needed (a reboot kills the browser
+kills the blob). The counter/stamp/pinParams are same-compartment and
+attacker-resettable — stated plainly (spec 05 A7-extension); absent a hardware rate
+limiter the counter brakes only the in-scope human-at-keyboard opportunist, and the
+PIN entropy floor + session scoping are the actual bounds against blob exfiltration.
+
+**Account switch (A6).** A full unlock as a *different* `userId` than a stored blob's
+MUST wipe that blob (the AAD already blocks cross-account crypto use; this is the
+explicit erase story).
 
 ### Auto-lock (policy `autoLockSeconds`)
 

@@ -4,10 +4,13 @@
 A1 vault plaintext (credentials, TOTP seeds, notes, attachments). A2 master
 passwords. A3 UVKs/VKs/identity keys. A4 the org recovery seed. A5 account
 availability (lockout = losing access to everything). A6 metadata (who has how many
-items, sizes, timing). A7 the at-rest quick-unlock secret (Android: the
-Keystore-wrapped UVK blob + its non-exportable hardware key, spec 01 §8.1) — the
-only durable on-device artifact that, combined with a live authenticator, opens a
-vault without the master password.
+items, sizes, timing). A7 the at-rest quick-unlock secret — the on-device artifact
+that, combined with a live unlocking factor, opens a vault without the master
+password. Two variants with **different at-rest posture**: **A7-android** (the
+Keystore-wrapped UVK blob + its non-exportable hardware key, spec 01 §8.1) is
+*durable* but *hardware-gated*; **A7-extension** (the PIN-wrapped, session-scoped UVK
+blob double-wrapped under a non-extractable WebCrypto co-key, spec 01 §8.4) is
+*non-durable* (browser-session-scoped, dies at browser exit) but *hardware-less*.
 
 ## Adversaries & guarantees
 
@@ -116,6 +119,35 @@ plaintext — resettable only by an attacker already inside the app sandbox (T5)
 who still cannot use the Keystore key. The A5 risk of *forgetting* the master
 password behind a working biometric is bounded by the normative 30-day periodic
 full-password rule (spec 01 §8.1).
+
+## Quick-unlock at-rest secret (A7-extension — spec 01 §8.4)
+
+The MV3 extension's quick unlock (spec 01 §8.4) has a **different** A7 posture than
+Android's: **non-durable but hardware-less**. Enabling it puts a PIN-wrapped,
+session-scoped UVK blob (`ct = AEAD(K_pin, AEAD(K_nonexp, UVK))`) **plus a live
+refresh token** in `chrome.storage.session` (memory-backed, `TRUSTED_CONTEXTS`,
+gone at browser exit), and the non-extractable co-key `K_nonexp` in IndexedDB. What
+each attacker gets:
+
+| Attacker | Outcome |
+|---|---|
+| **Device powered off / browser closed (thief, border search)** | Nothing quick-unlock-specific: `chrome.storage.session` is memory-backed and **evaporates at browser exit**, so the blob, counter, and retained token are simply gone. **Strictly better than A7-android vs a powered-off device** (no durable blob at all). Residual: OS **swap / hibernation** may page a memory image (blob + token) to disk — the co-key mitigates data-exfil of the blob alone but not a full RAM/swap image; ⊆ T7 for a disk that also holds the swapfile. |
+| **Human-at-keyboard opportunist, browser running, extension locked-armed** | The in-scope delta. Where a locked extension previously required the master password, it now falls to a **6+-char PIN, 5 attempts, then wipe**. This is the accepted, opt-in narrowing. The attempt counter is same-compartment and **attacker-resettable** (below), so against a *sophisticated* local attacker it is theater; against the opportunist it holds, and the PIN entropy floor + session scoping are the real bounds. |
+| **Malware / debugger reading the browser process or `storage.session`** | **T5, out of scope** for every client (a keylogger already gets the master password; unlocked-process memory already holds `vaultKeys`). Such an attacker gets a **PIN-crackable blob (double-wrapped: ~32 MiB+ Argon2id over a ≥6-char / ≥10-digit PIN ≈ GPU-hours for a floor PIN, more for a word) *plus* a live refresh token** — but note the blob alone is useless without the **non-extractable co-key** (A1): a pure `storage.session` dump cannot open it. **Per-extension storage isolation is a PLUS**: a co-installed extension cannot read another extension's `storage.session` except via a `chrome.debugger` grant or OS access (both T5). |
+| **Co-installed page / content script** | No access: the PIN UI and enroll are **popup-only** (`chrome-extension://`), there is no `externally_connectable`, and the `TRUSTED_CONTEXTS` access level is a hard precondition to arming at all (if it can't be guaranteed, the client does NOT arm — spec 01 §8.4). A page can neither send the PIN nor read the blob. |
+| **The server** | Learns nothing — quick unlock is wire-invisible (spec 01 §8); no new endpoint/header/field. The one wire *interaction* is that a redeem forces a `POST /auth/refresh` FIRST, so revocation / a rescue (which revokes sessions) takes effect at the next redeem (T1 unaffected). |
+
+Residuals accepted (A7-extension): (a) **memory-backed ≠ never-on-disk** — OS
+swap/hiberfil can page the blob + token; the co-key defends data-exfil of the blob,
+not a full RAM/swap image. (b) The **attempt counter, freshness stamp, and pinParams
+are same-compartment and attacker-resettable** by a `storage.session`/DevTools write
+(= T5) — they defend only the unsophisticated opportunist; a **pinParams ceiling**
+still bounds a planted-params OOM, and a sub-range set is treated as corrupt → wipe.
+(c) The whole in-scope delta reduces to the **human-at-keyboard opportunist on an
+unlocked machine with the browser running**; a machine that is unlocked with the
+browser running is already adjacent to T4/T5. The A5 risk of forgetting the master
+password behind a working PIN is bounded by the **min(browser session, 24 h)**
+periodic-full-password rule (spec 01 §8.4).
 
 ## Autofill (client-side, Android)
 

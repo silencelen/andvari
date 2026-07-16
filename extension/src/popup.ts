@@ -6,7 +6,7 @@
  * TOTP chips re-polled each second. The SW holds all key material — this page only messages it.
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
-import { CARD_COPY_FAILED, CLIPBOARD_FAILED, fillErrorCopy, lockNoticeCopy, revealErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
+import { CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
 import { displaySite, safeSiteUrl } from "./siteurl";
 
@@ -42,6 +42,9 @@ let searchSeq = 0;
 let clipClearTimer: number | undefined;
 /** Monotonic id source for per-chip TOTP "seconds left" descriptions (a11y 5b). */
 let totpSeq = 0;
+/** Quick-unlock (spec 01 §8.4): when the user picks "use your master password instead" on the armed
+ *  locked screen, show the full form instead of the PIN field for the rest of this popup opening. */
+let pinFallback = false;
 
 function showMsg(kind: "err" | "info", text: string): void {
   const m = el("msg");
@@ -86,10 +89,14 @@ function showView(unlocked: boolean): void {
   el("locked").hidden = unlocked;
   el("unlocked").hidden = !unlocked;
   el("lock").hidden = !unlocked;
+  el("sign-out").hidden = !unlocked; // spec 01 §8.4 — full sign-out, distinct from Lock
   el("count").hidden = !unlocked;
   if (!unlocked) {
     stopTotp();
     el("must-change").hidden = true; // unlocked-session chrome — refresh() re-derives it
+    el("qu-offer").hidden = true; // quick-unlock offer/enroll are unlocked-only chrome (spec 01 §8.4)
+    el("qu-enroll").hidden = true;
+    el("qu-settings").hidden = true;
     // Drop rendered vault rows/codes on lock — nothing lingers in the DOM.
     el("site-list").replaceChildren();
     el("all-list").replaceChildren();
@@ -110,6 +117,7 @@ async function refresh(): Promise<void> {
     return;
   }
   showView(s.unlocked);
+  renderQuickUnlock(s.quickUnlock, s.unlocked); // spec 01 §8.4 — PIN entry (locked) / offer+settings (unlocked)
   // E1-6: rescue-issued temporary password — a persistent, non-dismissable strip for the
   // whole unlocked session; it clears only via a fresh unlock whose response drops the flag.
   el("must-change").hidden = !(s.unlocked && s.mustChangePassword);
@@ -125,6 +133,11 @@ async function refresh(): Promise<void> {
   // F26 (E1-7): say WHY the vault is locked — recorded for idle autolock only (manual lock
   // renders no reason line, web useAutoLock parity); verbatim web copy via lockNoticeCopy.
   if (s.lockNotice) showMsg("info", lockNoticeCopy(s.lockNotice.seconds));
+  // Armed quick unlock (and not falling back) → the PIN field owns the focus; else the master form.
+  if (s.quickUnlock.armed && !pinFallback) {
+    el("qu-pin").focus();
+    return;
+  }
   const email = el<HTMLInputElement>("email");
   if (!email.value) {
     const remembered = s.email ?? (await rememberedEmail());
@@ -189,12 +202,16 @@ async function rememberedEmail(): Promise<string | null> {
 }
 
 function relocked(): void {
+  pinFallback = false; // a fresh relock re-offers the quick-unlock PIN if the SW armed one
   showView(false);
   // a11y 4a: a mid-session relock hid the unlocked view under focus — move focus to a real
   // element (#email) instead of letting it fall to <body>. showMsg is a live region (2a) so
   // the reason is announced.
   el("email").focus();
   showMsg("info", "Session locked — unlock to continue.");
+  // Re-query status so an armed quick-unlock (an idle autolock ARMS it — spec 01 §8.4) shows its PIN
+  // field; refresh() refines the focus + lock-notice (an idle notice supersedes the message above).
+  void refresh();
 }
 
 async function loadUnlocked(): Promise<void> {
@@ -817,6 +834,122 @@ el<HTMLInputElement>("email").addEventListener("keydown", (e) => {
 });
 el<HTMLInputElement>("password").addEventListener("keydown", (e) => {
   if (e.key === "Enter") void unlock();
+});
+
+/* ---- quick unlock Tier B (spec 01 §8.4): PIN entry (locked) + offer / enroll / settings (unlocked) ---- */
+
+/** Drive the quick-unlock chrome from the SW's status sub-state. Locked: the PIN field iff `armed` and
+ *  the user hasn't chosen the master-password fallback. Unlocked: the Settings on/off row always, plus
+ *  the one-time offer card when not enrolled + not dismissed (and the enroll form isn't already open). */
+function renderQuickUnlock(qu: Res<"status">["quickUnlock"], unlocked: boolean): void {
+  const showPin = !unlocked && qu.armed && !pinFallback;
+  el("qu-locked").hidden = !showPin;
+  el("qu-master-form").hidden = showPin;
+  if (!unlocked) return; // showView already hid the unlocked-only offer/enroll/settings chrome
+
+  el("qu-settings").hidden = false;
+  el("qu-settings-state").textContent = qu.enrolled ? "Quick unlock is on" : "Quick unlock is off";
+  el("qu-toggle").textContent = qu.enrolled ? "Turn off" : "Set up";
+  const enrollOpen = !el("qu-enroll").hidden;
+  el("qu-offer").hidden = qu.enrolled || qu.offerDismissed || enrollOpen;
+}
+
+async function quUnlock(): Promise<void> {
+  const pinEl = el<HTMLInputElement>("qu-pin");
+  if (!pinEl.value || el<HTMLButtonElement>("qu-unlock").disabled) return;
+  const pin = pinEl.value;
+  const btn = el<HTMLButtonElement>("qu-unlock");
+  btn.disabled = true;
+  clearMsg();
+  try {
+    const r = await ask({ type: "unlockWithPin", pin });
+    pinEl.value = ""; // never leave the PIN in the field
+    if (r?.ok) {
+      await refresh();
+      return;
+    }
+    showMsg("err", pinUnlockErrorCopy(r?.code, r?.attemptsRemaining));
+    // A wrong PIN keeps the field for a retry; anything that WIPED or invalidated the blob (exhausted /
+    // expired / corrupt / revoked / hard fault) drops us to the master password (re-render clears #qu-locked).
+    if (r && (r.code === "wrong_pin" || r.code === "network" || r.code === "server_error")) {
+      pinEl.focus();
+    } else {
+      pinFallback = true;
+      await refresh();
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+el("qu-unlock").addEventListener("click", () => void quUnlock());
+el<HTMLInputElement>("qu-pin").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") void quUnlock();
+});
+el("qu-use-master").addEventListener("click", () => {
+  pinFallback = true;
+  el("qu-locked").hidden = true;
+  el("qu-master-form").hidden = false;
+  const email = el<HTMLInputElement>("email");
+  (email.value ? el("password") : email).focus();
+});
+
+function openEnroll(): void {
+  el("qu-offer").hidden = true;
+  el("qu-enroll").hidden = false;
+  el<HTMLInputElement>("qu-new-pin").value = "";
+  el("qu-new-pin").focus();
+}
+
+async function quEnrollSave(): Promise<void> {
+  const pinEl = el<HTMLInputElement>("qu-new-pin");
+  if (!pinEl.value || el<HTMLButtonElement>("qu-enroll-save").disabled) return;
+  const pin = pinEl.value;
+  const btn = el<HTMLButtonElement>("qu-enroll-save");
+  btn.disabled = true;
+  clearMsg();
+  try {
+    const r = await ask({ type: "enrollQuickUnlock", pin });
+    if (r?.ok) {
+      pinEl.value = "";
+      el("qu-enroll").hidden = true;
+      showMsg("info", "Quick unlock is on for this browser.");
+      await refresh();
+    } else {
+      pinEl.select();
+      showMsg("err", enrollErrorCopy(r?.code, r?.reason));
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+el("qu-offer-setup").addEventListener("click", openEnroll);
+el("qu-offer-dismiss").addEventListener("click", async () => {
+  await ask({ type: "dismissQuickUnlockOffer" });
+  el("qu-offer").hidden = true;
+});
+el("qu-enroll-save").addEventListener("click", () => void quEnrollSave());
+el<HTMLInputElement>("qu-new-pin").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") void quEnrollSave();
+});
+el("qu-enroll-cancel").addEventListener("click", () => {
+  el<HTMLInputElement>("qu-new-pin").value = "";
+  el("qu-enroll").hidden = true;
+  void refresh();
+});
+el("qu-toggle").addEventListener("click", async () => {
+  if (el("qu-settings-state").textContent === "Quick unlock is on") {
+    await ask({ type: "disableQuickUnlock" }); // wipe — no auth gate (§8.1 parity)
+    showMsg("info", "Quick unlock turned off.");
+    await refresh();
+  } else {
+    openEnroll();
+  }
+});
+el("sign-out").addEventListener("click", async () => {
+  await ask({ type: "signOut" }); // full wipe: blob + co-key + tokens + session (spec 01 §8.4)
+  clearMsg();
+  pinFallback = false;
+  await refresh();
 });
 
 /* ---- footer ---- */

@@ -22,6 +22,22 @@ type UnlockCode =
 type SaveErrorCode = "locked" | "conflict" | "failed";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
 type RevealFailCode = "locked" | "not_allowed";
+// Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
+type PinUnlockCode =
+  | "wrong_pin"
+  | "expired"
+  | "exhausted"
+  | "not_armed"
+  | "corrupt"
+  | "stale_uvk"
+  | "revoked"
+  | "network"
+  | "server_error"
+  | "identity_mismatch"
+  | "kdf_policy"
+  | "aborted";
+type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
+type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin";
 
 /** Verbatim web/src/ui/errors.ts UNREACHABLE — the one canonical "can't reach the server"
  *  sentence, duplicated as a const because no build path from extension/ to web/src exists. */
@@ -113,6 +129,66 @@ export function revealErrorCopy(code: RevealFailCode | undefined): string {
     default:
       // an absent code (SW mid-restart) — retryable, no jargon (the saveErrorCopy idiom).
       return "Could not release that login — try again.";
+  }
+}
+
+/**
+ * Quick-unlock redeem failure (spec 01 §8.4). `wrong_pin` is the generic no-oracle line (breaker
+ * A1/A2 — it reveals no partial correctness and never distinguishes a wrong PIN from a corrupt blob);
+ * it carries the remaining attempts. A wiped-blob outcome (exhausted/corrupt/stale_uvk) and a revoked
+ * session route the user to the master password; identity_mismatch/kdf_policy keep their hard-fault
+ * sentences (never softened). The PIN never touches the wire, so there is no remote oracle at all.
+ */
+export function pinUnlockErrorCopy(code: PinUnlockCode | undefined, attemptsRemaining?: number): string {
+  switch (code) {
+    case "wrong_pin": {
+      const n = typeof attemptsRemaining === "number" ? attemptsRemaining : 0;
+      return `That PIN didn't match — ${n} ${n === 1 ? "try" : "tries"} left, or use your master password.`;
+    }
+    case "expired":
+      return "It's been a while since you signed in — enter your master password to continue.";
+    case "exhausted":
+      return "Too many wrong PINs — quick unlock is off. Unlock with your master password.";
+    case "corrupt":
+    case "stale_uvk":
+      return "Quick unlock needs to be set up again — unlock with your master password.";
+    case "revoked":
+      return "Your session ended — sign in again with your master password.";
+    case "identity_mismatch":
+      return "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.";
+    case "kdf_policy":
+      return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.";
+    case "server_error":
+      return "The server had a problem answering — try again in a moment.";
+    case "network":
+      return UNREACHABLE;
+    default:
+      // not_armed / aborted (benign races) and an absent code — fall to the master password quietly.
+      return "Couldn't quick-unlock — unlock with your master password.";
+  }
+}
+
+/** Quick-unlock enrollment refusal (spec 01 §8.4). `weak_pin` carries the entropy-floor reason
+ *  (breaker A2⊕B8 — enforcement, not copy-only). */
+export function enrollErrorCopy(code: EnrollCode | undefined, reason?: PinWeakReason): string {
+  switch (code) {
+    case "locked":
+      return "Unlock andvari first to set up quick unlock.";
+    case "must_change_password":
+      return "Set a new master password in the web vault before turning on quick unlock.";
+    case "need_full_unlock":
+      return "Enter your master password once more to set up quick unlock.";
+    case "weak_pin":
+      switch (reason) {
+        case "too_short":
+          return "Use at least 6 characters for your PIN.";
+        case "digits_need_length":
+          return "An all-number PIN needs at least 10 digits — or add a letter to a shorter one.";
+        default:
+          return "That PIN is too easy to guess — avoid sequences and repeats.";
+      }
+    default:
+      return "Couldn't turn on quick unlock — try again.";
   }
 }
 
