@@ -1,7 +1,12 @@
 # andvari spec 03 — wire protocol
 
-HTTPS JSON API under `/api/v1`. Base URL: `https://andvari.taila2dff2.ts.net`
-(tailnet) or the break-glass public hostname. All binary fields base64url unpadded.
+HTTPS JSON API under `/api/v1`. Base URL: **whatever origin the client is pointed
+at** — andvari is endpoint-agnostic (2026-07-15 pivot,
+`docs/design/2026-07-15-multi-tenant-endpoints.md`): published clients ship
+preconfigured for the reference instance `https://andvari.monahanhosting.com` and can
+be repointed at any instance; a dual-origin deployment additionally serves a hardened
+break-glass twin origin (`ANDVARI_PUBLIC_HOSTNAME` — **opt-in**; single-origin is the
+default). All binary fields base64url unpadded.
 Server rejects request bodies > 256 KiB (sync push: > 8 MiB — a CSV import batch
 arrives as one body) except attachment uploads (streamed, quota-checked).
 
@@ -14,7 +19,76 @@ the server answers **426** with the standard error shape (§8):
 key on the BODY code, never the bare status (`message` is human-only; the actual pin
 comes from `/client-policy`); they block writes and show the upgrade path
 (devstore / /downloads / reload).
-`GET /api/v1/client-policy` (unauthenticated) returns current pins + `serverTime`.
+`GET /api/v1/client-policy` (unauthenticated) returns current pins + `serverTime` +
+the instance policy (§1.1); it carries a per-IP rate bucket (~60/min) — it is the
+most-hammered anonymous route on a public instance.
+
+### 1.1 Instance policy & the POLICY-TRUST BOUNDARY (2026-07-15 pivot)
+
+`ClientPolicy` (same `/client-policy` response) additionally declares the instance
+stance. All additions are defaulted, so old-server / old-client pairings degrade to
+today's behavior. The stance is **sourced from operator env** (not the in-app admin),
+**per-origin resolved**, and **stripped on persist** — `PUT /admin/policy` round-trips
+losslessly and can never clobber operator stance (a compromised admin session must not
+open the front door or disable instance TOTP):
+
+- `signupMode: String` (default `"invite-only"`) — enum `"closed" | "invite-only" |
+  "landing" | "open"`. `closed`: sign-in only, client renders no invite/enroll UI
+  (emitted per-origin for the break-glass twin origin regardless of the configured
+  mode; operator-settable for sign-in-only instances). `invite-only`: sign-in +
+  invite-gated enroll, no stranger nudge (self-host household default). `landing`:
+  `invite-only` plus the stranger landing — "invite-only: enter an invite, point at
+  your own server, or self-host" (the reference-instance value). `open`: registration
+  without invite — **reserved**; the server boot-coerces env `open` → `landing` with a
+  warning until the open-register path ships. Field absent (old server) ⇒ client
+  treats as `invite-only` (today's universal truth); unknown value (newer server) ⇒
+  `invite-only` — plain invite-gated enroll, **never** open-register UI, no nudge.
+- `totpRequired: Boolean` (default false) — per-instance login-factor stance (§2). A
+  pre-prompt UI hint only; the reactive server errors stay authoritative.
+- `instanceName: String?` — decorative label; NEVER rendered as a verified identity.
+- `canonicalOrigin: String?` — the server's claimed own origin; a proxy-misconfig
+  diagnostic + the server-side invite-minting origin, never a trust anchor.
+- `selfHostDocsUrl: String?` (default `<canonicalOrigin>/selfhost`) — rendered as a
+  raw https URL only.
+
+The durable-cache field keeps its **one wire name `offlineCacheAllowed`** (existing);
+no parallel field exists. Server env (normative names): `ANDVARI_SIGNUP_MODE`,
+`ANDVARI_TOTP_REQUIRED`, `ANDVARI_OFFLINE_CACHE_ALLOWED` (tighten-only floor ANDed
+over the admin-set policy value, default true), `ANDVARI_INSTANCE_NAME`,
+`ANDVARI_CANONICAL_ORIGIN` (also the emailed-invite minting origin — replaces
+`ANDVARI_INVITE_BASE_URL`, which remains a deprecated fallback alias with a boot
+warning; **https required for non-local hosts** — an emailed enroll link is a bearer
+credential), `ANDVARI_SELFHOST_DOCS_URL`, `ANDVARI_FORCE_HSTS`,
+`ANDVARI_LOGIN_RATE_PER_MIN` (default 5), `ANDVARI_STRICT_ENV` (the server boot-warns
+on unknown/invalid `ANDVARI_*`; under strict mode it **exits**).
+
+**POLICY-TRUST BOUNDARY (normative).** The client reads this object from an
+**unauthenticated endpoint on an untrusted server**. Governing invariant: *a field is
+trusted-as-declared iff it governs the server's own behavior; it is client-floor-only
+iff it touches the client device's at-rest posture, factor floors, or timer windows.
+A hostile server may always make the client safer, never laxer.* Each client
+implements one `applyPolicy()` whose tighten-only branches are structurally incapable
+of relaxing.
+
+| Field | Class | Rule |
+|---|---|---|
+| `signupMode` | **TRUSTED** (server-authoritative UI hint) | Drives which landing/enroll UI renders; register success stays server-enforced (invite-ROW gate). A lie only mis-decorates the liar's own front door. |
+| `totpRequired` | **TRUSTED** (UI hint) | Pre-shows the TOTP input. Authoritative path stays the reactive server errors (`totp_required` / `public_login_requires_totp` / `totp_enrollment_required`), which win over any declared value. Never gates a client-side protection. |
+| `sessionAccessTtlSeconds`, `sessionRefreshTtlDays`, attachment quotas, `serverTime` | **TRUSTED** (informational) | Describe the server's own enforcement; never security anchors. |
+| `offlineCacheAllowed` | **CLIENT-FLOOR-ONLY** (forbid-only) | `false` ⇒ prohibition + force-wipe of the **declaring origin's own namespace only**. `true` ⇒ **necessary but never sufficient**: at-rest persistence additionally requires per-device consent on web + desktop; Android's default-ON exemption is on the record (spec 05 T3). |
+| `kdfParams` | **CLIENT-FLOOR-ONLY** | Existing floors unchanged, incl. the cache-read sub-floor (below-floor cached params ⇒ refuse offline unlock, spec 05 T8) — the backstop that makes even a mis-enabled cache non-catastrophic. |
+| `autoLockSeconds` | **CLIENT-FLOOR-ONLY** (clamp — **ADDED 2026-07-15**) | Effective value clamps into `[floor, AUTO_LOCK_MAX_SECONDS = 900]`; a server-supplied 0/absent ("never lock") clamps to the ceiling — **a server cannot disable auto-lock**. Constants live in core (`ClientPolicyClamps`) with byte-pinned web/ext mirrors; all four clients test that oversized values clamp down. |
+| `clipboardClearSeconds` | **CLIENT-FLOOR-ONLY** (clamp — **ADDED 2026-07-15**) | Clamps into `[1, CLIPBOARD_CLEAR_MAX_SECONDS = 300]`, same constant/mirror/test discipline — a server cannot pin secrets on the clipboard. |
+| `minVersion` | **CLIENT-FLOOR-ONLY** | Force-upgrade-only (fail-safe); unchanged. |
+| `recoveryFingerprint` | **DECORATIVE** | A value to check against the human-anchored printed sheet; never itself an anchor. |
+| `instanceName`, `canonicalOrigin`, `selfHostDocsUrl` | **DECORATIVE** | Never rendered as verified identity; never shown in the endpoint-switch trust gate; `selfHostDocsUrl` rendered as a raw URL only. |
+
+**Per-origin overlay:** on a dual-origin instance the break-glass twin origin answers
+`signupMode="closed"` (sign-in only, admin invite QR suppressed) while the primary
+serves the configured mode — clients never sniff hostnames. **Policy fetch failure ⇒
+conservative defaults:** render sign-in + manual invite entry, treat `signupMode` as
+`invite-only`, `totpRequired=false` (the server re-prompts authoritatively), durable
+cache OFF.
 
 ## 2. Auth & sessions
 
@@ -39,10 +113,18 @@ comes from `/client-policy`); they block writes and show the upgrade path
   string only when the org has no recovery key configured. Waived posture is **not** signalled
   by this field — it is reconciled server-side via `users.escrowPolicy` / the absence of an
   escrow row (design §F.4, spec 02 §5). Failures are uniform `401 invalid_credentials` (no
-  user/password distinction). Via the public origin, server-TOTP is mandatory
-  (break-glass hardening): an account without it enrolled is refused outright
-  (`403 public_login_requires_totp`); enrolled accounts must supply `totp`
-  (missing → `401 totp_required`).
+  user/password distinction). **TOTP matrix (2026-07-15 pivot — enrolled TOTP is
+  origin-independent):** an account with server-TOTP **enrolled** has it verified on
+  **every** origin (missing/wrong code → `401 totp_required`; the accepted-step
+  anti-replay below applies). An account **without** TOTP enrolled: instance
+  `totpRequired=false` (§1.1) ⇒ password-only login; `totpRequired=true` ⇒ login
+  succeeds into a **restricted session** — the response carries `mustEnrollTotp: true`
+  (additive `SessionResponse` field, default `false`) and every authenticated route
+  except TOTP setup/confirm + logout answers `403 totp_enrollment_required` until
+  enrollment completes (single enforcement point beside the principal check). On the
+  **opt-in break-glass twin origin** an unenrolled account is refused outright
+  (`403 public_login_requires_totp`) — no restricted-session hatch on the emergency
+  origin.
 - Tokens are opaque 256-bit random, transported as base64url, stored server-side as
   `sha256(token)`. Access: 1 h. Refresh: 30 d, **rotating** — `POST /auth/refresh
   { refreshToken }` → new pair, old refresh token single-use; reuse of a consumed
@@ -279,21 +361,32 @@ proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — veri
   upstream (`SUFFIX:COUNT` lines). Client computes SHA-1 locally and compares
   suffixes locally; full hashes never leave the device.
 - `GET /downloads` — web UI + manifest `{ windows: { version, url, sha256 } }`.
+- `GET /selfhost` — static self-hosting page (bundled render of
+  `docs/self-hosting.md` plus downloadable `docker-compose.yml` /
+  `andvari.env.template` / `bringup.sh`), registered **before** the SPA fallback so
+  `selfHostDocsUrl` (§1.1) always resolves. Every instance carries its own
+  self-host docs.
 - `GET /healthz` (200 when the DB is readable — the probe is a read-only rev
   SELECT, so an unwritable-but-readable DB still answers 200) — Kuma target.
   `GET /metrics` — Prometheus, bound to localhost for Alloy only.
-- Rate limits: prelogin/login are **per IP** 10/min (fixed window; per-account keys
-  exist on vault-create, user-lookup and the §11 lifecycle buckets
-  (`vault_destructive`/`vault_recovery`) — per-account login keys are a
-  deferred hardening item);
-  on the public origin (CF-Connecting-IP present + configured public hostname)
-  **login** drops to 5/min (prelogin stays 10/min), TOTP is required, and
-  register/refresh are hard-disabled (`403 register_public_disabled` /
-  `public_refresh_disabled` — no policy flag enables them; break-glass sessions
-  re-login with TOTP instead of refreshing). The `/recovery/self/*` routes (§12) are
-  **per-IP fixed-window** (≥ public-login tightness; **no** per-account counter, so a
-  targeted account cannot be locked out of its own recovery — spec 05 R9) and, like
-  register, **hard-refused on the public break-glass origin** (`403`).
+- Rate limits (2026-07-15 pivot — **decoupled from origin**): prelogin stays **per-IP
+  10/min** (fixed window); **login is a flat per-IP `ANDVARI_LOGIN_RATE_PER_MIN`
+  (default 5/min) on every origin** — the old 10-private/5-public fork is revoked.
+  After 5 consecutive failures keyed on the **normalized submitted email** (existing
+  account or not — extending the prelogin fake-salt anti-enumeration discipline so
+  throttling is not an account oracle), an exponential delay `2^(n-5)` s capped at
+  900 s applies uniformly, reset on success. `/client-policy` carries a per-IP bucket
+  (~60/min, §1.1). Per-account keys also exist on vault-create, user-lookup and the
+  §11 lifecycle buckets (`vault_destructive`/`vault_recovery`). On the **opt-in
+  break-glass twin origin** (CF-Connecting-IP present + configured
+  `ANDVARI_PUBLIC_HOSTNAME`, exact-host match) TOTP is required and register/refresh
+  are hard-disabled (`403 register_public_disabled` / `public_refresh_disabled` — no
+  policy flag enables them; break-glass sessions re-login with TOTP instead of
+  refreshing). The `/recovery/self/*` routes (§12) keep their unconditional **per-IP
+  5/min** and gain the same email-keyed backoff (capped 900 s ⇒ a targeted account's
+  recovery can be delayed, never locked out — spec 05 R9/R12); they stay
+  **hard-refused on the break-glass twin origin** (`403`) but are internet-reachable
+  on single-origin instances (posture: spec 05 R10).
 - Client IP (rate keys + audit rows): derived from `CF-Connecting-IP`, else the
   **rightmost** `X-Forwarded-For` entry, **only when the direct TCP peer is
   loopback** (both front-ends terminate there). Any other peer uses the socket
@@ -447,9 +540,13 @@ The self-service counterpart to admin escrow recovery (§7 `/admin/recovery`): a
 who kept their generated recovery piece (spec 01 §2.1, spec 04 §6) resets their own
 password without the admin. **Two-phase**, so the server hands out no pre-auth UVK blob,
 exposes no enumeration oracle, and binds the reset to one replay-bound ticket. **All four
-routes (verify, commit, self-setup, self-confirm) are refused on the public break-glass origin** (`403`, same guard as register) and
-**per-IP fixed-window rate-limited** at ≥ public-login tightness (§8; no per-account
-counter → a targeted account cannot be locked out of its own recovery, spec 05 R9). No
+routes (verify, commit, self-setup, self-confirm) are refused on the break-glass twin origin** (`403`, same guard as
+register — the twin origin is opt-in; on a single-origin instance, the default since
+the 2026-07-15 pivot, these routes are internet-reachable: spec 05 R10) and
+**per-IP fixed-window rate-limited** at ≥ public-login tightness plus the §8
+email-keyed backoff (capped 900 s → a targeted account's recovery can be delayed but
+never locked out, spec 05 R9/R12; the recovery secret's ≥128-bit entropy and the
+constant-time verify comparison are build-time-confirmed). No
 `/recovery/prelogin` exists: the recovery secret is high-entropy and its derivation is
 HKDF-only with no server salt/params (spec 01 §2.1), so there is nothing to fetch before
 phase 1 — hence no recovery-side prelogin oracle to equalize.

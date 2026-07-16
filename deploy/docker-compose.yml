@@ -1,0 +1,37 @@
+# andvari self-host — docker compose (design 2026-07-15 §8.2).
+#
+# The one required file. Bring-up: ./bringup.sh (writes andvari.env + .env,
+# runs the escrow ceremony, starts this stack, smoke-tests /client-policy).
+# Updates: docker compose pull && docker compose up -d
+#
+# The app port is published on 127.0.0.1 ONLY by default — a TLS front must sit
+# in front of it (the caddy overlay `docker-compose.caddy.yml`, or your own
+# proxy / cloudflared / tailscale serve pointed at 127.0.0.1:8080). For a plain
+# LAN/dev deployment set ANDVARI_BIND=0.0.0.0 in `.env` (bringup.sh does this
+# automatically when you choose an http:// origin).
+#
+# NOTE on client IPs (rate-limit keys + audit rows): the server trusts
+# forwarded-IP headers only when the direct TCP peer is loopback (spec 03 §8).
+# A proxy reaching the container over the docker bridge is NOT loopback — use
+# the caddy overlay (which shares the app's network namespace, so its upstream
+# hop IS loopback) or run your proxy on the host pointing at 127.0.0.1:8080
+# with the understanding that per-client IPs then need the loopback topology.
+
+name: andvari
+
+services:
+  andvari:
+    image: ghcr.io/silencelen/andvari:${ANDVARI_VERSION:-latest}
+    restart: unless-stopped
+    env_file: andvari.env
+    ports:
+      - "${ANDVARI_BIND:-127.0.0.1}:8080:8080"
+    volumes:
+      # All state: SQLite DB + blob dir (+ optional downloads dir). Back this up.
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s

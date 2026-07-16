@@ -1,0 +1,41 @@
+# andvari self-host — OPTIONAL auto-HTTPS sidecar overlay (design 2026-07-15 §8.2).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
+#
+# (bringup.sh --caddy writes COMPOSE_FILE into .env so plain `docker compose`
+# picks both files up from then on.)
+#
+# Caddy terminates TLS for ${ANDVARI_DOMAIN} (Let's Encrypt / ZeroSSL, ports
+# 80+443 must be reachable from the internet and the DNS A/AAAA record must
+# point here) and proxies to the app.
+#
+# Topology note: caddy runs INSIDE the app container's network namespace
+# (network_mode: service:andvari) so its upstream hop to 127.0.0.1:8080 is a
+# LOOPBACK peer — the server then trusts X-Forwarded-For for per-client
+# rate-limit keys + audit rows (spec 03 §8). Ports 80/443 are therefore
+# published on the andvari service (the namespace owner) below.
+# If the app container is ever re-created, run `docker compose up -d` again so
+# caddy reattaches to the fresh namespace.
+
+services:
+  andvari:
+    ports:
+      - "80:80"
+      - "443:443"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    network_mode: "service:andvari"
+    depends_on:
+      - andvari
+    # ANDVARI_DOMAIN comes from deploy/.env (bringup.sh writes it from the
+    # canonical origin's host).
+    command: caddy reverse-proxy --from ${ANDVARI_DOMAIN:?set ANDVARI_DOMAIN in deploy/.env} --to 127.0.0.1:8080
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:
