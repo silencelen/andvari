@@ -80,22 +80,21 @@ class SessionStore(context: Context) {
         // the shipped-default rewrite MUST run BEFORE the namespace adoption, so the adoption
         // files the legacy unscoped data under the POST-rewrite origin's key.
         //
-        // ── WAVE-4 COUPLING — read before touching either call ──────────────────────────────
-        // Wave 4 replaces migrateDefaultOnce() with v2 (LAN|tailnet → the public default,
-        // new `baseUrlMigratedPublic` flag, §6). v2 MUST slot exactly HERE, still ahead of
-        // adoptNamespacesOnce(), so a pre-namespacing install's first run of the release build
-        // rewrites baseUrl first and then adopts its unscoped data under the PUBLIC origin key.
-        // AND: if a build carrying THIS adoption ever ships BEFORE the Wave-4 default swap,
-        // fielded installs will already have adopted under the TAILNET origin key — Wave 4 must
-        // then ALSO move ns/<originKey(tailnet)>/ → ns/<originKey(public)>/ (same instance, two
-        // fronts, §6.2), not just rewrite baseUrl. Flagged here instead of guessed at.
+        // ── §6 migration + §4.2 adoption ORDERING (Wave-4 DONE) ─────────────────────────────
+        // migrateDefaultOnce() is v2 (LAN|tailnet → public default). It MUST stay ahead of
+        // adoptNamespacesOnce() so a pre-namespacing install rewrites baseUrl FIRST, then adopts its
+        // unscoped data under the PUBLIC origin's key. For the common bundled-release path (W2/3/4 ship
+        // together) that's the whole story — no install cached under a legacy key before this swap. But
+        // migrateDefaultOnce ALSO runs the §6.2 carry as defense-in-depth for the one exception: a
+        // dev/test profile that ran an intermediate namespacing build under the tailnet key — see
+        // [carryLegacyNamespaceToPublic].
         // ─────────────────────────────────────────────────────────────────────────────────────
         //
         // Living in the constructor (not MainActivity.onCreate) is deliberate: the autofill
         // entry points build their own SessionStore and may be the FIRST code to run after an
         // app update — every reader of the scoped layout must be preceded by the adoption, and
         // the constructor is the one choke point all of them share.
-        migrateDefaultOnce()
+        migrateDefaultOnce(context.noBackupFilesDir)
         adoptNamespacesOnce(context.noBackupFilesDir)
     }
 
@@ -399,17 +398,68 @@ class SessionStore(context: Context) {
     }
 
     /**
-     * One-time bump of the persisted server URL from the old VLAN-2 LAN default to the
-     * tailnet HTTPS default (reachable from any Tailscale device; the LAN IP isn't, off-VLAN-2).
-     * Only rewrites the exact legacy default, so a deliberate custom URL is left alone.
-     * Invoked from `init` — BEFORE [adoptNamespacesOnce], see the ordering note there.
+     * Wave-4 v2 (design §6): one-time bump of the persisted server URL from EITHER historical shipped
+     * default (the VLAN-2 LAN host OR the tailnet HTTPS host) to the public reference default. Only the
+     * two exact legacy defaults rewrite — a deliberate custom URL (a self-hoster's) is left alone. Runs
+     * from `init` BEFORE [adoptNamespacesOnce] (see the ordering note there), so a pre-namespacing
+     * install's unscoped data adopts under the PUBLIC origin's key. A new flag (`baseUrlMigratedPublic`)
+     * — the retired v1 `baseUrlMigratedTailnet` one-shot may have already fired (bumping LAN→tailnet),
+     * so v2 must re-run for those installs to carry tailnet→public; the old flag is left orphaned.
+     * After the rewrite, [carryLegacyNamespaceToPublic] runs as §6.2 defense-in-depth: it fires ONLY if a
+     * dev/test profile ran an intermediate namespacing build under a legacy key before this swap (the
+     * bundled release makes that the exception, not the rule) — otherwise a no-op.
      */
-    private fun migrateDefaultOnce() {
-        if (prefs.getBoolean("baseUrlMigratedTailnet", false)) return
-        if (prefs.getString("baseUrl", null) == LEGACY_LAN_DEFAULT) {
-            prefs.edit().putString("baseUrl", DEFAULT_BASE_URL).apply()
+    private fun migrateDefaultOnce(noBackupDir: File) {
+        if (prefs.getBoolean("baseUrlMigratedPublic", false)) return
+        val cur = prefs.getString("baseUrl", null)
+        val rewrite = cur == LEGACY_LAN_DEFAULT || cur == LEGACY_DEFAULT_TAILNET
+        if (rewrite) prefs.edit().putString("baseUrl", DEFAULT_BASE_URL).apply()
+        prefs.edit().putBoolean("baseUrlMigratedPublic", true).apply()
+        if (rewrite) carryLegacyNamespaceToPublic(noBackupDir)
+    }
+
+    /**
+     * §6.2 defense-in-depth (review 2026-07-16) — the twin of DesktopSessionStore.carryLegacyNamespace
+     * ToPublic. If an INTERMEDIATE namespacing build (W2/W3, run on a dev/test profile BEFORE this swap)
+     * already adopted this install's data under a LEGACY origin key, move that namespace to the PUBLIC
+     * key — else the tailnet→public rewrite strands the offline cache AND the durable outbound mutation
+     * queue (permanent loss of unsynced edits). Fires ONLY when the public ns is ABSENT and a legacy ns
+     * EXISTS — a no-op for the common bundled-release path. The quick-unlock Keystore alias is hardware
+     * -bound + can't be renamed; its blob records its own alias, so the moved meta still resolves it
+     * (worst case a re-enrolled quick-unlock, never data loss).
+     */
+    private fun carryLegacyNamespaceToPublic(noBackupDir: File) {
+        val nsRoot = File(noBackupDir, "ns")
+        val publicKey = OriginNamespace.originKey(DEFAULT_BASE_URL)
+        val publicDir = File(nsRoot, OriginNamespace.pathSafe(publicKey))
+        if (publicDir.exists()) return // the public origin already owns a namespace — never clobber it
+        for (legacy in listOf(LEGACY_DEFAULT_TAILNET, LEGACY_LAN_DEFAULT)) {
+            val legacyKey = OriginNamespace.originKey(legacy)
+            if (legacyKey == publicKey) continue
+            val legacyDir = File(nsRoot, OriginNamespace.pathSafe(legacyKey))
+            if (!legacyDir.isDirectory) continue
+            runCatching {
+                if (!legacyDir.renameTo(publicDir)) { legacyDir.copyRecursively(publicDir, overwrite = false); legacyDir.deleteRecursively() }
+            }
+            // carry the per-origin SharedPreferences: ns.<legacyKey>.* → ns.<publicKey>.*
+            val fromPrefix = "ns.$legacyKey."
+            val toPrefix = "ns.$publicKey."
+            val edit = prefs.edit()
+            for ((k, v) in prefs.all) {
+                if (!k.startsWith(fromPrefix)) continue
+                val nk = toPrefix + k.removePrefix(fromPrefix)
+                if (!prefs.contains(nk)) when (v) {
+                    is Boolean -> edit.putBoolean(nk, v)
+                    is Int -> edit.putInt(nk, v)
+                    is Long -> edit.putLong(nk, v)
+                    is String -> edit.putString(nk, v)
+                    else -> {}
+                }
+                edit.remove(k)
+            }
+            edit.apply()
+            return // at most one legacy source (v1 collapses LAN→tailnet, so it is the tailnet key in practice)
         }
-        prefs.edit().putBoolean("baseUrlMigratedTailnet", true).apply()
     }
 
     /**
@@ -483,8 +533,15 @@ class SessionStore(context: Context) {
     }
 
     companion object {
-        const val DEFAULT_BASE_URL = "https://andvari.taila2dff2.ts.net"
+        // Wave-4 public default (design §5.5/§6): the reference instance, reachable from ANY network.
+        // RELEASE-GATED — a build carrying this must not ship until the reference origin is promoted to
+        // full service (§6.3 live /client-policy probe) + the §7.4 env flip; otherwise a migrated install
+        // lands on the break-glass régime that refuses refresh/recovery/sharing and demands TOTP.
+        const val DEFAULT_BASE_URL = "https://andvari.monahanhosting.com"
+        // Historical SHIPPED defaults — kept ONLY as migrateDefaultOnce match-targets (never dialed;
+        // §5.5 release-gate carve-out for the tailnet/LAN literals).
         private const val LEGACY_LAN_DEFAULT = "http://192.168.2.122:8080"
+        private const val LEGACY_DEFAULT_TAILNET = "https://andvari.taila2dff2.ts.net"
 
         /** Unscoped keys the §4.2 adoption moves under the origin prefix (see the class doc). */
         private val ADOPT_FIXED_KEYS = setOf(
