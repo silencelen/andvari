@@ -3,8 +3,20 @@ package io.silencelen.andvari.app
 import android.os.SystemClock
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
+import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.SyncEngine
 import kotlinx.coroutines.sync.Mutex
+
+/**
+ * The B1-1 auto-lock clamp (design 2026-07-15 §2.3): `autoLockSeconds` arrives from an
+ * UNAUTHENTICATED endpoint on an UNTRUSTED server, and it governs THIS device's exposure
+ * window — CLIENT-FLOOR-ONLY. Effective value = clamp into `[floor, AUTO_LOCK_MAX_SECONDS]`;
+ * a server-supplied 0/negative (which used to mean "never lock") clamps to the CEILING, so a
+ * hostile server cannot disable auto-lock. Single source ceiling: core [ClientPolicyClamps].
+ */
+internal fun clampAutoLockSeconds(seconds: Int): Int =
+    if (seconds <= 0) ClientPolicyClamps.AUTO_LOCK_MAX_SECONDS
+    else minOf(seconds, ClientPolicyClamps.AUTO_LOCK_MAX_SECONDS)
 
 /**
  * Process-wide holder for the unlocked vault (`AndvariApi`/`Account`/`SyncEngine`), shared
@@ -63,16 +75,22 @@ object VaultSession {
     private var lastInteractionElapsedMs: Long = SystemClock.elapsedRealtime()
 
     @Volatile
-    private var autoLockMs: Long = 0L // 0 = disabled; from ClientPolicy.autoLockSeconds
+    private var autoLockMs: Long = 0L // from ClientPolicy.autoLockSeconds, CLAMPED (B1-1); 0 only before first arm
 
     /** Record user interaction (touch/key). Called per input event — must stay this cheap. */
     fun touch() {
         lastInteractionElapsedMs = SystemClock.elapsedRealtime()
     }
 
-    /** Set the org policy window (0 disables). Callers pass the freshest value they hold. */
+    /**
+     * Arm the org policy window. Callers pass the freshest value they hold — always a
+     * server-derived one (a live `ClientPolicy` or its persisted per-origin mirror) — and THIS
+     * single choke point applies the B1-1 clamp ([clampAutoLockSeconds]), so every arm site is
+     * tighten-only by construction: a server can shorten the window, never disable or stretch
+     * it past the ceiling. (Pre-clamp persisted values from old builds get re-clamped here too.)
+     */
     fun setAutoLockSeconds(seconds: Int) {
-        autoLockMs = seconds.coerceAtLeast(0) * 1000L
+        autoLockMs = clampAutoLockSeconds(seconds) * 1000L
     }
 
     /** True when unlocked and the inactivity window has fully elapsed. */

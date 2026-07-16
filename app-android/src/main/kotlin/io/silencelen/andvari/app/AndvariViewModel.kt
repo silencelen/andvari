@@ -339,6 +339,24 @@ internal fun enrollPosture(linkRfp: String?, memberHasSheet: Boolean): EnrollPos
     else -> EnrollPosture.Waived
 }
 
+/**
+ * The client-effective `signupMode` (design 2026-07-15 §2.1 — the normative enum contract).
+ * `"closed"` and `"landing"` render as declared; EVERYTHING else — field absent (old server,
+ * `policy == null` / probe failed → the §2.3 conservative default), an unknown value (newer
+ * server), and the reserved `"open"` (no open-register UI exists in this client; the server
+ * boot-coerces the env anyway, §7.3) — degrades to `"invite-only"`: plain invite-gated enroll,
+ * never an open door, no stranger nudge.
+ *
+ * Trust class (§2.3): TRUSTED as a server-authoritative UI HINT only — it decorates the
+ * declaring server's own front door; register success stays server-enforced (invite-ROW gate),
+ * so a lying value cannot open anything, and it never gates a client-side protection.
+ */
+internal fun effectiveSignupMode(declared: String?): String = when (declared) {
+    "closed" -> "closed"
+    "landing" -> "landing"
+    else -> "invite-only"
+}
+
 class AndvariViewModel(
     private val store: SessionStore,
     private val cacheDir: File,
@@ -391,10 +409,13 @@ class AndvariViewModel(
         super.onCleared()
     }
 
-    private fun cacheFile(userId: String) = File(cacheDir, "vault-$userId.db")
+    /** §4.2 layout: `<noBackup>/ns/<originKey>/<userId>/vault-<userId>.db` (userId fragment
+     *  path-safe-laundered — it is server-supplied). Writers mkdirs at the use site. */
+    private fun cacheFile(originKey: String, userId: String) =
+        File(OriginNamespace.dir(cacheDir, originKey, userId), "vault-${OriginNamespace.pathSafe(userId)}.db")
 
-    private fun deleteCache(userId: String) {
-        for (suffix in listOf("", "-wal", "-shm")) File(cacheDir, "vault-$userId.db$suffix").delete()
+    private fun deleteCache(originKey: String, userId: String) {
+        OfflineData.deleteVaultCache(cacheDir, originKey, userId)
     }
 
     /** Live policy if known, else the persisted last-known value (offline cold start). */
@@ -405,18 +426,28 @@ class AndvariViewModel(
         if (cacheAllowed()) store.saveAccountKeys(keys) else store.clearAccountKeys()
     }
 
-    /** Enforce offlineCacheAllowed=false (policy flip): drop the vault DB, cached keys AND the
-     *  quick-unlock blob (A3/A4 shared helper) — the session itself stays valid. */
-    private fun purgeOfflineData(userId: String) { OfflineData.purgeCacheForbidden(cacheDir, store, userId) }
+    /**
+     * Enforce offlineCacheAllowed=false (policy flip): drop the vault DB, cached keys AND the
+     * quick-unlock blob (A3/A4 shared helper) — the session itself stays valid.
+     *
+     * §4.2 (design 2026-07-15, B2-3): [originKey] is the namespace of the origin whose POLICY
+     * VERDICT is being enforced — captured by the caller beside its probe, BEFORE any await, so
+     * a verdict landing after a racing setBaseUrl still purges the origin it came from and a
+     * probe of server B can never touch server A's namespace.
+     */
+    private fun purgeOfflineData(originKey: String, userId: String) {
+        OfflineData.purgeCacheForbidden(cacheDir, store, originKey, userId)
+    }
 
     /**
      * Recompute the derived quick-unlock UI flags from disk + the live session. Cheap; called
-     * after any unlock, on the Unlock screen (start), and when Settings opens.
+     * after any unlock, on the Unlock screen (start), and when Settings opens. All reads are
+     * scoped to the CURRENT origin's namespace (§4.2).
      */
     private fun refreshQuickUnlockState() {
         val userId = store.load()?.userId
         val eligible = QuickUnlock.isEligible(appContext, store)
-        val enrolled = userId != null && QuickUnlock.isEnrolled(cacheDir, userId)
+        val enrolled = userId != null && QuickUnlock.isEnrolled(cacheDir, store.currentOriginKey(), userId)
         val fresh = enrolled && userId != null && QuickUnlock.isFresh(store, userId)
         _ui.value = _ui.value.copy(
             quickUnlockEligible = eligible,
@@ -463,7 +494,7 @@ class AndvariViewModel(
         }
         val acct = account ?: return
         viewModelScope.launch {
-            when (val r = QuickUnlock.enroll(activity, cacheDir, userId, acct)) {
+            when (val r = QuickUnlock.enroll(activity, cacheDir, store.currentOriginKey(), userId, acct)) {
                 is QuickUnlock.Enroll.Ok -> {
                     store.quickUnlockOfferDismissed = true // the toggle is now the control surface
                     refreshQuickUnlockState()
@@ -475,10 +506,10 @@ class AndvariViewModel(
         }
     }
 
-    /** Disable quick unlock — wipe the blob + key. Never gated (reducing standing secret material
-     *  must not require auth, spec 01 §8.1). */
+    /** Disable quick unlock — wipe the CURRENT origin's blob + key. Never gated (reducing
+     *  standing secret material must not require auth, spec 01 §8.1). */
     fun disableQuickUnlock() {
-        store.load()?.userId?.let { QuickUnlock.wipe(cacheDir, it) }
+        store.load()?.userId?.let { QuickUnlock.wipe(cacheDir, store.currentOriginKey(), it) }
         refreshQuickUnlockState()
     }
 
@@ -497,7 +528,8 @@ class AndvariViewModel(
     fun unlockWithBiometric(activity: FragmentActivity) = op {
         val session = store.load() ?: throw IllegalStateException("no session")
         val userId = session.userId
-        val uvk = when (val r = QuickUnlock.recoverUvk(activity, cacheDir, userId)) {
+        val originKey = store.currentOriginKey() // §4.2: this unlock's namespace, captured before any await
+        val uvk = when (val r = QuickUnlock.recoverUvk(activity, cacheDir, originKey, userId)) {
             is QuickUnlock.Recover.Ok -> r.uvk
             is QuickUnlock.Recover.Fallback -> { _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason); return@op }
             is QuickUnlock.Recover.Wiped -> { refreshQuickUnlockState(); _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason); return@op }
@@ -513,7 +545,7 @@ class AndvariViewModel(
                 a.close()
                 // F26: a definitive rejection is a session-end — explain it on the Unlock
                 // surface (B6: a dead token is a plain 401 here; there is no revoked variant).
-                if (e.status == 401) { OfflineData.purgeRevoked(cacheDir, store, userId); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
+                if (e.status == 401) { OfflineData.purgeRevoked(cacheDir, store, originKey, userId); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
                 throw e
             } catch (t: Throwable) { a.close(); throw t }
             val acct = try {
@@ -522,7 +554,7 @@ class AndvariViewModel(
                 a.close()
                 // §5: seed won't open under the recovered UVK → wipe (stale/foreign); an identityPub
                 // MISMATCH is a security fault — keep the blob (evidence) and hard-fail.
-                if (t is CryptoException && t.message?.contains("identity key mismatch") != true) QuickUnlock.wipe(cacheDir, userId)
+                if (t is CryptoException && t.message?.contains("identity key mismatch") != true) QuickUnlock.wipe(cacheDir, originKey, userId)
                 throw t
             }
             try {
@@ -544,14 +576,21 @@ class AndvariViewModel(
     /**
      * Record a freshly-fetched policy everywhere it's enforced: UI state, the persisted
      * offline fallbacks, and the process-wide auto-lock gate (shared with autofill).
+     *
+     * [originKey] is REQUIRED (§4.2): the persisted mirrors are per-origin, and every caller
+     * captures the key of the origin it PROBED beside the probe itself (before any await) — a
+     * probe result landing after a racing setBaseUrl still files under the origin it came from,
+     * never under whatever happens to be current. The timer window is CLAMPED (§2.3/B1-1)
+     * before it is persisted or armed — a hostile server cannot disable or stretch auto-lock.
      */
-    private fun applyPolicy(p: ClientPolicy) {
+    private fun applyPolicy(p: ClientPolicy, originKey: String) {
         _ui.value = _ui.value.copy(policy = p, policyFetchFailed = false) // N2 §3: any fetch success clears the failure flag
-        store.cacheAllowed = p.offlineCacheAllowed
-        store.autoLockSeconds = p.autoLockSeconds
-        store.policyFetchedAt = System.currentTimeMillis() // A4: quick-unlock eligibility freshness
-        store.bumpServerTimeFloor(p.serverTime) // A2 (review [2]): the one clock the holder cannot set
-        VaultSession.setAutoLockSeconds(p.autoLockSeconds)
+        store.setCacheAllowed(originKey, p.offlineCacheAllowed)
+        val autoLock = clampAutoLockSeconds(p.autoLockSeconds) // B1-1: [floor, AUTO_LOCK_MAX_SECONDS]
+        store.setAutoLockSeconds(originKey, autoLock)
+        store.setPolicyFetchedAt(originKey, System.currentTimeMillis()) // A4: quick-unlock eligibility freshness
+        store.bumpServerTimeFloor(originKey, p.serverTime) // A2 (review [2]): the one clock the holder cannot set — per-origin
+        VaultSession.setAutoLockSeconds(autoLock)
     }
 
     // Unlocked state (api/account/engine) now lives in the process-wide VaultSession, shared
@@ -623,15 +662,20 @@ class AndvariViewModel(
                 _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), baseUrl = store.baseUrl)
             }
             val session = store.load()
+            // §4.2: capture the PROBED origin's key beside the probe (newApi() reads the same
+            // baseUrl) — the async verdict below purges/persists under THIS key, so a racing
+            // setBaseUrl can never redirect it onto another origin's namespace.
+            val originKey = store.currentOriginKey()
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
                 runCatching { probe.clientPolicy() }
                     .onSuccess { p ->
-                        applyPolicy(p) // UI state + persisted fallbacks + auto-lock gate
+                        applyPolicy(p, originKey) // UI state + persisted fallbacks + auto-lock gate
                         // Policy may forbid the durable cache; honor it the moment we learn it,
                         // deleting any existing file (spec 02 §8) — but only when no live engine holds
-                        // it (when bound, a later lock/rebind enforces the purge safely).
-                        if (!p.offlineCacheAllowed && session != null && !bound) purgeOfflineData(session.userId)
+                        // it (when bound, a later lock/rebind enforces the purge safely). Scoped to
+                        // the probed origin's namespace ONLY (§4.2).
+                        if (!p.offlineCacheAllowed && session != null && !bound) purgeOfflineData(originKey, session.userId)
                     }
                     // N2 §3: this probe feeds the Welcome/Enroll gate — record the failure
                     // honestly (the policy itself stays last-known for the offline gates).
@@ -661,14 +705,21 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(baseUrl = store.baseUrl, policy = null, policyFetchFailed = false)
         // Re-fetch policy against the new server so the recovery fingerprint / pins update
         // immediately (no app restart needed).
+        // §4.2 — THE call site the namespacing exists for: this probes the JUST-SET origin, so
+        // a forbidding answer purges the NEW origin's (empty) namespace and can no longer
+        // destroy the previous server's offline data + account keys. The key is captured here,
+        // synchronously with the baseUrl write, so a second setBaseUrl racing this in-flight
+        // probe still lands the verdict on the origin that produced it.
+        val originKey = store.currentOriginKey()
         viewModelScope.launch {
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
                 runCatching { probe.clientPolicy() }
                     .onSuccess { p ->
-                        applyPolicy(p)
-                        // Same policy enforcement as start(): a forbidding server purges the cache.
-                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
+                        applyPolicy(p, originKey)
+                        // Same policy enforcement as start(): a forbidding server purges ITS OWN
+                        // namespace for the stored session's user — never another origin's.
+                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(originKey, it.userId) }
                     }
                     // A deliberate URL change invalidates the old server's policy (null stays
                     // right) — and the probe against the NEW one failed, so say so (N2 §3);
@@ -687,13 +738,14 @@ class AndvariViewModel(
     fun retryPolicy() {
         if (_ui.value.busy) return
         _ui.value = _ui.value.copy(busy = true)
+        val originKey = store.currentOriginKey() // §4.2: captured beside the probe it scopes
         viewModelScope.launch {
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
                 runCatching { probe.clientPolicy() }
                     .onSuccess { p ->
-                        applyPolicy(p)
-                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
+                        applyPolicy(p, originKey)
+                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(originKey, it.userId) }
                     }
                     .onFailure { _ui.value = _ui.value.copy(policyFetchFailed = true) }
             } finally {
@@ -836,6 +888,8 @@ class AndvariViewModel(
 
     fun unlock(email: String, password: String) = op(mapError = HouseholdCopy::forUnlockError) {
         val session = store.load() ?: throw IllegalStateException("no session")
+        val originKey = store.currentOriginKey() // §4.2: the server this unlock talks to
+
         // §F.9: set when this unlock must land in the capture gate — the FRESH accountKeys said
         // recoveryConfirmed=false. Decided inside the mutex (where the keys are in scope), acted
         // on after the sync below; the gate's authKey derivation (an extra argon2id) deliberately
@@ -860,8 +914,9 @@ class AndvariViewModel(
                 // Definitive rejection: this device's session is dead (e.g. the web password
                 // change revoked every other session, spec 03 §3) — wipe it, including the
                 // persisted F58 flag (store.clear()); mirror the clear into UI state, and say
-                // WHY on the Unlock/sign-in surface (F26 session-end reason).
-                if (e.status == 401) { purgeOfflineData(session.userId); store.clear(); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
+                // WHY on the Unlock/sign-in surface (F26 session-end reason). §4.2: the 401
+                // came from THIS origin — only its namespace is purged.
+                if (e.status == 401) { purgeOfflineData(originKey, session.userId); store.clear(); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
                 throw e
             } catch (t: Throwable) {
                 a.close(); throw t // F74: a generic throw must never leak the transient client
@@ -1375,6 +1430,7 @@ class AndvariViewModel(
             return
         }
         _ui.value = _ui.value.copy(busy = true, error = null)
+        val originKey = store.currentOriginKey() // §4.2: newApi() below dials this same origin
         viewModelScope.launch {
             val a = newApi() // unauthenticated — closed in finally (F74)
             try {
@@ -1390,7 +1446,7 @@ class AndvariViewModel(
                 // Phase 1 just proved the server reachable: re-probe lazily, exactly when phase 2
                 // needs the params (enrollOp's idiom). clientPolicy() runs the H1 KDF floor fence
                 // (spec 05 T1); a failed probe surfaces through recoverResetError below.
-                val policy = _ui.value.policy ?: a.clientPolicy().also { applyPolicy(it) }
+                val policy = _ui.value.policy ?: a.clientPolicy().also { applyPolicy(it, originKey) }
                 // §F.7 cancel fence (recoverVerify's twin), re-checked after EVERY await: system
                 // back isn't busy-gated, and once THIS wizard instance is gone the continuation
                 // must zero its alias and die without touching UI state. The pendingRecover*
@@ -1412,7 +1468,10 @@ class AndvariViewModel(
                 if (cancelled) secret.fill(0) else zeroPendingRecover()
                 val session = store.load()
                 if (session != null && recoveredEmail != null && session.email.equals(recoveredEmail, ignoreCase = true)) {
-                    OfflineData.purgeRevoked(cacheDir, store, session.userId)
+                    // §4.2: the commit ran against the origin captured at entry (newApi() dialed
+                    // it), and the stored session it just revoked belongs there — purge that
+                    // namespace only.
+                    OfflineData.purgeRevoked(cacheDir, store, originKey, session.userId)
                 }
                 if (cancelled) return@launch // …but the wizard is gone: no screen/notice to paint
                 val next = store.load()?.takeIf { it.accessToken.isNotEmpty() }?.let { Screen.Unlock(it.email) } ?: Screen.Welcome
@@ -1817,11 +1876,15 @@ class AndvariViewModel(
         val current = VaultSession.get() ?: return
         if (_ui.value.busy || _ui.value.importBusy || _ui.value.syncing) return
         _ui.value = _ui.value.copy(syncing = true)
+        // §4.2: the poll rides the LIVE session's api, whose origin is the baseUrl the session
+        // was unlocked against — unchanged for the session's lifetime today (the ServerField
+        // only renders signed-out; wave 3's switch flow tears the session down first).
+        val originKey = store.currentOriginKey()
         viewModelScope.launch {
             // N2 §3/B4: deliberately NO onFailure — the poll must never flip policyFetchFailed
             // (that flag belongs to the enroll-feeding fetches; the last-known policy stays
             // live here for the offline gates). Success still clears it via applyPolicy.
-            runCatching { current.api.clientPolicy() }.onSuccess { applyPolicy(it) }
+            runCatching { current.api.clientPolicy() }.onSuccess { applyPolicy(it, originKey) }
             try {
                 syncNow(current.engine)
                 if (VaultSession.get() !== current) { // locked/rebound mid-sync — publish nothing stale
@@ -2468,10 +2531,14 @@ class AndvariViewModel(
             movePickerMode = null
             movePickerItemId = null
             session?.userId?.let {
-                deleteCache(it)
+                // §4.2: a sign-out clears the CURRENT origin's namespace — the session being
+                // ended lived there; other origins' material is bounded by their own staleness
+                // ceilings and policy flips, never collaterally wiped.
+                val originKey = store.currentOriginKey()
+                deleteCache(originKey, it)
                 // Sign-out always clears the quick-unlock secret + freshness stamp (spec 01 §8.1).
-                QuickUnlock.wipe(cacheDir, it)
-                store.clearFullPasswordStamp(it)
+                QuickUnlock.wipe(cacheDir, originKey, it)
+                store.clearFullPasswordStamp(originKey, it)
             }
             store.clear()
             _ui.value = _ui.value.copy(
@@ -2563,10 +2630,11 @@ class AndvariViewModel(
         // Prefer the live policy; fall back to the persisted last-known value when offline
         // (a policy-forbidden device cold-starting offline must NOT recreate the cache).
         val allowed = _ui.value.policy?.offlineCacheAllowed ?: store.cacheAllowed
+        val originKey = store.currentOriginKey() // §4.2: the session binds to the current origin's namespace
         val cache = if (allowed) {
-            sqliteVaultCache(cacheFile(acct.userId).absolutePath, acct.userId)
+            sqliteVaultCache(cacheFile(originKey, acct.userId).apply { parentFile?.mkdirs() }.absolutePath, acct.userId)
         } else {
-            deleteCache(acct.userId); InMemoryVaultCache()
+            deleteCache(originKey, acct.userId); InMemoryVaultCache()
         }
         val newEngine = SyncEngine(a, acct, cache).also { it.hydrate() }
         // VaultSession closes any previously-bound engine/api (defensive: never two conns).

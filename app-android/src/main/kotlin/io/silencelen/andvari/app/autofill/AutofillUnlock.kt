@@ -5,9 +5,11 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.silencelen.andvari.app.KdfReKey
 import io.silencelen.andvari.app.OfflineData
+import io.silencelen.andvari.app.OriginNamespace
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
+import io.silencelen.andvari.app.clampAutoLockSeconds
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
@@ -104,22 +106,29 @@ object AutofillUnlock {
         provenance: VaultSession.UnlockProvenance,
         buildAccount: (AccountKeys) -> Account,
     ): Locked {
-        val api = AndvariApi(store.baseUrl, HttpClient(OkHttp), session.tokens(), { store.updateTokens(it) }) // platform "android"
+        // §4.2: ONE baseUrl read feeds both the api and the namespace key, so the policy verdict
+        // below can only ever be enforced against the namespace of the origin it came from.
+        val baseUrl = store.baseUrl
+        val originKey = OriginNamespace.originKey(baseUrl)
+        val api = AndvariApi(baseUrl, HttpClient(OkHttp), session.tokens(), { store.updateTokens(it) }) // platform "android"
 
         // A4: the autofill process fetches /client-policy on its ONLINE path (cheap, unauthenticated)
         // so an admin's `offlineCacheAllowed` flip reaches this process too, and persists
         // policyFetchedAt for QuickUnlock.isEligible's 7-day staleness gate. A fetch failure = offline.
+        // All persisted mirrors are per-origin (§4.2), and the auto-lock window is CLAMPED (B1-1).
         var policy: ClientPolicy? = null
         runCatching { api.clientPolicy() }.onSuccess { p ->
             policy = p
-            store.cacheAllowed = p.offlineCacheAllowed
-            store.autoLockSeconds = p.autoLockSeconds
-            store.policyFetchedAt = System.currentTimeMillis()
-            store.bumpServerTimeFloor(p.serverTime) // A2 (review [2]): trusted duration anchor
-            VaultSession.setAutoLockSeconds(p.autoLockSeconds)
-            // Policy forbids durable at-rest key material → drop cache + cached keys + the
-            // quick-unlock blob (spec 01 §8.1 / A4). Session stays valid.
-            if (!p.offlineCacheAllowed) OfflineData.purgeCacheForbidden(appContext.noBackupFilesDir, store, session.userId)
+            store.setCacheAllowed(originKey, p.offlineCacheAllowed)
+            val autoLock = clampAutoLockSeconds(p.autoLockSeconds) // §2.3: a server can't disable/stretch the lock
+            store.setAutoLockSeconds(originKey, autoLock)
+            store.setPolicyFetchedAt(originKey, System.currentTimeMillis())
+            store.bumpServerTimeFloor(originKey, p.serverTime) // A2 (review [2]): trusted duration anchor, per-origin
+            VaultSession.setAutoLockSeconds(autoLock)
+            // Policy forbids durable at-rest key material → drop THIS origin's cache + cached
+            // keys + quick-unlock blob (spec 01 §8.1 / A4 / §4.2). Session stays valid; other
+            // origins' namespaces are untouched.
+            if (!p.offlineCacheAllowed) OfflineData.purgeCacheForbidden(appContext.noBackupFilesDir, store, originKey, session.userId)
         }
 
         var online = false
@@ -130,9 +139,10 @@ object AutofillUnlock {
             }
         } catch (e: ApiException) {
             // A3: a definitive 401 (survived the api's own refresh) means this device is revoked —
-            // purge EVERYTHING (cache + keys + quick-unlock blob + store.clear()) so a stolen,
-            // overlay-only device can no longer open the cached vault. Then rethrow.
-            if (e.status == 401) OfflineData.purgeRevoked(appContext.noBackupFilesDir, store, session.userId)
+            // purge the session + THIS origin's namespace (cache + keys + quick-unlock blob +
+            // store.clear()) so a stolen, overlay-only device can no longer open the cached
+            // vault. Then rethrow.
+            if (e.status == 401) OfflineData.purgeRevoked(appContext.noBackupFilesDir, store, originKey, session.userId)
             api.close(); throw e
         } catch (e: IOException) {
             // Offline: fall back to the cached accountKeys (spec 02 §8).
@@ -151,11 +161,13 @@ object AutofillUnlock {
         // sqlite handle) and, unless VaultSession already adopted the api, the api too.
         var cache: VaultCache? = null
         val engine = try {
-            cache = if (store.cacheAllowed) {
-                sqliteVaultCache(File(appContext.noBackupFilesDir, "vault-${acct.userId}.db").absolutePath, acct.userId)
+            cache = if (store.cacheAllowed(originKey)) {
+                // §4.2 layout: <noBackup>/ns/<originKey>/<userId>/vault-<userId>.db
+                val nsDir = OriginNamespace.dir(appContext.noBackupFilesDir, originKey, acct.userId).apply { mkdirs() }
+                sqliteVaultCache(File(nsDir, "vault-${OriginNamespace.pathSafe(acct.userId)}.db").absolutePath, acct.userId)
             } else {
-                // Policy forbids the durable cache: delete any existing file (spec 02 §8).
-                for (s in listOf("", "-wal", "-shm")) File(appContext.noBackupFilesDir, "vault-${acct.userId}.db$s").delete()
+                // Policy forbids the durable cache: delete any existing file (spec 02 §8) — scoped.
+                OfflineData.deleteVaultCache(appContext.noBackupFilesDir, originKey, acct.userId)
                 InMemoryVaultCache()
             }
             SyncEngine(api, acct, cache).also { it.hydrate() }

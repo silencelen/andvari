@@ -144,8 +144,9 @@ class AutofillUnlockActivity : FragmentActivity() {
         // the BiometricPrompt when eligible + enrolled + within the 30-day window. Any
         // failure/cancel leaves the password card in place (never neither, design §5).
         val dir = applicationContext.noBackupFilesDir
+        // §4.2: the blob/eligibility/freshness all live in the CURRENT origin's namespace.
         if (QuickUnlock.isEligible(applicationContext, store) &&
-            QuickUnlock.isEnrolled(dir, session.userId) &&
+            QuickUnlock.isEnrolled(dir, store.currentOriginKey(), session.userId) &&
             QuickUnlock.isFresh(store, session.userId)
         ) {
             tryBiometricUnlock(store, session, structure, inlineRequest)
@@ -161,8 +162,9 @@ class AutofillUnlockActivity : FragmentActivity() {
         inlineRequest: InlineSuggestionsRequest?,
     ) {
         if (busy) return
+        val originKey = store.currentOriginKey() // §4.2: recover/wipe stay inside this origin's namespace
         lifecycleScope.launch {
-            when (val r = QuickUnlock.recoverUvk(this@AutofillUnlockActivity, applicationContext.noBackupFilesDir, session.userId)) {
+            when (val r = QuickUnlock.recoverUvk(this@AutofillUnlockActivity, applicationContext.noBackupFilesDir, originKey, session.userId)) {
                 is QuickUnlock.Recover.Ok -> {
                     busy = true
                     errorText = null
@@ -180,7 +182,7 @@ class AutofillUnlockActivity : FragmentActivity() {
                         // design §5: a stale/foreign UVK (identity SEED won't open) wipes the blob;
                         // an identityPub MISMATCH is a hard fault — keep the blob (evidence), banner.
                         if (t is CryptoException && !isIdentityMismatch(t)) {
-                            QuickUnlock.wipe(applicationContext.noBackupFilesDir, session.userId)
+                            QuickUnlock.wipe(applicationContext.noBackupFilesDir, originKey, session.userId)
                         }
                         errorText = friendly(t)
                     }
