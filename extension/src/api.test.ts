@@ -324,3 +324,35 @@ test("B1-1: clampClipboardClearSeconds — clamps into [1, ceiling]; absent → 
   assert.equal(clampClipboardClearSeconds(undefined, 30), 30);
   assert.equal(clampClipboardClearSeconds(Number.NaN, 30), 30);
 });
+
+test("§4.1 rule 1 / B1-5: AndvariApi's origin is immutable — a fresh instance carries no token", async () => {
+  // The STRUCTURAL property the origin-clean switch relies on: AndvariApi has no baseUrl setter, so the
+  // only way to point at a new origin is a brand-new instance — which starts tokenless, so an old
+  // origin's Bearer can never ride to the new one. This pins that property at the AndvariApi level; that
+  // background.applyServerChange actually INSTALLS a fresh instance on switch (the wiring the reviewer
+  // flagged as unguarded here) is driven end-to-end in serverswitch.test.ts against the real switch core.
+  const seen: { url: string; auth: string | undefined }[] = [];
+  globalThis.fetch = (async (url: string, init: { headers: Record<string, string> }) => {
+    seen.push({ url, auth: init.headers["authorization"] });
+    return jsonResp(200, OK_SYNC);
+  }) as unknown as typeof fetch;
+
+  // Old origin, authenticated.
+  const oldApi = new AndvariApi("https://old.example", "1.0.0");
+  oldApi.setTokens("access-OLD", "refresh-OLD");
+  await oldApi.sync(0);
+  assert.equal(seen.at(-1)!.auth, "Bearer access-OLD", "sanity: the old instance does send its token");
+
+  // The switch: a fresh instance for the new origin holds NO tokens.
+  const newApi = new AndvariApi("https://new.example", "1.0.0");
+  assert.deepEqual(newApi.getTokens(), { access: null, refresh: null });
+  await newApi.sync(0);
+  const newCall = seen.at(-1)!;
+  assert.ok(newCall.url.startsWith("https://new.example"));
+  assert.equal(newCall.auth, undefined, "no Authorization header may cross the baseUrl change");
+
+  // Belt: across EVERY recorded call, no request to the new origin ever carried the old token.
+  for (const c of seen) {
+    if (c.url.startsWith("https://new.example")) assert.notEqual(c.auth, "Bearer access-OLD");
+  }
+});

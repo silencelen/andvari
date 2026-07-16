@@ -7,6 +7,7 @@ import {
   canonicalizeServerUrl,
   DEFAULT_SERVER_URL,
   getServerUrl,
+  middleTruncateOrigin,
   nsKey,
   originKeyFor,
   originMatchPattern,
@@ -166,6 +167,24 @@ test("namespacing round-trip — A→B→A preserves A's material; wipes stay or
   current = A;
   assert.deepEqual(get("quickUnlock"), { userId: "user-a", blob: "blob-a", lockedTokens: { access: "tok-a", refresh: "r-a" } });
   assert.equal(get("quOfferDismissed"), true);
+});
+
+test("middleTruncateOrigin — popup header display: short passes through, long elides the MIDDLE", () => {
+  // Within budget → unchanged (the common reference/self-host case).
+  assert.equal(middleTruncateOrigin("https://andvari.monahanhosting.com"), "https://andvari.monahanhosting.com");
+  assert.equal(middleTruncateOrigin("https://self.example"), "https://self.example");
+  // Over budget → head + ellipsis + tail, both ends preserved (scheme start AND final labels visible).
+  const long = "https://vault.some-really-long-subdomain.internal.example.com:8443";
+  const out = middleTruncateOrigin(long, 34);
+  assert.ok(out.length <= 34, `truncated to <=34 chars, got ${out.length}`);
+  assert.ok(out.includes("…"), "uses a single-char ellipsis");
+  assert.ok(out.startsWith("https://vault"), "keeps the scheme + host start");
+  assert.ok(out.endsWith(":8443"), "keeps the tail (final labels + port)");
+  assert.ok(!out.includes("......"), "the ellipsis is U+2026, never dots that could read as labels");
+  // Exactly at the budget → unchanged (boundary).
+  const exact = "https://abcdefghijklmnopqrst.example"; // 35 chars
+  assert.equal(middleTruncateOrigin(exact, exact.length), exact);
+  assert.equal(middleTruncateOrigin(exact, exact.length - 1).length, exact.length - 1);
 });
 
 test("originMatchPattern — vault-exclusion patterns (B2-5): ports dropped, IPv6 fails closed", () => {

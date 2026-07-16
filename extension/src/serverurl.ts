@@ -125,3 +125,19 @@ export function originMatchPattern(origin: string): string | null {
   const host = m?.[2];
   return scheme && host ? `${scheme}://${host}/*` : null;
 }
+
+/**
+ * Middle-truncate an origin for the popup header's persistent anti-phishing display (design §5.1):
+ * the RAW origin is always shown, but a long self-host URL is elided in the MIDDLE (keeping the
+ * scheme + start AND the tail) rather than the end — so the host's most impersonation-prone parts,
+ * its beginning and its final labels, both stay visible. The full origin rides the element's
+ * title/aria-label for hover/focus. `max` is the visible character budget; an origin already within
+ * it is returned unchanged. The ellipsis is the single-char U+2026 so it never itself reads as a dot.
+ */
+export function middleTruncateOrigin(origin: string, max = 34): string {
+  if (max < 5 || origin.length <= max) return origin;
+  const keep = max - 1; // one char goes to the ellipsis
+  const head = Math.ceil(keep / 2);
+  const tail = Math.floor(keep / 2);
+  return origin.slice(0, head) + "…" + origin.slice(origin.length - tail);
+}
