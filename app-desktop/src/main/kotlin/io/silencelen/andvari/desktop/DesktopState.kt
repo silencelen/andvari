@@ -34,6 +34,7 @@ import io.silencelen.andvari.core.client.BackupPreflight
 import io.silencelen.andvari.core.client.BackupResult
 import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupVault
+import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CsvPreflight
 import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.client.ExportPlanner
@@ -119,6 +120,26 @@ enum class EnrollPosture { Waived, RequiredTyped }
 fun enrollPosture(memberHasSheet: Boolean): EnrollPosture =
     if (memberHasSheet) EnrollPosture.RequiredTyped else EnrollPosture.Waived
 
+/**
+ * §2.3 (B1-1) auto-lock clamp: `ClientPolicy.autoLockSeconds` is CLIENT-FLOOR-ONLY — it comes
+ * from an unauthenticated endpoint on an untrusted server, and it governs THIS device's exposure
+ * window. Effective = clamp into [1, AUTO_LOCK_MAX_SECONDS]; a server-supplied 0/negative (which
+ * meant "never lock") clamps to the CEILING, so a hostile server cannot disable the auto-lock —
+ * only shorten it. Applied inside [DesktopState.applyPolicy] (the one write path into policy
+ * state) and re-applied on the persisted offline fallback read (belt for pre-clamp prefs).
+ */
+internal fun clampAutoLockSeconds(v: Int): Int =
+    if (v <= 0 || v > ClientPolicyClamps.AUTO_LOCK_MAX_SECONDS) ClientPolicyClamps.AUTO_LOCK_MAX_SECONDS else v
+
+/**
+ * §2.3 (B1-1) clipboard clamp: [1, CLIPBOARD_CLEAR_MAX_SECONDS]. 0 still clears after 1 s (the
+ * pre-existing floor, never "keep forever" for secrets); an oversized value can no longer pin a
+ * copied secret on the clipboard for hours. Applied inside [DesktopState.applyPolicy], so the
+ * Ui.kt copy sites read a structurally-clamped `policy.clipboardClearSeconds`.
+ */
+internal fun clampClipboardClearSeconds(v: Int): Int =
+    v.coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS)
+
 /** F74: the Settings server-TOTP status fetch as an honest tri-state — Failed must STOP
  *  the spinner and offer Retry, instead of spinning forever beside its own error (the old
  *  shape used totpStatus==null for both "checking" and "check failed"). */
@@ -136,6 +157,13 @@ class DesktopState(private val scope: CoroutineScope) {
         // One-time: bump an old LAN-default server URL to the tailnet default before any
         // state reads it (mirrors Android's MainActivity.migrateDefaultOnce).
         store.migrateDefaultOnce()
+        // §4.2 adoption one-shot — MUST stay AFTER migrateDefaultOnce so the legacy unscoped
+        // layout adopts under the key of the URL the app will actually dial. WAVE-4 COUPLING
+        // (design §4.2/§6.2 — flagged, don't guess): the wave-4 default swap ships
+        // migrateDefaultOnce v2, which must keep this position AND carry namespaces this build
+        // already adopted under the tailnet key across the tailnet→public rewrite — see the
+        // full note on DesktopSessionStore.adoptNamespacesOnce.
+        store.adoptNamespacesOnce()
         // Inactivity auto-lock watcher (spec 01 §8, 1 s resolution) + the spec 03 §6 poll
         // (every 5 min while unlocked). Both live on the window's scope: they die with it.
         scope.launch {
@@ -167,6 +195,12 @@ class DesktopState(private val scope: CoroutineScope) {
     // key configured". ONLY those fetches touch it (B4): the unlocked 5-min background
     // refresh keeps last-known policy for the offline gates (auto-lock) and never writes it.
     var policyFetchFailed by mutableStateOf(false)
+        private set
+    // §5.3 (B1-4): the one-time per-(device, origin) durable-cache consent prompt is up. Raised
+    // on vault landing (toVault) when the current origin's consent was never answered and the org
+    // doesn't forbid the cache; lowered by the answer, by dismiss (re-asks at a later landing —
+    // consent stays unanswered and nothing persists meanwhile), and with the session teardown.
+    var cacheConsentPrompt by mutableStateOf(false)
         private set
     // §6 (F26): why the vault locked — one quiet line on the Unlock screen. Set FRESH per
     // lock event (manual / idle), cleared on successful unlock + sign-in and by signOut
@@ -471,13 +505,18 @@ class DesktopState(private val scope: CoroutineScope) {
 
     fun start() {
         scope.launch {
+            // §4.2: pin the PROBED origin's key before any await — a policy verdict may only
+            // ever touch the declaring origin's own namespace, even if baseUrl moves mid-probe.
+            val probedKey = originKey(store.baseUrl)
             val probe = newApi()
             runCatching { probe.clientPolicy() }.onSuccess { p ->
                 policyFetchFailed = false
-                applyPolicy(p) // UI state + persisted offline fallbacks (auto-lock included)
+                applyPolicy(p, probedKey) // UI state + persisted offline fallbacks (auto-lock included)
                 // Policy may forbid the durable cache; purge any existing file the moment
                 // we learn it (spec 02 §8), even before unlock — mirrors the Android client.
-                if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
+                // §4.2 (B2-3): scoped to the DECLARING origin's namespace — a forbidding server
+                // can no longer destroy another (home) server's offline data on a mere probe.
+                if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(probedKey, it.userId) }
             }.onFailure { policyFetchFailed = true } // §3: never render the no-key lie off a failed probe
             probe.close()
             // UI-audit #24: checkForUpdate is a BLOCKING java.net.http call — it ran directly on
@@ -578,15 +617,20 @@ class DesktopState(private val scope: CoroutineScope) {
         // then mirror Android setBaseUrl: apply + purge-on-forbid on success, flag on failure.
         policy = null
         policyFetchFailed = false
+        // §4.2: the key of the origin THIS probe interrogates (baseUrl was just committed above).
+        // Captured before the await so a fast follow-up switch can't re-aim the purge.
+        val probedKey = originKey(store.baseUrl)
         scope.launch {
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
                 runCatching { probe.clientPolicy() }
                     .onSuccess { p ->
                         policyFetchFailed = false
-                        applyPolicy(p)
-                        // Same policy enforcement as start(): a forbidding server purges the cache.
-                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
+                        applyPolicy(p, probedKey)
+                        // Same policy enforcement as start(): a forbidding server purges the cache
+                        // — its OWN origin's namespace only (§4.2, B2-3): probing a hostile/locked-
+                        // down server must never wipe the home server's offline data or keys.
+                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(probedKey, it.userId) }
                     }
                     .onFailure { policyFetchFailed = true }
             } finally {
@@ -600,15 +644,17 @@ class DesktopState(private val scope: CoroutineScope) {
     fun retryPolicy() {
         if (busy) return
         busy = true
+        val probedKey = originKey(store.baseUrl) // §4.2: see start()/updateServer
         scope.launch {
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
                 runCatching { probe.clientPolicy() }
                     .onSuccess { p ->
                         policyFetchFailed = false
-                        applyPolicy(p)
-                        // Same policy enforcement as start(): a forbidding server purges the cache.
-                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(it.userId) }
+                        applyPolicy(p, probedKey)
+                        // Same policy enforcement as start(): a forbidding server purges the cache
+                        // (its own origin's namespace only — §4.2).
+                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(probedKey, it.userId) }
                     }
                     .onFailure { policyFetchFailed = true }
             } finally {
@@ -617,6 +663,41 @@ class DesktopState(private val scope: CoroutineScope) {
             }
         }
     }
+
+    /**
+     * §5.3 (B1-4): record the one-time per-(device, origin) durable-cache consent answer.
+     * Desktops are routinely shared/portable machines, so unlike the phone the offline copy is
+     * OPT-IN, default OFF — a fresh install persists nothing at rest until this lands. YES
+     * materializes the copy NOW rather than at the next unlock: cache the accountKeys (offline
+     * unlock), then rebind the session onto the (now-permitted) durable sqlite cache — empty
+     * until the sync below fills it — mirroring exactly what an unlock does. NO just records the
+     * decline: nothing was ever persisted pre-answer, so there is nothing to purge. Existing
+     * installs never see this — the §4.2 adoption one-shot carried them in as consent=ON
+     * (continuity: nobody's offline access silently vanishes).
+     */
+    fun answerCacheConsent(granted: Boolean) {
+        if (busy) return // S2 re-assert: never race an in-flight op with an engine rebind
+        cacheConsentPrompt = false
+        store.setCacheConsent(originKey(store.baseUrl), granted)
+        if (!granted) return
+        val a = api ?: return
+        val acct = account ?: return
+        op {
+            // Offline-unlock material first (persistAccountKeys now passes its consent gate).
+            // Best-effort: a blip here self-heals at the next online unlock's persist.
+            runCatching { a.accountKeys() }.onSuccess { persistAccountKeys(acct.userId, it) }
+            bind(a, acct)
+            runCatching { syncNow(engine!!) }.onFailure {
+                if (it !is java.io.IOException) throw it
+                notice = "Offline — your encrypted offline copy will finish at the next sync."
+            }
+            refreshItems()
+        }
+    }
+
+    /** §5.3: close the consent prompt WITHOUT answering — consent stays unanswered (nothing
+     *  persists) and the prompt re-asks at a later vault landing. */
+    fun dismissCacheConsentPrompt() { cacheConsentPrompt = false }
 
     fun clearError() { error = null }
     fun clearSaveError() { saveError = null }
@@ -649,7 +730,7 @@ class DesktopState(private val scope: CoroutineScope) {
             }
             val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys) }
             store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
-            persistAccountKeys(s.accountKeys)
+            persistAccountKeys(s.userId, s.accountKeys)
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
             mustChangePassword = s.mustChangePassword // F58: a recovery temp password forces the banner
@@ -686,13 +767,17 @@ class DesktopState(private val scope: CoroutineScope) {
         // anyway), so an offline unlock deliberately skips the gate rather than stranding
         // offline vault access behind an unreachable server. The flag re-gates next online unlock.
         var freshKeys = true
+        // §4.2: this unlock's namespace = the CURRENT origin (the one the session dials).
+        val nsKey = originKey(store.baseUrl)
         val keys = try {
-            a.accountKeys().also { persistAccountKeys(it) }
+            a.accountKeys().also { persistAccountKeys(session.userId, it) }
         } catch (e: java.io.IOException) {
             freshKeys = false
-            store.loadAccountKeys() ?: throw e
+            store.loadAccountKeys(nsKey, session.userId) ?: throw e
         } catch (e: ApiException) {
-            if (e.status == 401) { purgeOfflineData(session.userId); store.clear() }
+            // §4.2: the 401 wipe is scoped to the REJECTING origin's own namespace — a foreign
+            // server's rejection must never reach another origin's offline data.
+            if (e.status == 401) { purgeOfflineData(nsKey, session.userId); store.clear() }
             throw e
         }
         // KDF off the UI thread (argon2id 64 MiB — the unlock spinner must animate).
@@ -750,7 +835,10 @@ class DesktopState(private val scope: CoroutineScope) {
             // Close the throwaway probe client whether the (now KDF-fenced) policy fetch succeeds or throws.
             val probe = newApi()
             try {
-                probe.clientPolicy().also { policy = it; policyFetchFailed = false }
+                // B1-1: route through applyPolicy — the ONE policy write path — so this fallback
+                // can't seed state with unclamped timers (the raw object is still returned for
+                // the enroll's kdfParams/fingerprint reads, which the clamps don't touch).
+                probe.clientPolicy().also { applyPolicy(it); policyFetchFailed = false }
             } catch (t: Throwable) {
                 policyFetchFailed = true; throw t
             } finally {
@@ -793,7 +881,7 @@ class DesktopState(private val scope: CoroutineScope) {
             }
             val s = a.register(req)
             store.save(DesktopSession(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
-            persistAccountKeys(s.accountKeys)
+            persistAccountKeys(s.userId, s.accountKeys)
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
             mustChangePassword = s.mustChangePassword // F58: never true for a fresh enroll; wired for truth
@@ -1608,8 +1696,12 @@ class DesktopState(private val scope: CoroutineScope) {
      */
     private fun maybeIdleLock() {
         if (engine == null) return
-        val window = policy?.autoLockSeconds ?: store.autoLockSeconds
-        if (window <= 0) return
+        // §2.3 (B1-1): the window is clamped into [1, AUTO_LOCK_MAX_SECONDS] — live policy is
+        // pre-clamped by applyPolicy; the per-origin persisted fallback (§4.2) is re-clamped here
+        // as the belt (pre-clamp prefs, or a hand-edited file). A 0 that used to mean "auto-lock
+        // disabled" now means the CEILING: no server — and no stale fallback — can disable the
+        // lock any more; that path is deliberately gone.
+        val window = clampAutoLockSeconds(policy?.autoLockSeconds ?: store.originAutoLockSeconds(originKey(baseUrl)))
         // A-copyGate: the rescue copy holds `busy`, but any OTHER op finishing mid-copy
         // clears it — the op guard is what actually keeps the idle lock off the engine
         // for the whole copy (never yank the engine mid-rescue).
@@ -2355,7 +2447,10 @@ class DesktopState(private val scope: CoroutineScope) {
             pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
             pendingPieceId = null // piece binding: see lock()
             pendingCaptureAuthKey = null // (v2 #15): see lock()
-            session?.userId?.let { deleteCache(it) }
+            // §4.2: explicit sign-out removes the CURRENT origin's cache for this user — other
+            // origins' namespaces are out of this gesture's reach (B2-7: wipe only on explicit
+            // remove or that origin's own policy-forbid).
+            session?.userId?.let { store.deleteCacheDb(originKey(store.baseUrl), it) }
             store.clear()
             clearSecondary(); signInTotpRequired = false
             importRequested = false // §2: drop any pending menu import request with the session
@@ -2378,6 +2473,7 @@ class DesktopState(private val scope: CoroutineScope) {
         // clears it itself (B1 identity gates), and a blind reset would disarm the single-flight
         // guard under it.
         recoveryCaptureError = null; recoveryReplacedNotice = null; editorOpen = false; idleLockImminent = false; downloadingAttachmentId = null
+        cacheConsentPrompt = false // §5.3: an unanswered prompt dies with the session; re-asks at the next landing
         clearRecoverState() // §F.7 belt: the self-recovery stash never outlives a session teardown
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
         backupPreflight = null; backupResult = null; csvPreflight = null
@@ -2397,32 +2493,52 @@ class DesktopState(private val scope: CoroutineScope) {
         escrowStale = false; escrowFingerprint = ""
     }
 
-    private fun cacheFile(userId: String) = File(store.cacheDir, "vault-$userId.db")
+    /** Last-known org offlineCacheAllowed for the CURRENT origin — live policy first, then that
+     *  origin's persisted fallback (spec 02 §8; per-origin per §4.2 — origin A's stance never
+     *  governs origin B's cold start). */
+    private fun orgCacheAllowed(): Boolean =
+        policy?.offlineCacheAllowed ?: store.orgCacheAllowed(originKey(store.baseUrl))
 
-    private fun deleteCache(userId: String) {
-        for (suffix in listOf("", "-wal", "-shm")) {
-            val f = File(store.cacheDir, "vault-$userId.db$suffix")
-            // Windows: a straggler handle (AV/indexer) can defeat the unlink — retry at JVM exit.
-            if (!f.delete() && f.exists()) f.deleteOnExit()
-        }
+    /**
+     * §5.3 (B1-4): may anything land at rest for the CURRENT origin? Org allowance (tighten-only,
+     * §2.3) AND this device's per-origin consent — which is default-OFF (null = never asked ⇒ OFF),
+     * so the org's `true` is necessary but never sufficient. Structurally incapable of relaxing:
+     * both legs must independently say yes.
+     */
+    private fun durableCacheEnabled(): Boolean =
+        orgCacheAllowed() && store.cacheConsent(originKey(store.baseUrl)) == true
+
+    /**
+     * Record a freshly-fetched policy in UI state + the persisted offline fallbacks. THE one
+     * write path into [policy] — §2.3 (B1-1): the device-exposure timers are CLAMPED here, so
+     * every downstream consumer (maybeIdleLock, the Ui.kt clipboard copy sites) reads
+     * structurally-bounded values and no server can disable the auto-lock or pin the clipboard.
+     * [key] names the PROBED origin (§4.2) — async callers capture it before awaiting the fetch
+     * so a mid-flight switch can't cross-write another origin's fallbacks.
+     */
+    private fun applyPolicy(p: ClientPolicy, key: String = originKey(store.baseUrl)) {
+        policy = p.copy(
+            autoLockSeconds = clampAutoLockSeconds(p.autoLockSeconds),
+            clipboardClearSeconds = clampClipboardClearSeconds(p.clipboardClearSeconds),
+        )
+        store.setOrgCacheAllowed(key, p.offlineCacheAllowed)
+        store.setOriginAutoLockSeconds(key, clampAutoLockSeconds(p.autoLockSeconds))
     }
 
-    private fun cacheAllowed(): Boolean = policy?.offlineCacheAllowed ?: store.cacheAllowed
-
-    /** Record a freshly-fetched policy in UI state + the persisted offline fallbacks. */
-    private fun applyPolicy(p: ClientPolicy) {
-        policy = p
-        store.cacheAllowed = p.offlineCacheAllowed
-        store.autoLockSeconds = p.autoLockSeconds
+    /** Persist accountKeys for offline unlock ONLY when the org allows AND this device consented
+     *  (spec 02 §8 + §5.3) — into the CURRENT origin's namespace (§4.2). */
+    private fun persistAccountKeys(userId: String, keys: io.silencelen.andvari.core.model.AccountKeys) {
+        val key = originKey(store.baseUrl)
+        if (durableCacheEnabled()) store.saveAccountKeys(key, userId, keys) else store.clearAccountKeys(key, userId)
     }
 
-    /** Persist accountKeys for offline unlock ONLY when the policy permits it (spec 02 §8). */
-    private fun persistAccountKeys(keys: io.silencelen.andvari.core.model.AccountKeys) {
-        if (cacheAllowed()) store.saveAccountKeys(keys) else store.clearAccountKeys()
+    /** Enforce offlineCacheAllowed=false / a definitive auth rejection: drop BOTH the vault DB and
+     *  the cached keys — for the NAMED origin's namespace ONLY (§4.2, B2-3: every caller passes
+     *  the origin whose verdict triggered the purge; no path wipes globally any more). */
+    private fun purgeOfflineData(key: String, userId: String) {
+        store.deleteCacheDb(key, userId)
+        store.clearAccountKeys(key, userId)
     }
-
-    /** Enforce offlineCacheAllowed=false: drop BOTH the vault DB and the cached keys. */
-    private fun purgeOfflineData(userId: String) { deleteCache(userId); store.clearAccountKeys() }
 
     /**
      * F61 KDF upgrade (spec 01 §7, design 2026-07-10 §4) — the desktop mirror of Android's
@@ -2474,9 +2590,11 @@ class DesktopState(private val scope: CoroutineScope) {
                     ),
                 )
                 // design §4 step 3: keep the offline cache in step, or the next offline unlock derives
-                // with stale params and fails. Only when the cache is allowed (persistAccountKeys' gate).
-                if (cacheAllowed()) {
+                // with stale params and fails. Same gate as persistAccountKeys (org allowance AND
+                // per-device consent, §5.3) and the same per-origin home (§4.2).
+                if (durableCacheEnabled()) {
                     store.saveAccountKeys(
+                        originKey(store.baseUrl), userId,
                         keys.copy(kdfSalt = Bytes.toB64(newSalt), kdfParams = newParams, wrappedUvk = wrappedUvkNew),
                     )
                 }
@@ -2488,15 +2606,21 @@ class DesktopState(private val scope: CoroutineScope) {
         touch() // spec 01 §8: the auto-lock timer resets on unlock
         engine?.close()
         api = a; account = acct
-        val allowed = policy?.offlineCacheAllowed ?: store.cacheAllowed
+        val key = originKey(store.baseUrl) // §4.2: this session's namespace = the current origin
+        // §5.3 (B1-4): at-rest cache needs BOTH the org's allowance and this device's per-origin
+        // consent (default OFF — null means the one-time prompt hasn't been answered).
+        val allowed = (policy?.offlineCacheAllowed ?: store.orgCacheAllowed(key)) && store.cacheConsent(key) == true
         val newCache = if (allowed) {
-            val db = cacheFile(acct.userId)
+            val db = store.cacheDbFile(key, acct.userId)
+            db.parentFile?.mkdirs() // ns/<originKey>/<userId>/ — first durable cache for this pair
             sqliteVaultCache(db.absolutePath, acct.userId).also {
                 // 0600 on POSIX, best-effort on Windows — same handling as session.json.
                 for (suffix in listOf("", "-wal", "-shm")) restrictToOwner(File("${db.path}$suffix"))
             }
         } else {
-            deleteCache(acct.userId); InMemoryVaultCache()
+            // Enforcement backstop, scoped to THIS origin (§4.2): an org-forbid (or missing
+            // consent) session runs in memory and leaves no stale DB behind for this pair.
+            store.deleteCacheDb(key, acct.userId); InMemoryVaultCache()
         }
         engine = SyncEngine(a, acct, newCache).also { it.hydrate() }
     }
@@ -2528,6 +2652,11 @@ class DesktopState(private val scope: CoroutineScope) {
         recoveryPhrase = null // §F.7: the shown-once display form must not survive landing
         recoveryReplacedNotice = null // gate-scoped (the CURRENT piece was captured) — never follows into the vault
         busy = false; error = null
+        // §5.3 (B1-4): the one-time post-first-unlock durable-cache consent prompt — only where
+        // this (device, origin) never answered AND the org doesn't forbid the cache (a forbid
+        // leaves nothing to consent to). Continuity installs were adopted consent=ON (§4.2
+        // one-shot) and never see it.
+        if (store.cacheConsent(originKey(store.baseUrl)) == null && orgCacheAllowed()) cacheConsentPrompt = true
         refreshLifecycle() // A-funnel: offers/notices delivered by the unlock sync show at once
     }
 

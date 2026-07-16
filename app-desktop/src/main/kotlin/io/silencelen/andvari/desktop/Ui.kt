@@ -174,6 +174,10 @@ fun DesktopApp(state: DesktopState) {
     // design 2026-07-13 platform-fit §2: Help ▸ About andvari — a Dialog, so it overlays every
     // screen regardless of placement in the tree; the menu toggles state.aboutRequested.
     if (state.aboutRequested) AboutDialog(state)
+    // §5.3 (B1-4, design 2026-07-15): the one-time per-(device, origin) durable-cache consent
+    // prompt — raised by the state layer on vault landing, so mounting it here (over any signed-in
+    // screen) can never show it pre-unlock; lock/sign-out lower the flag.
+    if (state.cacheConsentPrompt) CacheConsentDialog(state)
     }
 }
 
@@ -204,6 +208,42 @@ private fun AboutDialog(state: DesktopState) {
             }
         },
         confirmButton = { TextButton(onClick = { state.dismissAbout() }) { Text("Close") } },
+    )
+}
+
+/**
+ * §5.3 (B1-4, design 2026-07-15-multi-tenant-endpoints): the one-time post-first-unlock
+ * durable-cache consent prompt. Desktops are routinely shared/portable/work machines — closer to
+ * web's borrowed-browser posture than to a phone — so the encrypted offline copy is OPT-IN,
+ * default OFF: a fresh install persists nothing at rest until the user answers here. Existing
+ * installs never see this (the §4.2 adoption one-shot carried a held cache in as consent=ON).
+ * Two explicit answers; Esc/click-away is "not now" — consent stays unanswered (still nothing
+ * persists) and the prompt re-asks at a later vault landing.
+ */
+@Composable
+private fun CacheConsentDialog(state: DesktopState) {
+    AlertDialog(
+        onDismissRequest = { state.dismissCacheConsentPrompt() },
+        title = { Text("Keep an encrypted offline copy?") },
+        text = {
+            Column {
+                Text(
+                    "andvari can keep an encrypted copy of your vault on this computer, so you can open it when the server is unreachable.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "On a shared or borrowed computer, choose “Not on this device” — nothing will be stored at rest.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = !state.busy, onClick = { state.answerCacheConsent(true) }) { Text("Keep offline copy") }
+        },
+        dismissButton = {
+            TextButton(enabled = !state.busy, onClick = { state.answerCacheConsent(false) }) { Text("Not on this device") }
+        },
     )
 }
 

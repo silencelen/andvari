@@ -18,6 +18,8 @@ dependencies {
     implementation(compose.materialIconsExtended)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.ktor.client.java) // the JVM HTTP engine for AndvariApi
+    // §4.2 namespacing gate tests (originKey byte-parity pins, adoption one-shot, scoped purges).
+    testImplementation(libs.kotlin.test)
 }
 
 compose.desktop {
