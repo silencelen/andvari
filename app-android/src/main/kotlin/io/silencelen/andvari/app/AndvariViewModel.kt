@@ -33,6 +33,7 @@ import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.DeletedVaultInfo
+import io.silencelen.andvari.core.client.EnrollLink
 import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.InMemoryVaultCache
@@ -182,6 +183,17 @@ data class UiState(
     val error: String? = null,
     val notice: String? = null,
     val baseUrl: String = SessionStore.DEFAULT_BASE_URL,
+    // Wave-3 endpoint switch (design 2026-07-15 §4.3):
+    //  - [trustGate]: non-null while the anti-phishing raw-origin gate is shown before ANY serverUrl
+    //    change (manual ServerField, invite repoint, or launch-reconcile Finish).
+    //  - [pendingSwitch]: non-null while an invite-driven repoint is committed-to-attempt but
+    //    enrollment hasn't SUCCEEDED (B2-6) — Welcome hides sign-in + the ServerField and offers only
+    //    "complete enrollment" / "cancel and return to the previous origin".
+    //  - [pendingReconcile]: non-null at launch when a persisted [PendingServer] marker survived a
+    //    restart uncommitted (B2-9) — Welcome shows "Finish setting up at <origin> / Discard".
+    val trustGate: TrustGatePrompt? = null,
+    val pendingSwitch: PendingSwitchUi? = null,
+    val pendingReconcile: PendingServer? = null,
     val loginTotpRequired: Boolean = false,
     val totpStatus: TotpStatus? = null,
     val totpSetup: TotpSetupResponse? = null,
@@ -356,6 +368,166 @@ internal fun effectiveSignupMode(declared: String?): String = when (declared) {
     "landing" -> "landing"
     else -> "invite-only"
 }
+
+// ---- endpoint-switch UX + anti-phishing trust gate (design 2026-07-15 §4, Wave-3) ----
+//
+// Every decision that can be a pure function IS one (the OriginNamespaceTest precedent), so the
+// security-critical rules — no-token-replay across a switch, the anti-phishing render, the
+// pending commit/revert selection — are pinned by unit tests instead of buried in the ViewModel /
+// Compose layers.
+
+/**
+ * §4.1 rule 1 (B1-5 — HARD MUST): does a change of server FROM [oldOrigin] TO [newOrigin] drop the
+ * active session? True iff it is a REAL origin change (canonical compare) — a real switch drops the
+ * old origin's access+refresh tokens and in-memory unlock state, so the rebuilt client for the new
+ * origin can never replay the old bearer token. A no-op canonical "switch" (a trailing-slash /
+ * case re-entry of your own server) keeps the session — re-probing your own origin must not sign
+ * you out. Canonicalization reuses [OriginNamespace] so it agrees with the namespace key.
+ */
+internal fun switchDropsSession(oldOrigin: String, newOrigin: String): Boolean =
+    OriginNamespace.canonicalOrigin(oldOrigin) != OriginNamespace.canonicalOrigin(newOrigin)
+
+/**
+ * The tokens a client rebuilt for [newOrigin] may inherit from a session last held against
+ * [oldOrigin] (§4.1 rule 1 / B1-5). A real origin switch inherits NOTHING — null — so no
+ * `Authorization` header can ever cross a baseUrl change; a no-op switch keeps the tokens. This is
+ * the pure model of what [AndvariViewModel.setBaseUrl] enforces on the Context-bound store/api
+ * (which a JVM unit test can't touch): the regression test asserts THIS returns null across a switch.
+ */
+internal fun inheritedTokensAcrossSwitch(oldOrigin: String, newOrigin: String, oldTokens: Tokens?): Tokens? =
+    if (switchDropsSession(oldOrigin, newOrigin)) null else oldTokens
+
+/**
+ * What the "Invite code or link" field currently holds (design 2026-07-15 §4.4 Android). The field
+ * accepts either a raw invite token (today's behavior) or a full enroll LINK
+ * (`<origin>/enroll#a1.…`); the core [EnrollLink.parse] twin (multiplatform, total — null on
+ * anything that isn't a link) decides which. Reused, never reimplemented.
+ */
+internal sealed interface InviteFieldParse {
+    /** The invite token to submit (the verbatim text, or a link's `t`). */
+    val token: String
+
+    /** Not a link — the trimmed text is the token; carries no origin/rfp. */
+    data class Token(override val token: String) : InviteFieldParse
+
+    /**
+     * A parsed enroll link. [gate] is true iff [origin] differs (canonically) from the current
+     * baseUrl — a repoint that MUST pass the Trust Gate before enrollment (§4.4). [rfp] drives the
+     * `required-affirm` posture ([enrollPosture]); [email] is the invite-bound address.
+     */
+    data class Link(
+        override val token: String,
+        val origin: String,
+        val email: String,
+        val rfp: String?,
+        val gate: Boolean,
+    ) : InviteFieldParse
+}
+
+/** Parse the invite field against the current [currentBaseUrl] (design §4.4). Total — a
+ *  non-link falls through to [InviteFieldParse.Token]. */
+internal fun parseInviteField(raw: String, currentBaseUrl: String): InviteFieldParse {
+    val p = EnrollLink.parse(raw) ?: return InviteFieldParse.Token(raw.trim())
+    val gate = OriginNamespace.canonicalOrigin(p.o) != OriginNamespace.canonicalOrigin(currentBaseUrl)
+    return InviteFieldParse.Link(token = p.t, origin = p.o, email = p.e, rfp = p.rfp, gate = gate)
+}
+
+/**
+ * The anti-phishing Trust Gate's render decision (design 2026-07-15 §4.3) — pure so the IDN /
+ * plain-http defenses are test-pinned. The gate shows the RAW origin, never a display name.
+ */
+data class TrustGateRender(
+    /** The origin to show — scheme+host+port, monospaced + dominant; a non-ASCII host is rendered
+     *  in its punycode (`xn--…`) form so a homograph can't hide. */
+    val displayOrigin: String,
+    /** The host is an IDN (non-ASCII, or already `xn--` punycode) — show the "international
+     *  characters" caution beside the punycode form. */
+    val punycodeCaution: Boolean,
+    /** An `http://` origin — show the plain-http caution. */
+    val httpCaution: Boolean,
+)
+
+private val ORIGIN_SPLIT = Regex("^(https?)://(\\[[^\\]]*]|[^/:?#]*)(:[0-9]+)?", RegexOption.IGNORE_CASE)
+
+/** §4.3 render rules: punycode a non-ASCII host + caution; caution an already-`xn--` host (the
+ *  homograph vector); caution `http://`. */
+internal fun trustGateRender(origin: String): TrustGateRender {
+    val trimmed = origin.trim()
+    val httpCaution = trimmed.startsWith("http://", ignoreCase = true)
+    val m = ORIGIN_SPLIT.find(trimmed)
+    val scheme = m?.groupValues?.get(1)?.lowercase() ?: ""
+    // `.substringAfterLast('@')` drops any userinfo (defense-in-depth: the manual path already
+    // canonicalizes, but a raw origin must resolve to the REAL host, never a `real.host@evil` prefix).
+    val host = (m?.groupValues?.get(2) ?: "").substringAfterLast('@')
+    val port = m?.groupValues?.get(3) ?: ""
+    val nonAscii = host.any { it.code > 0x7F }
+    // Fail CLOSED: if IDN.toASCII can't punycode a non-ASCII host, escape its code points rather than
+    // rendering the raw homograph the punycode display exists to defeat (§4.3). The caution below still fires.
+    val punyHost = if (nonAscii) runCatching { java.net.IDN.toASCII(host) }.getOrNull() else host
+    val safeHost = punyHost ?: host.map { if (it.code > 0x7F) "\\u%04x".format(it.code) else it.toString() }.joinToString("")
+    // A raw non-ASCII host OR a host already encoded as punycode (`xn--`) is an IDN — the
+    // homograph vector spec/05 R8 warns about, whether the attacker sent us Unicode or the encoding.
+    val idn = nonAscii || safeHost.split('.').any { it.startsWith("xn--", ignoreCase = true) }
+    val display = if (m != null && nonAscii) "$scheme://$safeHost$port" else trimmed
+    return TrustGateRender(displayOrigin = display, punycodeCaution = idn, httpCaution = httpCaution)
+}
+
+// §4.3 trust-gate copy — pinned as constants so the phishing wording can't drift. Baseline is
+// shown always; the enrollment variant (B2-8) ADDS the new-account/password-reuse warning.
+internal const val TRUST_GATE_TITLE = "Connect to a different server?"
+internal const val TRUST_GATE_BASELINE =
+    "This server will store your encrypted vault and see your account activity (email, sign-ins, item counts). Only continue if you trust it."
+internal const val TRUST_GATE_ENROLLMENT_EXTRA =
+    "Your invite was issued by this server. Enrolling creates a NEW account there — it does not move any existing vault. Choose a master password you don't use anywhere else."
+
+/** §4.3 body paragraphs: baseline always, plus the enrollment warning when [enrollment]. Pure so
+ *  the copy selection is test-pinned. */
+internal fun trustGateBody(enrollment: Boolean): List<String> =
+    if (enrollment) listOf(TRUST_GATE_BASELINE, TRUST_GATE_ENROLLMENT_EXTRA) else listOf(TRUST_GATE_BASELINE)
+
+/**
+ * §4.1 rule 3: the persisted default origin after a pending invite switch resolves. On enroll
+ * SUCCESS the pending [PendingServer.origin] commits; on cancel / failure / reconcile-discard the
+ * [PendingServer.previousOrigin] is restored. Pure so a refactor can never silently commit a
+ * half-finished switch.
+ */
+internal fun resolvedDefaultOrigin(pending: PendingServer, enrollSucceeded: Boolean): String =
+    if (enrollSucceeded) pending.origin else pending.previousOrigin
+
+/** What the Trust Gate's Connect commits to (design §4.3/§4.4). */
+sealed interface TrustGateAction {
+    /** Manual ServerField switch — Connect commits immediately (the gate IS the gesture, §4.1 rule 3). */
+    data class ManualSwitch(val origin: String) : TrustGateAction
+
+    /** Invite-link repoint — Connect enters the PENDING state (commit on enroll success). [email]
+     *  seeds the crash marker. */
+    data class InviteRepoint(val origin: String, val email: String) : TrustGateAction
+
+    /** Launch-time reconcile "Finish" (§4.3 B2-9) — the raw-origin gate re-shown before repointing. */
+    data class ReconcileFinish(val origin: String) : TrustGateAction
+}
+
+/**
+ * §4.3 B2-6 — what [AndvariViewModel.trustGateCancel] restores. Cancelling a launch-reconcile Finish
+ * gate must return to the reconcile CHOICE (the marker): store.baseUrl already points at the
+ * UNCOMMITTED foreign origin, so landing on a bare Welcome would re-expose sign-in there (the
+ * credential leak — a user who "cancelled" then signs in leaks an offline-crackable authKey). A
+ * manual/invite gate never moved store.baseUrl (commit is on Connect), so its Cancel restores nothing.
+ * Pure so the "only ReconcileFinish restores the reconcile prompt" rule is test-pinned.
+ */
+internal fun reconcileRestoreOnCancel(action: TrustGateAction?, pending: PendingServer?): PendingServer? =
+    if (action is TrustGateAction.ReconcileFinish) pending else null
+
+/** The Trust Gate prompt held in UI state while shown. */
+data class TrustGatePrompt(
+    val render: TrustGateRender,
+    val enrollment: Boolean,
+    val action: TrustGateAction,
+)
+
+/** The in-session pending invite switch (design §4.3 B2-6): while set, Welcome hides sign-in +
+ *  the ServerField and offers only "complete enrollment" / "cancel and return to [previousOrigin]". */
+data class PendingSwitchUi(val origin: String, val previousOrigin: String)
 
 class AndvariViewModel(
     private val store: SessionStore,
@@ -653,6 +825,14 @@ class AndvariViewModel(
 
     fun start() {
         viewModelScope.launch {
+            // §4.3 B2-9: a persisted pendingServer marker means a prior invite switch was left
+            // UNCOMMITTED (enrollment success clears it) — baseUrl may already point at that
+            // foreign origin. Reconcile ("Finish setting up at <origin> / Discard") BEFORE trusting
+            // it or offering sign-in there; the reconcile drives the next steps.
+            store.pendingServer?.let { pending ->
+                _ui.value = _ui.value.copy(screen = Screen.Welcome, baseUrl = store.baseUrl, pendingReconcile = pending)
+                return@launch
+            }
             // If the vault was already unlocked in this process (autofill unlocked it first,
             // or the activity was recreated while the process lived), show it straight away —
             // but through the auto-lock gate: an idle-expired leftover session must land on
@@ -696,13 +876,35 @@ class AndvariViewModel(
     }
 
     fun setBaseUrl(url: String) {
-        store.baseUrl = url.trim().removeSuffix("/")
+        val newUrl = url.trim().removeSuffix("/")
+        // §4.1 rule 1 (B1-5 — HARD MUST): a REAL origin change drops the old origin's access+refresh
+        // tokens and in-memory unlock state BEFORE the probe below fires, so the client rebuilt for
+        // the new origin (newApi() reads the just-changed baseUrl) can never replay the old bearer
+        // token — no `Authorization` header crosses a baseUrl change ([inheritedTokensAcrossSwitch]).
+        // A no-op canonical re-entry keeps the session. Old-origin NAMESPACED material (cached keys,
+        // vault cache, quick-unlock) is PRESERVED (§4.2/B2-7 — a switch is not a wipe); only the
+        // single global session slot is cleared, via [SessionStore.clearSessionTokens].
+        val drop = switchDropsSession(store.baseUrl, newUrl)
+        store.baseUrl = newUrl
+        if (drop) {
+            VaultSession.lock() // close the old origin's api/engine before any request goes to the new one
+            store.clearSessionTokens()
+            // In-flight secret material belongs to the old origin's session — it must not survive
+            // into the new one (mirrors lock()/signOut()'s zeroize discipline).
+            zeroPendingRecovery(); zeroPendingRecover(); pendingCaptureAuthKey = null
+        }
         // §3/B4(4) (review MED, desktop-twin parity): a deliberate URL change nulls the OLD
         // server's policy and clears the flag AT CHANGE TIME, so Welcome renders the neutral
         // "Checking the server…" state during the probe — never the old server's ceremony
         // (whose stale fingerprint would die in Account.enroll's cross-check) and never a
         // stale failure whose enabled Retry could race this probe and clobber its result.
-        _ui.value = _ui.value.copy(baseUrl = store.baseUrl, policy = null, policyFetchFailed = false)
+        _ui.value = _ui.value.copy(
+            baseUrl = store.baseUrl, policy = null, policyFetchFailed = false,
+            // A dropped session leaves nothing unlockable on the new origin — land on Welcome
+            // (never flash the old origin's Unlock) and clear the session-derived F58 banner.
+            screen = if (drop) Screen.Welcome else _ui.value.screen,
+            mustChangePassword = if (drop) false else _ui.value.mustChangePassword,
+        )
         // Re-fetch policy against the new server so the recovery fingerprint / pins update
         // immediately (no app restart needed).
         // §4.2 — THE call site the namespacing exists for: this probes the JUST-SET origin, so
@@ -729,6 +931,115 @@ class AndvariViewModel(
                 probe.close()
             }
         }
+    }
+
+    // ---- Wave-3 endpoint switch + anti-phishing trust gate (design 2026-07-15 §4) ----
+
+    /** ServerField "Set" (design §4.4 requirement 3): a MANUAL switch shows the Trust Gate
+     *  (baseline copy); Connect commits via [setBaseUrl] (the gate IS the gesture). A canonical
+     *  no-op is applied straight through — no gate for re-entering your own origin. */
+    fun requestManualSwitchGate(url: String) {
+        // §4.4 (review 2026-07-16 MEDIUM): reject a userinfo/path-bearing string that would spoof the gate
+        // (`https://real.host@evil.example` shows a reassuring host while the HTTP stack dials evil.example
+        // → authKey phishing on the next sign-in). canonicalServerOrigin returns the bare canonical origin
+        // the gate shows AND dials, or null to refuse.
+        val target = OriginNamespace.canonicalServerOrigin(url)
+        if (target == null) {
+            _ui.value = _ui.value.copy(error = "Enter a server address like https://example.org — no username, path, or query.")
+            return
+        }
+        if (!switchDropsSession(store.baseUrl, target)) { setBaseUrl(target); return }
+        _ui.value = _ui.value.copy(
+            trustGate = TrustGatePrompt(trustGateRender(target), enrollment = false, action = TrustGateAction.ManualSwitch(target)),
+        )
+    }
+
+    /** A foreign-origin enroll link was entered (design §4.4): show the Trust Gate (ENROLLMENT
+     *  variant, B2-8). Connect enters the PENDING repoint; [email] seeds the crash marker. */
+    fun requestInviteTrustGate(origin: String, email: String) {
+        _ui.value = _ui.value.copy(
+            trustGate = TrustGatePrompt(trustGateRender(origin), enrollment = true, action = TrustGateAction.InviteRepoint(origin, email)),
+        )
+    }
+
+    /** Trust Gate → Cancel (the safe default, §4.3): dismiss without any server change. A
+     *  launch-reconcile Finish gate is special (B2-6): store.baseUrl already points at the uncommitted
+     *  marker origin, so Cancel must return to the reconcile CHOICE (Finish/Discard) — landing on a bare
+     *  Welcome would re-expose sign-in against the foreign origin. Manual/invite gates never moved
+     *  store.baseUrl (commit is on Connect), so their Cancel is a plain dismiss. */
+    fun trustGateCancel() {
+        _ui.value = _ui.value.copy(
+            trustGate = null,
+            pendingReconcile = reconcileRestoreOnCancel(_ui.value.trustGate?.action, store.pendingServer),
+        )
+    }
+
+    /** Trust Gate → Connect: act on the held [TrustGateAction]. */
+    fun trustGateConnect() {
+        val gate = _ui.value.trustGate ?: return
+        when (val a = gate.action) {
+            // Manual switch — commit now (the gate is the gesture): setBaseUrl drops tokens + re-probes.
+            is TrustGateAction.ManualSwitch -> { _ui.value = _ui.value.copy(trustGate = null); setBaseUrl(a.origin) }
+            // Invite repoint — enter the PENDING state; commit only on enroll success (§4.1 rule 3).
+            is TrustGateAction.InviteRepoint -> beginPendingSwitch(a.origin, a.email)
+            // Launch-reconcile Finish (§4.3 B2-9): baseUrl already points at the origin. If register
+            // already succeeded (a session survived the crash) commit + go unlock as that email;
+            // otherwise re-enter the pending enroll form. Either way the marker's fate is decided here.
+            is TrustGateAction.ReconcileFinish -> {
+                _ui.value = _ui.value.copy(trustGate = null, pendingReconcile = null)
+                val session = store.load()
+                if (session != null && session.accessToken.isNotEmpty()) {
+                    store.pendingServer = null // register succeeded — commit the switch
+                    _ui.value = _ui.value.copy(pendingSwitch = null, screen = Screen.Unlock(session.email))
+                } else {
+                    val prev = store.pendingServer?.previousOrigin ?: a.origin
+                    _ui.value = _ui.value.copy(pendingSwitch = PendingSwitchUi(a.origin, prev), screen = Screen.Welcome)
+                }
+                retryPolicy() // re-probe the (still-current) origin so the enroll form / unlock reflects it
+            }
+        }
+    }
+
+    /**
+     * §4.1 rule 3 (B2-6): begin a PENDING invite-driven repoint to [origin]. Writes the uncommitted
+     * [PendingServer] marker (BEFORE any enrollment, so a crash reconciles at launch), captures
+     * [previousOrigin] for a later revert, then switches origin via [setBaseUrl] — which drops the
+     * old origin's tokens (§4.1 rule 1) and probes [origin]'s policy so the enroll form renders its
+     * fingerprint. Welcome then hides sign-in + the ServerField (driven by [UiState.pendingSwitch]).
+     */
+    private fun beginPendingSwitch(origin: String, email: String) {
+        val previous = store.baseUrl
+        store.pendingServer = PendingServer(origin = origin, previousOrigin = previous, email = email.ifBlank { null }, ts = System.currentTimeMillis())
+        _ui.value = _ui.value.copy(trustGate = null, pendingSwitch = PendingSwitchUi(origin, previous))
+        setBaseUrl(origin)
+    }
+
+    /** §4.3 B2-6: "cancel and return to <previous origin>" — revert the uncommitted repoint,
+     *  clear the marker, re-probe the previous origin (which re-enables sign-in). */
+    fun cancelPendingSwitch() {
+        val marker = store.pendingServer ?: run { _ui.value = _ui.value.copy(pendingSwitch = null); return }
+        store.pendingServer = null
+        _ui.value = _ui.value.copy(pendingSwitch = null, trustGate = null)
+        setBaseUrl(resolvedDefaultOrigin(marker, enrollSucceeded = false)) // → previousOrigin, drop + re-probe
+    }
+
+    /** §4.3 B2-9 launch reconcile → "Finish setting up at <origin>": re-show the raw-origin gate,
+     *  then repoint/commit (see [trustGateConnect]'s ReconcileFinish). */
+    fun finishReconcile() {
+        val marker = store.pendingServer ?: run { _ui.value = _ui.value.copy(pendingReconcile = null); return }
+        _ui.value = _ui.value.copy(
+            pendingReconcile = null,
+            trustGate = TrustGatePrompt(trustGateRender(marker.origin), enrollment = true, action = TrustGateAction.ReconcileFinish(marker.origin)),
+        )
+    }
+
+    /** §4.3 B2-9 launch reconcile → "Discard": revert to the previous origin + clear the marker. */
+    fun discardReconcile() {
+        val marker = store.pendingServer
+        store.pendingServer = null
+        _ui.value = _ui.value.copy(pendingReconcile = null, pendingSwitch = null)
+        if (marker != null) setBaseUrl(resolvedDefaultOrigin(marker, enrollSucceeded = false))
+        else _ui.value = _ui.value.copy(screen = Screen.Welcome)
     }
 
     /** N2 §3 (design 2026-07-10): Welcome/Enroll's Retry for a failed policy probe — the same
@@ -831,6 +1142,17 @@ class AndvariViewModel(
     fun closeTrash() { _ui.value = _ui.value.copy(screen = Screen.Vault, deletedItems = null) }
 
     fun signIn(email: String, password: String, totp: String? = null) = op(mapError = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }) {
+        // §4.3 B2-6 (sink guard — the authoritative backstop for the pending-state sign-in lockout):
+        // an uncommitted pendingServer marker means store.baseUrl is OPTIMISTICALLY pointed at an
+        // unverified invite origin (enroll-success is what clears the marker). Deriving a master-password
+        // authKey (prelogin salt + deriveAuthKey below) against that origin is exactly the offline-crack
+        // leak B2-6 exists to stop. The UI hides sign-in in the pending/reconcile states, but this backstops
+        // ANY path that leaves the marker set with the controls re-exposed (e.g. reconcile Finish→Cancel) —
+        // route back to the reconcile choice instead of signing in against the foreign origin.
+        store.pendingServer?.let {
+            _ui.value = _ui.value.copy(busy = false, pendingReconcile = it, error = null)
+            return@op
+        }
         val a = newApi()
         try {
             val pre = a.prelogin(email)
@@ -1039,11 +1361,21 @@ class AndvariViewModel(
                 )
             }
             recoverySecret = secret
+            // §4.3 B2-9 crash marker: on a PENDING invite switch, capture the enrolling email in the
+            // marker BEFORE register — a crash between register success and the commit below is then
+            // reconciled at next launch with the address to sign in as. No-op on a same-origin enroll
+            // (no marker). baseUrl already points at the pending origin, so register hits the right one.
+            store.pendingServer?.let { store.pendingServer = it.copy(email = email) }
             val s = a.register(req)
             recoveryPieceId = s.recoveryPieceId
             store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.accountKeys)
             bind(a, acct)
+            // §4.1 rule 3 (B2-6): enrollment SUCCEEDED — COMMIT the pending invite switch. Clearing
+            // the uncommitted marker is the commit (baseUrl already points here), and it leaves the
+            // pending Welcome state. A same-origin enroll has no marker/pendingSwitch — both no-op.
+            if (store.pendingServer != null) store.pendingServer = null
+            _ui.value = _ui.value.copy(pendingSwitch = null)
             // F58: symmetric with signIn — a register response carries the flag too (false
             // for a fresh enrollment, but the wire says so, not us).
             store.mustChangePassword = s.mustChangePassword

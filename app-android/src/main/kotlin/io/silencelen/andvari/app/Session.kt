@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.SystemClock
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.model.AccountKeys
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
 import kotlin.math.max
@@ -22,6 +23,26 @@ data class Session(
 ) {
     fun tokens() = Tokens(accessToken, refreshToken)
 }
+
+/**
+ * The persisted "an invite-driven server switch is UNCOMMITTED" marker (design 2026-07-15
+ * §4.3, breaker B2-6/B2-9). Its mere presence is the source of truth for "pending": while it
+ * exists the switch to [origin] is NOT trusted as the new default — enrollment success clears it
+ * (the commit, §4.1 rule 3) and a Discard reverts to [previousOrigin] and clears it.
+ *
+ * Written BEFORE `register` so a crash between register and the commit is reconciled at the next
+ * launch ("Finish setting up at <origin> / Discard"). [previousOrigin] is the Android-specific
+ * addition to the design's `{origin, email?, ts}` — this app keeps a single global session slot,
+ * so a revert needs to know where to return. [email] is captured at register time (the address to
+ * sign in as if register already succeeded before the crash).
+ */
+@Serializable
+data class PendingServer(
+    val origin: String,
+    val previousOrigin: String,
+    val email: String? = null,
+    val ts: Long,
+)
 
 /**
  * Persistence layout (design 2026-07-15 §4.2 — (origin, userId) namespacing):
@@ -81,6 +102,18 @@ class SessionStore(context: Context) {
     var baseUrl: String
         get() = prefs.getString("baseUrl", DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
         set(v) = prefs.edit().putString("baseUrl", v).apply()
+
+    /**
+     * The uncommitted invite-switch marker ([PendingServer]) or null. GLOBAL (not namespaced):
+     * exactly one switch can be in flight, and it is about the identity of the current default
+     * origin, not any origin's cached material — so the §4.2 adoption sweep deliberately leaves it
+     * alone. Null clears it; a non-null value round-trips as JSON.
+     */
+    var pendingServer: PendingServer?
+        get() = prefs.getString("pendingServer", null)
+            ?.let { runCatching { json.decodeFromString(PendingServer.serializer(), it) }.getOrNull() }
+        set(v) = if (v == null) prefs.edit().remove("pendingServer").apply()
+            else prefs.edit().putString("pendingServer", json.encodeToString(PendingServer.serializer(), v)).apply()
 
     /** [OriginNamespace.originKey] of the current [baseUrl] — the namespace the implicit
      *  accessors below address. */
@@ -351,6 +384,18 @@ class SessionStore(context: Context) {
         val ok = currentOriginKey()
         prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken")
             .remove(ns(ok, "accountKeys")).remove("mustChangePassword").remove(ns(ok, "quickUnlockOfferDismissed")).apply()
+    }
+
+    /**
+     * §4.1 rule 1 (B1-5): drop ONLY the single global active session — identity + access/refresh
+     * tokens + the F58 flag — so a client rebuilt for a DIFFERENT origin can carry no old bearer
+     * token to the new one. Unlike [clear], this touches NO per-origin namespace: a server switch
+     * is not a wipe, so the old origin's cached account keys / vault cache / quick-unlock survive
+     * for an A→B→A round trip (§4.2/B2-7). Callers change [baseUrl] around this.
+     */
+    fun clearSessionTokens() {
+        prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken")
+            .remove("mustChangePassword").apply()
     }
 
     /**

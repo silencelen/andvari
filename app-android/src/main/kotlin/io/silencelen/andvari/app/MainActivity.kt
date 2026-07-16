@@ -459,6 +459,16 @@ internal fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
 
 @Composable
 fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
+    // design 2026-07-15 §4.3: the anti-phishing Trust Gate overlays everything — BOTH the manual
+    // ServerField switch and the invite repoint route through it before any serverUrl change.
+    ui.trustGate?.let { TrustGateDialog(it, vm) }
+    // §4.3 B2-9: a pending invite switch survived a restart uncommitted — reconcile first (its own
+    // full-screen prompt), before offering sign-in on a foreign origin.
+    ui.pendingReconcile?.let { PendingReconcileScreen(vm, ui, it); return }
+    // §4.3 B2-6: while an invite switch is PENDING, the welcome UI is enroll-only — sign-in and the
+    // ServerField are hidden so the "I already have an account" reflex can't hand the pending
+    // (possibly hostile) server an offline-crackable digest of the real master password.
+    val pending = ui.pendingSwitch
     var tab by rememberSaveable { mutableStateOf(0) }
     // design 2026-07-15 §2.1/§7.1: the server-declared signupMode drives which front-door UI
     // renders (a TRUSTED UI hint, §2.3 — register stays invite-gated server-side regardless):
@@ -466,15 +476,16 @@ fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
     //  - "landing"     → invite-only + the stranger nudge over the enroll tab;
     //  - anything else → today's invite-only two-tab welcome (incl. policy==null: §2.3's
     //                    conservative default while the probe is in flight / failed).
-    // The ServerField below stays in every mode (§7.1: natives keep the server field).
     val signupMode = effectiveSignupMode(ui.policy?.signupMode)
     val showEnroll = signupMode != "closed"
-    val effTab = if (showEnroll) tab else 0 // a remembered Enroll selection can't outlive a closed flip
+    // Pending ⇒ force the enroll surface (sign-in is locked out); a remembered Enroll selection
+    // can't outlive a closed flip.
+    val effTab = if (pending != null) 1 else if (showEnroll) tab else 0
     Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(40.dp))
         Sigil()
         Spacer(Modifier.height(24.dp))
-        if (showEnroll) {
+        if (pending == null && showEnroll) {
             TabRow(selectedTabIndex = effTab) {
                 Tab(effTab == 0, { tab = 0 }, text = { Text("Sign in") })
                 Tab(effTab == 1, { tab = 1 }, text = { Text("Enroll") })
@@ -485,14 +496,129 @@ fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
         // Success landings that end HERE need a voice too — chiefly the recover flow's
         // "Master password reset — sign in with your new password." (sessions were revoked).
         NoticeBar(ui.notice, vm::clearNotice)
-        if (effTab == 0) {
-            SignInForm(vm, ui)
-        } else {
-            if (signupMode == "landing") LandingNudge(ui.policy?.selfHostDocsUrl)
-            EnrollForm(vm, ui)
-        }
+        // §4.3 B2-6 pending notice sits ABOVE the shared enroll form as a separate sibling — so it
+        // can appear without disturbing the form's composition identity.
+        if (pending != null) PendingSwitchNotice(vm, pending)
+        // §7.1 stranger nudge — only in the non-pending enroll-tab landing case.
+        if (pending == null && effTab == 1 && signupMode == "landing") LandingNudge(ui.policy?.selfHostDocsUrl)
+        // ONE stable call site per auth form: SignInForm only when signed-in entry is allowed, else
+        // EnrollForm. Entering the pending state keeps `pending == null && effTab == 0` false on the
+        // enroll path (false→false), so the else branch survives — the pasted invite link + typed
+        // password are NOT cleared by the repoint (they'd be, if EnrollForm were called from two
+        // different branches). The invite field then re-parses as same-origin and the form completes.
+        if (pending == null && effTab == 0) SignInForm(vm, ui) else EnrollForm(vm, ui)
         Spacer(Modifier.height(24.dp))
-        ServerField(ui.baseUrl, vm::setBaseUrl)
+        // §7.1: natives keep the server field — but NOT while a repoint is pending (§4.3 B2-6:
+        // finish or cancel the invite first). "Set" opens the Trust Gate, commit-on-Connect (§4.4).
+        if (pending == null) ServerField(ui.baseUrl, vm::requestManualSwitchGate)
+    }
+}
+
+/**
+ * The anti-phishing Trust Gate (design 2026-07-15 §4.3), rendered natively (NOT web, §4.4). Shown
+ * before EVERY serverUrl change. It displays the RAW origin the client will connect to — scheme+
+ * host+port, monospaced + dominant, NEVER a display name (an attacker's branding is never rendered
+ * as verified). A non-ASCII host is shown in punycode with an "international characters" caution
+ * (IDN homograph defense); an http:// origin gets a plain-http caution. Cancel is the safe default
+ * (the dialog's dismiss); there is no "don't ask again". All render/copy decisions are the pure,
+ * test-pinned [trustGateRender] / [trustGateBody].
+ */
+@Composable
+private fun TrustGateDialog(gate: TrustGatePrompt, vm: AndvariViewModel) {
+    AlertDialog(
+        onDismissRequest = vm::trustGateCancel, // dismiss (scrim / back) = Cancel — the safe default
+        title = { Text(TRUST_GATE_TITLE) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                // Raw origin — visually dominant, monospaced (R8: never a display name).
+                Text(
+                    gate.render.displayOrigin,
+                    style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                if (gate.render.punycodeCaution) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "This address uses international characters, shown above in their punycode (xn--) form. Check it is exactly the server you expect — lookalike letters are a known phishing trick.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (gate.render.httpCaution) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "This is an unencrypted http:// address — anyone on the network can read traffic to it.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                trustGateBody(gate.enrollment).forEach {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
+                }
+            }
+        },
+        // Cancel is listed as the dismiss (left/safe) action and dismiss-on-scrim maps to it; there
+        // is deliberately no "don't ask again". Compose has no focus-default primitive, so Connect
+        // is never auto-activated — the user must deliberately tap it.
+        confirmButton = { TextButton(onClick = vm::trustGateConnect) { Text("Connect") } },
+        dismissButton = { TextButton(onClick = vm::trustGateCancel) { Text("Cancel") } },
+    )
+}
+
+/**
+ * §4.3 B2-6 pending-state notice: while an invite switch is uncommitted, sign-in is hidden and the
+ * user may only complete enrollment (the form below) or cancel and return to the previous origin.
+ */
+@Composable
+private fun PendingSwitchNotice(vm: AndvariViewModel, pending: PendingSwitchUi) {
+    Card(
+        Modifier.fillMaxWidth().padding(bottom = 12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text("Enrolling at a new server", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            Text(pending.origin, style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onTertiaryContainer)
+            Text(
+                "Signed-in accounts stay on ${pending.previousOrigin} — finish or cancel this invite first. Sign-in is unavailable here until you do.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            TextButton(
+                onClick = vm::cancelPendingSwitch,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
+            ) { Text("Cancel and return to ${pending.previousOrigin}") }
+        }
+    }
+}
+
+/**
+ * §4.3 B2-9 launch reconcile: a persisted pendingServer marker survived a restart with no committed
+ * enrollment. Offer "Finish setting up at <origin>" (re-shows the raw-origin gate, then repoints —
+ * register-already-succeeded users land on Unlock, pre-register crashes re-open the enroll form) or
+ * "Discard" (revert to the previous origin + clear the marker). Sign-in is not offered here — the
+ * origin is still uncommitted.
+ */
+@Composable
+private fun PendingReconcileScreen(vm: AndvariViewModel, ui: UiState, marker: PendingServer) {
+    Column(
+        Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Spacer(Modifier.height(40.dp))
+        Sigil()
+        Spacer(Modifier.height(24.dp))
+        Text("Finish setting up?", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "You started connecting to a different server but didn't finish enrolling. Finish setting up there, or discard it and stay on your previous server.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center, modifier = Modifier.padding(vertical = 12.dp),
+        )
+        Text(marker.origin, style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace))
+        Spacer(Modifier.height(20.dp))
+        PrimaryButton("Finish setting up at this server", enabled = !ui.busy, busy = ui.busy) { vm.finishReconcile() }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = vm::discardReconcile, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) {
+            Text("Discard — return to ${marker.previousOrigin}")
+        }
     }
 }
 
@@ -578,139 +704,193 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
     // spec 04 §2(3): the user TYPES the first 16 sheet chars; the short form is public
     // (first 16 of a served fingerprint), so rememberSaveable is fold-safe AND safe.
     var shortFp by rememberSaveable { mutableStateOf("") }
-    // §F.1 posture (client-derived, web parity): android has NO enroll-link channel (the invite
-    // token is typed), so linkRfp is always null — WAIVED by default (frictionless, no admin
-    // backstop), required-typed when the member declares a printed sheet. Both flags are
-    // non-secret and fold-safe.
+    // §F.1 posture (client-derived, web parity): WAIVED by default (frictionless, no admin
+    // backstop), required-typed when the member declares a printed sheet, and — new in Wave-3
+    // (design §4.4) — required-affirm when a pasted enroll LINK carries an in-person-QR rfp. All
+    // flags are non-secret and fold-safe.
     var hasSheet by rememberSaveable { mutableStateOf(false) }
     var waivedAck by rememberSaveable { mutableStateOf(false) }
-    val posture = enrollPosture(linkRfp = null, memberHasSheet = hasSheet)
+    var affirmed by rememberSaveable { mutableStateOf(false) }
+    // §4.4 Android: the invite field accepts a raw token OR a full enroll LINK. Derive against the
+    // CURRENT origin every recomposition (the reused core [EnrollLink.parse] twin; the field is
+    // never mutated, so a foreign→pending flip re-parses the same text as same-origin).
+    val parsed = parseInviteField(invite, ui.baseUrl)
+    val effToken = parsed.token
+    val linkRfp = (parsed as? InviteFieldParse.Link)?.rfp
+    val linkEmail = (parsed as? InviteFieldParse.Link)?.email
+    // A link whose origin differs from the current server must clear the Trust Gate BEFORE enrolling.
+    val foreign = (parsed as? InviteFieldParse.Link)?.takeIf { it.gate }
+    // Prefill the invite-bound email when the user hasn't typed one (server binds case-insensitively;
+    // still editable).
+    LaunchedEffect(linkEmail) { if (linkEmail != null && email.isBlank()) email = linkEmail }
+    val posture = enrollPosture(linkRfp = linkRfp, memberHasSheet = hasSheet)
     val fp = ui.policy?.recoveryFingerprint ?: ""
     val shortOk = Escrow.shortFormMatches(shortFp, fp)
-    // One shared gate per posture (enrollReady): the core EnrollCeremony legs for required-typed
-    // (F60 floor + typed ceremony — the two legs this form historically under-enforced), or the
-    // §F.4 no-backstop acknowledgment for waived.
-    val ready = enrollReady(posture, invite, email, password, confirm, shortFp, fpOk, waivedAck, fp)
+    // required-affirm: the scanned rfp must match THIS server's advertised recovery fingerprint —
+    // the T10 anchor-redirect defense. enrollOp re-asserts it authoritatively before sealing.
+    val affirmMatches = !linkRfp.isNullOrEmpty() && Escrow.shortFormMatches(linkRfp, fp)
+    // A foreign-origin link blocks submit until the gate repoints (foreign becomes null once we are
+    // on its origin). Otherwise the per-posture ceremony legs decide readiness.
+    val ready = foreign == null && enrollReady(posture, effToken, email, password, confirm, shortFp, fpOk, waivedAck, affirmed, linkRfp, fp)
     Column(Modifier.fillMaxWidth()) {
-        Field("Invite token", invite, { invite = it }, mono = true)
-        Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
-        Field("Name (optional)", name, { name = it })
-        SecretField("Master password", password) { password = it }
-        if (password.isNotEmpty()) {
-            val score = Strength.estimateStrength(password)
-            if (Strength.meetsMasterPasswordFloor(password)) {
-                Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else {
-                Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        Field("Invite code or link", invite, { invite = it }, mono = true)
+        Text(
+            "Paste the link from your invite — or just the invite code.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (foreign != null) {
+            // §4.4: a foreign-origin invite link. Do NOT auto-repoint — offer the anti-phishing
+            // Trust Gate explicitly; only its Connect enters the pending switch (§4.1 rule 3). The
+            // rest of the form appears once the gate has repointed us to this server.
+            Spacer(Modifier.height(8.dp))
+            Text("This invite is for a different server:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(foreign.origin, style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace))
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = { vm.requestInviteTrustGate(foreign.origin, foreign.email) }, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) {
+                Text("Review server and continue")
             }
-            if (Strength.masterPasswordHasNonAscii(password)) {
-                Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
-            }
-        }
-        SecretField("Confirm password", confirm) { confirm = it }
-        // Routed through InlineError so its Polite liveRegion announces the mismatch (a11yand-01).
-        InlineError(if (confirm.isNotEmpty() && confirm != password) "passwords don't match" else null)
-        // §F.1 posture UI (web FingerprintProvenance parity): waived renders NO fingerprint UI at
-        // all — there is no org pubkey to substitute — only the stark posture acknowledgment.
-        // required-typed keeps the N2 §3/B4 four honest states, in web's pinned order
-        // (Welcome.tsx) — fingerprint present wins over everything, then a FAILED probe
-        // (retryable), then probe-in-flight, and only a SUCCESSFUL fetch that returned an
-        // empty fingerprint may claim the ceremony isn't done.
-        when {
-            // (0) WAIVED (§F.4): the posture-specific acknowledgment — visually distinct from the
-            // backstop ceremony (error-toned; the one irreversible fact of this posture).
-            posture == EnrollPosture.Waived -> {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "There is NO admin backstop. Only your recovery phrase can restore this account. Lose both your master password and this phrase and this account is gone forever.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                Row(
-                    Modifier.padding(top = 8.dp)
-                        .toggleable(value = waivedAck, role = Role.Checkbox, onValueChange = { waivedAck = it }),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Checkbox(waivedAck, onCheckedChange = null)
-                    Text("I understand: without my master password AND my recovery phrase, this account cannot be recovered by anyone.", style = MaterialTheme.typography.bodySmall)
+        } else {
+            Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
+            Field("Name (optional)", name, { name = it })
+            SecretField("Master password", password) { password = it }
+            if (password.isNotEmpty()) {
+                val score = Strength.estimateStrength(password)
+                if (Strength.meetsMasterPasswordFloor(password)) {
+                    Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                if (Strength.masterPasswordHasNonAscii(password)) {
+                    Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
                 }
             }
-            // (1) Fingerprint known → the enroll ceremony, exactly as before.
-            fp.isNotEmpty() -> {
-                Spacer(Modifier.height(8.dp))
-                // Deliberately NOT displayed until typed — showing it above the input would
-                // reduce the check to transcription (spec 04 §2(3); web Enroll parity; the
-                // F57 re-seal card already works this way).
-                // Cut M (v2 #13): the printed sheet belongs to the ADMIN (required posture,
-                // handed over in person) — "your printed recovery sheet" sent an emailed
-                // enrollee hunting for a sheet that was never theirs.
-                Text("Recovery check — type the FIRST 16 characters of the fingerprint on the printed recovery sheet your admin gave you", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true)
-                if (shortFp.isNotBlank() && !shortOk) {
-                    Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            SecretField("Confirm password", confirm) { confirm = it }
+            // Routed through InlineError so its Polite liveRegion announces the mismatch (a11yand-01).
+            InlineError(if (confirm.isNotEmpty() && confirm != password) "passwords don't match" else null)
+            // §F.1 posture UI (web FingerprintProvenance parity): required-affirm shows the scanned
+            // rfp + a one-tap eyeball affirmation; waived renders the stark no-backstop ack;
+            // required-typed keeps the N2 §3/B4 four honest states, in web's pinned order.
+            when {
+                // (−1) required-affirm (§4.4): a pasted link carried an in-person-QR rfp. Display it
+                // grouped and take a one-tap affirmation — no typing (the scanned QR is the anchor).
+                posture == EnrollPosture.RequiredAffirm -> {
+                    Spacer(Modifier.height(8.dp))
+                    Text("Recovery check — this code came from the invite you scanned in person. Confirm it matches the fingerprint on your admin's screen.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(groupHex(linkRfp ?: ""), style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.secondary)
+                    if (fp.isNotEmpty() && !affirmMatches) {
+                        Text("doesn't match this server's recovery key — if you scanned it correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                    }
+                    Row(
+                        Modifier.padding(top = 8.dp)
+                            .toggleable(value = affirmed, role = Role.Checkbox, onValueChange = { affirmed = it }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(affirmed, onCheckedChange = null)
+                        Text("I scanned this code in person from my household admin and it matches their screen.", style = MaterialTheme.typography.bodySmall)
+                    }
                 }
-                if (shortOk) {
-                    Text("matches — full fingerprint: ${groupHex(fp)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                // (0) WAIVED (§F.4): the posture-specific acknowledgment — visually distinct from the
+                // backstop ceremony (error-toned; the one irreversible fact of this posture).
+                posture == EnrollPosture.Waived -> {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "There is NO admin backstop. Only your recovery phrase can restore this account. Lose both your master password and this phrase and this account is gone forever.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Row(
+                        Modifier.padding(top = 8.dp)
+                            .toggleable(value = waivedAck, role = Role.Checkbox, onValueChange = { waivedAck = it }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(waivedAck, onCheckedChange = null)
+                        Text("I understand: without my master password AND my recovery phrase, this account cannot be recovered by anyone.", style = MaterialTheme.typography.bodySmall)
+                    }
                 }
-                Row(
-                    Modifier.padding(top = 8.dp)
-                        .toggleable(value = fpOk, enabled = shortOk, role = Role.Checkbox, onValueChange = { fpOk = it })
-                        .semantics { if (!shortOk) stateDescription = "Type the 16 sheet characters above first" },
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Checkbox(fpOk, onCheckedChange = null, enabled = shortOk)
-                    Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
+                // (1) Fingerprint known → the enroll ceremony, exactly as before.
+                fp.isNotEmpty() -> {
+                    Spacer(Modifier.height(8.dp))
+                    // Deliberately NOT displayed until typed — showing it above the input would
+                    // reduce the check to transcription (spec 04 §2(3); web Enroll parity; the
+                    // F57 re-seal card already works this way).
+                    // Cut M (v2 #13): the printed sheet belongs to the ADMIN (required posture,
+                    // handed over in person) — "your printed recovery sheet" sent an emailed
+                    // enrollee hunting for a sheet that was never theirs.
+                    Text("Recovery check — type the FIRST 16 characters of the fingerprint on the printed recovery sheet your admin gave you", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true)
+                    if (shortFp.isNotBlank() && !shortOk) {
+                        Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                    }
+                    if (shortOk) {
+                        Text("matches — full fingerprint: ${groupHex(fp)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                    }
+                    Row(
+                        Modifier.padding(top = 8.dp)
+                            .toggleable(value = fpOk, enabled = shortOk, role = Role.Checkbox, onValueChange = { fpOk = it })
+                            .semantics { if (!shortOk) stateDescription = "Type the 16 sheet characters above first" },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(fpOk, onCheckedChange = null, enabled = shortOk)
+                        Text("This fingerprint matches the recovery sheet. I understand my master password can only be reset with that offline key.", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                // (2) The policy probe FAILED — don't claim the ceremony isn't done (it may well
+                // be). Web-parity copy (errors.ts POLICY_UNAVAILABLE) + a Retry that re-probes.
+                ui.policyFetchFailed -> {
+                    Text("Couldn't load the server's settings — it may be briefly unavailable. Try again in a moment.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
+                    OutlinedButton(onClick = vm::retryPolicy, enabled = !ui.busy) {
+                        Text(if (ui.busy) "Retrying…" else "Retry")
+                    }
+                }
+                // (3) Probe in flight (setBaseUrl's re-probe is async under this shown form) —
+                // a neutral line, never the no-key text.
+                ui.policy == null -> {
+                    Text("Checking the server…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                }
+                // (4) Policy loaded and the fingerprint is genuinely empty → the recovery key
+                // really isn't configured on this server yet (waived enrollment still works — the
+                // flip below is the way through).
+                else -> {
+                    Text("This server has no recovery key configured yet — the admin backstop can't be set up.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
                 }
             }
-            // (2) The policy probe FAILED — don't claim the ceremony isn't done (it may well
-            // be). Web-parity copy (errors.ts POLICY_UNAVAILABLE) + a Retry that re-probes.
-            ui.policyFetchFailed -> {
-                Text("Couldn't load the server's settings — it may be briefly unavailable. Try again in a moment.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
-                OutlinedButton(onClick = vm::retryPolicy, enabled = !ui.busy) {
-                    Text(if (ui.busy) "Retrying…" else "Retry")
+            // §F.1 posture flip (web FingerprintProvenance parity): waived ↔ required-typed. HIDDEN
+            // when a link rfp is present — required-affirm's posture is fixed by the scanned code,
+            // not a sheet declaration (web hides the toggle the same way). Otherwise OUTSIDE the
+            // fp-state `when`, so the flip is never hostage to a policy fetch.
+            if (linkRfp.isNullOrEmpty()) {
+                TextButton(onClick = { hasSheet = posture == EnrollPosture.Waived }) {
+                    Text(
+                        if (posture == EnrollPosture.Waived) "My admin gave me a printed recovery sheet (add the admin backstop)"
+                        else "I don't have a recovery sheet — set up without an admin backstop",
+                    )
                 }
             }
-            // (3) Probe in flight (setBaseUrl's re-probe is async under this shown form) —
-            // a neutral line, never the no-key text.
-            ui.policy == null -> {
-                Text("Checking the server…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-            }
-            // (4) Policy loaded and the fingerprint is genuinely empty → the recovery key
-            // really isn't configured on this server yet (waived enrollment still works — the
-            // flip below is the way through).
-            else -> {
-                Text("This server has no recovery key configured yet — the admin backstop can't be set up.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
-            }
-        }
-        // §F.1 posture flip (web FingerprintProvenance parity): each posture offers the way into
-        // the other — waived is the default (an emailed invitee has no sheet), the typed-sheet
-        // ceremony is one declaration away. Deliberately OUTSIDE the fp-state `when`, so the flip
-        // is never hostage to a policy fetch.
-        TextButton(onClick = { hasSheet = posture == EnrollPosture.Waived }) {
-            Text(
-                if (posture == EnrollPosture.Waived) "My admin gave me a printed recovery sheet (add the admin backstop)"
-                else "I don't have a recovery sheet — set up without an admin backstop",
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        // The onClick RE-EVALUATES the gate from the same live reads it submits: the
-        // button's enabled flag reflects the last composition, so a same-frame edit +
-        // tap could otherwise submit values `ready` never approved (S2-review race
-        // class; web enforces at submit for the same reason). Busy is re-checked in
-        // the ViewModel, where the read is live.
-        PrimaryButton("Create vault", enabled = ready && !ui.busy, busy = ui.busy) {
-            val postureNow = enrollPosture(linkRfp = null, memberHasSheet = hasSheet)
-            if (enrollReady(postureNow, invite, email, password, confirm, shortFp, fpOk, waivedAck, fp)) {
-                vm.enroll(invite.trim(), email.trim(), name.trim(), password, waived = postureNow == EnrollPosture.Waived, typedShortFp = shortFp)
+            Spacer(Modifier.height(12.dp))
+            // The onClick RE-EVALUATES the gate from the same live reads it submits: the
+            // button's enabled flag reflects the last composition, so a same-frame edit +
+            // tap could otherwise submit values `ready` never approved (S2-review race
+            // class; web enforces at submit for the same reason). Busy is re-checked in
+            // the ViewModel, where the read is live.
+            PrimaryButton("Create vault", enabled = ready && !ui.busy, busy = ui.busy) {
+                val postureNow = enrollPosture(linkRfp = linkRfp, memberHasSheet = hasSheet)
+                // required-affirm feeds the SCANNED rfp as the "typed" fingerprint into the same
+                // sealing path required-typed uses; enrollOp re-asserts it against the server's
+                // advertised fingerprint (and Account.enroll refuses a mismatched served key) — the
+                // T10 defense — before sealing escrow.
+                val typedFp = if (postureNow == EnrollPosture.RequiredAffirm) (linkRfp ?: "") else shortFp
+                if (enrollReady(postureNow, effToken, email, password, confirm, shortFp, fpOk, waivedAck, affirmed, linkRfp, fp)) {
+                    vm.enroll(effToken.trim(), email.trim(), name.trim(), password, waived = postureNow == EnrollPosture.Waived, typedShortFp = typedFp)
+                }
             }
         }
     }
 }
 
-/** The enroll submit gate per §F.1 posture: the core ceremony legs (EnrollCeremony, jvm-tested)
- *  for required-typed, or the invite/email/password legs + the §F.4 no-backstop acknowledgment
- *  for waived. required-affirm is unreachable here (no enroll-link channel) and falls to the
- *  ceremony branch, which fails closed without a typed sheet. */
+/** The enroll submit gate per §F.1 posture (design §4.4): the core ceremony legs (EnrollCeremony,
+ *  jvm-tested) for required-typed; the invite/email/password legs + a one-tap affirmation for
+ *  required-affirm (the scanned rfp must be present — enrollOp does the authoritative match); or
+ *  those legs + the §F.4 no-backstop acknowledgment for waived. */
 private fun enrollReady(
     posture: EnrollPosture,
     invite: String,
@@ -720,13 +900,17 @@ private fun enrollReady(
     shortFp: String,
     fpOk: Boolean,
     waivedAck: Boolean,
+    affirmed: Boolean,
+    linkRfp: String?,
     fp: String,
-): Boolean =
-    if (posture == EnrollPosture.Waived) {
+): Boolean = when (posture) {
+    EnrollPosture.Waived ->
         invite.isNotBlank() && email.isNotBlank() && Strength.meetsMasterPasswordFloor(password) && password == confirm && waivedAck
-    } else {
+    EnrollPosture.RequiredAffirm ->
+        invite.isNotBlank() && email.isNotBlank() && Strength.meetsMasterPasswordFloor(password) && password == confirm && affirmed && !linkRfp.isNullOrEmpty()
+    EnrollPosture.RequiredTyped ->
         EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, fp)
-    }
+}
 
 /**
  * Shown-once self-service recovery phrase (design 2026-07-12 §F.4/§F.7). The per-member recovery
