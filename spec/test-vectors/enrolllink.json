@@ -17,17 +17,17 @@
     },
     {
       "name": "tsnet-https-43char-token",
-      "o": "https://andvari.taila2dff2.ts.net",
+      "o": "https://andvari.example.net",
       "t": "K7gNU3sdo-OL0wNhqoVWhr3g6s1xYv72ol_pe_Unols",
       "e": "brynn@example.com",
-      "link": "https://andvari.taila2dff2.ts.net/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHM6Ly9hbmR2YXJpLnRhaWxhMmRmZjIudHMubmV0IiwidCI6Iks3Z05VM3Nkby1PTDB3Tmhxb1ZXaHIzZzZzMXhZdjcyb2xfcGVfVW5vbHMiLCJlIjoiYnJ5bm5AZXhhbXBsZS5jb20ifQ"
+      "link": "https://andvari.example.net/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHM6Ly9hbmR2YXJpLmV4YW1wbGUubmV0IiwidCI6Iks3Z05VM3Nkby1PTDB3Tmhxb1ZXaHIzZzZzMXhZdjcyb2xfcGVfVW5vbHMiLCJlIjoiYnJ5bm5AZXhhbXBsZS5jb20ifQ"
     },
     {
       "name": "lan-http-ip-origin",
-      "o": "http://192.168.2.122",
+      "o": "http://192.168.1.9",
       "t": "lanTok-123_x",
       "e": "kid@example.com",
-      "link": "http://192.168.2.122/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cDovLzE5Mi4xNjguMi4xMjIiLCJ0IjoibGFuVG9rLTEyM194IiwiZSI6ImtpZEBleGFtcGxlLmNvbSJ9"
+      "link": "http://192.168.1.9/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cDovLzE5Mi4xNjguMS45IiwidCI6ImxhblRvay0xMjNfeCIsImUiOiJraWRAZXhhbXBsZS5jb20ifQ"
     },
     {
       "name": "https-explicit-port",

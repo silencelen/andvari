@@ -760,7 +760,7 @@ private fun exportVectors(): JsonObject {
     val vaultId = "11111111-1111-4111-8111-111111111111"
     val itemsOnlyPayload = BackupPayload(
         exportedAt = 1751850000000,
-        origin = "https://andvari.taila2dff2.ts.net",
+        origin = "https://vault.example.net",
         userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         identityFingerprint = "0123456789abcdef",
         vaults = listOf(BackupVault(vaultId, "personal", "Personal", "owner")),

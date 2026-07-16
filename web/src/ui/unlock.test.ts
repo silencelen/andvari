@@ -37,7 +37,7 @@ const g = globalThis as { indexedDB?: IDBFactory; window?: { location: { origin:
 /** Origin stubs kept ONLY to prove the gate is origin-INDEPENDENT now (design 2026-07-15 §5.4.1:
  *  webCacheEnabled is consent-keyed — `idbUsable && !orgCacheOff && !deviceOptOut &&
  *  deviceOptIn(userId)` — and never reads window.location). */
-const TAILNET_ORIGIN = "https://andvari.taila2dff2.ts.net";
+const TAILNET_ORIGIN = "https://andvari.example.net";
 const PUBLIC_ORIGIN = "https://andvari.monahanhosting.com";
 function setOrigin(origin: string): void {
   g.window = { location: { origin } };

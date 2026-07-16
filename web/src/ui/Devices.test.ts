@@ -108,7 +108,7 @@ describe("extensionRowState (downloads manifest → browser-extension row)", () 
 });
 
 describe("DevicesCard — endpoint-agnostic (design 2026-07-15 §5.4.4: no origin gate, no baked hostnames)", () => {
-  const TAILNET = "https://andvari.taila2dff2.ts.net";
+  const TAILNET = "https://andvari.example.net";
   const PUBLIC = "https://vault.example.com";
 
   it("renders the same manifest-driven rows on ANY origin — the old private/public fork is gone", () => {
@@ -131,7 +131,7 @@ describe("DevicesCard — endpoint-agnostic (design 2026-07-15 §5.4.4: no origi
     // row lands, pin here that an `android` manifest entry — and ONLY that — renders it (with QR).
     const html = renderToStaticMarkup(createElement(DevicesCard, { origin: PUBLIC }));
     expect(html).not.toContain("devserv");
-    expect(html).not.toContain("taila2dff2.ts.net");
+    expect(html).not.toContain("ts.net");
     expect(html).not.toContain("<svg");
     expect(html).not.toContain("Show QR code");
     expect(html).not.toContain("Android"); // nothing honest to render for phones until the artifact publish

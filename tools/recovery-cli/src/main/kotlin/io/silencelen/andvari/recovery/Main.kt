@@ -71,15 +71,23 @@ fun main(args: Array<String>) {
 }
 
 /**
- * spec 04 §5 guard: any URL-ish argument — a scheme, or a bare andvari server hostname
- * (the tailnet name or the public break-glass host, spec 03) — marks the invocation as
- * confused/hostile. Legitimate arguments are subcommands, base64url blobs, and local
- * file paths, none of which contain "://" or those hostnames.
+ * spec 04 §5 guard: any URL-ish argument — a scheme (`https://…`, `wss://…`), or a bare
+ * server-host shape — marks the invocation as confused/hostile. HOST-AGNOSTIC by design
+ * (2026-07-15 §5.5): andvari is self-hostable, so ANY origin must be refused as loudly as the
+ * reference instance's — no hardcoded hostnames. A bare host is: dotted DNS labels with at
+ * least three labels (`andvari.monahanhosting.com`, any `*.ts.net` tailnet name, an IPv4), or
+ * any dotted name carrying a `:port` (`myvault.net:8443`). Legitimate arguments are
+ * subcommands, base64url blobs, and local file paths — none contain "://", and anything with a
+ * path separator is never host-shaped, so a multi-dotted FILENAME that trips the guard can
+ * always be passed as `./name`.
  */
 internal fun serverUrlArg(args: Array<String>): String? = args.firstOrNull { arg ->
     val a = arg.lowercase()
-    "://" in a || ".ts.net" in a || "andvari.monahanhosting" in a
+    "://" in a || BARE_HOST.matches(a)
 }
+
+private const val HOST_LABEL = """[a-z0-9]([a-z0-9-]*[a-z0-9])?"""
+private val BARE_HOST = Regex("""$HOST_LABEL(\.$HOST_LABEL){2,}(:\d{1,5})?|$HOST_LABEL(\.$HOST_LABEL)+:\d{1,5}""")
 
 private fun keygen() {
     print(keygenSheet(crypto.randomBytes(32)))

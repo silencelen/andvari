@@ -34,8 +34,8 @@ const UID = "user-mono";
 const OPT_IN = `andvari.cacheOptIn.${UID}`;
 
 const ORIGINS = [
-  "https://andvari.taila2dff2.ts.net", // the old "private ⇒ trusted" shapes…
-  "http://192.168.2.122",
+  "https://andvari.example.net", // the old "private ⇒ trusted" shapes…
+  "http://192.168.1.9",
   "http://localhost:5173",
   "https://andvari.monahanhosting.com", // …and the public/reference shape: all identical now
   "https://self-hosted.example.org",

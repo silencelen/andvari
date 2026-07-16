@@ -116,7 +116,7 @@ describe("backup round-trip (own impl — random params + attachment sections)",
     return {
       v: 1,
       exportedAt: 1751850000000,
-      origin: "https://andvari.taila2dff2.ts.net",
+      origin: "https://andvari.example.net",
       userId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       identityFingerprint: "0123456789abcdef",
       vaults: [{ vaultId: "v-1", type: "personal", name: "Personal", role: "owner" }],
