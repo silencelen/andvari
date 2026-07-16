@@ -33,8 +33,12 @@ comes from `/client-policy`); they block writes and show the upgrade path
   carries the piece id itself. `recoverySetupNeeded` (additive, default
   `false` — same additive shape as `escrowStale`, spec 04 §4) is `true` for an existing
   account with no `member_recovery` row: the per-member-recovery migration nudge (§12,
-  spec 04 §6). `escrowFingerprint` is **absent/null for a `waived` member** (no org
-  escrow — §7 register gate). Failures are uniform `401 invalid_credentials` (no
+  spec 04 §6). `escrowFingerprint` carries the **current org recovery fingerprint** for
+  **every** account (the F57 re-seal target + the pubkey-verification anchor paired with
+  `escrowStale` above), delivered regardless of the member's escrow posture; it is the empty
+  string only when the org has no recovery key configured. Waived posture is **not** signalled
+  by this field — it is reconciled server-side via `users.escrowPolicy` / the absence of an
+  escrow row (design §F.4, spec 02 §5). Failures are uniform `401 invalid_credentials` (no
   user/password distinction). Via the public origin, server-TOTP is mandatory
   (break-glass hardening): an account without it enrolled is refused outright
   (`403 public_login_requires_totp`); enrolled accounts must supply `totp`
