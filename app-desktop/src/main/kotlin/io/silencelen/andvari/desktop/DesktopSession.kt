@@ -25,6 +25,19 @@ data class DesktopSession(
 }
 
 /**
+ * §4.3 (B2-9) crash-window marker for an in-flight invite-driven server switch (design
+ * 2026-07-15-multi-tenant-endpoints) — persisted to ~/.andvari-desktop/pending-server.json BEFORE
+ * the irreversible register, and reconciled at next launch (`store.baseUrl == origin` ⇒ the switch
+ * committed and the marker is a crash-between-commit-and-clear straggler; otherwise the switch never
+ * committed ⇒ Finish/Discard). Doubles as the in-memory pending-switch state DesktopState holds
+ * while the Trust Gate + enroll ceremony run against [origin]. [email] pre-fills the reconcile /
+ * sign-in; [ts] is for diagnostics/aging. Carries NO invite token and NO session tokens — a bearer
+ * credential must never be the thing a straggler leaves on disk.
+ */
+@Serializable
+data class PendingServer(val origin: String, val email: String? = null, val ts: Long = 0)
+
+/**
  * On-disk layout (design 2026-07-15-multi-tenant-endpoints §4.2 — (origin, userId) namespacing):
  *
  *     ~/.andvari-desktop/
@@ -47,6 +60,8 @@ class DesktopSessionStore(
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
     private val file = File(dir, "session.json")
     private val prefsFile = File(dir, "prefs.json")
+    // §4.3 (B2-9) crash-window marker for an in-flight invite switch (see [PendingServer]).
+    private val pendingFile = File(dir, "pending-server.json")
     // LEGACY pre-§4.2 unscoped account-keys location — touched ONLY by [adoptNamespacesOnce].
     private val legacyKeysFile = File(dir, "account-keys.json")
 
@@ -231,6 +246,28 @@ class DesktopSessionStore(
         load()?.let { s -> clearAccountKeys(originKey(baseUrl), s.userId) }
         file.delete()
     }
+
+    /**
+     * §4.1 rule 1 (B1-5): drop ONLY the persisted session (access+refresh tokens) — used on a
+     * server SWITCH, where no bearer token may cross to the new origin but the origins' at-rest
+     * namespaces must SURVIVE (B2-7: a switch is not a sign-out; a round trip A→B→A keeps A's cache
+     * and account-keys). Unlike [clear], this deliberately touches NO account-keys namespace.
+     */
+    fun clearSession() { file.delete() }
+
+    // ---- §4.3 (B2-9) crash-window pending-server marker ----
+
+    /** Persist the in-flight invite switch BEFORE register, so a crash in the commit window
+     *  reconciles at next launch instead of stranding the user on an orphaned account. */
+    fun setPendingServer(p: PendingServer) {
+        dir.mkdirs()
+        pendingFile.writeText(json.encodeToString(PendingServer.serializer(), p))
+    }
+
+    fun loadPendingServer(): PendingServer? =
+        runCatching { json.decodeFromString(PendingServer.serializer(), pendingFile.readText()) }.getOrNull()
+
+    fun clearPendingServer() { pendingFile.delete() }
 
     /**
      * §4.2 adoption one-shot: on the first run of this build, move the legacy UNSCOPED layout

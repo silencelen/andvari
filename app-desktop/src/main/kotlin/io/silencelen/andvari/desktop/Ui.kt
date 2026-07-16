@@ -178,6 +178,11 @@ fun DesktopApp(state: DesktopState) {
     // prompt — raised by the state layer on vault landing, so mounting it here (over any signed-in
     // screen) can never show it pre-unlock; lock/sign-out lower the flag.
     if (state.cacheConsentPrompt) CacheConsentDialog(state)
+    // §4.4 Desktop: the MANUAL ServerField repoint's baseline Trust Gate (commit-on-Connect), and
+    // §4.3 (B2-9) the launch-time reconcile of an uncommitted invite switch — both modal, above any
+    // screen. (The ENROLLMENT-variant gate renders inline in the enroll pane, not here.)
+    state.manualSwitchTarget?.let { ManualTrustGateDialog(state, it) }
+    state.pendingReconcile?.let { PendingReconcileDialog(state, it) }
     }
 }
 
@@ -370,22 +375,54 @@ private fun ReSealCard(state: DesktopState) {
 
 @Composable
 private fun Welcome(state: DesktopState) {
+    // §4.3 (B2-6) pending-state sign-in lockout: while an invite-driven switch is uncommitted, the
+    // welcome UI offers ONLY "complete enrollment" (the enroll pane's Trust Gate → ceremony) and
+    // "cancel and return to <previous origin>" — sign-in and the manual ServerField are gone, so the
+    // "I already have an account" reflex can't hand a hostile pending server an offline-crackable
+    // authKey digest of the real master password.
+    //
+    // Fixed-slot structure (deliberate): the header/footer swap content when a switch is armed, but
+    // the AUTH-PANE slot is a single `if (showEnroll) Enroll else SignIn` at a stable call site —
+    // and arming always happens FROM the enroll tab (that's where the invite field lives), so
+    // showEnroll stays true through the toggle and the Enroll composable is NEVER unmounted. Its
+    // remembered invite/password therefore survive the lockout (a separate pending-Welcome
+    // composable would move Enroll to a new position and silently reset the pasted invite).
+    val pending = state.pendingServer
     var tab by remember { mutableStateOf(0) }
+    val showEnroll = pending != null || tab == 1
+    val prev = state.pendingReturnOrigin ?: state.baseUrl
     Column(Modifier.fillMaxSize().padding(28.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(24.dp)); Sigil(); Spacer(Modifier.height(20.dp))
         // (update banner now renders once at the app root, above every screen)
-        TabRow(selectedTabIndex = tab) {
-            Tab(tab == 0, { tab = 0 }, text = { Text("Sign in") })
-            Tab(tab == 1, { tab = 1 }, text = { Text("Enroll") })
+        if (pending == null) {
+            TabRow(selectedTabIndex = tab) {
+                Tab(tab == 0, { tab = 0 }, text = { Text("Sign in") })
+                Tab(tab == 1, { tab = 1 }, text = { Text("Enroll") })
+            }
+        } else {
+            Text("Set up your account", style = MaterialTheme.typography.titleMedium)
         }
         Spacer(Modifier.height(16.dp))
         ErrorBar(state.error, state::clearError)
         // Self-recovery lands here with "Master password reset — sign in with your new password."
         // — Welcome composed no notice surface before, so the line was silently lost.
         NoticeBar(state.notice, state::clearNotice)
-        if (tab == 0) SignIn(state) else Enroll(state)
+        if (showEnroll) Enroll(state) else SignIn(state)
         Spacer(Modifier.height(20.dp))
-        ServerField(state.baseUrl, state::updateServer)
+        if (pending == null) {
+            // §4.4 Desktop: a manual repoint arms the BASELINE Trust Gate (commit-on-Connect), never
+            // a silent switch — beginManualSwitch replaces the old direct updateServer.
+            ServerField(state.baseUrl, state::beginManualSwitch)
+        } else {
+            // B2-6 lockout copy + the always-available "cancel and return". (The pre-Connect Trust
+            // Gate also carries a Cancel; a redundant one here is harmless and covers the connected
+            // ceremony stage, which has no gate of its own.)
+            Text(
+                "Signed-in accounts stay on $prev — finish or cancel this invite first.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = { state.cancelPendingSwitch() }) { Text("Cancel and return to $prev") }
+        }
     }
 }
 
@@ -474,15 +511,30 @@ private fun Enroll(state: DesktopState) {
     // confirmation line below the field. Display-only; the fingerprint ceremony is the gate.
     var linkOrigin by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxWidth()) {
+        // §4.4 Desktop: a pasted invite for a DIFFERENT origin arms a pending switch — render the
+        // Trust Gate (enrollment variant) here (replacing the form) until Connect. The form's
+        // remembered fields above survive (they're read before this branch), so Connect returns to a
+        // pre-filled ceremony against the pending origin's policy. (The escrow-fingerprint ceremony
+        // below stays the cryptographic anchor — it just runs against the pending origin now.)
+        val pending = state.pendingServer
+        if (pending != null && !state.pendingConnected) {
+        TrustGateInline(
+            model = trustGateModel(pending.origin, TrustGateVariant.Enrollment),
+            busy = state.busy,
+            onConnect = { state.trustGateConnect() },
+            onCancel = { state.cancelPendingSwitch() },
+        )
+        } else {
         // (v2 #13): the invite email carries a LINK (<origin>/enroll#a1.<payload>), not a bare
         // token — but this field demanded exactly the token, rejected the pasted link with zero
         // guidance, and made the invitee hand-copy email + server on top. Run EVERY change
         // through the shared EnrollLink twin (total parse: null on anything that isn't a link,
         // so plain token entry falls through untouched) and unpack a recognized link into all
-        // three fields. Setting the server goes through updateServer, which re-probes policy —
-        // the typed-sheet fingerprint ceremony below re-renders against the LINK'S server, so a
-        // hostile link can point anywhere it likes and still can't pass enrollment without the
-        // printed sheet matching that server's recovery key.
+        // three fields. A link targeting a DIFFERENT origin arms a PENDING switch behind the Trust
+        // Gate (beginEnrollSwitch — no silent repoint); the typed-sheet fingerprint ceremony below
+        // then re-renders against the LINK'S server after Connect, so a hostile link can point
+        // anywhere it likes and still can't pass enrollment without the printed sheet matching that
+        // server's recovery key.
         //
         // payload.rfp is deliberately IGNORED here: a present rfp is honored ONLY via the
         // in-person QR affirmation (design §F.1 — web gates it on the page origin; a
@@ -493,7 +545,9 @@ private fun Enroll(state: DesktopState) {
             if (p != null) {
                 invite = p.t
                 email = p.e // the invite-bound address (server binds case-insensitively); still editable
-                if (p.o != state.baseUrl) state.updateServer(p.o)
+                // §4.4 Desktop: a different-origin link arms the pending switch + Trust Gate (never a
+                // silent auto-repoint); a same-origin link needs no gate and just fills the fields.
+                if (p.o != state.baseUrl) state.beginEnrollSwitch(p.o, p.e)
                 linkOrigin = p.o
             } else {
                 invite = raw
@@ -598,7 +652,120 @@ private fun Enroll(state: DesktopState) {
         }
         Spacer(Modifier.height(12.dp))
         Primary("Create vault", ready && !state.busy, state.busy, submit)
+        } // end else (form vs Trust Gate)
     }
+}
+
+/**
+ * §4.3 anti-phishing Trust Gate, rendered INLINE (the enroll pane variant). Shows the raw origin the
+ * client will dial — monospaced + dominant, punycoded when the host is non-ASCII, NEVER a display
+ * name — plus the IDN/plain-http cautions and the baseline-or-enrollment copy from [TrustGateModel]
+ * (the pure decision function; this composable invents no copy). Cancel takes default focus; there is
+ * no "don't ask again". [onCancel] null ⇒ the caller supplies the cancel affordance (the pending
+ * Welcome's "cancel and return").
+ */
+@Composable
+private fun TrustGateInline(model: TrustGateModel, busy: Boolean, onConnect: () -> Unit, onCancel: (() -> Unit)?) {
+    val cancelFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { cancelFocus.requestFocus() } } // Cancel = default focus
+    Column(Modifier.fillMaxWidth()) {
+        TrustGateBody(model)
+        Spacer(Modifier.height(16.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (onCancel != null) {
+                TextButton(onClick = onCancel, modifier = Modifier.focusRequester(cancelFocus)) { Text("Cancel") }
+                Spacer(Modifier.width(8.dp))
+            }
+            Primary("Connect", !busy, busy, onConnect)
+        }
+    }
+}
+
+/**
+ * §4.3 Trust Gate body — the shared render of a [TrustGateModel] used by both the inline (enroll) and
+ * dialog (manual/reconcile) gates. The raw origin is monospaced, dominant, and SELECTABLE (so the
+ * user can copy it to compare), and it is NEVER a display name (attacker branding is never rendered
+ * as verified — §4.3 / R8).
+ */
+@Composable
+private fun TrustGateBody(model: TrustGateModel) {
+    Column(Modifier.fillMaxWidth()) {
+        Text(model.lead, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(10.dp))
+        // The dominant destination line — monospaced (punycoded when non-ASCII), selectable.
+        SelectionContainer {
+            Text(
+                model.displayOrigin,
+                style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(model.body, style = MaterialTheme.typography.bodyMedium)
+        model.enrollmentNote?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, style = MaterialTheme.typography.bodyMedium)
+        }
+        // IDN homograph + plain-transport cautions — errorContainer-toned so they read as warnings.
+        model.internationalCaution?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        model.httpCaution?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+/**
+ * §4.4 Desktop: the MANUAL ServerField repoint's baseline Trust Gate, as a modal dialog (Cancel =
+ * default focus / Connect; commit-on-Connect — the gate IS the gesture). Also drives the §4.3
+ * (B2-9) reconcile "Finish" repoint. No "don't ask again".
+ */
+@Composable
+private fun ManualTrustGateDialog(state: DesktopState, target: String) {
+    val cancelFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { cancelFocus.requestFocus() } }
+    AlertDialog(
+        onDismissRequest = { state.manualSwitchCancel() },
+        title = { Text("Connect to a different server?") },
+        text = { TrustGateBody(trustGateModel(target, TrustGateVariant.Baseline)) },
+        confirmButton = { TextButton(enabled = !state.busy, onClick = { state.manualSwitchConnect() }) { Text("Connect") } },
+        dismissButton = { TextButton(onClick = { state.manualSwitchCancel() }, modifier = Modifier.focusRequester(cancelFocus)) { Text("Cancel") } },
+    )
+}
+
+/**
+ * §4.3 (B2-9): the launch-time reconcile prompt for an uncommitted invite switch found on disk —
+ * "Finish setting up at <origin>" (re-shows the raw-origin gate then repoints) or "Discard" (revert
+ * + clear marker). The origin is monospaced + selectable; never a display name.
+ */
+@Composable
+private fun PendingReconcileDialog(state: DesktopState, marker: PendingServer) {
+    AlertDialog(
+        onDismissRequest = { state.discardPendingReconcile() },
+        title = { Text("Finish setting up your account?") },
+        text = {
+            Column {
+                Text(
+                    "You were setting up a new account on a different server but didn't finish. " +
+                        "Continue there, or discard and stay on your current server.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(10.dp))
+                SelectionContainer {
+                    Text(
+                        marker.origin,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { state.finishPendingReconcile() }) { Text("Finish setting up") } },
+        dismissButton = { TextButton(onClick = { state.discardPendingReconcile() }) { Text("Discard") } },
+    )
 }
 
 /**

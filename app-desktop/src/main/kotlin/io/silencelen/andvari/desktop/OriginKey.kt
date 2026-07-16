@@ -77,4 +77,30 @@ internal fun canonicalOrigin(url: String): String {
     return if (port == -1 || port == defaultPort) "$scheme://$host" else "$scheme://$host:$port"
 }
 
+/**
+ * Strict validation + canonicalization of a USER-TYPED server address for the manual switch
+ * (design §4.4). Mirrors the extension's `canonicalizeServerUrl`: a userinfo/path-bearing input is a
+ * bearer-credential PHISHING vector — `https://real.host@evil.example` lets the Trust Gate show a
+ * reassuring host while the HTTP stack actually dials `evil.example`, and a manual switch commits
+ * immediately, so a subsequent sign-in hands the attacker an offline-crackable authKey of the real
+ * master password (the B2-6 threat). So REJECT anything that is not a bare http(s) origin — any
+ * userinfo, any path beyond "/", any query/fragment — returning null so the caller refuses it instead
+ * of arming the gate on a spoofable string. On success returns the canonical `scheme://host[:port]`
+ * (identical to [canonicalOrigin] for a clean origin), which is what the gate then displays AND dials.
+ */
+internal fun canonicalServerOrigin(input: String): String? {
+    val trimmed = input.trim().trimEnd('/')
+    val uri = runCatching { java.net.URI(trimmed) }.getOrNull() ?: return null
+    val scheme = uri.scheme?.lowercase() ?: return null
+    if (scheme != "https" && scheme != "http") return null
+    if (uri.userInfo != null) return null // `user[:pass]@` — the phishing vector; refuse outright
+    val host = uri.host?.lowercase()
+    if (host.isNullOrEmpty()) return null
+    if (!uri.rawPath.isNullOrEmpty() && uri.rawPath != "/") return null // no path
+    if (uri.rawQuery != null || uri.rawFragment != null) return null // no query/fragment
+    val defaultPort = when (scheme) { "https" -> 443; "http" -> 80; else -> -1 }
+    val port = uri.port
+    return if (port == -1 || port == defaultPort) "$scheme://$host" else "$scheme://$host:$port"
+}
+
 private const val HEX = "0123456789abcdef"
