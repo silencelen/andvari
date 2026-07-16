@@ -40,8 +40,10 @@ origin only). Each zip carries a tester-facing `INSTALL.txt`; Firefox loads are 
 ## Load + verify (on a real Chromium — I can't here)
 
 1. `chrome://extensions` → Developer mode → **Load unpacked** → select `extension/dist`.
-2. Open the popup → **Test server connection**. Expect "server reachable (t=…)" — proves
-   `host_permissions` reaches the tailnet server with **no CORS** (be on Tailscale).
+2. Open the popup → **Test server connection**. Expect "Server reachable." — proves the granted
+   host permission reaches the configured server with **no CORS** (preconfigured:
+   `https://andvari.monahanhosting.com`; on Firefox grant the host permission first — see
+   "Host permissions" below).
 3. Service-worker console (chrome://extensions → "service worker"): **no CSP violation** — confirms
    the bundled `@noble` crypto loads (the spike's whole premise: no WASM, no eval).
 4. Open a login page (e.g. https://fill.dev), unlock in the popup, then click a username/password
@@ -91,9 +93,35 @@ origin only). Each zip carries a tester-facing `INSTALL.txt`; Firefox loads are 
     `securityCode` — pick up the core classifier's fuller CSC demotion with the deferred in-page
     card-fill slice; the id is only consulted when the name is empty).
 - **Manifests (both):** branded icons (`icons/icon{16,32,48,128}.png` — the treasury coin + ᛅ rune),
-  content script in **all frames** (`"all_frames": true` — iframe logins) with the vault app's own
-  origin excluded (`exclude_matches` — never run the PM UI inside andvari itself), extension-page
-  CSP without `'wasm-unsafe-eval'` (nothing loads wasm).
+  extension-page CSP without `'wasm-unsafe-eval'` (nothing loads wasm). The autofill content script
+  is **registered dynamically by the service worker** (`chrome.scripting.registerContentScripts`,
+  all frames, `document_idle`) — there is deliberately **no static `content_scripts` entry**: a
+  static entry's `exclude_matches` is immutable at runtime, so it would inject the autofill UI into
+  every *self-hosted* vault origin (design 2026-07-15 §5.1/B2-5). The SW recomputes
+  `excludeMatches` (configured server origin + the shipped default) on every start, install, and
+  server change, and reconciles on every host-permission grant.
+
+## Host permissions & the install-warning strategy (B2-10 — read before ANY host change)
+
+- **Chrome (`manifest.json`):** `host_permissions` carries ONLY the reference instance
+  (`https://andvari.monahanhosting.com/*`); the broad patterns (`https://*/*`,
+  `http://localhost/*`, `http://127.0.0.1/*`) live in `optional_host_permissions` and are granted
+  **at runtime, per user gesture** (the wave-3 options page's Trust-Gate → `permissions.request`).
+  Install shows only the reference-instance warning; autofill *injects* only on granted origins —
+  until the broad grant, the dynamic registration is effective nowhere (the vault origins are
+  excluded anyway).
+- **Firefox (`manifest.firefox.json`):** MV3 host permissions are **optional-by-default**, and
+  `optional_host_permissions` isn't supported at our `strict_min_version` (121), so ALL patterns —
+  including the default origin — sit in `host_permissions` as user-grantable toggles. First run
+  may hold NO grant at all: the popup detects this (`data-missing-host-grant` hook) and the wave-3
+  options page routes the grant.
+- **Why this is release-gated:** the 0.15.0→0.16.0 update *removes* the static all-URLs content
+  script and *adds* new host patterns in the same release — a changed install-time warning set can
+  **disable the extension on update**. Per design §5.1 (B2-10) this must be **observed, never
+  reasoned**: before shipping any release that touches `host_permissions`/
+  `optional_host_permissions`/content-script registration, load the previous store build in real
+  Chrome + Firefox profiles, apply the new build as an in-place update, and assert it stays
+  enabled, fetch works, and the Firefox first-run grant flow triggers.
 - **Firefox:** `manifest.firefox.json` + `TARGET=firefox npm run build` (background event page instead
   of the SW; `browser_specific_settings`). The `chrome.*` calls work on both.
 - **Next:** in-page card fill (behind the frame-origin egress contract above), more item types

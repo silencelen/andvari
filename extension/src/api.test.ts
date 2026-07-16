@@ -4,7 +4,14 @@
 // because it has no runtime imports (KdfParams is an `import type`) and no parameter properties.
 import { strict as assert } from "node:assert";
 import { afterEach, test } from "node:test";
-import { AndvariApi, ApiError } from "./api.ts";
+import {
+  AndvariApi,
+  ApiError,
+  AUTO_LOCK_MAX_SECONDS,
+  CLIPBOARD_CLEAR_MAX_SECONDS,
+  clampAutoLockSeconds,
+  clampClipboardClearSeconds,
+} from "./api.ts";
 
 // A minimal Response stand-in. `json`-mode bodies parse; `text`-mode bodies make .json() throw
 // (a non-JSON error body — the http_<status>/statusText fallback path).
@@ -287,4 +294,33 @@ test("E1-2/E1-3: body code upgrade_required fires onUpgradeRequired AND still th
   globalThis.fetch = (async () => jsonResp(426, { error: "upgrade_required", message: "min extension 0.11.0" })) as unknown as typeof fetch;
   await assert.rejects(api.sync(0), (e: unknown) => e instanceof ApiError && e.status === 426 && e.code === "upgrade_required");
   assert.equal(fired, 1);
+});
+
+// ---- §2.3/B1-1 policy-timer clamps (design 2026-07-15) — ceilings live beside the constants ----
+// they mirror; every branch is CLIENT-FLOOR-ONLY: a hostile self-host server may tighten a timer,
+// never disable or stretch it. web/src/policy-clamps.test.ts pins the ceiling VALUES three-way
+// (core/web/ext); these pin the ext clamp BEHAVIOR feeding background.fetchPolicyInto.
+
+test("B1-1: clampAutoLockSeconds — 0/negative (the 'never lock' attempt) clamps to the CEILING", () => {
+  assert.equal(clampAutoLockSeconds(0, 900), AUTO_LOCK_MAX_SECONDS);
+  assert.equal(clampAutoLockSeconds(-5, 900), AUTO_LOCK_MAX_SECONDS);
+});
+
+test("B1-1: clampAutoLockSeconds — oversized clamps down; in-range passes; absent → bounded default", () => {
+  assert.equal(clampAutoLockSeconds(86_400, 900), AUTO_LOCK_MAX_SECONDS); // a day-long window shrinks
+  assert.equal(clampAutoLockSeconds(300, 900), 300); // the shipped wire default is never clamped
+  assert.equal(clampAutoLockSeconds(AUTO_LOCK_MAX_SECONDS, 900), AUTO_LOCK_MAX_SECONDS);
+  assert.equal(clampAutoLockSeconds(undefined, 900), 900); // policy absent → the conservative default
+  assert.equal(clampAutoLockSeconds(Number.NaN, 900), 900);
+  assert.equal(clampAutoLockSeconds(Number.POSITIVE_INFINITY, 900), 900);
+  assert.equal(clampAutoLockSeconds("600", 900), 900); // a non-number never sneaks past (JS-bypass guard)
+});
+
+test("B1-1: clampClipboardClearSeconds — clamps into [1, ceiling]; absent → bounded default", () => {
+  assert.equal(clampClipboardClearSeconds(0, 30), 1); // 'never clear' → the 1 s floor
+  assert.equal(clampClipboardClearSeconds(-1, 30), 1);
+  assert.equal(clampClipboardClearSeconds(3_600, 30), CLIPBOARD_CLEAR_MAX_SECONDS); // hours-long pin shrinks
+  assert.equal(clampClipboardClearSeconds(30, 30), 30); // the shipped wire default is never clamped
+  assert.equal(clampClipboardClearSeconds(undefined, 30), 30);
+  assert.equal(clampClipboardClearSeconds(Number.NaN, 30), 30);
 });

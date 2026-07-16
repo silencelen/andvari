@@ -1,4 +1,4 @@
-import { AndvariApi, ApiError, type MutationResult, type SyncResponse } from "./api";
+import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SyncResponse } from "./api";
 import { cardSubtitle, composeShortExpiry, digitsOnly } from "./card";
 import {
   adIdkey,
@@ -43,6 +43,7 @@ import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./ur
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor } from "./savetarget";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
+import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -63,7 +64,17 @@ import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type QuCoKey, type
  * Unlock flow (mirrors web Account.unlock): prelogin → Argon2id → login (authKey) → unwrap UVK
  * from accountKeys → sync → unwrap each vault key from its grant → decrypt items under the VK.
  */
-const SERVER_URL = "https://andvari.taila2dff2.ts.net";
+// ---- server endpoint + per-origin namespace (design 2026-07-15 §5.1/§4.2) ----
+// The baked tailnet constant is GONE: the origin is a per-device choice in storage.local
+// (serverurl.ts), preconfigured for DEFAULT_SERVER_URL. `serverReady` below loads it before any
+// network/namespace use; a storage change of SERVER_URL_KEY is an origin-clean switch (§4.1).
+let serverUrl = DEFAULT_SERVER_URL;
+let currentOriginKey = originKeyFor(DEFAULT_SERVER_URL);
+/** A storage key under the CURRENT origin's namespace (§4.2/B2-7): quick-unlock/PIN co-key
+ *  material and cached per-origin state live under `ns.<originKey>.<key>`, so a server switch can
+ *  never read, mint, or wipe another origin's material. Computed at CALL time — the switch path
+ *  locks under the OLD key, then flips `currentOriginKey`. */
+const nsk = (key: string): string => nsKey(currentOriginKey, key);
 
 const SKEY = "session"; // storage.session: SessionSnapshot
 const TKEY = "tabs"; //    storage.session: Record<tabId, TabState>
@@ -72,12 +83,16 @@ const NKEY = "lockNotice"; // storage.session: { kind:"idle"; seconds } — F26 
 // ensureLoaded MUST NOT hydrate `session` from it, so a locked-armed record leaves every `!session`
 // gate reporting fully locked. DKEY is the durable, NON-secret offer-card dismissed-once flag (breaker
 // B7). The non-extractable co-key lives in IndexedDB (below) — wiped on every QKEY wipe (breaker A1).
-const QKEY = "quickUnlock"; // storage.session: QuRecord (blob + attempt counter + locked-token stash)
-const DKEY = "quOfferDismissed"; // storage.local (non-secret): the offer card was dismissed once
-const UKEY = "updateInfo"; // storage.local (non-secret): UpdateInfo while a newer build is live
-const ULAST = "updateCheckedAt"; // storage.local: epoch ms of the last COMPLETED update fetch
-const USEQ = "updateAcceptedSeq"; // storage.local: highest signed-manifest seq ever accepted (§B anti-rollback)
-const UQUIET = "updateChannelQuiet"; // storage.local: { reason } — H2 fail-closed-QUIET state (§M-D5), never a nag
+// The five keys below are PER-ORIGIN state and are stored under `nsk(...)` (§4.2/B2-7): the
+// quick-unlock record + offer flag belong to the account/server they were minted against, and the
+// update-channel state describes ONE origin's /downloads channel (an unscoped USEQ would let one
+// origin's seq numbering poison another's anti-rollback). Every read/write goes through nsk().
+const QKEY = "quickUnlock"; // storage.session, namespaced: QuRecord (blob + counter + locked-token stash)
+const DKEY = "quOfferDismissed"; // storage.local, namespaced (non-secret): the offer card was dismissed once
+const UKEY = "updateInfo"; // storage.local, namespaced (non-secret): UpdateInfo while a newer build is live
+const ULAST = "updateCheckedAt"; // storage.local, namespaced: epoch ms of the last COMPLETED update fetch
+const USEQ = "updateAcceptedSeq"; // storage.local, namespaced: highest signed-manifest seq ever accepted (§B anti-rollback)
+const UQUIET = "updateChannelQuiet"; // storage.local, namespaced: { reason } — H2 fail-closed-QUIET (§M-D5), never a nag
 // M-D4b: ONLY these quiet reasons are ACTIONABLE and may surface a muted popup line. `seq_regression`
 // (already-accepted manifest re-polled — the normal steady state) and `disabled` are benign and must
 // NEVER render as "couldn't be verified" (permanent false alarm = the alert-fatigue failure M-D4b exists
@@ -172,6 +187,10 @@ interface Session {
  *  is deliberately NOT here (breaker B1 — memory-only custody); provenance + lastFullUnlockAt ride so
  *  the quick-unlock 24 h-window invariant (breaker A4) survives a wake. */
 interface SessionSnapshot {
+  /** The server origin this snapshot's tokens belong to (§4.1 rule 1). ensureLoaded refuses to
+   *  hydrate a snapshot minted against a DIFFERENT origin — e.g. the server was switched while the
+   *  SW was dead — so persisted tokens can never replay across a serverUrl change. */
+  origin: string;
   access: string;
   refresh: string | null;
   userId: string;
@@ -222,12 +241,41 @@ let loadPromise: Promise<void> | null = null;
  *  logged out = no socket (doLock tears it down first thing). Dies with the SW; T1/T3 revive. */
 let events: EventsHandle | null = null;
 
-const api = new AndvariApi(SERVER_URL, chrome.runtime.getManifest().version);
-// Awaited on every pair mutation — the consumed refresh token must reach the snapshot BEFORE the
-// refresh POST (a stale persisted pair resurrected on SW wake = revoked device). While unlocked it
-// lands in the full SessionSnapshot; DURING a quick-unlock redeem (session still null) it lands in the
-// locked-token stash so a mid-refresh SW death never resurrects a spent token (breaker A5, AM1 parity).
-api.onTokensChanged = () => persistTokens();
+/** Build the api client for [url] with its custodial handlers attached. A server switch swaps in a
+ *  FRESH instance (never a mutated baseUrl — §4.1 rule 1/B1-5: a new instance holds no tokens, so
+ *  an Authorization header can never cross a baseUrl change; the old instance becomes garbage). */
+function makeApi(url: string): AndvariApi {
+  const a = new AndvariApi(url, chrome.runtime.getManifest().version);
+  // Awaited on every pair mutation — the consumed refresh token must reach the snapshot BEFORE the
+  // refresh POST (a stale persisted pair resurrected on SW wake = revoked device). While unlocked it
+  // lands in the full SessionSnapshot; DURING a quick-unlock redeem (session still null) it lands in the
+  // locked-token stash so a mid-refresh SW death never resurrects a spent token (breaker A5, AM1 parity).
+  a.onTokensChanged = () => persistTokens();
+  // A 426 min-version pin (spec 03 §1) surfaces via checkForUpdate → the existing update banner is
+  // the download surface. checkForUpdate hits the static /downloads route (not api.ts), so it can
+  // never itself 426 — no re-entry loop (AM4).
+  a.onUpgradeRequired = () => void checkForUpdate(true);
+  return a;
+}
+let api = makeApi(serverUrl);
+
+/** Resolves once the persisted server origin is loaded and `serverUrl`/`currentOriginKey`/`api`
+ *  reflect it (plus the §4.2 one-shot legacy-key adoption). EVERY path that touches the api, the
+ *  per-origin namespace, or the network awaits this first (ensureLoaded, doLock, checkForUpdate) —
+ *  the module-eval placeholders above exist only so the symbols are never undefined. */
+const serverReady: Promise<void> = (async () => {
+  try {
+    const url = await getServerUrl();
+    if (url !== serverUrl) {
+      serverUrl = url;
+      currentOriginKey = originKeyFor(url);
+      api = makeApi(url);
+    }
+  } catch {
+    /* storage unavailable — stay on the baked default (getServerUrl already folds most failures) */
+  }
+  await adoptLegacyNamespaceOnce();
+})();
 
 // ---- quick-unlock Tier B engine (spec 01 §8.4) ----
 // The non-extractable co-key (breaker A1) persists in IndexedDB — a service worker CAN open IDB, and
@@ -268,22 +316,26 @@ function idbRun<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBR
   );
 }
 
+// Both quick-unlock stores key by the CURRENT origin's namespace at CALL time (§4.2/B2-7): a
+// server switch leaves the old origin's record + co-key standing under its own keys — redeemable
+// again on return, bounded by the staleness ceiling — and every wipe-class event (sign-out,
+// exhausted attempts, policy-forbid) erases ONLY the origin it happened under.
 const quCoKey: QuCoKey = {
   async generate() {
     const k = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, /* extractable */ false, ["encrypt", "decrypt"]);
-    await idbRun<void>("readwrite", (s) => s.put(k, IDB_KEY));
+    await idbRun<void>("readwrite", (s) => s.put(k, nsk(IDB_KEY)));
     return k;
   },
   async get() {
     try {
-      return (await idbRun<CryptoKey | undefined>("readonly", (s) => s.get(IDB_KEY))) ?? null;
+      return (await idbRun<CryptoKey | undefined>("readonly", (s) => s.get(nsk(IDB_KEY)))) ?? null;
     } catch {
       return null; // IDB unavailable / co-key gone → treated as a corrupt blob at redeem
     }
   },
   async delete() {
     try {
-      await idbRun<void>("readwrite", (s) => s.delete(IDB_KEY));
+      await idbRun<void>("readwrite", (s) => s.delete(nsk(IDB_KEY)));
     } catch {
       /* nothing to delete / IDB unavailable */
     }
@@ -294,12 +346,56 @@ const quCoKey: QuCoKey = {
  *  A7/A10/B7) — never via persistSession, which early-returns when session===null. */
 const quStore: QuStore = {
   async read() {
-    const got = await chrome.storage.session.get(QKEY);
-    return (got[QKEY] as QuRecord | undefined) ?? null;
+    const key = nsk(QKEY);
+    const got = await chrome.storage.session.get(key);
+    return (got[key] as QuRecord | undefined) ?? null;
   },
-  write: (rec) => chrome.storage.session.set({ [QKEY]: rec }),
-  remove: () => chrome.storage.session.remove(QKEY),
+  write: (rec) => chrome.storage.session.set({ [nsk(QKEY)]: rec }),
+  remove: () => chrome.storage.session.remove(nsk(QKEY)),
 };
+
+/** §4.2 adoption one-shot: pre-namespacing builds kept this material under BARE keys. Move it into
+ *  the CURRENT origin's namespace once — for every fielded install the current origin IS the new
+ *  default, and the tailnet front + the public origin are two fronts of the SAME instance (§6.4),
+ *  so the adopted quick-unlock blob/co-key stay redeemable. Idempotent + retried: the flag is
+ *  stamped only after all moves succeed; a partial move re-runs and no-ops the already-moved keys. */
+const NS_ADOPTED_KEY = "nsAdoptedOnce";
+async function adoptLegacyNamespaceOnce(): Promise<void> {
+  try {
+    if ((await chrome.storage.local.get(NS_ADOPTED_KEY))[NS_ADOPTED_KEY] === true) return;
+    // storage.local: the offer-dismissed flag + the update-channel state.
+    const legacyLocal = [DKEY, UKEY, ULAST, USEQ, UQUIET];
+    const got = await chrome.storage.local.get(legacyLocal);
+    const moved: Record<string, unknown> = {};
+    for (const k of legacyLocal) if (got[k] !== undefined) moved[nsk(k)] = got[k];
+    if (Object.keys(moved).length > 0) await chrome.storage.local.set(moved);
+    await chrome.storage.local.remove(legacyLocal);
+    // storage.session: a quick-unlock record armed by the pre-update build (present only if the
+    // browser session survived the update).
+    try {
+      const rec = (await chrome.storage.session.get(QKEY))[QKEY];
+      if (rec !== undefined) {
+        await chrome.storage.session.set({ [nsk(QKEY)]: rec });
+        await chrome.storage.session.remove(QKEY);
+      }
+    } catch {
+      /* storage.session unavailable — nothing to adopt */
+    }
+    // IndexedDB: the non-extractable co-key moves to its per-origin record key.
+    try {
+      const k = await idbRun<CryptoKey | undefined>("readonly", (s) => s.get(IDB_KEY));
+      if (k) {
+        await idbRun<void>("readwrite", (s) => s.put(k, nsk(IDB_KEY)));
+        await idbRun<void>("readwrite", (s) => s.delete(IDB_KEY));
+      }
+    } catch {
+      /* IDB unavailable — a missing co-key reads as a corrupt blob at redeem and self-wipes */
+    }
+    await chrome.storage.local.set({ [NS_ADOPTED_KEY]: true });
+  } catch {
+    /* best-effort: legacy keys + unset flag remain, so the next SW start retries the adoption */
+  }
+}
 
 /** One-shot enroll bench (breaker B8). Pure-JS Argon2id is ~linear in memBytes at fixed ops (and 64 MiB
  *  is multi-second), so a 4-candidate scan would cost ~15 s. Instead: measure ONE derive at the FLOOR
@@ -354,11 +450,6 @@ function persistTokens(): Promise<void> {
   if (redeemInFlight) return quickUnlock.setLockedTokens(api.getTokens());
   return Promise.resolve();
 }
-// A 426 min-version pin (spec 03 §1) surfaces via checkForUpdate → the existing update banner is
-// the download surface. checkForUpdate hits the static /downloads route (not api.ts), so it can
-// never itself 426 — no re-entry loop (AM4).
-api.onUpgradeRequired = () => void checkForUpdate(true);
-
 // ---- one-time per SW life; listeners MUST register synchronously (MV3 wake requirement) ----
 
 void chrome.action.setBadgeBackgroundColor({ color: BADGE_BG });
@@ -400,8 +491,16 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // The self-update check runs on its OWN daily schedule, independent of lock state (it reads only
 // the public downloads manifest — no vault, no session). A reload/update fires onInstalled, which
 // re-checks against the NEW installed version and so clears a now-satisfied signal immediately.
-chrome.runtime.onInstalled.addListener(() => void checkForUpdate(true));
-chrome.runtime.onStartup.addListener(() => void checkForUpdate(true));
+// Both hooks also reconcile the dynamic autofill registration (B2-5) — install/update is exactly
+// when a stale or missing registration is most likely.
+chrome.runtime.onInstalled.addListener(() => {
+  void checkForUpdate(true);
+  void serverReady.then(registerAutofillScripts);
+});
+chrome.runtime.onStartup.addListener(() => {
+  void checkForUpdate(true);
+  void serverReady.then(registerAutofillScripts);
+});
 void (async () => {
   // Survive SW recycling without resetting the period on every wake (that would starve a
   // 1440-min alarm): create it only when absent. The wake-path check is throttled by ULAST.
@@ -418,6 +517,134 @@ void (async () => {
 // T1: EVERY SW start (browser startup, install, popup/content-message/alarm wake) re-establishes
 // the live dirty-bell socket if a restorable session exists — no-op when locked or logged out.
 void ensureSocket();
+
+// ---- dynamic autofill registration (design §5.1, B2-5 — security-critical) ----
+// The static manifest `content_scripts` entry is GONE from both manifests: a static entry's
+// exclude_matches is immutable at runtime, so keeping it would inject the autofill UI into every
+// SELF-HOSTED vault origin (and adding a dynamic twin would double-inject everywhere else).
+// Autofill registers dynamically instead, excludeMatches recomputed from the configured server
+// origin + the shipped default. Effective injection is additionally bounded by GRANTED host
+// permissions (Chrome: optional_host_permissions granted at runtime; Firefox MV3: all host
+// permissions are optional-by-default) — the wave-3 options/grant flow widens the effective set,
+// and permissions.onAdded below re-reconciles the moment a grant lands.
+const AUTOFILL_SCRIPT_ID = "autofill";
+
+/** Reconcile the registered autofill content script with the current serverUrl. Runs on every SW
+ *  start, on install/update, on every server switch, and on every host-permission grant — a
+ *  registration that failed (or predates a switch) is detected and self-healed here (§5.1
+ *  corollary: a failure means no autofill until the SW next runs, never a mis-scoped injection). */
+async function registerAutofillScripts(): Promise<void> {
+  const excludeMatches: string[] = [];
+  for (const origin of new Set([serverUrl, DEFAULT_SERVER_URL])) {
+    const p = originMatchPattern(origin);
+    if (p === null) {
+      // The vault origin cannot be expressed as a match pattern (e.g. an IPv6-literal host), so it
+      // cannot be EXCLUDED — fail CLOSED to "no autofill anywhere" rather than inject into a vault.
+      await unregisterAutofillScripts();
+      return;
+    }
+    if (!excludeMatches.includes(p)) excludeMatches.push(p);
+  }
+  const desired: chrome.scripting.RegisteredContentScript = {
+    id: AUTOFILL_SCRIPT_ID,
+    matches: ["http://*/*", "https://*/*"],
+    excludeMatches,
+    js: ["content.js"],
+    runAt: "document_idle",
+    allFrames: true,
+    persistAcrossSessions: true, // survives browser restarts; the SW-start reconcile covers the rest
+  };
+  try {
+    const existing = (await chrome.scripting.getRegisteredContentScripts({ ids: [AUTOFILL_SCRIPT_ID] }))[0];
+    if (!existing) {
+      await chrome.scripting.registerContentScripts([desired]);
+    } else if (!sameStringSet(existing.excludeMatches ?? [], excludeMatches)) {
+      await chrome.scripting.updateContentScripts([desired]);
+    }
+  } catch {
+    // Fail CLOSED (review 2026-07-16 D1): a failed register/update must NOT leave a STALE registration
+    // whose excludeMatches are the OLD origin while serverUrl has moved to a new (un-excluded) vault
+    // origin — that would inject content.js into the new vault's own UI (content.ts has no self-guard).
+    // Drop to "no autofill anywhere"; the next SW-start / permissions.onAdded reconcile retries.
+    await unregisterAutofillScripts();
+  }
+}
+
+async function unregisterAutofillScripts(): Promise<void> {
+  try {
+    await chrome.scripting.unregisterContentScripts({ ids: [AUTOFILL_SCRIPT_ID] });
+  } catch {
+    /* not registered */
+  }
+}
+
+function sameStringSet(a: string[], b: string[]): boolean {
+  return a.length === b.length && [...a].sort().join("\n") === [...b].sort().join("\n");
+}
+
+// B2-5: every SW start reconciles the registration (module scope runs on install, browser
+// startup, and every wake — including after a serverUrl change landed while this worker was dead).
+void serverReady.then(registerAutofillScripts);
+// A runtime host-permission grant (the wave-3 options flow; Firefox's first-run grant) can land
+// while the SW is alive — reconcile immediately so autofill starts without a browser restart.
+try {
+  chrome.permissions.onAdded.addListener(() => void serverReady.then(registerAutofillScripts));
+} catch {
+  /* permissions events unavailable on this engine — the SW-start reconcile covers it */
+}
+
+// ---- server switch (§4.1 origin-clean rules) ----
+// The ONLY writer of SERVER_URL_KEY is serverurl.setServerUrl (the wave-3 options page commits
+// through the Trust Gate); the SW reacts to the persisted change so the api/WS/namespace/autofill
+// all rebuild no matter which surface wrote it. Serialized: two rapid switches apply in order,
+// each locking under ITS old namespace first.
+let switchChain: Promise<void> = Promise.resolve();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !(SERVER_URL_KEY in changes)) return;
+  switchChain = switchChain.then(applyServerChange).catch(() => {});
+});
+
+/** Apply a persisted serverUrl change. Order is the whole story (§4.1): lock under the OLD origin
+ *  first — the armed branch stashes the live token pair into the OLD origin's quick-unlock record
+ *  (PRESERVED per B2-7, never wiped: an A→B→A round trip keeps A's PIN, bounded by the staleness
+ *  ceiling) — then swap in a FRESH api (a new instance carries no tokens, so no Authorization
+ *  header can cross the change) + the new namespace key, then recompute the autofill exclusions.
+ *  Old-origin namespaces are wiped ONLY via that origin's own policy-forbid or the explicit
+ *  wave-3 "remove data for this server" action (purgeOriginNamespace). */
+async function applyServerChange(): Promise<void> {
+  await ensureLoaded();
+  const next = await getServerUrl();
+  if (next === serverUrl) return;
+  redeemGen++; // an in-flight PIN redeem belongs to the old origin — it discards itself (owns() guard)
+  if (session) await doLock("manual"); // still under the OLD originKey: the stash lands in the old namespace
+  serverUrl = next;
+  currentOriginKey = originKeyFor(next);
+  api = makeApi(next);
+  await registerAutofillScripts();
+}
+
+/** Wave-3 hook (§4.2): the ONLY destructive per-origin path. The options page's explicit "remove
+ *  data for this server" action — and an origin's own policy-forbid — call this with THAT origin's
+ *  key. Removes that origin's namespaced keys everywhere (storage.local + storage.session + the
+ *  IDB co-key) and touches nothing else; safe for current and non-current origins alike. */
+export async function purgeOriginNamespace(originKey: string): Promise<void> {
+  const keys = [QKEY, DKEY, UKEY, ULAST, USEQ, UQUIET].map((k) => nsKey(originKey, k));
+  try {
+    await chrome.storage.local.remove(keys);
+  } catch {
+    /* best-effort */
+  }
+  try {
+    await chrome.storage.session.remove(keys);
+  } catch {
+    /* storage.session unavailable */
+  }
+  try {
+    await idbRun<void>("readwrite", (s) => s.delete(nsKey(originKey, IDB_KEY)));
+  } catch {
+    /* IDB unavailable */
+  }
+}
 
 // Re-offer a pending save once the post-login navigation lands. Belt: the content script also
 // polls pendingSave on load; braces: this reaches SPAs that "complete" without a fresh script.
@@ -450,8 +677,16 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 /** Lazy wake path: one storage.session read per SW life hydrates session + tab state. */
 function ensureLoaded(): Promise<void> {
   loadPromise ??= (async () => {
+    await serverReady; // api/originKey/namespace reflect the persisted origin before any state hydrates
     const got = await chrome.storage.session.get([SKEY, TKEY]);
-    const snap = got[SKEY] as SessionSnapshot | undefined;
+    let snap = got[SKEY] as SessionSnapshot | undefined;
+    // §4.1 rule 1 (no token replay across a serverUrl change): a snapshot minted against another
+    // origin is DROPPED, not hydrated — the user re-unlocks at the new server. A pre-0.16 snapshot
+    // (no `origin` field) fails the same check: fail closed, never guess.
+    if (snap && snap.origin !== serverUrl) {
+      snap = undefined;
+      await chrome.storage.session.remove(SKEY);
+    }
     if (snap && !session) {
       api.setTokens(snap.access || null, snap.refresh);
       session = {
@@ -470,8 +705,10 @@ function ensureLoaded(): Promise<void> {
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
         items: snap.items.map((i) => ({ ...i, formatVersion: i.formatVersion ?? 1 })),
       };
-      autoLockSeconds = snap.autoLockSeconds;
-      clipboardClearSeconds = snap.clipboardClearSeconds ?? DEFAULT_CLIPBOARD_CLEAR_SECONDS;
+      // Re-clamp on restore (§2.3/B1-1 defense-in-depth): a snapshot persisted by a pre-clamp
+      // build could carry a server value the ceilings would have refused.
+      autoLockSeconds = clampAutoLockSeconds(snap.autoLockSeconds, DEFAULT_AUTOLOCK_SECONDS);
+      clipboardClearSeconds = clampClipboardClearSeconds(snap.clipboardClearSeconds, DEFAULT_CLIPBOARD_CLEAR_SECONDS);
     }
     const t = got[TKEY] as Record<string, TabState> | undefined;
     if (t) tabs = new Map(Object.entries(t).map(([id, st]) => [Number(id), st]));
@@ -489,6 +726,7 @@ function persistSession(): Promise<void> {
   if (!session) return Promise.resolve();
   const t = api.getTokens();
   const snap: SessionSnapshot = {
+    origin: serverUrl, // binds the persisted tokens to their server (§4.1 rule 1 — see ensureLoaded)
     access: t.access ?? "",
     refresh: t.refresh,
     userId: session.userId,
@@ -520,6 +758,7 @@ function persistTabs(): void {
  *  a PIN. `signout` (an explicit user action / revocation) NEVER arms and full-wipes the blob + co-key.
  *  When quick unlock is not enrolled, an idle/manual lock stays byte-identical to today's full erase. */
 async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise<void> {
+  await serverReady; // the arm/wipe below must land in the CURRENT origin's namespace (§4.2)
   redeemGen++; // any lock invalidates an in-flight quick-unlock redeem (owns() guard, breaker A5⊕B4)
   const toks = api.getTokens(); // capture the live pair BEFORE clearing — the armed branch stashes it
   events?.close(); // live socket + all its timers die FIRST — locked means no bell traffic at all
@@ -629,7 +868,7 @@ async function ensureSocket(reset = false): Promise<void> {
   if (!session) return;
   if (!events || events.closed) {
     events = startEvents({
-      wsUrl: SERVER_URL.replace(/^http/, "ws") + "/api/v1/events",
+      wsUrl: serverUrl.replace(/^http/, "ws") + "/api/v1/events",
       mintTicket,
       // The DOM WebSocket satisfies WsLike at runtime; TS's strict property variance on the on*
       // slots blocks the structural check — bridge it here, at the one real-socket seam.
@@ -659,7 +898,7 @@ interface UpdateInfo {
  *  the server origin unless the manifest already gave an absolute URL. */
 function downloadUrl(u: unknown): string | null {
   if (typeof u !== "string" || !u) return null;
-  return /^https?:\/\//i.test(u) ? u : SERVER_URL + u;
+  return /^https?:\/\//i.test(u) ? u : serverUrl + u;
 }
 
 /**
@@ -677,14 +916,19 @@ function downloadUrl(u: unknown): string | null {
  */
 async function checkForUpdate(force = false): Promise<void> {
   try {
+    await serverReady; // the channel state below is per-origin (nsk) and the fetch needs serverUrl
+    const kInfo = nsk(UKEY);
+    const kLast = nsk(ULAST);
+    const kSeq = nsk(USEQ);
+    const kQuiet = nsk(UQUIET);
     if (!force) {
-      const seen = (await chrome.storage.local.get(ULAST))[ULAST];
+      const seen = (await chrome.storage.local.get(kLast))[kLast];
       if (typeof seen === "number" && Date.now() - seen < UPDATE_MIN_GAP_MS) return;
     }
     // §M-D3: a build pinning only the placeholder sentinel has NO update path — do not even fetch.
     if (!updatesEnabled()) return;
 
-    const base = SERVER_URL + "/downloads/manifest.json";
+    const base = serverUrl + "/downloads/manifest.json";
     let mResp: Response;
     let sResp: Response;
     try {
@@ -699,13 +943,13 @@ async function checkForUpdate(force = false): Promise<void> {
       // (§M-D5): otherwise, once ULAST ages past UPDATE_MIN_GAP_MS, every SW wake (content message,
       // popup, alarm) would re-hammer two no-store fetches indefinitely. A genuine network reject is
       // caught above and left un-stamped for prompt retry when connectivity returns.
-      await chrome.storage.local.set({ [UQUIET]: { reason: "manifest_fetch_failed" }, [ULAST]: Date.now() });
+      await chrome.storage.local.set({ [kQuiet]: { reason: "manifest_fetch_failed" }, [kLast]: Date.now() });
       return;
     }
 
     const raw = new Uint8Array(await mResp.arrayBuffer()); // EXACT bytes — never resp.json() (§M-D6)
     const sigText = await sResp.text();
-    const storedSeq = (await chrome.storage.local.get(USEQ))[USEQ];
+    const storedSeq = (await chrome.storage.local.get(kSeq))[kSeq];
     // §M-D4(a) anti-rollback FLOOR: a fresh install (or a wiped USEQ) starts at MIN_SEQ, not 0, so a
     // T1 server can't steer it to any validly-signed-but-older (known-vuln) manifest below the floor.
     const lastAcceptedSeq = Math.max(typeof storedSeq === "number" ? storedSeq : 0, MIN_SEQ);
@@ -720,13 +964,13 @@ async function checkForUpdate(force = false): Promise<void> {
         // Treat it like a clean verified read — CLEAR any prior quiet marker (healthy channel) and stamp
         // ULAST. Surfacing this as "couldn't be verified" would be a permanent false alarm, and stamping
         // it would also clobber a real prior `unverified`/`stale` signal (fail-open). Leave [UKEY] alone.
-        await chrome.storage.local.remove(UQUIET);
-        await chrome.storage.local.set({ [ULAST]: Date.now() });
+        await chrome.storage.local.remove(kQuiet);
+        await chrome.storage.local.set({ [kLast]: Date.now() });
         return;
       }
       // Fail-closed QUIET (unverified/malformed/stale): record the distinct ACTIONABLE reason; leave any
       // prior VERIFIED [UKEY] signal alone.
-      await chrome.storage.local.set({ [UQUIET]: { reason: decision.reason }, [ULAST]: Date.now() });
+      await chrome.storage.local.set({ [kQuiet]: { reason: decision.reason }, [kLast]: Date.now() });
       return;
     }
 
@@ -734,13 +978,13 @@ async function checkForUpdate(force = false): Promise<void> {
     const ext = decision.ext;
     const latest = typeof ext.version === "string" ? ext.version : null;
     const current = chrome.runtime.getManifest().version;
-    await chrome.storage.local.remove(UQUIET); // a clean verified read clears the quiet marker
+    await chrome.storage.local.remove(kQuiet); // a clean verified read clears the quiet marker
     if (latest && isNewerVersion(latest, current)) {
       const info: UpdateInfo = { latest, chromeUrl: downloadUrl(ext.chromeUrl), firefoxUrl: downloadUrl(ext.firefoxUrl) };
-      await chrome.storage.local.set({ [UKEY]: info, [USEQ]: decision.seq, [ULAST]: Date.now() });
+      await chrome.storage.local.set({ [kInfo]: info, [kSeq]: decision.seq, [kLast]: Date.now() });
     } else {
-      await chrome.storage.local.remove(UKEY); // up to date (or unreadable version) → no signal
-      await chrome.storage.local.set({ [USEQ]: decision.seq, [ULAST]: Date.now() });
+      await chrome.storage.local.remove(kInfo); // up to date (or unreadable version) → no signal
+      await chrome.storage.local.set({ [kSeq]: decision.seq, [kLast]: Date.now() });
     }
   } catch {
     /* unexpected — any existing signal stands until a clean verified read supersedes it */
@@ -754,11 +998,13 @@ async function checkForUpdate(force = false): Promise<void> {
  *  (mutually exclusive, mirroring the desktop's `updateAvailable` vs `updateChannelNotice`). */
 async function updateStatus(): Promise<Res<"updateStatus">> {
   const current = chrome.runtime.getManifest().version;
-  const info = (await chrome.storage.local.get(UKEY))[UKEY] as UpdateInfo | undefined;
+  const kInfo = nsk(UKEY);
+  const kQuiet = nsk(UQUIET);
+  const info = (await chrome.storage.local.get(kInfo))[kInfo] as UpdateInfo | undefined;
   if (info && typeof info.latest === "string" && isNewerVersion(info.latest, current)) {
     return { current, latest: info.latest, chromeUrl: info.chromeUrl ?? null, firefoxUrl: info.firefoxUrl ?? null, quietReason: null };
   }
-  const quiet = (await chrome.storage.local.get(UQUIET))[UQUIET] as { reason?: unknown } | undefined;
+  const quiet = (await chrome.storage.local.get(kQuiet))[kQuiet] as { reason?: unknown } | undefined;
   // Surface ONLY actionable reasons (M-D4b): a benign seq_regression — or any marker a pre-fix build
   // may have persisted — must never render as a scary "couldn't be verified" line.
   const rawReason = quiet && typeof quiet.reason === "string" ? quiet.reason : null;
@@ -979,17 +1225,15 @@ function buildVaultKeys(sync: SyncResponse, uvk: Uint8Array, identity: { publicK
 
 /** Policy fetch — a failed fetch must never mean "no idle lock at all" (web resolveAutoLockSeconds
  *  falls back to a persisted value; here the conservative defaults stand in). Also captures the
- *  clipboard-clear window (E1-4): finite ≥ 0 else default 30. Shared by unlock + redeem (breaker B6
- *  re-fetches autoLockSeconds on a quick unlock). */
+ *  clipboard-clear window (E1-4). Shared by unlock + redeem (breaker B6 re-fetches autoLockSeconds
+ *  on a quick unlock). Values pass the §2.3/B1-1 CEILINGS (api.ts clamps): with the server now an
+ *  arbitrary self-host endpoint, a hostile policy's 0/oversized timer clamps into range — it can
+ *  tighten the lock/clear windows but never disable them. */
 async function fetchPolicyInto(): Promise<void> {
   try {
     const p = await api.clientPolicy();
-    autoLockSeconds =
-      typeof p.autoLockSeconds === "number" && Number.isFinite(p.autoLockSeconds) ? Math.max(0, p.autoLockSeconds) : DEFAULT_AUTOLOCK_SECONDS;
-    clipboardClearSeconds =
-      typeof p.clipboardClearSeconds === "number" && Number.isFinite(p.clipboardClearSeconds) && p.clipboardClearSeconds >= 0
-        ? p.clipboardClearSeconds
-        : DEFAULT_CLIPBOARD_CLEAR_SECONDS;
+    autoLockSeconds = clampAutoLockSeconds(p.autoLockSeconds, DEFAULT_AUTOLOCK_SECONDS);
+    clipboardClearSeconds = clampClipboardClearSeconds(p.clipboardClearSeconds, DEFAULT_CLIPBOARD_CLEAR_SECONDS);
   } catch {
     autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
     clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
@@ -1216,7 +1460,8 @@ async function quStateForStatus(): Promise<{ enrolled: boolean; armed: boolean; 
   const st = await quickUnlock.status();
   let offerDismissed = false;
   try {
-    offerDismissed = (await chrome.storage.local.get(DKEY))[DKEY] === true;
+    const dk = nsk(DKEY);
+    offerDismissed = (await chrome.storage.local.get(dk))[dk] === true;
   } catch {
     /* storage.local unavailable — treat as not-dismissed (the offer is best-effort chrome) */
   }
@@ -1226,7 +1471,7 @@ async function quStateForStatus(): Promise<{ enrolled: boolean; armed: boolean; 
 /** Remember the offer card was dismissed once (breaker B7 — durable, storage.local, NON-secret). */
 async function dismissQuickUnlockOffer(): Promise<Res<"dismissQuickUnlockOffer">> {
   try {
-    await chrome.storage.local.set({ [DKEY]: true });
+    await chrome.storage.local.set({ [nsk(DKEY)]: true });
   } catch {
     /* best-effort */
   }
