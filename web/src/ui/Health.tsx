@@ -10,6 +10,8 @@ import { ViewHeader } from "./ViewHeader";
 interface Props {
   store: VaultStore;
   client: ApiClient;
+  /** CR-08: keys the in-session breach cache per-account so a shared browser never cross-contaminates. */
+  userId: string;
   onOpenItem: (itemId: string) => void;
 }
 
@@ -23,7 +25,7 @@ interface Row {
 }
 
 /** Vault-wide password health: strength, reuse, and (on demand) HIBP breach exposure. */
-export function Health({ store, client, onOpenItem }: Props) {
+export function Health({ store, client, userId, onOpenItem }: Props) {
   const rows = useMemo<Row[]>(() => {
     const logins = store.list().filter((it) => it.doc.type === "login" && it.doc.login?.password);
     const byPassword = new Map<string, number>();
@@ -47,7 +49,7 @@ export function Health({ store, client, onOpenItem }: Props) {
   // itemId → breach count, filled by a scan and cached ON-DEVICE (by itemId — never the plaintext
   // password, which is only the scan's lookup key) so it survives navigating away from Health.
   // Loaded from the cache on mount → the button reads "Rescan" and the column shows last results.
-  const [breachByItem, setBreachByItem] = useState<Map<string, number> | null>(() => loadBreachCache());
+  const [breachByItem, setBreachByItem] = useState<Map<string, number> | null>(() => loadBreachCache(userId));
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [scanErr, setScanErr] = useState("");
@@ -77,7 +79,7 @@ export function Health({ store, client, onOpenItem }: Props) {
       // Persist + display keyed by itemId — never the plaintext password (the scan's lookup key).
       const byItem = new Map(rows.map((r) => [r.itemId, result.get(r.password) ?? 0]));
       setBreachByItem(byItem);
-      saveBreachCache(byItem);
+      saveBreachCache(userId, byItem);
     } catch {
       setScanErr("Breach scan failed — the HIBP relay is unavailable. Partial results were discarded.");
     } finally {
@@ -176,23 +178,41 @@ export function Health({ store, client, onOpenItem }: Props) {
   );
 }
 
-// On-device breach cache — itemId → count only (no password material; itemIds are UUIDs, so a stale
-// entry from another account simply never matches a current row). Survives Health unmount/remount.
-const BREACH_CACHE_KEY = "andvari:breach-cache:v1";
-function loadBreachCache(): Map<string, number> | null {
+// In-session breach cache — itemId → count only (no password material). CR-08 (compliance
+// 2026-07-15): this used to persist to a GLOBAL localStorage key ("andvari:breach-cache:v1"),
+// where a map derived from decrypted passwords (a >10M count fingerprints a top-100 password)
+// survived sign-out/revocation, landed on the public break-glass origin, and cross-contaminated
+// accounts on a shared browser — a client-at-rest artifact outside the spec 02 §5 table and every
+// WC-13 wipe gate. Fix: keep it in MEMORY only, keyed PER-ACCOUNT, matching the wipe table —
+// retained across a lock and Health unmount/remount (module scope survives a phase change), GONE
+// on sign-out (clearBreachCache, called from App.signOut, the one wipe choke point) and on reload.
+// Nothing is written at rest, so there is no residue, no public-origin leak, and no gate to bypass.
+const breachCacheByUser = new Map<string, Map<string, number>>();
+/** CR-08: the retired global localStorage key. Proactively purged (below) so the pre-fix at-rest
+ *  residue — item count + a password-popularity fingerprint on the public break-glass origin — is
+ *  removed from devices that ran the old build, not merely left un-updated. */
+const LEGACY_BREACH_CACHE_KEY = "andvari:breach-cache:v1";
+function purgeLegacyBreachResidue(): void {
   try {
-    const raw = localStorage.getItem(BREACH_CACHE_KEY);
-    return raw ? new Map(Object.entries(JSON.parse(raw) as Record<string, number>)) : null;
+    localStorage.removeItem(LEGACY_BREACH_CACHE_KEY);
   } catch {
-    return null;
+    /* storage unreachable (privacy mode / non-window) — nothing to purge */
   }
 }
-function saveBreachCache(byItem: Map<string, number>): void {
-  try {
-    localStorage.setItem(BREACH_CACHE_KEY, JSON.stringify(Object.fromEntries(byItem)));
-  } catch {
-    /* private mode / quota — the in-memory map still works for this session */
-  }
+function loadBreachCache(userId: string): Map<string, number> | null {
+  purgeLegacyBreachResidue(); // opening Health scrubs any old at-rest map first
+  const m = breachCacheByUser.get(userId);
+  return m ? new Map(m) : null; // a copy — callers own their snapshot; never share the stored ref
+}
+function saveBreachCache(userId: string, byItem: Map<string, number>): void {
+  breachCacheByUser.set(userId, new Map(byItem));
+}
+/** CR-08 / WC-13 §E.4: drop every account's in-memory breach map. Called from App.signOut (the
+ *  declared wipe choke point) so the map is GONE on sign-out / revocation / definitive-401 — never
+ *  outliving the session the way the old localStorage key did. A lock does NOT call this (retained). */
+export function clearBreachCache(): void {
+  breachCacheByUser.clear();
+  purgeLegacyBreachResidue(); // and scrub the legacy at-rest residue at the wipe choke point
 }
 
 function Tile({ label, value, tone, hint }: { label: string; value: string; tone?: "good" | "bad"; hint?: string }) {

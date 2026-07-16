@@ -408,7 +408,35 @@ export class VaultStore {
      *  through `this.cache` unconditionally; NullCache no-ops). The cross-tab lock name
      *  derives from `account.userId` (§D.5). */
     private cache: VaultCache = new NullCache(),
-  ) {}
+  ) {
+    // CR-01 (compliance 2026-07-15): the moment this cache's IndexedDB connection closes out
+    // from under us — a browser-forced close (eviction/corruption) or a sibling tab / session-
+    // level wipe firing deleteDatabase → versionchange — idbcache invokes onClosed. Demote to
+    // NullCache so a closed handle can never linger with durable=true and silently swallow
+    // (black-hole) an offline write. Set on construction; demoteCache re-points nothing (the
+    // NullCache it swaps in never fires onClosed).
+    this.cache.onClosed = () => this.demoteCache();
+  }
+
+  /**
+   * CR-01 (breaker #1): sever the live store from a cache whose IndexedDB connection has CLOSED.
+   * A closed IdbVaultCache keeps `durable=true` yet resolves every write as a guarded no-op
+   * (§D.2a), so without this save()/remove() would enqueue into a black hole and report SUCCESS
+   * while the mutation is neither pushed, queued, nor refused (the CR-01 offline-write black hole).
+   * Demoting to NullCache flips durable=false, so offlineQueueAllowed() refuses the queue and the
+   * write routes to the real flushChunk send (refuse-not-degrade). Wired two ways: the cache's
+   * onClosed callback (idbcache versionchange/onclose — covers a sibling tab / setOfflineCopyEnabled
+   * / wipeVaultCache / applyOrgOfflineCachePolicy, all of which deleteDatabase this live handle) AND
+   * a direct call from the Settings offline-copy toggle/remove for a synchronous demote. Idempotent;
+   * does NOT wipe (whoever closed the DB owns deleteDatabase) and does NOT set the stuck-cache
+   * storage-error flag (this is a clean close, not the 3-strike breaker). Safe when already cache-less.
+   */
+  demoteCache(): void {
+    if (!this.cache.durable) return; // already NullCache — nothing to demote
+    const dead = this.cache;
+    this.cache = new NullCache();
+    dead.close(); // programmatic close never re-fires onClosed — no reentrancy
+  }
 
   list(): VaultItem[] {
     return [...this.itemsById.values()].sort((a, b) => a.doc.name.localeCompare(b.doc.name));
@@ -1909,7 +1937,7 @@ export class VaultStore {
     }
 
     const m = this.putMutation(id, targetVaultId, doc, existing?.rev ?? 0);
-    const mayQueue = newFiles.length === 0 && (await this.offlineQueueAllowed());
+    let mayQueue = newFiles.length === 0 && (await this.offlineQueueAllowed());
 
     const committedAt = Date.now();
     const optimisticRev = (existing?.rev ?? 0) + 1; // the reconcile pull trues the rev up
@@ -1918,7 +1946,16 @@ export class VaultStore {
     // false there), so the direct flushChunk branch below sends m instead. M2: the pre-edit
     // snapshot rides the row (sealed, local-only) so a denial classified only after a restart
     // still reverts — hydrate reloads it into preEditByMutation.
-    await this.cache.enqueue(m, this.durablePreEdit(existing ?? null, "put", optimisticRev, committedAt));
+    // CR-01 (breaker #1): enqueue() now VERIFIES the row landed. A durable cache whose connection
+    // closed mid-session (sibling wipe / force-close) keeps durable=true but no-ops every write
+    // (§D.2a) — so an unverified enqueue would black-hole this save yet flushQueue would drain an
+    // empty queue and report SUCCESS. When the row did NOT land, demote the dead handle and refuse
+    // the queue so the send below routes to the REAL flushChunk (refuse-not-degrade), never silent.
+    const enqueued = await this.cache.enqueue(m, this.durablePreEdit(existing ?? null, "put", optimisticRev, committedAt));
+    if (!enqueued) {
+      this.demoteCache(); // no-op if already cache-less; else sever the dead handle
+      mayQueue = false; // this write can't be durably queued — do the real send or refuse
+    }
     // Optimistic apply — memory AND disk — so the item renders immediately with a "pending
     // sync" mark and survives a restart (the queue row carries the mutation, not the envelope).
     // C2 (a): the pre-edit truth, keyed by mutationId — if this write is later classified a
@@ -1938,9 +1975,10 @@ export class VaultStore {
     // `denied` result is STAGED (not thrown) and an OFFLINE reject propagates.
     const displaced: { item: WireItem; winnerRev: number }[] = [];
     try {
-      if (this.cache.durable) {
+      if (this.cache.durable && enqueued) {
         await this.flushQueue(); // materializes its own displaced conflicts internally
       } else {
+        // NullCache, or a durable row that did NOT land (CR-01 demoted handle): send m directly.
         await this.flushChunk([m], displaced);
       }
     } catch (e) {
@@ -2147,10 +2185,17 @@ export class VaultStore {
     const existing = this.itemsById.get(itemId);
     if (!existing) return;
     const m = this.deleteMutation(itemId, existing.vaultId, existing.rev);
-    const mayQueue = await this.offlineQueueAllowed();
+    let mayQueue = await this.offlineQueueAllowed();
     // Durable, stable mutationId (idempotent retry); no-op on NullCache. M2: the pre-delete
     // snapshot rides the row (sealed, local-only) so a post-restart denial still restores.
-    await this.cache.enqueue(m, this.durablePreEdit(existing, "delete", 0, 0));
+    // CR-01 (breaker #1): as in save() — a verified-not-landed enqueue (a closed/force-wiped cache
+    // that still reports durable=true) must refuse the queue and route to the real send, never
+    // report a black-holed delete as success (a "deleted" item that silently resurrects on reload).
+    const enqueued = await this.cache.enqueue(m, this.durablePreEdit(existing, "delete", 0, 0));
+    if (!enqueued) {
+      this.demoteCache();
+      mayQueue = false;
+    }
     // C2 (a): the pre-delete truth — a GENUINE denial restores the item live (memory + disk)
     // instead of leaving it locally-deleted forever while it stays live server-side.
     this.preEditByMutation.set(m.mutationId, { pre: existing, op: "delete", optimisticRev: 0, optimisticUpdatedAt: 0 });
@@ -2166,7 +2211,7 @@ export class VaultStore {
     // single-flighted, lock-wrapped); direct flushChunk only on NullCache (no-op enqueue).
     const displaced: { item: WireItem; winnerRev: number }[] = [];
     try {
-      if (this.cache.durable) {
+      if (this.cache.durable && enqueued) {
         await this.flushQueue();
       } else {
         await this.flushChunk([m], displaced); // send the delete; denied → staged; offline → throws

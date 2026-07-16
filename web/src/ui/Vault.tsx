@@ -454,7 +454,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
 
       <div className="wrap">
         {view === "health" ? (
-          <Health store={store} client={client} onOpenItem={goToItem} />
+          <Health store={store} client={client} userId={account.userId} onOpenItem={goToItem} />
         ) : view === "trash" ? (
           <TrashView store={store} onRestored={refresh} />
         ) : view === "sharing" ? (

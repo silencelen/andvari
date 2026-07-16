@@ -11,6 +11,7 @@ import { BrandSigil } from "./Sigil";
 import { Busy } from "./Busy";
 import { initTheme } from "./useTheme";
 import { Vault } from "./Vault";
+import { clearBreachCache } from "./Health";
 import { Announcer } from "./Msg";
 import { inactivityNotice } from "./format";
 import {
@@ -156,6 +157,7 @@ export function App() {
     clearSession();
     clientRef.current?.setTokens(null);
     if (uid) void wipeVaultCache(uid);
+    clearBreachCache(); // CR-08: the in-session HIBP breach map is dropped at the wipe choke point
     setPhase({ kind: "welcome", notice: lostCount });
   }, []);
 

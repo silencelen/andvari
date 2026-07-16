@@ -66,6 +66,17 @@ export interface KdfUpgradeInputs {
   policyKdfParams: KdfParams;
   /** A5: an admin recovery left a temporary password live — never silently re-key it (Android parity). */
   mustChangePassword: boolean;
+  /**
+   * CR-07 (compliance 2026-07-15): after a successful silent re-key, the web durable offline cache
+   * still holds the PRE-upgrade wrappedUvk/kdfParams, so an offline unlock keeps accepting the old
+   * (cheaper-to-crack) wrap until the next ONLINE unlock — the spec 05 T3 stale-wrap window this
+   * upgrade exists to close (WC-13 §E.4 wipe table: "password change → cached accountKeys REPLACED";
+   * F61 design §4 step 3 mandates the post-re-key persist). The caller passes a hook that re-caches
+   * the post-change accountKeys (session.refreshCachedAccountKeys), mirroring the user-initiated
+   * Settings change (Settings.tsx). Invoked ONLY after changePassword resolves; best-effort like the
+   * rest of this driver — a re-cache failure is swallowed. Optional so the pure unit tests may omit it.
+   */
+  onUpgraded?: () => void | Promise<void>;
 }
 
 /**
@@ -88,6 +99,10 @@ export async function maybeKdfUpgrade(inputs: KdfUpgradeInputs): Promise<void> {
     const currentAuthKey = await Account.deriveAuthKey(inputs.password, inputs.currentKdfSalt, inputs.currentKdfParams);
     const change = await inputs.account.buildPasswordChange(inputs.password, inputs.policyKdfParams);
     await inputs.client.changePassword({ currentAuthKey, ...change });
+    // CR-07: replace the cached accountKeys with the post-upgrade wrappedUvk/params so an offline
+    // unlock uses the NEW (stronger) wrap — the whole point of the re-key. Best-effort (swallowed
+    // by the catch below); runs only after the server-side change committed.
+    await inputs.onUpgraded?.();
   } catch {
     // Best-effort by design: a transient failure (offline, 5xx, a concurrent change) just leaves the
     // account on the old params; the next online full-password unlock re-attempts.

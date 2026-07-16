@@ -324,6 +324,10 @@ function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string 
     setNotice("");
     try {
       await setOfflineCopyEnabled(userId, enabled);
+      // CR-01: turning the copy OFF just deleted this account's cache DB out from under the LIVE
+      // store's open handle. Demote it synchronously so — even before the versionchange callback
+      // lands — a save()/remove() this session can't black-hole into the now-dead handle.
+      if (!enabled) store.demoteCache();
       setNotice(
         enabled
           ? "Offline copy turned on — it will be created at your next unlock or sign-in."
@@ -341,6 +345,10 @@ function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string 
     setNotice("");
     try {
       await wipeVaultCache(userId);
+      // CR-01: the DB the live store held is gone — sever the store from the dead handle now so a
+      // later write routes to the real send instead of no-oping into it (the versionchange callback
+      // does this too; this is the synchronous belt).
+      store.demoteCache();
       setNotice(
         "Offline copy removed. It will be re-created at your next unlock — turn the toggle off to keep this device clean.",
       );

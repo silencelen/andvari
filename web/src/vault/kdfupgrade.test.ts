@@ -93,6 +93,70 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
     expect(client.changePassword).toHaveBeenCalledWith({ currentAuthKey: "current-auth", ...change });
   });
 
+  it("CR-07: calls onUpgraded AFTER changePassword resolves (re-cache the post-upgrade accountKeys)", async () => {
+    vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
+    const { client, account } = mocks();
+    const order: string[] = [];
+    client.changePassword = vi.fn(async () => {
+      order.push("changePassword");
+    });
+    const onUpgraded = vi.fn(async () => {
+      order.push("onUpgraded");
+    });
+    await maybeKdfUpgrade({
+      client,
+      account,
+      password: "correct horse",
+      currentKdfSalt: "old-salt",
+      currentKdfParams: BELOW_FLOOR,
+      policyKdfParams: FLOOR,
+      mustChangePassword: false,
+      onUpgraded,
+    });
+    expect(onUpgraded).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["changePassword", "onUpgraded"]); // strictly after the server-side change
+  });
+
+  it("CR-07: does NOT call onUpgraded when no upgrade fires (already at policy params)", async () => {
+    vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
+    const { client, account } = mocks();
+    const onUpgraded = vi.fn();
+    await maybeKdfUpgrade({
+      client,
+      account,
+      password: "pw",
+      currentKdfSalt: "s",
+      currentKdfParams: FLOOR,
+      policyKdfParams: FLOOR,
+      mustChangePassword: false,
+      onUpgraded,
+    });
+    expect(client.changePassword).not.toHaveBeenCalled();
+    expect(onUpgraded).not.toHaveBeenCalled();
+  });
+
+  it("CR-07: an onUpgraded failure is swallowed — the re-key still counts as done (best-effort)", async () => {
+    vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
+    const { client, account } = mocks();
+    const onUpgraded = vi.fn(async () => {
+      throw new Error("cache write blew up");
+    });
+    await expect(
+      maybeKdfUpgrade({
+        client,
+        account,
+        password: "pw",
+        currentKdfSalt: "s",
+        currentKdfParams: BELOW_FLOOR,
+        policyKdfParams: FLOOR,
+        mustChangePassword: false,
+        onUpgraded,
+      }),
+    ).resolves.toBeUndefined();
+    expect(client.changePassword).toHaveBeenCalledTimes(1);
+    expect(onUpgraded).toHaveBeenCalledTimes(1);
+  });
+
   it("does NOT fire when the account is ALREADY at the policy params (no argon2id, no PUT)", async () => {
     const deriveSpy = vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
     const { client, account } = mocks();

@@ -23,6 +23,7 @@ import {
   ensureCachePersistenceRequested,
   installId,
   offlineCopyStamp,
+  refreshCachedAccountKeys,
   saveSession,
   webCacheEnabled,
   wipeVaultCache,
@@ -30,8 +31,24 @@ import {
 } from "./session";
 import { BrandSigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength, masterPasswordHasNonAscii, meetsMasterPasswordFloor } from "./strength";
+import { useAutoLock } from "./useAutoLock";
 
 type Mode = { unlock: Session } | { fresh: true };
+
+/**
+ * CR-02 (compliance 2026-07-15): the recovery-phrase reveal / capture-gate / self-recovery screens
+ * hold a fully-unlocked Account and/or a UVK-equivalent recovery secret (TM-R9) OUTSIDE the vault
+ * phase, where App's inactivity auto-lock (keyed to phase.kind==="vault") never arms — so a
+ * walked-away device could display a standing account-takeover credential indefinitely, outside the
+ * TM-T4 auto-lock bound spec 05 claims exists (KH-22). A fixed conservative idle cap bounds it. The
+ * same activity-reset useAutoLock as the vault, so an actively-typing user is never cut off; only a
+ * genuinely-idle screen expires. On expiry: zero the secret, drop the held Account/store, land on the
+ * sign-in/unlock card with a non-alarming notice — the capture/reveal re-fires with a FRESH phrase at
+ * the next sign-in (recoveryConfirmed stays false), the finding's prescribed heal path.
+ */
+const REVEAL_TIMEOUT_S = 300; // 5 minutes idle
+/** Static (never interpolated — §F.7). Never implies the account/vault is broken. */
+const REVEAL_TIMEOUT_NOTICE = "Timed out for your security. Sign in again — a fresh recovery phrase will be shown.";
 
 /** What the vault shell needs to know about how this session came to be. */
 export interface LoginMeta {
@@ -165,6 +182,9 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
             clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
             onReady={onReady}
             onSignOut={() => onForget()}
+            // CR-02: on idle-timeout, sign out with the timeout notice (onForget routes it through
+            // App.signOut → the §E.4 wipe + welcome card). The gate re-fires with a fresh phrase.
+            onTimeout={() => onForget(REVEAL_TIMEOUT_NOTICE)}
           />
         </div>
       </div>
@@ -224,6 +244,9 @@ function FreshStart({ client, policy, policyError, policyErrorMessage, onRetryPo
         policy={policy}
         onDone={(n) => { setRecovering(false); setTab("signin"); setLocalNotice(n); }}
         onCancel={() => setRecovering(false)}
+        // CR-02: the reset step holds the UVK-equivalent recovery secret — an idle-timeout lands
+        // back on Sign-in with the notice (same as onDone's placement, distinct semantics).
+        onTimedOut={(n) => { setRecovering(false); setTab("signin"); setLocalNotice(n); }}
       />
     );
   }
@@ -281,7 +304,7 @@ function FreshStart({ client, policy, policyError, policyErrorMessage, onRetryPo
         {tab === "signin" ? (
           <SignIn client={client} policy={policy} onReady={onReady} onForgot={() => { setLocalNotice(""); setRecovering(true); }} onBlockingChange={setBlocking} />
         ) : (
-          <Enroll client={client} policy={policy} policyError={policyError} policyErrorMessage={policyErrorMessage} onRetryPolicy={onRetryPolicy} onReady={onReady} prefill={consented ? validPrefill : null} onBlockingChange={setBlocking} />
+          <Enroll client={client} policy={policy} policyError={policyError} policyErrorMessage={policyErrorMessage} onRetryPolicy={onRetryPolicy} onReady={onReady} prefill={consented ? validPrefill : null} onBlockingChange={setBlocking} onTimedOut={(n) => { setBlocking(false); setTab("signin"); setLocalNotice(n); }} />
         )}
       </div>
     </div>
@@ -357,7 +380,9 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
       // (meta.mustChangePassword ← s.mustChangePassword), so the silent re-key can safely honour A5.
       // Detached + best-effort: never blocks/fails sign-in; maybeKdfUpgrade no-ops before any argon2id
       // when already current or must-change. LIVE policy only (App.loadPolicy) — never a stale value.
-      if (policy) void maybeKdfUpgrade({ client, account, password, currentKdfSalt: s.accountKeys.kdfSalt, currentKdfParams: s.accountKeys.kdfParams, policyKdfParams: policy.kdfParams, mustChangePassword: meta.mustChangePassword });
+      // CR-07: on a successful silent re-key, replace the durable cache's accountKeys (mirrors the
+      // user-initiated Settings change at Settings.tsx) — else the pre-upgrade wrap lingers offline.
+      if (policy) void maybeKdfUpgrade({ client, account, password, currentKdfSalt: s.accountKeys.kdfSalt, currentKdfParams: s.accountKeys.kdfParams, policyKdfParams: policy.kdfParams, mustChangePassword: meta.mustChangePassword, onUpgraded: () => refreshCachedAccountKeys(client, account.userId) });
       onReady(account, store, meta);
     } catch (e) {
       if (e instanceof ApiError && e.code === "totp_required") {
@@ -392,6 +417,26 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
   // §F.9: the un-skippable capture gate replaces the sign-in form (it renders inside FreshStart's card,
   // whose brand hero + hidden-while-blocking tab bar already surround it).
   if (capture) {
+    // Mirror App's signOut (unreachable from here): drop the persisted session + tokens and
+    // fall back to the sign-in form. Signing out of the gate is SAFE — the flag is still false,
+    // so the capture gate simply re-fires at the next sign-in.
+    // §E.4 (S3-1): SignIn.submit already SEEDED the durable cache (openVaultCache + setAccountKeys)
+    // BEFORE this gate mounted, so — unlike App.signOut, the choke point this path can't reach —
+    // the wipe MUST happen here too, or a sign-out on a shared machine leaves crackable ciphertext +
+    // the user's email in someone else's profile forever. Read the userId before clearSession, then
+    // wipe (fire-and-forget; deleteDatabase self-completes, §D.5.3). `notice` (CR-02): the idle-
+    // timeout escape surfaces the timeout copy on the returned sign-in form.
+    const signOutOfCapture = (notice = "") => {
+      const uid = capture.account.userId;
+      clearSession();
+      client.setTokens(null);
+      void wipeVaultCache(uid);
+      setPassword("");
+      setTotp("");
+      setTotpNeeded(false);
+      setErr(notice);
+      setCapture(null);
+    };
     return (
       <RecoveryCaptureGate
         client={client}
@@ -401,24 +446,9 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
         currentAuthKey={capture.currentAuthKey}
         clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
         onReady={onReady}
-        onSignOut={() => {
-          // Mirror App's signOut (unreachable from here): drop the persisted session + tokens and
-          // fall back to the sign-in form. Signing out of the gate is SAFE — the flag is still
-          // false, so the capture gate simply re-fires at the next sign-in.
-          // §E.4 (S3-1): SignIn.submit already SEEDED the durable cache (openVaultCache +
-          // setAccountKeys) BEFORE this gate mounted, so — unlike App.signOut, the choke point this
-          // path can't reach — the wipe MUST happen here too, or a sign-out on a shared machine leaves
-          // crackable ciphertext + the user's email in someone else's profile forever. Read the userId
-          // before clearSession, then wipe (fire-and-forget; deleteDatabase self-completes, §D.5.3).
-          const uid = capture.account.userId;
-          clearSession();
-          client.setTokens(null);
-          void wipeVaultCache(uid);
-          setPassword("");
-          setTotp("");
-          setTotpNeeded(false);
-          setCapture(null);
-        }}
+        onSignOut={() => signOutOfCapture()}
+        // CR-02: idle-timeout → same safe teardown, with the timeout notice on the sign-in form.
+        onTimeout={() => signOutOfCapture(REVEAL_TIMEOUT_NOTICE)}
       />
     );
   }
@@ -456,7 +486,7 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
   );
 }
 
-function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy, onReady, prefill, onBlockingChange }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; policyErrorMessage?: string; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; prefill?: EnrollPayload | null; onBlockingChange: (blocking: boolean) => void }) {
+function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy, onReady, prefill, onBlockingChange, onTimedOut }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; policyErrorMessage?: string; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; prefill?: EnrollPayload | null; onBlockingChange: (blocking: boolean) => void; onTimedOut: (notice: string) => void }) {
   // A prefill applies ONLY if the link was minted FOR this exact origin — the page IS served
   // by payload.o, so a mismatch means a redirect or a hand-mangled link; fall through to manual
   // entry rather than silently enrolling against the wrong server.
@@ -514,6 +544,23 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   // frame around the reveal mounting.
   const revealing = ready !== null && (secretRef.current !== null || pieceStale || settling);
   useLayoutEffect(() => { onBlockingChange(revealing); }, [revealing, onBlockingChange]);
+
+  // CR-02: the shown-once reveal holds a freshly-enrolled unlocked Account and displays the raw
+  // recovery phrase (UVK-equivalent). Bound the whole account-held window (ready !== null) by the
+  // idle auto-lock. On expiry zero the secret, SIGN OUT (the session was already saved at register),
+  // and route to Sign-in with the notice — the vault-entry capture gate re-fires with a fresh phrase
+  // at the next sign-in (recoveryConfirmed stays false), the finding's enroll heal path. Disabled
+  // (timeout 0) until a reveal is live. Activity resets it — an actively-typing member is never cut.
+  useAutoLock(ready !== null ? REVEAL_TIMEOUT_S : 0, () => {
+    const uid = ready?.account.userId;
+    secretRef.current?.fill(0);
+    secretRef.current = null;
+    clearSession();
+    client.setTokens(null);
+    if (uid) void wipeVaultCache(uid);
+    setReady(null);
+    onTimedOut(REVEAL_TIMEOUT_NOTICE);
+  });
 
   const retryPolicy = async () => {
     setRetrying(true);
@@ -953,6 +1000,7 @@ function RecoveryCaptureGate({
   clipboardClearSeconds,
   onReady,
   onSignOut,
+  onTimeout,
 }: {
   client: ApiClient;
   account: Account;
@@ -962,6 +1010,9 @@ function RecoveryCaptureGate({
   clipboardClearSeconds: number;
   onReady: (a: Account, s: VaultStore, m: LoginMeta) => void;
   onSignOut: () => void;
+  /** CR-02: idle-timeout escape — the caller drops the held session and lands on the sign-in/unlock
+   *  card with the timeout notice; the gate re-fires with a fresh phrase at next sign-in. */
+  onTimeout: () => void;
 }) {
   const secretRef = useRef<Uint8Array | null>(null);
   // design 2026-07-13: the server-minted id of the piece THIS gate committed + revealed — presented at
@@ -977,6 +1028,19 @@ function RecoveryCaptureGate({
   // One settlement per reveal (the confirm is awaited now, so the reveal outlives the first click).
   const settlingRef = useRef(false);
   const aliveRef = useRef(true);
+
+  // CR-02: this gate holds a fully-unlocked Account for its whole lifetime and displays the raw
+  // recovery phrase (a UVK-equivalent, TM-R9) once it reaches the reveal — bound it by the same idle
+  // auto-lock the vault uses. On expiry zero the secret + its piece id and hand control to the
+  // caller's timeout escape (drop the session, land on sign-in with the notice; the gate re-fires
+  // with a fresh phrase next sign-in). Activity resets it, so a member actively typing the phrase
+  // back is never interrupted.
+  useAutoLock(REVEAL_TIMEOUT_S, () => {
+    secretRef.current?.fill(0);
+    secretRef.current = null;
+    pieceIdRef.current = null;
+    onTimeout();
+  });
 
   // §F.7: zero the raw secret (and clear its piece id — together) on unmount as well as on confirm.
   // aliveRef re-arms across a StrictMode remount so a settlement landing after unmount can't onReady.

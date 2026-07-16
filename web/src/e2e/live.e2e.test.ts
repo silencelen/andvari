@@ -550,7 +550,42 @@ describe.skipIf(!BASE)("live server e2e", () => {
       drill4 = "ran(queued→flushed idempotent)";
     }
 
+    // ======================================================================
+    // DRILL 5 — wipe/close mid-queue must REFUSE-NOT-DEGRADE, never silent-success
+    // (CR-01, the compliance high). With the durable-queue path ARMED (persistence
+    // granted), force-close the live cache mid-session (models a sibling-tab wipe /
+    // browser-forced close: durable lingers true, every write no-ops §D.2a). A save()
+    // while ONLINE must do the REAL send (verifiable enqueue reports the row did not
+    // land → demote → direct flushChunk); it must never report success for a write that
+    // was neither pushed nor durably queued.
+    // ======================================================================
+    let drill5 = "skipped(no-persist-stub)";
+    if (persistStubbed) {
+      const q5Client = new ApiClient(BASE!, state.tokens);
+      const q5Cache = await openVaultCache(userId);
+      const q5Store = new VaultStore(q5Client, account, q5Cache);
+      await q5Store.hydrate();
+      await q5Store.sync();
+
+      // Force-close the live handle mid-session — the CR-01 black-hole precondition.
+      q5Cache.close();
+
+      const bhName = `forceclose-online-${A2_SENTINEL}-note`;
+      // MUST resolve by doing the real send (never throw here — we are online), and MUST NOT
+      // silently swallow: a fresh store syncing from the server must SEE the item.
+      await q5Store.save(null, { type: "note", name: bhName, notes: "written after a mid-session cache close" });
+      expect(q5Store.cacheDurable, "force-close: the store demoted the dead cache to NullCache").toBe(false);
+
+      const verify5 = new VaultStore(live, account, new NullCache());
+      await verify5.sync();
+      expect(
+        verify5.list().filter((i) => i.doc.name === bhName).length,
+        "force-close mid-queue online: the save did the REAL send — never a silent black hole (CR-01)",
+      ).toBe(1);
+      drill5 = "ran(forceclose→real-send,no-blackhole)";
+    }
+
     // Loud, grep-able completion marker for the harness log (proves the drills executed).
-    console.log(`PHASE-C-DRILLS-COMPLETE a2=absent+present offlineUnlock=ok tornResync=byte-identical queuedFlush=${drill4}`);
+    console.log(`PHASE-C-DRILLS-COMPLETE a2=absent+present offlineUnlock=ok tornResync=byte-identical queuedFlush=${drill4} forceCloseRefuse=${drill5}`);
   }, 120_000);
 });
