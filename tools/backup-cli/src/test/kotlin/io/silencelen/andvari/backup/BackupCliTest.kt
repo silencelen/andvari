@@ -112,6 +112,20 @@ class BackupCliTest {
     }
 
     @Test
+    fun secretsDescription_enumeratesFullMaskedSet() {
+        // CR-16 / PT-M6 residual: the `--secrets` help text (Main.kt usage) and the runtime
+        // WARNING banner (Main.kt dump) both interpolate Redact.secretsDescription, so this pins
+        // that the operator-facing text names card PAN, CVV and note bodies — not just the old
+        // password/TOTP/fileKey — and is derived from SECRET_KEYS so it can't drift again.
+        val d = Redact.secretsDescription
+        for (term in listOf("password", "TOTP seed", "fileKey", "card number", "security code", "note body")) {
+            assertTrue(term in d, "secrets description must name '$term' — got: $d")
+        }
+        // The description must cover every masked key (the Redact init-block coverage invariant).
+        assertEquals(Redact.SECRET_KEYS.size, 6, "SECRET_KEYS changed — update SECRET_LABELS to match")
+    }
+
+    @Test
     fun dump_secretsFlag_printsRaw() {
         val sample = TestBackups.buildSample("dump secrets phrase")
         val opened = Backup.open(crypto, sample.passphrase, sample.file)
