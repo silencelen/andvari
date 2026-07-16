@@ -1394,15 +1394,16 @@ export class VaultStore {
     return delivered;
   }
 
-  /** The row's plaintext `metaV` (spec 02 §4): it counts ONLY when it is an integral,
-   *  non-negative JSON number, else 0 — a string-encoded/fractional/negative value must
-   *  read identically on every client (the same read buildRenameMeta uses), or one impl
-   *  pins while another applies, forking the fleet in exactly the adversarial anti-replay
-   *  path this guard exists for. Core twin: SyncEngine.metaV. */
+  /** The row's plaintext `metaV` (spec 02 §4): counts ONLY as a non-negative integer ≤ 2^53
+   *  (Number.MAX_SAFE_INTEGER, via Number.isSafeInteger), else 0 — the SAME rule buildRenameMeta
+   *  applies, and it MUST read identically on every client (else one impl pins while another
+   *  applies, forking the fleet in the adversarial anti-replay path this guard exists for). The
+   *  safe-integer cap keeps a >2^63 literal reading 0 here AND on Kotlin (core Account.parseMetaV
+   *  reads the raw JSON token as a Double under the same ceiling). Core twin: SyncEngine.metaV. */
   private metaVOf(vaultId: string, metaBlob: string): number {
     const meta = this.account.decryptVaultMeta(vaultId, metaBlob);
     const v = meta.metaV;
-    return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : 0;
+    return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0;
   }
 
   private async materializeConflict(item: WireItem): Promise<void> {

@@ -469,10 +469,11 @@ export class Account {
    */
   buildRenameMeta(vaultId: string, metaBlob: string, newName: string): string {
     const meta = this.decryptVaultMeta(vaultId, metaBlob);
-    // spec 02 §4: metaV counts ONLY when it is an integral, non-negative JSON number,
-    // else 0 — the SAME rule store.ts metaVOf applies, so write and apply agree.
+    // spec 02 §4: metaV counts ONLY as a non-negative integer ≤ 2^53 (Number.MAX_SAFE_INTEGER),
+    // else 0 — the SAME rule store.ts metaVOf applies, so write and apply agree on every client
+    // (the safe-integer cap makes a >2^63 literal read 0 here AND on Kotlin's core parseMetaV).
     const v = meta.metaV;
-    const metaV = typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : 0;
+    const metaV = typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0;
     const next = { ...meta, name: newName, metaV: metaV + 1 };
     return toB64(seal(this.vk(vaultId), utf8(JSON.stringify(next)), adVaultMeta(vaultId)));
   }

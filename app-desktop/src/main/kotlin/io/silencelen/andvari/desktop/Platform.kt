@@ -132,6 +132,10 @@ private val updateCrypto by lazy { createCryptoProvider() }
  */
 fun checkForUpdate(baseUrl: String, lastAcceptedSeq: Long): UpdateCheck {
     if (!UpdateVerify.updatesEnabled()) return UpdateCheck.Disabled // §M-D3 hard-off on the test key
+    // §M-D4(a) anti-rollback FLOOR (mirror of extension background.ts:711 `Math.max(storedSeq, MIN_SEQ)`):
+    // a fresh install (or one whose persisted lastAcceptedSeq was wiped) evaluates from MIN_SEQ, not 0,
+    // so a T1 server can't steer it below the compile-time floor with a validly-signed-but-older manifest.
+    val floorSeq = maxOf(lastAcceptedSeq, UpdateVerify.MIN_SEQ)
     val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4)).build()
     val raw: ByteArray = try {
         val req = HttpRequest.newBuilder(URI.create("$baseUrl/downloads/manifest.json")).timeout(Duration.ofSeconds(4)).GET().build()
@@ -160,7 +164,8 @@ fun checkForUpdate(baseUrl: String, lastAcceptedSeq: Long): UpdateCheck {
     // manifest replayed to steer a downgrade. `==` is NOT refused: steady state re-fetches the
     // very manifest whose seq set the floor, and refusing our own current manifest would turn
     // every launch into a false "couldn't verify". The floor only advances on seq > floor.
-    if (manifest.seq < lastAcceptedSeq) return UpdateCheck.Unverified
+    // floorSeq (not the raw stored seq) is the effective floor — never below MIN_SEQ (§M-D4a).
+    if (manifest.seq < floorSeq) return UpdateCheck.Unverified
     val isWindows = System.getProperty("os.name").orEmpty().lowercase().contains("win")
     val available = (if (isWindows) manifest.windows else manifest.linux)?.version?.takeIf { it.isNotBlank() }
     return when {

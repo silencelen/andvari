@@ -786,6 +786,9 @@ class DesktopState(private val scope: CoroutineScope) {
                     recoveryPublicKey = recoveryPub,
                     recoveryFingerprint = if (recoveryPub != null) pol.recoveryFingerprint else null,
                     deviceName = deviceName(),
+                    // CR-20: the device row/audit must record the TRUE OS, not the "android" default,
+                    // to match this session's X-Andvari-Client header (desktopPlatform() feeds both).
+                    platform = desktopPlatform(),
                 )
             }
             val s = a.register(req)
