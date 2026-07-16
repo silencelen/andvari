@@ -32,6 +32,12 @@ No version bump yet.*
   characters and plain-http) before your client talks to anywhere new. Keeping an encrypted
   offline copy on web and desktop becomes an explicit per-device choice; Android keeps its
   current behavior.
+- **Your existing phone/desktop app moves to the public address on its own, with your data.**
+  Once the household server's public address is fully live, updating the app rewrites its
+  built-in address from the old home/tailnet default to `andvari.monahanhosting.com` in one
+  step — and your offline copy, saved logins, and quick-unlock come with it (same server, new
+  front door). An address you set yourself by hand is never touched. The old home address keeps
+  working for a while for anyone who hasn't updated yet.
 - **Self-hosting becomes a first-class path:** a public container image plus a one-command
   `deploy/bringup.sh` stand up your own instance — see `docs/self-hosting.md` (also served
   by every instance at `/selfhost`).
