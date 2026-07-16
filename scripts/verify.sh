@@ -24,8 +24,8 @@ echo "    all clients report $CORE_VER"
 echo "==> Kotlin: :core + :server + recovery-cli tests (RFC pins, vectors, full server integration)"
 (cd "$REPO_DIR" && flock "$LOCK" ./gradlew :core:jvmTest :server:test :tools:recovery-cli:test --console=plain -q)
 
-echo "==> Android: :app-android:assembleDebug (the only compile gate for the app/autofill glue)"
-(cd "$REPO_DIR" && flock "$LOCK" ./gradlew :app-android:assembleDebug --console=plain -q)
+echo "==> Android: :app-android:testDebugUnitTest (originKey byte-parity pins) + assembleDebug (app/autofill compile gate)"
+(cd "$REPO_DIR" && flock "$LOCK" ./gradlew :app-android:testDebugUnitTest :app-android:assembleDebug --console=plain -q)
 
 echo "==> TypeScript: web vitest (RFC pins + vector consumption) + typecheck"
 (cd "$REPO_DIR/web" && npx vitest run --silent && npx tsc --noEmit)

@@ -84,4 +84,8 @@ dependencies {
     // "Choose file" picker, MainActivity.kt) under activity 1.9.3's registry. See libs.versions.toml.
     implementation(libs.androidx.fragment)
     implementation(libs.kotlinx.coroutines.core)
+    // Gate-2 §4.2 originKey byte-parity pins (OriginNamespaceTest) — pure-JVM, runs under
+    // testDebugUnitTest. Explicit JUnit4 provider: this is the first AGP module with unit tests,
+    // and AGP's testDebugUnitTest runs JUnit4 natively (no useJUnitPlatform wiring needed).
+    testImplementation(kotlin("test-junit"))
 }
