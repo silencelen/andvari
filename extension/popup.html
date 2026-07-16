@@ -24,6 +24,11 @@
       <a id="update-link" class="update-link" target="_blank" rel="noopener noreferrer" hidden></a>
     </div>
 
+    <!-- H2 §M-D4b quiet update-channel note (both views). One muted, non-modal line when the SW's
+         update check is fail-closed-quiet (couldn't verify / stale listing) — deliberately NOT the
+         gold update banner and NOT an error strip: a sig-stripping server must not get a scary lever. -->
+    <p id="update-quiet" class="update-quiet" role="status" hidden></p>
+
     <!-- E1-6 recovery-password nudge: a rescued member re-logged in with the admin-known
          temporary password. Persistent + non-dismissable for the whole unlocked session (the
          mustChange banner idiom, not the dismissable-notice one); shown only when unlocked AND

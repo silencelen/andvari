@@ -101,6 +101,12 @@ describe("CVV-negative rule — whole-token-run verdicts (never substring)", () 
     expect(isCvvNameOrId("csc")).toBe(true);
     expect(isCvvNameOrId("card-cvc")).toBe(true);
     expect(isCvvNameOrId("cardCvc")).toBe(true); // camelCase boundary (Stripe's field name)
+    // [A7] S3 broadened the extension's set to FULL core CSC_DEMOTION parity (securitycode +
+    // cardverification). This is the fix for the shipped 0.13.0 bug where a checkout
+    // `securityCode` password slipped the save-suppression and could overwrite a stored merchant
+    // password with a CVV. The pin below was written to break WHEN this arrived — flipped here.
+    expect(isCvvNameOrId("securityCode")).toBe(true); // A7: flipped from false (was the deferred-slice sentinel)
+    expect(isCvvNameOrId("cardVerificationValue")).toBe(true); // [card,verification,value] → "cardverification" run
   });
 
   it("never suppresses a real password (or anything by substring)", () => {
@@ -108,10 +114,39 @@ describe("CVV-negative rule — whole-token-run verdicts (never substring)", () 
     expect(isCvvNameOrId("card_note")).toBe(false);
     expect(isCvvNameOrId("mycvv")).toBe(false); // substring guard — mirrors the classify vector
     expect(isCvvNameOrId("cv_code")).toBe(false); // a run may not end mid-token
-    // Deliberately OUTSIDE the extension's set: the design scopes this rule to cvv/cvc/csc
-    // (the core classifier's fuller CSC demotion — securitycode/cardverification — arrives
-    // with the deferred in-page card-fill slice, not this suppression heuristic).
-    expect(isCvvNameOrId("securityCode")).toBe(false);
+    expect(isCvvNameOrId("securityCodes")).toBe(false); // plural — a run may not end mid-token
     expect(isCvvNameOrId("")).toBe(false);
+  });
+});
+
+describe("S3 card-fill egress pins ([A9]) — the safety-critical background.ts lines", () => {
+  const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+
+  it("redemption binds the granted frameId (fail-closed)", () => {
+    // The frame that detected the card form is the ONLY one that can redeem its grant.
+    expect(bg).toContain("sender.frameId === grant.frameId");
+  });
+
+  it("redemption binds the granted origin (first-ever sender.origin reliance)", () => {
+    expect(bg).toContain("sender.origin === grant.origin");
+  });
+
+  it("redemption re-fetches the live top-level origin and re-checks it", () => {
+    // A nav between the popup click and the redemption voids the fill: the recheck reads tab.url…
+    expect(bg).toContain("new URL(t.url).origin");
+    // …and compares the grant's origin against that freshly-fetched top origin.
+    expect(bg).toContain("grant.origin === top");
+  });
+
+  it("the card grant is ONE-SHOT (consumed on redemption) and a store SEPARATE from login grants", () => {
+    expect(bg).toContain("cardGrants.delete(");
+    // A distinct store — sharing single-slot `grants` would let card/login grants clobber + cross-redeem.
+    expect(bg).toMatch(/const cardGrants = new Map</);
+  });
+
+  it("the new popup-only card messages refuse tab (page) senders", () => {
+    // Both minting an offer and enumerating offers must be popup-only — a page can never invoke them.
+    expect(bg).toMatch(/async function cardFillOffers[\s\S]*?sender\.tab !== undefined/);
+    expect(bg).toMatch(/async function fillCardFromPopup[\s\S]*?sender\.tab !== undefined/);
   });
 });

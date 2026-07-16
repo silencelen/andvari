@@ -31,6 +31,18 @@ export const PINNED_UPDATE_KEYS: readonly string[] = ["e_2TpyoQG4ygtbdVO9RUWbUW4
  *  security update by re-serving a stale-but-signed manifest is irreducible, so make it detectable. */
 export const UPDATE_MAX_SIGNED_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
+/** §M-D4a — compile-time anti-rollback FLOOR: the lowest signed-manifest `seq` a FRESH install (or a
+ *  client whose stored `USEQ` was wiped) will accept. `background.ts` floors `lastAcceptedSeq` at
+ *  this, shrinking the fresh-install window a T1 server could use to steer a client to a
+ *  validly-signed-but-older (known-vuln) manifest below the floor.
+ *
+ *  0 for now: NO signed manifest is published to `/downloads` yet (H2 signing is owner-pending), so
+ *  0 admits the first real release (`seq` 1) while still flooring any wiped state at ≥ 0.
+ *  TODO: bump to the first published manifest's `seq` at the first signed release — §D8 has the
+ *  signer derive `seq` as max(published)+1, so this floor should track the published floor.
+ *  Mirrors core `UpdateVerify.MIN_SEQ` (a DIFFERENT lane owns core) — keep the two in lockstep. */
+export const MIN_SEQ = 0;
+
 /** §M-D3 — true iff at least one pinned key is a REAL key (not the placeholder). A build pinning
  *  only the sentinel offers no updates at all (no path executes), never verifies against a test key. */
 export function updatesEnabled(pinned: readonly string[] = PINNED_UPDATE_KEYS): boolean {
@@ -114,13 +126,17 @@ export function evaluateSignedManifest(raw: Uint8Array, sigText: string | null, 
   // its signal already stands) — both simply yield no NEW offer, quietly.
   if (seq <= opts.lastAcceptedSeq) return { kind: "quiet", reason: "seq_regression" };
 
-  const signedAt = typeof m.signedAt === "string" ? m.signedAt : null;
-  if (signedAt !== null) {
-    const t = Date.parse(signedAt);
-    if (Number.isNaN(t)) return { kind: "quiet", reason: "malformed" };
-    // §M-D4b: a manifest signed too long ago = a possibly-withheld channel → quiet stale.
-    if (opts.now - t > (opts.maxAgeMs ?? UPDATE_MAX_SIGNED_AGE_MS)) return { kind: "quiet", reason: "stale" };
-  }
+  // §M-D4b freshness — compliance fail-OPEN FIX. Desktop `Platform.updateChannelStale`
+  // (Platform.kt:158-164) treats a MISSING or UNREADABLE `signedAt` as stale; this used to skip the
+  // gate entirely for a missing/non-string value (a silent pass) and quiet-MALFORMED an unparseable
+  // one. Now BOTH are treated as a quiet STALE channel — withholding a security update by
+  // stripping/garbling `signedAt` is irreducible, so make it detectable, never a silent pass. Only a
+  // present, parseable, in-window value clears the gate.
+  if (typeof m.signedAt !== "string") return { kind: "quiet", reason: "stale" };
+  const t = Date.parse(m.signedAt);
+  if (Number.isNaN(t)) return { kind: "quiet", reason: "stale" };
+  if (opts.now - t > (opts.maxAgeMs ?? UPDATE_MAX_SIGNED_AGE_MS)) return { kind: "quiet", reason: "stale" };
+  const signedAt = m.signedAt;
 
   const be = m.browserExtension;
   const ext = be != null && typeof be === "object" ? (be as { version?: unknown; chromeUrl?: unknown; firefoxUrl?: unknown }) : {};

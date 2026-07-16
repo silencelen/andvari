@@ -14,10 +14,12 @@ import {
   showToast,
   type DropdownState,
 } from "./content-ui";
-import { findLoginForms, isSubmitLike, type LoginForm } from "./detect";
+import { findCardForms, findLoginForms, isSubmitLike, type CardFieldKind, type CardForm, type LoginForm } from "./detect";
 import { fillErrorCopy, saveErrorCopy } from "./errors";
 import {
   send,
+  type CardFillFields,
+  type CardFillOutcome,
   type FillOutcome,
   type MatchItem,
   type PendingSave,
@@ -136,6 +138,93 @@ async function scheduleClipboardClear(): Promise<void> {
   const s = r?.clearSeconds ?? 30;
   window.clearTimeout(clipClearTimer); // AM2: single slot — the newest copy owns the clear
   clipClearTimer = window.setTimeout(() => void navigator.clipboard.writeText("").catch(() => {}), Math.max(1, s) * 1000);
+}
+
+// ---- S3 in-page card fill (design 2026-07-10-extension-card-fill) ----
+// Detection is passive per frame: findCardForms reports metadata-only kinds to the SW, which binds
+// this frame's identity to browser-set sender.origin. Fill is a targeted round-trip: the SW sends
+// {fillCard} to THIS frame only, we redeem via revealCardForFill (the value round-trip), and the
+// revealed card fields stay strictly function-local — never snapshotted, never save-bannerable ([A6]).
+
+/** The current frame's card form (first one found), cached for the fill round-trip. */
+let cardForm: CardForm | null = null;
+/** Last reported kind signature — skip redundant cardFormInfo sends on quiet mutations. */
+let lastCardSig = "";
+
+/** Re-scan and report this frame's card form to the SW (metadata only). Empty ⇒ the form went
+ *  away and the SW clears our record. Idempotent: a stable kind-set never re-sends. */
+function reportCardForm(): void {
+  cardForm = findCardForms(document)[0] ?? null;
+  const kinds: CardFieldKind[] = cardForm ? cardForm.fields.map((f) => f.kind) : [];
+  const sig = kinds.join(",");
+  if (sig === lastCardSig) return;
+  lastCardSig = sig;
+  void safeSend({ type: "cardFormInfo", fields: kinds });
+}
+
+/** Re-resolve to the live card form (an SPA may have swapped the subtree since detection). */
+function liveCardForm(): CardForm | null {
+  if (cardForm && cardForm.fields.length > 0 && cardForm.fields.every((f) => f.input.isConnected)) return cardForm;
+  cardForm = findCardForms(document)[0] ?? null;
+  return cardForm;
+}
+
+/** Map a detected card kind to its fill value. Split MM/YY feeds standalone month/year inputs. */
+function cardValueFor(kind: CardFieldKind, v: CardFillFields): string | null {
+  switch (kind) {
+    case "cardnumber":
+      return v.number ?? null;
+    case "cardexpiry":
+      return v.expiry ?? null;
+    case "cardexpmonth":
+      return v.expiry ? v.expiry.slice(0, 2) : null; // "MM" of "MM/YY"
+    case "cardexpyear":
+      return v.expiry ? v.expiry.slice(3) : null; //    "YY" of "MM/YY"
+    case "cardname":
+      return v.name ?? null;
+    case "cardcvv":
+      return v.cvv ?? null;
+  }
+}
+
+/** Write the revealed card fields into the form's inputs, CVV LAST (some checkouts validate CVV
+ *  against the entered PAN). [A6]: NEVER updateSnapshot / touch `snapshots` — the values are used
+ *  synchronously inside this call frame and implicitly cleared with it. */
+function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome {
+  let wrote = false;
+  filling = true;
+  try {
+    for (const { kind, input } of form.fields) {
+      if (kind === "cardcvv") continue; // CVV last
+      const val = cardValueFor(kind, values);
+      if (val !== null && input.isConnected) {
+        setValue(input, val);
+        wrote = true;
+      }
+    }
+    for (const { kind, input } of form.fields) {
+      if (kind !== "cardcvv") continue;
+      const val = cardValueFor(kind, values);
+      if (val !== null && input.isConnected) {
+        setValue(input, val);
+        wrote = true;
+      }
+    }
+  } finally {
+    filling = false;
+  }
+  return wrote ? { filled: "card" } : { filled: "nothing", code: "no_fields" };
+}
+
+/** Popup-granted card fill: redeem the one-shot grant (the SW verifies frameId + origin + live
+ *  top-origin), then write the returned fields. The card values never persist past this call. */
+async function fillCardIntoForm(itemId: string): Promise<CardFillOutcome> {
+  const form = liveCardForm();
+  if (!form) return { filled: "nothing", code: "no_form" };
+  const r = await safeSend({ type: "revealCardForFill", itemId });
+  if (!r) return { filled: "nothing", code: "unreachable" };
+  if (!r.ok || !r.fields) return { filled: "nothing", code: "not_allowed" };
+  return applyCardFill(form, r.fields);
 }
 
 // ---- dropdown ----
@@ -379,6 +468,7 @@ function init(): void {
     window.clearTimeout(mutateTimer);
     mutateTimer = window.setTimeout(() => {
       formsCache = null;
+      reportCardForm(); // S3: a checkout card form may have just rendered (or gone away)
       // Multi-step: step 1 was captured and the password page/fragment just rendered with
       // focus already on the password field — offer without another user gesture.
       if (Date.now() - usernameStepAt < 120_000) {
@@ -391,26 +481,35 @@ function init(): void {
     }, 150);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  chrome.runtime.onMessage.addListener((msg: TabMsg, _sender, sendResponse: (o: FillOutcome) => void) => {
-    if (msg.type === "fillItem") {
-      // Popup-granted fill: the SW minted a one-shot grant, so the normal host-bound reveal
-      // path clears it — single secret-egress path. Cut M (v2 #14): the REAL outcome goes back
-      // via sendResponse (the SW relays it to the popup, whose ok used to mean mere delivery) —
-      // a form-less page answers no_form instead of staying silent.
-      const all = scanForms();
-      const f = all.find((x) => x.kind === "login") ?? all[0];
-      if (!f) {
-        sendResponse({ filled: "nothing", code: "no_form" });
-        return undefined;
+  chrome.runtime.onMessage.addListener(
+    (msg: TabMsg, _sender, sendResponse: (o: FillOutcome | CardFillOutcome) => void) => {
+      if (msg.type === "fillItem") {
+        // Popup-granted fill: the SW minted a one-shot grant, so the normal host-bound reveal
+        // path clears it — single secret-egress path. Cut M (v2 #14): the REAL outcome goes back
+        // via sendResponse (the SW relays it to the popup, whose ok used to mean mere delivery) —
+        // a form-less page answers no_form instead of staying silent.
+        const all = scanForms();
+        const f = all.find((x) => x.kind === "login") ?? all[0];
+        if (!f) {
+          sendResponse({ filled: "nothing", code: "no_form" });
+          return undefined;
+        }
+        void fillItem(msg.itemId, f, false).then(sendResponse);
+        return true; // keep the channel open for the async outcome
       }
-      void fillItem(msg.itemId, f, false).then(sendResponse);
-      return true; // keep the channel open for the async outcome
-    }
-    if (msg.type === "offerPendingSave" && isTop) offerBanner(msg.pending);
-    return undefined;
-  });
+      if (msg.type === "fillCard") {
+        // S3: the SW sent this to THIS frame only (frameId-targeted). We redeem the one-shot card
+        // grant and write the returned fields; the SW re-verifies frameId + origin + top origin.
+        void fillCardIntoForm(msg.itemId).then(sendResponse);
+        return true; // keep the channel open for the async outcome
+      }
+      if (msg.type === "offerPendingSave" && isTop) offerBanner(msg.pending);
+      return undefined;
+    },
+  );
 
   void safeSend({ type: "pageInfo", host: location.hostname });
+  reportCardForm(); // S3: report any card form present at load (metadata only)
 
   // Post-navigation re-offer — top frame only, or every iframe would grow a banner.
   if (isTop) {

@@ -21,9 +21,22 @@ import {
 import { startEvents, type EventsHandle, type WsLike } from "./events";
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "./format";
 import { isNewerVersion } from "./version";
-import { evaluateSignedManifest, updatesEnabled } from "./updateverify";
+import { evaluateSignedManifest, MIN_SEQ, updatesEnabled } from "./updateverify";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
-import type { CardItem, FillOutcome, MatchItem, PendingSave, Req, Res, SaveErrorCode, TabMsg, UnlockCode } from "./messages";
+import type { CardFieldKind } from "./detect";
+import type {
+  CardFillFields,
+  CardFillOutcome,
+  CardItem,
+  FillOutcome,
+  MatchItem,
+  PendingSave,
+  Req,
+  Res,
+  SaveErrorCode,
+  TabMsg,
+  UnlockCode,
+} from "./messages";
 import { currentCode } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
@@ -57,6 +70,11 @@ const UKEY = "updateInfo"; // storage.local (non-secret): UpdateInfo while a new
 const ULAST = "updateCheckedAt"; // storage.local: epoch ms of the last COMPLETED update fetch
 const USEQ = "updateAcceptedSeq"; // storage.local: highest signed-manifest seq ever accepted (§B anti-rollback)
 const UQUIET = "updateChannelQuiet"; // storage.local: { reason } — H2 fail-closed-QUIET state (§M-D5), never a nag
+// M-D4b: ONLY these quiet reasons are ACTIONABLE and may surface a muted popup line. `seq_regression`
+// (already-accepted manifest re-polled — the normal steady state) and `disabled` are benign and must
+// NEVER render as "couldn't be verified" (permanent false alarm = the alert-fatigue failure M-D4b exists
+// to prevent). The write path also refuses to stamp seq_regression; this Set is the belt-and-suspenders.
+const SURFACEABLE_QUIET_REASONS = new Set(["unverified", "malformed", "stale", "manifest_fetch_failed"]);
 const DEFAULT_AUTOLOCK_SECONDS = 15 * 60; // policy fetch failed/absent — never "no lock at all"
 const DEFAULT_CLIPBOARD_CLEAR_SECONDS = 30; // spec 01 §8 policy default; clearing is safety-positive
 const CLIPBOARD_CLEAR_ALARM = "clipboardclear"; // SW backstop clear (E1-4); survives idle doLock
@@ -73,7 +91,7 @@ const BADGE_INK = "#1a1509"; // …treasury charcoal (web --gold / --btn-ink)
 // (pageInfo) or the popup's 1 s status/TOTP poll would defer autolock forever while the user is
 // away. `status` is here too: merely leaving the popup open (it polls status every second for
 // liveness) is not activity; real interaction (matches/reveal/search/save/…) still re-arms.
-const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status"]);
+const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status", "cardFormInfo"]);
 
 /** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
  *  account.ts:40 parity). The unlock mapper carries it to the popup as code "identity_mismatch" —
@@ -153,6 +171,11 @@ interface TabState {
    *  `frameId` is the frame that captured it: a DIFFERENT frame may not overwrite a live pending,
    *  so a hostile sub-frame can't silently redirect the top frame's Save banner to its own login. */
   pending?: (PendingSave & { password: string; frameId: number }) | undefined;
+  /** S3 per-frame card-form registry: frameId → { the frame's browser-set origin, the card-field
+   *  kinds it declared }. METADATA ONLY (never card values). `origin` is `sender.origin` ([A2]);
+   *  every card offer/redemption re-derives the tab's top origin and compares against it, so a
+   *  stale record can never leak a fill across origins. Cleared with the tab (onRemoved / lock). */
+  cardForms?: Record<number, { origin: string; fields: CardFieldKind[] }>;
 }
 
 let session: Session | null = null;
@@ -164,6 +187,12 @@ let tabs = new Map<number, TabState>();
  *  grant is consumed ONLY by the tab's TOP frame (fillFromPopup targets frameId 0) — a
  *  broadcast-to-all-frames grant would let a hostile cross-origin sub-frame claim the secret. */
 const grants = new Map<number, { itemId: string; expiresMs: number }>();
+/** S3 CARD fill grants — a store SEPARATE from login `grants` ([A5]). `grants` is single-slot per
+ *  tab, so sharing it would let a card grant clobber a live login grant (and let one path's
+ *  redemption consume the other's). A card grant carries the two extra bindings the contract needs
+ *  — the frame that detected the form (`frameId`) and its browser-set `origin` — and is consumed
+ *  ONLY by `revealCardForFill` (never the login `reveal()`, nor the reverse). One-shot, 30 s. */
+const cardGrants = new Map<number, { itemId: string; frameId: number; origin: string; expiresMs: number }>();
 /** In-flight write count — resync must not replace session.items out from under a landing put. */
 let writesInFlight = 0;
 let loadPromise: Promise<void> | null = null;
@@ -249,6 +278,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   grants.delete(tabId);
+  cardGrants.delete(tabId);
   void (async () => {
     await ensureLoaded();
     if (tabs.delete(tabId)) persistTabs();
@@ -326,6 +356,7 @@ async function doLock(reason: "idle" | "manual" = "manual"): Promise<void> {
   clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
   tabs.clear();
   grants.clear();
+  cardGrants.clear();
   api.setTokens(null, null);
   await chrome.storage.session.remove([SKEY, TKEY]);
   // Write the reason AFTER the [SKEY,TKEY] remove so it survives it (a notice only from the idle
@@ -472,13 +503,26 @@ async function checkForUpdate(force = false): Promise<void> {
     const raw = new Uint8Array(await mResp.arrayBuffer()); // EXACT bytes — never resp.json() (§M-D6)
     const sigText = await sResp.text();
     const storedSeq = (await chrome.storage.local.get(USEQ))[USEQ];
-    const lastAcceptedSeq = typeof storedSeq === "number" ? storedSeq : 0;
+    // §M-D4(a) anti-rollback FLOOR: a fresh install (or a wiped USEQ) starts at MIN_SEQ, not 0, so a
+    // T1 server can't steer it to any validly-signed-but-older (known-vuln) manifest below the floor.
+    const lastAcceptedSeq = Math.max(typeof storedSeq === "number" ? storedSeq : 0, MIN_SEQ);
     const decision = evaluateSignedManifest(raw, sigText, { lastAcceptedSeq, now: Date.now() });
 
     // A completed fetch stamps ULAST regardless of verdict (the throttle floors real fetches, §M-D5
     // — a tampering/stale server must not be hammered on every SW wake).
     if (decision.kind === "quiet") {
-      // Fail-closed QUIET: record the distinct reason; leave any prior VERIFIED [UKEY] signal alone.
+      if (decision.reason === "seq_regression") {
+        // NOT a failure: the fetch verified a genuine, signature-valid, well-formed manifest that is
+        // simply not newer than one we already accepted (the normal steady state after every accept).
+        // Treat it like a clean verified read — CLEAR any prior quiet marker (healthy channel) and stamp
+        // ULAST. Surfacing this as "couldn't be verified" would be a permanent false alarm, and stamping
+        // it would also clobber a real prior `unverified`/`stale` signal (fail-open). Leave [UKEY] alone.
+        await chrome.storage.local.remove(UQUIET);
+        await chrome.storage.local.set({ [ULAST]: Date.now() });
+        return;
+      }
+      // Fail-closed QUIET (unverified/malformed/stale): record the distinct ACTIONABLE reason; leave any
+      // prior VERIFIED [UKEY] signal alone.
       await chrome.storage.local.set({ [UQUIET]: { reason: decision.reason }, [ULAST]: Date.now() });
       return;
     }
@@ -501,14 +545,22 @@ async function checkForUpdate(force = false): Promise<void> {
 }
 
 /** Popup query: the stored signal, RE-VALIDATED against the currently-installed version so a
- *  signal recorded before an in-place reload can never linger as a false "update available". */
+ *  signal recorded before an in-place reload can never linger as a false "update available". When
+ *  there is no offer, surface the fail-closed-QUIET update-channel reason from [UQUIET] (M-D4b /
+ *  compliance UQUIET-read) so the popup can render ONE muted line — an offer supersedes it
+ *  (mutually exclusive, mirroring the desktop's `updateAvailable` vs `updateChannelNotice`). */
 async function updateStatus(): Promise<Res<"updateStatus">> {
   const current = chrome.runtime.getManifest().version;
   const info = (await chrome.storage.local.get(UKEY))[UKEY] as UpdateInfo | undefined;
   if (info && typeof info.latest === "string" && isNewerVersion(info.latest, current)) {
-    return { current, latest: info.latest, chromeUrl: info.chromeUrl ?? null, firefoxUrl: info.firefoxUrl ?? null };
+    return { current, latest: info.latest, chromeUrl: info.chromeUrl ?? null, firefoxUrl: info.firefoxUrl ?? null, quietReason: null };
   }
-  return { current, latest: null, chromeUrl: null, firefoxUrl: null };
+  const quiet = (await chrome.storage.local.get(UQUIET))[UQUIET] as { reason?: unknown } | undefined;
+  // Surface ONLY actionable reasons (M-D4b): a benign seq_regression — or any marker a pre-fix build
+  // may have persisted — must never render as a scary "couldn't be verified" line.
+  const rawReason = quiet && typeof quiet.reason === "string" ? quiet.reason : null;
+  const quietReason = rawReason && SURFACEABLE_QUIET_REASONS.has(rawReason) ? rawReason : null;
+  return { current, latest: null, chromeUrl: null, firefoxUrl: null, quietReason };
 }
 
 // ---- message dispatch ----
@@ -614,6 +666,14 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     }
     case "updateStatus":
       return updateStatus();
+    case "cardFormInfo":
+      return cardFormInfo(msg, sender);
+    case "cardFillOffers":
+      return cardFillOffers(sender);
+    case "fillCardFromPopup":
+      return fillCardFromPopup(msg.itemId, sender);
+    case "revealCardForFill":
+      return revealCardForFill(msg, sender);
   }
 }
 
@@ -1036,6 +1096,158 @@ async function fillFromPopup(itemId: string): Promise<Res<"fillFromPopup">> {
     return { ok: false, outcome, code: outcome.code ?? "no_fields", error: `fill wrote nothing (${outcome.code ?? "no_fields"})` };
   }
   return { ok: true, outcome };
+}
+
+// ---- S3 in-page card fill (the frame-origin egress contract — design 2026-07-10) ----
+// Card data leaves the SW ONLY via revealCardForFill, one field-set per explicit popup click,
+// bound to the exact frame that detected the form (frameId + sender.origin + a live top-origin
+// recheck), one-shot, in a store SEPARATE from login grants. The popup-only messages refuse tab
+// senders; the content path can neither mint a grant nor enumerate offers.
+
+/** The tab's CURRENT top-level origin, read from `tab.url` under the popup-open `activeTab` window
+ *  ([A4] — the manifest has NO `tabs` permission; needing `tab.url` outside this window would be a
+ *  permission bump + a re-review). Fail-closed ([A3]): null on an unreadable/empty/opaque URL — a
+ *  missing URL is NEVER a match, and `null === null` never passes an eligibility check below. */
+async function topOrigin(tabId: number): Promise<string | null> {
+  try {
+    const t = await chrome.tabs.get(tabId);
+    if (typeof t.url !== "string" || t.url === "") return null;
+    const o = new URL(t.url).origin;
+    return o === "null" ? null : o; // opaque/sandboxed top → never eligible ([A1])
+  } catch {
+    return null;
+  }
+}
+
+/** Content (per frame): record/clear this frame's card form. [A2]/[A3]: identity binds to
+ *  browser-set `sender.origin` ONLY (no page-controlled host), fail-closed on any undefined. */
+async function cardFormInfo(
+  msg: Extract<Req, { type: "cardFormInfo" }>,
+  sender: chrome.runtime.MessageSender,
+): Promise<Res<"cardFormInfo">> {
+  const tabId = sender.tab?.id;
+  const frameId = sender.frameId;
+  if (tabId === undefined || frameId === undefined || typeof sender.origin !== "string" || sender.origin === "" || sender.origin === "null") {
+    return { ok: false };
+  }
+  const st = tabs.get(tabId) ?? {};
+  const forms = st.cardForms ?? {};
+  if (msg.fields.length === 0) delete forms[frameId];
+  else forms[frameId] = { origin: sender.origin, fields: msg.fields };
+  st.cardForms = forms;
+  tabs.set(tabId, st);
+  persistTabs();
+  return { ok: true };
+}
+
+/** Popup ONLY: is the active tab fillable, and to which origin? Fillable iff a recorded card
+ *  form's origin equals the tab's current top-level origin (SW-derived). Refuses tab senders. */
+async function cardFillOffers(sender: chrome.runtime.MessageSender): Promise<Res<"cardFillOffers">> {
+  if (sender.tab !== undefined) return { fillable: false, origin: null }; // popup-only guard
+  if (!session) return { fillable: false, origin: null };
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.id === undefined) return { fillable: false, origin: null };
+  const top = await topOrigin(tab.id);
+  if (top === null) return { fillable: false, origin: null };
+  const forms = tabs.get(tab.id)?.cardForms ?? {};
+  const eligible = Object.values(forms).some((f) => f.origin === top);
+  return { fillable: eligible, origin: eligible ? top : null };
+}
+
+/** Shape-check the granted frame's sendResponse before trusting it (mirrors asFillOutcome). */
+function asCardFillOutcome(v: unknown): CardFillOutcome | null {
+  if (typeof v !== "object" || v === null) return null;
+  const f = (v as { filled?: unknown }).filled;
+  return f === "card" || f === "nothing" ? (v as CardFillOutcome) : null;
+}
+
+/** Popup ONLY: mint the tab's one-shot CARD grant for the eligible frame, then send `fillCard` to
+ *  THAT frame only. The frame redeems via revealCardForFill (the value round-trip) — the SW never
+ *  pushes card values at a tab. Refuses tab senders. */
+async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageSender): Promise<Res<"fillCardFromPopup">> {
+  if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "not allowed from a page" };
+  if (!session) return { ok: false, code: "locked", error: "locked" };
+  if (!session.items.some((i) => i.itemId === itemId && i.doc.type === "card")) {
+    return { ok: false, code: "not_allowed", error: "unknown item" };
+  }
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.id === undefined) return { ok: false, code: "unreachable", error: "no active tab" };
+  const top = await topOrigin(tab.id);
+  if (top === null) return { ok: false, code: "not_allowed", error: "no top origin" };
+  // The eligible frame = a recorded card form whose origin equals the current top origin. Prefer
+  // the top frame (0) when it qualifies; else the first eligible frame.
+  const forms = tabs.get(tab.id)?.cardForms ?? {};
+  const eligible = Object.entries(forms).filter(([, f]) => f.origin === top).map(([fid]) => Number(fid));
+  if (eligible.length === 0) return { ok: false, code: "no_form", error: "no eligible card form" };
+  const frameId = eligible.includes(0) ? 0 : eligible[0]!;
+  cardGrants.set(tab.id, { itemId, frameId, origin: top, expiresMs: Date.now() + GRANT_TTL_MS });
+  const msg: TabMsg = { type: "fillCard", itemId };
+  let raw: unknown;
+  try {
+    raw = await chrome.tabs.sendMessage(tab.id, msg, { frameId });
+  } catch {
+    cardGrants.delete(tab.id);
+    return { ok: false, code: "unreachable", error: "frame not reachable — reload the tab and retry" };
+  }
+  // Round-trip over — void any unconsumed grant rather than leaving it armed for the TTL.
+  cardGrants.delete(tab.id);
+  const outcome = asCardFillOutcome(raw);
+  if (!outcome) return { ok: false, code: "unreachable", error: "no fill outcome from the page" };
+  if (outcome.filled === "nothing") {
+    return { ok: false, outcome, code: outcome.code ?? "no_fields", error: `card fill wrote nothing (${outcome.code ?? "no_fields"})` };
+  }
+  return { ok: true, outcome };
+}
+
+/** Content (S3 redemption): return the declared card fields to the granted frame ONCE. Every
+ *  check fails CLOSED on undefined ([A3]); success consumes the grant, any failure consumes
+ *  nothing. This is a store SEPARATE from login `grants` — it can ONLY match a card grant, never a
+ *  login one ([A5]). PAN/CVV are composed here and never touch `snapshots`/the save path ([A6]). */
+async function revealCardForFill(
+  msg: Extract<Req, { type: "revealCardForFill" }>,
+  sender: chrome.runtime.MessageSender,
+): Promise<Res<"revealCardForFill">> {
+  if (!session) return { ok: false, error: "locked" };
+  const tabId = sender.tab?.id;
+  if (tabId === undefined) return { ok: false, error: "not a page sender" };
+  const grant = cardGrants.get(tabId);
+  if (!grant || grant.itemId !== msg.itemId || grant.expiresMs <= Date.now()) return { ok: false, error: "no card grant" };
+  // Frame + origin: fail-closed on undefined (first-ever sender.origin reliance in the extension),
+  // then the positive equality binding.
+  const frameOk = sender.frameId === grant.frameId;
+  const originOk = sender.origin === grant.origin;
+  if (sender.frameId === undefined || !frameOk) return { ok: false, error: "frame mismatch" };
+  if (sender.origin === undefined || !originOk) return { ok: false, error: "origin mismatch" };
+  // A navigation between the click and this redemption voids the fill: the grant's origin must
+  // still equal the tab's CURRENT top-level origin (re-fetched from tab.url).
+  const top = await topOrigin(tabId);
+  const topOk = grant.origin === top;
+  if (top === null || !topOk) return { ok: false, error: "top-origin changed" };
+
+  const item = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "card");
+  const c = item?.doc.card;
+  if (!c) return { ok: false, error: "unknown item" }; // consumes nothing
+  // Compose ONLY the kinds the detected form declared ("CVV only if a CVV field was detected").
+  const declared = new Set(tabs.get(tabId)?.cardForms?.[grant.frameId]?.fields ?? []);
+  const fields: CardFillFields = {};
+  if (declared.has("cardnumber")) {
+    const n = digitsOnly(c.number ?? "");
+    if (n !== "") fields.number = n;
+  }
+  if (declared.has("cardexpiry") || declared.has("cardexpmonth") || declared.has("cardexpyear")) {
+    const e = composeShortExpiry(c.expMonth ?? "", c.expYear ?? "");
+    if (e !== null) fields.expiry = e;
+  }
+  if (declared.has("cardname")) {
+    const nm = c.cardholderName ?? "";
+    if (nm !== "") fields.name = nm;
+  }
+  if (declared.has("cardcvv")) {
+    const s = c.securityCode ?? "";
+    if (s !== "") fields.cvv = s;
+  }
+  cardGrants.delete(tabId); // one-shot: success consumes the grant
+  return { ok: true, fields };
 }
 
 // ---- capture → pending save → resolve ----

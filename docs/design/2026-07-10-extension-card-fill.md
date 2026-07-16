@@ -217,3 +217,16 @@ same-origin top page" risk is the explicit-pick trust model the login path alrea
 **Non-blocking (framing kept as-is):** a hostile SAME-origin sibling frame redeeming the
 grant gets only what the user explicitly sent to that origin, and same-origin XSS stays
 out of scope — the browser's own trust boundary; no finer one is invented.
+
+## Post-build review follow-up (2026-07-15 find→refute, LOW — documented, not fixed)
+
+The `Fill → <origin>` **label** cached in the popup (`popup.ts loadUnlocked`) can go stale if
+the tab performs a full same-tab *navigation* while the popup stays open (the design only ruled
+out an active-tab *change*, not a same-tab nav). **Egress is unaffected** — `fillCardFromPopup`
+re-derives the live top origin and re-filters eligible frames, and `revealCardForFill` re-checks
+`sender.origin`/`sender.frameId`/live-top-origin, so a card can only ever fill into the tab's
+*current* top-origin same-origin frame; only the *displayed* origin can lag. Low exploitability
+(a legitimate site won't self-navigate to an attacker origin), so this is deferred rather than
+fixed now. If tightened later (R1's "the user sees exactly where the card will go" premise): have
+the popup re-query `tab.url` on `chrome.tabs.onUpdated` for its active tab, or re-derive the label
+at render time, and clear the offer if the origin changed.

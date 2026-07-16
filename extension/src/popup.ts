@@ -30,6 +30,9 @@ async function ask<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promi
 }
 
 let tabHost: string | null = null;
+/** S3: whether the active tab has a same-origin card form we may Fill into, and to which origin.
+ *  Fetched once per unlocked render — the active tab can't change while the popup is open. */
+let cardFill: { fillable: boolean; origin: string | null } = { fillable: false, origin: null };
 let totpTimer: number | undefined;
 let searchTimer: number | undefined;
 let searchSeq = 0;
@@ -135,12 +138,21 @@ async function refresh(): Promise<void> {
  *  answers whether locked or not, so the banner surfaces on the unlock screen too. */
 async function renderUpdate(): Promise<void> {
   const banner = el("update");
+  const quiet = el("update-quiet");
   const link = el<HTMLAnchorElement>("update-link");
   const r = await ask({ type: "updateStatus" });
   if (!r || !r.latest) {
     banner.hidden = true;
+    // M-D4b (compliance UQUIET-read): when there is no offer, the SW's fail-closed-QUIET
+    // update-channel reason (unverified/stale/…) shows as ONE muted, non-modal line —
+    // distinct from the gold "update available" banner AND from silence. A sig-stripping
+    // server must not be able to train the household on scary noise, so never a banner/nag.
+    const reason = r?.quietReason ?? null;
+    quiet.textContent = reason ? updateQuietCopy(reason) : "";
+    quiet.hidden = !reason;
     return;
   }
+  quiet.hidden = true; // an offer supersedes the quiet note (mutually exclusive)
   el("update-text").textContent = `Update available — andvari ${r.latest}. `;
   // Firefox gets the Firefox zip; everything else (Chrome/Edge/Brave) the Chrome zip. Fall back
   // to whichever URL exists so a single-target publish still links somewhere real.
@@ -154,6 +166,14 @@ async function renderUpdate(): Promise<void> {
     link.hidden = true; // a version with no usable link: still tell them one exists
   }
   banner.hidden = false;
+}
+
+/** M-D4b muted update-channel copy (surface owns the sentences; the seam carries only a reason
+ *  code). Mirrors the desktop's two quiet Settings lines (DesktopState UPDATE_*_NOTICE). */
+function updateQuietCopy(reason: string): string {
+  return reason === "stale"
+    ? "Updates: the server’s update listing hasn’t been re-signed in a while — if you’re expecting an update, mention it to your admin."
+    : "Updates: the server’s update listing couldn’t be verified, so no update will be offered from it. Your vault and sync are unaffected.";
 }
 
 /** Email is deliberately non-secret (remembered for convenience) — the ZK line is the master
@@ -201,6 +221,9 @@ async function loadUnlocked(): Promise<void> {
   renderList(el("all-list"), all.items, "The hoard is empty");
   const cards = await ask({ type: "cardItems" });
   if (!cards || cards.locked) return relocked();
+  // S3: may we offer in-page card fill for this tab? (popup-only query; the SW derives the origin)
+  const offer = await ask({ type: "cardFillOffers" });
+  cardFill = offer ? { fillable: offer.fillable, origin: offer.origin } : { fillable: false, origin: null };
   renderCards(cards.items);
   startTotp();
   el<HTMLInputElement>("search").focus();
@@ -604,11 +627,11 @@ async function tickTotp(): Promise<void> {
   }
 }
 
-/* ---- cards: copy-only group beneath the logins (cards design 2026-07-09) ----
- * Mounted from code so popup.html stays untouched this slice; rows reuse the login-row
- * styling. NO fill affordance — in-page card fill is deferred behind the frame-origin
- * egress contract. The row shows the masked identity line only; number/expiry/CVV go
- * straight from the SW to the clipboard (copyPassword's exact path), never into this DOM. */
+/* ---- cards: copy group beneath the logins (cards design 2026-07-09; S3 in-page fill 2026-07-10)
+ * Rows reuse the login-row styling. The row shows the masked identity line only; number/expiry/CVV
+ * go straight from the SW to the clipboard (copyPassword's exact path), never into this DOM. When
+ * the active tab has a same-origin card form (cardFillOffers), each row also offers a Fill button
+ * that shows the target origin — the trusted, unspoofable surface for the egress grant ([A2]/R1). */
 
 const cardsLabel = document.createElement("div");
 cardsLabel.className = "section-label";
@@ -649,15 +672,40 @@ function cardRow(it: CardItem): HTMLElement {
   sub.className = "sub";
   sub.textContent = it.subtitle;
   body.append(name, sub);
+  // S3: show exactly where the card will go — the browser-provided origin, under the row body.
+  if (cardFill.fillable && cardFill.origin) {
+    const dest = document.createElement("div");
+    dest.className = "card-fill-dest";
+    dest.textContent = `Fill → ${cardFill.origin}`;
+    body.append(dest);
+  }
 
   const acts = document.createElement("span");
   acts.className = "acts";
+  if (cardFill.fillable) {
+    acts.append(
+      actBtn("fill", `Fill this card into ${cardFill.origin ?? "the page"}`, (btn) => void fillCardRow(it.itemId, btn)),
+    );
+  }
   if (it.hasNumber) acts.append(actBtn("num", "Copy card number", (btn) => void copyCardField(it.itemId, "number", btn)));
   if (it.hasExpiry) acts.append(actBtn("exp", "Copy expiry (MM/YY)", (btn) => void copyCardField(it.itemId, "expiry", btn)));
   if (it.hasCvv) acts.append(actBtn("cvv", "Copy security code", (btn) => void copyCardField(it.itemId, "cvv", btn)));
 
   r.append(glyph, body, acts);
   return r;
+}
+
+/** S3: mint the SW's one-shot card grant for the active tab's detected card form and fill it. Like
+ *  the login row fill, close only when a field actually landed; else render the canon seam copy. */
+async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void> {
+  btn.disabled = true;
+  const r = await ask({ type: "fillCardFromPopup", itemId });
+  btn.disabled = false;
+  if (r?.ok) {
+    window.close(); // the card fill really landed in the page
+  } else {
+    showMsg("err", fillErrorCopy(r?.code));
+  }
 }
 
 /** Same secret-clipboard path as copyPassword: the SW answers exactly one field, it goes
