@@ -218,16 +218,144 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
   );
 }
 
+/**
+ * §7.1/§2.1 the reference-instance landing decision — a pure CLIENT RENDERING of the server-
+ * DECLARED `signupMode` (never a hostname sniff; the origin.ts heuristic is gone). Unit-pinnable
+ * because the card itself reads window.location + module singletons and cannot render in the node
+ * test env. Modes:
+ *  - "landing"     → the reference-instance stranger landing (self-host nudge over invite-gated enroll);
+ *  - "closed"      → sign-in only, NO invite/enroll UI (the per-origin break-glass overlay, §2.2);
+ *  - "invite-only" → today's plain sign-in + invite-gated enroll.
+ * "open" is RESERVED — treated as landing until the open-register path ships (§7.3). Absent (old
+ * server / a failed policy fetch ⇒ policy null) and any unknown value from a newer server both
+ * degrade to "invite-only": never an open-register surface (§2.1, §2.3 conservative default).
+ */
+export type LandingMode = "landing" | "closed" | "invite-only";
+export function landingModeFor(signupMode: string | null | undefined): LandingMode {
+  if (signupMode === "closed") return "closed";
+  if (signupMode === "landing" || signupMode === "open") return "landing";
+  return "invite-only";
+}
+
+/** The live per-render inputs {@link freshStartAffordances} maps to onboarding surfaces. `tab` is the
+ *  user's current selection; `hasPendingLink`/`hasValidPrefill` come from a peeked enroll link
+ *  (`pending !== null` / `enrollPrefillFor(...) !== null` for THIS origin); `consented`/`dismissed`
+ *  are the consent-card outcome; `blocking` is set while a child reveal/capture gate is un-skippable. */
+export interface FreshStartState {
+  hasPendingLink: boolean;
+  hasValidPrefill: boolean;
+  tab: "signin" | "enroll";
+  consented: boolean;
+  dismissed: boolean;
+  blocking: boolean;
+}
+/** What FreshStart's render is allowed to expose, given the mode + state. */
+export interface FreshStartAffordances {
+  enrollAvailable: boolean;
+  effectiveTab: "signin" | "enroll";
+  showConsentCard: boolean;
+  showTabBar: boolean;
+  showNudge: boolean;
+  showMismatch: boolean;
+}
+/**
+ * §2.1/§7.1/§4.4 the security-relevant mode→affordance WIRING for {@link FreshStart}: from the
+ * server-DECLARED landing mode + the current link/consent/blocking state, decide which onboarding
+ * surfaces the card may render. Extracted PURE and exported because FreshStart itself reads
+ * window.location + module singletons and cannot render in the node test env — so THIS seam (not the
+ * card) is where the wiring is unit-pinned (welcome-landing.test.ts). FreshStart must CALL this rather
+ * than re-inline the booleans, or a future mis-wire (exposing enroll on a "closed" break-glass origin,
+ * or failing to force the tab to sign-in) would ship untested. Security-load-bearing outputs:
+ *  - enrollAvailable — any enroll surface at all; FALSE only on "closed" (the §2.2 break-glass overlay);
+ *  - effectiveTab    — FORCED to "signin" whenever enroll is unavailable, even if a stale tab state (or
+ *                      a landing→closed policy refresh) left `tab` on "enroll";
+ *  - showConsentCard — the explicit origin-consent step (consume-semantics rule 4): only with enroll
+ *                      available, a valid same-origin prefill, and neither consented nor dismissed —
+ *                      "closed" never shows it, not even for a crafted same-origin link (§2.1);
+ *  - showTabBar      — hidden while a child reveal blocks (escape-hatch guard, §F.7/§F.9) AND whenever
+ *                      enroll is unavailable ("closed" ⇒ sign-in only);
+ *  - showNudge       — the stranger self-host nudge: "landing" only, and not while blocking;
+ *  - showMismatch    — the §4.4 terminal reject: a captured link present but NOT valid for this origin.
+ */
+export function freshStartAffordances(landingMode: LandingMode, s: FreshStartState): FreshStartAffordances {
+  const enrollAvailable = landingMode !== "closed";
+  return {
+    enrollAvailable,
+    effectiveTab: enrollAvailable ? s.tab : "signin",
+    showConsentCard: enrollAvailable && s.hasValidPrefill && !s.consented && !s.dismissed,
+    showTabBar: !s.blocking && enrollAvailable,
+    showNudge: !s.blocking && landingMode === "landing",
+    showMismatch: s.hasPendingLink && !s.hasValidPrefill,
+  };
+}
+
+/** §2.3 R8 rule: `selfHostDocsUrl` is DECORATIVE, server-declared, and untrusted — render it as a
+ *  raw link ONLY when it is a real http(s) URL, so a hostile server cannot slip a `javascript:` /
+ *  `data:` href into the landing. Returns the url verbatim when safe, else null (link omitted). */
+function safeHttpUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const scheme = new URL(url).protocol;
+    return scheme === "https:" || scheme === "http:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/** §7.1 stranger landing banner (signupMode "landing"/"open"): the invite-only + self-host nudge.
+ *  Static copy only — it adds NO account/enumeration surface (no email probe, no "account exists"
+ *  oracle); server enforcement of register-without-invite is unchanged (invite-ROW gate). The
+ *  self-host docs URL is rendered as a raw link, and only when present AND a safe http(s) URL. */
+export function LandingNudge({ selfHostDocsUrl }: { selfHostDocsUrl?: string | null }) {
+  const docs = safeHttpUrl(selfHostDocsUrl);
+  return (
+    <div className="msg info" style={{ display: "block" }}>
+      This is a <strong>private, invite-only server</strong>. Have an invite? Paste it here. Want your own?{" "}
+      andvari is self-hostable — <strong>run your own server</strong>
+      {docs ? (
+        <>
+          {": "}
+          <a href={docs} rel="noreferrer noopener">{docs}</a>
+        </>
+      ) : (
+        "."
+      )}
+    </div>
+  );
+}
+
+/** §4.4 web REJECT-on-mismatch (B2-2): a captured enroll link minted for a DIFFERENT origin than
+ *  this page is a TERMINAL, non-actionable state. The foreign origin is shown as PLAIN TEXT — never
+ *  a link, never a button, and with no "continue"/"switch" affordance — so this trusted page can
+ *  never become an escort to the attacker origin, where post-navigation JS (T6) could phish the
+ *  master password and replay it against the user's REAL server. There is deliberately no
+ *  `enrollSwitchProposalFor`: on web the link IS the switch (opening the genuine link lands on the
+ *  issuing server's own SPA). The user's own same-origin sign-in / enroll below stay available. */
+export function EnrollMismatchNotice({ origin }: { origin: string }) {
+  return (
+    <div className="msg err" style={{ display: "block" }} role="alert">
+      This invite belongs to <span className="mono">{origin}</span>. Open the original link you were given.
+    </div>
+  );
+}
+
 /** No session: sign in to an existing account, or enroll with an invite. */
 function FreshStart({ client, policy, policyError, policyErrorMessage, onRetryPolicy, notice, onReady }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; policyErrorMessage?: string; onRetryPolicy: () => Promise<void>; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
+  // §7.1/§2.1 landing decision — the server-DECLARED signupMode drives which onboarding surface
+  // renders (never a hostname sniff). "closed" ⇒ sign-in only (no enroll UI); "landing"/"open" ⇒
+  // the stranger self-host nudge over the enroll form; else today's plain sign-in + invite enroll.
+  const landingMode = landingModeFor(policy?.signupMode);
   // One-scan onboarding: peek (never consume) the captured enroll link so a StrictMode
   // double-invoked initializer reads the same value both times. The seed is read ONCE here.
   const [pending] = useState<EnrollPayload | null>(() => peekPendingEnroll());
-  // Only a link minted for THIS exact origin applies (a mismatch → a notice + manual entry).
+  // Only a link minted for THIS exact origin applies (a mismatch → the terminal reject notice).
   const validPrefill = enrollPrefillFor(pending, window.location.origin);
   const [consented, setConsented] = useState(false);
   const [dismissed, setDismissed] = useState(false);
-  const [tab, setTab] = useState<"signin" | "enroll">("signin");
+  // Stranger-first on the reference-instance landing: open on the invite field ("paste it here",
+  // §7.1); every other mode opens on Sign in. policy is fetched before the welcome phase mounts
+  // (App boot awaits loadPolicy before setPhase), so the mode is settled at this first render.
+  const [tab, setTab] = useState<"signin" | "enroll">(landingMode === "landing" ? "enroll" : "signin");
   // Self-service recovery (design §F.3): its own screen, reachable from the sign-in form or a
   // `#recover` deep link. On success it lands back on Sign in with a notice (sessions were revoked).
   const [recovering, setRecovering] = useState(() => typeof window !== "undefined" && window.location.hash === "#recover");
@@ -237,6 +365,17 @@ function FreshStart({ client, policy, policyError, policyErrorMessage, onRetryPo
   // a tab switch would navigate away from the reveal, unmounting it and losing the phrase the user
   // was told to save (a silent-total-loss escape). Whichever child is mounted reports this.
   const [blocking, setBlocking] = useState(false);
+
+  // §2.1/§7.1/§4.4: the mode→affordance wiring lives in the pure, unit-pinned freshStartAffordances
+  // (this card can't render in the node test env, so the booleans are proven THERE, not inline).
+  const { effectiveTab, showConsentCard, showTabBar, showNudge, showMismatch } = freshStartAffordances(landingMode, {
+    hasPendingLink: !!pending,
+    hasValidPrefill: !!validPrefill,
+    tab,
+    consented,
+    dismissed,
+    blocking,
+  });
 
   if (recovering) {
     return (
@@ -255,8 +394,9 @@ function FreshStart({ client, policy, policyError, policyErrorMessage, onRetryPo
   // Consume-semantics rule 4 (normative): a captured link must NOT auto-advance into the
   // prefilled form. Show an explicit origin-consent step first, so a silent drive-by
   // navigation (a hostile page replaying a photographed QR link) can't stage an enrollment
-  // the member never saw and accepted.
-  if (validPrefill && !consented && !dismissed) {
+  // the member never saw and accepted. §2.1 "closed" renders no enroll UI at all — not even
+  // the consent card for a (crafted) same-origin link a closed instance would never mint.
+  if (showConsentCard) {
     return (
       <div className="auth-shell">
         <div className="card">
@@ -289,20 +429,22 @@ function FreshStart({ client, policy, policyError, policyErrorMessage, onRetryPo
             persistent Announcer speaks it; this box is the sighted-user copy. */}
         {notice && <Msg kind="info">{notice}</Msg>}
         {localNotice && <Msg kind="info">{localNotice}</Msg>}
-        {pending && !validPrefill && (
-          <div className="msg err" style={{ display: "block" }} role="alert">
-            This invite link is for a different address ({pending.o}) — open the exact link you were given, or sign in / enroll by hand.
-          </div>
-        )}
+        {/* §4.4 reject-on-mismatch (B2-2): a foreign-origin invite link is TERMINAL + non-actionable
+            — the origin is plain text, with NO affordance escorting the user to attacker turf. */}
+        {showMismatch && <EnrollMismatchNotice origin={pending!.o} />}
+        {/* §7.1 stranger landing: the self-host nudge frames the enroll form on a "landing"
+            (reference-instance) or reserved-"open" server. Hidden while a child reveal blocks. */}
+        {showNudge && <LandingNudge selfHostDocsUrl={policy?.selfHostDocsUrl} />}
         {/* §F.7/§F.9: the tab bar is the escape hatch out of an un-skippable reveal — hide it while a
-            child is blocking so the reveal cannot be navigated away from without confirming. */}
-        {!blocking && (
+            child is blocking so the reveal cannot be navigated away from without confirming.
+            §2.1 "closed" ⇒ sign-in only: no tab bar, no enroll surface. */}
+        {showTabBar && (
           <div className="tabs">
-            <button className={tab === "signin" ? "active" : ""} aria-pressed={tab === "signin"} onClick={() => setTab("signin")}>Sign in</button>
-            <button className={tab === "enroll" ? "active" : ""} aria-pressed={tab === "enroll"} onClick={() => setTab("enroll")}>Enroll</button>
+            <button className={effectiveTab === "signin" ? "active" : ""} aria-pressed={effectiveTab === "signin"} onClick={() => setTab("signin")}>Sign in</button>
+            <button className={effectiveTab === "enroll" ? "active" : ""} aria-pressed={effectiveTab === "enroll"} onClick={() => setTab("enroll")}>Enroll</button>
           </div>
         )}
-        {tab === "signin" ? (
+        {effectiveTab === "signin" ? (
           <SignIn client={client} policy={policy} onReady={onReady} onForgot={() => { setLocalNotice(""); setRecovering(true); }} onBlockingChange={setBlocking} />
         ) : (
           <Enroll client={client} policy={policy} policyError={policyError} policyErrorMessage={policyErrorMessage} onRetryPolicy={onRetryPolicy} onReady={onReady} prefill={consented ? validPrefill : null} onBlockingChange={setBlocking} onTimedOut={(n) => { setBlocking(false); setTab("signin"); setLocalNotice(n); }} />
