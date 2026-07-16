@@ -48,7 +48,7 @@ test("canonicalizeServerUrl — normalizes to lowercase scheme://host[:non-defau
   assert.equal(canonicalizeServerUrl("https://example.org:443"), "https://example.org"); // default port strips
   assert.equal(canonicalizeServerUrl("http://example.org:80"), "http://example.org");
   assert.equal(canonicalizeServerUrl("https://example.org:8443"), "https://example.org:8443"); // non-default kept
-  assert.equal(canonicalizeServerUrl("http://192.168.2.122:8080"), "http://192.168.2.122:8080"); // LAN self-host
+  assert.equal(canonicalizeServerUrl("http://192.168.1.9:8080"), "http://192.168.1.9:8080"); // LAN self-host
   assert.equal(canonicalizeServerUrl("https://пример.рф"), "https://xn--e1afmkfd.xn--p1ai"); // IDN → punycode
   assert.equal(canonicalizeServerUrl("https://[::1]:8443"), "https://[::1]:8443"); // IPv6 literal
   assert.equal(canonicalizeServerUrl("https://[0:0:0:0:0:0:0:1]"), "https://[::1]"); // IPv6 canonical form
@@ -191,7 +191,7 @@ test("originMatchPattern — vault-exclusion patterns (B2-5): ports dropped, IPv
   assert.equal(originMatchPattern(DEFAULT_SERVER_URL), "https://andvari.monahanhosting.com/*");
   // Match patterns cannot carry a port — the host pattern matches EVERY port (over-excludes, safe).
   assert.equal(originMatchPattern("https://self.example:8443"), "https://self.example/*");
-  assert.equal(originMatchPattern("http://192.168.2.122:8080"), "http://192.168.2.122/*");
+  assert.equal(originMatchPattern("http://192.168.1.9:8080"), "http://192.168.1.9/*");
   // A bracketed IPv6 literal has no valid pattern form → null → caller must NOT register autofill.
   assert.equal(originMatchPattern("https://[::1]:8443"), null);
   assert.equal(originMatchPattern("not-an-origin"), null);

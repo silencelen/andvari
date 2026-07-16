@@ -20,13 +20,15 @@ class CliHardeningTest {
     @Test
     fun serverUrlArgs_areDetected() {
         assertEquals(
-            "https://andvari.taila2dff2.ts.net",
-            serverUrlArg(arrayOf("recover", "https://andvari.taila2dff2.ts.net")),
+            "https://andvari.example.net",
+            serverUrlArg(arrayOf("recover", "https://andvari.example.net")),
         )
         assertNotNull(serverUrlArg(arrayOf("verify", "seed.txt", "http://192.168.7.122:8080/api")))
-        assertNotNull(serverUrlArg(arrayOf("keygen", "--server", "andvari.taila2dff2.ts.net"))) // bare tailnet host
+        assertNotNull(serverUrlArg(arrayOf("keygen", "--server", "andvari.example.net"))) // bare host, no scheme
         assertNotNull(serverUrlArg(arrayOf("canary", "make", "ANDVARI.MONAHANHOSTING.COM"))) // case-insensitive
-        assertNotNull(serverUrlArg(arrayOf("wss://andvari.taila2dff2.ts.net/api/v1/events")))
+        assertNotNull(serverUrlArg(arrayOf("keygen", "--server", "vault.selfhost.example"))) // ANY host — the matcher is host-agnostic (§5.5)
+        assertNotNull(serverUrlArg(arrayOf("recover", "myvault.net:8443"))) // dotted name + port
+        assertNotNull(serverUrlArg(arrayOf("wss://andvari.example.net/api/v1/events")))
     }
 
     @Test

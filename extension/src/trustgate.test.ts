@@ -31,12 +31,12 @@ test("hasPunycodeLabel — true only for a host carrying an xn-- label", () => {
   assert.equal(hasPunycodeLabel("https://xn--80ak6aa92e.com"), true); // apple homograph
   assert.equal(hasPunycodeLabel("https://example.org"), false);
   assert.equal(hasPunycodeLabel("https://self.example:8443"), false);
-  assert.equal(hasPunycodeLabel("http://192.168.2.122:8080"), false);
+  assert.equal(hasPunycodeLabel("http://192.168.1.9:8080"), false);
 });
 
 test("isPlainHttp — true only for an http:// origin", () => {
   assert.equal(isPlainHttp("http://localhost:8443"), true);
-  assert.equal(isPlainHttp("http://192.168.2.122:8080"), true);
+  assert.equal(isPlainHttp("http://192.168.1.9:8080"), true);
   assert.equal(isPlainHttp("https://example.org"), false);
 });
 
@@ -57,7 +57,7 @@ test("trustGateView — IDN origin raises the punycode caution", () => {
 });
 
 test("trustGateView — plain-http origin raises the http caution", () => {
-  const v = trustGateView("http://192.168.2.122:8080");
+  const v = trustGateView("http://192.168.1.9:8080");
   assert.equal(v.httpCaution, TRUST_GATE_HTTP_CAUTION);
   assert.equal(v.punycodeCaution, null);
 });

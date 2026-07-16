@@ -14,23 +14,23 @@ import {
 // The two client-side security gates of the S4 web slice, pinned as pure functions so a
 // refactor that drops or inverts either trips a test instead of silently exposing it.
 
-const payload: EnrollPayload = { v: 1, o: "https://vault.taila2dff2.ts.net", t: "invite-token-value", e: "a@x.com" };
+const payload: EnrollPayload = { v: 1, o: "https://vault.example.net", t: "invite-token-value", e: "a@x.com" };
 
 describe("enrollPrefillFor — a link applies only to its exact minting origin", () => {
   it("returns the payload on an exact origin match", () => {
-    expect(enrollPrefillFor(payload, "https://vault.taila2dff2.ts.net")).toBe(payload);
+    expect(enrollPrefillFor(payload, "https://vault.example.net")).toBe(payload);
   });
   it("refuses a different host (origin substitution)", () => {
     expect(enrollPrefillFor(payload, "https://evil.example")).toBeNull();
   });
   it("refuses a scheme change (http vs https is a different origin)", () => {
-    expect(enrollPrefillFor(payload, "http://vault.taila2dff2.ts.net")).toBeNull();
+    expect(enrollPrefillFor(payload, "http://vault.example.net")).toBeNull();
   });
   it("refuses a port change", () => {
-    expect(enrollPrefillFor(payload, "https://vault.taila2dff2.ts.net:8443")).toBeNull();
+    expect(enrollPrefillFor(payload, "https://vault.example.net:8443")).toBeNull();
   });
   it("is null when there is no captured link", () => {
-    expect(enrollPrefillFor(null, "https://vault.taila2dff2.ts.net")).toBeNull();
+    expect(enrollPrefillFor(null, "https://vault.example.net")).toBeNull();
   });
 });
 
@@ -52,7 +52,7 @@ describe("shouldOfferQr — keyed to the DECLARED signupMode, no hostname sniffi
 
 describe("tryQrModules — the encoder-overflow guard", () => {
   it("returns a non-empty module matrix for a realistic enroll link", () => {
-    const m = tryQrModules("https://vault.taila2dff2.ts.net/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHMifQ");
+    const m = tryQrModules("https://vault.example.net/enroll#a1.eyJ2IjoxLCJvIjoiaHR0cHMifQ");
     expect(Array.isArray(m)).toBe(true);
     expect((m as boolean[][]).length).toBeGreaterThan(0);
   });
