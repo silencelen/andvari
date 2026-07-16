@@ -15,8 +15,8 @@ import java.security.MessageDigest
  * shared vectors below (asserted in OriginNamespaceTest — Android's lane pins the same literals):
  *
  *     https://andvari.monahanhosting.com  -> e1fd6516bf573c7f
- *     https://andvari.taila2dff2.ts.net   -> edfce5729b02fa19
- *     http://192.168.2.122:8080           -> 63572e635897bbf3
+ *     https://vault.example.net           -> 45858d4d141c5edd
+ *     http://192.168.1.9:8080             -> 4e629db6dc46b0f6
  *     https://example.org                 -> 50d7a905e3046b88
  *     https://example.org:8443            -> 3e1098e31ab128b1
  *
