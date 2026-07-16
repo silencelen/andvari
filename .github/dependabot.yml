@@ -1,0 +1,38 @@
+# Dependabot — dependency + GitHub Actions update PRs (W3 tooling, trust-attestation strategy).
+# Grouped weekly to keep the noise down on a small project.
+version: 2
+updates:
+  # One Gradle build covers :core, :server, :app-android, :app-desktop, :tools:* (libs.versions.toml).
+  - package-ecosystem: gradle
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      gradle-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      web-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: "/extension"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      ext-minor-patch:
+        update-types: [minor, patch]
+
+  # Keep the Actions in the workflows below pinned + current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

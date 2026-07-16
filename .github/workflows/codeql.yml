@@ -1,0 +1,51 @@
+# CodeQL static analysis (W3 tooling). Free on public repositories, so this sidesteps the
+# account's GitHub Actions billing block once the repo is public.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so newly-published CodeQL queries catch drift even with no pushes.
+    - cron: "27 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload results to the Security tab
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: java-kotlin
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+    # NOTE (build-mode): `none` extracts from source without compiling — chosen because the full
+    # Gradle build needs ~8-12 GB and won't fit a GitHub-hosted runner. For deeper Kotlin dataflow,
+    # switch java-kotlin to `build-mode: autobuild` (or `manual` with `./gradlew … assemble`) on a
+    # self-hosted / larger runner.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
