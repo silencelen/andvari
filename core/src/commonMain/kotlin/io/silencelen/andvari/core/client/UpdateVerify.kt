@@ -16,20 +16,25 @@ import io.silencelen.andvari.core.crypto.CryptoProvider
  */
 object UpdateVerify {
     /**
-     * The pinned Ed25519 update-signing PUBLIC keys (base64url, 32 bytes each). A key SET (§M-D7) so
-     * a rotation can overlap without bricking already-fielded clients. Ships with ONLY the
-     * [TEST_PUBKEY] sentinel until the owner mints the real workstation key (§F) and its pubkey is
-     * pinned here — at which point remove the sentinel.
+     * The placeholder sentinel. Pinning ONLY this value hard-disables the update path (§M-D3
+     * fail-closed) — which is the SHIPPED state again since the 2026-07-15 multi-tenant pivot
+     * deliberately un-armed the channel (design §9; see [PINNED]).
      */
     const val TEST_PUBKEY = "TEST_KEY_placeholder__pin_the_real_workstation_pubkey_here"
 
     /**
-     * The real workstation update-signing public key(s) (ceremony 2026-07-14 —
-     * `docs/runbooks/release-signing-keys.md`). A SET (§M-D7) so a future rotation can add the next
-     * key and overlap without bricking fielded clients. The private key lives only on the owner's
-     * workstation; each release's `/downloads/manifest.json` is signed there with `tools/update-signer`.
+     * UN-ARMED for the endpoint-agnostic pivot (design 2026-07-15-multi-tenant-endpoints §9): under
+     * self-hosting, a single owner-pinned key makes every self-host `/downloads`
+     * unverifiable-by-construction while keeping a live verification path aimed at untrusted
+     * servers — so the shipped default re-pins the [TEST_PUBKEY] sentinel, which hard-disables the
+     * whole update path fail-closed-quiet (§M-D3: [updatesEnabled] → false, no manifest fetch, no
+     * nag). `/downloads` keeps serving as plain pull distribution. Per-instance signed updates
+     * (key discovery/pinning/rotation) are separate later work; the signer + real key (ceremony
+     * 2026-07-14, `docs/runbooks/release-signing-keys.md`) stay on the owner workstation. Still a
+     * SET (§M-D7) so any future re-arm can rotate with overlap. Byte-locked to the extension's
+     * `updateverify.ts PINNED_UPDATE_KEYS` by `updateverify.test.ts` — change together.
      */
-    val PINNED: List<String> = listOf("e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI")
+    val PINNED: List<String> = listOf(TEST_PUBKEY)
 
     /**
      * §M-D4(a) — compile-time anti-rollback FLOOR: the lowest signed-manifest `seq` a FRESH desktop

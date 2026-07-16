@@ -308,6 +308,9 @@ export interface ClientPolicy {
   kdfParams: KdfParams;
   autoLockSeconds: number;
   clipboardClearSeconds: number;
+  /** THE durable-cache wire field (design 2026-07-15 §2.1, binding — the owner-decision term
+   *  "durableCacheAllowed" IS this field; no parallel field exists). Tighten-only: false ⇒
+   *  prohibition + wipe of this origin's own cache; true is necessary but never sufficient. */
   offlineCacheAllowed: boolean;
   sessionAccessTtlSeconds: number;
   sessionRefreshTtlDays: number;
@@ -317,7 +320,33 @@ export interface ClientPolicy {
   attachmentMaxBytes: number;
   itemAttachmentsMaxBytes: number;
   userAttachmentsMaxBytes: number;
+  // ---- multi-tenant / endpoint-agnostic pivot (design 2026-07-15 §2.1/§2.2) ----
+  // Additive/optional — old servers omit them; mirrors core Wire.kt ClientPolicy +
+  // extension/src/api.ts ClientPolicyResponse, byte-consistent.
+  /** §2.1 enum: "closed" | "invite-only" | "landing" | "open". Absent (old server) OR unknown value
+   *  (newer server) ⇒ treat as "invite-only": plain invite-gated enroll, never open-register UI,
+   *  no stranger nudge. Register success stays server-enforced (invite-ROW gate) either way. */
+  signupMode?: string;
+  /** §2.6 — per-instance login-factor stance. A UI pre-prompt HINT only; the reactive server errors
+   *  (totp_required / public_login_requires_totp) stay authoritative. Never gates a client-side
+   *  protection (§2.3 trust table). Absent ⇒ false. */
+  totpRequired?: boolean;
+  /** Decorative label — NEVER rendered as a verified identity, never in the trust gate (§2.3). */
+  instanceName?: string | null;
+  /** Server-claimed own origin — proxy-misconfig diagnostic only; never a trust anchor (§2.3). */
+  canonicalOrigin?: string | null;
+  /** Rendered as a raw https URL only (§2.3 R8 rule) — never as trusted branding. */
+  selfHostDocsUrl?: string | null;
 }
+
+/** Client-side ceilings for the server-declared policy timers (design 2026-07-15 §2.3, breaker B1-1).
+ *  Byte-pinned mirror of core `ClientPolicyClamps` (Kotlin) — locked three-way (core/web/ext) by
+ *  `web/src/policy-clamps.test.ts`; bump all three together. The fields are CLIENT-FLOOR-ONLY: a
+ *  hostile server may make the client safer, never laxer — a 0/absent/oversized `autoLockSeconds`
+ *  clamps to the ceiling, so a server cannot disable auto-lock or pin the clipboard for hours.
+ *  Wave 1 defines the constants only; call-site clamping (useAutoLock.ts etc.) is wave-2 work. */
+export const AUTO_LOCK_MAX_SECONDS = 900;
+export const CLIPBOARD_CLEAR_MAX_SECONDS = 300;
 
 export interface EscrowUpload {
   sealed: string;

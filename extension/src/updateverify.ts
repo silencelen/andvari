@@ -22,10 +22,14 @@ import nacl from "tweetnacl";
 /** Placeholder sentinel — mirrors core `UpdateVerify.TEST_PUBKEY`. Pinning ONLY this disables updates. */
 export const TEST_PUBKEY = "TEST_KEY_placeholder__pin_the_real_workstation_pubkey_here";
 
-/** The pinned Ed25519 update-signing public key SET (base64url, 32 bytes each) — mirrors core
- *  `UpdateVerify.PINNED` (ceremony 2026-07-14). The private key lives only on the owner's
- *  workstation; each release's manifest is signed there. Byte-pinned to the Kotlin constant. */
-export const PINNED_UPDATE_KEYS: readonly string[] = ["e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI"];
+/** UN-ARMED for the endpoint-agnostic pivot (design 2026-07-15-multi-tenant-endpoints §9): under
+ *  self-hosting, a single owner-pinned key makes every self-host `/downloads`
+ *  unverifiable-by-construction — so the shipped default re-pins the sentinel, hard-disabling the
+ *  update path fail-closed-quiet (§M-D3: `updatesEnabled()` → false ⇒ the SW never fetches the
+ *  manifest, no nag). Per-instance signed updates are separate later work; the signer + real key
+ *  (ceremony 2026-07-14) stay on the owner workstation. Mirrors core `UpdateVerify.PINNED` —
+ *  byte-locked by updateverify.test.ts, change together. */
+export const PINNED_UPDATE_KEYS: readonly string[] = [TEST_PUBKEY];
 
 /** §M-D4b — a signed manifest older than this is treated as a (quiet) STALE channel: withholding a
  *  security update by re-serving a stale-but-signed manifest is irreducible, so make it detectable. */

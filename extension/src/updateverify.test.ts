@@ -45,17 +45,24 @@ test("PINNED_UPDATE_KEYS + TEST_PUBKEY are byte-single-sourced to core UpdateVer
   const ktTest = /TEST_PUBKEY\s*=\s*"([^"]+)"/.exec(kt);
   assert.ok(ktTest, "core TEST_PUBKEY literal not found");
   assert.equal(TEST_PUBKEY, ktTest[1], "extension TEST_PUBKEY must equal the Kotlin sentinel");
-  // PINNED set parity — every base64url literal inside the Kotlin listOf(...) must appear here.
+  // PINNED set parity — every entry inside the Kotlin listOf(...) must appear here, in order.
+  // Entries are either base64url string LITERALS (an armed build) or the bare TEST_PUBKEY symbol
+  // (the UN-ARMED shipped default since the 2026-07-15 multi-tenant pivot, design §9) — the symbol
+  // maps to the sentinel value already proven byte-equal above, so the lock stays meaningful:
+  // both sides pin the exact same sentinel.
   const ktPinnedBlock = /val PINNED[^=]*=\s*listOf\(([^)]*)\)/.exec(kt);
   assert.ok(ktPinnedBlock, "core PINNED listOf(...) not found");
-  const ktKeys = [...ktPinnedBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  const ktKeys = [...ktPinnedBlock[1].matchAll(/"([^"]+)"|(\bTEST_PUBKEY\b)/g)].map((m) => m[1] ?? TEST_PUBKEY);
+  assert.ok(ktKeys.length > 0, "core PINNED must pin at least one entry (sentinel or real)");
   assert.deepEqual([...PINNED_UPDATE_KEYS], ktKeys, "extension pinned key SET must byte-equal Kotlin UpdateVerify.PINNED");
 });
 
 test("updatesEnabled — sentinel-only is disabled, a real key enables (§M-D3)", () => {
   assert.equal(updatesEnabled([TEST_PUBKEY]), false);
   assert.equal(updatesEnabled(PINNED_LOCAL), true);
-  assert.equal(updatesEnabled(), true); // shipped default pins a real key
+  // Shipped default is UN-ARMED (placeholder-pinned) for the multi-tenant pivot (design 2026-07-15
+  // §9) — fail-closed-quiet: the SW never fetches the manifest, /downloads stays plain pull.
+  assert.equal(updatesEnabled(), false);
 });
 
 test("verifyManifest — a valid detached sig over the EXACT bytes verifies", () => {
