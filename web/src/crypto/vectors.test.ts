@@ -24,7 +24,7 @@ import {
   secretstreamEncrypt,
 } from "./provider";
 import { initSodium } from "./sodium";
-import { base32Decode, base32Encode, parseOtpauthUri, totpCode, type TotpAlgorithm } from "./totp";
+import { base32Decode, base32Encode, normalizeTotp, parseOtpauthUri, totpCode, type TotpAlgorithm } from "./totp";
 
 /**
  * Consumes spec/test-vectors — the SAME files the Kotlin VectorsTest verifies.
@@ -216,6 +216,33 @@ describe("totp.json", () => {
       expect(parsed.label).toBe(c.expect.label);
       expect(parsed.issuer).toBe(c.expect.issuer);
     }
+  });
+
+  // The DISPLAY path (Vault.tsx TotpView) renders an imported / other-client secret that is a
+  // bare base32 string, not an otpauth:// URI. parseOtpauthUri alone THROWS on it ("invalid"
+  // forever); TotpView first runs the shared normalizeTotp, exactly as the editor's save path
+  // does. This pins that composition so the bare-secret display never regresses.
+  describe("bare base32 secret renders through the display normalize (TotpView regression)", () => {
+    const bare = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"; // RFC 6238 SHA1 seed, no otpauth wrapper
+
+    it("parseOtpauthUri throws on a bare secret, but normalizeTotp makes it a live code", async () => {
+      expect(() => parseOtpauthUri(bare)).toThrow(); // the pre-fix bug: display showed "invalid"
+
+      const cfg = parseOtpauthUri(normalizeTotp(bare)); // TotpView's tolerant path
+      expect(cfg.algorithm).toBe("SHA1"); // otpauth defaults applied by normalizeTotp's wrapper
+      expect(cfg.digits).toBe(6);
+      expect(cfg.periodSeconds).toBe(30);
+
+      const code = await totpCode(cfg, 59);
+      expect(code).toMatch(/^\d{6}$/);
+      // …and it is the SAME live code the explicit otpauth URI would render.
+      expect(code).toBe(await totpCode(parseOtpauthUri(`otpauth://totp/x?secret=${bare}`), 59));
+    });
+
+    it("an already-otpauth URI passes through the display normalize unchanged", () => {
+      const uri = `otpauth://totp/x?secret=${bare}`;
+      expect(normalizeTotp(uri)).toBe(uri);
+    });
   });
 });
 

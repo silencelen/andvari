@@ -24,6 +24,12 @@
         .boot { color: #6b6047; }
       }
     </style>
+    <!-- Forced-theme cold-load FOUC fix: a same-origin, classic (render-blocking) script that
+         stamps <html data-theme> from the persisted preference BEFORE first paint. Inline JS is
+         barred by the CSP (script-src 'self', not 'unsafe-inline'), so it lives in /public and is
+         a faithful twin of applyThemePref/readThemePref in src/ui/useTheme.ts (initTheme re-runs
+         the same logic on mount). Must stay classic + before the module bundle so it runs pre-paint. -->
+    <script src="/theme-boot.js"></script>
   </head>
   <body>
     <!-- No JS = no crypto, no app — say so instead of a permanent blank page. -->

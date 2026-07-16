@@ -729,6 +729,15 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
           `A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). ` +
           `If nobody in your household did this, tell your admin — the server may be misbehaving.`,
       };
+    case "meta-regression":
+      // spec 02 §4 warn-and-keep-newer: a delivered metaBlob whose metaV regressed below the
+      // one held here was kept as-is (anti-replay). Calm, informational — never an error tone.
+      return {
+        warn: false,
+        body:
+          `A saved change to “${name}” looked older than expected and was kept as-is — ` +
+          `if a recent change is missing, re-save it.`,
+      };
   }
 }
 

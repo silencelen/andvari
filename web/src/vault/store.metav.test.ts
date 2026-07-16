@@ -154,6 +154,23 @@ describe("keepNewerMeta (spec 02 §4 warn-and-keep-newer)", () => {
     expect(row(s).deleteId).toBe("did-replay"); // lifecycle fields still apply
   });
 
+  it("emits a calm meta-regression notice so the keep-newer is user-visible, not console-only", async () => {
+    const s = await seeded();
+    await applyRename(s);
+    expect(s.store.notices().some((n) => n.kind === "meta-regression")).toBe(false);
+
+    // Replay the pre-rename (metaV-0) row → keepNewerMeta pins the newer blob AND surfaces it.
+    s.api.queue.push({
+      rev: 7, full: false, vaults: [{ ...s.vault, rev: 7 }], grants: [], items: [], removedGrants: [],
+    });
+    await s.store.sync();
+
+    const notice = s.store.notices().find((n) => n.kind === "meta-regression");
+    expect(notice, "a meta-regression notice must surface").toBeDefined();
+    expect(notice!.vaultId).toBe(s.vaultId);
+    expect(notice!.vaultName).toBe("Family v2"); // the kept (newer) name, decrypted for the banner
+  });
+
   it("the guard is inert on a 410 resync — vaultsById was just cleared, the snapshot applies as-is", async () => {
     const s = await seeded();
     await applyRename(s);

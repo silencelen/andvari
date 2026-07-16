@@ -67,8 +67,12 @@ function syncThemeColorMetas(pref: ThemePref): void {
 }
 
 /** Boot-time application of the persisted preference — App calls this once, pre-paint
- *  (useLayoutEffect). The pre-React boot placeholder still follows the OS scheme: the
- *  CSP allows no inline script in index.html, so nothing can stamp the attribute earlier. */
+ *  (useLayoutEffect). A cold load stamps the attribute even EARLIER via the classic
+ *  same-origin `/theme-boot.js` (public/, referenced in index.html <head> — inline JS is
+ *  CSP-barred), a faithful twin of applyThemePref/readThemePref that kills the forced-theme
+ *  FOUC; this call re-runs the identical logic idempotently once React mounts. Keep the two
+ *  in lockstep — if you change applyThemePref/readThemePref/syncThemeColorMetas, mirror it
+ *  in theme-boot.js. */
 export function initTheme(): void {
   applyThemePref(readThemePref());
 }

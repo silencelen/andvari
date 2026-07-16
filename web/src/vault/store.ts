@@ -96,7 +96,8 @@ export interface LifecycleNotice {
     | "transfer-complete"
     | "transfer-anomaly"
     | "replay-denied"
-    | "write-refused";
+    | "write-refused"
+    | "meta-regression";
   /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
   purgeAt?: number;
   /** verified delete: N of the member's edits parked for replay on restore (F21).
@@ -1349,6 +1350,14 @@ export class VaultStore {
         console.warn(
           `vault ${delivered.vaultId}: delivered metaV ${deliveredV} regressed below held ${heldV} — replayed metaBlob; keeping the newer local one`,
         );
+        // Surface the keep-newer to the user (non-alarming) alongside the console warn — held
+        // decrypts (metaVOf just read it above), so decryptVaultName can't throw here.
+        this.pushNotice({
+          id: crypto.randomUUID(),
+          vaultId: delivered.vaultId,
+          vaultName: this.account.decryptVaultName(delivered.vaultId, held.metaBlob),
+          kind: "meta-regression",
+        });
         return { ...delivered, metaBlob: held.metaBlob };
       }
     } catch {
