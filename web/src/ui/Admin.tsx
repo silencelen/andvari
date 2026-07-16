@@ -14,14 +14,16 @@ import { UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
-import { isPrivateOrigin } from "./origin";
 import { QrSvg } from "./QrSvg";
 import { ViewHeader } from "./ViewHeader";
 import { qrModules } from "../vendor/qrcode-generator";
 
 type Tab = "users" | "audit" | "policy" | "status";
 
-export function Admin({ client }: { client: ApiClient }) {
+/** `policy` is the pre-login-fetched, per-origin-resolved ClientPolicy (App.loadPolicy) — the QR
+ *  gate reads its `signupMode` (design 2026-07-15 §5.4.5; null = fetch failed, treated per §2.3's
+ *  conservative default as "invite-only"). */
+export function Admin({ client, policy }: { client: ApiClient; policy: ClientPolicy | null }) {
   const [tab, setTab] = useState<Tab>("users");
   return (
     <div>
@@ -33,7 +35,7 @@ export function Admin({ client }: { client: ApiClient }) {
           </button>
         ))}
       </div>
-      {tab === "users" && <UsersTab client={client} />}
+      {tab === "users" && <UsersTab client={client} signupMode={policy?.signupMode} />}
       {tab === "audit" && <AuditTab client={client} />}
       {tab === "policy" && <PolicyTab client={client} />}
       {tab === "status" && <StatusTab client={client} />}
@@ -63,7 +65,7 @@ function shortId(id: string | null): string {
 
 // ---- Users ----
 
-function UsersTab({ client }: { client: ApiClient }) {
+function UsersTab({ client, signupMode }: { client: ApiClient; signupMode: string | undefined }) {
   const [users, setUsers] = useState<AdminUserSummary[] | null>(null);
   const [devices, setDevices] = useState<Record<string, AdminDeviceSummary[]>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -121,7 +123,7 @@ function UsersTab({ client }: { client: ApiClient }) {
   return (
     <div>
       {err && <Msg kind="err">{err}</Msg>}
-      <InviteForm client={client} onInvited={load} />
+      <InviteForm client={client} signupMode={signupMode} onInvited={load} />
       {!users ? (
         <p className="muted"><Busy>loading…</Busy></p>
       ) : (
@@ -301,12 +303,16 @@ export function inviteTtlMinutes(choice: InviteTtl): number {
   }
 }
 
-/** v1 containment (design §Server work 2): the QR path is offered only on a private origin.
- *  The link embeds that origin, and public register is server-refused anyway — a public QR
- *  would sail through the ceremony and die at the last step. Pure, so a refactor that drops
- *  or inverts this gate trips a unit test rather than silently exposing it. */
-export function shouldOfferQr(origin: string): boolean {
-  return isPrivateOrigin(origin);
+/** design 2026-07-15-multi-tenant-endpoints §5.4.5: the QR/link affordance is keyed to the
+ *  server-DECLARED, per-origin-resolved `signupMode` — no hostname sniffing (origin.ts is
+ *  deleted). A break-glass twin origin answers `"closed"` (§2.2 overlay: register is refused
+ *  there, so a QR would sail through the ceremony and die at the last step) ⇒ token-only;
+ *  every other mode — and absent (old server) or unknown (newer server) values, which §2.1
+ *  says to treat as "invite-only" — offers the QR. signupMode is TRUSTED-class UI decoration
+ *  (§2.3): register success stays server-enforced by the invite-ROW gate either way. Pure, so
+ *  a refactor that drops or inverts this gate trips a unit test. */
+export function shouldOfferQr(signupMode: string | null | undefined): boolean {
+  return signupMode !== "closed";
 }
 
 /** The vendored QR encoder THROWS a bare string on capacity overflow — never let a long
@@ -391,7 +397,7 @@ export function escrowPostureLabel(
 // the admin confirms it against their printed sheet ONCE per session, not per invite (§F.1).
 let sessionOrgFp: string | null = null;
 
-function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () => void }) {
+function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; signupMode: string | undefined; onInvited: () => void }) {
   const [email, setEmail] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
   const [ttl, setTtl] = useState<InviteTtl>(INVITE_TTL_DEFAULT);
@@ -422,15 +428,16 @@ function InviteForm({ client, onInvited }: { client: ApiClient; onInvited: () =>
     setOrgFpErr("");
     setOrgFpInput("");
   };
-  // The enroll link embeds location.origin verbatim. On the public break-glass origin that link
-  // would sail through the whole ceremony and then die at register (public-register is
-  // server-refused) — so the QR path simply doesn't exist there; the plain token stays, redeemed
-  // wherever the member actually enrolls. shouldOfferQr gates every QR-bearing surface below.
-  const qrAvailable = shouldOfferQr(window.location.origin);
+  // The enroll link embeds location.origin verbatim (§3: on a single-origin instance that IS the
+  // canonical origin). Where the per-origin-resolved policy answers signupMode="closed" — the
+  // break-glass twin — register is server-refused, so the QR path simply doesn't exist there; the
+  // plain token stays, redeemed wherever the member actually enrolls. shouldOfferQr (§5.4.5,
+  // declared-policy-keyed — no hostname sniffing) gates every QR-bearing surface below.
+  const qrAvailable = shouldOfferQr(signupMode);
 
   // cut 4: the "email this invite" checkbox appears only when the server has email fully configured
-  // (SMTP + a valid private base URL) AND we're on a private origin (an emailed public-origin link
-  // dies at register). One status fetch drives availability.
+  // (SMTP + a valid canonical base URL) AND this origin's declared signupMode permits enroll links
+  // (an emailed link minted from a closed origin dies at register). One status fetch drives availability.
   useEffect(() => {
     let live = true;
     if (qrAvailable) client.adminStatus().then((s) => { if (live) setEmailAvailable(s.emailConfigured); }).catch(() => {});

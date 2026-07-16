@@ -5,7 +5,6 @@ import {
   backupNudge,
   buildPreflight,
   exportFilename,
-  isExportOriginAllowed,
   orderForExport,
   planAttachments,
 } from "./plan";
@@ -29,39 +28,8 @@ describe("exportFilename", () => {
   });
 });
 
-describe("isExportOriginAllowed (break-glass suppression, spec 07 intro)", () => {
-  it("allows tailnet, LAN, and localhost origins", () => {
-    for (const origin of [
-      "https://andvari.taila2dff2.ts.net",
-      "http://localhost:5173",
-      "http://127.0.0.1:8080",
-      "https://[::1]:8443",
-      "http://10.0.7.5",
-      "http://192.168.1.20:8080",
-      "http://172.16.0.1",
-      "http://172.31.255.254",
-      "http://100.64.0.1", // raw Tailscale CGNAT address
-      "http://100.127.9.9",
-      "https://heimdall.local",
-      "https://vault.home.arpa",
-    ]) {
-      expect(isExportOriginAllowed(origin), origin).toBe(true);
-    }
-  });
-  it("hides on public / unknown origins", () => {
-    for (const origin of [
-      "https://andvari.example.com", // the break-glass public origin shape
-      "https://vault.monahanhosting.com",
-      "http://172.32.0.1", // just past RFC1918
-      "http://100.128.0.1", // just past the CGNAT /10
-      "http://8.8.8.8",
-      "not a url",
-      "",
-    ]) {
-      expect(isExportOriginAllowed(origin), origin).toBe(false);
-    }
-  });
-});
+// isExportOriginAllowed is DELETED (design 2026-07-15 §5.4.2 — origin.ts and the whole origin
+// heuristic are gone): export renders whenever the vault is unlocked, on every origin.
 
 describe("orderForExport", () => {
   it("orders by vault position then updatedAt, dropping opted-out vaults", () => {

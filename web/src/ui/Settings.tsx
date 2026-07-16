@@ -12,7 +12,6 @@ import { UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
-import { isPrivateOrigin } from "./origin";
 import { QrSvg } from "./QrSvg";
 import { MasterPasswordHint } from "./Welcome";
 import {
@@ -36,8 +35,8 @@ interface Props {
   policy: ClientPolicy | null;
   onPasswordChanged: () => void;
   // IA P3: backups are actionable from here now (the card used to only point at the toolbar).
-  // Undefined on the public break-glass origin (export is suppressed there), which also hides
-  // the buttons — so the card degrades to describe-only, exactly as before, on that origin.
+  // Kept optional for the describe-only degradation, but Vault passes both whenever unlocked —
+  // the break-glass export suppression is gone (design 2026-07-15 §5.4.2).
   onBackup?: () => void;
   onCsv?: () => void;
 }
@@ -102,9 +101,8 @@ function BackupCard({ account, onBackup, onCsv }: { account: Account; onBackup?:
 /** Everything the Offline-copy card renders, assembled once per (re-)load. Pure data so the
  *  card body is a static function of it (the repo's node-env test posture — see offline-copy-card.test.ts). */
 export interface OfflineCopyModel {
-  /** isPrivateOrigin(location.origin) — the card is HIDDEN on the public break-glass origin unless opted in. */
-  privateOrigin: boolean;
-  /** webCacheEnabled() — the §F.1 gate: on/off for THIS device + origin. */
+  /** webCacheEnabled(userId) — the §F.1 gate: consented ON for THIS device + user (design 2026-07-15
+   *  §5.4.1: per-device opt-in, default OFF, on every origin). */
   enabled: boolean;
   /** §E.4: org policy pins the cache off (last-known bit) — explains the missing toggle. */
   orgDisallowed: boolean;
@@ -126,8 +124,8 @@ export interface OfflineCopyModel {
  *  best-effort: any probe failure degrades to "unknown", never a broken card). Exported for tests. */
 export async function offlineCopyModel(
   store: Pick<VaultStore, "cacheDurable" | "cacheDemoted" | "lastSyncAt" | "queuedMutationCount">,
+  userId: string,
 ): Promise<OfflineCopyModel> {
-  const origin = typeof window !== "undefined" && window.location ? window.location.origin : "";
   let persisted: boolean | null = null;
   let usageBytes: number | null = null;
   try {
@@ -147,8 +145,7 @@ export async function offlineCopyModel(
     /* a count failure must never break the card (session.pendingSyncCount posture) */
   }
   return {
-    privateOrigin: isPrivateOrigin(origin),
-    enabled: webCacheEnabled(),
+    enabled: webCacheEnabled(userId),
     orgDisallowed: orgOfflineCacheDisallowed(),
     durable: store.cacheDurable,
     demoted: store.cacheDemoted,
@@ -160,14 +157,15 @@ export async function offlineCopyModel(
 }
 
 /**
- * The card body — a pure function of the model (exported for the static-render tests). States:
- *  - public origin + not opted in ⇒ renders NOTHING (§E.3.3: the break-glass origin never
- *    advertises the feature; controls appear only once a copy was opted into);
+ * The card body — a pure function of the model (exported for the static-render tests). ALWAYS
+ * renders (design 2026-07-15 §5.4.3: the origin gate is gone — the card, with its default-off
+ * toggle, is the standing consent entry point on every origin). States:
  *  - org-disallowed ⇒ the policy explanation, no toggle (the wipe already ran, §E.4);
  *  - demoted ⇒ the §D.1 "offline copy unavailable — storage error" row;
  *  - enabled+durable ⇒ last-synced / eviction-protection / size / queued rows + wipe-now;
  *  - enabled but not (yet) durable ⇒ "ready after your next unlock" (toggle just flipped ON,
- *    or this session's unlock degraded cache-less).
+ *    or this session's unlock degraded cache-less);
+ *  - not enabled ⇒ the unchecked opt-in toggle (per-device consent, default OFF — §5.4.1).
  */
 export function OfflineCopyBody({
   model,
@@ -182,7 +180,6 @@ export function OfflineCopyBody({
   onToggle: (enabled: boolean) => void;
   onWipe: () => void;
 }) {
-  if (!model.privateOrigin && !model.enabled) return null; // hidden on the public break-glass origin unless opted in
   return (
     <div className="sheet">
       <h2>Offline copy</h2>
@@ -306,17 +303,17 @@ function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string 
   // (Re-)assemble the model; guarded so a slow probe never lands state on an unmounted card.
   useEffect(() => {
     let alive = true;
-    void offlineCopyModel(store).then((m) => {
+    void offlineCopyModel(store, userId).then((m) => {
       if (alive) setModel(m);
     });
     return () => {
       alive = false;
     };
-  }, [store]);
+  }, [store, userId]);
 
   if (!model) return null; // first probe still in flight — the card appears fully formed
 
-  const refresh = async () => setModel(await offlineCopyModel(store));
+  const refresh = async () => setModel(await offlineCopyModel(store, userId));
 
   const toggle = async (enabled: boolean) => {
     if (!enabled && !(await confirmQueueLoss(store, model.queued))) return;

@@ -1,9 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { isExportOriginAllowed } from "../export/plan";
 import { coerceManifest, DevicesCard, extensionRowState, platformRowState, windowsRowState } from "./Devices";
-import { isPrivateOrigin } from "./origin";
 
 describe("coerceManifest (fetch-parse → state, review finding web-correctness-2)", () => {
   it("a JSON body of literal null (or any non-object) is 'error', NEVER the loading state", () => {
@@ -23,10 +21,10 @@ describe("coerceManifest (fetch-parse → state, review finding web-correctness-
 
 /**
  * The manifest→state decision path is pure (coerceManifest + windowsRowState) and
- * tested exhaustively here. The useEffect fetch itself and its private-origin guard
- * are NOT executed in this suite (node environment, no jsdom, static markup runs no
- * effects) — accepted per review test-adequacy-4: the effect is a one-line guard over
- * the same isPrivateOrigin predicate pinned below and in export/plan tests.
+ * tested exhaustively here. The useEffect fetch itself is NOT executed in this suite
+ * (node environment, no jsdom, static markup runs no effects) — accepted per review
+ * test-adequacy-4: since the endpoint-agnostic pivot (design 2026-07-15 §5.4.4) it is
+ * an unconditional same-origin manifest fetch with no gate left to pin.
  */
 describe("windowsRowState (downloads manifest → Windows row)", () => {
   it("null = still fetching", () => {
@@ -109,33 +107,33 @@ describe("extensionRowState (downloads manifest → browser-extension row)", () 
   });
 });
 
-describe("DevicesCard origin suppression", () => {
-  const PRIVATE = "https://andvari.taila2dff2.ts.net";
+describe("DevicesCard — endpoint-agnostic (design 2026-07-15 §5.4.4: no origin gate, no baked hostnames)", () => {
+  const TAILNET = "https://andvari.taila2dff2.ts.net";
   const PUBLIC = "https://vault.example.com";
 
-  it("shares its private-origin predicate with export-button suppression", () => {
-    expect(isPrivateOrigin(PRIVATE)).toBe(true);
-    expect(isPrivateOrigin(PUBLIC)).toBe(false);
-    // isExportOriginAllowed now delegates to the same primitive — one source of truth.
-    expect(isExportOriginAllowed(PRIVATE)).toBe(isPrivateOrigin(PRIVATE));
-    expect(isExportOriginAllowed(PUBLIC)).toBe(isPrivateOrigin(PUBLIC));
+  it("renders the same manifest-driven rows on ANY origin — the old private/public fork is gone", () => {
+    const a = renderToStaticMarkup(createElement(DevicesCard, { origin: TAILNET }));
+    const b = renderToStaticMarkup(createElement(DevicesCard, { origin: PUBLIC }));
+    for (const html of [a, b]) {
+      expect(html).toContain("Checking…"); // no effect under static markup → manifest null → loading rows
+      expect(html).toContain("Windows");
+      expect(html).toContain("Linux");
+      expect(html).toContain("Browser extension");
+      expect(html).not.toContain("home network"); // the public-origin "hidden" copy is deleted
+    }
+    // The "any browser" row shows the CURRENT address — origin is just an address now.
+    expect(a).toContain(TAILNET);
+    expect(b).toContain(PUBLIC);
   });
 
-  it("on a private origin advertises the devstore install; the QR is behind a default-off toggle", () => {
-    const html = renderToStaticMarkup(createElement(DevicesCard, { origin: PRIVATE }));
-    expect(html).toContain("devserv.taila2dff2.ts.net");
-    // Owner dev-note 2026-07-10: the install QR is DEFAULT HIDDEN behind a toggle button —
-    // pin the default (no svg) and the affordance that reveals it.
-    expect(html).not.toContain("<svg");
-    expect(html).toContain("Show QR code");
-    expect(html).toContain("Checking…"); // no effect under static markup → manifest null → loading
-    expect(html).toContain(PRIVATE); // the "any browser" row shows the current address
-  });
-
-  it("on the public break-glass origin hides device pointers (no devstore, no QR)", () => {
+  it("bakes no tailnet hostname and ships no devstore QR (§5.5 tailnet-leak removal)", () => {
+    // TODO Wave 3 (§5.4.4, gated on the Gate-1 artifact publish): when the manifest-driven Android
+    // row lands, pin here that an `android` manifest entry — and ONLY that — renders it (with QR).
     const html = renderToStaticMarkup(createElement(DevicesCard, { origin: PUBLIC }));
-    expect(html).not.toContain("devserv.taila2dff2.ts.net");
+    expect(html).not.toContain("devserv");
+    expect(html).not.toContain("taila2dff2.ts.net");
     expect(html).not.toContain("<svg");
-    expect(html).toContain("home network");
+    expect(html).not.toContain("Show QR code");
+    expect(html).not.toContain("Android"); // nothing honest to render for phones until the artifact publish
   });
 });

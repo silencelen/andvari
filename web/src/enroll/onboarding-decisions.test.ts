@@ -34,14 +34,19 @@ describe("enrollPrefillFor — a link applies only to its exact minting origin",
   });
 });
 
-describe("shouldOfferQr — the public-origin containment", () => {
-  it("offers the QR on tailnet and LAN origins", () => {
-    expect(shouldOfferQr("https://vault.taila2dff2.ts.net")).toBe(true);
-    expect(shouldOfferQr("http://192.168.2.122")).toBe(true);
-    expect(shouldOfferQr("http://localhost:5173")).toBe(true);
+describe("shouldOfferQr — keyed to the DECLARED signupMode, no hostname sniffing (design 2026-07-15 §5.4.5)", () => {
+  it('refuses only signupMode "closed" (the per-origin break-glass overlay — register is refused there)', () => {
+    expect(shouldOfferQr("closed")).toBe(false);
   });
-  it("refuses the public break-glass origin (a QR there dies at register)", () => {
-    expect(shouldOfferQr("https://andvari.monahanhosting.com")).toBe(false);
+  it("offers the QR for every enroll-capable declared mode", () => {
+    expect(shouldOfferQr("invite-only")).toBe(true);
+    expect(shouldOfferQr("landing")).toBe(true);
+    expect(shouldOfferQr("open")).toBe(true);
+  });
+  it('absent (old server / failed fetch) and unknown (newer server) values degrade to "invite-only" ⇒ QR offered (§2.1)', () => {
+    expect(shouldOfferQr(undefined)).toBe(true);
+    expect(shouldOfferQr(null)).toBe(true);
+    expect(shouldOfferQr("some-future-mode")).toBe(true);
   });
 });
 

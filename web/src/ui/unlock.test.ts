@@ -34,12 +34,33 @@ import { unlockExistingSession } from "./unlock";
 
 const g = globalThis as { indexedDB?: IDBFactory; window?: { location: { origin: string } } };
 
-/** design §F.1/§E.3.3: webCacheEnabled() reads window.location.origin — drive the dark-ship gate by
- *  stubbing it. A PRIVATE (tailnet) origin defaults the durable cache ON; the public origin OFF. */
-const PRIVATE_ORIGIN = "https://andvari.taila2dff2.ts.net";
+/** Origin stubs kept ONLY to prove the gate is origin-INDEPENDENT now (design 2026-07-15 §5.4.1:
+ *  webCacheEnabled is consent-keyed — `idbUsable && !orgCacheOff && !deviceOptOut &&
+ *  deviceOptIn(userId)` — and never reads window.location). */
+const TAILNET_ORIGIN = "https://andvari.taila2dff2.ts.net";
 const PUBLIC_ORIGIN = "https://andvari.monahanhosting.com";
 function setOrigin(origin: string): void {
   g.window = { location: { origin } };
+}
+
+/** Map-backed localStorage for the node test environment — the consent markers need a store. */
+function fakeStorage(): Storage {
+  const m = new Map<string, string>();
+  return {
+    get length() {
+      return m.size;
+    },
+    clear: () => m.clear(),
+    getItem: (k: string) => m.get(k) ?? null,
+    key: (i: number) => [...m.keys()][i] ?? null,
+    removeItem: (k: string) => void m.delete(k),
+    setItem: (k: string, v: string) => void m.set(k, v),
+  } as Storage;
+}
+
+/** §5.4.1: write base.userId's per-(device, user) opt-in — the ONLY thing that turns the gate on. */
+function optIn(): void {
+  localStorage.setItem(`andvari.cacheOptIn.${base.userId}`, "1");
 }
 
 const AT_FLOOR_KDF: KdfParams = { v: 1, alg: "argon2id13", ops: 3, memBytes: 67_108_864 };
@@ -89,12 +110,15 @@ beforeAll(async () => {
   };
 });
 
-// A fresh IDB universe per test — no cache DB bleeds between cases. Default the suite to a PRIVATE
-// (tailnet) origin so the §F.1 dark-ship gate enables the durable cache exactly as an enrolled device;
-// the gate tests below flip to the public origin per-case.
+// A fresh IDB universe + marker store per test — no cache DB or consent bleeds between cases.
+// Default the suite to an OPTED-IN device (§5.4.1: the per-user opt-in marker is what the old
+// private-origin default used to be) so the §F.1 dark-ship gate enables the durable cache exactly
+// as a consented device; the gate tests below drop the marker per-case.
 beforeEach(() => {
   g.indexedDB = new FakeIDBFactory();
-  setOrigin(PRIVATE_ORIGIN);
+  setOrigin(TAILNET_ORIGIN);
+  vi.stubGlobal("localStorage", fakeStorage());
+  optIn();
 });
 
 const confirmed = (): AccountKeys => ({ ...base.keys, recoveryConfirmed: true });
@@ -338,9 +362,9 @@ describe("§E.4 wipe-by-userId (wipeVaultCache) + cold state", () => {
   });
 });
 
-describe("§F.1/§E.3.3 dark-ship gate (S3-3 — webCacheEnabled origin default)", () => {
-  it("PRIVATE origin (tailnet) online unlock stands up a DURABLE cache", async () => {
-    setOrigin(PRIVATE_ORIGIN);
+describe("§F.1 dark-ship gate — CONSENT-keyed, origin-independent (design 2026-07-15 §5.4.1)", () => {
+  it("an opted-in device stands up a DURABLE cache — even on the public origin (origin is just an address)", async () => {
+    setOrigin(PUBLIC_ORIGIN); // would have been NullCache under the deleted origin heuristic
     const client = fakeClient({ accountKeys: async () => confirmed() });
     const r = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password);
     expect(r.kind).toBe("ready");
@@ -352,18 +376,29 @@ describe("§F.1/§E.3.3 dark-ship gate (S3-3 — webCacheEnabled origin default)
     c.close();
   });
 
-  it("PUBLIC break-glass origin online unlock uses a NullCache — no durable cache, nothing persisted", async () => {
-    setOrigin(PUBLIC_ORIGIN);
+  it("WITHOUT the opt-in the unlock uses a NullCache — even on the tailnet origin (the old private default is GONE)", async () => {
+    setOrigin(TAILNET_ORIGIN);
+    localStorage.removeItem(`andvari.cacheOptIn.${base.userId}`); // a fresh, never-asked device
     const client = fakeClient({ accountKeys: async () => confirmed() });
     const r = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password);
     expect(r.kind).toBe("ready");
     if (r.kind !== "ready") return;
-    expect(r.store.cacheDurable).toBe(false); // gated OFF on the public origin → NullCache
+    expect(r.store.cacheDurable).toBe(false); // no consent → NullCache, default OFF everywhere
     // Nothing was persisted by the gated unlock: a fresh open (reopen bypasses the gate) sees a cold DB.
     const c = await reopen();
     expect(await c.accountKeys()).toBeNull();
     expect(await c.envelopes()).toEqual([]);
     c.close();
+  });
+
+  it("another user's opt-in is NOT this user's consent (per-(device, user) marker)", async () => {
+    localStorage.removeItem(`andvari.cacheOptIn.${base.userId}`);
+    localStorage.setItem("andvari.cacheOptIn.somebody-else", "1");
+    const client = fakeClient({ accountKeys: async () => confirmed() });
+    const r = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password);
+    expect(r.kind).toBe("ready");
+    if (r.kind !== "ready") return;
+    expect(r.store.cacheDurable).toBe(false);
   });
 });
 
@@ -386,8 +421,8 @@ describe("§D.2c refreshCachedAccountKeys after changePassword (S3-2)", () => {
     after.close();
   });
 
-  it("is a no-op on the public origin — never CREATES a cache where caching is off", async () => {
-    setOrigin(PUBLIC_ORIGIN);
+  it("is a no-op without this user's consent — never CREATES a cache where caching is off", async () => {
+    localStorage.removeItem(`andvari.cacheOptIn.${base.userId}`); // non-consented device (any origin)
     const client = fakeClient({ accountKeys: async () => confirmed() });
     await refreshCachedAccountKeys(client, base.userId);
     const c = await reopen(); // reopen (gate-bypassing) makes a fresh empty DB — proving refresh wrote nothing
@@ -419,31 +454,15 @@ describe("§B.4(iii) runtime cache-failure resilience (S3-4b — never brick the
 });
 
 describe("§B.5 (S5) — persist() requested at cache-enable", () => {
-  /** Map-backed localStorage: the once-marker needs a store; the suite's other describes run
-   *  without one (webCacheEnabled falls through), so it is stubbed ONLY here. */
-  function fakeStorage(): Storage {
-    const m = new Map<string, string>();
-    return {
-      get length() {
-        return m.size;
-      },
-      clear: () => m.clear(),
-      getItem: (k: string) => m.get(k) ?? null,
-      key: (i: number) => [...m.keys()][i] ?? null,
-      removeItem: (k: string) => void m.delete(k),
-      setItem: (k: string, v: string) => void m.set(k, v),
-    } as Storage;
-  }
-
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("a DURABLE unlock (private origin, default gate) requests navigator.storage.persist() exactly once", async () => {
-    setOrigin(PRIVATE_ORIGIN);
+  it("a DURABLE unlock (opted-in device, default gate) requests navigator.storage.persist() exactly once", async () => {
     const persist = vi.fn(async () => true);
     vi.stubGlobal("navigator", { storage: { persist, persisted: async () => true } });
-    vi.stubGlobal("localStorage", fakeStorage());
+    vi.stubGlobal("localStorage", fakeStorage()); // fresh store for the once-marker…
+    optIn(); // …so re-pin this user's consent (§5.4.1)
 
     const client = fakeClient({ accountKeys: async () => confirmed() });
     const r1 = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password);
@@ -456,11 +475,10 @@ describe("§B.5 (S5) — persist() requested at cache-enable", () => {
     expect(persist).toHaveBeenCalledTimes(1);
   });
 
-  it("a NullCache unlock (public break-glass origin) never requests persist()", async () => {
-    setOrigin(PUBLIC_ORIGIN);
+  it("a NullCache unlock (no consent — any origin) never requests persist()", async () => {
     const persist = vi.fn(async () => true);
     vi.stubGlobal("navigator", { storage: { persist, persisted: async () => true } });
-    vi.stubGlobal("localStorage", fakeStorage());
+    vi.stubGlobal("localStorage", fakeStorage()); // fresh store, NO opt-in marker
 
     const client = fakeClient({ accountKeys: async () => confirmed() });
     const r = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password);

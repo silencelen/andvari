@@ -6,15 +6,16 @@ import { confirmQueueLoss, OfflineCopyBody, offlineCopyModel, type OfflineCopyMo
 import { OfflineCopyUnlockLine } from "./Welcome";
 
 /**
- * S5 (design 2026-07-13-web-offline-cache §E.3.4/§B.5/§D.1): the settings "Offline copy" card and
- * the Unlock transparency line, proven statically (house pattern: Field.test.ts / Devices.test.ts —
- * renderToStaticMarkup runs no effects, so the body is a pure function of the injected model; the
- * async model ASSEMBLY is tested separately against a stub store + stubbed navigator.storage).
+ * S5 (design 2026-07-13-web-offline-cache §E.3.4/§B.5/§D.1) as amended by the endpoint-agnostic
+ * pivot (design 2026-07-15 §5.4.3): the settings "Offline copy" card — now ALWAYS rendered, on
+ * every origin, as the standing consent entry point — and the Unlock transparency line, proven
+ * statically (house pattern: Field.test.ts / Devices.test.ts — renderToStaticMarkup runs no
+ * effects, so the body is a pure function of the injected model; the async model ASSEMBLY is
+ * tested separately against a stub store + stubbed navigator.storage).
  */
 
-const g = globalThis as { window?: { location: { origin: string } } };
-
-const PRIVATE_ORIGIN = "https://andvari.taila2dff2.ts.net";
+const UID = "user-card";
+const OPT_IN_KEY = `andvari.cacheOptIn.${UID}`;
 
 /** Map-backed localStorage for the node test environment. */
 function fakeStorage(): Storage {
@@ -32,7 +33,6 @@ function fakeStorage(): Storage {
 }
 
 const model = (over: Partial<OfflineCopyModel> = {}): OfflineCopyModel => ({
-  privateOrigin: true,
   enabled: true,
   orgDisallowed: false,
   durable: true,
@@ -50,12 +50,17 @@ const render = (m: OfflineCopyModel): string =>
   );
 
 describe("OfflineCopyBody — state rendering", () => {
-  it("PUBLIC origin + not opted in renders NOTHING (hidden on the break-glass origin, §E.3.3)", () => {
-    expect(render(model({ privateOrigin: false, enabled: false }))).toBe("");
+  it("NOT enabled still renders the card with the unchecked opt-in toggle — the §5.4.1 consent entry point on every origin", () => {
+    const html = render(model({ enabled: false, durable: false }));
+    expect(html).toContain("Offline copy");
+    expect(html).toContain("Keep an offline copy on this device");
+    expect(html).not.toContain("checked");
+    // The old public-origin blank render is gone: the body never returns nothing anymore.
+    expect(html).not.toBe("");
   });
 
-  it("PUBLIC origin + opted in renders the card (controls exist once a copy was chosen)", () => {
-    const html = render(model({ privateOrigin: false, enabled: true }));
+  it("enabled renders the card with its controls", () => {
+    const html = render(model({ enabled: true }));
     expect(html).toContain("Offline copy");
     expect(html).toContain("Keep an offline copy on this device");
   });
@@ -105,12 +110,10 @@ describe("OfflineCopyBody — state rendering", () => {
 
 describe("offlineCopyModel — assembly from the frozen store surface + navigator.storage", () => {
   beforeEach(() => {
-    g.window = { location: { origin: PRIVATE_ORIGIN } };
     vi.stubGlobal("localStorage", fakeStorage());
   });
   afterEach(() => {
     vi.unstubAllGlobals();
-    delete g.window;
   });
 
   const stubStore = (over: Partial<{ cacheDurable: boolean; cacheDemoted: boolean; lastSyncAt: number | null; queued: number }> = {}) => {
@@ -123,14 +126,14 @@ describe("offlineCopyModel — assembly from the frozen store surface + navigato
     };
   };
 
-  it("maps store state + storage estimates into the model", async () => {
+  it("maps store state + storage estimates into the model (opted-in device — the gate reads THIS user's marker)", async () => {
     vi.stubGlobal("navigator", {
       storage: { persisted: async () => true, estimate: async () => ({ usage: 4096, quota: 10_000_000 }) },
     });
-    const m = await offlineCopyModel(stubStore());
+    localStorage.setItem(OPT_IN_KEY, "1"); // §5.4.1: consent is the ONLY way enabled goes true
+    const m = await offlineCopyModel(stubStore(), UID);
     expect(m).toMatchObject({
-      privateOrigin: true,
-      enabled: true, // private origin, no markers
+      enabled: true,
       orgDisallowed: false,
       durable: true,
       demoted: false,
@@ -141,30 +144,40 @@ describe("offlineCopyModel — assembly from the frozen store surface + navigato
     });
   });
 
+  it("no opt-in marker ⇒ enabled false — default OFF on every origin (§5.4.1)", async () => {
+    vi.stubGlobal("navigator", {});
+    const m = await offlineCopyModel(stubStore(), UID);
+    expect(m.enabled).toBe(false);
+  });
+
   it("degrades to unknown when navigator.storage is missing — never a broken card", async () => {
     vi.stubGlobal("navigator", {});
-    const m = await offlineCopyModel(stubStore());
+    const m = await offlineCopyModel(stubStore(), UID);
     expect(m.persisted).toBeNull();
     expect(m.usageBytes).toBeNull();
   });
 
   it("a failing queued count reads 0 (display-only, session.pendingSyncCount posture)", async () => {
     vi.stubGlobal("navigator", {});
-    const m = await offlineCopyModel({
-      cacheDurable: true,
-      cacheDemoted: false,
-      lastSyncAt: null,
-      queuedMutationCount: async () => {
-        throw new Error("closed handle");
+    const m = await offlineCopyModel(
+      {
+        cacheDurable: true,
+        cacheDemoted: false,
+        lastSyncAt: null,
+        queuedMutationCount: async () => {
+          throw new Error("closed handle");
+        },
       },
-    });
+      UID,
+    );
     expect(m.queued).toBe(0);
   });
 
-  it("reflects the org pin and the opt-out marker (the card's WHY rows)", async () => {
+  it("reflects the org pin (the card's WHY row) — beating even an explicit opt-in", async () => {
     vi.stubGlobal("navigator", {});
     localStorage.setItem("andvari.orgCacheOff", "1");
-    const m = await offlineCopyModel(stubStore());
+    localStorage.setItem(OPT_IN_KEY, "1");
+    const m = await offlineCopyModel(stubStore(), UID);
     expect(m.orgDisallowed).toBe(true);
     expect(m.enabled).toBe(false);
   });
