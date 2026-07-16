@@ -10,13 +10,16 @@
  *    fill grant minted by an explicit user click in the popup (`fillFromPopup`).
  *  - List/match responses never carry passwords — name/username/uris only. Card lists
  *    carry a MASKED identity line ("Visa ••4242"), never the number/expiry/CVV.
- *  - A card secret leaves the SW only via `revealCardField` — popup-only (the SW refuses
- *    tab senders), one field per request, straight to a clipboard write. The in-page fill
- *    path has NO route to card data (in-page card fill is deferred behind the
- *    frame-origin egress contract — cards design 2026-07-09).
+ *  - A card secret leaves the SW two ways, both explicit-user-action gated: (1) `revealCardField`
+ *    — popup-only (the SW refuses tab senders), one field per request, straight to a clipboard
+ *    write; (2) `revealCardForFill` — the S3 in-page fill path, redeemable ONLY by the exact frame
+ *    that detected the card form, bound to browser-set `sender.origin` + `sender.frameId` + a live
+ *    top-origin recheck, one-shot (design 2026-07-10-extension-card-fill). Neither ever routes a
+ *    card value into a `snapshots`/save-banner path.
  *  - Locked state is FIRST-CLASS: list calls answer `{locked:true}` rather than
  *    pretending "no matches", so the UI can render an honest locked state.
  */
+import type { CardFieldKind } from "./detect";
 
 /** A listable login — safe subset, never the password. */
 export interface MatchItem {
@@ -49,6 +52,28 @@ export interface RevealedSecret {
   password: string | null;
   /** Current TOTP code when the item carries login.totp (so fill can auto-copy it). */
   totpCode: string | null;
+}
+
+/** S3 in-page card fill: the values a `revealCardForFill` redemption returns — composed SW-side,
+ *  and ONLY for the kinds the detected form declared ([A2]/egress step 4: "CVV only if a CVV
+ *  field was detected"). Held strictly function-local in the content script; never snapshotted,
+ *  never rendered ([A6]). `expiry` is the MM/YY composed per CardNormalize parity. */
+export interface CardFillFields {
+  number?: string;
+  expiry?: string;
+  name?: string;
+  cvv?: string;
+}
+
+/** Why an in-page card fill wrote NOTHING (parity with FillFailCode; the copy lives in the
+ *  surface). `no_form` = the granted frame had no live card form; `not_allowed` = a redemption
+ *  origin/frame/top-origin check refused. */
+export type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable";
+
+/** The content script's honest card-fill outcome — `card` when at least one card field landed. */
+export interface CardFillOutcome {
+  filled: "card" | "nothing";
+  code?: CardFillFailCode;
 }
 
 /** Cut M (v2 #14): why a fill wrote NOTHING — crosses the seam as a code (the user-facing
@@ -145,7 +170,26 @@ export type Req =
   | { type: "scheduleClipboardClear" }
   /** Popup: is a newer extension version published to /downloads? Non-secret and vault-free —
    *  the SW answers whether locked or not (the check reads only the public downloads manifest). */
-  | { type: "updateStatus" };
+  | { type: "updateStatus" }
+  /** Content (per frame, passive, S3): a same-origin card form was detected in THIS frame.
+   *  METADATA ONLY — kinds, never values, and [A2] NO page-controlled host (the SW binds frame
+   *  identity to browser-set `sender.origin`; a `msg.host` would be a spoofable offer-manufacture
+   *  input). `fields:[]` ⇒ the frame's card form went away and its record is cleared. */
+  | { type: "cardFormInfo"; fields: CardFieldKind[] }
+  /** Popup ONLY (the SW refuses tab senders): may the Cards group show a Fill button for the
+   *  active tab, and to which origin? `fillable` iff a recorded card form's origin equals the
+   *  tab's CURRENT top-level origin (SW-derived from `tab.url` under `activeTab`, [A4]). */
+  | { type: "cardFillOffers" }
+  /** Popup ONLY: user clicked Fill on a card row → the SW mints a one-shot CARD grant (a store
+   *  SEPARATE from login `grants`, [A5]) bound to (tabId,itemId,frameId,origin) and forwards
+   *  {type:"fillCard"} to that ONE frame. */
+  | { type: "fillCardFromPopup"; itemId: string }
+  /** Content (S3 redemption): the granted frame redeems its card fill. The SW verifies, all
+   *  fail-closed-on-undefined ([A3]): a live card grant for (tabId,itemId); `sender.frameId ===
+   *  grant.frameId`; `sender.origin === grant.origin`; and `grant.origin` still equals the tab's
+   *  current top-level origin (re-fetched). Success consumes the grant and returns the declared
+   *  fields ONCE; any failure consumes nothing. */
+  | { type: "revealCardForFill"; itemId: string };
 
 export type Res<T extends Req["type"]> = T extends "status"
   ? {
@@ -202,10 +246,22 @@ export type Res<T extends Req["type"]> = T extends "status"
                                         latest: string | null;
                                         chromeUrl: string | null;
                                         firefoxUrl: string | null;
+                                        /** M-D4b / UQUIET-read: the fail-closed-QUIET update-channel reason
+                                         *  (unverified/stale/…), or null. Rendered as ONE muted popup line, never a
+                                         *  banner/nag. Mutually exclusive with `latest` (an offer supersedes it). */
+                                        quietReason?: string | null;
                                       }
                                     : T extends "scheduleClipboardClear"
                                       ? { ok: boolean; clearSeconds: number }
-                                      : never;
+                                      : T extends "cardFormInfo"
+                                        ? { ok: boolean }
+                                        : T extends "cardFillOffers"
+                                          ? { fillable: boolean; origin: string | null }
+                                          : T extends "fillCardFromPopup"
+                                            ? { ok: boolean; outcome?: CardFillOutcome; code?: CardFillFailCode; error?: string }
+                                            : T extends "revealCardForFill"
+                                              ? { ok: boolean; fields?: CardFillFields; error?: string }
+                                              : never;
 
 /** SW → content (chrome.tabs.sendMessage): fill this item now (popup-granted). The
  *  content script performs its normal `reveal` round-trip with its own host — the SW
@@ -214,7 +270,11 @@ export type Res<T extends Req["type"]> = T extends "status"
 export type TabMsg =
   | { type: "fillItem"; itemId: string }
   /** SW → content: (re-)offer the tab's pending save banner (e.g. after navigation). */
-  | { type: "offerPendingSave"; pending: PendingSave };
+  | { type: "offerPendingSave"; pending: PendingSave }
+  /** SW → content (S3): fill this card into the granted frame's card form. Sent to ONE frameId
+   *  only; the frame redeems via `revealCardForFill` (the value round-trip), never receiving the
+   *  card values on this message. */
+  | { type: "fillCard"; itemId: string };
 
 /** Typed sendMessage helper both UIs use. */
 export function send<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promise<Res<T>> {

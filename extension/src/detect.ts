@@ -7,7 +7,9 @@
  * kits hide credential sinks — and a multi-step page's not-yet-shown password field must NOT
  * collapse step 1 into a normal login form.
  */
-import { classify, type FieldKind, type FieldSignal } from "./urimatch";
+// Explicit .ts so the node --test runner (detect.cards.test.ts) can resolve this transitively —
+// esbuild (bundle) + tsc (allowImportingTsExtensions) accept it too; node ESM needs the extension.
+import { classify, type FieldKind, type FieldSignal } from "./urimatch.ts";
 
 /** A scope that can own a login form: the <form>, a nearest-common container, or the scan root. */
 export type Scope = Element | Document | ShadowRoot;
@@ -40,9 +42,53 @@ const AUTOCOMPLETE_HINT_MAP: Record<string, string> = {
 /** Mirrors urimatch's NAME_NEGATIVE (not exported there) — gates the username-fallback pool. */
 const NAME_NEGATIVE_RX = /search|otp|captcha|code|query|phone/;
 
-/** CVV keywords for the save-suppression rule — the tight core of the core classifier's
- *  CSC_DEMOTION set (FieldClassifier.kt), whole-token-run matched, never substring. */
-const CVV_TOKENS = ["cvv", "cvc", "csc"];
+/** CVV keywords for the save-suppression / CSC-demotion rule — FULL core `CSC_DEMOTION` parity
+ *  (FieldClassifier.kt), whole-token-run matched, never substring. `securitycode` +
+ *  `cardverification` graduated in with S3 (design 2026-07-10-extension-card-fill [A7]): the
+ *  shipped 0.13.0 set (cvv/cvc/csc) was narrower than core, so a checkout `securityCode` password
+ *  slipped the save-suppression and could overwrite a stored merchant password with a CVV. */
+const CVV_TOKENS = ["cvv", "cvc", "csc", "securitycode", "cardverification"];
+
+/** Card field kinds the in-page card-fill path (S3) recognises — the extension's projection of
+ *  core `FieldKind`'s CC_* set. Reported to the SW as METADATA ONLY (never values, design [A2])
+ *  and index the fill executor's per-field value setter. */
+export type CardFieldKind = "cardnumber" | "cardexpiry" | "cardexpmonth" | "cardexpyear" | "cardname" | "cardcvv";
+
+/** Card autocomplete hints (normalized: lowercase, [-_] stripped) → kind — mirrors core
+ *  `FieldClassifier.CARD_HINTS`. fieldSignalOf already maps cc-number→cardnumber and
+ *  cc-csc→creditcardsecuritycode via AUTOCOMPLETE_HINT_MAP; re-normalizing here is idempotent. */
+const CARD_HINTS: Record<string, CardFieldKind> = {
+  cardnumber: "cardnumber",
+  creditcardnumber: "cardnumber",
+  ccnumber: "cardnumber",
+  creditcardsecuritycode: "cardcvv",
+  cccsc: "cardcvv",
+  creditcardexpirationmonth: "cardexpmonth",
+  ccexpmonth: "cardexpmonth",
+  creditcardexpirationyear: "cardexpyear",
+  ccexpyear: "cardexpyear",
+  creditcardexpirationdate: "cardexpiry",
+  ccexp: "cardexpiry",
+  ccname: "cardname",
+};
+
+/** Card name/id token runs (whole-token-run matched) → kind — mirrors core
+ *  `FieldClassifier.CARD_NAME_KINDS`. Group ORDER matters: exp-month/-year before the generic
+ *  exp group ("expmonth" would also whole-run-match a bare "exp" group member). "pan" is
+ *  deliberately absent (hazard exceeds value); no bare "exp". */
+const CARD_NAME_KINDS: [readonly string[], CardFieldKind][] = [
+  [["cardnumber", "ccnumber", "ccnum", "cardno", "cardnum"], "cardnumber"],
+  [["expmonth", "expmm", "expirationmonth"], "cardexpmonth"],
+  [["expyear", "expyy", "expirationyear"], "cardexpyear"],
+  [["expiry", "expdate", "ccexp", "expiration", "expirationdate"], "cardexpiry"],
+  [["cvv", "cvc", "csc", "securitycode"], "cardcvv"],
+  [["cardholder", "nameoncard", "ccname"], "cardname"],
+];
+
+/** HTML types the card NAME-keyword fallback may fire from (core `CARD_FALLBACK_HTML_TYPES`
+ *  parity): the keyword is the card signal, never numeric-ness; a password type is NEVER
+ *  name-classified as a card field here — only the form-level CSC demotion may relabel it. */
+const CARD_FALLBACK_HTML_TYPES = new Set(["", "text", "tel", "number"]);
 
 /** name/id → lowercase ASCII tokens: split on non-alphanumerics, camelCase boundaries, and
  *  letter↔digit boundaries ("cardVerificationValue" → [card,verification,value]; "cvv2" →
@@ -105,6 +151,36 @@ export function isCvvNameOrId(nameOrId: string): boolean {
   return CVV_TOKENS.some((kw) => tokenMatch(toks, kw));
 }
 
+/** Per-field card classification — pure (FieldSignal → kind), no DOM. Fires ONLY in the
+ *  `classify() == none` gap (design [A8], core `FieldClassifier` step-4 parity): every field the
+ *  login classifier decided keeps its verdict, so a card kind can never outrank USERNAME/PASSWORD
+ *  and login verdicts on card-free forms stay bit-identical. Autocomplete card hints win first
+ *  (a masked cc-csc password is a NEGATIVE login hint → lands in the gap here); then name/id token
+ *  runs, but only for card-fallback HTML types (never a password type — the CSC demotion below is
+ *  the only path that relabels a password). */
+export function classifyCardField(sig: FieldSignal): CardFieldKind | null {
+  if (classify(sig) !== "none") return null;
+  const hints = (sig.hints ?? []).map((h) => h.toLowerCase().replace(/[_-]/g, ""));
+  for (const h of hints) {
+    const k = CARD_HINTS[h];
+    if (k) return k;
+  }
+  if (!CARD_FALLBACK_HTML_TYPES.has((sig.htmlType ?? "").toLowerCase())) return null;
+  const toks = tokens(sig.htmlNameOrId ?? "");
+  for (const [kws, kind] of CARD_NAME_KINDS) if (kws.some((kw) => tokenMatch(toks, kw))) return kind;
+  return null;
+}
+
+/** Form-level CSC demotion — pure (kind + type + name → kind). A password-typed field named like a
+ *  security code, sitting ON a card form (a cardnumber anchor is present — the caller only invokes
+ *  this then), IS the CVV: name-based parity with core `CardForm.refine`'s cluster demotion. This
+ *  keeps login verdicts bit-identical (it never runs on a card-free form) while letting the fill
+ *  executor reach a masked CVV box. */
+export function demoteCsc(kind: CardFieldKind | null, htmlType: string, nameOrId: string): CardFieldKind | null {
+  if (!kind && htmlType.toLowerCase() === "password" && isCvvNameOrId(nameOrId)) return "cardcvv";
+  return kind;
+}
+
 const SUBMIT_TEXT_RX = /sign.?in|log.?in|continue|next|submit|anmelden|einloggen/i;
 
 /** input types that never hold a fillable credential — a "show password" checkbox or a "Login"
@@ -153,6 +229,9 @@ interface Field {
   isNewPassword: boolean;
   /** Username-fallback eligibility: unclassified text/email with no negative name signal. */
   textLike: boolean;
+  /** Per-field card kind (pre-demotion, S3) — null on non-card fields. Only ever non-null in the
+   *  `classify() == none` gap, so adding it never perturbs login grouping on card-free forms. */
+  cardKind: CardFieldKind | null;
 }
 
 /** offsetParent is null for position:fixed elements even when visible — hence the rects check. */
@@ -172,7 +251,9 @@ function collect(root: Document | ShadowRoot): Field[] {
       kind === "none" &&
       (t === "text" || t === "email") &&
       !NAME_NEGATIVE_RX.test((input.name || input.id).toLowerCase());
-    if (kind !== "none" || textLike) out.push({ input, kind, isNewPassword: sig.isNewPassword, textLike });
+    const cardKind = classifyCardField(sig);
+    if (kind !== "none" || textLike || cardKind !== null)
+      out.push({ input, kind, isNewPassword: sig.isNewPassword, textLike, cardKind });
   }
   return out;
 }
@@ -224,6 +305,10 @@ function formlessGroups(loose: Field[], root: Document | ShadowRoot): { containe
 
 function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: Field[]): LoginForm | null {
   const passwords = fields.filter((f) => f.kind === "password");
+  // [A7] formKind gate: ANY form carrying a detected card-NUMBER field is a card form and is
+  // excluded from the login capture/save path — an "update" here would overwrite a stored merchant
+  // password with a PAN/CVV. This is the general fix; the lone-CVV rule below is the narrower one.
+  const isCardForm = fields.some((f) => f.cardKind === "cardnumber");
 
   if (passwords.length === 0) {
     // Multi-step step 1: exactly one CLASSIFIED username (fallback pool doesn't qualify)
@@ -242,7 +327,7 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
       password: null,
       newPasswords: [],
       isSignup: false,
-      suppressSave: false,
+      suppressSave: isCardForm,
     };
   }
 
@@ -277,16 +362,25 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
   // CVV-negative rule: only a genuinely password-TYPED input qualifies (a text field that
   // classify()'d password off a name keyword can't be a CVV box), and only when it is the
   // form's ONLY password field — a real username+password+cvv checkout keeps its banner path
-  // (not lone), and a login form named normally is untouched.
+  // (not lone), and a login form named normally is untouched. [A7] a card form (cardnumber
+  // anchor present) also suppresses, regardless of the password count.
   const suppressSave =
-    passwords.length === 1 && primary.input.type === "password" && isCvvNameOrId(primary.input.name || primary.input.id);
+    isCardForm ||
+    (passwords.length === 1 && primary.input.type === "password" && isCvvNameOrId(primary.input.name || primary.input.id));
 
   return { kind: "login", form, container, username, password: primary.input, newPasswords, isSignup, suppressSave };
 }
 
-/** All fillable login forms under `root`, document order: formed groups first, then formless
- *  clusters. Does not descend into shadow roots — callers pass each root they care about. */
-export function findLoginForms(root: Document | ShadowRoot): LoginForm[] {
+interface FieldGroup {
+  form: HTMLFormElement | null;
+  container: Scope;
+  fields: Field[];
+}
+
+/** The one field-grouping pass (document order: formed groups first, then formless clusters),
+ *  shared by the login and card builders so they see IDENTICAL grouping. Does not descend into
+ *  shadow roots — callers pass each root they care about. */
+function groupFields(root: Document | ShadowRoot): FieldGroup[] {
   const fields = collect(root);
   const byForm = new Map<HTMLFormElement | null, Field[]>();
   for (const f of fields) {
@@ -294,19 +388,57 @@ export function findLoginForms(root: Document | ShadowRoot): LoginForm[] {
     if (list) list.push(f);
     else byForm.set(f.input.form, [f]);
   }
-
-  const out: LoginForm[] = [];
+  const out: FieldGroup[] = [];
   for (const [form, group] of byForm) {
     if (form === null) continue;
-    const built = buildLoginForm(form, form, group);
-    if (built) out.push(built);
+    out.push({ form, container: form, fields: group });
   }
   const loose = byForm.get(null);
   if (loose) {
-    for (const g of formlessGroups(loose, root)) {
-      const built = buildLoginForm(null, g.container, g.fields);
-      if (built) out.push(built);
-    }
+    for (const g of formlessGroups(loose, root)) out.push({ form: null, container: g.container, fields: g.fields });
+  }
+  return out;
+}
+
+/** All fillable login forms under `root`, document order. */
+export function findLoginForms(root: Document | ShadowRoot): LoginForm[] {
+  const out: LoginForm[] = [];
+  for (const g of groupFields(root)) {
+    const built = buildLoginForm(g.form, g.container, g.fields);
+    if (built) out.push(built);
+  }
+  return out;
+}
+
+/** A same-page card form: a field group with a detected card-NUMBER anchor. `fields` carries the
+ *  index-aligned card kinds + their inputs (CSC demotion applied) for the S3 fill executor. */
+export interface CardFormFieldRef {
+  kind: CardFieldKind;
+  input: HTMLInputElement;
+}
+export interface CardForm {
+  form: HTMLFormElement | null;
+  container: Scope;
+  fields: CardFormFieldRef[];
+}
+
+function buildCardForm(form: HTMLFormElement | null, container: Scope, fields: Field[]): CardForm | null {
+  if (!fields.some((f) => f.cardKind === "cardnumber")) return null; // a card form REQUIRES the PAN anchor
+  const refs: CardFormFieldRef[] = [];
+  for (const f of fields) {
+    const kind = demoteCsc(f.cardKind, f.input.type, f.input.name || f.input.id);
+    if (kind) refs.push({ kind, input: f.input });
+  }
+  return { form, container, fields: refs };
+}
+
+/** All same-page card forms under `root`, document order — same grouping as findLoginForms so the
+ *  two views never disagree on which fields belong to which form. */
+export function findCardForms(root: Document | ShadowRoot): CardForm[] {
+  const out: CardForm[] = [];
+  for (const g of groupFields(root)) {
+    const built = buildCardForm(g.form, g.container, g.fields);
+    if (built) out.push(built);
   }
   return out;
 }
