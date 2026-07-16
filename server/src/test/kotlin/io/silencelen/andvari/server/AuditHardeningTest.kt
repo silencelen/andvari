@@ -768,4 +768,119 @@ class AuditHardeningTest : P4TestSupport() {
         assertTrue(csp.contains("form-action 'none'"), csp)
         assertTrue(csp.contains("script-src 'self' 'wasm-unsafe-eval'"), csp)
     }
+
+    // ---- CR-18: /metrics loopback gate ALSO requires the absence of any proxy forwarding header ----
+
+    /**
+     * peerIsLoopback() alone can't distinguish a genuine local Alloy scrape from a request that
+     * merely TERMINATED on loopback at tailscale-serve / cloudflared (both do) — so the gate now
+     * additionally denies any request bearing a reverse-proxy forwarding header. A real local scrape
+     * carries none → 200; a proxied one always carries one → 403. (The non-loopback-peer path is 403
+     * as before, but testApplication's peer is always loopback, so it can't be exercised here.)
+     */
+    @Test
+    fun metricsGate_servesLocalScrape_butRejectsAnyForwardedRequest() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+
+        // Loopback peer + NO forwarding header (a genuine local Alloy scrape) → 200 with real metrics.
+        val direct = client.get("/metrics")
+        assertEquals(HttpStatusCode.OK, direct.status, direct.bodyAsText())
+        assertTrue(direct.bodyAsText().isNotEmpty(), "a local scrape must return the metrics body")
+
+        // Arrived via a front-end (loopback peer, but a forwarding header present) → 403. XFF (both
+        // proxies), CF-Connecting-IP (cloudflared), and a bare X-Forwarded-Proto (tailscale-serve)
+        // are each independently sufficient to deny — the whole tailnet + public tunnel are shut out.
+        assertEquals(HttpStatusCode.Forbidden, client.get("/metrics") { header("X-Forwarded-For", "100.64.0.9") }.status)
+        assertEquals(HttpStatusCode.Forbidden, client.get("/metrics") { header("CF-Connecting-IP", "203.0.113.7") }.status)
+        assertEquals(HttpStatusCode.Forbidden, client.get("/metrics") { header("X-Forwarded-Proto", "https") }.status)
+    }
+
+    // ---- CR-17: HSTS is emitted ONLY on the public break-glass origin (never on plain-http LAN dev) ----
+
+    @Test
+    fun hsts_presentOnPublicOrigin_absentOnPrivateOrigin() = testApplication {
+        val publicHost = "andvari.example.com"
+        application { andvariModule(buildServices(config(publicHostname = publicHost), Notifier())) }
+        val client = jsonClient(this)
+
+        // Public origin (Host = the configured break-glass hostname) → HSTS present.
+        val pub = client.get("/api/v1/client-policy") { header("Host", publicHost) }
+        assertEquals(HttpStatusCode.OK, pub.status, pub.bodyAsText())
+        assertEquals("max-age=31536000; includeSubDomains", pub.headers["Strict-Transport-Security"])
+
+        // Private / dev origin (any other Host, incl. plain-http RFC1918) → NO HSTS, so a LAN dev box
+        // is never pinned to HTTPS-only.
+        val priv = client.get("/api/v1/client-policy") { header("Host", "192.168.7.50:8080") }
+        assertEquals(HttpStatusCode.OK, priv.status, priv.bodyAsText())
+        assertNull(priv.headers["Strict-Transport-Security"], "HSTS must not leak onto the private/dev origin")
+    }
+
+    // ---- CR-04 (PT-L11): malformed bodies and bad HIBP prefixes are 400, not 500 ----
+
+    @Test
+    fun malformedBody_and_badHibpPrefix_return400_notInternalError() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+
+        // Malformed JSON on an unauthenticated receive route: Ktor wraps the deserialization failure
+        // as BadRequestException, which the StatusPages `when` now maps to 400 bad_request instead of
+        // letting it fall to else → 500 "unhandled".
+        val bad = client.post("/api/v1/auth/prelogin") {
+            contentType(ContentType.Application.Json); header("X-Andvari-Client", "test/1.0.0")
+            setBody("{ not valid json ]")
+        }
+        assertEquals(HttpStatusCode.BadRequest, bad.status, bad.bodyAsText())
+        assertEquals("bad_request", errorOf(bad))
+
+        // Bad HIBP k-anonymity prefix (must be exactly 5 hex chars) → validated in-route → 400 bad_prefix
+        // (never Hibp.range()'s require() throwing IllegalArgumentException down to a 500).
+        val admin = VirtualClient("hibp@x.com", "hibp prefix password one", fast = true)
+        client.register(admin, bootstrapToken)
+        val badPrefix = client.get("/api/v1/hibp/range/ZZ") { authed(admin) }
+        assertEquals(HttpStatusCode.BadRequest, badPrefix.status, badPrefix.bodyAsText())
+        assertEquals("bad_prefix", errorOf(badPrefix))
+    }
+
+    // ---- CR-05: WS /events revocation re-check is register-first-then-recheck (TOCTOU close) ----
+
+    /**
+     * A device revoked inside its ticket window that opens a socket must be torn down. The handler now
+     * REGISTERS the socket first, THEN re-checks deviceHasLiveSession under the same authority: the
+     * revoke route commits its DB row before its notifier fan-out, so either the recheck reads the dead
+     * session and self-closes, or (in the true race) the fan-out's snapshot includes the just-registered
+     * conn and closes it. Deterministic proxy for the race: revoke lands before connect, and the
+     * post-register recheck (not a pre-register check that a late registration could dodge) self-closes.
+     */
+    @Test
+    fun revokedDevice_registerFirstRecheck_selfClosesSocket() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val ws = createClient { install(ContentNegotiation) { json(json) }; install(WebSockets) }
+        val admin = VirtualClient("cr05-admin@x.com", "cr05 admin password one", fast = true)
+        ws.register(admin, bootstrapToken)
+        val inviteResp = ws.post("/api/v1/admin/users") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(InviteRequest("cr05-member@x.com", isAdmin = false))
+        }
+        val inviteTok = json.decodeFromString(InviteResponse.serializer(), inviteResp.bodyAsText()).inviteToken
+        val member = VirtualClient("cr05-member@x.com", "cr05 member password one", fast = true)
+        val memberSession = ws.register(member, inviteTok)
+
+        // Member mints a ticket while live; the admin revokes the member's device (DB commit + fan-out)
+        // BEFORE the socket opens.
+        val ticket = json.decodeFromString(
+            WsTicketResponse.serializer(),
+            ws.post("/api/v1/events/ticket") { authed(member) }.bodyAsText(),
+        ).ticket
+        assertEquals(HttpStatusCode.OK, ws.post("/api/v1/admin/devices/${memberSession.deviceId}/revoke") { authed(admin) }.status)
+
+        // The socket registers, the post-register recheck sees the revoked session, and it self-closes +
+        // unregisters — never left live receiving dirty-bells.
+        ws.webSocket("/api/v1/events?ticket=${ticket.encodeURLParameter()}") {
+            assertEquals(
+                CloseReason.Codes.VIOLATED_POLICY.code, closeReason.await()?.code,
+                "a socket registering for a revoked device must self-close on the post-register recheck",
+            )
+        }
+    }
 }

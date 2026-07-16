@@ -45,6 +45,30 @@ fun ApplicationCall.clientId(): ClientId {
 fun ApplicationCall.peerIsLoopback(): Boolean =
     runCatching { java.net.InetAddress.getByName(request.origin.remoteAddress).isLoopbackAddress }.getOrDefault(false)
 
+/**
+ * Reverse-proxy forwarding headers that a genuine LOCAL scrape/caller never carries but that
+ * BOTH front-ends (tailscale-serve, cloudflared) stamp on every request they forward. Used ONLY
+ * by the /metrics gate: peerIsLoopback() is true for every PROXIED request too (both front-ends
+ * terminate TLS on 127.0.0.1), so it alone cannot tell a real local Alloy scrape from a request
+ * that merely arrived via a front-end — a request bearing ANY of these did. Deliberately a broad
+ * superset of trustedIpHeaders (presence-only; never consulted for clientIp trust).
+ */
+val FORWARDED_HEADER_NAMES = listOf(
+    "X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP", "True-Client-IP",
+    "Forwarded", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Forwarded-Port",
+)
+
+/**
+ * True when the request carries any reverse-proxy forwarding header (see [FORWARDED_HEADER_NAMES])
+ * OR any operator-configured trusted IP header ([extraTrusted], normally `config.trustedIpHeaders`).
+ * A genuine loopback Alloy /metrics scrape has none; anything via tailscale-serve or cloudflared has
+ * at least one. Including [extraTrusted] makes the "superset of trustedIpHeaders" contract real, so a
+ * custom front-end stamping only a non-default trusted header can't slip past the /metrics gate
+ * (server review 2026-07-15). Header-PRESENCE check only — it does not affect clientIp() trust.
+ */
+fun ApplicationCall.hasForwardedHeader(extraTrusted: List<String> = emptyList()): Boolean =
+    (FORWARDED_HEADER_NAMES + extraTrusted).any { request.header(it) != null }
+
 fun ApplicationCall.clientIp(config: Config): String =
     pickClientIp(peerIsLoopback(), { request.header(it) }, config.trustedIpHeaders, request.origin.remoteHost)
 
