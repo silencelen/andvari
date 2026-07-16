@@ -112,6 +112,11 @@ data class SessionResponse(
     // piece. Populated ONLY by register; login/refresh MUST leave it null. Additive + defaulted so a
     // fielded 0.15/0.16 client (ignoreUnknownKeys) and a rollback server both stay safe.
     val recoveryPieceId: String? = null,
+    // design 2026-07-15 §2.6: instance totpRequired=true + user not yet enrolled ⇒ login succeeds
+    // into a RESTRICTED session — every authenticated route except TOTP setup/confirm + logout
+    // answers 403 totp_enrollment_required until enrollment completes. Additive + defaulted false
+    // (old servers omit it; an old client that ignores it simply hits the 403s reactively).
+    val mustEnrollTotp: Boolean = false,
 )
 
 @Serializable
@@ -576,6 +581,10 @@ data class ClientPolicy(
     val kdfParams: KdfParams = KdfParams(),
     val autoLockSeconds: Int = 300,
     val clipboardClearSeconds: Int = 30,
+    // THE durable-cache wire field (design 2026-07-15 §2.1, binding): the owner-decision term
+    // "durableCacheAllowed" IS this field — no parallel field exists anywhere. Clients treat it
+    // tighten-only: false ⇒ prohibition + wipe of the declaring origin's own namespace; true is
+    // necessary but never sufficient (per-device consent still gates web/desktop persistence).
     val offlineCacheAllowed: Boolean = true,
     val sessionAccessTtlSeconds: Long = 3600,
     val sessionRefreshTtlDays: Long = 30,
@@ -585,6 +594,25 @@ data class ClientPolicy(
     val attachmentMaxBytes: Long = 25L * 1024 * 1024,
     val itemAttachmentsMaxBytes: Long = 100L * 1024 * 1024,
     val userAttachmentsMaxBytes: Long = 1024L * 1024 * 1024,
+    // ---- multi-tenant / endpoint-agnostic pivot (design 2026-07-15 §2.1/§2.2) ----
+    // All additive + defaulted (the AdminStatus.emailConfigured precedent): an old server that omits
+    // them and an old client that ignores them both degrade to today's behavior. Mirrors:
+    // web/src/api/types.ts ClientPolicy, extension/src/api.ts ClientPolicyResponse.
+    // §2.1 enum: "closed" | "invite-only" | "landing" | "open". Absent (old server) OR unknown value
+    // (newer server) ⇒ clients treat as "invite-only": plain invite-gated enroll, never open-register
+    // UI, no stranger nudge. Register success stays server-enforced (invite-ROW gate) either way.
+    val signupMode: String = "invite-only",
+    // §2.6: per-instance login-factor stance. A UI pre-prompt HINT only — the reactive server errors
+    // (totp_required / public_login_requires_totp) stay authoritative and win over any declared value;
+    // never gates a client-side protection (§2.3 trust table).
+    val totpRequired: Boolean = false,
+    // Decorative label — NEVER rendered as a verified identity, never shown in the trust gate (§2.3).
+    val instanceName: String? = null,
+    // Server-claimed own origin — a proxy-misconfig diagnostic and the server-side invite-minting
+    // source only; never a client trust anchor (§2.3).
+    val canonicalOrigin: String? = null,
+    // Rendered as a raw https URL only (§2.3 R8 rule) — never as trusted branding.
+    val selfHostDocsUrl: String? = null,
 )
 
 /** Single-use WS auth ticket (spec 03 §6): minted over authenticated REST, ~30 s TTL. */

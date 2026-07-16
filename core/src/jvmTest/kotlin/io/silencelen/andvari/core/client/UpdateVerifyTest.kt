@@ -45,8 +45,11 @@ class UpdateVerifyTest {
         assertFalse(UpdateVerify.updatesEnabled(listOf(UpdateVerify.TEST_PUBKEY)), "sentinel-only must be disabled")
         assertFalse(UpdateVerify.verify(crypto, msg, sig, listOf(UpdateVerify.TEST_PUBKEY)), "sentinel-only fails closed")
 
-        // The SHIPPED default now pins the real workstation key (ceremony 2026-07-14) → updates enabled.
-        assertTrue(UpdateVerify.updatesEnabled(), "shipped default pins a real key")
+        // The SHIPPED default is UN-ARMED again — re-pinned to the placeholder sentinel for the
+        // multi-tenant/endpoint-agnostic pivot (design 2026-07-15 §9): a single owner-pinned key
+        // makes every self-host /downloads unverifiable-by-construction. Fail-closed-quiet; the
+        // signer + real key stay on the owner workstation; per-instance signing is later work.
+        assertFalse(UpdateVerify.updatesEnabled(), "shipped default is UN-ARMED (placeholder-pinned) for the multi-tenant pivot")
 
         // A key SET (§M-D7): a real key alongside the sentinel still verifies (rotation overlap).
         assertTrue(UpdateVerify.verify(crypto, msg, sig, listOf(UpdateVerify.TEST_PUBKEY, Bytes.toB64(pub))))
