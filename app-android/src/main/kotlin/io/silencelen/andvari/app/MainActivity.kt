@@ -643,7 +643,7 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
         PrimaryButton("Create vault", enabled = ready && !ui.busy, busy = ui.busy) {
             val postureNow = enrollPosture(linkRfp = null, memberHasSheet = hasSheet)
             if (enrollReady(postureNow, invite, email, password, confirm, shortFp, fpOk, waivedAck, fp)) {
-                vm.enroll(invite.trim(), email.trim(), name.trim(), password, waived = postureNow == EnrollPosture.Waived)
+                vm.enroll(invite.trim(), email.trim(), name.trim(), password, waived = postureNow == EnrollPosture.Waived, typedShortFp = shortFp)
             }
         }
     }
