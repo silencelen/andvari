@@ -25,8 +25,8 @@ class OriginNamespaceTest {
     @Test
     fun originKeyPinnedVectors() {
         assertEquals("e1fd6516bf573c7f", OriginNamespace.originKey("https://andvari.monahanhosting.com"))
-        assertEquals("edfce5729b02fa19", OriginNamespace.originKey("https://andvari.taila2dff2.ts.net"))
-        assertEquals("63572e635897bbf3", OriginNamespace.originKey("http://192.168.2.122:8080"))
+        assertEquals("45858d4d141c5edd", OriginNamespace.originKey("https://vault.example.net"))
+        assertEquals("4e629db6dc46b0f6", OriginNamespace.originKey("http://192.168.1.9:8080"))
         assertEquals("50d7a905e3046b88", OriginNamespace.originKey("https://example.org"))
         assertEquals("3e1098e31ab128b1", OriginNamespace.originKey("https://example.org:8443"))
     }
