@@ -146,11 +146,11 @@ export function ExtensionRowView({ state }: { state: ExtensionRow }) {
           {state.chromeStoreUrl &&
             "Chrome-family browsers install from the Chrome Web Store and update automatically."}
           {state.chromeStoreUrl && xpiUrl && " "}
-          {/* Honest asymmetry (review 2026-07-17): the self-distributed .xpi has no update_url and
-              the in-extension update nag ships un-armed (§M-D3 sentinel key) — so never imply the
-              Firefox install updates itself or will announce updates. */}
+          {/* Since ext 0.16.2 the .xpi bakes gecko.update_url → this server's
+              /downloads/firefox-updates.json, so signed installs self-update like Chrome's.
+              (The in-extension nag stays un-armed §M-D3 — Firefox itself does the updating.) */}
           {xpiUrl &&
-            "Firefox installs the Mozilla-signed add-on directly — approve the prompt it shows. It can’t update itself: when a newer version appears here, install it again from this button."}
+            "Firefox installs the Mozilla-signed add-on directly — approve the prompt it shows; it updates itself automatically."}
         </p>
       )}
       {(zipChrome || zipFirefox) && (
@@ -175,8 +175,13 @@ export function ExtensionRowView({ state }: { state: ExtensionRow }) {
   );
 }
 
-export function DevicesCard({ origin }: { origin?: string }) {
-  const here = origin ?? (typeof location !== "undefined" ? location.origin : "");
+export function DevicesCard({ origin, canonicalOrigin }: { origin?: string; canonicalOrigin?: string | null }) {
+  const current = origin ?? (typeof location !== "undefined" ? location.origin : "");
+  // Advertise the SERVER-DECLARED canonical origin (client-policy `canonicalOrigin`) to other
+  // devices — the session may ride a legacy front (e.g. the ≥90-day tailnet compat front) that
+  // new devices shouldn't be pointed at. No policy → the current origin is the honest answer.
+  const canonical = (canonicalOrigin ?? "").trim();
+  const here = canonical || current;
   const [manifest, setManifest] = useState<DownloadsManifest | null | "error">(null);
 
   useEffect(() => {
@@ -202,6 +207,9 @@ export function DevicesCard({ origin }: { origin?: string }) {
         <label>Any browser</label>
         <p className="muted">
           Open <span className="mono">{here || "this address"}</span> and sign in with your master password.
+          {canonical && current && canonical !== current && (
+            <> (You’re connected over <span className="mono">{current}</span> right now — both reach the same vault.)</>
+          )}
         </p>
       </div>
 

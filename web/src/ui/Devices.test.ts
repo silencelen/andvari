@@ -164,10 +164,11 @@ describe("ExtensionRowView — store buttons replace the zip flow when a better 
     expect(html).toContain(`href="${XPI}"`); // …the xpi installs in place (no _blank)
     expect(html).toContain("update automatically");
     expect(html).toContain("Mozilla-signed");
-    // Review 2026-07-17 (copy-honesty HIGH): the xpi has no update_url — the card must say so
-    // right next to Chrome's auto-update claim, never imply parity.
-    expect(html).toContain("can’t update itself");
-    expect(html).toContain("install it again from this button");
+    // Since ext 0.16.2 the xpi bakes gecko.update_url → signed installs self-update; the card
+    // may (and should) claim parity with Chrome. The unpacked-zip flow is the only one that
+    // can't update, and its caveat must not leak into the buttons-only rendering.
+    expect(html).toContain("updates itself automatically");
+    expect(html).not.toContain("can’t update itself");
     expect(html).not.toContain("unzip"); // the packaged-file flow is gone when buttons exist
     expect(html).not.toContain(ZIP_C); // chrome zip suppressed by the store listing
   });
@@ -219,6 +220,23 @@ describe("DevicesCard — endpoint-agnostic (design 2026-07-15 §5.4.4: no origi
     // The "any browser" row shows the CURRENT address — origin is just an address now.
     expect(a).toContain(TAILNET);
     expect(b).toContain(PUBLIC);
+  });
+
+  it("advertises the server-declared canonicalOrigin over the session's own front (legacy-front fix 2026-07-17)", () => {
+    const CANONICAL = "https://vault.example.com";
+    // Browsing over a legacy front: the card points other devices at the CANONICAL address,
+    // with an honest aside naming the front this session actually rides.
+    const html = renderToStaticMarkup(createElement(DevicesCard, { origin: TAILNET, canonicalOrigin: CANONICAL }));
+    expect(html).toContain(CANONICAL);
+    expect(html).toContain("both reach the same vault");
+    expect(html).toContain(TAILNET); // the aside names the current front — runtime value, not baked
+    // No declared canonical (self-host without the policy field) → current origin, no aside.
+    const bare = renderToStaticMarkup(createElement(DevicesCard, { origin: TAILNET }));
+    expect(bare).toContain(TAILNET);
+    expect(bare).not.toContain("both reach the same vault");
+    // Canonical == current → no redundant aside.
+    const same = renderToStaticMarkup(createElement(DevicesCard, { origin: CANONICAL, canonicalOrigin: CANONICAL }));
+    expect(same).not.toContain("both reach the same vault");
   });
 
   it("bakes no tailnet hostname and ships no devstore QR (§5.5 tailnet-leak removal)", () => {
