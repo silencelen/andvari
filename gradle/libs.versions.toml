@@ -13,7 +13,7 @@ logback = "1.5.38"
 angus-mail = "2.0.5"
 micrometer = "1.17.0"
 zxing = "3.5.4"
-shadow = "8.3.5"
+shadow = "9.6.0"
 compose-bom = "2024.12.01"
 activity-compose = "1.9.3"
 # Force a modern fragment: androidx.biometric:1.2.0-alpha05 drags in fragment 1.2.5, whose
