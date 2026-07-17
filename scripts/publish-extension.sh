@@ -75,6 +75,11 @@ publish_chrome() {
   local pub
   pub=$(curl -s -X POST -H "Authorization: Bearer $tok" -H "x-goog-api-version: 2" -H "Content-Length: 0" \
         "https://www.googleapis.com/chromewebstore/v1.1/items/$CWS_ITEM_ID/publish") || true
+  if echo "$pub" | jq -e '.error' >/dev/null 2>&1; then
+    echo "[chrome] PUBLISH BLOCKED: $(echo "$pub" | jq -r '.error.message')" >&2
+    echo "[chrome] NOTE: the $VERSION package IS uploaded as the draft — fix the above in the dashboard, then re-run '--chrome' to publish (no re-upload needed)." >&2
+    exit 1
+  fi
   echo "[chrome] response: $(echo "$pub" | jq -c '{status,statusDetail}' 2>/dev/null || echo "$pub")"
   echo "[chrome] uploaded + submitted. Google review is pending before the update goes live."
 }

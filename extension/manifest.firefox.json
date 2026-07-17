@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "andvari",
-  "version": "0.16.0",
-  "description": "Zero-knowledge password manager — fill and save logins. Works with any andvari server; preconfigured for andvari.monahanhosting.com — point it at your own in Options.",
+  "version": "0.16.1",
+  "description": "Zero-knowledge password manager — fill and save logins. Works with any andvari server; set your own in Options.",
   "browser_specific_settings": {
     "gecko": { "id": "andvari@monahanhosting.com", "strict_min_version": "121.0" }
   },

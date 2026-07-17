@@ -1,6 +1,9 @@
 # andvari — changelog
 
-## 0.19.0 (2026-07-17) — point andvari at any server (endpoint-agnostic pivot) · web/server/apps 0.19.0, extension 0.16.0
+## 0.19.0 (2026-07-17) — point andvari at any server (endpoint-agnostic pivot) · web/server/apps 0.19.0, extension 0.16.1
+
+*Extension patch 0.16.1: shortened the manifest `description` to fit the Chrome Web Store's 132-char
+summary limit (the endpoint-agnostic rewrite had pushed it to 166) — no behavioural change.*
 
 *The 2026-07-15 multi-tenant/self-host design
 (`docs/design/2026-07-15-multi-tenant-endpoints.md`). The reference instance
