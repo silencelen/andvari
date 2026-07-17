@@ -24,6 +24,17 @@ updates:
           - "com.goterl:*"          # lazysodium
           - "net.java.dev.jna*"
           - "androidx.*"
+    # Deferred-major lanes (docs/ROADMAP.md § Dependency upgrade lanes, triage 2026-07-17).
+    # LIFT the matching ignore when a lane opens — these suppress re-filing until then.
+    ignore:
+      - dependency-name: "com.android*"            # AGP — atomic AGP9 lane
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "com.gradleup.shadow"     # breaks on Gradle 9 — AGP9 lane
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "gradle"                  # wrapper — AGP9 lane
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "androidx.compose:compose-bom"  # needs compileSdk 36 — AGP9 lane stage 3
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: "/web"
@@ -38,6 +49,19 @@ updates:
         exclude-patterns:
           - "libsodium-wrappers-sumo"
           - "@types/libsodium-wrappers-sumo"
+    ignore:
+      - dependency-name: "react"                   # React 19 atomic lane
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vite"                    # vite8+vitest4 lane
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node"             # tracks the runtime Node major (22.x)
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: "/extension"
@@ -47,6 +71,9 @@ updates:
     groups:
       ext-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      - dependency-name: "typescript"              # TS7/tsgo equivalence lane (web+ext together)
+        update-types: ["version-update:semver-major"]
 
   # Keep the Actions in the workflows below pinned + current.
   - package-ecosystem: github-actions

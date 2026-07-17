@@ -498,3 +498,32 @@ each cycle. Small reviewed batches, additive wire, docs true as you go.
 - **Releases:** verify.sh + e2e.sh green → `ops/deploy.sh` (server+web) → `scripts/ship.sh`
   (Android → devstore) → owner MSI (desktop). Keep the 7 crypto vector files byte-identical;
   regenerate only the new one per feature.
+
+## Dependency upgrade lanes (Dependabot triage 2026-07-17)
+
+The public flip woke Dependabot; 16 PRs were triaged — minors + security applied on main
+(`e64f91d`/`25c4986`/`8d00b7e`), the majors below deferred into deliberate lanes. Each has a
+matching `ignore:` rule in `.github/dependabot.yml` — **lift the ignore when its lane opens.**
+Full per-family analysis lives in the closed PRs' comments (#5 #7-#16 #19).
+
+1. **Crypto (web):** `libsodium-wrappers-sumo` 0.7.15 → 0.8.4 — the sodium/WASM engine; bump +
+   DELETE the deprecated `@types/libsodium-wrappers-sumo` stub, audit `src/crypto/sodium.ts`
+   init/API parity, full byte-locked vector gate in isolation.
+2. **Crypto (native):** `lazysodium` 5.2.0 + `jna` 5.19.1 — swaps bundled libsodium 1.0.18→1.0.20;
+   also update the hardcoded coords in `core/build.gradle.kts`; JVM vector suite PLUS an on-device
+   Android smoke (JVM tests never load the .aar natives). jna ≥5.17 = 16KB-page .so (Android 15/16 win).
+3. **React 19 (web):** react + react-dom + both @types atomically (each alone is peer-broken);
+   fix the v19 type churn under `tsc --noEmit`; re-verify renderToStaticMarkup-based a11y tests.
+4. **vite 8 + vitest 4 (web):** must move together with `@vitejs/plugin-react`'s major (Dependabot's
+   solo-vite PR left an internally inconsistent lockfile — never merge that shape). Rolldown +
+   lightningcss change every produced byte → re-run the release string-scan after.
+5. **TS 7 / tsgo (web+ext):** engine replacement; pin the same 7.x in both, and equivalence-check
+   the gate (run 5.9 and 7.x side-by-side, diff diagnostics) before trusting it — exit 0 proves
+   compatibility, not equal strictness.
+6. **AGP 9 toolchain (atomic):** gradle-wrapper 9.6 + AGP 9.3 + shadow 9.6 + the Kotlin cluster
+   (kotlin 2.4.x, coroutines/serialization 1.11, kotlinx-datetime 0.8 — port SyncEngine off
+   `kotlinx.datetime.Instant`, compose-multiplatform 1.11, ktor 3.5) as ONE commit — no
+   intermediate state builds. Then stage 3: compileSdk/targetSdk 36 (+ platform-36 on the build
+   host) → compose-bom 2026.06 → re-derive the androidx fragment/activity/biometric pin lattice
+   by hand (no alphas on the unlock path). Re-run the in-container Docker build (it downloads the
+   wrapper independently).
