@@ -2289,15 +2289,15 @@ var qrcode = function() {
 (function (factory) {
   if (typeof define === 'function' && define.amd) {
       define([], factory);
-  } else if (typeof exports === 'object') {
-      module.exports = factory();
   }
 }(function () {
     return qrcode;
 }));
 
 // ---- andvari vendor epilogue (NOT upstream; see README.md) -------------------
-// Everything above this marker is byte-identical to ./qrcode.js. This appended
-// block is the only difference: it turns the UMD file into an importable ES
-// module (the UMD footer above no-ops under ESM: no `define`, no `exports`).
+// This runtime copy differs from pristine ./qrcode.js in exactly TWO marked ways
+// (both enforced by integrity.test.ts): (1) the UMD footer's CommonJS branch is
+// REMOVED above — vitest 3's module runner supplies interop `exports`/`module`
+// globals, so upstream's `module.exports = factory()` fired and collided with
+// the read-only ESM namespace; (2) this appended export makes it an ES module.
 export default qrcode;
