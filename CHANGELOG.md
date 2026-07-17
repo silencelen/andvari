@@ -5,6 +5,12 @@
 *Extension patch 0.16.1: shortened the manifest `description` to fit the Chrome Web Store's 132-char
 summary limit (the endpoint-agnostic rewrite had pushed it to 166) — no behavioural change.*
 
+*Web (post-release refresh): the Devices card's browser-extension row now renders install buttons —
+the Chrome Web Store listing (new manifest key `browserExtension.chromeStoreUrl`, auto-updating) and
+the Mozilla-signed `.xpi` for Firefox (click-to-install) — instead of the zip + load-unpacked flow,
+which remains the self-host fallback. Copy is update-honest per review: the xpi and unpacked copies
+state they can't update themselves (no popup-flag promise — the update nag ships un-armed, §M-D3).*
+
 *The 2026-07-15 multi-tenant/self-host design
 (`docs/design/2026-07-15-multi-tenant-endpoints.md`). The reference instance
 `andvari.monahanhosting.com` is promoted to full service; updating the apps moves them

@@ -1,7 +1,14 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { coerceManifest, DevicesCard, extensionRowState, platformRowState, windowsRowState } from "./Devices";
+import {
+  coerceManifest,
+  DevicesCard,
+  ExtensionRowView,
+  extensionRowState,
+  platformRowState,
+  windowsRowState,
+} from "./Devices";
 
 describe("coerceManifest (fetch-parse → state, review finding web-correctness-2)", () => {
   it("a JSON body of literal null (or any non-object) is 'error', NEVER the loading state", () => {
@@ -104,6 +111,94 @@ describe("extensionRowState (downloads manifest → browser-extension row)", () 
       chromeUrl: "/downloads/andvari-extension-chrome-0.6.0.zip",
       firefoxUrl: "/downloads/andvari-extension-firefox-0.6.0.zip",
     });
+  });
+
+  it("a store listing alone is a real install surface — available with just chromeStoreUrl", () => {
+    expect(
+      extensionRowState({
+        browserExtension: { version: "0.16.1", chromeStoreUrl: "https://chromewebstore.google.com/detail/andvari/x" },
+      }),
+    ).toEqual({
+      kind: "available",
+      version: "0.16.1",
+      chromeStoreUrl: "https://chromewebstore.google.com/detail/andvari/x",
+      chromeUrl: undefined,
+      firefoxUrl: undefined,
+    });
+  });
+
+  it("store + zips + xpi all pass through together", () => {
+    expect(
+      extensionRowState({
+        browserExtension: {
+          version: "0.16.1",
+          chromeStoreUrl: "https://chromewebstore.google.com/detail/andvari/x",
+          chromeUrl: "/downloads/andvari-extension-chrome-0.16.1.zip",
+          firefoxUrl: "/downloads/andvari-extension-firefox-0.16.1.xpi",
+        },
+      }),
+    ).toEqual({
+      kind: "available",
+      version: "0.16.1",
+      chromeStoreUrl: "https://chromewebstore.google.com/detail/andvari/x",
+      chromeUrl: "/downloads/andvari-extension-chrome-0.16.1.zip",
+      firefoxUrl: "/downloads/andvari-extension-firefox-0.16.1.xpi",
+    });
+  });
+});
+
+describe("ExtensionRowView — store buttons replace the zip flow when a better surface exists", () => {
+  const STORE = "https://chromewebstore.google.com/detail/andvari/ndhkgfgkbnfieehncjgegcjhfdbhmmbn";
+  const XPI = "/downloads/andvari-extension-firefox-0.16.1.xpi";
+  const ZIP_C = "/downloads/andvari-extension-chrome-0.16.1.zip";
+  const ZIP_F = "/downloads/andvari-extension-firefox-0.16.1.zip";
+
+  it("store + signed xpi → two install buttons, NO unzip instructions (zip suppressed even if present)", () => {
+    const html = renderToStaticMarkup(
+      createElement(ExtensionRowView, {
+        state: { kind: "available", version: "0.16.1", chromeStoreUrl: STORE, chromeUrl: ZIP_C, firefoxUrl: XPI },
+      }),
+    );
+    expect(html).toContain(`href="${STORE}"`);
+    expect(html).toContain('target="_blank"'); // store opens in a new tab…
+    expect(html).toContain(`href="${XPI}"`); // …the xpi installs in place (no _blank)
+    expect(html).toContain("update automatically");
+    expect(html).toContain("Mozilla-signed");
+    // Review 2026-07-17 (copy-honesty HIGH): the xpi has no update_url — the card must say so
+    // right next to Chrome's auto-update claim, never imply parity.
+    expect(html).toContain("can’t update itself");
+    expect(html).toContain("install it again from this button");
+    expect(html).not.toContain("unzip"); // the packaged-file flow is gone when buttons exist
+    expect(html).not.toContain(ZIP_C); // chrome zip suppressed by the store listing
+  });
+
+  it("zips only (self-host without a store listing) keeps the honest load-unpacked flow", () => {
+    const html = renderToStaticMarkup(
+      createElement(ExtensionRowView, {
+        state: { kind: "available", version: "0.6.0", chromeUrl: ZIP_C, firefoxUrl: ZIP_F },
+      }),
+    );
+    expect(html).not.toContain("getbtns");
+    expect(html).toContain("unzip");
+    expect(html).toContain("INSTALL.txt");
+    expect(html).toContain(`href="${ZIP_C}"`);
+    expect(html).toContain(`href="${ZIP_F}"`);
+    // Review 2026-07-17 (copy-honesty MED): the update nag ships un-armed (§M-D3 sentinel key) —
+    // the popup can never flag an update, so the card must not promise one. "Check back here."
+    expect(html).not.toContain("will flag");
+    expect(html).toContain("check back here");
+  });
+
+  it("mixed: store listing + firefox ZIP → chrome button, firefox falls back to the zip flow", () => {
+    const html = renderToStaticMarkup(
+      createElement(ExtensionRowView, {
+        state: { kind: "available", version: "0.16.1", chromeStoreUrl: STORE, firefoxUrl: ZIP_F },
+      }),
+    );
+    expect(html).toContain(`href="${STORE}"`);
+    expect(html).toContain("Or download");
+    expect(html).toContain(`href="${ZIP_F}"`);
+    expect(html).not.toContain("Mozilla-signed"); // a zip is not the signed build — never claim it is
   });
 });
 

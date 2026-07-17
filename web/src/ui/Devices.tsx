@@ -6,8 +6,9 @@ import { useEffect, useState } from "react";
  *  - web: the very origin the user is reading this on;
  *  - Windows/Linux: the /downloads/manifest.json the server already serves (B4 made it
  *    honest) — a link once a build is published, a plain "not yet" until then.
- *  - Browser extension: same manifest (`browserExtension` entry) — Chrome/Firefox zips
- *    published to /downloads.
+ *  - Browser extension: same manifest (`browserExtension` entry) — preferred surfaces are
+ *    the Chrome Web Store listing (`chromeStoreUrl`) and a Mozilla-signed `.xpi`
+ *    (`firefoxUrl`); plain zips remain the self-host load-unpacked fallback.
  *
  * Endpoint-agnostic pivot (design 2026-07-15 §5.4.4): the origin gate is GONE — the card
  * renders (and fetches the same-origin manifest) everywhere, so a self-host instance's
@@ -23,7 +24,10 @@ interface PlatformBuild {
 }
 export interface ExtensionBuild {
   version?: string;
+  /** Store listing for Chrome-family browsers (auto-updating install) — preferred over chromeUrl. */
+  chromeStoreUrl?: string;
   chromeUrl?: string;
+  /** A `.xpi` here is a Mozilla-signed click-to-install build; a `.zip` is the load-unpacked fallback. */
   firefoxUrl?: string;
 }
 export interface DownloadsManifest {
@@ -41,7 +45,7 @@ export type WindowsRow = PlatformRow;
 export type ExtensionRow =
   | { kind: "loading" }
   | { kind: "unpublished" }
-  | { kind: "available"; version: string; chromeUrl?: string; firefoxUrl?: string };
+  | { kind: "available"; version: string; chromeStoreUrl?: string; chromeUrl?: string; firefoxUrl?: string };
 
 /**
  * Coerce whatever the manifest fetch parsed into a usable value. `r.json()` can
@@ -81,16 +85,20 @@ export function windowsRowState(manifest: DownloadsManifest | null | "error"): W
 
 /**
  * Same decision for the browser-extension row. Available needs a version plus AT LEAST
- * one browser zip (Chrome-family or Firefox) — a version with no usable link stays
- * "unpublished" so we never render a dead row.
+ * one install surface (store listing, Chrome zip, or Firefox build) — a version with no
+ * usable link stays "unpublished" so we never render a dead row.
  */
 export function extensionRowState(manifest: DownloadsManifest | null | "error"): ExtensionRow {
   if (manifest === null) return { kind: "loading" };
   const ext = manifest === "error" ? null : manifest.browserExtension;
   if (ext && typeof ext.version === "string" && ext.version) {
-    const chromeUrl = typeof ext.chromeUrl === "string" && ext.chromeUrl ? ext.chromeUrl : undefined;
-    const firefoxUrl = typeof ext.firefoxUrl === "string" && ext.firefoxUrl ? ext.firefoxUrl : undefined;
-    if (chromeUrl || firefoxUrl) return { kind: "available", version: ext.version, chromeUrl, firefoxUrl };
+    const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+    const chromeStoreUrl = str(ext.chromeStoreUrl);
+    const chromeUrl = str(ext.chromeUrl);
+    const firefoxUrl = str(ext.firefoxUrl);
+    if (chromeStoreUrl || chromeUrl || firefoxUrl) {
+      return { kind: "available", version: ext.version, chromeStoreUrl, chromeUrl, firefoxUrl };
+    }
   }
   return { kind: "unpublished" };
 }
@@ -109,25 +117,60 @@ function PlatformRowView({ state, noun }: { state: PlatformRow; noun: string }) 
   return <p className="muted">The {noun} isn’t published yet — it will appear here when it is.</p>;
 }
 
-function ExtensionRowView({ state }: { state: ExtensionRow }) {
+export function ExtensionRowView({ state }: { state: ExtensionRow }) {
   if (state.kind === "loading") return <p className="muted">Checking…</p>;
   if (state.kind === "unpublished") {
     return <p className="muted">The browser extension isn’t published yet — it will appear here when it is.</p>;
   }
+  // Preferred installs: the Chrome Web Store listing (auto-updates) and a Mozilla-signed
+  // `.xpi` (Firefox click-to-install). A plain zip is the self-host fallback and keeps the
+  // load-unpacked instructions — but only for a browser that has no better surface above.
+  const xpiUrl = state.firefoxUrl && state.firefoxUrl.endsWith(".xpi") ? state.firefoxUrl : undefined;
+  const zipChrome = state.chromeStoreUrl ? undefined : state.chromeUrl;
+  const zipFirefox = xpiUrl ? undefined : state.firefoxUrl;
   return (
     <>
-      <p className="muted">
-        Autofill on this computer’s browser. Download for{" "}
-        {state.chromeUrl && <a href={state.chromeUrl}>Chrome / Edge / Brave</a>}
-        {state.chromeUrl && state.firefoxUrl && " or "}
-        {state.firefoxUrl && <a href={state.firefoxUrl}>Firefox</a>} (andvari {state.version}), unzip it to a
-        folder you’ll keep, then follow the INSTALL.txt inside — about two minutes; the steps differ per browser.
-      </p>
-      <p className="muted">
-        Because it’s loaded unpacked, the extension can’t update itself — it will flag inside its popup when a
-        newer version ({state.version} is current) is published here. Updating means re-downloading above and
-        reloading it in your browser’s extensions page.
-      </p>
+      <p className="muted">Autofill in this computer’s browser (andvari {state.version}).</p>
+      {(state.chromeStoreUrl || xpiUrl) && (
+        <div className="getbtns">
+          {state.chromeStoreUrl && (
+            <a href={state.chromeStoreUrl} target="_blank" rel="noreferrer">
+              Get for Chrome / Edge / Brave
+            </a>
+          )}
+          {xpiUrl && <a href={xpiUrl}>Get for Firefox</a>}
+        </div>
+      )}
+      {(state.chromeStoreUrl || xpiUrl) && (
+        <p className="muted">
+          {state.chromeStoreUrl &&
+            "Chrome-family browsers install from the Chrome Web Store and update automatically."}
+          {state.chromeStoreUrl && xpiUrl && " "}
+          {/* Honest asymmetry (review 2026-07-17): the self-distributed .xpi has no update_url and
+              the in-extension update nag ships un-armed (§M-D3 sentinel key) — so never imply the
+              Firefox install updates itself or will announce updates. */}
+          {xpiUrl &&
+            "Firefox installs the Mozilla-signed add-on directly — approve the prompt it shows. It can’t update itself: when a newer version appears here, install it again from this button."}
+        </p>
+      )}
+      {(zipChrome || zipFirefox) && (
+        <>
+          <p className="muted">
+            {state.chromeStoreUrl || xpiUrl ? "Or download" : "Download"} for{" "}
+            {zipChrome && <a href={zipChrome}>Chrome / Edge / Brave</a>}
+            {zipChrome && zipFirefox && " or "}
+            {zipFirefox && <a href={zipFirefox}>Firefox</a>}, unzip it to a folder you’ll keep, then follow
+            the INSTALL.txt inside — about two minutes; the steps differ per browser.
+          </p>
+          <p className="muted">
+            {/* No popup-flag promise: the update nag ships un-armed (§M-D3) — the extension never
+                checks this manifest, so the only honest channel is "check back here". */}
+            Because it’s loaded unpacked, that copy can’t update itself — check back here for newer versions
+            ({state.version} is current). Updating means re-downloading above and reloading it in your
+            browser’s extensions page.
+          </p>
+        </>
+      )}
     </>
   );
 }
