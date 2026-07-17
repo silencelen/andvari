@@ -11,6 +11,19 @@ updates:
     groups:
       gradle-minor-patch:
         update-types: [minor, patch]
+        # Triage 2026-07-17: "minor" is meaningless for these families — Kotlin-ecosystem
+        # minors are toolchain generations, lazysodium/jna swap the bundled libsodium
+        # native, and the androidx train is pinned deliberately (fragment/activity crash
+        # lattice; biometric alphas guard the unlock path). They surface as INDIVIDUAL
+        # PRs for deliberate lanes instead of hiding inside the "safe" group.
+        exclude-patterns:
+          - "org.jetbrains.kotlin*"
+          - "org.jetbrains.kotlinx*"
+          - "io.ktor*"
+          - "org.jetbrains.compose*"
+          - "com.goterl:*"          # lazysodium
+          - "net.java.dev.jna*"
+          - "androidx.*"
 
   - package-ecosystem: npm
     directory: "/web"
@@ -20,6 +33,11 @@ updates:
     groups:
       web-minor-patch:
         update-types: [minor, patch]
+        # libsodium-wrappers-sumo is the web crypto engine (byte-locked vectors) — its
+        # 0.x bumps are de-facto majors and get their own lane, never the group.
+        exclude-patterns:
+          - "libsodium-wrappers-sumo"
+          - "@types/libsodium-wrappers-sumo"
 
   - package-ecosystem: npm
     directory: "/extension"

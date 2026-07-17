@@ -36,16 +36,24 @@ jobs:
     # self-hosted / larger runner.
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           queries: security-extended
+          # Tests aren't shipped code: security-extended on assertion patterns produces
+          # only false positives there (e.g. js/incomplete-url-substring-sanitization on
+          # `assert(url.startsWith(...))` pins — alerts 1-5, dismissed 2026-07-17).
+          config: |
+            paths-ignore:
+              - "**/*.test.ts"
+              - "**/src/test/**"
+              - "web/src/e2e/**"
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"
