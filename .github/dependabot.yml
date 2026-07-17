@@ -1,8 +1,14 @@
 # Dependabot — dependency + GitHub Actions update PRs (W3 tooling, trust-attestation strategy).
 # Grouped weekly to keep the noise down on a small project.
+#
+# ignore blocks below defer whole families to deliberate upgrade LANES
+# (docs/ROADMAP.md § Dependency upgrade lanes, triage 2026-07-17). "minor/patch" is
+# meaningless for these — Kotlin-ecosystem minors are toolchain generations, ktor/AGP
+# minors drag a Gradle bump, lazysodium swaps the bundled native, libsodium-sumo 0.x is
+# a de-facto major, and the androidx train is a pinned crash lattice. LIFT an ignore when
+# its lane opens. Security *alerts* are unaffected by ignore — vulns still surface.
 version: 2
 updates:
-  # One Gradle build covers :core, :server, :app-android, :app-desktop, :tools:* (libs.versions.toml).
   - package-ecosystem: gradle
     directory: "/"
     schedule:
@@ -11,30 +17,17 @@ updates:
     groups:
       gradle-minor-patch:
         update-types: [minor, patch]
-        # Triage 2026-07-17: "minor" is meaningless for these families — Kotlin-ecosystem
-        # minors are toolchain generations, lazysodium/jna swap the bundled libsodium
-        # native, and the androidx train is pinned deliberately (fragment/activity crash
-        # lattice; biometric alphas guard the unlock path). They surface as INDIVIDUAL
-        # PRs for deliberate lanes instead of hiding inside the "safe" group.
-        exclude-patterns:
-          - "org.jetbrains.kotlin*"
-          - "org.jetbrains.kotlinx*"
-          - "io.ktor*"
-          - "org.jetbrains.compose*"
-          - "com.goterl:*"          # lazysodium
-          - "net.java.dev.jna*"
-          - "androidx.*"
-    # Deferred-major lanes (docs/ROADMAP.md § Dependency upgrade lanes, triage 2026-07-17).
-    # LIFT the matching ignore when a lane opens — these suppress re-filing until then.
     ignore:
-      - dependency-name: "com.android*"            # AGP — atomic AGP9 lane
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "com.gradleup.shadow"     # breaks on Gradle 9 — AGP9 lane
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "gradle"                  # wrapper — AGP9 lane
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "androidx.compose:compose-bom"  # needs compileSdk 36 — AGP9 lane stage 3
-        update-types: ["version-update:semver-major"]
+      - dependency-name: "com.android*"                    # AGP — AGP9 lane (min-Gradle entangled)
+      - dependency-name: "com.gradleup.shadow"             # breaks on Gradle 9 — AGP9 lane
+      - dependency-name: "gradle"                          # wrapper — AGP9 lane
+      - dependency-name: "org.jetbrains.kotlin*"           # Kotlin toolchain lane
+      - dependency-name: "org.jetbrains.kotlinx*"
+      - dependency-name: "io.ktor*"                        # klibs need Kotlin 2.2+ — toolchain lane
+      - dependency-name: "org.jetbrains.compose*"
+      - dependency-name: "androidx.*"                      # needs compileSdk 36 — AGP9 lane stage 3
+      - dependency-name: "com.goterl*"                     # lazysodium — native crypto lane
+      - dependency-name: "net.java.dev.jna*"               # jna — native crypto lane
 
   - package-ecosystem: npm
     directory: "/web"
@@ -44,23 +37,18 @@ updates:
     groups:
       web-minor-patch:
         update-types: [minor, patch]
-        # libsodium-wrappers-sumo is the web crypto engine (byte-locked vectors) — its
-        # 0.x bumps are de-facto majors and get their own lane, never the group.
-        exclude-patterns:
-          - "libsodium-wrappers-sumo"
-          - "@types/libsodium-wrappers-sumo"
     ignore:
-      - dependency-name: "react"                   # React 19 atomic lane
-        update-types: ["version-update:semver-major"]
+      - dependency-name: "libsodium-wrappers-sumo"         # sodium/WASM engine — crypto lane
+      - dependency-name: "@types/libsodium-wrappers-sumo"  # deprecated stub, deleted in that lane
+      - dependency-name: "react"                           # React 19 atomic lane
       - dependency-name: "react-dom"
-        update-types: ["version-update:semver-major"]
       - dependency-name: "@types/react"
-        update-types: ["version-update:semver-major"]
       - dependency-name: "@types/react-dom"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "vite"                    # vite8+vitest4 lane
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "@types/node"             # tracks the runtime Node major (22.x)
+      - dependency-name: "vite"                            # vite8 + vitest4 lane
+      - dependency-name: "vitest"
+      - dependency-name: "@vitejs/plugin-react"
+      - dependency-name: "typescript"                      # TS7 / tsgo lane (web+ext together)
+      - dependency-name: "@types/node"                     # tracks the runtime Node major (22.x)
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
@@ -72,10 +60,8 @@ updates:
       ext-minor-patch:
         update-types: [minor, patch]
     ignore:
-      - dependency-name: "typescript"              # TS7/tsgo equivalence lane (web+ext together)
-        update-types: ["version-update:semver-major"]
+      - dependency-name: "typescript"                      # TS7 / tsgo lane
 
-  # Keep the Actions in the workflows below pinned + current.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
