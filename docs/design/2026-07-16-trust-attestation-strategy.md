@@ -4,7 +4,7 @@
 > strategy session 2026-07-16 (tmux `andvari3rdpart`), grounded against spec 02 §5 / spec 05 at
 > HEAD `30bdc22`. Companion docs (this one deliberately does NOT re-decide anything they settled):
 > `2026-07-15-multi-tenant-endpoints.md` (the self-hostable / endpoint-agnostic pivot — owner
-> decisions locked) and `../assess/2026-07-16-public-release-secret-scan.md` (safe-to-publish
+> decisions locked) and the internal pre-publication secret scan (2026-07-16, held privately in `andvari-internal`; safe-to-publish
 > verdict: SAFE-AFTER-TREE-FIXES, no mandatory history scrub). Scope here = the **outward-facing
 > trust story once the repo is public**: what proves, to a stranger, that the cryptography does
 > what we say and that the publisher (and any server operator) sees exactly what spec 02 §5 says
@@ -60,8 +60,8 @@ anchor).
   `docs/runbooks/release-signing-keys.md`), CWS/AMO store-signing in flight, Ed25519 update
   manifest (being **un-armed** by the pivot — update mechanics defer to that doc; §W4 signs
   whatever artifacts publish, wherever they publish).
-- **Secret-scan remediation list** (`../assess/2026-07-16-public-release-secret-scan.md` §4) —
-  the flip gate. Not duplicated here.
+- **Secret-scan remediation list** (the internal pre-publication secret scan §4, held privately
+  in `andvari-internal`) — the flip gate. Not duplicated here.
 
 ## 3. Workstreams (orchestrator lanes)
 
