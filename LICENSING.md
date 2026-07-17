@@ -27,9 +27,7 @@ auditable.
 
 ## Before publishing (flip checklist)
 
-- [ ] **`server/LICENSE`** currently carries an AGPLv3 *declaration* with a flagged
-      placeholder — paste the verbatim canonical text from
-      `https://www.gnu.org/licenses/agpl-3.0.txt` (it was not available offline; do
-      not hand-transcribe a legal document).
+- [x] **`server/LICENSE`** — the verbatim canonical GNU AGPLv3 text is in place
+      (2026-07-16, from spdx/license-list-data; §13 Affero clause verified).
 - [ ] Confirm F1 is still the intended split (owner may overturn at pickup, per the
       trust-attestation doc).
