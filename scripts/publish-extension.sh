@@ -104,10 +104,31 @@ publish_firefox() {
     || { echo "[firefox] ERROR: web-ext sign failed" >&2; rm -rf "$tmp"; exit 1; }
   rm -rf "$tmp"
 
-  local xpi; xpi=$(ls -1t "$out"/*.xpi 2>/dev/null | head -1)
-  echo "[firefox] signed XPI: $xpi"
-  echo "[firefox] host the signed .xpi at your instance's downloads dir (ANDVARI_DOWNLOADS_DIR)"
-  echo "          so release-Firefox users install the Mozilla-signed build."
+  local xpi named; xpi=$(ls -1t "$out"/*.xpi 2>/dev/null | head -1)
+  named="$out/andvari-extension-firefox-$VERSION.xpi"
+  [ "$xpi" = "$named" ] || cp "$xpi" "$named"
+
+  # Auto-update channel: the manifest bakes gecko.update_url → /downloads/firefox-updates.json.
+  # Assert the SIGNED bytes actually carry it (a build regression here silently strands every
+  # install on its current version forever), then emit the updates.json to host alongside the xpi.
+  local m; m=$(unzip -p "$named" manifest.json 2>/dev/null)
+  local upd; upd=$(echo "$m" | jq -r '.browser_specific_settings.gecko.update_url // empty')
+  local ver; ver=$(echo "$m" | jq -r '.version // empty')
+  [ "$ver" = "$VERSION" ] || { echo "[firefox] ERROR: signed xpi version '$ver' != $VERSION" >&2; exit 1; }
+  if [ -z "$upd" ]; then
+    echo "[firefox] WARNING: signed xpi has NO update_url — installs of this build will never auto-update." >&2
+  else
+    local origin="${upd%/downloads/firefox-updates.json}"
+    jq -n --arg id "$(echo "$m" | jq -r '.browser_specific_settings.gecko.id')" \
+          --arg ver "$VERSION" \
+          --arg link "$origin/downloads/andvari-extension-firefox-$VERSION.xpi" \
+          '{addons: {($id): {updates: [{version: $ver, update_link: $link}]}}}' \
+          > "$out/firefox-updates.json"
+    echo "[firefox] update channel: $out/firefox-updates.json (serve at $upd)"
+  fi
+  echo "[firefox] signed XPI: $named"
+  echo "[firefox] host the .xpi AND firefox-updates.json at the instance's downloads dir"
+  echo "          (ANDVARI_DOWNLOADS_DIR) — installs poll updates.json and self-update to newer signed builds."
 }
 
 [ "$DO_CHROME"  = 1 ] && publish_chrome

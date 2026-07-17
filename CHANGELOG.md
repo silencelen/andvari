@@ -5,6 +5,15 @@
 *Extension patch 0.16.1: shortened the manifest `description` to fit the Chrome Web Store's 132-char
 summary limit (the endpoint-agnostic rewrite had pushed it to 166) — no behavioural change.*
 
+*Extension patch 0.16.2 — Firefox auto-updates: the Firefox manifest now bakes
+`gecko.update_url` → the reference `/downloads/firefox-updates.json`, so Mozilla-signed installs
+self-update like Chrome's store installs (Firefox verifies the signature on every update;
+`publish-extension.sh` now emits the updates.json and asserts the signed xpi carries the channel).
+Installs of ≤0.16.1 predate the channel and need one manual reinstall from the Devices card.
+The card also now advertises the server-declared `canonicalOrigin` to other devices instead of the
+session's own front (a tailnet-front session used to show the legacy address), with an honest aside
+naming the front you're connected over.*
+
 *Web (post-release refresh): the Devices card's browser-extension row now renders install buttons —
 the Chrome Web Store listing (new manifest key `browserExtension.chromeStoreUrl`, auto-updating) and
 the Mozilla-signed `.xpi` for Firefox (click-to-install) — instead of the zip + load-unpacked flow,

@@ -49,7 +49,7 @@ export function Settings({ client, account, store, policy, onPasswordChanged, on
     return (
       <div>
         <ViewHeader title="Your devices" actions={<button type="button" className="link" onClick={() => setSub("main")}>‹ Back to settings</button>} />
-        <DevicesCard />
+        <DevicesCard canonicalOrigin={policy?.canonicalOrigin} />
       </div>
     );
   }
