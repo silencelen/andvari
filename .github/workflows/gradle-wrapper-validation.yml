@@ -1,0 +1,21 @@
+# Validates the checked-in gradle-wrapper.jar against Gradle's published checksums —
+# the standard mitigation for a committed binary (Scorecard Binary-Artifacts): a
+# tampered wrapper jar fails this on every push/PR that could carry one.
+name: Gradle wrapper validation
+
+on:
+  push:
+    branches: [main]
+    paths: ["gradle/wrapper/**"]
+  pull_request:
+    paths: ["gradle/wrapper/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: gradle/actions/wrapper-validation@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4
