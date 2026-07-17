@@ -369,6 +369,16 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 /* ---- detail / editor ---- */
 .sheet { background: var(--bg-raised); border: 1px solid var(--edge); border-radius: 14px; padding: 24px; margin-top: 20px; }
 .sheet h2 { font-family: var(--serif); font-weight: 600; margin: 0 0 4px; font-size: 22px; }
+
+/* Devices card: browser-extension install buttons (Chrome Web Store / signed .xpi).
+   Anchor twins of button.ghost — element-qualified button styles can't reach an <a>. */
+.getbtns { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 8px; }
+.getbtns a {
+  display: inline-block; font-size: 14px; color: var(--ink); text-decoration: none;
+  background: var(--bg-input); border: 1px solid var(--edge); border-radius: var(--radius);
+  padding: 9px 14px; transition: 0.15s;
+}
+.getbtns a:hover { color: var(--gold-bright); border-color: var(--edge-strong); }
 .secret-row { display: flex; gap: 8px; align-items: stretch; }
 .secret-row input { flex: 1; }
 .copy-flash { color: var(--ok); font-size: 12px; }
