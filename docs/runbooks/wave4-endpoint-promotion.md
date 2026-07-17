@@ -55,11 +55,15 @@ The clients are already coded for the public default; releasing = bump + build +
 - [ ] Bump `ANDVARI_CLIENT_VERSION` (and the Gradle-side `versionName`/`packageVersion`, web
       `CLIENT_VERSION`, ext manifest/package versions) in lockstep — `scripts/verify.sh` asserts they match.
 - [ ] Build + **string-scan every published artifact**: `strings <apk/deb/zip> | grep -E "ts\.net|192\.168\.2\.122"` → zero (the tailnet/LAN literals survive only as never-dialed migration match-targets in the binary, which is acceptable, but verify nothing is a *dialed* default).
-- [ ] Publish per the artifact plan. **Reconcile F3 vs B2-4 first:** the trust-attestation strategy
-      (`docs/design/2026-07-16-trust-attestation-strategy.md` F3) makes **GitHub Releases** canonical
-      for client artifacts with `/downloads` a mirror; the pivot design (§8, B2-4) promoted `/downloads`.
-      Pick one as canonical and make the other the mirror before publishing, so the web Devices card
-      (manifest-driven) and the update/downloads copy agree.
+- [ ] Publish per the artifact plan. **F3 vs B2-4 — RESOLVED (2026-07-16): they are different layers,
+      not a conflict.** **GitHub Releases is canonical** for the *official reference* build — that's where
+      the signed `SHA256SUMS` + SLSA/attestations live and where strangers download (F3, discoverable +
+      verifiable). **`/downloads/manifest.json` stays the per-instance in-app source** the web Devices
+      card fetches same-origin (B2-4): on the reference instance it simply mirrors/points at the GitHub
+      Release; on a self-host instance it serves *that operator's* own builds. **No client code change** —
+      `Devices.tsx` already fetches same-origin `/downloads/manifest.json` correctly. The only action is
+      the reference build/publish step: cut the GitHub Release (canonical) and populate the reference
+      instance's `/downloads` from it.
 - [ ] Web + server deploy to CT122 (byte-verify, as prior deploys).
 
 ## 4. Verify the migration on a real device
