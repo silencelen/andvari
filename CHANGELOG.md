@@ -1,10 +1,11 @@
 # andvari — changelog
 
-## Unreleased — point andvari at any server (endpoint-agnostic pivot)
+## 0.19.0 (2026-07-17) — point andvari at any server (endpoint-agnostic pivot) · web/server/apps 0.19.0, extension 0.16.0
 
-*In progress — the 2026-07-15 multi-tenant/self-host design
-(`docs/design/2026-07-15-multi-tenant-endpoints.md`), landing over the next release train.
-No version bump yet.*
+*The 2026-07-15 multi-tenant/self-host design
+(`docs/design/2026-07-15-multi-tenant-endpoints.md`). The reference instance
+`andvari.monahanhosting.com` is promoted to full service; updating the apps moves them
+there and migrates their data (see below). The extension is versioned separately (0.16.0).*
 
 ### Heads-up for the household: your authenticator code now counts everywhere
 
