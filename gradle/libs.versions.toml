@@ -22,7 +22,7 @@ activity-compose = "1.9.3"
 # registry, which mints codes above 16 bits. 1.8.5 is the fragment aligned with activity 1.9.3.
 androidx-fragment = "1.8.5"
 lifecycle = "2.8.7"
-compose-multiplatform = "1.7.3"
+compose-multiplatform = "1.11.1"
 androidx-autofill = "1.1.0"
 
 [libraries]
