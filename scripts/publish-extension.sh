@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Publish the andvari browser extension to BOTH stores from a build host (huginn):
+#   * Chrome Web Store  — unlisted, via the Publish API (OAuth2)
+#   * Firefox AMO       — self-distribution / unlisted, via `web-ext sign`
+#
+#   scripts/publish-extension.sh [--version X.Y.Z] [--chrome] [--firefox] [--dry-run]
+#
+# Default = BOTH browsers, version read from extension/manifest.json.
+# This is the local-publish pattern (like ship.sh / publish-image.sh) — deliberately
+# NOT CI (this account's GitHub Actions billing is broken). Zips must already be built
+# (extension/package.mjs). NOTE: each store STILL REVIEWS the update before it goes
+# live — this automates the upload + submit, not Google's/Mozilla's review wait.
+#
+# Credentials live OUTSIDE this repo (which is destined to go public):
+#   ~/.andvari/store-publish.env  (chmod 600) — see scripts/store-publish.env.template
+#   and docs/runbooks/extension-store-publishing.md § Automated publishing.
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${ANDVARI_STORE_ENV:-$HOME/.andvari/store-publish.env}"
+DO_CHROME=0 DO_FIREFOX=0 DRY=0 VERSION=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --version) VERSION="${2:?}"; shift 2 ;;
+    --chrome)  DO_CHROME=1; shift ;;
+    --firefox) DO_FIREFOX=1; shift ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) awk 'NR>1 && /^#/{sub(/^# ?/,"");print;next} NR>1{exit}' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1 (see --help)" >&2; exit 2 ;;
+  esac
+done
+[ "$DO_CHROME" = 0 ] && [ "$DO_FIREFOX" = 0 ] && { DO_CHROME=1; DO_FIREFOX=1; }  # neither => both
+
+[ -f "$ENV_FILE" ] || {
+  echo "ERROR: no creds file $ENV_FILE" >&2
+  echo "  copy scripts/store-publish.env.template there, chmod 600, and fill it in." >&2
+  echo "  one-time setup: docs/runbooks/extension-store-publishing.md § Automated publishing" >&2
+  exit 1
+}
+# shellcheck source=/dev/null
+set -a; . "$ENV_FILE"; set +a
+
+# version: prefer flag, else the single source of truth (manifest.json)
+VERSION="${VERSION:-$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$REPO_DIR/extension/manifest.json" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')}"
+[ -n "$VERSION" ] || { echo "ERROR: could not determine extension version" >&2; exit 1; }
+
+CHROME_ZIP="$REPO_DIR/extension/artifacts/andvari-extension-chrome-$VERSION.zip"
+FIREFOX_ZIP="$REPO_DIR/extension/artifacts/andvari-extension-firefox-$VERSION.zip"
+echo "[publish-ext] version $VERSION  chrome=$DO_CHROME firefox=$DO_FIREFOX dry-run=$DRY"
+
+# ---------------------------- Chrome Web Store ----------------------------
+publish_chrome() {
+  : "${CWS_CLIENT_ID:?set in $ENV_FILE}" "${CWS_CLIENT_SECRET:?set in $ENV_FILE}"
+  : "${CWS_REFRESH_TOKEN:?set in $ENV_FILE}" "${CWS_ITEM_ID:?set in $ENV_FILE}"
+  [ -f "$CHROME_ZIP" ] || { echo "ERROR: missing $CHROME_ZIP — run: (cd extension && node package.mjs)" >&2; exit 1; }
+  echo "[chrome] item $CWS_ITEM_ID  package $(basename "$CHROME_ZIP")"
+  if [ "$DRY" = 1 ]; then echo "[chrome] DRY-RUN: would mint token, upload $(basename "$CHROME_ZIP"), publish item $CWS_ITEM_ID"; return; fi
+
+  local tok=""
+  tok=$(curl -sf -X POST https://oauth2.googleapis.com/token \
+        -d client_id="$CWS_CLIENT_ID" -d client_secret="$CWS_CLIENT_SECRET" \
+        -d refresh_token="$CWS_REFRESH_TOKEN" -d grant_type=refresh_token 2>/dev/null | jq -r '.access_token // empty') || true
+  [ -n "$tok" ] || { echo "[chrome] ERROR: OAuth token exchange failed — check CWS_* creds" >&2; exit 1; }
+
+  echo "[chrome] uploading package…"
+  local up state
+  up=$(curl -s -X PUT -T "$CHROME_ZIP" \
+        -H "Authorization: Bearer $tok" -H "x-goog-api-version: 2" \
+        "https://www.googleapis.com/upload/chromewebstore/v1.1/items/$CWS_ITEM_ID") || true
+  state=$(echo "$up" | jq -r '.uploadState // "?"' 2>/dev/null || echo "?")
+  [ "$state" = "SUCCESS" ] || { echo "[chrome] ERROR: upload state=$state → $up" >&2; exit 1; }
+
+  echo "[chrome] publishing (submit for review)…"
+  local pub
+  pub=$(curl -s -X POST -H "Authorization: Bearer $tok" -H "x-goog-api-version: 2" -H "Content-Length: 0" \
+        "https://www.googleapis.com/chromewebstore/v1.1/items/$CWS_ITEM_ID/publish") || true
+  echo "[chrome] response: $(echo "$pub" | jq -c '{status,statusDetail}' 2>/dev/null || echo "$pub")"
+  echo "[chrome] uploaded + submitted. Google review is pending before the update goes live."
+}
+
+# ------------------ Firefox AMO (self-distribution / unlisted) ------------------
+publish_firefox() {
+  : "${AMO_JWT_ISSUER:?set in $ENV_FILE}" "${AMO_JWT_SECRET:?set in $ENV_FILE}"
+  [ -f "$FIREFOX_ZIP" ] || { echo "ERROR: missing $FIREFOX_ZIP — run: (cd extension && node package.mjs)" >&2; exit 1; }
+  command -v npx >/dev/null || { echo "[firefox] ERROR: npx (Node) required for web-ext" >&2; exit 1; }
+
+  local tmp out addon; tmp="$(mktemp -d)"; out="$REPO_DIR/extension/artifacts"
+  unzip -oq "$FIREFOX_ZIP" -d "$tmp"
+  addon=$(jq -r '.browser_specific_settings.gecko.id // "?"' "$tmp/manifest.json" 2>/dev/null)
+  echo "[firefox] sign (AMO, channel=unlisted)  addon $addon  source $(basename "$FIREFOX_ZIP")"
+
+  if [ "$DRY" = 1 ]; then echo "[firefox] DRY-RUN: would 'web-ext sign --channel=unlisted' the $VERSION firefox build"; rm -rf "$tmp"; return; fi
+
+  npx --yes web-ext@latest sign \
+      --channel=unlisted \
+      --api-key="$AMO_JWT_ISSUER" --api-secret="$AMO_JWT_SECRET" \
+      --source-dir="$tmp" --artifacts-dir="$out" \
+    || { echo "[firefox] ERROR: web-ext sign failed" >&2; rm -rf "$tmp"; exit 1; }
+  rm -rf "$tmp"
+
+  local xpi; xpi=$(ls -1t "$out"/*.xpi 2>/dev/null | head -1)
+  echo "[firefox] signed XPI: $xpi"
+  echo "[firefox] host the signed .xpi at your instance's downloads dir (ANDVARI_DOWNLOADS_DIR)"
+  echo "          so release-Firefox users install the Mozilla-signed build."
+}
+
+[ "$DO_CHROME"  = 1 ] && publish_chrome
+[ "$DO_FIREFOX" = 1 ] && publish_firefox
+echo "[publish-ext] done (version $VERSION)."
