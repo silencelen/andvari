@@ -201,5 +201,17 @@ scripts/publish-extension.sh                 # push BOTH stores at the manifest 
 # scripts/publish-extension.sh --chrome --version 0.16.0   # one browser / pinned version
 ```
 Chrome auto-updates installed users once review passes. For Firefox, host the resulting signed
-`.xpi` (printed by the script) at the instance's `ANDVARI_DOWNLOADS_DIR` so release-Firefox installs
-the Mozilla-signed build.
+`.xpi` (printed by the script) at the instance's `ANDVARI_DOWNLOADS_DIR` — along with the
+`firefox-updates.json` the script emits — so release-Firefox installs the Mozilla-signed build and
+auto-updates via the baked `update_url`.
+
+### Releases faster than Chrome reviews — the push queue (standard process 2026-07-17)
+
+Chrome refuses a new upload while a prior version is still in review (`ITEM_NOT_UPDATABLE`), and
+reviews can take days. When that happens the script does NOT fail: it writes the version to
+`~/.andvari/cws-push-queue` (single line, **newest wins** — releasing again before the store frees
+up simply overwrites the queue, and the superseded version is never pushed). An operator-side cron
+watcher drains the queue by re-running `publish-extension.sh --chrome --version <queued>` until the
+store accepts it; on the reference deployment that's `andvari-cws-watch.sh` (every 6 h, notifies on
+success or on a non-review failure, silent while waiting). Firefox never queues — AMO signs
+unlisted submissions in seconds.
