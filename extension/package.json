@@ -16,8 +16,8 @@
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
-    "@types/chrome": "^0.0.287",
-    "esbuild": "^0.24.0",
+    "@types/chrome": "^0.2.2",
+    "esbuild": "^0.28.1",
     "typescript": "^5.6.3"
   }
 }
