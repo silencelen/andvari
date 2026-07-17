@@ -18,6 +18,10 @@ updates:
       gradle-minor-patch:
         update-types: [minor, patch]
     ignore:
+      # Gradle version catalogs: Dependabot matches ignores against the catalog KEY when a
+      # shared version drives several plugins (e.g. `kotlin`), and against the Maven
+      # COORDINATE otherwise — so both forms are listed for every deferred family.
+      # Coordinates:
       - dependency-name: "com.android*"                    # AGP — AGP9 lane (min-Gradle entangled)
       - dependency-name: "com.gradleup.shadow"             # breaks on Gradle 9 — AGP9 lane
       - dependency-name: "gradle"                          # wrapper — AGP9 lane
@@ -28,6 +32,23 @@ updates:
       - dependency-name: "androidx.*"                      # needs compileSdk 36 — AGP9 lane stage 3
       - dependency-name: "com.goterl*"                     # lazysodium — native crypto lane
       - dependency-name: "net.java.dev.jna*"               # jna — native crypto lane
+      # Catalog keys (shared-version plugin bundles + belt-and-suspenders):
+      - dependency-name: "kotlin"                          # 5 kotlin.* plugins share this ref
+      - dependency-name: "coroutines"
+      - dependency-name: "kotlinx-serialization"
+      - dependency-name: "kotlinx-datetime"
+      - dependency-name: "ktor"
+      - dependency-name: "compose-multiplatform"
+      - dependency-name: "compose-bom"
+      - dependency-name: "lazysodium-java"
+      - dependency-name: "lazysodium-android"
+      - dependency-name: "jna"
+      - dependency-name: "agp"
+      - dependency-name: "shadow"
+      - dependency-name: "activity-compose"
+      - dependency-name: "androidx-fragment"
+      - dependency-name: "androidx-autofill"
+      - dependency-name: "lifecycle"
 
   - package-ecosystem: npm
     directory: "/web"
