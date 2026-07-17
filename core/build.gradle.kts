@@ -50,7 +50,7 @@ kotlin {
                 implementation("com.goterl:lazysodium-android:5.1.0") {
                     exclude(group = "net.java.dev.jna", module = "jna")
                 }
-                implementation("net.java.dev.jna:jna:5.14.0@aar")
+                implementation("net.java.dev.jna:jna:5.19.1@aar")
                 api(libs.ktor.client.okhttp)
             }
         }
