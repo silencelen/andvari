@@ -59,6 +59,28 @@ The extension **already** enforces tier separation by not implementing account-c
 If the extension ever grows a Tier-2 action, it must step up to the full password (or bounce to web),
 never ride the quick-unlock session.
 
+## (C) Client-scoped TOTP policy (owner idea, 2026-07-18)
+
+> If TOTP is enrolled, keep it **required for web/desktop** (the extra-functionality clients), but let
+> it be **toggled on/off for the extension**.
+
+Coherent, and it composes with (A)/(B). Server shape: a per-account flag (e.g. `totpExtensionExempt`)
++ the login path keying the TOTP requirement off the **client type** — the login already carries a
+`ClientId`/version, so the server can waive the second factor for `client=extension` when the account
+opted in, while web/desktop stay gated. No change to the 0.16.3 code-entry seam (it just isn't hit
+when exempt). Owner-facing toggle in the web account UI.
+
+**One honest caveat to weigh first:** the extension *reads* every secret (fill/view), so "TOTP off for
+the extension" means **password-only access to the whole vault's plaintext** — the exact thing TOTP
+defends when a password is phished/keylogged. It's a real reduction, not a free convenience.
+
+**Recommendation / sequencing.** The *convenience* the toggle chases is already delivered more safely
+by quick-unlock: do TOTP **once** on the full sign-in, then ~24 h of PIN — or, per (A), biometric —
+relocks with no code. That keeps the 2FA gate on the credential while removing the repeated friction.
+So: land **biometric quick-unlock (A)** first; if that doesn't satisfy the owner's "trusted personal
+browser, no 2FA" preference, add **(C)** as an explicit, clearly-labelled opt-out (never a default).
+The two are compatible — (C) is a deliberate lower-security choice, (A) is the balanced one.
+
 ## Scope / sequencing
 
 Own lane, breaker-vetted (custody of the PRF-wrapped blob; the biometric-bypass threat model; the
