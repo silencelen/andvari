@@ -106,8 +106,7 @@ body {
 
 /* ---- header: compact wordmark + connectivity dot ---- */
 .pop-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 16px 10px;
+  padding: 10px 16px 8px;
   border-bottom: 1px solid var(--edge);
 }
 .brand { font-family: var(--serif); font-weight: 600; font-size: 18px; letter-spacing: 0.02em; color: var(--ink); }
@@ -124,8 +123,10 @@ body {
 /* Persistent origin display (design §5.1): the raw server origin, middle-truncated in JS, taking the
    flexible middle of the header and pushing the dot to the edge. Monospaced so a homograph can't hide
    in a proportional font; focusable so keyboard users reach the full value (title/aria-label). */
+/* Brand row: wordmark left, status dot right (the origin moved to its own line 2026-07-18). */
+.pop-head-top { display: flex; align-items: center; justify-content: space-between; }
 .server-origin {
-  flex: 1 1 auto; min-width: 0; text-align: right; margin: 0 9px;
+  display: block; margin: 3px 0 0;
   font-family: var(--mono); font-size: 11px; color: var(--ink-dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: ltr;
 }
@@ -231,8 +232,9 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .kdf .cap { margin-top: 6px; font-size: 11.5px; color: var(--ink-faint); text-align: center; }
 
 /* ---- unlocked view: search + generator + current-site + all-items lists (web .item idiom, popup-scaled) ---- */
-/* Chrome caps the popup viewport at 600px. Budget: header ~49 + this + #msg ~50 + footer ~80 must
-   stay under that even with the message strip visible — so 400, and #all-list scrolls internally. */
+/* Chrome caps the popup viewport at 600px. Budget: header ~63 (two-row since 2026-07-18: brand+dot
+   over the full-width origin) + this + #msg ~50 + footer ~80 must stay under that even with the
+   message strip visible — so 400, and #all-list scrolls internally. */
 .unlocked { display: flex; flex-direction: column; max-height: 400px; }
 .toolbar { display: flex; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--edge); }
 .toolbar input { flex: 1; min-width: 0; }

@@ -22,9 +22,16 @@ test("UNREACHABLE is the canonical web sentence", () => {
   assert.equal(UNREACHABLE, "Can't reach the andvari server — check you're on the home network or VPN, then try again.");
 });
 
-test("unlock ladder: all seven codes render web's exact copy", () => {
+test("unlock ladder: every code renders the exact copy", () => {
   assert.equal(unlockErrorCopy("bad_credentials"), "Wrong email or master password.");
-  assert.equal(unlockErrorCopy("totp_required"), "This account requires a one-time code — sign in from the web vault.");
+  // 0.16.3: totp_required is no longer a web-vault dead-end — it's the instruction the popup shows
+  // when it flips to the one-time-code field (rendered polite/info, not as an error).
+  assert.equal(unlockErrorCopy("totp_required"), "Enter the 6-digit code from your authenticator app.");
+  assert.equal(unlockErrorCopy("totp_bad_code"), "That code didn’t work — codes change every 30 seconds, so try the current one.");
+  assert.equal(unlockErrorCopy("totp_rate_limited"), "Too many attempts — wait a minute, then sign in again.");
+  assert.equal(unlockErrorCopy("totp_expired"), "That took too long — sign in again.");
+  assert.equal(unlockErrorCopy("totp_enroll_required"), "This server requires two-factor setup — finish it in the web vault, then sign in here.");
+  assert.equal(unlockErrorCopy("aborted"), "Sign-in was interrupted — try again.");
   // Deliberately does NOT hard-promise the banner link (AM5): a pin can name an
   // unpublished build, in which case no update banner materializes.
   assert.equal(unlockErrorCopy("upgrade_required"), "Your server requires a newer extension — get the update from the web vault or the link above.");

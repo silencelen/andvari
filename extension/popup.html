@@ -7,17 +7,20 @@
   </head>
   <body>
     <header class="pop-head">
-      <!-- The ᛅ marks are inline SVG (web Sigil.tsx geometry) — the raw runic codepoint renders
-           as tofu wherever no installed font covers the Runic block. Kept in lockstep with
-           popup.ts sigilSvg(). No whitespace between the brand spans (inline flow). -->
-      <span class="brand"><span class="sigil-sm"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v18"/><path d="M5.5 8.5l13 6"/></svg></span><span class="a-mark">and</span>vari</span>
-      <!-- Persistent anti-phishing origin display (design §5.1): the RAW server origin this popup is
-           bound to, middle-truncated to fit; the full origin rides title + aria-label (hover/focus). -->
+      <div class="pop-head-top">
+        <!-- The ᛅ marks are inline SVG (web Sigil.tsx geometry) — the raw runic codepoint renders
+             as tofu wherever no installed font covers the Runic block. Kept in lockstep with
+             popup.ts sigilSvg(). No whitespace between the brand spans (inline flow). -->
+        <span class="brand"><span class="sigil-sm"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v18"/><path d="M5.5 8.5l13 6"/></svg></span><span class="a-mark">and</span>vari</span>
+        <!-- a11y 5a: the coloured dot is decorative; the visually-hidden twin carries the state
+             to AT (a title on a non-interactive span is unreliable + unfocusable). -->
+        <span id="conn" class="dot off" title="server" aria-hidden="true"></span>
+        <span id="conn-status" class="visually-hidden">Server status unknown</span>
+      </div>
+      <!-- Persistent anti-phishing origin display (design §5.1): the RAW server origin this popup
+           is bound to — its own full-width line (2026-07-18: sharing the brand row smushed both);
+           middle-truncation stays only as overflow safety; full origin rides title + aria-label. -->
       <span id="server-origin" class="server-origin" tabindex="0"></span>
-      <!-- a11y 5a: the coloured dot is decorative; the visually-hidden twin carries the state
-           to AT (a title on a non-interactive span is unreliable + unfocusable). -->
-      <span id="conn" class="dot off" title="server" aria-hidden="true"></span>
-      <span id="conn-status" class="visually-hidden">Server status unknown</span>
     </header>
 
     <!-- Firefox first-run route (design §5.1): host permissions are optional-by-default there, so a
@@ -94,13 +97,32 @@
           <button id="forgot" class="link dim">Forgot your master password?</button>
         </p>
       </div>
+
+      <!-- TOTP challenge (0.16.3): shown after a master-password sign-in that returns totp_required.
+           The password is already verified + the keys derived (SW memory); this only collects the
+           6-digit code. Popup-only, like the PIN — never a page DOM (anti-phishing line below). The
+           code field auto-sanitizes to digits so a pasted "123 456" doesn't truncate. -->
+      <div id="totp-challenge" hidden>
+        <div class="field">
+          <label for="totp-code">One-time code</label>
+          <!-- No maxlength: the browser applies it to a RAW paste BEFORE our input handler runs, so
+               "123 456" would truncate to "123 45"; the handler strips non-digits + caps at 6 instead. -->
+          <input id="totp-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+                 pattern="[0-9]*" autocapitalize="off" spellcheck="false" />
+        </div>
+        <button id="totp-verify" class="primary">Verify</button>
+        <p class="qu-antiphish" role="note">andvari only ever asks for your code here, in this popup — never on a web page.</p>
+        <p style="margin: 10px 0 0; text-align: center;">
+          <button id="totp-startover" class="link dim">Start over</button>
+        </p>
+      </div>
     </section>
 
     <section id="unlocked" class="unlocked" hidden>
       <!-- Quick-unlock one-time offer card (spec 01 §8.4; dismissed-once via storage.local — breaker B7).
            Shown after unlock only when NOT enrolled and NOT previously dismissed. -->
       <div id="qu-offer" class="qu-offer" role="note" hidden>
-        <p>Skip the master password next time — set a quick-unlock PIN for this browser.</p>
+        <p>Skip the master password <em>and</em> your one-time code next time — set a quick-unlock PIN for this browser (works for about a day, then a full sign-in).</p>
         <div class="qu-acts">
           <button id="qu-offer-setup" class="ghost sm">Set up quick unlock</button>
           <button id="qu-offer-dismiss" class="link dim">Not now</button>

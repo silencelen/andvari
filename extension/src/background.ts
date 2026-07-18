@@ -1,4 +1,4 @@
-import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SyncResponse } from "./api";
+import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
 import { cardSubtitle, composeShortExpiry, digitsOnly } from "./card";
 import {
   adIdkey,
@@ -440,6 +440,29 @@ let redeemInFlight = false;
 /** Single-flight for the quick-unlock redeem (mirrors AndvariApi.refreshInFlight) — two racing popups
  *  submitting a PIN must not each start a redeem and double-spend the attempt counter (breaker A5⊕B4). */
 let pinUnlockInFlight: Promise<Res<"unlockWithPin">> | null = null;
+/** TOTP unlock seam (0.16.3): a TOTP-enrolled login returns 401 totp_required — we hold the ALREADY-
+ *  DERIVED {authKey, wrapKey} so the code retry needs no second ~6 s Argon2id, and let the popup
+ *  render a code field. This lives in SW MEMORY ONLY, NEVER storage.session: breaker B1 keeps the
+ *  UVK (and UVK-equivalent wrapKey) out of at-rest storage, and while quick-unlock is armed the
+ *  storage compartment already holds the plaintext token pair — persisting wrapKey there too would
+ *  let a storage-read alone recover the UVK with no PIN and no TOTP. Memory-only means its lifetime
+ *  (SW alive — held by the open popup port) exactly matches when the retry can succeed: if the SW is
+ *  evicted (popup closed >~30 s while grabbing the code), it's gone → status reports no challenge →
+ *  the popup shows the full form → a fresh sign-in. Origin-bound + 5-min fused; every read re-checks. */
+const PENDING_TOTP_TTL_MS = 5 * 60 * 1000;
+let pendingTotp: { origin: string; email: string; authKey: Uint8Array; wrapKey: Uint8Array; expiresAt: number } | null = null;
+let totpUnlockInFlight: Promise<Res<"unlockTotp">> | null = null;
+/** Read the live challenge, dropping it if it has expired or the server was switched under it (the
+ *  §4.1 origin guard, applied at READ like ensureLoaded does for the session snapshot). */
+function livePendingTotp(): typeof pendingTotp {
+  if (pendingTotp && (pendingTotp.origin !== serverUrl || Date.now() >= pendingTotp.expiresAt)) pendingTotp = null;
+  return pendingTotp;
+}
+/** Drop the challenge (and its in-memory authKey/wrapKey). Called on every transition to a live
+ *  session (full unlock, TOTP redeem, PIN redeem), on sign-out, on server switch, and on cancel. */
+function clearPendingTotp(): void {
+  pendingTotp = null;
+}
 /** owns() generation (breaker A5⊕B4): bumped by every lock / sign-out / full unlock. A redeem that
  *  reads a different value after its async KDF/network discards itself rather than clobber new state. */
 let redeemGen = 0;
@@ -615,6 +638,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
  *  wave-3 "remove data for this server" action (purgeOriginNamespace). */
 async function applyServerChange(): Promise<void> {
   await ensureLoaded();
+  clearPendingTotp(); // a challenge belongs to the OLD origin — never carry its authKey across a switch
   // The §4.1 origin-clean swap ORDER (bump redeemGen → lock-under-OLD → adopt new origin → swap in a
   // FRESH api for it → re-register autofill) lives in the serverswitch leaf, so serverswitch.test.ts
   // drives it with a real AndvariApi and proves no Authorization header crosses the change (B1-5).
@@ -794,6 +818,7 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   events = null;
   const secondsAtLock = autoLockSeconds; // capture before the reset below (web App.tsx:209 parity)
   session = null; // in-memory vault material — INCLUDING the memory-only uvk (breaker B1) — is dropped
+  clearPendingTotp(); // and any in-flight TOTP challenge (covers sign-out; a normal lock has none)
   autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
   clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
   tabs.clear();
@@ -1065,6 +1090,10 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       const lockNotice = session ? null : await readLockNotice();
       // Quick-unlock sub-state (spec 01 §8.4) — `armed` drives the LOCKED popup's PIN field vs the
       // master-password field; `enrolled`/`offerDismissed` drive the unlocked Settings toggle + offer.
+      // TOTP challenge in progress (0.16.3): read from the SW memory var — its lifetime IS "the retry
+      // can still succeed", so a cold-woken SW correctly reports none and the popup shows the full form.
+      // Outranks the quick-unlock PIN view (a live challenge is the most-recent intent — see popup).
+      const tp = livePendingTotp();
       return {
         unlocked: session !== null,
         count: loginItems().length,
@@ -1072,6 +1101,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         mustChangePassword: session?.mustChangePassword ?? false,
         lockNotice,
         quickUnlock: await quStateForStatus(),
+        totpPending: tp ? { email: tp.email, expiresAt: tp.expiresAt } : null,
       } satisfies Res<"status">;
     }
     case "lock": {
@@ -1084,6 +1114,11 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     }
     case "unlock":
       return unlockWithMapping(msg.email, msg.password);
+    case "unlockTotp":
+      return unlockTotp(msg.code);
+    case "cancelTotp":
+      clearPendingTotp(); // popup "start over" / bad-code cap → drop the in-memory challenge
+      return { ok: true } satisfies Res<"cancelTotp">;
     case "unlockWithPin":
       return unlockWithPin(msg.pin);
     case "enrollQuickUnlock":
@@ -1292,49 +1327,128 @@ function reofferPendingSaves(): void {
 
 async function unlock(email: string, password: string): Promise<Res<"unlock">> {
   redeemGen++; // a full unlock supersedes any in-flight quick-unlock redeem (owns() guard)
+  clearPendingTotp(); // a fresh sign-in supersedes any prior TOTP challenge
+  const gen = redeemGen; // owns() token: a server switch / lock mid-sign-in bumps this → we abort
   const pre = await api.prelogin(email);
   assertServerKdfParams(pre.kdfParams); // H1 (spec 05 T1): refuse a weakened/absurd KDF before deriving (also blocks a 4 GiB SW OOM)
   const mk = await deriveMasterKeyAsync(password, pre.kdfParams, fromB64(pre.kdfSalt));
-  const s = await api.login(email, toB64(authKey(mk)));
+  const ak = authKey(mk);
+  const wk = wrapKey(mk); // needed by hydrateSession to open wrappedUvk; mk is otherwise done
+  let s: SessionResponse;
+  try {
+    s = await api.login(email, toB64(ak));
+  } catch (e) {
+    // Enrolled second factor: stash the ALREADY-DERIVED {authKey, wrapKey} (no second Argon2id) so
+    // the code retry (unlockTotp) can finish; the popup renders a code field. Memory-only — see the
+    // pendingTotp declaration for the B1 custody reason. Rethrow → unlockWithMapping → "totp_required".
+    // Only if still current (a mid-sign-in switch / lock owns the outcome — never strand foreign keys).
+    if (e instanceof ApiError && e.status === 401 && e.code === "totp_required" && gen === redeemGen && !session) {
+      pendingTotp = { origin: serverUrl, email, authKey: ak, wrapKey: wk, expiresAt: Date.now() + PENDING_TOTP_TTL_MS };
+    }
+    throw e;
+  }
+  return hydrateSession(email, s, wk, gen);
+}
+
+/** Phase C — shared by the password unlock and the TOTP retry: open the UVK with the derived
+ *  wrapKey, verify server identity, sync + decrypt, install the session, arm the session chrome.
+ *  `gen` is the caller's owns()-token: a server switch (applyServerChange bumps redeemGen) or a lock
+ *  landing during the sign-in must NOT let this install the OLD origin's tokens/vault under the NEW
+ *  origin — so we abort on a gen change, before any token/vault material is installed or POSTed.
+ *  A throw here (identity mismatch, restricted-session 403, network) crosses to the caller's mapper;
+ *  on ANY non-install exit the freshly-minted token pair is cleared so it never lingers while locked. */
+async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array, gen: number): Promise<Res<"unlock">> {
+  if (gen !== redeemGen || session) return { ok: false, code: "aborted" }; // superseded before we touched `api`
   api.setTokens(s.accessToken, s.refreshToken);
+  try {
+    const uvk = open(wk, fromB64(s.accountKeys.wrappedUvk), adUvk(s.userId));
+    // Identity keypair — for member (shared-vault) grants sealed to us.
+    const identity = boxKeypairFromSeed(open(uvk, fromB64(s.accountKeys.encryptedIdentitySeed), adIdkey(s.userId)));
+    verifyServerIdentity(identity.publicKey, s.accountKeys.identityPub); // before ANY vault material is synced/persisted
 
-  const uvk = open(wrapKey(mk), fromB64(s.accountKeys.wrappedUvk), adUvk(s.userId));
-  // Identity keypair — for member (shared-vault) grants sealed to us.
-  const identity = boxKeypairFromSeed(open(uvk, fromB64(s.accountKeys.encryptedIdentitySeed), adIdkey(s.userId)));
-  verifyServerIdentity(identity.publicKey, s.accountKeys.identityPub); // before ANY vault material is synced/persisted
+    const sync = await api.sync(0);
+    if (gen !== redeemGen || session) {
+      api.setTokens(null, null); // a switch/lock landed during sync — drop the tokens, install nothing
+      return { ok: false, code: "aborted" };
+    }
+    const vaultKeys = buildVaultKeys(sync, uvk, identity, s.userId);
+    const items = decryptItems(sync, vaultKeys);
+    // The personal vault (save target) = the type="personal" vault we hold a key for (web store.ts parity).
+    const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
+    // uvk RETAINED in memory (breaker B1) so enroll can wrap it; provenance PASSWORD + a fresh
+    // lastFullUnlockAt stamp — the only place that mints `now` (breaker A4).
+    session = {
+      userId: s.userId,
+      email,
+      items,
+      vaultKeys,
+      personalVaultId,
+      mustChangePassword: s.mustChangePassword ?? false,
+      uvk,
+      provenance: "PASSWORD",
+      lastFullUnlockAt: Date.now(),
+    };
+    clearPendingTotp(); // a live session exists — the challenge (if any) is spent
 
-  const sync = await api.sync(0);
-  const vaultKeys = buildVaultKeys(sync, uvk, identity, s.userId);
-  const items = decryptItems(sync, vaultKeys);
-  // The personal vault (save target) = the type="personal" vault we hold a key for (web store.ts parity).
-  const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
-  // uvk RETAINED in memory (breaker B1) so enroll can wrap it; provenance PASSWORD + a fresh
-  // lastFullUnlockAt stamp — the only place that mints `now` (breaker A4).
-  session = {
-    userId: s.userId,
-    email,
-    items,
-    vaultKeys,
-    personalVaultId,
-    mustChangePassword: s.mustChangePassword ?? false,
-    uvk,
-    provenance: "PASSWORD",
-    lastFullUnlockAt: Date.now(),
-  };
+    await fetchPolicyInto();
+    // breaker A6 + A11: a full unlock as a DIFFERENT user strands any prior quick-unlock blob → wipe;
+    // a surviving same-user blob gets its 24 h window re-stamped to now (the fail-closed "a successful
+    // full unlock re-stamps" rule) and its attempt budget refreshed to full.
+    await quickUnlock.onFullUnlock(s.userId, session.lastFullUnlockAt);
 
-  await fetchPolicyInto();
-  // breaker A6 + A11: a full unlock as a DIFFERENT user strands any prior quick-unlock blob → wipe;
-  // a surviving same-user blob gets its 24 h window re-stamped to now (the fail-closed "a successful
-  // full unlock re-stamps" rule) and its attempt budget refreshed to full.
-  await quickUnlock.onFullUnlock(s.userId, session.lastFullUnlockAt);
+    await persistSession();
+    void chrome.storage.session.remove(NKEY); // a fresh unlock clears the F26 idle-lock notice (E1-7)
+    void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
+    void ensureSocket(true); // T2: live bell up within ~1 s of unlock
+    armAutoLock();
+    reofferPendingSaves();
+    return { ok: true };
+  } catch (e) {
+    if (!session) api.setTokens(null, null); // never leave live tokens in the api while locked (doUnlockWithPin:1597 parity)
+    throw e;
+  }
+}
 
-  await persistSession();
-  void chrome.storage.session.remove(NKEY); // a fresh unlock clears the F26 idle-lock notice (E1-7)
-  void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
-  void ensureSocket(true); // T2: live bell up within ~1 s of unlock
-  armAutoLock();
-  reofferPendingSaves();
-  return { ok: true };
+/** Single-flight for the TOTP code retry (mirrors pinUnlockInFlight): two racing popups / an
+ *  Enter+click double-fire must not each POST /login and burn the server's login backoff. */
+function unlockTotp(code: string): Promise<Res<"unlockTotp">> {
+  totpUnlockInFlight ??= doUnlockTotp(code).finally(() => {
+    totpUnlockInFlight = null;
+  });
+  return totpUnlockInFlight;
+}
+
+async function doUnlockTotp(code: string): Promise<Res<"unlockTotp">> {
+  await ensureLoaded();
+  if (session) return { ok: true }; // a concurrent full unlock already won — nothing to do
+  const p = livePendingTotp();
+  if (!p) return { ok: false, code: "totp_expired" }; // SW evicted / switched origin / 5-min fuse blew
+  redeemGen++; // ONLY once a real challenge exists (a dead no-op must not abort an in-flight PIN redeem)
+  const gen = redeemGen;
+  let s: SessionResponse;
+  try {
+    s = await api.login(p.email, toB64(p.authKey), code);
+  } catch (e) {
+    if (session) return { ok: true }; // lost the race but the vault is open — not an error
+    if (e instanceof ApiError) {
+      // 401 here is NOT the authKey (proven at stash time) — it's the code (wrong/replayed) or, in a
+      // 5-min-window edge, a server-side password change; the popup caps consecutive bad codes and
+      // falls back to a full sign-in, which self-heals the edge. 429 gets its own copy; 403 = enroll.
+      if (e.status === 401) return { ok: false, code: "totp_bad_code" };
+      if (e.status === 429) return { ok: false, code: "totp_rate_limited" };
+      return { ok: false, code: mapUnlockError(e) };
+    }
+    return { ok: false, code: mapUnlockError(e) };
+  }
+  if (session) return { ok: true }; // a full unlock landed while we were on the wire
+  // A server switch during the login POST would have bumped redeemGen AND cleared pendingTotp (both
+  // via applyServerChange) — hydrateSession's gen guard is the backstop, but bail early + explicitly.
+  if (gen !== redeemGen || !livePendingTotp()) return { ok: false, code: "aborted" };
+  try {
+    return await hydrateSession(p.email, s, p.wrapKey, gen); // clears pendingTotp on success
+  } catch (e) {
+    return { ok: false, code: mapUnlockError(e), error: String(e) };
+  }
 }
 
 /** Wrap unlock() so its throws cross the seam as a coded Res<"unlock"> (design decision 4): the SW
@@ -1353,6 +1467,10 @@ function mapUnlockError(e: unknown): UnlockCode {
   if (e instanceof IdentityMismatchError) return "identity_mismatch";
   if (e instanceof ApiError) {
     if (e.code === "upgrade_required") return "upgrade_required"; // 426 min-version pin (any status)
+    // Restricted session (server §2.6 row 4): a totpRequired instance let an un-enrolled user's
+    // login succeed, then every authed route 403s until they enroll in the web vault. Route there
+    // honestly instead of the server_error dead-end (moot on the reference instance — TOTP off).
+    if (e.status === 403 && (e.code === "totp_enrollment_required" || e.code === "public_login_requires_totp")) return "totp_enroll_required";
     if (e.status === 401) return e.code === "totp_required" ? "totp_required" : "bad_credentials";
     return "server_error"; // 429/500/… fold here (strict Welcome-ladder parity, decision 5)
   }
@@ -1465,6 +1583,7 @@ async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
           // From here only LOCAL storage awaits remain (no doLock is UI-reachable during a redeem — the popup
           // shows the locked PIN screen, whose Lock/Sign-out buttons are unlocked-only; the gen checks above
           // are defense-in-depth). completeRedeem clears the token stash and keeps the blob for the next lock.
+          clearPendingTotp(); // a PIN redeem opened the vault → any stale TOTP challenge is spent
           await persistSession();
           await quickUnlock.completeRedeem(autoLockSeconds);
           void chrome.storage.session.remove(NKEY);
