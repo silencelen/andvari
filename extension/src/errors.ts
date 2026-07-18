@@ -13,6 +13,11 @@
 type UnlockCode =
   | "bad_credentials"
   | "totp_required"
+  | "totp_bad_code"
+  | "totp_rate_limited"
+  | "totp_expired"
+  | "totp_enroll_required"
+  | "aborted"
   | "upgrade_required"
   | "identity_mismatch"
   | "kdf_policy"
@@ -47,7 +52,9 @@ export const UNREACHABLE = "Can't reach the andvari server — check you're on t
  * Unlock failures → web's FreshStart ladder (Welcome.tsx), verbatim where web has the
  * sentence. The extension flow is a full sign-in, not the unlock gate, so the 401 copy is
  * the sign-in form ("Wrong email or master password."). Extension-specific rungs:
- *  - totp_required: the popup has no TOTP field (A1 territory) — route to the web vault.
+ *  - totp_required (0.16.3): the popup flips to a one-time-code field — this copy is the INSTRUCTION
+ *    shown there (rendered as info/polite, not an error). totp_bad_code/rate_limited/expired are the
+ *    retry rungs; totp_enroll_required routes a restricted (instance-requires-TOTP) session to the web app.
  *  - upgrade_required: the update banner exists only when a strictly-newer build is
  *    actually PUBLISHED, so the copy must not hard-promise the link (AM5).
  *  - identity_mismatch: web IdentityMismatchError's exact sentence — a hard security
@@ -58,7 +65,18 @@ export function unlockErrorCopy(code: UnlockCode | undefined): string {
     case "bad_credentials":
       return "Wrong email or master password.";
     case "totp_required":
-      return "This account requires a one-time code — sign in from the web vault.";
+      return "Enter the 6-digit code from your authenticator app.";
+    case "totp_bad_code":
+      return "That code didn’t work — codes change every 30 seconds, so try the current one.";
+    case "totp_rate_limited":
+      return "Too many attempts — wait a minute, then sign in again.";
+    case "totp_expired":
+      return "That took too long — sign in again.";
+    case "totp_enroll_required":
+      return "This server requires two-factor setup — finish it in the web vault, then sign in here.";
+    case "aborted":
+      // A switch/lock landed mid-sign-in; the popup silently re-renders, so this is a fallback only.
+      return "Sign-in was interrupted — try again.";
     case "upgrade_required":
       return "Your server requires a newer extension — get the update from the web vault or the link above.";
     case "identity_mismatch":

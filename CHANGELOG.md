@@ -5,6 +5,15 @@
 *Extension patch 0.16.1: shortened the manifest `description` to fit the Chrome Web Store's 132-char
 summary limit (the endpoint-agnostic rewrite had pushed it to 166) — no behavioural change.*
 
+*Extension patch 0.16.3 — TOTP sign-in in the popup + header polish. A TOTP-enrolled sign-in used to
+dead-end ("sign in from the web vault"); the popup now shows a one-time-code field and finishes the
+sign-in in place. The already-derived keys are held in service-worker memory only (never at rest — a
+wrapKey at rest would defeat the zero-knowledge model), so entering the code needs no second ~6 s KDF;
+the challenge is origin-bound, 5-minute-fused, and single-flighted, and the popup keeps the worker
+alive while the code field is up. The "Any browser" address now shows the server-declared canonical
+origin, and the popup header is a two-row layout (brand/status over the full-width origin) instead of
+a single cramped row. Reminder: a quick-unlock PIN skips both the password and the code for ~24 h.*
+
 *Extension patch 0.16.2 — Firefox auto-updates: the Firefox manifest now bakes
 `gecko.update_url` → the reference `/downloads/firefox-updates.json`, so Mozilla-signed installs
 self-update like Chrome's store installs (Firefox verifies the signature on every update;

@@ -112,7 +112,12 @@ export interface PendingSave {
  *  surface (design decision 4). `network` is a fetch rejection; `unknown` is the catch-all. */
 export type UnlockCode =
   | "bad_credentials"
-  | "totp_required"
+  | "totp_required" // 0.16.3: no longer a dead-end — flips the popup to the code field
+  | "totp_bad_code" // wrong/replayed code on the retry (authKey already proven at challenge time)
+  | "totp_rate_limited" // 429 on the retry — too many attempts
+  | "totp_expired" // the 5-min challenge fused / the SW was evicted → sign in again
+  | "totp_enroll_required" // restricted session (instance requires TOTP, user not enrolled) → web vault
+  | "aborted" // a server switch / lock landed mid-sign-in — the popup silently re-renders, no error
   | "upgrade_required"
   | "identity_mismatch"
   | "kdf_policy"
@@ -151,6 +156,12 @@ export type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" 
 export type Req =
   | { type: "status" }
   | { type: "unlock"; email: string; password: string }
+  /** Popup: finish a TOTP-gated sign-in with the authenticator code (0.16.3). Follows an `unlock`
+   *  that answered `totp_required`; the SW holds the already-derived keys so no second KDF runs.
+   *  Renders ONLY in the popup (chrome-extension://), never a page — same law as the PIN. */
+  | { type: "unlockTotp"; code: string }
+  /** Popup: abandon a pending TOTP challenge ("start over" / bad-code cap) — drops the in-memory keys. */
+  | { type: "cancelTotp" }
   | { type: "lock" }
   /** Explicit full sign-out (a new popup action) — clears everything INCLUDING the quick-unlock blob
    *  + co-key + retained tokens (spec 01 §8.4; distinct from `lock`, which may arm quick unlock). */
@@ -247,11 +258,19 @@ export type Res<T extends Req["type"]> = T extends "status"
        *  shows the PIN field on the locked screen); `enrolled` + `offerDismissed` drive the unlocked
        *  Settings toggle + the one-time offer card; `attemptsRemaining` for the "N tries left" copy. */
       quickUnlock: { enrolled: boolean; armed: boolean; attemptsRemaining: number; offerDismissed: boolean };
+      /** 0.16.3: a TOTP-gated sign-in awaiting the code (SW-memory only, so a reopened popup — the
+       *  common case, since copying a code from an authenticator app closes it — re-renders the code
+       *  field). Outranks the armed-PIN view. Null when there's no live challenge (or the SW evicted). */
+      totpPending: { email: string; expiresAt: number } | null;
     }
   : T extends "unlock"
     ? { ok: boolean; code?: UnlockCode; error?: string }
-    : T extends "lock"
-      ? { ok: true }
+    : T extends "unlockTotp"
+      ? { ok: boolean; code?: UnlockCode; error?: string }
+      : T extends "cancelTotp"
+        ? { ok: true }
+        : T extends "lock"
+          ? { ok: true }
       : T extends "signOut"
         ? { ok: true }
         : T extends "unlockWithPin"

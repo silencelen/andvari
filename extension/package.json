@@ -1,6 +1,6 @@
 {
   "name": "andvari-extension",
-  "version": "0.16.2",
+  "version": "0.16.3",
   "private": true,
   "description": "andvari browser extension (MV3) — PC autofill. Pure-JS @noble crypto (no WASM/eval).",
   "type": "module",

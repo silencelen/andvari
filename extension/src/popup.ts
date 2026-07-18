@@ -46,6 +46,10 @@ let totpSeq = 0;
 /** Quick-unlock (spec 01 §8.4): when the user picks "use your master password instead" on the armed
  *  locked screen, show the full form instead of the PIN field for the rest of this popup opening. */
 let pinFallback = false;
+/** TOTP challenge (0.16.3): consecutive wrong codes this challenge. After 3 we abandon it (clear the
+ *  SW keys) and drop to the full form — self-healing the edge where the password changed server-side
+ *  mid-window (every fresh code would 401 forever otherwise). */
+let totpBadCount = 0;
 
 function showMsg(kind: "err" | "info", text: string): void {
   const m = el("msg");
@@ -87,6 +91,8 @@ function showView(unlocked: boolean): void {
   // so any list/lock transition drops it (and any revealed password rendered inside it).
   el("detail").hidden = true;
   el("detail-body").replaceChildren();
+  el("totp-challenge").hidden = true; // reset the 0.16.3 code view; refresh() re-shows it iff totpPending
+  setTotpKeepalive(false); // stop the challenge SW-keepalive on any view change (refresh re-arms it if needed)
   el("locked").hidden = unlocked;
   el("unlocked").hidden = !unlocked;
   el("lock").hidden = !unlocked;
@@ -129,6 +135,13 @@ async function refresh(): Promise<void> {
     // last focus wins, so this beats the focus race rather than relying on an appears-populated
     // role=alert. No-op if the strip is hidden (e.g. a mid-load relock).
     if (s.mustChangePassword) el("must-change").focus();
+    return;
+  }
+  // 0.16.3: a live TOTP challenge (popup reopened mid-code-entry — the common case, since copying a
+  // code from an authenticator app closed the popup) OUTRANKS both the armed-PIN view and the master
+  // form. renderQuickUnlock already ran; enterTotpChallenge overrides those two hidden.
+  if (s.totpPending) {
+    enterTotpChallenge(true);
     return;
   }
   // F26 (E1-7): say WHY the vault is locked — recorded for idle autolock only (manual lock
@@ -811,6 +824,22 @@ async function unlock(): Promise<void> {
         /* remembering is best-effort */
       }
       await refresh();
+    } else if (r?.code === "totp_required") {
+      // 0.16.3: password verified server-side + keys derived (SW memory) — collect the code, no
+      // second KDF. Clear the password field (a "start over" is a fresh full sign-in).
+      pw.value = "";
+      totpBadCount = 0;
+      // The email is proven correct here (server accepted the authKey, only the code is left) — remember
+      // it now, else TOTP-enrolled accounts (exactly this seam's users) never get it stored.
+      try {
+        await chrome.storage.local.set({ lastEmail: email });
+      } catch {
+        /* best-effort */
+      }
+      enterTotpChallenge(true);
+    } else if (r?.code === "aborted") {
+      // A server switch / lock landed mid-sign-in — the SW installed nothing; just re-render silently.
+      await refresh();
     } else {
       // E1-3: render the coded ladder (errors.ts), never the SW's raw `error` debug detail.
       showMsg("err", unlockErrorCopy(r?.code));
@@ -829,6 +858,97 @@ async function unlock(): Promise<void> {
   }
 }
 
+/* ---- TOTP challenge (0.16.3): the code step after a totp_required sign-in ---- */
+
+/** Keep the SW alive while the code view is up (MV3 has no popup "port" keepalive, and the challenge
+ *  keys live in SW memory — a ~30 s idle eviction would drop them mid-entry, forcing a full re-sign-in
+ *  and re-creating the very friction this fixes). A `status` ping every 15 s (< the ~30 s idle window)
+ *  is passive — PASSIVE_MSGS, so it never re-arms autolock. Stops when the challenge leaves the screen. */
+let totpKeepalive: ReturnType<typeof setInterval> | undefined;
+function setTotpKeepalive(on: boolean): void {
+  if (totpKeepalive !== undefined) {
+    clearInterval(totpKeepalive);
+    totpKeepalive = undefined;
+  }
+  if (on) totpKeepalive = setInterval(() => void ask({ type: "status" }), 15_000);
+}
+
+/** Show the one-time-code field, hiding both the master form and the armed-PIN view (a live challenge
+ *  outranks them). `withInstruction` posts the polite instruction (info, not an error role). */
+function enterTotpChallenge(withInstruction: boolean): void {
+  el("totp-challenge").hidden = false;
+  el("qu-master-form").hidden = true;
+  el("qu-locked").hidden = true;
+  setTotpKeepalive(true);
+  const code = el<HTMLInputElement>("totp-code");
+  code.value = "";
+  if (withInstruction) showMsg("info", unlockErrorCopy("totp_required"));
+  code.focus(); // explicit — unhiding a section does not move focus in this popup
+}
+
+/** Leave the challenge (success, "start over", or the bad-code cap); the caller then refresh()es. */
+function exitTotpChallenge(): void {
+  el("totp-challenge").hidden = true;
+  el<HTMLInputElement>("totp-code").value = "";
+  totpBadCount = 0;
+  setTotpKeepalive(false);
+}
+
+function setTotpVerifying(busy: boolean): void {
+  const b = el<HTMLButtonElement>("totp-verify");
+  b.disabled = busy; // single-flight the Verify click/Enter — a double-submit burns the login backoff
+  b.textContent = busy ? "Verifying…" : "Verify";
+  el<HTMLButtonElement>("totp-startover").disabled = busy; // don't let "start over" race an in-flight verify
+}
+
+async function verifyTotp(): Promise<void> {
+  const input = el<HTMLInputElement>("totp-code");
+  const code = input.value.replace(/\D/g, ""); // paste "123 456" → "123456" (maxlength would truncate first)
+  if (el<HTMLButtonElement>("totp-verify").disabled) return;
+  if (code.length < 6) {
+    showMsg("info", "Enter all 6 digits of the code."); // not a silent no-op (a11y: SR announces it)
+    input.focus();
+    return;
+  }
+  clearMsg();
+  setTotpVerifying(true);
+  try {
+    const r = await ask({ type: "unlockTotp", code });
+    if (r?.ok || r?.code === "aborted") {
+      // ok → unlocked; aborted → a switch/lock re-rendered us. Either way just re-render (no error).
+      totpBadCount = 0;
+      input.value = "";
+      exitTotpChallenge();
+      await refresh();
+      return;
+    }
+    if (r?.code === "totp_bad_code" && ++totpBadCount < 3) {
+      showMsg("err", unlockErrorCopy("totp_bad_code"));
+      input.select();
+      return;
+    }
+    // Bad-code cap, expiry, rate-limit, enroll-required, or a transport error: end the challenge
+    // (drop the SW keys) and drop to the full form with the honest reason.
+    const capped = totpBadCount >= 3;
+    await ask({ type: "cancelTotp" });
+    exitTotpChallenge();
+    await refresh();
+    showMsg("err", capped ? "Too many wrong codes — sign in again." : unlockErrorCopy(r?.code));
+  } finally {
+    setTotpVerifying(false);
+  }
+}
+
+/** "Start over" — abandon the challenge and return to the master form (the user was in a password
+ *  flow, so pin over the PIN view with pinFallback before re-rendering); clear the stale instruction. */
+async function totpStartOver(): Promise<void> {
+  await ask({ type: "cancelTotp" });
+  pinFallback = true;
+  exitTotpChallenge();
+  clearMsg(); // the "Enter the 6-digit code" instruction must not linger over the master form
+  await refresh();
+}
+
 el<HTMLButtonElement>("unlock").addEventListener("click", () => void unlock());
 el<HTMLInputElement>("email").addEventListener("keydown", (e) => {
   if (e.key === "Enter") el("password").focus();
@@ -836,6 +956,16 @@ el<HTMLInputElement>("email").addEventListener("keydown", (e) => {
 el<HTMLInputElement>("password").addEventListener("keydown", (e) => {
   if (e.key === "Enter") void unlock();
 });
+el<HTMLButtonElement>("totp-verify").addEventListener("click", () => void verifyTotp());
+el<HTMLInputElement>("totp-code").addEventListener("input", (e) => {
+  const t = e.target as HTMLInputElement; // keep the field digits-only as they type/paste
+  const digits = t.value.replace(/\D/g, "").slice(0, 6);
+  if (t.value !== digits) t.value = digits;
+});
+el<HTMLInputElement>("totp-code").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") void verifyTotp();
+});
+el("totp-startover").addEventListener("click", () => void totpStartOver());
 
 /* ---- quick unlock Tier B (spec 01 §8.4): PIN entry (locked) + offer / enroll / settings (unlocked) ---- */
 
