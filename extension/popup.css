@@ -245,10 +245,13 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
   padding: 10px 14px 4px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em;
   color: var(--ink-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.list { overflow-y: auto; padding: 6px 8px 8px; display: flex; flex-direction: column; gap: 6px; }
-/* Site matches stay compact; the all-logins list takes the remaining height and scrolls. */
-#site-list { flex: none; max-height: 140px; }
-#all-list { flex: 1 1 auto; min-height: 64px; }
+/* ONE scroll region for This site + All logins + Cards (the dynamic Cards section lands inside it) —
+   a single continuous list, not three nested overflow boxes. Grows into the .unlocked column's
+   remaining height (min-height:0 lets it actually shrink-to-scroll inside the flex parent). */
+.vault-scroll { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+.list { padding: 6px 8px 8px; display: flex; flex-direction: column; gap: 6px; }
+/* The inner lists no longer scroll independently — the wrapper owns the single scrollbar. */
+#site-list, #all-list { flex: none; }
 
 .item {
   display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;

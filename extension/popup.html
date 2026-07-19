@@ -161,10 +161,15 @@
         </div>
         <span id="gen-flash" class="copy-flash" hidden>copied ✓</span>
       </section>
-      <div id="site-label" class="section-label">This site</div>
-      <div id="site-list" class="list"></div>
-      <div class="section-label">All logins</div>
-      <div id="all-list" class="list"></div>
+      <!-- ONE scroll region for the whole vault (This site / All logins / Cards) so it reads as a
+           single continuous list, not three nested scroll boxes with broken joins between them. The
+           dynamic Cards label+list (popup.ts renderCards) inserts after #all-list, i.e. inside here. -->
+      <div id="vault-scroll" class="vault-scroll">
+        <div id="site-label" class="section-label">This site</div>
+        <div id="site-list" class="list"></div>
+        <div class="section-label">All logins</div>
+        <div id="all-list" class="list"></div>
+      </div>
     </section>
 
     <!-- Item detail: clicking a login opens its data + a link here, instead of blind-filling
