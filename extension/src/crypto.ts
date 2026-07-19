@@ -74,6 +74,9 @@ export const adIdkey = (userId: string): Uint8Array => ad("idkey", userId);
  *  a tampered blob fails the tag). Distinct token from Android's `quick-unlock` (§8.1) — the two
  *  platforms never share a blob. Applied to BOTH double-wrap layers (PIN + non-extractable co-key). */
 export const adQuickUnlock = (userId: string): Uint8Array => ad("ext-quick-unlock", userId);
+// Biometric quick-unlock blobs use a DISTINCT AAD (0.17.0, review amendment 2) so a cross-kind
+// transplant (a bio blob relabelled 'pin' or vice versa) fails the AEAD tag, not merely key-space luck.
+export const adQuickUnlockBio = (userId: string): Uint8Array => ad("ext-quick-unlock-bio", userId);
 export const adItem = (vaultId: string, itemId: string, formatVersion: number): Uint8Array =>
   ad("item", vaultId, itemId, String(formatVersion));
 
@@ -124,6 +127,15 @@ export function deriveMasterKey(password: string, params: KdfParams, salt: Uint8
 /** RFC 5869 HKDF-SHA-256 (empty salt ⇒ HashLen zeros, per RFC/@noble). */
 export function hkdfSha256(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, length: number): Uint8Array {
   return hkdf(sha256, ikm, salt, info, length);
+}
+
+/** K_bio (0.17.0) — the OUTER quick-unlock wrap key for the biometric method. The 32-byte WebAuthn-PRF
+ *  secret is full entropy (hardware-held, released only after OS user-verification), so it is HKDF'd —
+ *  NOT run through Argon2id like the PIN — info-bound to the user + a versioned purpose so it can never
+ *  collide with another derivation. Device-binding is provided by the non-extractable co-key inner
+ *  wrap (breaker A1), NOT by this key, so a synced-PRF passkey on another device still can't open the blob. */
+export function deriveKBio(prfSecret: Uint8Array, userId: string): Uint8Array {
+  return hkdfSha256(prfSecret, new Uint8Array(0), utf8("andvari/qu-bio/v1|" + userId), 32);
 }
 
 const INFO_AUTH = utf8("andvari/v1/auth");

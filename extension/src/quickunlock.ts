@@ -1,6 +1,6 @@
 // Runtime (value) imports carry the .ts extension so quickunlock.ts resolves under `node --test`
 // (its test imports it); esbuild + tsc (allowImportingTsExtensions) accept the suffix for the bundle.
-import { adQuickUnlock, fromB64, open, seal, toB64, type KdfParams } from "./crypto.ts";
+import { adQuickUnlock, adQuickUnlockBio, deriveKBio, fromB64, open, seal, toB64, type KdfParams } from "./crypto.ts";
 
 /**
  * Extension quick-unlock Tier B (spec 01 §8.4; design 2026-07-13-platform-fit §1) — a PIN-wrapped,
@@ -111,8 +111,7 @@ const ab = (u: Uint8Array): Uint8Array<ArrayBuffer> => {
 /** ct = AEAD(K_pin, AEAD(K_nonexp, UVK)). Inner = WebCrypto AES-GCM under the non-extractable co-key
  *  (IV prepended to its ciphertext); outer = the existing XChaCha20-Poly1305 envelope under K_pin.
  *  Both layers AAD-bound to `adQuickUnlock(userId)`. Returns the outer envelope base64url. */
-export async function sealDoubleWrap(kPin: Uint8Array, kNonExp: CryptoKey, uvk: Uint8Array, userId: string): Promise<string> {
-  const aad = adQuickUnlock(userId);
+export async function sealDoubleWrap(kPin: Uint8Array, kNonExp: CryptoKey, uvk: Uint8Array, userId: string, aad: Uint8Array = adQuickUnlock(userId)): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(INNER_IV_BYTES));
   const innerCt = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: ab(aad) }, kNonExp, ab(uvk)));
   const innerBlob = new Uint8Array(INNER_IV_BYTES + innerCt.length);
@@ -124,8 +123,7 @@ export async function sealDoubleWrap(kPin: Uint8Array, kNonExp: CryptoKey, uvk: 
 /** Reverse of sealDoubleWrap. Throws on wrong PIN / tampered outer (open) OR a wrong/absent co-key
  *  / tampered inner (subtle.decrypt) — indistinguishable by design, so there is NO partial-correctness
  *  oracle (breaker A1/A2 fail-closed table row). */
-export async function openDoubleWrap(kPin: Uint8Array, kNonExp: CryptoKey, ct: string, userId: string): Promise<Uint8Array> {
-  const aad = adQuickUnlock(userId);
+export async function openDoubleWrap(kPin: Uint8Array, kNonExp: CryptoKey, ct: string, userId: string, aad: Uint8Array = adQuickUnlock(userId)): Promise<Uint8Array> {
   const innerBlob = open(kPin, fromB64(ct), aad); // outer AEAD — throws on wrong PIN / tamper / unknown version
   if (innerBlob.length < INNER_IV_BYTES + AES_TAG_BYTES) throw new Error("quick-unlock inner blob too short");
   const iv = innerBlob.subarray(0, INNER_IV_BYTES);
@@ -137,13 +135,46 @@ export async function openDoubleWrap(kPin: Uint8Array, kNonExp: CryptoKey, ct: s
 
 /** The PIN-wrapped-UVK blob. `ct` is the double wrap; `lastFullUnlockAt` is COPIED from the surviving
  *  full-password unlock at enroll (breaker A4) — never minted `now` from a QUICK session. */
-export interface QuBlob {
+/** PIN-wrapped-UVK blob (the original v:1 shape). `kind` is absent on pre-0.17.0 records and reads as
+ *  "pin"; new PIN enrolls write it explicitly. */
+export interface QuBlobPin {
   v: 1;
+  kind?: "pin";
   salt: string; // base64url, 16 bytes — Argon2id(PIN) salt
   kdfParams: KdfParams;
   ct: string; // base64url — AEAD(K_pin, AEAD(K_nonexp, UVK))
   createdAt: number;
   lastFullUnlockAt: number;
+}
+/** Biometric-wrapped-UVK blob (0.17.0). The outer key K_bio = HKDF(WebAuthn-PRF secret) is NEVER
+ *  stored — only the credential id + PRF salt needed to re-derive it via the platform authenticator
+ *  (gated by OS user-verification). No KDF params: the PRF output is full entropy, so the
+ *  assertPinKdfParams floor/ceiling fence is pin-only. AAD = adQuickUnlockBio (review amendment 2). */
+export interface QuBlobBio {
+  v: 1;
+  kind: "biometric";
+  credentialId: string; // base64url WebAuthn rawId
+  prfSalt: string; // base64url, 32 bytes
+  ct: string; // base64url — AEAD(K_bio, AEAD(K_nonexp, UVK))
+  createdAt: number;
+  lastFullUnlockAt: number;
+}
+export type QuBlob = QuBlobPin | QuBlobBio;
+export type BlobKind = "pin" | "biometric";
+
+/** Validate + narrow a stored blob's method (review amendment 1). Absent `kind` ⇒ "pin" (v:1 compat).
+ *  Returns null when the narrowed shape is missing a required field — the caller treats null as
+ *  corrupt → wipe. MUST run BEFORE any reserve-decrement so a kind-stripped bio blob (which narrows to
+ *  "pin" and would hit assertPinKdfParams(undefined) → uncaught TypeError, escaping doUnlockWithPin's
+ *  un-try'd beginRedeem) can never leave the blob un-wiped. */
+export function validBlobKind(blob: QuBlob | null | undefined): BlobKind | null {
+  if (!blob || typeof blob !== "object") return null;
+  const b = blob as unknown as Record<string, unknown>;
+  const kind: BlobKind = b.kind === "biometric" ? "biometric" : "pin";
+  if (kind === "pin") {
+    return typeof b.salt === "string" && !!b.kdfParams && typeof b.kdfParams === "object" && typeof b.ct === "string" ? "pin" : null;
+  }
+  return typeof b.credentialId === "string" && typeof b.prfSalt === "string" && typeof b.ct === "string" ? "biometric" : null;
 }
 
 /** The whole quick-unlock compartment. Present whenever ARMED (unlocked-armed OR locked-armed).
@@ -183,11 +214,23 @@ export interface QuCoKey {
   delete(): Promise<void>;
 }
 
+/** The WebAuthn ceremony seam (0.17.0) — injected so quickunlock.ts stays chrome/WebAuthn-free and
+ *  node-testable. The real impl runs `navigator.credentials.create/get` in the connector window and
+ *  brokers the result to the SW; a throw (NotAllowedError = cancel/timeout/deleted credential) surfaces
+ *  as `bio_cancelled` with the record left UNTOUCHED. `enroll` returns prfEnabled=false on a platform
+ *  without PRF (→ bio_unsupported). `evalPrf` returns the 32-byte PRF secret. */
+export interface QuBiometric {
+  enroll(prfSalt: Uint8Array): Promise<{ credentialId: string; prfEnabled: boolean }>;
+  evalPrf(credentialId: string, prfSalt: Uint8Array): Promise<Uint8Array>;
+}
+
 export interface QuDeps {
   store: QuStore;
   coKey: QuCoKey;
   /** Argon2id(PIN) via the SW's kdf worker (background.deriveMasterKeyAsync). */
   deriveKPin(pin: string, params: KdfParams, salt: Uint8Array): Promise<Uint8Array>;
+  /** WebAuthn-PRF ceremony broker (0.17.0). Absent → the biometric method is unavailable (PIN only). */
+  biometric?: QuBiometric;
   /** One-shot enroll bench → the strongest floored params under ~1 s on this machine (breaker B8). */
   benchPinParams(): Promise<KdfParams>;
   now(): number;
@@ -206,15 +249,25 @@ export interface EnrollArgs {
   autoLockSeconds: number;
 }
 export type EnrollResult = { ok: true } | { ok: false; code: "weak_pin"; reason: PinWeakReason };
+/** enrollBio outcome. `bio_unsupported` = no platform authenticator / no PRF (prfEnabled false or a
+ *  non-32-byte secret); `bio_cancelled` = the ceremony threw (user cancel / timeout / no gesture). In
+ *  BOTH failure cases NOTHING is wiped (amendment 3 — the ceremony runs before any wipe). */
+export type EnrollBioResult = { ok: true } | { ok: false; code: "bio_unsupported" | "bio_cancelled" };
 
 /** doLock armed-branch verdict. `not-enrolled` → the caller stays byte-identical to today's full
  *  erase; `declined` (ineligible record OR a read that threw — fail-closed) → full erase + wipe. */
 export type ArmResult = "armed" | "not-enrolled" | "declined";
 
+export type BeginRedeemOk = { ok: true; uvk: Uint8Array; userId: string; email: string; tokens: { access: string; refresh: string | null }; blob: QuBlob; autoLockSeconds: number };
 export type BeginRedeem =
-  | { ok: true; uvk: Uint8Array; userId: string; email: string; tokens: { access: string; refresh: string | null }; blob: QuBlob; autoLockSeconds: number }
+  | BeginRedeemOk
   | { ok: false; code: "not_armed" | "expired" | "exhausted" | "corrupt" }
   | { ok: false; code: "wrong_pin"; attemptsRemaining: number };
+/** Biometric redeem outcome — no `wrong_pin`/`exhausted` (no attempt budget); adds `bio_cancelled`
+ *  (the ceremony threw, record kept). Distinct from BeginRedeem so the PIN mapper never sees bio codes. */
+export type BeginRedeemBio =
+  | BeginRedeemOk
+  | { ok: false; code: "not_armed" | "expired" | "corrupt" | "bio_cancelled" };
 
 export interface QuStatus {
   enrolled: boolean;
@@ -222,6 +275,9 @@ export interface QuStatus {
    *  PIN field vs master-password field on the LOCKED screen. */
   armed: boolean;
   attemptsRemaining: number;
+  /** Which method is enrolled (0.17.0) — drives the PIN field vs the "Unlock with Windows Hello /
+   *  Touch ID" button on the locked screen. null when nothing is enrolled. */
+  kind: BlobKind | null;
 }
 
 /**
@@ -285,11 +341,12 @@ export class QuickUnlock {
   async status(): Promise<QuStatus> {
     try {
       const rec = await this.deps.store.read();
-      if (!rec) return { enrolled: false, armed: false, attemptsRemaining: 0 };
-      const armed = rec.lockedTokens !== null && rec.attemptsRemaining > 0 && this.isStampFresh(rec.blob.lastFullUnlockAt);
-      return { enrolled: true, armed, attemptsRemaining: rec.attemptsRemaining };
+      if (!rec) return { enrolled: false, armed: false, attemptsRemaining: 0, kind: null };
+      const kind = validBlobKind(rec.blob); // a corrupt/missing blob → null → the popup shows the master form
+      const armed = kind !== null && rec.lockedTokens !== null && rec.attemptsRemaining > 0 && this.isStampFresh(rec.blob.lastFullUnlockAt);
+      return { enrolled: kind !== null, armed, attemptsRemaining: rec.attemptsRemaining, kind };
     } catch {
-      return { enrolled: false, armed: false, attemptsRemaining: 0 };
+      return { enrolled: false, armed: false, attemptsRemaining: 0, kind: null };
     }
   }
 
@@ -306,7 +363,7 @@ export class QuickUnlock {
     const salt = this.deps.randomBytes(16);
     const kPin = await this.deps.deriveKPin(args.pin, kdfParams, salt);
     const ct = await sealDoubleWrap(kPin, kNonExp, args.uvk, args.userId);
-    const blob: QuBlob = { v: 1, salt: toB64(salt), kdfParams, ct, createdAt: this.deps.now(), lastFullUnlockAt: args.lastFullUnlockAt };
+    const blob: QuBlobPin = { v: 1, kind: "pin", salt: toB64(salt), kdfParams, ct, createdAt: this.deps.now(), lastFullUnlockAt: args.lastFullUnlockAt };
     await this.deps.store.write({
       v: 1,
       userId: args.userId,
@@ -317,6 +374,95 @@ export class QuickUnlock {
       lockedTokens: null,
     });
     return { ok: true };
+  }
+
+  /** Enroll the BIOMETRIC method (0.17.0). Same caller gates as enroll() (unlocked, uvk in memory,
+   *  !mustChangePassword). Amendment 3: the WebAuthn ceremonies run BEFORE wipe() — a cancelled/failed
+   *  prompt (the likeliest failure) must never leave the prior quick-unlock wiped with no replacement.
+   *  Only once the PRF secret is in hand do we wipe + mint a fresh co-key + seal, all-or-nothing. */
+  async enrollBio(args: Omit<EnrollArgs, "pin">): Promise<EnrollBioResult> {
+    const bio = this.deps.biometric;
+    if (!bio) return { ok: false, code: "bio_unsupported" };
+    const prfSalt = this.deps.randomBytes(32);
+    let credentialId: string;
+    let secret: Uint8Array;
+    try {
+      const c = await bio.enroll(prfSalt);
+      if (!c.prfEnabled) return { ok: false, code: "bio_unsupported" }; // platform without PRF — nothing written
+      credentialId = c.credentialId;
+      secret = await bio.evalPrf(credentialId, prfSalt);
+    } catch {
+      return { ok: false, code: "bio_cancelled" }; // NotAllowedError etc. — prior record UNTOUCHED
+    }
+    if (secret.length !== 32) {
+      secret.fill(0);
+      return { ok: false, code: "bio_unsupported" };
+    }
+    const kBio = deriveKBio(secret, args.userId);
+    secret.fill(0); // zeroize the raw PRF secret the moment K_bio is derived
+    await this.wipe(); // commit point — from here it's all-or-nothing on a fresh co-key
+    const kNonExp = await this.deps.coKey.generate();
+    const ct = await sealDoubleWrap(kBio, kNonExp, args.uvk, args.userId, adQuickUnlockBio(args.userId));
+    kBio.fill(0);
+    const blob: QuBlobBio = { v: 1, kind: "biometric", credentialId, prfSalt: toB64(prfSalt), ct, createdAt: this.deps.now(), lastFullUnlockAt: args.lastFullUnlockAt };
+    await this.deps.store.write({
+      v: 1,
+      userId: args.userId,
+      email: args.email,
+      blob,
+      attemptsRemaining: MAX_PIN_ATTEMPTS, // inert for bio (never decremented) — see beginRedeemBio
+      autoLockSeconds: args.autoLockSeconds,
+      lockedTokens: null,
+    });
+    return { ok: true };
+  }
+
+  /** Biometric redeem — the counterpart of beginRedeem for a `kind:'biometric'` armed record. NO
+   *  reserve-then-attempt: the blob is not offline-crackable (K_bio is a full-entropy hardware secret
+   *  released only after OS user-verification, with the OS's own anti-hammering), so the attempt
+   *  counter is never decremented. A ceremony throw = `bio_cancelled` (record UNTOUCHED, retry allowed).
+   *  A post-PRF AEAD-open failure is deterministic corruption → wipe (a wrong K_bio can only mean a
+   *  tampered blob, since the PRF re-derives identically). */
+  async beginRedeemBio(): Promise<BeginRedeemBio> {
+    const bio = this.deps.biometric;
+    if (!bio) return { ok: false, code: "not_armed" };
+    let rec: QuRecord | null;
+    try {
+      rec = await this.deps.store.read();
+    } catch {
+      return { ok: false, code: "not_armed" };
+    }
+    if (!rec || rec.lockedTokens === null) return { ok: false, code: "not_armed" };
+    if (validBlobKind(rec.blob) !== "biometric") {
+      await this.wipe(); // wrong-kind / corrupt / missing shape → wipe (amendment 1)
+      return { ok: false, code: "corrupt" };
+    }
+    const bioBlob = rec.blob as QuBlobBio;
+    if (!this.isStampFresh(bioBlob.lastFullUnlockAt)) return { ok: false, code: "expired" };
+    let secret: Uint8Array;
+    try {
+      secret = await bio.evalPrf(bioBlob.credentialId, fromB64(bioBlob.prfSalt));
+    } catch {
+      return { ok: false, code: "bio_cancelled" }; // cancel / timeout / deleted credential — record kept
+    }
+    const kBio = deriveKBio(secret, rec.userId);
+    secret.fill(0);
+    const kNonExp = await this.deps.coKey.get();
+    if (!kNonExp) {
+      kBio.fill(0);
+      await this.wipe(); // co-key gone but blob survived → orphaned → wipe
+      return { ok: false, code: "corrupt" };
+    }
+    let uvk: Uint8Array;
+    try {
+      uvk = await openDoubleWrap(kBio, kNonExp, bioBlob.ct, rec.userId, adQuickUnlockBio(rec.userId));
+    } catch {
+      kBio.fill(0);
+      await this.wipe(); // PRF verified but the AEAD failed → tampered blob → wipe (deterministic corruption)
+      return { ok: false, code: "corrupt" };
+    }
+    kBio.fill(0);
+    return { ok: true, uvk, userId: rec.userId, email: rec.email, tokens: rec.lockedTokens, blob: bioBlob, autoLockSeconds: rec.autoLockSeconds };
   }
 
   /** doLock armed branch (breaker B3): stash the live token pair so a locked-but-authenticated PIN
@@ -333,7 +479,7 @@ export class QuickUnlock {
     if (!rec) return "not-enrolled";
     // !rec.blob: a malformed record → decline (the caller full-erases + wipes). Guard the deref so a
     // blob-less record can never THROW out of arm() past doLock's [SKEY,TKEY] erase (review F1).
-    if (!rec.blob || rec.attemptsRemaining <= 0 || !this.isStampFresh(rec.blob.lastFullUnlockAt)) return "declined";
+    if (validBlobKind(rec.blob) === null || rec.attemptsRemaining <= 0 || !this.isStampFresh(rec.blob.lastFullUnlockAt)) return "declined";
     rec.lockedTokens = { access: tokens.access, refresh: tokens.refresh };
     try {
       await this.deps.store.write(rec);
@@ -357,13 +503,17 @@ export class QuickUnlock {
       return { ok: false, code: "not_armed" };
     }
     if (!rec || rec.lockedTokens === null) return { ok: false, code: "not_armed" };
-    if (!rec.blob) {
-      await this.wipe(); // malformed record (no blob) → wipe; never deref-throw (review F1)
+    // Amendment 1: validate + require the PIN kind BEFORE the reserve-decrement. A missing blob, a
+    // bio blob mis-routed here, or a kind-stripped blob → corrupt → wipe (never deref bad shapes /
+    // decrement for a blob we can't open with a PIN).
+    if (validBlobKind(rec.blob) !== "pin") {
+      await this.wipe();
       return { ok: false, code: "corrupt" };
     }
+    const pinBlob = rec.blob as QuBlobPin;
     // 24 h / future-stamp gate — blob KEPT (a fresh full unlock re-stamps). Not a guessing oracle,
     // so it is safe to evaluate before the reservation.
-    if (!this.isStampFresh(rec.blob.lastFullUnlockAt)) return { ok: false, code: "expired" };
+    if (!this.isStampFresh(pinBlob.lastFullUnlockAt)) return { ok: false, code: "expired" };
     if (rec.attemptsRemaining <= 0) {
       await this.wipe();
       return { ok: false, code: "exhausted" };
@@ -375,8 +525,8 @@ export class QuickUnlock {
 
     let kPin: Uint8Array;
     try {
-      assertPinKdfParams(rec.blob.kdfParams); // A8 — sub-range params are corrupt, never derived under
-      kPin = await this.deps.deriveKPin(pin, rec.blob.kdfParams, fromB64(rec.blob.salt));
+      assertPinKdfParams(pinBlob.kdfParams); // A8 — sub-range params are corrupt, never derived under
+      kPin = await this.deps.deriveKPin(pin, pinBlob.kdfParams, fromB64(pinBlob.salt));
     } catch (e) {
       if (e instanceof PinKdfPolicyError) {
         await this.wipe(); // planted/corrupt params → wipe (not a "wrong PIN")
@@ -391,7 +541,7 @@ export class QuickUnlock {
     }
     let uvk: Uint8Array;
     try {
-      uvk = await openDoubleWrap(kPin, kNonExp, rec.blob.ct, rec.userId);
+      uvk = await openDoubleWrap(kPin, kNonExp, pinBlob.ct, rec.userId);
     } catch {
       // Wrong PIN / tampered / unknown version / wrong co-key — indistinguishable, no oracle.
       if (remaining <= 0) {
