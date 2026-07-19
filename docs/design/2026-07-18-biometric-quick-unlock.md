@@ -90,8 +90,11 @@ ceremony; on absence → treat as capability loss → PIN fallback, **zero count
 gesture-needing calls out of the popup. The connector presents its **own** "Continue" button (fresh
 user activation — `create()` needs it and the popup→SW→connector hop can lose the popup's), runs the
 ceremony, **pings the SW every 15 s** (the 0.16.3 TOTP-keepalive pattern) so redeem state survives,
-posts the PRF secret to the SW over **sender-verified intra-extension messaging** (`sender.tab ===
-undefined` + extension-origin URL; zeroize the buffer after HKDF), and closes. On Chrome, if day-1
+posts the PRF secret to the SW over **sender-verified intra-extension messaging** (gate = the sender's
+extension-origin **connector URL** + `sender.id`; **NOT `sender.tab === undefined`** — a
+`chrome.windows.create({type:'popup'})` extension page HAS a tab, empirically verified on Chromium
+during the 2026-07-18 Stage-B review, so a tab-absence check would reject the connector itself;
+zeroize the buffer after HKDF), and closes. On Chrome, if day-1
 testing shows the action popup survives, the inline popup path may be used; Firefox always uses the
 connector.
 

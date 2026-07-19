@@ -63,18 +63,21 @@ export async function applyServerSwitch<A extends SwitchApi>(deps: ServerSwitchD
 
 /**
  * The purgeServerData message handler core (§4.2 — the ONLY destructive per-origin path: the options
- * page's explicit "Remove data for this server"). POPUP/options ONLY: a sender WITH a tab is a content
- * script ⇒ refused (parity with revealCardField / fillCardFromPopup). It is not page-reachable today (no
+ * page's explicit "Remove data for this server"). Extension pages ONLY: the caller computes
+ * `untrustedSender` from the sender's URL (an extension-origin URL ⇒ trusted; a content script's
+ * sender.url is the WEB page's ⇒ refused). NOT from `sender.tab` — an extension page opened in a tab
+ * or a chrome.windows popup HAS a tab (2026-07-18 review Finding 2: the old tab-based check refused
+ * the options page, the ONLY legitimate caller). It is not page-reachable today (no
  * externally_connectable, no content→SW relay), but this arbitrary-origin wipe of a quick-unlock record
  * must never gain a page route if a content-script relay is ever added. Then canonicalize (a non-origin
  * string ⇒ no key ⇒ no-op) and hand the derived originKey to [purge]. Returns the handler's { ok }.
  */
 export async function purgeServerDataFor(
   origin: string,
-  senderHasTab: boolean,
+  untrustedSender: boolean,
   purge: (originKey: string) => Promise<void>,
 ): Promise<{ ok: boolean }> {
-  if (senderHasTab) return { ok: false }; // page/content sender — refuse before any wipe (defense-in-depth)
+  if (untrustedSender) return { ok: false }; // page/content sender — refuse before any wipe (defense-in-depth)
   const canonical = canonicalizeServerUrl(origin);
   if (canonical) await purge(originKeyFor(canonical));
   return { ok: canonical !== null };

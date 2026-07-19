@@ -153,6 +153,27 @@ export type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
 /** Quick-unlock enrollment-failure code. `weak_pin` additionally carries a `reason`. */
 export type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin";
 
+/** Biometric quick-unlock redeem failure (0.17.0). No `wrong_pin`/`exhausted` — a hardware-held
+ *  full-entropy PRF secret has no offline oracle, so there is no attempt budget. `bio_cancelled` =
+ *  the OS ceremony was cancelled / timed out / the passkey was deleted (record KEPT, retry allowed);
+ *  the remaining codes are the byte-identical server-dance outcomes shared with the PIN lane. */
+export type BioUnlockCode =
+  | "bio_cancelled"
+  | "not_armed"
+  | "expired"
+  | "corrupt"
+  | "stale_uvk"
+  | "revoked"
+  | "network"
+  | "server_error"
+  | "identity_mismatch"
+  | "kdf_policy"
+  | "aborted";
+
+/** Biometric enrollment refusal (0.17.0). `bio_unsupported` = no platform authenticator / no PRF;
+ *  `bio_cancelled` = the enroll ceremony threw (nothing written — amendment 3). */
+export type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled";
+
 export type Req =
   | { type: "status" }
   | { type: "unlock"; email: string; password: string }
@@ -172,6 +193,15 @@ export type Req =
   /** Popup: enroll a quick-unlock PIN over the in-memory UVK (only while unlocked; refused while
    *  mustChangePassword). Never carries key material — the SW holds the UVK (breaker B1). */
   | { type: "enrollQuickUnlock"; pin: string }
+  /** Popup: redeem an armed BIOMETRIC quick-unlock (0.17.0) — the SW opens the WebAuthn connector
+   *  window, runs the ceremony, and does the same server dance as `unlockWithPin`. No payload; the
+   *  UVK never leaves the SW. Renders ONLY in the popup (breaker B7). */
+  | { type: "unlockWithBio" }
+  /** Popup: enroll biometric quick-unlock over the in-memory UVK (only while unlocked; same gates as
+   *  `enrollQuickUnlock`). Opens the connector for the create()+PRF ceremony. Never carries key material.
+   *  (Platform capability is probed IN the popup via isUserVerifyingPlatformAuthenticatorAvailable —
+   *  a page context WebAuthn query the SW can't make — so there is no separate capability message.) */
+  | { type: "enrollQuickUnlockBio" }
   /** Popup: turn quick unlock off — a full wipe, no auth gate (§8.1 parity). */
   | { type: "disableQuickUnlock" }
   /** Popup: the one-time post-unlock offer card was dismissed (durable, storage.local — breaker B7). */
@@ -257,7 +287,7 @@ export type Res<T extends Req["type"]> = T extends "status"
       /** Quick-unlock Tier B sub-state (spec 01 §8.4). `armed` = locked-armed + redeemable (the popup
        *  shows the PIN field on the locked screen); `enrolled` + `offerDismissed` drive the unlocked
        *  Settings toggle + the one-time offer card; `attemptsRemaining` for the "N tries left" copy. */
-      quickUnlock: { enrolled: boolean; armed: boolean; attemptsRemaining: number; offerDismissed: boolean };
+      quickUnlock: { enrolled: boolean; armed: boolean; attemptsRemaining: number; offerDismissed: boolean; kind: "pin" | "biometric" | null };
       /** 0.16.3: a TOTP-gated sign-in awaiting the code (SW-memory only, so a reopened popup — the
        *  common case, since copying a code from an authenticator app closes it — re-renders the code
        *  field). Outranks the armed-PIN view. Null when there's no live challenge (or the SW evicted). */
@@ -277,6 +307,10 @@ export type Res<T extends Req["type"]> = T extends "status"
           ? { ok: boolean; code?: PinUnlockCode; attemptsRemaining?: number }
           : T extends "enrollQuickUnlock"
             ? { ok: boolean; code?: EnrollCode; reason?: PinWeakReason }
+            : T extends "unlockWithBio"
+              ? { ok: boolean; code?: BioUnlockCode }
+              : T extends "enrollQuickUnlockBio"
+                ? { ok: boolean; code?: EnrollBioCode }
             : T extends "disableQuickUnlock"
               ? { ok: true }
               : T extends "dismissQuickUnlockOffer"

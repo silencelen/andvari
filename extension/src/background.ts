@@ -42,7 +42,7 @@ import { currentCode } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor } from "./savetarget";
-import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
+import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
 import { armGate, withRedeemInFlight } from "./locksequence";
 import { applyServerSwitch, purgeServerDataFor } from "./serverswitch";
@@ -91,6 +91,7 @@ const NKEY = "lockNotice"; // storage.session: { kind:"idle"; seconds } — F26 
 // origin's seq numbering poison another's anti-rollback). Every read/write goes through nsk().
 const QKEY = "quickUnlock"; // storage.session, namespaced: QuRecord (blob + counter + locked-token stash)
 const DKEY = "quOfferDismissed"; // storage.local, namespaced (non-secret): the offer card was dismissed once
+const BKEY = "quBioCred"; // storage.local, namespaced (non-secret, 0.17.0 amendment 4): { credentialId, prfSalt, userId } — reuse a passkey on re-enroll (avoid TPM/SEP litter). NOT secret: the PRF *output* needs the hardware + OS user-verification; salt/id/userId are public inputs (like a KDF salt).
 const UKEY = "updateInfo"; // storage.local, namespaced (non-secret): UpdateInfo while a newer build is live
 const ULAST = "updateCheckedAt"; // storage.local, namespaced: epoch ms of the last COMPLETED update fetch
 const USEQ = "updateAcceptedSeq"; // storage.local, namespaced: highest signed-manifest seq ever accepted (§B anti-rollback)
@@ -425,10 +426,154 @@ async function benchPinParams(): Promise<KdfParams> {
   return { v: 1, alg: "argon2id13", ops: PIN_KDF_MIN_OPS, memBytes };
 }
 
+// ---- biometric quick-unlock connector broker (0.17.0, spec docs/design/2026-07-18-biometric-quick-unlock.md) ----
+// WebAuthn create()/get() cannot run in the SW (no navigator.credentials) NOR the action popup (the OS
+// prompt closes the popup — spike 2026-07-18), so the ceremony runs in a dedicated connector WINDOW.
+// The engine's injected QuBiometric dep is an RPC to that window: open it, hand it the op via a
+// sender-verified "ready" reply, receive the PRF secret in its "result" post. The connector self-drives
+// under its own gesture; the SW never touches WebAuthn. The 32-byte PRF secret is base64 on the wire and
+// zeroized the moment K_bio is derived (engine side). Device-binding is the co-key (breaker A1), not the
+// PRF — a synced passkey on another device re-derives the PRF but cannot open the co-key-wrapped blob.
+type BioReq =
+  | { op: "enroll"; prfSalt: string; userHandleB64: string; userName: string; reuse?: { credentialId: string; prfSalt: string } }
+  | { op: "eval"; credentialId: string; prfSalt: string };
+type BioResult =
+  | { ok: true; op: "enroll"; credentialId: string; prfEnabled: boolean; prfSalt: string; secretB64: string }
+  | { ok: true; op: "eval"; secretB64: string }
+  | { ok: false; error?: string };
+let pendingBio: { req: BioReq; resolve: (r: BioResult) => void; windowId?: number } | null = null;
+const CONNECTOR_URL = chrome.runtime.getURL("connector.html");
+
+/** Resolve (and clear) the in-flight ceremony exactly once — from a connector "result" post OR from
+ *  the window being closed (onRemoved) BEFORE a result arrived (→ cancel = bio_cancelled). */
+function resolvePendingBio(r: BioResult): void {
+  const p = pendingBio;
+  pendingBio = null;
+  p?.resolve(r);
+}
+
+/** Open the connector window and await its ceremony result. One at a time (the redeem/enroll lanes are
+ *  single-flighted above this, but guard anyway so a stray second call can never orphan a window). */
+function brokerBioCeremony(req: BioReq): Promise<BioResult> {
+  if (pendingBio) return Promise.resolve({ ok: false, error: "ceremony already in flight" });
+  return new Promise<BioResult>((resolve) => {
+    pendingBio = { req, resolve };
+    chrome.windows
+      .create({ url: CONNECTOR_URL, type: "popup", width: 380, height: 520, focused: true })
+      .then((w) => {
+        if (pendingBio) pendingBio.windowId = w?.id;
+      })
+      .catch(() => resolvePendingBio({ ok: false, error: "could not open connector" }));
+  });
+}
+
+// The connector window closed without posting a result → the user dismissed the OS prompt / closed it
+// → cancel. (A posted result clears pendingBio first, so this no-ops for the normal path.)
+chrome.windows.onRemoved.addListener((wid) => {
+  if (pendingBio && pendingBio.windowId === wid) resolvePendingBio({ ok: false, error: "connector closed" });
+});
+
+/** Sender-verified connector RPC. Only our own connector PAGE may drive a ceremony. The gate is the
+ *  sender's extension-origin URL — NOT `sender.tab === undefined`: a `chrome.windows.create({type:
+ *  'popup'})` extension page IS a tab (empirically verified on Chromium, 2026-07-18 review), so a
+ *  tab-absence check would reject the connector itself. A content script's sender.url is the WEB
+ *  page's (http/https) → refused; other extensions/pages can't reach onMessage at all (no
+ *  externally_connectable — they'd arrive via onMessageExternal); our popup/options don't match
+ *  the connector URL → refused. sender.id is belt-and-suspenders. */
+async function handleBioConnector(msg: { __bio: string } & Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  if (sender.id !== chrome.runtime.id || !(sender.url ?? "").startsWith(CONNECTOR_URL)) return { error: "unauthorized" };
+  if (msg.__bio === "ready") return pendingBio ? pendingBio.req : null; // hand the connector its op
+  if (msg.__bio === "result") {
+    resolvePendingBio(msg as unknown as BioResult);
+    return { ack: true };
+  }
+  return { error: "unknown" };
+}
+
+// ---- QuBiometric dep: brokers the ceremony; caches the enroll-time secret so the engine's follow-up
+//      evalPrf needs no THIRD OS prompt (enroll already did create()+get() in one window). ----
+let enrollSecretCache: { credentialId: string; secret: Uint8Array } | null = null;
+let lastBioEnroll: { credentialId: string; prfSaltB64: string } | null = null; // for the amendment-4 reuse record
+function dropEnrollSecretCache(): void {
+  if (enrollSecretCache) {
+    enrollSecretCache.secret.fill(0);
+    enrollSecretCache = null;
+  }
+}
+/** Read-and-clear the dep-set enroll record. A function boundary (not an inline read) so the handler
+ *  gets the DECLARED union type — the dep mutates this during an await, which TS's control-flow can't see. */
+function takeLastBioEnroll(): { credentialId: string; prfSaltB64: string } | null {
+  const v = lastBioEnroll;
+  lastBioEnroll = null;
+  return v;
+}
+
+const biometricDep: QuBiometric = {
+  async enroll(prfSalt) {
+    dropEnrollSecretCache();
+    lastBioEnroll = null;
+    const userId = session?.userId ?? "";
+    // A stable, non-reversible user handle (WebAuthn stores it in the passkey; we key by credentialId).
+    const userHandleB64 = toB64(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("andvari-bio|" + userId))));
+    const reuse = await readBioCred(userId); // amendment 4: reuse an on-record passkey if one exists
+    const r = await brokerBioCeremony({
+      op: "enroll",
+      prfSalt: toB64(prfSalt),
+      userHandleB64,
+      userName: session?.email ?? "andvari",
+      reuse: reuse ? { credentialId: reuse.credentialId, prfSalt: reuse.prfSalt } : undefined,
+    });
+    if (!r.ok || r.op !== "enroll") throw new Error("bio enroll ceremony failed");
+    if (r.prfEnabled) {
+      enrollSecretCache = { credentialId: r.credentialId, secret: fromB64(r.secretB64) };
+      lastBioEnroll = { credentialId: r.credentialId, prfSaltB64: r.prfSalt };
+    }
+    return { credentialId: r.credentialId, prfEnabled: r.prfEnabled, prfSalt: fromB64(r.prfSalt) };
+  },
+  async evalPrf(credentialId, prfSalt) {
+    // Enroll's own get() already produced this secret — hand it off (one-shot; the engine zeroizes it).
+    if (enrollSecretCache && enrollSecretCache.credentialId === credentialId) {
+      const s = enrollSecretCache.secret;
+      enrollSecretCache = null;
+      return s;
+    }
+    const r = await brokerBioCeremony({ op: "eval", credentialId, prfSalt: toB64(prfSalt) });
+    if (!r.ok || r.op !== "eval") throw new Error("bio eval ceremony failed");
+    return fromB64(r.secretB64);
+  },
+};
+
+// ---- amendment-4 reuse record (namespaced storage.local; non-secret — see BKEY) ----
+type BioCred = { credentialId: string; prfSalt: string; userId: string };
+async function readBioCred(userId: string): Promise<BioCred | null> {
+  try {
+    const k = nsk(BKEY);
+    const rec = (await chrome.storage.local.get(k))[k] as BioCred | undefined;
+    return rec && rec.userId === userId && typeof rec.credentialId === "string" && typeof rec.prfSalt === "string" ? rec : null;
+  } catch {
+    return null; // reuse is best-effort — a miss just mints a fresh passkey
+  }
+}
+async function writeBioCred(rec: BioCred): Promise<void> {
+  try {
+    await chrome.storage.local.set({ [nsk(BKEY)]: rec });
+  } catch {
+    /* best-effort litter reduction */
+  }
+}
+async function clearBioCred(): Promise<void> {
+  try {
+    await chrome.storage.local.remove(nsk(BKEY));
+  } catch {
+    /* */
+  }
+}
+
 const quickUnlock = new QuickUnlock({
   store: quStore,
   coKey: quCoKey,
   deriveKPin: (pin, params, salt) => deriveMasterKeyAsync(pin, params, salt),
+  biometric: biometricDep,
   benchPinParams,
   now: () => Date.now(),
   randomBytes: (n) => crypto.getRandomValues(new Uint8Array(n)),
@@ -440,6 +585,10 @@ let redeemInFlight = false;
 /** Single-flight for the quick-unlock redeem (mirrors AndvariApi.refreshInFlight) — two racing popups
  *  submitting a PIN must not each start a redeem and double-spend the attempt counter (breaker A5⊕B4). */
 let pinUnlockInFlight: Promise<Res<"unlockWithPin">> | null = null;
+/** Single-flight for the biometric redeem (0.17.0). Separate slot from the PIN's — only ONE method is
+ *  ever armed per device (one-method-at-a-time enroll), so the two lanes cannot race; both funnel into
+ *  the shared finishRedeem, whose redeemInFlight flag is therefore never touched concurrently. */
+let bioUnlockInFlight: Promise<Res<"unlockWithBio">> | null = null;
 /** TOTP unlock seam (0.16.3): a TOTP-enrolled login returns 401 totp_required — we hold the ALREADY-
  *  DERIVED {authKey, wrapKey} so the code retry needs no second ~6 s Argon2id, and let the popup
  *  render a code field. This lives in SW MEMORY ONLY, NEVER storage.session: breaker B1 keeps the
@@ -498,6 +647,15 @@ try {
 }
 
 chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
+  // 0.17.0 biometric connector RPC — a PRIVATE protocol (not part of Req), handled before the normal
+  // dispatch and gated on a same-extension connector-page sender inside handleBioConnector.
+  const bio = msg as unknown as { __bio?: unknown };
+  if (bio && typeof bio.__bio === "string") {
+    handleBioConnector(bio as { __bio: string } & Record<string, unknown>, sender)
+      .then(sendResponse)
+      .catch((e: unknown) => sendResponse({ error: String(e) }));
+    return true;
+  }
   handle(msg, sender)
     .then(sendResponse)
     .catch((e: unknown) => sendResponse({ ok: false, error: String(e) }));
@@ -668,7 +826,7 @@ async function applyServerChange(): Promise<void> {
  *  key. Removes that origin's namespaced keys everywhere (storage.local + storage.session + the
  *  IDB co-key) and touches nothing else; safe for current and non-current origins alike. */
 export async function purgeOriginNamespace(originKey: string): Promise<void> {
-  const keys = [QKEY, DKEY, UKEY, ULAST, USEQ, UQUIET].map((k) => nsKey(originKey, k));
+  const keys = [QKEY, DKEY, BKEY, UKEY, ULAST, USEQ, UQUIET].map((k) => nsKey(originKey, k));
   try {
     await chrome.storage.local.remove(keys);
   } catch {
@@ -871,6 +1029,7 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
  *  never the armed-retaining lock (breaker A3⊕B2). Routed here from onRevoked, the popup "Sign out"
  *  action, and every definitive-401 during a quick-unlock redeem. */
 function doSignOut(): Promise<void> {
+  void clearBioCred(); // 0.17.0: explicit sign-out tears down the amendment-4 reuse record too
   return doLock("signout");
 }
 
@@ -1123,17 +1282,27 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return unlockWithPin(msg.pin);
     case "enrollQuickUnlock":
       return enrollQuickUnlock(msg.pin);
+    case "unlockWithBio":
+      return unlockWithBio();
+    case "enrollQuickUnlockBio":
+      return enrollQuickUnlockBio();
     case "disableQuickUnlock":
       return disableQuickUnlock();
     case "dismissQuickUnlockOffer":
       return dismissQuickUnlockOffer();
     case "purgeServerData":
       // §4.2/B2-7 — the ONLY destructive per-origin path (the options page's explicit "Remove data for
-      // this server"). The popup-only sender guard + canonicalize + originKey derivation live in the
-      // serverswitch leaf (serverswitch.test.ts drives them, incl. the tab-sender rejection): a sender
-      // WITH a tab is a content script ⇒ refused (parity with revealCardField / fillCardFromPopup);
-      // a non-origin string yields no key ⇒ no-op; safe for the current origin, never touches another's.
-      return purgeServerDataFor(msg.origin, sender.tab !== undefined, purgeOriginNamespace) satisfies Promise<Res<"purgeServerData">>;
+      // this server"). Trust gate: the sender must be one of OUR extension pages, judged by its
+      // extension-origin URL — NOT by `sender.tab === undefined`, which is FALSE for the options page
+      // (options_ui open_in_tab: a real tab, so the old tab-based check refused the ONLY legitimate
+      // caller — 2026-07-18 review Finding 2). A content script's sender.url is the WEB page's ⇒
+      // refused; canonicalize + originKey derivation stay in the serverswitch leaf (a non-origin
+      // string yields no key ⇒ no-op; safe for the current origin, never touches another's).
+      return purgeServerDataFor(
+        msg.origin,
+        !(sender.url ?? "").startsWith(chrome.runtime.getURL("")),
+        purgeOriginNamespace,
+      ) satisfies Promise<Res<"purgeServerData">>;
     case "scheduleClipboardClear":
       return scheduleClipboardClear();
     case "matches": {
@@ -1502,6 +1671,31 @@ async function enrollQuickUnlock(pin: string): Promise<Res<"enrollQuickUnlock">>
   return { ok: true };
 }
 
+/** Enroll biometric quick-unlock (0.17.0) — same gates as enrollQuickUnlock (unlocked, in-memory UVK,
+ *  !mustChangePassword). The engine opens the connector for create()+PRF via the injected dep. On success
+ *  we record the credential for amendment-4 reuse (litter reduction) so a future re-enroll needs only a
+ *  get(). Never carries key material: the UVK stays in the SW (breaker B1). */
+async function enrollQuickUnlockBio(): Promise<Res<"enrollQuickUnlockBio">> {
+  if (!session) return { ok: false, code: "locked" };
+  if (session.mustChangePassword) return { ok: false, code: "must_change_password" };
+  if (!session.uvk) return { ok: false, code: "need_full_unlock" };
+  dropEnrollSecretCache();
+  const userId = session.userId;
+  const r = await quickUnlock.enrollBio({
+    uvk: session.uvk,
+    userId,
+    email: session.email,
+    lastFullUnlockAt: session.lastFullUnlockAt, // COPIED — never Date.now() from a QUICK session (breaker A4)
+    autoLockSeconds,
+  });
+  dropEnrollSecretCache(); // whether or not evalPrf consumed it
+  const enrolled = takeLastBioEnroll(); // read + clear the dep-set record (defeats TS closure-narrowing)
+  if (!r.ok) return { ok: false, code: r.code };
+  // amendment 4: persist the credential the engine committed to, for reuse on a later re-enroll.
+  if (enrolled) await writeBioCred({ credentialId: enrolled.credentialId, prfSalt: enrolled.prfSaltB64, userId });
+  return { ok: true };
+}
+
 /** Quick-unlock redeem (spec 01 §8.4). Single-flight (breaker A5). The engine's beginRedeem does the
  *  reserve-then-open; this does the server dance: forced refresh FIRST (breaker A3⊕B2), re-assert the
  *  master-KDF floor + re-verify identity + re-fetch policy (breaker B6), then sync + rebuild + persist. */
@@ -1510,6 +1704,26 @@ function unlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
     pinUnlockInFlight = null;
   });
   return pinUnlockInFlight;
+}
+
+type RedeemDanceResult = { ok: true } | { ok: false; code: "aborted" | "revoked" | "network" | "identity_mismatch" | "kdf_policy" | "server_error" | "stale_uvk" };
+
+function unlockWithBio(): Promise<Res<"unlockWithBio">> {
+  bioUnlockInFlight ??= doUnlockWithBio().finally(() => {
+    bioUnlockInFlight = null;
+  });
+  return bioUnlockInFlight;
+}
+
+async function doUnlockWithBio(): Promise<Res<"unlockWithBio">> {
+  await ensureLoaded();
+  if (session) return { ok: true }; // already unlocked (a race)
+  const gen = redeemGen;
+  const begin = await quickUnlock.beginRedeemBio(); // opens the connector + runs the WebAuthn ceremony
+  if (!begin.ok) return { ok: false, code: begin.code }; // not_armed | expired | corrupt | bio_cancelled
+  // owns() guard: a lock / sign-out / full unlock landed during the ceremony → discard silently.
+  if (gen !== redeemGen || session) return { ok: false, code: "aborted" };
+  return finishRedeem(begin, gen);
 }
 
 async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
@@ -1524,7 +1738,15 @@ async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
   }
   // owns() guard: a lock / sign-out / full unlock intervened during the PIN KDF → discard silently.
   if (gen !== redeemGen || session) return { ok: false, code: "aborted" };
+  return finishRedeem(begin, gen);
+}
 
+/** The shared quick-unlock server dance — byte-identical for the PIN and biometric lanes (spec §5).
+ *  Runs after a verified engine beginRedeem/beginRedeemBio returns the UVK + stashed tokens and the
+ *  owns() guard passes: forced refresh (catches rescue/revocation) → getAccountKeys → verifyServerIdentity
+ *  → sync → session build under withRedeemInFlight, GUARANTEEING api tokens clear on any locked exit.
+ *  Its failure codes are exactly the subset both PinUnlockCode and BioUnlockCode carry. */
+async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDanceResult> {
   api.setTokens(begin.tokens.access, begin.tokens.refresh);
   // withRedeemInFlight sets redeemInFlight for the server dance and GUARANTEES it clears on EVERY exit
   // (success / owns()-abort return / throw) — a mid-redeem switch/lock that bumps redeemGen and aborts
@@ -1538,7 +1760,7 @@ async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
       (v) => {
         redeemInFlight = v; // true → token mutations land in QKEY.lockedTokens (persistTokens), not a session
       },
-      async (): Promise<Res<"unlockWithPin">> => {
+      async (): Promise<RedeemDanceResult> => {
         try {
           // A3⊕B2: forced rotation is the FIRST server contact. It is also the account-state read that
           // catches a rescue (which revokes all sessions, spec 03) — a revoked/rotated refresh → 401.
@@ -1621,13 +1843,14 @@ async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
  *  material is never gated). */
 async function disableQuickUnlock(): Promise<Res<"disableQuickUnlock">> {
   await quickUnlock.wipe();
+  await clearBioCred(); // 0.17.0: drop the amendment-4 reuse record too (explicit off = full teardown)
   return { ok: true };
 }
 
 /** The quick-unlock sub-state the popup needs in BOTH views (folded into `status`): `armed`
  *  (locked-armed → show the PIN field), `enrolled` + `offerDismissed` (unlocked → Settings toggle +
  *  the one-time offer card). Every read is fail-closed. */
-async function quStateForStatus(): Promise<{ enrolled: boolean; armed: boolean; attemptsRemaining: number; offerDismissed: boolean }> {
+async function quStateForStatus(): Promise<{ enrolled: boolean; armed: boolean; attemptsRemaining: number; offerDismissed: boolean; kind: "pin" | "biometric" | null }> {
   const st = await quickUnlock.status();
   let offerDismissed = false;
   try {
@@ -1636,7 +1859,7 @@ async function quStateForStatus(): Promise<{ enrolled: boolean; armed: boolean; 
   } catch {
     /* storage.local unavailable — treat as not-dismissed (the offer is best-effort chrome) */
   }
-  return { enrolled: st.enrolled, armed: st.armed, attemptsRemaining: st.attemptsRemaining, offerDismissed };
+  return { enrolled: st.enrolled, armed: st.armed, attemptsRemaining: st.attemptsRemaining, offerDismissed, kind: st.kind };
 }
 
 /** Remember the offer card was dismissed once (breaker B7 — durable, storage.local, NON-secret). */

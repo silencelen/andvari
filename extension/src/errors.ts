@@ -43,6 +43,20 @@ type PinUnlockCode =
   | "aborted";
 type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
 type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin";
+// Biometric quick-unlock (0.17.0) twins — literal-identical to messages.ts BioUnlockCode / EnrollBioCode.
+type BioUnlockCode =
+  | "bio_cancelled"
+  | "not_armed"
+  | "expired"
+  | "corrupt"
+  | "stale_uvk"
+  | "revoked"
+  | "network"
+  | "server_error"
+  | "identity_mismatch"
+  | "kdf_policy"
+  | "aborted";
+type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled";
 
 /** Verbatim web/src/ui/errors.ts UNREACHABLE — the one canonical "can't reach the server"
  *  sentence, duplicated as a const because no build path from extension/ to web/src exists. */
@@ -207,6 +221,56 @@ export function enrollErrorCopy(code: EnrollCode | undefined, reason?: PinWeakRe
       }
     default:
       return "Couldn't turn on quick unlock — try again.";
+  }
+}
+
+/**
+ * Biometric quick-unlock redeem failure (0.17.0). No `wrong_pin`/`exhausted` (a hardware-held PRF secret
+ * has no offline oracle). `bio_cancelled` = the OS prompt was dismissed / timed out / the passkey was
+ * deleted — all indistinguishable by design, and all retryable. Wiped-blob outcomes (expired/corrupt/
+ * stale_uvk) and a revoked session route to the master password; hard faults keep their sentences.
+ */
+export function bioUnlockErrorCopy(code: BioUnlockCode | undefined): string {
+  switch (code) {
+    case "bio_cancelled":
+      return "Device unlock was cancelled — try again, or use your master password.";
+    case "expired":
+      return "It's been a while since you signed in — enter your master password to continue.";
+    case "corrupt":
+    case "stale_uvk":
+      return "Quick unlock needs to be set up again — unlock with your master password.";
+    case "revoked":
+      return "Your session ended — sign in again with your master password.";
+    case "identity_mismatch":
+      return "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.";
+    case "kdf_policy":
+      return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.";
+    case "server_error":
+      return "The server had a problem answering — try again in a moment.";
+    case "network":
+      return UNREACHABLE;
+    default:
+      // not_armed / aborted (benign races) and an absent code — fall to the master password quietly.
+      return "Couldn't unlock with your device — unlock with your master password.";
+  }
+}
+
+/** Biometric enrollment refusal (0.17.0). `bio_unsupported` = no platform authenticator / no PRF on this
+ *  device (the PIN stays available); `bio_cancelled` = the setup prompt was dismissed (nothing written). */
+export function enrollBioErrorCopy(code: EnrollBioCode | undefined): string {
+  switch (code) {
+    case "locked":
+      return "Unlock andvari first to set up quick unlock.";
+    case "must_change_password":
+      return "Set a new master password in the web vault before turning on quick unlock.";
+    case "need_full_unlock":
+      return "Enter your master password once more to set up quick unlock.";
+    case "bio_unsupported":
+      return "This device can't do biometric quick unlock — set up a PIN instead.";
+    case "bio_cancelled":
+      return "Setup was cancelled — try again when you're ready.";
+    default:
+      return "Couldn't turn on device quick unlock — try again.";
   }
 }
 
