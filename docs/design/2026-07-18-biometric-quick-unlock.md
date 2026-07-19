@@ -86,7 +86,9 @@ ceremony; on absence → treat as capability loss → PIN fallback, **zero count
 
 **Surface abstraction (`connector`):** the popup's "Unlock with Windows Hello / Touch ID" button only
 **signals** the SW; the SW opens a minimal `connector.html` (`chrome.windows.create({type:'popup',
-~360×480, centered}`) — same precedent as the Firefox host-grant flow that already routes
+600×760}` — NOT slim: Chrome anchors its passkey chooser/consent dialogs INSIDE this window and a
+~380-wide popup clips them, owner-observed on Windows 2026-07-18) — same precedent as the Firefox
+host-grant flow that already routes
 gesture-needing calls out of the popup. The connector presents its **own** "Continue" button (fresh
 user activation — `create()` needs it and the popup→SW→connector hop can lose the popup's), runs the
 ceremony, **pings the SW every 15 s** (the 0.16.3 TOTP-keepalive pattern) so redeem state survives,

@@ -458,8 +458,12 @@ function brokerBioCeremony(req: BioReq): Promise<BioResult> {
   if (pendingBio) return Promise.resolve({ ok: false, error: "ceremony already in flight" });
   return new Promise<BioResult>((resolve) => {
     pendingBio = { req, resolve };
+    // 600×760, not a slim popup: Chrome renders its passkey chooser/consent dialogs INSIDE this window
+    // (anchored top-center, ~450 px wide, taller with account lists) — a ~380-wide window CLIPS them
+    // (owner-observed on Windows, 2026-07-18 E2E). The OS Hello/Touch-ID prompt itself is a native
+    // dialog and doesn't care, but the in-window chooser needs the room.
     chrome.windows
-      .create({ url: CONNECTOR_URL, type: "popup", width: 380, height: 520, focused: true })
+      .create({ url: CONNECTOR_URL, type: "popup", width: 600, height: 760, focused: true })
       .then((w) => {
         if (pendingBio) pendingBio.windowId = w?.id;
       })

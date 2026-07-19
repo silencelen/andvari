@@ -19,6 +19,10 @@
         gap: 14px;
         text-align: center;
         align-items: stretch;
+        /* The window is deliberately ROOMY (600×760 — Chrome draws its passkey chooser inside it and
+           clips in a slim popup); keep our own column narrow and centered so it still reads as a card. */
+        max-width: 340px;
+        margin: 24px auto 0;
       }
       .cx h1 {
         font-size: 16px;
