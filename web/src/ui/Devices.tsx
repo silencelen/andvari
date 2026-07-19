@@ -148,7 +148,8 @@ export function ExtensionRowView({ state }: { state: ExtensionRow }) {
           {state.chromeStoreUrl && xpiUrl && " "}
           {/* Since ext 0.16.2 the .xpi bakes gecko.update_url → this server's
               /downloads/firefox-updates.json, so signed installs self-update like Chrome's.
-              (The in-extension nag stays un-armed §M-D3 — Firefox itself does the updating.) */}
+              (Firefox itself does the updating; the in-extension banner — armed 2026-07-18,
+              reference-origin-scoped — is a belt on top for zip installs, never needed here.) */}
           {xpiUrl &&
             "Firefox installs the Mozilla-signed add-on directly — approve the prompt it shows; it updates itself automatically."}
         </p>
@@ -163,8 +164,9 @@ export function ExtensionRowView({ state }: { state: ExtensionRow }) {
             the INSTALL.txt inside — about two minutes; the steps differ per browser.
           </p>
           <p className="muted">
-            {/* No popup-flag promise: the update nag ships un-armed (§M-D3) — the extension never
-                checks this manifest, so the only honest channel is "check back here". */}
+            {/* No popup-flag promise: fielded ≤0.17.0 builds pin the sentinel (§M-D3) and never
+                check this manifest; 0.18+ reference-origin installs DO get the signed banner
+                (armed 2026-07-18), but "check back here" stays the only promise honest for BOTH. */}
             Because it’s loaded unpacked, that copy can’t update itself — check back here for newer versions
             ({state.version} is current). Updating means re-downloading above and reloading it in your
             browser’s extensions page.

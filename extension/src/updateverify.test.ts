@@ -60,9 +60,12 @@ test("PINNED_UPDATE_KEYS + TEST_PUBKEY are byte-single-sourced to core UpdateVer
 test("updatesEnabled — sentinel-only is disabled, a real key enables (§M-D3)", () => {
   assert.equal(updatesEnabled([TEST_PUBKEY]), false);
   assert.equal(updatesEnabled(PINNED_LOCAL), true);
-  // Shipped default is UN-ARMED (placeholder-pinned) for the multi-tenant pivot (design 2026-07-15
-  // §9) — fail-closed-quiet: the SW never fetches the manifest, /downloads stays plain pull.
-  assert.equal(updatesEnabled(), false);
+  // Shipped default is ARMED (2026-07-18: the 2026-07-14 ceremony key is pinned) — and the channel
+  // is REFERENCE-INSTANCE-SCOPED in background.checkForUpdate (multi-tenant §9: a self-host/custom
+  // origin never fetches, same quiet posture as the un-armed era). The sentinel must NOT be pinned:
+  // its presence alongside a real key would be inert, alone it would disable the channel.
+  assert.equal(updatesEnabled(), true);
+  assert.ok(!PINNED_UPDATE_KEYS.includes(TEST_PUBKEY), "the armed set must not carry the sentinel");
 });
 
 test("verifyManifest — a valid detached sig over the EXACT bytes verifies", () => {

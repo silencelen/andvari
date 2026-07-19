@@ -132,6 +132,12 @@ private val updateCrypto by lazy { createCryptoProvider() }
  */
 fun checkForUpdate(baseUrl: String, lastAcceptedSeq: Long): UpdateCheck {
     if (!UpdateVerify.updatesEnabled()) return UpdateCheck.Disabled // §M-D3 hard-off on the test key
+    // Reference-instance scope (2026-07-18 arming; multi-tenant §9): the pinned ceremony key signs
+    // the REFERENCE instance's `/downloads` only, so the channel runs solely against the shipped
+    // default origin. A self-host/custom baseUrl returns the same quiet Disabled the un-armed build
+    // gave every origin — never an "unverified" nag about a server our key was never meant to vouch
+    // for. (Per-instance keys/pinning are separate later work.)
+    if (baseUrl.trimEnd('/') != DesktopSessionStore.DEFAULT_BASE_URL) return UpdateCheck.Disabled
     // §M-D4(a) anti-rollback FLOOR (mirror of extension background.ts:711 `Math.max(storedSeq, MIN_SEQ)`):
     // a fresh install (or one whose persisted lastAcceptedSeq was wiped) evaluates from MIN_SEQ, not 0,
     // so a T1 server can't steer it below the compile-time floor with a validly-signed-but-older manifest.

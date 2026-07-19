@@ -45,11 +45,12 @@ class UpdateVerifyTest {
         assertFalse(UpdateVerify.updatesEnabled(listOf(UpdateVerify.TEST_PUBKEY)), "sentinel-only must be disabled")
         assertFalse(UpdateVerify.verify(crypto, msg, sig, listOf(UpdateVerify.TEST_PUBKEY)), "sentinel-only fails closed")
 
-        // The SHIPPED default is UN-ARMED again — re-pinned to the placeholder sentinel for the
-        // multi-tenant/endpoint-agnostic pivot (design 2026-07-15 §9): a single owner-pinned key
-        // makes every self-host /downloads unverifiable-by-construction. Fail-closed-quiet; the
-        // signer + real key stay on the owner workstation; per-instance signing is later work.
-        assertFalse(UpdateVerify.updatesEnabled(), "shipped default is UN-ARMED (placeholder-pinned) for the multi-tenant pivot")
+        // The SHIPPED default is ARMED (2026-07-18): the 2026-07-14 ceremony pubkey is pinned
+        // (docs/runbooks/release-signing-keys.md) and the CALLERS scope the channel to the shipped
+        // reference origin (multi-tenant §9: a self-host/custom baseUrl returns Disabled without a
+        // fetch — desktop Platform.checkForUpdate + extension background.checkForUpdate).
+        assertTrue(UpdateVerify.updatesEnabled(), "shipped default is ARMED with the ceremony key (reference-instance-scoped)")
+        assertFalse(UpdateVerify.PINNED.contains(UpdateVerify.TEST_PUBKEY), "the armed set must not carry the sentinel")
 
         // A key SET (§M-D7): a real key alongside the sentinel still verifies (rotation overlap).
         assertTrue(UpdateVerify.verify(crypto, msg, sig, listOf(UpdateVerify.TEST_PUBKEY, Bytes.toB64(pub))))
@@ -58,10 +59,11 @@ class UpdateVerifyTest {
     @Test
     fun minSeq_isTheCompileTimeAntiRollbackFloor_lockstepWithExtension() {
         // §M-D4(a): the desktop anti-rollback floor (consumed by Platform.checkForUpdate as
-        // maxOf(storedSeq, MIN_SEQ)). Kept in LOCKSTEP with the extension's updateverify.ts
-        // `MIN_SEQ = 0` (a different lane owns the extension) — 0 admits the first real release
-        // (seq 1) while flooring any wiped/fresh state at ≥ 0. Bump BOTH constants together.
-        assertEquals(0L, UpdateVerify.MIN_SEQ, "MIN_SEQ must mirror extension updateverify.ts MIN_SEQ = 0")
+        // maxOf(storedSeq, MIN_SEQ)). 1 since the first signed manifest (seq 1, 2026-07-18):
+        // desktop refuses `seq < floor`, so 1 admits exactly the published floor. SEMANTIC (not
+        // numeric) lockstep with the extension's `MIN_SEQ = 0` — its comparator refuses
+        // `seq <= lastAccepted`, so the same "earliest acceptable seq is 1" floor is 0 there.
+        assertEquals(1L, UpdateVerify.MIN_SEQ, "desktop floor = first published seq (its < comparator admits equality)")
         assertTrue(UpdateVerify.MIN_SEQ >= 0L, "the floor is never negative")
 
         // The floor semantics Platform.checkForUpdate applies: a fresh install (0) or a wiped/garbage
