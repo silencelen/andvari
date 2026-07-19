@@ -146,13 +146,23 @@ only. Same code ships in `manifest.json` + `manifest.firefox.json`; runtime dete
 simply never render where the probe fails. Windows lane floored at **Chrome 147** to sidestep the
 Chrome-146 enroll ambiguity. Bump `minimum_chrome_version` consideration is runtime, not manifest.
 
-## 9. Day-1 empirical spike (BLOCKING before build)
+## 9. Day-1 empirical spike — RESULTS (2026-07-18, owner hardware)
 
-1. `navigator.credentials.create/get` from the connector page — Chrome/Win, Chrome/mac, Firefox — succeeds; `prf.enabled === true` after create.
-2. Does the Chrome action popup survive the native Windows Hello prompt? (if yes, inline fast-path allowed; if no, connector-only.)
-3. `get()` user-activation survives the SW→connector hop (else always the connector's own button).
-4. PRF output deterministic across two `get()`s on the same device; different across a synced second device (confirm the "rely on neither" stance).
-5. Runtime-withheld host permission → `SecurityError` shape → PIN fallback path.
+**GREEN. Key decisions settled:**
+- `UVPAA = true`, **`prf.enabled = true`**, PRF output **32 bytes, deterministic** across two `get()`s
+  → the lane is feasible and `K_bio = HKDF(PRF)` is reliable on this hardware.
+- `create()`/`get()` with `rp.id = andvari.monahanhosting.com` **succeeded with no SecurityError** →
+  the fixed-RP-ID-via-host-permission decision (§3) is confirmed; the host permission was honored.
+- **The action popup CANNOT host the ceremony** — `create()` failed twice with `NotAllowedError`,
+  while the **connector window survived every prompt** and reached DONE. ⇒ **DECISION: connector-only,
+  no inline popup fast-path** (simpler + universal; §5 updated). Firefox already required it — now
+  it's the single path everywhere.
+- `PRF at create() present? false` on this platform → enroll must do `create()` **then** `get()` (two
+  prompts) to obtain the secret; matches the §5 enroll flow.
+
+Still worth a quick confirm before/while building (not blocking the architecture): the same four
+values on **Firefox** and on **macOS/Touch ID**, and that a synced second device yields a *different*
+PRF (the "rely on portability in neither direction" stance). The tested browser/OS should be recorded.
 
 ## 10. Related decisions (from the design chat, for the record)
 
