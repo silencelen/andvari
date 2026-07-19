@@ -6,10 +6,21 @@ Sibling to the escrow/recovery-ceremony record (`docs/drills/escrow-genesis-cere
 
 ## 1. Update-manifest signing — Ed25519 (H2 §F / core `UpdateVerify.PINNED`)
 - **Public key (base64url):** `e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI`
-- Pinned in `core/.../client/UpdateVerify.kt` `PINNED` (the client verifies the `/downloads` manifest
-  signature against it). Sign a manifest with `tools/update-signer sign … --key <privkey>` on the
-  workstation.
+- **ARMED 2026-07-18**, pinned in `core/.../client/UpdateVerify.kt` `PINNED` + the extension's
+  `updateverify.ts PINNED_UPDATE_KEYS` (byte-locked by `updateverify.test.ts`). The channel is
+  **reference-instance-scoped** (multi-tenant §9): desktop `Platform.checkForUpdate` and extension
+  `background.checkForUpdate` run it ONLY when the configured server is the shipped default origin —
+  a self-host/custom origin never fetches the manifest (quiet "disabled", exactly the un-armed
+  posture), so this single key never renders anyone else's `/downloads` "unverified".
 - Private key: `~/.andvari/update-signing.key` on PRESTIGE (ACL: `PRESTIGE\silence:(R)`).
+- **Per-release step (every time `/downloads/manifest.json` changes):** bump `seq` to
+  max(published)+1 (§D8; first signed manifest = seq 1, 2026-07-18), refresh `signedAt` (ISO-8601
+  UTC; clients treat > 30–45 d as a stale channel), then on PRESTIGE:
+  `java -jar tools\update-signer\build\libs\andvari-update-signer.jar sign manifest.json --key %USERPROFILE%\.andvari\update-signing.key`
+  and publish `manifest.json` + `manifest.json.sig` to CT122 `/opt/andvari/downloads/` TOGETHER
+  (the sig is over the exact bytes — any re-serialization breaks it). Anti-rollback floors:
+  core `MIN_SEQ = 1` (desktop refuses `seq < floor`) / extension `MIN_SEQ = 0` (refuses
+  `seq <= lastAccepted`) — the SAME semantic floor, deliberately different numbers.
 - Loss/rotation: mint a new keypair, add the new pubkey to `PINNED` (a key SET — keep the old one
   during the overlap so fielded clients don't brick), rebuild clients, then retire the old.
 
@@ -44,11 +55,14 @@ gNwuByi91u4o7pgD/VoZzh/N/hSiYNzHBX9UAP9JXVBhYc5GOokigvadNSG+olfm
 -----END PGP PUBLIC KEY BLOCK-----
 ```
 
-## Status (2026-07-14)
+## Status (2026-07-18)
 - **Load-bearing OS-signing DONE for desktop:** MSI Authenticode + deb GPG live on CT122. That closes
   the H2 §M-D1 "trojaned installer → RCE" path for the .msi/.deb the user runs (the bytes are now
-  OS-verifiable, independent of the server).
-- **Secondary manifest-sig:** pubkey pinned; the client verify wiring (desktop + extension) is the
-  remaining code; each release's manifest must be signed on the workstation with `update-signer sign`.
-- **Extension:** still needs store-signing (CWS/AMO, `docs/runbooks/extension-store-publishing.md`) —
-  the only real integrity for a browser extension; that's H2 for the extension.
+  OS-verifiable, independent of the server). (0.19.0's MSI shipped UNSIGNED — re-run the Authenticode
+  step at the next Windows build.)
+- **Secondary manifest-sig: ARMED 2026-07-18** — ceremony pubkey pinned in core + extension,
+  reference-instance-scoped (see §1); first signed manifest = seq 1. Fielded ≤0.17.0-ext /
+  ≤0.19.0-desktop builds pin the sentinel and stay quiet; builds from the arming commit onward
+  verify. Each manifest change re-signs on PRESTIGE per the §1 per-release step.
+- **Extension store-signing DONE** (CWS + AMO live since 0.16.x, `extension-store-publishing.md`) —
+  the load-bearing integrity for the extension; the signed manifest is the belt for zip installs.

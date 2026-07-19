@@ -205,6 +205,14 @@ Chrome auto-updates installed users once review passes. For Firefox, host the re
 `firefox-updates.json` the script emits — so release-Firefox installs the Mozilla-signed build and
 auto-updates via the baked `update_url`.
 
+**Then RE-SIGN the downloads manifest (H2 — armed 2026-07-18).** Any release that changes
+`/downloads/manifest.json` (new ext version/urls, new deb/msi) must bump `seq` to max(published)+1,
+refresh `signedAt` (ISO-8601 UTC), and sign the EXACT final bytes with the ceremony key on the owner
+workstation — per-release step + key locations in `docs/runbooks/release-signing-keys.md` §1.
+Publish `manifest.json` + `manifest.json.sig` together, byte-identical to what was signed. Skipping
+this leaves armed (0.18+) reference-origin installs showing the muted "update listing couldn't be
+verified" line — fielded sentinel builds (≤0.17.0 ext / ≤0.19.0 desktop) never fetch and don't care.
+
 ### Releases faster than Chrome reviews — the push queue (standard process 2026-07-17)
 
 Chrome refuses a new upload while a prior version is still in review (`ITEM_NOT_UPDATABLE`), and

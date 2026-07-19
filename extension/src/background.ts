@@ -1146,6 +1146,11 @@ async function checkForUpdate(force = false): Promise<void> {
     }
     // §M-D3: a build pinning only the placeholder sentinel has NO update path — do not even fetch.
     if (!updatesEnabled()) return;
+    // Reference-instance scope (2026-07-18 arming; multi-tenant §9): the pinned key signs OUR
+    // `/downloads` only, so the channel runs solely against the shipped default origin. A
+    // self-host/custom origin gets NO fetch and NO quiet marker — the exact fail-closed-quiet
+    // "disabled" posture the un-armed build gave every origin. (Per-instance keys are later work.)
+    if (serverUrl !== DEFAULT_SERVER_URL) return;
 
     const base = serverUrl + "/downloads/manifest.json";
     let mResp: Response;

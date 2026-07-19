@@ -22,14 +22,16 @@ import nacl from "tweetnacl";
 /** Placeholder sentinel — mirrors core `UpdateVerify.TEST_PUBKEY`. Pinning ONLY this disables updates. */
 export const TEST_PUBKEY = "TEST_KEY_placeholder__pin_the_real_workstation_pubkey_here";
 
-/** UN-ARMED for the endpoint-agnostic pivot (design 2026-07-15-multi-tenant-endpoints §9): under
- *  self-hosting, a single owner-pinned key makes every self-host `/downloads`
- *  unverifiable-by-construction — so the shipped default re-pins the sentinel, hard-disabling the
- *  update path fail-closed-quiet (§M-D3: `updatesEnabled()` → false ⇒ the SW never fetches the
- *  manifest, no nag). Per-instance signed updates are separate later work; the signer + real key
- *  (ceremony 2026-07-14) stay on the owner workstation. Mirrors core `UpdateVerify.PINNED` —
+/** ARMED 2026-07-18 with the ceremony key (minted 2026-07-14, public record
+ *  docs/runbooks/release-signing-keys.md; the private key stays on the owner workstation), SCOPED TO
+ *  THE REFERENCE INSTANCE: the multi-tenant §9 objection — a single owner-pinned key makes every
+ *  self-host `/downloads` unverifiable-by-construction — is answered by scope, not by staying dark.
+ *  `background.checkForUpdate` runs the channel ONLY when the configured server is the shipped
+ *  DEFAULT_SERVER_URL, so a self-host/custom origin never fetches the manifest at all (the same
+ *  fail-closed-quiet no-nag state the un-armed build had). Per-instance signed updates stay separate
+ *  later work. Still a SET (§M-D7) for overlap rotation. Mirrors core `UpdateVerify.PINNED` —
  *  byte-locked by updateverify.test.ts, change together. */
-export const PINNED_UPDATE_KEYS: readonly string[] = [TEST_PUBKEY];
+export const PINNED_UPDATE_KEYS: readonly string[] = ["e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI"];
 
 /** §M-D4b — a signed manifest older than this is treated as a (quiet) STALE channel: withholding a
  *  security update by re-serving a stale-but-signed manifest is irreducible, so make it detectable. */
@@ -40,11 +42,12 @@ export const UPDATE_MAX_SIGNED_AGE_MS = 30 * 24 * 60 * 60 * 1000;
  *  this, shrinking the fresh-install window a T1 server could use to steer a client to a
  *  validly-signed-but-older (known-vuln) manifest below the floor.
  *
- *  0 for now: NO signed manifest is published to `/downloads` yet (H2 signing is owner-pending), so
- *  0 admits the first real release (`seq` 1) while still flooring any wiped state at ≥ 0.
- *  TODO: bump to the first published manifest's `seq` at the first signed release — §D8 has the
- *  signer derive `seq` as max(published)+1, so this floor should track the published floor.
- *  Mirrors core `UpdateVerify.MIN_SEQ` (a DIFFERENT lane owns core) — keep the two in lockstep. */
+ *  0 is CORRECT for a first-published seq of 1 (2026-07-18 arming): this module refuses
+ *  `seq <= lastAccepted` (the floor doubles as "already recorded"), so a floor of 0 admits exactly
+ *  seq ≥ 1 and refuses a validly-signed seq-0/negative fabrication. NOTE the deliberate NUMERIC
+ *  asymmetry with core `UpdateVerify.MIN_SEQ = 1`: desktop refuses `seq < floor` (equal passes), so
+ *  the SAME semantic floor — "earliest acceptable published seq is 1" — is 0 here and 1 there. Keep
+ *  the two in SEMANTIC lockstep (§D8: each release's signer derives seq as max(published)+1). */
 export const MIN_SEQ = 0;
 
 /** §M-D3 — true iff at least one pinned key is a REAL key (not the placeholder). A build pinning

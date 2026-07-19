@@ -23,18 +23,20 @@ object UpdateVerify {
     const val TEST_PUBKEY = "TEST_KEY_placeholder__pin_the_real_workstation_pubkey_here"
 
     /**
-     * UN-ARMED for the endpoint-agnostic pivot (design 2026-07-15-multi-tenant-endpoints §9): under
-     * self-hosting, a single owner-pinned key makes every self-host `/downloads`
-     * unverifiable-by-construction while keeping a live verification path aimed at untrusted
-     * servers — so the shipped default re-pins the [TEST_PUBKEY] sentinel, which hard-disables the
-     * whole update path fail-closed-quiet (§M-D3: [updatesEnabled] → false, no manifest fetch, no
-     * nag). `/downloads` keeps serving as plain pull distribution. Per-instance signed updates
-     * (key discovery/pinning/rotation) are separate later work; the signer + real key (ceremony
-     * 2026-07-14, `docs/runbooks/release-signing-keys.md`) stay on the owner workstation. Still a
-     * SET (§M-D7) so any future re-arm can rotate with overlap. Byte-locked to the extension's
-     * `updateverify.ts PINNED_UPDATE_KEYS` by `updateverify.test.ts` — change together.
+     * ARMED 2026-07-18 with the ceremony key (minted 2026-07-14 on the owner workstation, public
+     * record `docs/runbooks/release-signing-keys.md`; the PRIVATE key never leaves that machine —
+     * Option B). The 2026-07-15 multi-tenant pivot had UN-armed this (design §9): a single
+     * owner-pinned key makes every self-host `/downloads` unverifiable-by-construction. That
+     * objection is answered by SCOPE, not by staying dark: the CALLERS (desktop
+     * `Platform.checkForUpdate`, extension `background.checkForUpdate`) gate the whole channel on
+     * the configured server being the shipped REFERENCE origin — a self-host/custom origin never
+     * fetches the manifest at all, landing in the same fail-closed-quiet "disabled" state the
+     * un-armed build had. Per-instance signed updates (key discovery/pinning/rotation) remain
+     * separate later work. Still a SET (§M-D7) so a rotation can overlap without bricking fielded
+     * clients. Byte-locked to the extension's `updateverify.ts PINNED_UPDATE_KEYS` by
+     * `updateverify.test.ts` — change together.
      */
-    val PINNED: List<String> = listOf(TEST_PUBKEY)
+    val PINNED: List<String> = listOf("e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI")
 
     /**
      * §M-D4(a) — compile-time anti-rollback FLOOR: the lowest signed-manifest `seq` a FRESH desktop
@@ -43,12 +45,15 @@ object UpdateVerify {
      * (`maxOf(storedSeq, MIN_SEQ)`), shrinking the fresh-install window a T1 server could use to
      * steer a client to a validly-signed-but-older (known-vuln) manifest below the floor.
      *
-     * 0 for now: NO signed manifest is published to `/downloads` yet (H2 signing is owner-pending),
-     * so 0 admits the first real release (`seq` 1) while flooring any wiped state at ≥ 0. Bump to the
-     * first published manifest's `seq` at the first signed release. Mirrors the extension's
-     * `updateverify.ts MIN_SEQ = 0` (a DIFFERENT lane owns the extension) — keep the two in lockstep.
+     * 1 since the first signed manifest published (seq 1, 2026-07-18 — the arming release); track
+     * the published floor upward on later releases when raising it is worth the recompile. NOTE the
+     * deliberate NUMERIC asymmetry with the extension's `MIN_SEQ = 0`: desktop refuses
+     * `seq < floor` (equal passes — steady-state re-fetch of the accepted manifest), the extension
+     * refuses `seq <= lastAccepted` (its floor doubles as "already recorded"), so the SAME semantic
+     * floor — "the earliest acceptable published seq is 1" — is 1 here and 0 there. Keep the two in
+     * SEMANTIC lockstep (both must admit the current first-published seq and refuse anything older).
      */
-    const val MIN_SEQ: Long = 0
+    const val MIN_SEQ: Long = 1
 
     /**
      * §M-D3 — the update path is HARD-DISABLED while only the placeholder is pinned. A build that
