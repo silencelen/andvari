@@ -5,6 +5,10 @@
 *Extension patch 0.16.1: shortened the manifest `description` to fit the Chrome Web Store's 132-char
 summary limit (the endpoint-agnostic rewrite had pushed it to 166) — no behavioural change.*
 
+*Extension patch 0.16.4 — one-scroll vault list. The unlocked popup rendered This-site / All-logins
+/ Cards as three independently-scrolling boxes (a broken seam once the vault had enough logins); they
+now live in a single scroll region — one continuous list, as the store screenshots show.*
+
 *Extension patch 0.16.3 — TOTP sign-in in the popup + header polish. A TOTP-enrolled sign-in used to
 dead-end ("sign in from the web vault"); the popup now shows a one-time-code field and finishes the
 sign-in in place. The already-derived keys are held in service-worker memory only (never at rest — a
