@@ -442,9 +442,114 @@ test("a redeem whose co-key vanished is corrupt → wiped (orphaned blob)", asyn
 
 test("status reflects enrolled / armed / attempts across the lifecycle", async () => {
   const { qu } = makeEngine();
-  assert.deepEqual(await qu.status(), { enrolled: false, armed: false, attemptsRemaining: 0 });
+  assert.deepEqual(await qu.status(), { enrolled: false, armed: false, attemptsRemaining: 0, kind: null });
   await qu.enroll(enrollArgs());
-  assert.deepEqual(await qu.status(), { enrolled: true, armed: false, attemptsRemaining: 5 }); // unlocked-armed: not redeemable yet
+  assert.deepEqual(await qu.status(), { enrolled: true, armed: false, attemptsRemaining: 5, kind: "pin" }); // unlocked-armed: not redeemable yet
   await qu.arm({ access: "a", refresh: "r" });
-  assert.deepEqual(await qu.status(), { enrolled: true, armed: true, attemptsRemaining: 5 }); // locked-armed: redeemable
+  assert.deepEqual(await qu.status(), { enrolled: true, armed: true, attemptsRemaining: 5, kind: "pin" }); // locked-armed: redeemable
+});
+
+// ---------------------------------------------------------------- biometric method (0.17.0)
+
+// A deterministic PRF stand-in: evalPrf(credId, salt) = SHA-256(credId ‖ salt) — stable per (cred,salt)
+// like the real WebAuthn PRF, so the redeem re-derives the same K_bio and the AEAD opens.
+function fakeBiometric(over: Partial<{ prfEnabled: boolean; enrollThrows: boolean; evalThrows: boolean }> = {}) {
+  const state = { enrolls: 0, evals: 0, prfEnabled: true, enrollThrows: false, evalThrows: false, ...over };
+  const bio = {
+    enroll: async (_salt: Uint8Array) => {
+      state.enrolls++;
+      if (state.enrollThrows) throw new Error("NotAllowedError");
+      return { credentialId: "cred-1", prfEnabled: state.prfEnabled };
+    },
+    evalPrf: async (credentialId: string, salt: Uint8Array) => {
+      state.evals++;
+      if (state.evalThrows) throw new Error("NotAllowedError");
+      return sha256(new Uint8Array([...new TextEncoder().encode(credentialId), ...salt]));
+    },
+  };
+  return { bio, state };
+}
+const bioArgs = () => ({ uvk: UVK, userId: "user-A", email: "a@example.com", lastFullUnlockAt: 1_000_000_000_000, autoLockSeconds: 900 });
+
+test("bio: enrollBio → arm → beginRedeemBio round-trips the UVK, and the attempt counter never moves", async () => {
+  const { bio } = fakeBiometric();
+  const { qu, s } = makeEngine({ biometric: bio });
+  assert.deepEqual(await qu.enrollBio(bioArgs()), { ok: true });
+  assert.equal((await qu.status()).kind, "biometric");
+  await qu.arm({ access: "a", refresh: "r" });
+  for (let i = 0; i < 3; i++) {
+    const r = await qu.beginRedeemBio();
+    assert.ok(r.ok, `redeem ${i}`);
+    if (r.ok) assert.deepEqual(r.uvk, UVK);
+    assert.equal(s.peek()!.attemptsRemaining, 5, "bio redeem never decrements the counter");
+  }
+});
+
+test("bio: a cancelled ceremony (evalPrf throws) → bio_cancelled, record UNTOUCHED, a later retry works", async () => {
+  const fb = fakeBiometric();
+  const { qu, s } = makeEngine({ biometric: fb.bio });
+  await qu.enrollBio(bioArgs());
+  await qu.arm({ access: "a", refresh: "r" });
+  fb.state.evalThrows = true;
+  assert.deepEqual(await qu.beginRedeemBio(), { ok: false, code: "bio_cancelled" });
+  assert.ok(s.peek(), "record kept after a cancel");
+  assert.notEqual(s.peek()!.lockedTokens, null, "still armed after a cancel");
+  fb.state.evalThrows = false;
+  assert.ok((await qu.beginRedeemBio()).ok, "retry succeeds");
+});
+
+test("bio: enrollBio amendment 3 — a ceremony failure leaves the PRIOR record intact (ceremonies BEFORE wipe)", async () => {
+  const fb = fakeBiometric({ evalThrows: true });
+  const { qu, s, c } = makeEngine({ biometric: fb.bio });
+  await qu.enroll(enrollArgs()); // an existing PIN quick-unlock
+  const before = s.peek();
+  assert.deepEqual(await qu.enrollBio(bioArgs()), { ok: false, code: "bio_cancelled" });
+  assert.equal((s.peek() as QuRecord).blob.ct, (before as QuRecord).blob.ct, "prior PIN blob untouched");
+  assert.equal((await qu.status()).kind, "pin", "still the PIN method");
+  assert.ok(c.present(), "prior co-key not wiped by a failed bio enroll");
+});
+
+test("bio: enrollBio on a platform without PRF → bio_unsupported, nothing written", async () => {
+  const { bio } = fakeBiometric({ prfEnabled: false });
+  const { qu, s } = makeEngine({ biometric: bio });
+  assert.deepEqual(await qu.enrollBio(bioArgs()), { ok: false, code: "bio_unsupported" });
+  assert.equal(s.peek(), null);
+});
+
+test("bio: no biometric dep → enrollBio bio_unsupported, beginRedeemBio not_armed", async () => {
+  const { qu } = makeEngine(); // no biometric injected
+  assert.deepEqual(await qu.enrollBio(bioArgs()), { ok: false, code: "bio_unsupported" });
+  assert.deepEqual(await qu.beginRedeemBio(), { ok: false, code: "not_armed" });
+});
+
+test("amendment 1: a bio blob routed to the PIN lane → corrupt + WIPED (no uncaught assertPinKdfParams throw)", async () => {
+  const { bio } = fakeBiometric();
+  const { qu, s } = makeEngine({ biometric: bio });
+  await qu.enrollBio(bioArgs());
+  await qu.arm({ access: "a", refresh: "r" });
+  assert.deepEqual(await qu.beginRedeem("any pin"), { ok: false, code: "corrupt" });
+  assert.equal(s.peek(), null, "wiped");
+});
+
+test("amendment 1: a kind-STRIPPED bio blob (narrows to pin, no salt/kdfParams) → corrupt + wiped, no throw", async () => {
+  const { bio } = fakeBiometric();
+  const { qu, s } = makeEngine({ biometric: bio });
+  await qu.enrollBio(bioArgs());
+  await qu.arm({ access: "a", refresh: "r" });
+  delete (s.peek()!.blob as { kind?: string }).kind; // the storage-writer A8 attacker strips the discriminant
+  assert.deepEqual(await qu.beginRedeem("any pin"), { ok: false, code: "corrupt" });
+  assert.equal(s.peek(), null, "wiped, not an uncaught TypeError");
+});
+
+test("cross-kind: a PIN blob relabelled kind:'biometric' can't be opened by beginRedeemBio → corrupt + wiped", async () => {
+  const { bio } = fakeBiometric();
+  const { qu, s } = makeEngine({ biometric: bio });
+  await qu.enroll(enrollArgs());
+  await qu.arm({ access: "a", refresh: "r" });
+  const b = s.peek()!.blob as Record<string, unknown>; // transplant the discriminant + fake bio fields
+  b.kind = "biometric";
+  b.credentialId = "cred-1";
+  b.prfSalt = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 32 b64url bytes
+  assert.deepEqual(await qu.beginRedeemBio(), { ok: false, code: "corrupt" });
+  assert.equal(s.peek(), null, "the transplant fails-closed to corrupt+wipe (wrong key + bio AAD)");
 });
