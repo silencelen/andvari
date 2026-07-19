@@ -4,8 +4,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
+  bioUnlockErrorCopy,
   CARD_COPY_FAILED,
   CLIPBOARD_FAILED,
+  enrollBioErrorCopy,
   enrollErrorCopy,
   fillErrorCopy,
   lockNoticeCopy,
@@ -104,6 +106,32 @@ test("quick-unlock enroll: the entropy-floor nudges (breaker A2⊕B8) + the gate
   assert.equal(enrollErrorCopy("must_change_password"), "Set a new master password in the web vault before turning on quick unlock.");
   assert.equal(enrollErrorCopy("need_full_unlock"), "Enter your master password once more to set up quick unlock.");
   assert.equal(enrollErrorCopy(undefined), "Couldn't turn on quick unlock — try again.");
+});
+
+test("biometric redeem (0.17.0): cancel is retryable; wiped/revoked/hard-fault route like the PIN lane", () => {
+  assert.equal(bioUnlockErrorCopy("bio_cancelled"), "Device unlock was cancelled — try again, or use your master password.");
+  assert.equal(bioUnlockErrorCopy("expired"), "It's been a while since you signed in — enter your master password to continue.");
+  assert.equal(bioUnlockErrorCopy("corrupt"), "Quick unlock needs to be set up again — unlock with your master password.");
+  assert.equal(bioUnlockErrorCopy("stale_uvk"), "Quick unlock needs to be set up again — unlock with your master password.");
+  assert.equal(bioUnlockErrorCopy("revoked"), "Your session ended — sign in again with your master password.");
+  // hard faults keep the exact shared sentences (never softened) — pinned against the source of truth.
+  assert.equal(bioUnlockErrorCopy("identity_mismatch"), unlockErrorCopy("identity_mismatch"));
+  assert.equal(bioUnlockErrorCopy("kdf_policy"), unlockErrorCopy("kdf_policy"));
+  assert.equal(bioUnlockErrorCopy("network"), UNREACHABLE);
+  assert.equal(bioUnlockErrorCopy("server_error"), "The server had a problem answering — try again in a moment.");
+  // not_armed / aborted (benign races) + an absent code fall to the master password quietly.
+  assert.equal(bioUnlockErrorCopy("not_armed"), "Couldn't unlock with your device — unlock with your master password.");
+  assert.equal(bioUnlockErrorCopy("aborted"), "Couldn't unlock with your device — unlock with your master password.");
+  assert.equal(bioUnlockErrorCopy(undefined), "Couldn't unlock with your device — unlock with your master password.");
+});
+
+test("biometric enroll (0.17.0): unsupported keeps the PIN path; cancel is retryable; gates route like the PIN", () => {
+  assert.equal(enrollBioErrorCopy("bio_unsupported"), "This device can't do biometric quick unlock — set up a PIN instead.");
+  assert.equal(enrollBioErrorCopy("bio_cancelled"), "Setup was cancelled — try again when you're ready.");
+  assert.equal(enrollBioErrorCopy("locked"), "Unlock andvari first to set up quick unlock.");
+  assert.equal(enrollBioErrorCopy("must_change_password"), "Set a new master password in the web vault before turning on quick unlock.");
+  assert.equal(enrollBioErrorCopy("need_full_unlock"), "Enter your master password once more to set up quick unlock.");
+  assert.equal(enrollBioErrorCopy(undefined), "Couldn't turn on device quick unlock — try again.");
 });
 
 test("card + clipboard copy failures (#23): honest retryable sentences, never raw exception text", () => {

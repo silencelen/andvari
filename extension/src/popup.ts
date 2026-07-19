@@ -6,7 +6,7 @@
  * TOTP chips re-polled each second. The SW holds all key material — this page only messages it.
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
-import { CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
 import { getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
 import { shouldRouteToOptions } from "./grantflow";
@@ -50,6 +50,32 @@ let pinFallback = false;
  *  SW keys) and drop to the full form — self-healing the edge where the password changed server-side
  *  mid-window (every fresh code would 401 forever otherwise). */
 let totpBadCount = 0;
+/** 0.17.0: whether this platform reports a user-verifying platform authenticator (Windows Hello /
+ *  Touch ID / device PIN). Probed once per popup open; gates the biometric ENROLL shortcuts only. The
+ *  locked bio view is driven by the SW's committed `kind`, not this — a device that enrolled bio then
+ *  lost its authenticator still shows the button and degrades to the master-password fallback. */
+let bioCapable = false;
+
+/** Cosmetic platform label for the biometric buttons — the ceremony itself works regardless. */
+function bioLabel(): string {
+  const ua = navigator.userAgent;
+  if (/Mac|iPhone|iPad|iPod/.test(ua)) return "Touch ID";
+  if (/Windows/.test(ua)) return "Windows Hello";
+  return "your device";
+}
+
+async function probeBioCapable(): Promise<void> {
+  try {
+    bioCapable =
+      typeof PublicKeyCredential !== "undefined" &&
+      typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === "function" &&
+      (await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable());
+  } catch {
+    bioCapable = false;
+  }
+  const label = bioLabel();
+  el("qu-bio-unlock").textContent = label === "your device" ? "Unlock with your device" : `Unlock with ${label}`;
+}
 
 function showMsg(kind: "err" | "info", text: string): void {
   const m = el("msg");
@@ -147,9 +173,10 @@ async function refresh(): Promise<void> {
   // F26 (E1-7): say WHY the vault is locked — recorded for idle autolock only (manual lock
   // renders no reason line, web useAutoLock parity); verbatim web copy via lockNoticeCopy.
   if (s.lockNotice) showMsg("info", lockNoticeCopy(s.lockNotice.seconds));
-  // Armed quick unlock (and not falling back) → the PIN field owns the focus; else the master form.
+  // Armed quick unlock (and not falling back) → the PIN field (or the bio button) owns the focus; else
+  // the master form.
   if (s.quickUnlock.armed && !pinFallback) {
-    el("qu-pin").focus();
+    el(s.quickUnlock.kind === "biometric" ? "qu-bio-unlock" : "qu-pin").focus();
     return;
   }
   const email = el<HTMLInputElement>("email");
@@ -973,9 +1000,12 @@ el("totp-startover").addEventListener("click", () => void totpStartOver());
  *  the user hasn't chosen the master-password fallback. Unlocked: the Settings on/off row always, plus
  *  the one-time offer card when not enrolled + not dismissed (and the enroll form isn't already open). */
 function renderQuickUnlock(qu: Res<"status">["quickUnlock"], unlocked: boolean): void {
-  const showPin = !unlocked && qu.armed && !pinFallback;
-  el("qu-locked").hidden = !showPin;
-  el("qu-master-form").hidden = showPin;
+  const armedView = !unlocked && qu.armed && !pinFallback;
+  const bioView = armedView && qu.kind === "biometric"; // the SW's committed method drives which view
+  const pinView = armedView && qu.kind !== "biometric";
+  el("qu-locked").hidden = !pinView;
+  el("qu-bio-locked").hidden = !bioView;
+  el("qu-master-form").hidden = armedView;
   if (!unlocked) return; // showView already hid the unlocked-only offer/enroll/settings chrome
 
   el("qu-settings").hidden = false;
@@ -983,6 +1013,10 @@ function renderQuickUnlock(qu: Res<"status">["quickUnlock"], unlocked: boolean):
   el("qu-toggle").textContent = qu.enrolled ? "Turn off" : "Set up";
   const enrollOpen = !el("qu-enroll").hidden;
   el("qu-offer").hidden = qu.enrolled || qu.offerDismissed || enrollOpen;
+  // Biometric enroll shortcuts render only where the platform supports it (bioCapable): one in the
+  // offer card (when the offer shows), one inside the open enroll form.
+  el("qu-offer-bio-wrap").hidden = el("qu-offer").hidden || !bioCapable;
+  el("qu-enroll-bio-wrap").hidden = !enrollOpen || !bioCapable;
 }
 
 async function quUnlock(): Promise<void> {
@@ -1024,9 +1058,70 @@ el("qu-use-master").addEventListener("click", () => {
   (email.value ? el("password") : email).focus();
 });
 
+/** Biometric redeem (0.17.0). The SW opens the WebAuthn connector WINDOW; this popup usually loses focus
+ *  and CLOSES the moment it does (so the `await` below rarely resolves here — the connector shows its own
+ *  progress and the vault is unlocked when the popup is reopened). The branch runs only where the popup
+ *  survived or the redeem failed before the window opened; it renders a fallback message then. */
+async function quBioUnlock(): Promise<void> {
+  const btn = el<HTMLButtonElement>("qu-bio-unlock");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  clearMsg();
+  showMsg("info", "Opening your device’s unlock prompt…");
+  try {
+    const r = await ask({ type: "unlockWithBio" });
+    if (r?.ok) {
+      clearMsg();
+      await refresh();
+      return;
+    }
+    if (!r) return; // popup context surviving without a response (rare) — the connector owns the outcome
+    showMsg("err", bioUnlockErrorCopy(r.code));
+    // A benign/transient outcome keeps the bio view for a retry; anything that WIPED or invalidated the
+    // blob (expired / corrupt / stale_uvk / revoked / hard fault) drops us to the master password.
+    if (r.code === "not_armed" || r.code === "bio_cancelled" || r.code === "network" || r.code === "server_error") {
+      el("qu-bio-unlock").focus();
+    } else {
+      pinFallback = true;
+      await refresh();
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+el("qu-bio-unlock").addEventListener("click", () => void quBioUnlock());
+el("qu-bio-use-master").addEventListener("click", () => {
+  pinFallback = true;
+  el("qu-bio-locked").hidden = true;
+  el("qu-master-form").hidden = false;
+  const email = el<HTMLInputElement>("email");
+  (email.value ? el("password") : email).focus();
+});
+
+/** Biometric enroll (0.17.0). Like quBioUnlock, the connector window usually closes this popup — the
+ *  status on the next open reflects the result. When the popup survives, we render the outcome. */
+async function quEnrollBio(): Promise<void> {
+  clearMsg();
+  showMsg("info", "Opening your device’s setup prompt…");
+  const r = await ask({ type: "enrollQuickUnlockBio" });
+  if (!r) return; // popup closed when the connector opened — the reopened popup shows the result
+  if (r.ok) {
+    el("qu-enroll").hidden = true;
+    showMsg("info", "Device quick unlock is on for this browser.");
+    await refresh();
+  } else {
+    showMsg("err", enrollBioErrorCopy(r.code));
+    await refresh();
+  }
+}
+el("qu-offer-bio").addEventListener("click", () => void quEnrollBio());
+el("qu-enroll-bio").addEventListener("click", () => void quEnrollBio());
+
 function openEnroll(): void {
   el("qu-offer").hidden = true;
+  el("qu-offer-bio-wrap").hidden = true;
   el("qu-enroll").hidden = false;
+  el("qu-enroll-bio-wrap").hidden = !bioCapable; // reveal the biometric alternative where supported
   el<HTMLInputElement>("qu-new-pin").value = "";
   el("qu-new-pin").focus();
 }
@@ -1175,7 +1270,9 @@ el("host-grant-cta").addEventListener("click", () => {
 });
 
 void renderServerOrigin();
-void refresh();
+// Probe biometric capability BEFORE the first status render so the bio enroll shortcuts appear on the
+// first paint (not only after an interaction re-renders). The probe is fast and never throws out.
+void probeBioCapable().finally(() => void refresh());
 void renderUpdate();
 // Passive connectivity dot — quiet ping on open, result only in the header dot.
 void ask({ type: "ping" }).then((r) => setConn(r?.ok === true));

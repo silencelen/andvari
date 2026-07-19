@@ -220,7 +220,11 @@ export interface QuCoKey {
  *  as `bio_cancelled` with the record left UNTOUCHED. `enroll` returns prfEnabled=false on a platform
  *  without PRF (→ bio_unsupported). `evalPrf` returns the 32-byte PRF secret. */
 export interface QuBiometric {
-  enroll(prfSalt: Uint8Array): Promise<{ credentialId: string; prfEnabled: boolean }>;
+  /** Create (or, amendment 4, reuse) a platform passkey and report whether PRF is available. May return
+   *  a `prfSalt` — when the broker REUSED an existing on-record credential it evaluated it under the
+   *  stored salt, so the engine must bind the blob to THAT salt (not the fresh one it generated) or the
+   *  redeem PRF won't reproduce K_bio. Absent ⇒ a fresh credential was minted under the engine's salt. */
+  enroll(prfSalt: Uint8Array): Promise<{ credentialId: string; prfEnabled: boolean; prfSalt?: Uint8Array }>;
   evalPrf(credentialId: string, prfSalt: Uint8Array): Promise<Uint8Array>;
 }
 
@@ -383,12 +387,15 @@ export class QuickUnlock {
   async enrollBio(args: Omit<EnrollArgs, "pin">): Promise<EnrollBioResult> {
     const bio = this.deps.biometric;
     if (!bio) return { ok: false, code: "bio_unsupported" };
-    const prfSalt = this.deps.randomBytes(32);
+    let prfSalt = this.deps.randomBytes(32);
     let credentialId: string;
     let secret: Uint8Array;
     try {
       const c = await bio.enroll(prfSalt);
       if (!c.prfEnabled) return { ok: false, code: "bio_unsupported" }; // platform without PRF — nothing written
+      // Amendment 4: the broker may have REUSED an on-record passkey under its stored salt — bind the
+      // blob to that salt so the redeem eval reproduces the same PRF secret (a 32-byte salt only).
+      if (c.prfSalt && c.prfSalt.length === 32) prfSalt = c.prfSalt;
       credentialId = c.credentialId;
       secret = await bio.evalPrf(credentialId, prfSalt);
     } catch {

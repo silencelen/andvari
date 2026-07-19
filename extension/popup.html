@@ -76,6 +76,17 @@
         </p>
       </section>
 
+      <!-- Biometric quick-unlock locked view (0.17.0): shown instead of the PIN field when the armed
+           method is `biometric`. The button opens the WebAuthn connector window (the OS prompt would
+           close this popup, so the ceremony runs there — spec §5). No secret is entered here. -->
+      <section id="qu-bio-locked" class="qu-block" hidden>
+        <button id="qu-bio-unlock" class="primary">Unlock with your device</button>
+        <p class="qu-antiphish" role="note">andvari asks your device to confirm it’s you — it never asks for a password on a web page.</p>
+        <p style="margin: 10px 0 0; text-align: center;">
+          <button id="qu-bio-use-master" class="link dim">Use your master password instead</button>
+        </p>
+      </section>
+
       <!-- The full master-password form. Hidden while an armed PIN entry is showing (the toggle above). -->
       <div id="qu-master-form">
         <div class="field">
@@ -127,6 +138,11 @@
           <button id="qu-offer-setup" class="ghost sm">Set up quick unlock</button>
           <button id="qu-offer-dismiss" class="link dim">Not now</button>
         </div>
+        <!-- Biometric enroll shortcut (0.17.0) — shown only where the platform reports a user-verifying
+             authenticator (Windows Hello / Touch ID / device PIN). JS sets the label per platform. -->
+        <p id="qu-offer-bio-wrap" style="margin: 10px 0 0; text-align: center;" hidden>
+          <button id="qu-offer-bio" class="link">Use your device instead (Windows Hello / Touch ID)</button>
+        </p>
       </div>
 
       <!-- Inline enroll form (popup-only PIN entry — breaker B7). Revealed from the offer or Settings row. -->
@@ -140,6 +156,11 @@
           <button id="qu-enroll-save" class="primary sm">Turn on quick unlock</button>
           <button id="qu-enroll-cancel" class="link dim">Cancel</button>
         </div>
+        <!-- Biometric alternative to a PIN (0.17.0) — one method per device, so choosing this enrolls
+             biometric instead of the PIN above. Shown only where the platform supports it. -->
+        <p id="qu-enroll-bio-wrap" style="margin: 12px 0 0; text-align: center;" hidden>
+          <button id="qu-enroll-bio" class="link">Or use your device (Windows Hello / Touch ID)</button>
+        </p>
       </section>
 
       <div class="toolbar">

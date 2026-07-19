@@ -115,18 +115,21 @@ test("§4.1: with NO live session the switch skips the lock but still swaps to a
   assert.deepEqual(installed!.getTokens(), { access: null, refresh: null });
 });
 
-// ---- FIX 1: purgeServerData popup-only sender guard (the SHIPPED handler core) ----
+// ---- FIX 1: purgeServerData extension-page-only sender guard (the SHIPPED handler core) ----
+// 0.17.0: the caller's trust boolean is now URL-derived (extension-origin sender URL ⇒ trusted),
+// NOT `sender.tab !== undefined` — the options page (options_ui open_in_tab) HAS a tab, so the old
+// tab-based derivation refused the only legitimate caller (2026-07-18 review Finding 2).
 
-test("purgeServerData — a TAB (content-script) sender is REFUSED and purges nothing", async () => {
+test("purgeServerData — an UNTRUSTED (content-script/page) sender is REFUSED and purges nothing", async () => {
   const purged: string[] = [];
-  const r = await purgeServerDataFor("https://self.example", /* senderHasTab */ true, async (k) => void purged.push(k));
+  const r = await purgeServerDataFor("https://self.example", /* untrustedSender */ true, async (k) => void purged.push(k));
   assert.deepEqual(r, { ok: false }, "a page/content sender never reaches the destructive per-origin wipe");
   assert.deepEqual(purged, [], "no origin namespace was wiped");
 });
 
-test("purgeServerData — a popup sender purges the CANONICAL origin's namespace", async () => {
+test("purgeServerData — a trusted extension-page sender purges the CANONICAL origin's namespace", async () => {
   const purged: string[] = [];
-  const r = await purgeServerDataFor("HTTPS://Self.Example/", /* senderHasTab */ false, async (k) => void purged.push(k));
+  const r = await purgeServerDataFor("HTTPS://Self.Example/", /* untrustedSender */ false, async (k) => void purged.push(k));
   assert.deepEqual(r, { ok: true });
   assert.deepEqual(purged, [originKeyFor("https://self.example")], "canonicalized first, then purged by originKey");
 });
