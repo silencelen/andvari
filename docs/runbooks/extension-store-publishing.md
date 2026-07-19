@@ -215,3 +215,12 @@ watcher drains the queue by re-running `publish-extension.sh --chrome --version 
 store accepts it; on the reference deployment that's `andvari-cws-watch.sh` (every 6 h, notifies on
 success or on a non-review failure, silent while waiting). Firefox never queues — AMO signs
 unlisted submissions in seconds.
+
+**BATCH releases — Chrome review is per-submission time-to-live (limitation, 2026-07-18).** Every
+Chrome Web Store submission is independently reviewed (minutes → days) before it reaches users, and a
+new version can't even upload while the prior one is still pending. So each version you push adds a
+full review cycle of latency. When several fixes are landing close together, **hold them and ship one
+combined version** rather than a rapid 0.16.x drip — one review, not N. (Firefox has no such tax —
+AMO signs in seconds and auto-updates immediately, so the asymmetry is worth remembering: a fix can be
+live on Firefox the same minute while its Chrome twin waits in review.) Example: the 0.16.4 unlocked-
+list layout fix was deliberately held and folded into the 0.17.0 biometric release for this reason.
