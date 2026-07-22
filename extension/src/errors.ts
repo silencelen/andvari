@@ -60,7 +60,7 @@ type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "b
 
 /** Verbatim web/src/ui/errors.ts UNREACHABLE — the one canonical "can't reach the server"
  *  sentence, duplicated as a const because no build path from extension/ to web/src exists. */
-export const UNREACHABLE = "Can't reach the andvari server — check you're on the home network or VPN, then try again.";
+export const UNREACHABLE = "Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.";
 
 /**
  * Unlock failures → web's FreshStart ladder (Welcome.tsx), verbatim where web has the

@@ -37,7 +37,7 @@ class HouseholdCopyTest {
     fun canonConstants_pinnedVerbatim() {
         // TWIN: web/src/ui/errors.ts UNREACHABLE + extension/src/errors.ts UNREACHABLE
         // (em dash U+2014, ASCII apostrophes).
-        assertEquals("Can't reach the andvari server — check you're on the home network or VPN, then try again.", HouseholdCopy.UNREACHABLE)
+        assertEquals("Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.", HouseholdCopy.UNREACHABLE)
         assertEquals("Something went wrong — please try again.", HouseholdCopy.SOMETHING_WENT_WRONG)
         // TWIN: web Recover.tsx verify/reset ApiError branch.
         assertEquals("The server had a problem answering — try again in a moment.", HouseholdCopy.SERVER_PROBLEM)
@@ -130,7 +130,7 @@ class HouseholdCopyTest {
 
     @Test
     fun forError_transportSecurityAndUnknownTypes() {
-        assertEquals("Can't reach the andvari server — check you're on the home network or VPN, then try again.", HouseholdCopy.forError(IOException("connect timed out")))
+        assertEquals("Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.", HouseholdCopy.forError(IOException("connect timed out")))
         assertEquals("This server sent weakened security settings for your master password. The action was blocked to protect you — contact your administrator.", HouseholdCopy.forError(weakKdf()))
         // The tampering signal NEVER softens — and never echoes the long core message.
         assertEquals("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.", HouseholdCopy.forError(identityMismatch))
@@ -187,7 +187,7 @@ class HouseholdCopyTest {
         assertEquals("Too many requests — please wait a bit and try again.", HouseholdCopy.forSignInError(api(429, "rate_limited")))
         // A refusal that isn't about the credentials — the server answered; details may be fine.
         assertEquals("The server had a problem answering — your details may be fine. Try again in a moment.", HouseholdCopy.forSignInError(api(500, "internal")))
-        assertEquals("Can't reach the andvari server — check you're on the home network or VPN, then try again.", HouseholdCopy.forSignInError(IOException("no route")))
+        assertEquals("Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.", HouseholdCopy.forSignInError(IOException("no route")))
         // Post-login the password is PROVEN — a late throw is never "wrong password" (web parity).
         assertEquals("Sign-in failed. Please try again.", HouseholdCopy.forSignInError(CryptoException("aead open failed")))
         assertEquals("Sign-in failed. Please try again.", HouseholdCopy.forSignInError(RuntimeException("raw leak")))
@@ -205,7 +205,7 @@ class HouseholdCopyTest {
         assertEquals("Too many requests — please wait a bit and try again.", HouseholdCopy.forUnlockError(api(429, "rate_limited")))
         assertEquals("The server had a problem answering — your password may be fine. Try again in a moment.", HouseholdCopy.forUnlockError(api(500, "internal")))
         assertEquals("This andvari server requires a newer version of the app — update andvari, then try again.", HouseholdCopy.forUnlockError(UpgradeRequiredException("upgrade_required", leak)))
-        assertEquals("Can't reach the andvari server — check you're on the home network or VPN, then try again.", HouseholdCopy.forUnlockError(IOException("offline")))
+        assertEquals("Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.", HouseholdCopy.forUnlockError(IOException("offline")))
         // Unknown Throwable: never blame the password for an arbitrary failure (unlike web,
         // whose unlock structure guarantees only crypto reaches its terminal).
         assertEquals("Couldn't unlock — please try again.", HouseholdCopy.forUnlockError(RuntimeException("raw leak")))
@@ -245,7 +245,7 @@ class HouseholdCopyTest {
     @Test
     fun totpLadder_delegatesToTheSharedMap() {
         assertEquals("That code isn't right — check your authenticator and try again.", HouseholdCopy.forTotpError(api(400, "bad_totp_code")))
-        assertEquals("Can't reach the andvari server — check you're on the home network or VPN, then try again.", HouseholdCopy.forTotpError(IOException("offline")))
+        assertEquals("Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.", HouseholdCopy.forTotpError(IOException("offline")))
         assertEquals("Something went wrong — please try again.", HouseholdCopy.forTotpError(RuntimeException("raw leak")))
     }
 }
