@@ -21,7 +21,7 @@ import {
 test("UNREACHABLE is the canonical web sentence", () => {
   // Byte-equal to web/src/ui/errors.ts UNREACHABLE (em dash U+2014, ASCII apostrophes).
   // Duplicated because no build path from extension/ to web/src exists.
-  assert.equal(UNREACHABLE, "Can't reach the andvari server — check you're on the home network or VPN, then try again.");
+  assert.equal(UNREACHABLE, "Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.");
 });
 
 test("unlock ladder: every code renders the exact copy", () => {

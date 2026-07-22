@@ -33,7 +33,7 @@ export async function net<T>(p: Promise<T>): Promise<T> {
 }
 
 /** The one canonical "can't reach the server" sentence, reused across auth surfaces. */
-export const UNREACHABLE = "Can't reach the andvari server — check you're on the home network or VPN, then try again.";
+export const UNREACHABLE = "Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.";
 
 /** Policy/settings fetch failed — deliberately neutral between "unreachable" and "server
  *  errored", because the caller can't always tell and must not send users VPN-debugging

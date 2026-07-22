@@ -74,7 +74,7 @@ object HouseholdCopy {
     // ---- canonical sentences (see the twin table above) ----
 
     /** TWIN of web/src/ui/errors.ts UNREACHABLE + extension/src/errors.ts UNREACHABLE. */
-    const val UNREACHABLE = "Can't reach the andvari server — check you're on the home network or VPN, then try again."
+    const val UNREACHABLE = "Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again."
 
     /** The one neutral, retryable terminal — never a raw `.message`. */
     const val SOMETHING_WENT_WRONG = "Something went wrong — please try again."

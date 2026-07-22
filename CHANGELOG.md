@@ -21,6 +21,11 @@ logins") — every such surface now describes the real model:
   one-time code checked at every sign-in — recommended".
 - **Web sharing**: the break-glass refusal dropped its "home network" phrasing.
 
+*Post-release refresh (same 0.19.1; web redeployed, natives and the extension pick it up at their
+next builds): the shared "can't reach the server" sentence dropped its "check you're on the home
+network" advice — now "check your connection (and your VPN, if your server is private), then try
+again." Byte-twinned in core `HouseholdCopy`, web `errors.ts`, and extension `errors.ts` (+ pins).*
+
 ## 0.19.0 (2026-07-17) — point andvari at any server (endpoint-agnostic pivot) · web/server/apps 0.19.0, extension 0.16.1
 
 *Extension patch 0.16.1: shortened the manifest `description` to fit the Chrome Web Store's 132-char
