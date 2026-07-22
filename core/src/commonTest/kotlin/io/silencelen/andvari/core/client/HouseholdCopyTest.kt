@@ -68,7 +68,7 @@ class HouseholdCopyTest {
         assertEquals("The server had a problem answering — your password may be fine. Try again in a moment.", HouseholdCopy.UNLOCK_SERVER_PROBLEM)
         assertEquals("Couldn't unlock — please try again.", HouseholdCopy.UNLOCK_FAILED)
         // TWIN: web Welcome.tsx "public_login_requires_totp" (spec 03 §2).
-        assertEquals("This account has no TOTP enrolled — sign-in from the public address is blocked. Connect from inside (VPN/LAN), enroll TOTP in Settings, then retry.", HouseholdCopy.PUBLIC_LOGIN_REQUIRES_TOTP)
+        assertEquals("This account doesn't have two-factor sign-in turned on, and this address only accepts accounts that do. Connect from inside (VPN/LAN), turn it on in Settings, then retry.", HouseholdCopy.PUBLIC_LOGIN_REQUIRES_TOTP)
         assertEquals("This account needs a one-time code — enter the code from your authenticator app.", HouseholdCopy.TOTP_CODE_NEEDED)
         // NATIVE-PINNED: desktop totpOp wording (deliberately unifies android's variant).
         assertEquals("That code isn't right — check your authenticator and try again.", HouseholdCopy.BAD_TOTP_CODE)
@@ -182,7 +182,7 @@ class HouseholdCopyTest {
         assertEquals("Wrong email or master password.", HouseholdCopy.forSignInError(api(401, "unauthorized")))
         assertEquals("Wrong email, master password, or one-time code.", HouseholdCopy.forSignInError(api(401, "unauthorized"), totpTried = true))
         assertEquals("This account needs a one-time code — enter the code from your authenticator app.", HouseholdCopy.forSignInError(api(401, "totp_required")))
-        assertEquals("This account has no TOTP enrolled — sign-in from the public address is blocked. Connect from inside (VPN/LAN), enroll TOTP in Settings, then retry.", HouseholdCopy.forSignInError(api(403, "public_login_requires_totp")))
+        assertEquals("This account doesn't have two-factor sign-in turned on, and this address only accepts accounts that do. Connect from inside (VPN/LAN), turn it on in Settings, then retry.", HouseholdCopy.forSignInError(api(403, "public_login_requires_totp")))
         assertEquals("This andvari server requires a newer version of the app — update andvari, then try again.", HouseholdCopy.forSignInError(UpgradeRequiredException("upgrade_required", leak)))
         assertEquals("Too many requests — please wait a bit and try again.", HouseholdCopy.forSignInError(api(429, "rate_limited")))
         // A refusal that isn't about the credentials — the server answered; details may be fine.

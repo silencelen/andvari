@@ -1,5 +1,26 @@
 # andvari — changelog
 
+## 0.19.1 (2026-07-21) — two-factor sign-in messaging catches up with the public model · web/server/apps 0.19.1, extension unchanged
+
+Copy-only release, no wire or behavior change. Server-TOTP has been an *optional, recommended*
+second factor since the endpoint-agnostic pivot: an enrolled authenticator is checked on **every**
+sign-in (any origin), and an account without one is never gated (unless a self-host instance sets
+`ANDVARI_TOTP_REQUIRED=true`, or deliberately arms the opt-in break-glass twin origin). The clients'
+copy still described the retired household model ("asks when you sign in from outside your home
+network" / "can no longer sign in from outside your home network" / "protects break-glass/public
+logins") — every such surface now describes the real model:
+
+- **Web Settings** two-factor card: enable/disable confirmations, status line, and setup pitch now
+  say "every sign-in"; the card is policy-aware and notes when the server *requires* two-factor
+  (`ClientPolicy.totpRequired`), including that disabling then re-prompts enrollment at next sign-in.
+- **Web sign-in**: the one-time-code hint no longer claims "you are connecting via the public
+  address" (enrolled accounts are challenged on every origin); the break-glass refusal copy
+  (`public_login_requires_totp`, byte-twinned in core `HouseholdCopy`) now explains the address
+  policy instead of presuming a home network.
+- **Desktop + Android Settings**: card subtitle "protects break-glass/public logins" → "an extra
+  one-time code checked at every sign-in — recommended".
+- **Web sharing**: the break-glass refusal dropped its "home network" phrasing.
+
 ## 0.19.0 (2026-07-17) — point andvari at any server (endpoint-agnostic pivot) · web/server/apps 0.19.0, extension 0.16.1
 
 *Extension patch 0.16.1: shortened the manifest `description` to fit the Chrome Web Store's 132-char
