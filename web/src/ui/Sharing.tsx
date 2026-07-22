@@ -220,7 +220,7 @@ function friendlyError(e: unknown): string {
       case "cannot_target_self": return "That's your own account — you already own this vault.";
       case "user_inactive": return "That account has been disabled — ask your admin to re-enable it first.";
       case "not_vault_owner": return "Only the vault's owner can manage its members.";
-      case "sharing_public_disabled": return "Sharing can only be managed from the home network, not over the public address.";
+      case "sharing_public_disabled": return "Sharing can't be managed from this public address — connect from inside (VPN/LAN) and try again.";
       // ---- lifecycle (spec 03 §11 / F48) ----
       case "owner_must_transfer_or_delete": return "You own this vault, so you can't just leave it — make someone else the owner first, or delete it.";
       case "vault_deleted": return "This vault was deleted. The owner can restore it for a few more days.";

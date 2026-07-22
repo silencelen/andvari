@@ -59,7 +59,7 @@ export function Settings({ client, account, store, policy, onPasswordChanged, on
       <IdentityCard account={account} />
       <BackupCard account={account} onBackup={onBackup} onCsv={onCsv} />
       <OfflineCopyCard store={store} userId={account.userId} />
-      <TotpCard client={client} />
+      <TotpCard client={client} policy={policy} />
       <PasswordCard client={client} account={account} policy={policy} onPasswordChanged={onPasswordChanged} />
       <AppearanceCard />
       <div className="sheet">
@@ -404,9 +404,9 @@ function CopyButton({ value, label = "Copy" }: { value: string; label?: string }
   return <button type="button" className="ghost" onClick={copy}>{flash ? "Copied ✓" : label}</button>;
 }
 
-// ---- server TOTP (spec 03 §2 — protects break-glass/public logins) ----
+// ---- server TOTP (spec 03 §2 — optional second factor, verified at every sign-in) ----
 
-function TotpCard({ client }: { client: ApiClient }) {
+function TotpCard({ client, policy }: Pick<Props, "client" | "policy">) {
   const [status, setStatus] = useState<TotpStatus | null>(null);
   const [setup, setSetup] = useState<TotpSetupResponse | null>(null);
   const [code, setCode] = useState("");
@@ -448,31 +448,41 @@ function TotpCard({ client }: { client: ApiClient }) {
       setCode("");
     });
 
-  // #23 household voice: "break-glass"/"public address" is ops jargon (it stays in code
-  // comments) — members hear "outside your home network".
+  // §2.6 model: an enrolled second factor is verified on EVERY sign-in, every origin —
+  // the copy says "every sign-in", never the retired "outside your home network" framing.
+  // (An armed break-glass origin is the only place location still matters; its refusal
+  // copy lives in Welcome.tsx / HouseholdCopy.PUBLIC_LOGIN_REQUIRES_TOTP.)
   const confirm = () =>
     run(async () => {
       setStatus(await client.totpConfirm(code.replace(/\s/g, "")));
       setSetup(null);
       setCode("");
-      setMsg("Two-factor sign-in is on. Signing in from outside your home network now asks for a one-time code.");
+      setMsg("Two-factor sign-in is on. Every sign-in now also asks for a code from your authenticator app.");
     });
 
   const disable = () =>
     run(async () => {
       setStatus(await client.totpDisable(code.replace(/\s/g, "")));
       setCode("");
-      setMsg("Two-factor sign-in is off. This account can no longer sign in from outside your home network.");
+      setMsg(
+        policy?.totpRequired
+          ? "Two-factor sign-in is off. This server requires it, so your next sign-in will ask you to set it up again."
+          : "Two-factor sign-in is off. Signing in now asks only for your master password.",
+      );
     });
 
   return (
     <div className="sheet">
       <h2>Two-factor sign-in (server)</h2>
       <p className="muted" style={{ marginTop: 0 }}>
-        An extra one-time code the server asks for when you sign in from outside your home
-        network. It's separate from your vault's encryption — your master password alone
-        still unseals the hoard.
+        An extra one-time code the server asks for each time you sign in. Recommended:
+        even someone who learns your master password can't sign in without your
+        authenticator. It's separate from your vault's encryption — your master password
+        alone still unseals the hoard.
       </p>
+      {policy?.totpRequired && (
+        <p className="muted">This server requires two-factor sign-in for every account.</p>
+      )}
       {err && <Msg kind="err">{err}</Msg>}
       {msg && <Msg kind="info">{msg}</Msg>}
       {/* BL-1: the enroll/disable result ("enrolled"/"disabled") is async info — a polite
@@ -484,7 +494,7 @@ function TotpCard({ client }: { client: ApiClient }) {
         <p className="muted"><Busy>loading…</Busy></p>
       ) : status.enrolled ? (
         <>
-          <div className="msg info">On ✓ — signing in from outside your home network asks for your authenticator code.</div>
+          <div className="msg info">On ✓ — every sign-in asks for your authenticator code.</div>
           <div className="field">
             <label>One-time code (required to turn off)</label>
             <div className="secret-row">
@@ -498,9 +508,8 @@ function TotpCard({ client }: { client: ApiClient }) {
       ) : setup ? (
         <>
           <p className="muted">
-            Add this to your authenticator app, then confirm with a code. It guards
-            sign-ins from outside your home network — without it, this account can't
-            sign in from out there at all.
+            Add this to your authenticator app, then confirm with a code. From then on,
+            signing in asks for your current code alongside your master password.
           </p>
           {otpModules && (
             <div className="field">

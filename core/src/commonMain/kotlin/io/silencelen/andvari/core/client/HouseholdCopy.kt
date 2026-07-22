@@ -132,8 +132,9 @@ object HouseholdCopy {
      *  a general Throwable mapper must not blame the password for an arbitrary failure. */
     const val UNLOCK_FAILED = "Couldn't unlock — please try again."
 
-    /** TWIN of web Welcome.tsx "public_login_requires_totp" (spec 03 §2 break-glass). */
-    const val PUBLIC_LOGIN_REQUIRES_TOTP = "This account has no TOTP enrolled — sign-in from the public address is blocked. Connect from inside (VPN/LAN), enroll TOTP in Settings, then retry."
+    /** TWIN of web Welcome.tsx "public_login_requires_totp" (spec 03 §2 break-glass — only
+     *  an armed opt-in break-glass twin origin answers this; single-origin instances never do). */
+    const val PUBLIC_LOGIN_REQUIRES_TOTP = "This account doesn't have two-factor sign-in turned on, and this address only accepts accounts that do. Connect from inside (VPN/LAN), turn it on in Settings, then retry."
 
     /** Native sign-in fallback for `totp_required` reaching an error slot (both natives
      *  normally handle it as control flow — reveal the code field — before mapping). */

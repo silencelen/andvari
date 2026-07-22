@@ -530,12 +530,13 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
       onReady(account, store, meta);
     } catch (e) {
       if (e instanceof ApiError && e.code === "totp_required") {
-        // Break-glass origin (spec 03 §2): the password checked out; the server
-        // additionally wants the account's server-TOTP code.
+        // §2.6 row 1 (origin-independent): the account has server-TOTP enrolled; the
+        // password checked out and the server additionally wants the current code.
         setTotpNeeded(true);
         setErr("");
       } else if (e instanceof ApiError && e.code === "public_login_requires_totp") {
-        setErr("This account has no TOTP enrolled — sign-in from the public address is blocked. Connect from inside (VPN/LAN), enroll TOTP in Settings, then retry.");
+        // Only an armed break-glass twin origin (opt-in dual-origin self-hosts) answers this.
+        setErr("This account doesn't have two-factor sign-in turned on, and this address only accepts accounts that do. Connect from inside (VPN/LAN), turn it on in Settings, then retry.");
       } else if (e instanceof KdfPolicyError) {
         // H1 (spec 05 T1): the server tried to weaken the master-password KDF — a distinct
         // security block, never softened into a wrong-password/credentials error.
@@ -609,7 +610,7 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
       {totpNeeded && (
         <Field
           label="One-time code"
-          hint={<span className="muted">You are connecting via the public address — enter the code from your authenticator app.</span>}
+          hint={<span className="muted">This account has two-factor sign-in — enter the code from your authenticator app.</span>}
         >
           <input
             className="mono"

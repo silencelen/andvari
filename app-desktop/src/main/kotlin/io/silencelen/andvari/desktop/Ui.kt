@@ -2731,7 +2731,7 @@ private fun SettingsScreen(state: DesktopState) {
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
                 Text("Two-factor sign-in (server)", style = MaterialTheme.typography.titleLarge)
-                Text("A second factor the server checks at sign-in — protects break-glass/public logins.",
+                Text("An extra one-time code checked at every sign-in — recommended. Separate from your vault's encryption.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(12.dp))
                 val status = state.totpStatus
