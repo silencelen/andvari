@@ -38,10 +38,30 @@ Sibling to the escrow/recovery-ceremony record (`docs/drills/escrow-genesis-cere
 
 ## 3. Linux deb signing — GPG (detached `.asc`)
 - **Key:** `andvari releases <releases@monahanhosting.com>` (ed25519, sign-only)
-- **Fingerprint:** `03B3437A126C5C534CA0E9687514033356FDB4BF` · **Expires:** 2028 · machine-local, no passphrase.
-- 0.16.0 deb signed → `andvari-0.16.0.deb.asc` published to `/downloads`. Users verify with:
-  `gpg --import <this key> && gpg --verify andvari-0.16.0.deb.asc andvari-0.16.0.deb`
-- **Public key block:**
+- **CURRENT key (rotated 2026-07-23):** **Fingerprint `741CF143A5E1EDF3B9CBE923D1CC699A598417FC`** ·
+  **Expires 2028-07-22** · machine-local, no passphrase, plus an offline-keyring backup so a keyring
+  reset can't lose it again (the 2026-07-14 key was lost exactly that way — see rotation note).
+- Signed releases: `andvari-0.19.1.deb.asc` (this key) · `andvari-0.16.0.deb.asc` (RETIRED key below).
+  0.17.0–0.19.0 debs shipped **unsigned** (the signing lapse the rotation closes). Users verify with:
+  `gpg --import <this key> && gpg --verify andvari-<ver>.deb.asc andvari-<ver>.deb`
+- **Public key block (CURRENT, 741CF143…):**
+```
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+mDMEamKObhYJKwYBBAHaRw8BAQdAfCGQuARf7aOAXl8V53q0fWcSh+Fvk20iAqWU
+gB0QhJ60LmFuZHZhcmkgcmVsZWFzZXMgPHJlbGVhc2VzQG1vbmFoYW5ob3N0aW5n
+LmNvbT6ImQQTFgoAQRYhBHQc8UOl4e3zucvpI9HMaZpZhBf8BQJqYo5uAhsDBQkD
+wmcABQsJCAcCAiICBhUKCQgLAgQWAgMBAh4HAheAAAoJENHMaZpZhBf8MtcA/jWH
+9GMDbm9s8MfTLi/Cr/U57aIsdZp5swZI2X7Ja4zbAP9G2+wLeFWkIvv+8u74hAKw
+qW2MjPc7z9lVeWr3ilciCQ==
+=j6ly
+-----END PGP PUBLIC KEY BLOCK-----
+```
+- **ROTATION NOTE (2026-07-23):** the 2026-07-14 key (`03B3437A126C5C534CA0E9687514033356FDB4BF`)
+  was lost in a build-host keyring reset (~2026-07-16) with no backup — it signed only
+  `andvari-0.16.0.deb.asc`, which stays verifiable against its block below. No compromise is
+  suspected (loss, not leak); the old key simply can't sign again.
+- **Public key block (RETIRED 2026-07-23, 03B3437A… — verifies 0.16.0 only):**
 ```
 -----BEGIN PGP PUBLIC KEY BLOCK-----
 
