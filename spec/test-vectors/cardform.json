@@ -787,6 +787,198 @@
                 }
             ],
             "formKind": "login"
+        },
+        {
+            "name": "G3 [X3-A1] billing positive: billingZip on an anchored card form classifies cc-postal (anchor-gated refine postal post-pass)",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "billingZip",
+                    "maxLength": 10,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-postal"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "G3 [X3-A1](i) shipping-suppressor: billingZip fills but a shippingPostalCode (matches postalcode, ALSO ship-run) is suppressed to none on a mixed checkout",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "billingZip",
+                    "maxLength": 10,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-postal"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "shippingPostalCode",
+                    "maxLength": 10,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "none"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "G3 [X3-A3] anchor-gate: a card-free username+password+postal_code page stays a plain login; postal_code is none (login bit-identity)",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "username",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "site.example",
+                    "expected": "username"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "password",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "site.example",
+                    "expected": "password"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "postal_code",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "site.example",
+                    "expected": "none"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "G3 [X3-A1] anchor-gate: a billingZip with NO cc-number anchor never classifies cc-postal",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "billingZip",
+                    "maxLength": 10,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "none"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "G3 [X3-A2] hint banned: a postal-code AUTOFILL HINT on an anchored card form is NOT cc-postal (safe miss; name carries no postal token)",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [
+                        "postal-code"
+                    ],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "field_5",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "none"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "G3 [X3-A1](ii) ambiguity PRE-STATE: two postal-eligible fields both classify cc-postal in refine; the fail-closed fill-none/declare-none is enforced DOWNSTREAM at reveal/plan ([X3-A4d] declared set), NOT in refine",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "billingZip",
+                    "maxLength": 10,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-postal"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "cardZip",
+                    "maxLength": 10,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-postal"
+                }
+            ],
+            "formKind": "card"
         }
     ]
 }

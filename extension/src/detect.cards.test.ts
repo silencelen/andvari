@@ -8,7 +8,7 @@
 // directions ([A8]) and the capture/save gate ([A7]) are anchored here.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { bumpLabelGeneration, classifyCardField, classifyCardRadio, classifyCardSelect, demoteCsc, formlessGroups, isCvvNameOrId, labelSourcesOf } from "./detect.ts";
+import { bumpLabelGeneration, classifyCardField, classifyCardRadio, classifyCardSelect, demoteCsc, formlessGroups, isCvvNameOrId, labelSourcesOf, postalIsAmbiguous } from "./detect.ts";
 import type { FieldSignal } from "./urimatch.ts";
 
 const sig = (over: Partial<FieldSignal>): FieldSignal => ({ hints: [], htmlType: "text", htmlNameOrId: null, ...over });
@@ -263,8 +263,9 @@ test("[U5] label source strings classify PER-STRING — concatenation across sou
   assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Card number"]), "cardnumber");
   assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["CVV"]), "cardcvv");
   assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Expiry date"]), "cardexpiry");
-  // first verdict wins across the ordered sources:
-  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Postal code", "Card number"]), "cardnumber");
+  // first verdict wins across the ordered sources (G3: the first label must be genuinely
+  // verdict-less — "Postal code" now classifies cc-postal, covered by the G3 cardpostal suite below):
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Billing address", "Card number"]), "cardnumber");
 });
 
 test("[U6] label bounds — a string over 60 chars or 8 tokens is IGNORED, not a verdict", () => {
@@ -309,6 +310,85 @@ test("classifyCardSelect — label param parity: weakest, per-string, kind-restr
   assert.equal(classifyCardSelect("field_1", null, [], ["Card number"]), null); // §0 restriction holds on labels too
   assert.equal(classifyCardSelect("cardNumber", null, [], ["Expiry month"]), null); // a name verdict stops the label pass
   assert.equal(classifyCardSelect("field_1", "expYear", [], ["Expiry month"]), "cardexpyear"); // id beats label
+});
+
+// ---- G3 (design 2026-07-23 §G3): CC_POSTAL — anchor-gated, shipping-suppressor, ambiguity ----
+
+/** Anchored card-form verdict mirror of buildCardForm ([X3-A1]): per-field classifyCardField, and
+ *  ONLY when a cardnumber anchor is present, demoteCsc + the [X3-A1](ii) ambiguity drop (>1
+ *  surviving cardpostal → none). Returns null when there is NO anchor — a standalone postal is not
+ *  a card form, so cardpostal never emerges (login grouping stays bit-identical). */
+function cardFormKinds(fields: FieldSignal[]) {
+  const cardKinds = fields.map((f) => classifyCardField(f));
+  if (!cardKinds.includes("cardnumber")) return null; // no anchor → not a card form
+  let kinds = fields.map((f, i) => demoteCsc(cardKinds[i]!, f.htmlType ?? "", f.htmlNameOrId ?? "", ""));
+  // Share the PRODUCTION count predicate (buildCardForm's line uses the same postalIsAmbiguous) —
+  // no hand-mirror of the >1 comparison the [X3-A1](ii) fail-close turns on.
+  if (postalIsAmbiguous(kinds)) kinds = kinds.map((k) => (k === "cardpostal" ? null : k));
+  return kinds;
+}
+
+test("[X3-A1] cc-postal per-field verdict: billing* + bare postalcode token runs classify cardpostal", () => {
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "billingZip" })), "cardpostal");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "billing_postal" })), "cardpostal");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "cardZip" })), "cardpostal");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "avsZip" })), "cardpostal");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "postal_code" })), "cardpostal"); // [postal,code] whole-run = postalcode
+  // a card-free state/coupon field carries no postal token run.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "state" })), null);
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "couponCode" })), null);
+});
+
+test("[X3-A1] anchored form → billingZip is cardpostal; STANDALONE (no PAN anchor) → none (not a card form)", () => {
+  assert.deepEqual(
+    cardFormKinds([sig({ htmlType: "text", htmlNameOrId: "cardnumber" }), sig({ htmlType: "text", htmlNameOrId: "billingZip" })]),
+    ["cardnumber", "cardpostal"],
+  );
+  // standalone: no cardnumber anchor → no card form → cardpostal never emerges (the pure per-field
+  // verdict above is inert without an anchor; login grouping stays bit-identical).
+  assert.equal(cardFormKinds([sig({ htmlType: "text", htmlNameOrId: "billingZip" })]), null);
+});
+
+test("[X3-A1](i) shipping-suppressor: a shipping* postal string suppresses to none (per-string, terminal)", () => {
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "shippingPostalCode" })), null); // cardpostal + "shipping" run → suppressed
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "recipientPostalCode" })), null); // "recipient" suppressor
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "livraison_postalcode" })), null); // i18n suppressor
+  // control: the SAME postal token run WITHOUT a shipping token classifies normally.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "billingPostalCode" })), "cardpostal");
+  // suppression is terminal per-string: a shipping-postal NAME is not resurrected off a clean id.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "shippingPostalCode" }), "billingZip"), null);
+});
+
+test("[X3-A1](ii) ambiguity: >1 surviving cardpostal on an anchored form → declare/fill NONE", () => {
+  // two billing-postal fields both survive → fail-closed to none (never guess which is the card's).
+  assert.deepEqual(
+    cardFormKinds([
+      sig({ htmlType: "text", htmlNameOrId: "cardnumber" }),
+      sig({ htmlType: "text", htmlNameOrId: "billingZip" }),
+      sig({ htmlType: "text", htmlNameOrId: "postalCode" }),
+    ]),
+    ["cardnumber", null, null],
+  );
+  // a billing + a SHIPPING postal is NOT ambiguous: the shipping one is suppressed PRE-count, so the
+  // lone billing zip survives and fills.
+  assert.deepEqual(
+    cardFormKinds([
+      sig({ htmlType: "text", htmlNameOrId: "cardnumber" }),
+      sig({ htmlType: "text", htmlNameOrId: "billingZip" }),
+      sig({ htmlType: "text", htmlNameOrId: "shippingPostalCode" }),
+    ]),
+    ["cardnumber", "cardpostal", null],
+  );
+});
+
+test("[X3-A2] NO postal autofill hint — an autocomplete=postal-code is not cardpostal (name carries no postal token)", () => {
+  assert.equal(classifyCardField(sig({ hints: ["postal-code"], htmlNameOrId: "field_1" })), null);
+  // even on an anchored form the hinted-but-name-less field is a safe miss (accepted: the hint is
+  // ambiguous billing-vs-shipping, so CC_POSTAL is name/id/label TOKEN-RUN only).
+  assert.deepEqual(
+    cardFormKinds([sig({ htmlType: "text", htmlNameOrId: "cardnumber" }), sig({ hints: ["postal-code"], htmlNameOrId: "field_1" })]),
+    ["cardnumber", null],
+  );
 });
 
 // ---- [T1] formless grouping: select-blind clustering + post-attach ----
@@ -444,6 +524,28 @@ test("[W7] formlessGroups — a password beside a cardtype radio group groups by
   assert.equal(groups.length, 1);
   assert.equal(groups[0]!.container, w as any);
   assert.deepEqual(new Set(groups[0]!.fields.map((f: any) => f.input)), new Set([pass, r1, r2]));
+});
+
+test("[X3-A3] formlessGroups — a cardpostal is login-inert: a login widget beside it groups bit-identically", () => {
+  // <div w1> <input username> <input password> </div>  <div w2> <input text cardpostal> </div>
+  const root = new StubNode();
+  const w1 = new StubNode();
+  const w2 = new StubNode();
+  root.append(w1, w2);
+  const user = new StubInput();
+  const pass = new StubInput();
+  w1.append(user, pass);
+  const zip = new StubInput();
+  w2.append(zip);
+  // cardpostal is login-inert (excluded from the clustering pool like a select / cardtype radio),
+  // so it can neither drive the password's early-stop nor pull into the login widget's cluster; it
+  // rides the root leftover. The login widget groups byte-identically to a no-postal page.
+  const groups = formlessGroups([stubField(user, "username"), stubField(pass, "password"), stubField(zip, "none", "cardpostal")] as any, root as any);
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0]!.container, w1 as any);
+  assert.deepEqual(new Set(groups[0]!.fields.map((f: any) => f.input)), new Set([user, pass]));
+  assert.equal(groups[1]!.container, root as any);
+  assert.deepEqual(groups[1]!.fields.map((f: any) => f.input), [zip]);
 });
 
 // ---- [U7] label source extraction: ordered sources + the per-generation cache ----

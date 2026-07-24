@@ -62,7 +62,7 @@ const CVV_TOKENS = ["cvv", "cvc", "csc", "securitycode", "cardverification"];
 /** Card field kinds the in-page card-fill path (S3) recognises — the extension's projection of
  *  core `FieldKind`'s CC_* set. Reported to the SW as METADATA ONLY (never values, design [A2])
  *  and index the fill executor's per-field value setter. */
-export type CardFieldKind = "cardnumber" | "cardexpiry" | "cardexpmonth" | "cardexpyear" | "cardname" | "cardcvv" | "cardtype";
+export type CardFieldKind = "cardnumber" | "cardexpiry" | "cardexpmonth" | "cardexpyear" | "cardname" | "cardcvv" | "cardtype" | "cardpostal";
 
 /** Card autocomplete hints (normalized: lowercase, [-_] stripped) → kind — mirrors core
  *  `FieldClassifier.CARD_HINTS`. fieldSignalOf already maps cc-number→cardnumber and
@@ -93,7 +93,19 @@ const VECTOR_CARD_KIND: Record<string, CardFieldKind> = {
   "cc-csc": "cardcvv",
   "cc-name": "cardname",
   "cc-type": "cardtype",
+  "cc-postal": "cardpostal", // G3 [X3-A4c]
 };
+
+/** [X3-A4b] one of the four silent-gap sites adding CC_POSTAL breaks NO compile check on: the
+ *  cardfill.json `keywords` groups drive `CARD_NAME_KINDS` by a per-group `kind` lookup, and a
+ *  `VECTOR_CARD_KIND[g.kind]!` non-null assertion would SILENTLY map a future unmapped vector kind
+ *  to `undefined`. Throw at MODULE INIT instead so a keyword group whose kind this module has no
+ *  CardFieldKind for reds loudly the moment detect.ts loads (any suite importing it). */
+function vectorCardKind(kind: string): CardFieldKind {
+  const k = VECTOR_CARD_KIND[kind];
+  if (k === undefined) throw new Error(`detect.ts: cardfill.json keyword group kind '${kind}' has no CardFieldKind mapping`);
+  return k;
+}
 
 /** Card name/id/label token runs (whole-token-run matched) → kind — the SINGLE normative
  *  in-bundle copy is cardfill.ts `TABLES.keywords` ([U8]: ordered groups, deep-equalled against
@@ -101,7 +113,7 @@ const VECTOR_CARD_KIND: Record<string, CardFieldKind> = {
  *  load-bearing: exp-month/-year before the generic exp group ("expirymonth" would also
  *  whole-run-match the exp group's "expiry"), and the trailing bare-`creditcard` group ([U1])
  *  fires only when no specific kind matched. */
-const CARD_NAME_KINDS: [readonly string[], CardFieldKind][] = TABLES.keywords.map((g) => [g.keywords, VECTOR_CARD_KIND[g.kind]!]);
+const CARD_NAME_KINDS: [readonly string[], CardFieldKind][] = TABLES.keywords.map((g) => [g.keywords, vectorCardKind(g.kind)]); // [X3-A4b] THROWS on an unmapped vector kind
 
 /** HTML types the card NAME-keyword fallback may fire from (core `CARD_FALLBACK_HTML_TYPES`
  *  parity): the keyword is the card signal, never numeric-ness; a password type is NEVER
@@ -182,11 +194,20 @@ export function isCvvNameOrId(nameOrId: string): boolean {
 // i18n number tokens ride with i18n suppressors (§1.3): "numeroCarteCadeau" must not anchor.
 const GIFT_SUPPRESS_TOKENS = ["gift", "egift", "voucher", "loyalty", "coupon", "cadeau", "geschenk", "regalo"];
 
-/** One name/id string → card verdict via the token runs. "gift" = a cardnumber verdict was
- *  produced AND suppressed — distinct from null (no verdict at all) because suppression is
- *  TERMINAL for the field: the string positively identified a gift-card number, so the §8 htmlId
- *  retry must not resurrect it off a cleaner-looking id. */
-function cardKindFromTokens(raw: string): CardFieldKind | "gift" | null {
+/** [X3-A1](i) shipping-suppressor tokens (whole-token-run matched, [T10]/gift-guard shape): a
+ *  cardpostal verdict whose producing string ALSO reads shipping/delivery is suppressed — billing
+ *  zip must never fill/overwrite a shipping zip on a mixed single-form checkout ("shippingPostalCode"
+ *  → cardpostal + "shipping" run → suppressed). Suppress-only + postal-only: other kinds pass. */
+const SHIP_SUPPRESS_TOKENS = ["ship", "shipping", "delivery", "deliver", "recipient", "lieferung", "liefer", "livraison", "envio", "spedizione"];
+
+/** A per-string token verdict. Beyond the card kinds, two TERMINAL suppression sentinels — distinct
+ *  from null (no verdict at all) because suppression is terminal for the string, so the §8 htmlId
+ *  retry / label pass must not resurrect the kind off a cleaner-looking source: "gift" (a suppressed
+ *  cardnumber, [T10]) and "shipsuppress" (a suppressed cardpostal, [X3-A1](i)). */
+type CardTokenVerdict = CardFieldKind | "gift" | "shipsuppress" | null;
+
+/** One name/id string → card verdict via the token runs. See CardTokenVerdict for the sentinels. */
+function cardKindFromTokens(raw: string): CardTokenVerdict {
   // [W4] ASCII-fold at THIS chokepoint (not inside tokens(), which also feeds isCvvNameOrId →
   // suppressSave, a login-capture verdict that MUST stay byte-identical): "Prüfnummer" → folded
   // "pruefnummer" → tokens → the shipped cc-csc keyword matches (raw tokens() splits at ü and never
@@ -195,10 +216,16 @@ function cardKindFromTokens(raw: string): CardFieldKind | "gift" | null {
   for (const [kws, kind] of CARD_NAME_KINDS) {
     if (kws.some((kw) => tokenMatch(toks, kw))) {
       if (kind === "cardnumber" && GIFT_SUPPRESS_TOKENS.some((kw) => tokenMatch(toks, kw))) return "gift";
+      if (kind === "cardpostal" && SHIP_SUPPRESS_TOKENS.some((kw) => tokenMatch(toks, kw))) return "shipsuppress"; // [X3-A1](i)
       return kind;
     }
   }
   return null;
+}
+
+/** A token verdict that is a real card kind (neither null nor a suppression sentinel). */
+function isSuppressSentinel(k: CardTokenVerdict): k is "gift" | "shipsuppress" {
+  return k === "gift" || k === "shipsuppress";
 }
 
 /** [U6] label-source bounds: a string longer than 60 chars or 8 tokens is IGNORED — help-sentence
@@ -220,7 +247,7 @@ function cardKindFromLabels(labels: readonly string[] | undefined): CardFieldKin
     // an invariant instead of a coincidence).
     if (s.length > LABEL_MAX_CHARS || tokens(fold(s)).length > LABEL_MAX_TOKENS) continue; // [U6] ignored, not a verdict
     const k = cardKindFromTokens(s);
-    if (k !== null) return k === "gift" ? null : k;
+    if (k !== null) return isSuppressSentinel(k) ? null : k;
   }
   return null;
 }
@@ -247,10 +274,10 @@ export function classifyCardField(sig: FieldSignal, htmlId?: string | null, labe
   }
   if (!CARD_FALLBACK_HTML_TYPES.has((sig.htmlType ?? "").toLowerCase())) return null;
   const byName = cardKindFromTokens(sig.htmlNameOrId ?? "");
-  if (byName === "gift") return null;
+  if (isSuppressSentinel(byName)) return null; // gift / shipsuppress are TERMINAL (no id/label retry)
   if (byName) return byName;
   const byId = htmlId ? cardKindFromTokens(htmlId) : null;
-  if (byId !== null) return byId === "gift" ? null : byId;
+  if (byId !== null) return isSuppressSentinel(byId) ? null : byId;
   return cardKindFromLabels(labels);
 }
 
@@ -266,8 +293,8 @@ const SELECT_CARD_KINDS: ReadonlySet<CardFieldKind> = new Set(["cardexpmonth", "
  *  CARD_FALLBACK_HTML_TYPES check (that's input vocabulary) and NO classify() gap-gate: a select
  *  is definitionally not a login credential, so the login engine is never consulted. */
 export function classifyCardSelect(nameOrId: string | null, htmlId: string | null, hints: readonly string[], labels?: readonly string[]): CardFieldKind | null {
-  const restricted = (k: CardFieldKind | "gift" | null): CardFieldKind | null =>
-    k !== null && k !== "gift" && SELECT_CARD_KINDS.has(k) ? k : null;
+  const restricted = (k: CardTokenVerdict): CardFieldKind | null =>
+    k !== null && !isSuppressSentinel(k) && SELECT_CARD_KINDS.has(k) ? k : null;
   for (const h of hints) {
     const k = CARD_HINTS[h.toLowerCase().replace(/[_-]/g, "")];
     if (k) return restricted(k);
@@ -285,7 +312,7 @@ export function classifyCardSelect(nameOrId: string | null, htmlId: string | nul
  *  classify() — a `name=rememberLogin` radio must be inert (none), never poison the login pool. Any
  *  non-cardtype card verdict on name still stops the id/label retries (kind-restricted-away → null).*/
 export function classifyCardRadio(nameOrId: string | null, htmlId: string | null, hints: readonly string[], labels?: readonly string[]): CardFieldKind | null {
-  const restricted = (k: CardFieldKind | "gift" | null): CardFieldKind | null => (k === "cardtype" ? "cardtype" : null);
+  const restricted = (k: CardTokenVerdict): CardFieldKind | null => (k === "cardtype" ? "cardtype" : null);
   for (const h of hints) {
     const k = CARD_HINTS[h.toLowerCase().replace(/[_-]/g, "")];
     if (k) return restricted(k);
@@ -490,14 +517,21 @@ function hasNearbySubmit(el: Element): boolean {
  *  candidate). Exported for the pure suite ([T1] §11): the algorithm is structural (parentElement
  *  climbs + contains) and runs against node stubs — no live DOM. */
 export function formlessGroups(loose: Field[], root: Document | ShadowRoot): { container: Scope; fields: Field[] }[] {
-  // Review-fold (Tier 3): the inert remainder is EXACTLY selects + cardtype radios. A bare
+  // Review-fold (Tier 3): the inert remainder is selects + cardtype radios; G3 [X3-A3] ADDS
+  // cardpostal INPUTS to it (login-inert — a billing zip is never needed for PAN-CVV cohesion,
+  // and keeping it out of the clustering pool is what makes a card-free username+password+postal
+  // page group login-bit-identically before/after G3: the postal cannot drive a password's
+  // early-stop; it attaches post-formation by container like a select/radio). A bare
   // (kind!=="none" || textLike) predicate silently demoted tel/number-typed card INPUTS too —
   // collect() admits them via cardKind alone (textLike needs type text/email) — splitting the
   // shipped password-CVV↔PAN clustering on formless checkouts (no demotion, no CVV fill, and
-  // the [A7] save-suppression lost its anchor). Non-radio card inputs must cluster exactly as
-  // they did under the old instanceof partition.
+  // the [A7] save-suppression lost its anchor). Non-radio, non-postal card inputs must cluster
+  // exactly as they did under the old instanceof partition. (A billing zip named non-negatively is
+  // textLike regardless — that path is unchanged; only cardKind-ONLY postals, e.g. `postal_code`,
+  // become inert, and those were never collected pre-G3.)
   const loginEligible = (f: Field): boolean =>
-    f.input instanceof HTMLInputElement && (f.kind !== "none" || f.textLike || (f.cardKind !== null && f.input.type !== "radio"));
+    f.input instanceof HTMLInputElement &&
+    (f.kind !== "none" || f.textLike || (f.cardKind !== null && f.cardKind !== "cardpostal" && f.input.type !== "radio"));
   const inputs = loose.filter(loginEligible);
   const inert = loose.filter((f) => !loginEligible(f));
   const remaining = new Set(inputs);
@@ -686,7 +720,22 @@ function buildCardForm(form: HTMLFormElement | null, container: Scope, fields: F
     }
     refs.push({ kind, input: f.input });
   }
-  return { form, container, fields: refs };
+  // [X3-A1](ii) fail-closed on ambiguity: if MORE than one field on THIS anchored form survives as
+  // cardpostal (the [X3-A1](i) shipping-suppressor already dropped shipping zips per-string, so a
+  // billing+shipping mix leaves ONE), declare/fill NONE — never guess which billing zip is the card's.
+  // Dropping the refs here removes cardpostal from the form's kind-signature too, so the SW's frozen
+  // grant.kinds ([U15]) never carries it and revealCardForFill composes no postalCode ([X3-A4d]).
+  // The count predicate is the SHARED `postalIsAmbiguous` (also driven by the pure test) — this DOM
+  // path can't run under node --test, so the exported predicate is what carries direct coverage.
+  const finalRefs = postalIsAmbiguous(refs.map((r) => r.kind)) ? refs.filter((r) => r.kind !== "cardpostal") : refs;
+  return { form, container, fields: finalRefs };
+}
+
+/** [X3-A1](ii): >1 surviving cardpostal on one anchored form is ambiguous → the caller drops ALL
+ *  cardpostal (fail-closed, never guess the card's billing zip among several). Exported so
+ *  buildCardForm and the pure suite share ONE count predicate rather than a hand-mirror. */
+export function postalIsAmbiguous(kinds: readonly (CardFieldKind | null)[]): boolean {
+  return kinds.filter((k) => k === "cardpostal").length > 1;
 }
 
 /** All same-page card forms under `root`, document order — same grouping as findLoginForms so the

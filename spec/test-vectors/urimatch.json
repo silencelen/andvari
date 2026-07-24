@@ -1089,6 +1089,40 @@
             "htmlType": null,
             "htmlNameOrId": "securityCode",
             "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "postalCode",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "postal_code",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "billingZip",
+            "expected": "none"
+        },
+        {
+            "hints": [
+                "postal-code"
+            ],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "field_5",
+            "expected": "none"
         }
     ]
 }

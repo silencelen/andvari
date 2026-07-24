@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
-  "minimum_chrome_version": "109",
+  "minimum_chrome_version": "127",
   "name": "andvari",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Zero-knowledge password manager — fill and save logins. Works with any andvari server; set your own in Options.",
-  "permissions": ["storage", "activeTab", "scripting", "alarms", "offscreen"],
+  "permissions": ["storage", "activeTab", "scripting", "alarms", "offscreen", "contextMenus"],
   "host_permissions": ["https://andvari.monahanhosting.com/*"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "options_ui": { "page": "options.html", "open_in_tab": true },
+  "commands": { "_execute_action": { "description": "Open andvari" } },
   "background": { "service_worker": "background.js", "type": "module" },
   "action": {
     "default_popup": "popup.html",

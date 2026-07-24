@@ -1039,6 +1039,15 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
               </div>
             </div>
           )}
+          {doc.card.postalCode && (
+            <div className="field">
+              <label>Billing ZIP / postal code</label>
+              <div className="secret-row">
+                <input readOnly value={doc.card.postalCode} />
+                <button className="ghost" onClick={() => copy("postal code", doc.card!.postalCode!)}>Copy</button>
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -1589,6 +1598,8 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { 
           expMonth: padMonth(card.expMonth ?? "") ?? undefined,
           expYear: yearTo4(card.expYear ?? "") ?? undefined,
           securityCode: digitsOnly(card.securityCode ?? "") || undefined,
+          // G3 billing postal: verbatim (alphanumeric, never digits-only), just trimmed.
+          postalCode: (card.postalCode ?? "").trim() || undefined,
           brand: brand(cardDigits) ?? undefined,
         },
       };
@@ -1734,6 +1745,10 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { 
                 is applied once, at submit, beside the other card normalizations. */}
             <SecretInput ariaLabel="Security code" value={card.securityCode ?? ""} onChange={(v) => setCard({ securityCode: v })} />
           </div>
+          <Field label="Billing ZIP / postal code">
+            {/* Verbatim (alphanumeric internationally) — trimmed once, at submit. */}
+            <input inputMode="numeric" autoComplete="off" value={card.postalCode ?? ""} onChange={(e) => setCard({ postalCode: e.target.value })} />
+          </Field>
         </>
       )}
       <Field label="Notes">

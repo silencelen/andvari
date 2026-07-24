@@ -2297,6 +2297,8 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
                 }
             }
             card.securityCode?.takeIf { it.isNotBlank() }?.let { CopyRow("Security code", it, secret = true, clearSeconds = clipClear) }
+            // G3 billing postal — not a secret; Copy parity through the auto-cleared clipboard.
+            card.postalCode?.takeIf { it.isNotBlank() }?.let { CopyRow("Billing ZIP / postal code", it, secret = false, clearSeconds = clipClear) }
         }
         doc.notes?.takeIf { it.isNotBlank() }?.let { ReadOnly("Notes", it) }
         if (doc.attachments.isNotEmpty()) {
@@ -2473,6 +2475,7 @@ private fun Editor(
     var expMonth by remember { mutableStateOf(initial.card?.expMonth ?: "") }
     var expYear by remember { mutableStateOf(initial.card?.expYear ?: "") }
     var securityCode by remember { mutableStateOf(initial.card?.securityCode ?: "") }
+    var cardPostal by remember { mutableStateOf(initial.card?.postalCode ?: "") }
     var notes by remember { mutableStateOf(initial.notes ?: "") }
     var attachments by remember { mutableStateOf(initial.attachments) }
     var pending by remember { mutableStateOf(listOf<PendingUpload>()) }
@@ -2548,6 +2551,8 @@ private fun Editor(
             // Masked-with-reveal (unlike the login password's plain field): a CVV is glanceable-
             // short and worth shielding from shoulders by default. Digits-only at save.
             Secret("Security code (optional — stored encrypted like everything else)", securityCode) { securityCode = it }
+            // G3 billing postal — verbatim (alphanumeric), trimmed once on Save.
+            Field("Billing ZIP / postal code", cardPostal, { cardPostal = it })
         }
         Field("Notes", notes, { notes = it }, singleLine = false)
         Spacer(Modifier.height(8.dp))
@@ -2600,6 +2605,7 @@ private fun Editor(
                     expMonth = expiry?.expMonth ?: CardNormalize.padMonth(expMonth),
                     expYear = expiry?.expYear ?: CardNormalize.yearTo4(expYear),
                     securityCode = CardNormalize.digitsOnly(securityCode).ifEmpty { null },
+                    postalCode = cardPostal.trim().ifEmpty { null },
                     brand = CardNormalize.brand(cardNumber),
                 ) else initial.card,
                 attachments = attachments)

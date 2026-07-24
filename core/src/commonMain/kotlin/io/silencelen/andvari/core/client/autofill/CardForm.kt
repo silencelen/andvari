@@ -6,9 +6,15 @@ enum class FormKind { LOGIN, CARD, MIXED }
 /** Output of [CardForm.refine]; [kinds] is index-aligned with the input fields. */
 data class RefinedForm(val kinds: List<FieldKind>, val formKind: FormKind)
 
+// [X3-A4a] exhaustive `when` (NO `else`) so a new FieldKind is COMPILE-FORCED to decide its
+// card-ness here — the silent-skip hazard the design names (adding CC_POSTAL flipped no compile
+// check under the old `||` chain). CardKindPartitionTest is the runtime backstop.
 val FieldKind.isCardKind: Boolean
-    get() = this == FieldKind.CC_NUMBER || this == FieldKind.CC_EXP_MONTH || this == FieldKind.CC_EXP_YEAR ||
-        this == FieldKind.CC_EXP || this == FieldKind.CC_NAME || this == FieldKind.CC_CSC || this == FieldKind.CC_TYPE
+    get() = when (this) {
+        FieldKind.CC_NUMBER, FieldKind.CC_EXP_MONTH, FieldKind.CC_EXP_YEAR, FieldKind.CC_EXP,
+        FieldKind.CC_NAME, FieldKind.CC_CSC, FieldKind.CC_TYPE, FieldKind.CC_POSTAL -> true
+        FieldKind.USERNAME, FieldKind.PASSWORD, FieldKind.NONE -> false
+    }
 
 /**
  * Form-level card refinement — the pure post-pass over a form's classified fields, shared by all
@@ -38,6 +44,13 @@ object CardForm {
                 val f = fields[i]
                 if (kinds[i] == FieldKind.PASSWORD && (f.maxLength ?: 0) in 1..4 && f.inputMode?.lowercase() == "numeric") {
                     kinds[i] = FieldKind.CC_CSC
+                } else if (kinds[i] == FieldKind.NONE && FieldClassifier.postalKind(f) == FieldKind.CC_POSTAL) {
+                    // [X3-A1] anchor-gated billing postal: a login-inert postal field (classify →
+                    // NONE) is promoted ONLY inside this CC_NUMBER-anchored cluster — a card-free
+                    // login form never enters here (login bit-identity). The [X3-A1](ii) >1-postal
+                    // fail-close is enforced DOWNSTREAM (CardFill.plan / reveal declared set), not
+                    // here — refine just labels every eligible field CC_POSTAL.
+                    kinds[i] = FieldKind.CC_POSTAL
                 }
             }
         }

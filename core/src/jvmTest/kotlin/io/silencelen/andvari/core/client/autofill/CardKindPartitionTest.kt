@@ -16,6 +16,7 @@ class CardKindPartitionTest {
             listOf(
                 FieldKind.CC_NUMBER, FieldKind.CC_EXP_MONTH, FieldKind.CC_EXP_YEAR,
                 FieldKind.CC_EXP, FieldKind.CC_NAME, FieldKind.CC_CSC, FieldKind.CC_TYPE,
+                FieldKind.CC_POSTAL,
             ),
             FieldKind.values().filter { it.isCardKind },
         )

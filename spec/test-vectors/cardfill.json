@@ -1,5 +1,5 @@
 {
- "_doc": "Tier-1 card fill vectors (design 2026-07-23-card-autofill-tier1 \u00a711). `tables` is the NORMATIVE copy of the brand-synonym / contains-word / month tables \u2014 each engine deep-equals its compiled-in tables against these, so drift on either side reds that side ([T14]). `selectIndexShared` = label-only <option> lists (options as plain strings; [T8] pins opt.value's attr-absent\u2192text fallback, so the value pass \u2261 the text pass and one string per option is lossless) \u2014 BOTH engines run these through their select matcher; `expected` is the 0-based option index, null = no match (safe miss, never a guess). Matching is PASS-MAJOR ([T2]): pass 1 whole-parse, 2 digit-extraction, 3 month-name (FIRST maximal ASCII-letter run, lowercased, EQUALITY against fullName/abbreviation \u2014 prefix matching forbidden, [T3]), 4 combined-expiry digits, 5 cc-type synonym-exact-else-contains-primary; the earliest pass with any match wins, options in document order within a pass. `selectIndexDom` = value\u2260text option pairs ({value,text}; within an option value is checked before text) \u2014 TS engine ONLY (Android exposes one string per option). `expiryText`/`yearText`/`monthText` = the \u00a74 text-target adapters; stored halves are canonical (expMonth 'MM', expYear 4-digit); maxLength null = undeclared (DOM -1); any case with a non-null placeholder carries tsOnly:true (core has no placeholder signal \u2014 its \u00a79 table is exactly the placeholder-null slice). The [T16] separator comes ONLY from the anchored /m{1,2}\\s*([-/.])\\s*y/i sniff on the placeholder (default '/') \u2014 never a bare contains-scan. cc-type cases carry the stored number AND its derived brand (consistent by CardNormalize.brand \u2014 each engine consumes whichever its API takes). Tier-2 (design 2026-07-23-card-autofill-tier2 \u00a71.3 [U8]): `tables.keywords` is the ORDERED [{kind, keywords}] group array \u2014 the normative name/id vocabulary; group order is load-bearing (month/year groups before the generic exp group; the TRAILING [U1] {cc-number: [creditcard]} group fires only when no specific kind matched, so bare credit_card \u2192 number while credit_card_cvv/_expiry/_type keep their specific verdicts) and BOTH engines assert SEQUENCE equality against it \u2014 kinds AND order AND contents, never per-key lookups (a per-key assert stays vacuously green on a reorder). `dateLeg` = CORE-ONLY consumer (the Android CC_EXP AUTOFILL_TYPE_DATE leg, \u00a75): expectedMs is the epoch ms of (expYear, expMonth, day 1) UTC via days-from-civil. `splitPan` = SHARED dual-consumer since Tier 3 [W2] \u2014 BOTH engines assert the SAME chunk arrays (core mirrors ext `splitPan` as `CardNormalize.splitPanChunks`): boxes = declared maxLengths in document order (null = undeclared); a split needs >1 box, every box declared 1..8, AND sum \u2265 PAN length \u2192 sequential digit chunks, final box a short remainder; a chunk is \"\" ONLY when earlier boxes already consumed every digit ([8,8,8]/15 \u2192 box3 \"\", whereas [4,4,4,4]/15 \u2192 a 3-digit last chunk); expected null = no split (one box, an undeclared box, or sum < digits \u2014 the whole-PAN fallback + fit-guard governs). The read-back `verifySplitPanLanded` stays the only ext-only split piece. `splitPanPlan` = CORE-ONLY consumer [W1] (the CardFill.plan integration): `clusters[{frameDomain, boxes[{kind, autofillType, maxLength}]}]` flatten to CcFields in order (box index = position across ALL clusters' boxes); `autofillType` is the CardFill.AUTOFILL_TYPE_* int (1 TEXT / 3 LIST / 4 DATE); `pan`/`expMonth`/`expYear` drive CardData. The >1-CC_NUMBER-TEXT-box split pre-pass runs PER frame cluster AFTER the anchor gate, so a cluster with no CC_NUMBER anchor is zero-filled; an ineligible (undeclared-maxLength) >1-box shape fills the FIRST box whole-PAN and SUPPRESSES the rest ([W1]); a single CC_NUMBER box is unchanged (whole PAN \u2014 the design's \"single-box \u2192 whole PAN\" lives here in the plan, not in the pure `splitPan`, which returns null for one box). `expectedPlanned` = [{index, text}] for the filled TEXT boxes ONLY; a box absent from it is SKIPPED. dateLeg/splitPanPlan are whole CORE-ONLY sections; splitPan/tables are dual \u2014 the tsOnly flag has no inverse, so a mixed single-consumer section would red the wrong engine. `tables.asciiFold` = the shared [W3] char\u2192STRING digraph fold (explicit, NOT normalize(\"NFD\")), asserted by BOTH engines; the non-decomposables (\u00df \u00f8 \u00e6 \u0153 \u0142 \u0111 \u00f0 \u00fe) are the pin that reds an NFD-style fork, uppercase forms map identically, unmapped chars pass through. `tables.monthNamesByLocale` = the shared [W5] locale\u2192[12 FOLDED full month names] for de/fr/es/pt/it/nl, authored in the asciiFold alphabet (M\u00e4rz\u2192maerz \u2014 the design doc agrees since the review-fold (entries MUST be fold-stable \u2014 the matcher folds the page option with the same table); authored maerz so a folded \"M\u00e4rz\" option actually matches), asserted by BOTH engines and consulted post-fold in the month-name select pass only (zero cross-month collisions vs every listed locale + en, verified). `radioIndexFor` = EXT-ONLY [W9]/[T14] (V3 radio card-type): {options:[{value,text}], brand} \u2192 index|null, the pure cc-type matcher (synonym-exact across all options, then contains-primary) reused for a radio group.",
+ "_doc": "Tier-1 card fill vectors (design 2026-07-23-card-autofill-tier1 \u00a711). `tables` is the NORMATIVE copy of the brand-synonym / contains-word / month tables \u2014 each engine deep-equals its compiled-in tables against these, so drift on either side reds that side ([T14]). `selectIndexShared` = label-only <option> lists (options as plain strings; [T8] pins opt.value's attr-absent\u2192text fallback, so the value pass \u2261 the text pass and one string per option is lossless) \u2014 BOTH engines run these through their select matcher; `expected` is the 0-based option index, null = no match (safe miss, never a guess). Matching is PASS-MAJOR ([T2]): pass 1 whole-parse, 2 digit-extraction, 3 month-name (FIRST maximal ASCII-letter run, lowercased, EQUALITY against fullName/abbreviation \u2014 prefix matching forbidden, [T3]), 4 combined-expiry digits, 5 cc-type synonym-exact-else-contains-primary; the earliest pass with any match wins, options in document order within a pass. `selectIndexDom` = value\u2260text option pairs ({value,text}; within an option value is checked before text) \u2014 TS engine ONLY (Android exposes one string per option). `expiryText`/`yearText`/`monthText` = the \u00a74 text-target adapters; stored halves are canonical (expMonth 'MM', expYear 4-digit); maxLength null = undeclared (DOM -1); any case with a non-null placeholder carries tsOnly:true (core has no placeholder signal \u2014 its \u00a79 table is exactly the placeholder-null slice). The [T16] separator comes ONLY from the anchored /m{1,2}\\s*([-/.])\\s*y/i sniff on the placeholder (default '/') \u2014 never a bare contains-scan. cc-type cases carry the stored number AND its derived brand (consistent by CardNormalize.brand \u2014 each engine consumes whichever its API takes). Tier-2 (design 2026-07-23-card-autofill-tier2 \u00a71.3 [U8]): `tables.keywords` is the ORDERED [{kind, keywords}] group array \u2014 the normative name/id vocabulary; group order is load-bearing (month/year groups before the generic exp group; the TRAILING [U1] {cc-number: [creditcard]} group fires only when no specific kind matched, so bare credit_card \u2192 number while credit_card_cvv/_expiry/_type keep their specific verdicts) and BOTH engines assert SEQUENCE equality against it \u2014 kinds AND order AND contents, never per-key lookups (a per-key assert stays vacuously green on a reorder). `dateLeg` = CORE-ONLY consumer (the Android CC_EXP AUTOFILL_TYPE_DATE leg, \u00a75): expectedMs is the epoch ms of (expYear, expMonth, day 1) UTC via days-from-civil. `splitPan` = SHARED dual-consumer since Tier 3 [W2] \u2014 BOTH engines assert the SAME chunk arrays (core mirrors ext `splitPan` as `CardNormalize.splitPanChunks`): boxes = declared maxLengths in document order (null = undeclared); a split needs >1 box, every box declared 1..8, AND sum \u2265 PAN length \u2192 sequential digit chunks, final box a short remainder; a chunk is \"\" ONLY when earlier boxes already consumed every digit ([8,8,8]/15 \u2192 box3 \"\", whereas [4,4,4,4]/15 \u2192 a 3-digit last chunk); expected null = no split (one box, an undeclared box, or sum < digits \u2014 the whole-PAN fallback + fit-guard governs). The read-back `verifySplitPanLanded` stays the only ext-only split piece. `splitPanPlan` = CORE-ONLY consumer [W1] (the CardFill.plan integration): `clusters[{frameDomain, boxes[{kind, autofillType, maxLength}]}]` flatten to CcFields in order (box index = position across ALL clusters' boxes); `autofillType` is the CardFill.AUTOFILL_TYPE_* int (1 TEXT / 3 LIST / 4 DATE); `pan`/`expMonth`/`expYear` drive CardData. The >1-CC_NUMBER-TEXT-box split pre-pass runs PER frame cluster AFTER the anchor gate, so a cluster with no CC_NUMBER anchor is zero-filled; an ineligible (undeclared-maxLength) >1-box shape fills the FIRST box whole-PAN and SUPPRESSES the rest ([W1]); a single CC_NUMBER box is unchanged (whole PAN \u2014 the design's \"single-box \u2192 whole PAN\" lives here in the plan, not in the pure `splitPan`, which returns null for one box). `expectedPlanned` = [{index, text}] for the filled TEXT boxes ONLY; a box absent from it is SKIPPED. dateLeg/splitPanPlan are whole CORE-ONLY sections; splitPan/tables are dual \u2014 the tsOnly flag has no inverse, so a mixed single-consumer section would red the wrong engine. `tables.asciiFold` = the shared [W3] char\u2192STRING digraph fold (explicit, NOT normalize(\"NFD\")), asserted by BOTH engines; the non-decomposables (\u00df \u00f8 \u00e6 \u0153 \u0142 \u0111 \u00f0 \u00fe) are the pin that reds an NFD-style fork, uppercase forms map identically, unmapped chars pass through. `tables.monthNamesByLocale` = the shared [W5] locale\u2192[12 FOLDED full month names] for de/fr/es/pt/it/nl, authored in the asciiFold alphabet (M\u00e4rz\u2192maerz \u2014 the design doc agrees since the review-fold (entries MUST be fold-stable \u2014 the matcher folds the page option with the same table); authored maerz so a folded \"M\u00e4rz\" option actually matches), asserted by BOTH engines and consulted post-fold in the month-name select pass only (zero cross-month collisions vs every listed locale + en, verified). `radioIndexFor` = EXT-ONLY [W9]/[T14] (V3 radio card-type): {options:[{value,text}], brand} \u2192 index|null, the pure cc-type matcher (synonym-exact across all options, then contains-primary) reused for a radio group. `postalText` = SHARED G3 [X3-A4c] CC_POSTAL fill leg (both engines consume it, the non-vacuity pin for the new CardFill.textFor / deriveCardWrite branch): a stored postalCode fills a `target:text` cardpostal box VERBATIM (no digit-strip: postal codes are alphanumeric internationally), fit-guarded (a value longer than maxLength SKIPS, never truncates), a missing/empty postal skips; a `target:select` cardpostal derives no faithful write (safe miss). tables.keywords gains a DISTINCT cc-postal group (billingzip/billingpostal/cardpostal/cardzip/avszip/postalcode) placed AFTER cc-type and BEFORE the trailing bare-creditcard [U1] group so no cross-kind run overlaps (verified: shipping* names never match a postal keyword; the shipping-SUPPRESSOR [X3-A1](i) fires only on a string that first produced a postal verdict, e.g. shippingPostalCode). CC_POSTAL is ANCHOR-GATED: it is login-inert in the bare per-field classifier (urimatch.json standalone stays none) and emerges ONLY in an anchored card form's refine post-pass (cardform.json), so login grouping stays bit-identical.",
  "tables": {
   "synonyms": {
    "visa": [
@@ -194,6 +194,17 @@
      "cardbrand",
      "ccbrand",
      "cbtype"
+    ]
+   },
+   {
+    "kind": "cc-postal",
+    "keywords": [
+     "billingzip",
+     "billingpostal",
+     "cardpostal",
+     "cardzip",
+     "avszip",
+     "postalcode"
     ]
    },
    {
@@ -1413,6 +1424,52 @@
     }
    ],
    "brand": "visa",
+   "expected": null
+  }
+ ],
+ "postalText": [
+  {
+   "name": "stored postal fills a cardpostal text target verbatim",
+   "postalCode": "98101",
+   "target": "text",
+   "maxLength": null,
+   "options": [],
+   "expected": "98101"
+  },
+  {
+   "name": "postal fits an exact-width target",
+   "postalCode": "98101",
+   "target": "text",
+   "maxLength": 5,
+   "options": [],
+   "expected": "98101"
+  },
+  {
+   "name": "fit-guard skips a target narrower than the stored postal (partial beats wrong, never truncate)",
+   "postalCode": "98101",
+   "target": "text",
+   "maxLength": 4,
+   "options": [],
+   "expected": null
+  },
+  {
+   "name": "a missing postalCode skips (never guesses a postal)",
+   "postalCode": "",
+   "target": "text",
+   "maxLength": null,
+   "options": [],
+   "expected": null
+  },
+  {
+   "name": "select / non-input skip: a cardpostal <select> derives no faithful write (safe miss, never guessed)",
+   "postalCode": "98101",
+   "target": "select",
+   "maxLength": null,
+   "options": [
+    "98101",
+    "98102",
+    "98103"
+   ],
    "expected": null
   }
  ]

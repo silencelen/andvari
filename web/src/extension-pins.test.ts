@@ -308,7 +308,9 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     const bySig = spanOf(ct, "function cardFormBySig(", "function applyCardFill(");
     expect(bySig).toContain('.join(",") === sig');
     expect(bySig).toContain("?? null");
-    const fillEntry = spanOf(ct, "async function fillCardIntoForm(", "function maybeOpen(");
+    // End the span at the G2 capture section (G2's own composedPath()[0] lives BELOW this, and is
+    // not part of the fill-redemption path this pin guards) — not at maybeOpen far downstream.
+    const fillEntry = spanOf(ct, "async function fillCardIntoForm(", "// ---- G2 save-card capture");
     expect(fillEntry).toContain('typeof sig === "string" ? cardFormBySig(sig) : null');
     expect(fillEntry).toContain('code: "no_form"');
     // The Tier-1 shape this replaced — any positional pick — must never come back on this path.
@@ -336,12 +338,13 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(bg).toContain('const sig = target.kinds.join(",")');
   });
 
-  it("[U17] composedPath()[0] retargets the FOUR shadow-blind paths: focusin, input, keydown, click-reopen", () => {
-    // Exactly four `[0]` retarget sites — reverting any one to e.target drops the count (the
-    // submit listener and the click submit-control probe are deliberate non-members: submit does
-    // not compose, and the control probe walks the WHOLE path). The `[=(]` prefix keeps the
-    // count over CODE shapes only — the [U17] doc comment quotes the literal in backticks.
-    expect(ct.match(/[=(] ?e\.composedPath\(\)\[0\]/g)).toHaveLength(4);
+  it("[U17] composedPath()[0] retargets the shadow-blind paths: focusin, input, keydown, click-reopen (+G2 capture keydown)", () => {
+    // The Tier-2 four retarget sites, PLUS one added by G2's card-submit-capture keydown-Enter
+    // path (design §G2 [X2-A3]) — a shadow-blind Enter in a card field must retarget the same way.
+    // Five total; reverting any to e.target drops the count. The submit listener and the click
+    // submit-control probe stay deliberate non-members (submit does not compose; the control probe
+    // walks the WHOLE path). The `[=(]` prefix keeps the count over CODE shapes only.
+    expect(ct.match(/[=(] ?e\.composedPath\(\)\[0\]/g)).toHaveLength(5);
     expect(ct).toMatch(/"focusin",[\s\S]{0,120}?maybeOpen\(e\.composedPath\(\)\[0\] \?\? null\)/);
     expect(ct).toMatch(/"input",[\s\S]{0,120}?e\.composedPath\(\)\[0\] \?\? e\.target/);
     expect(ct).toMatch(/"keydown",[\s\S]{0,120}?e\.composedPath\(\)\[0\] \?\? e\.target/);
@@ -444,10 +447,11 @@ describe("Tier-3 card autofill pins (design 2026-07-23-…-tier3.md §7) — V1�
     // low and split the PAN off the cluster. Review-fold: every OTHER card-classified input
     // (tel/number PANs, negative-name CVVs — kind "none"/!textLike but cardKind non-null) must STAY
     // in the pool via the cardKind clause, or the shipped password-CVV↔PAN clustering splits and
-    // the [A7] save-suppression loses its anchor. The pin is the FULL predicate.
+    // the [A7] save-suppression loses its anchor. The pin is the FULL predicate. G3 [X3-A3] adds
+    // `cardpostal` to the inert set (login-inert, attaches post-formation) alongside radios.
     const fg = spanOf(dt, "export function formlessGroups(", "const remaining = new Set(inputs)");
     expect(fg).toContain(
-      'f.input instanceof HTMLInputElement && (f.kind !== "none" || f.textLike || (f.cardKind !== null && f.input.type !== "radio"))',
+      'f.input instanceof HTMLInputElement &&\n    (f.kind !== "none" || f.textLike || (f.cardKind !== null && f.cardKind !== "cardpostal" && f.input.type !== "radio"))',
     );
     expect(fg).toContain("const inputs = loose.filter(loginEligible);");
     expect(fg).toContain("const inert = loose.filter((f) => !loginEligible(f));");

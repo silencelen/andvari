@@ -556,6 +556,9 @@ export interface CardData {
   expYear?: string;
   securityCode?: string;
   brand?: string;
+  /** G3 billing postal ([X3-N1]): typed optional, serializer-safe cross-version (a pre-G3 client
+   *  preserves it as an unknown key — no formatVersion bump). Alphanumeric, stored verbatim. */
+  postalCode?: string;
 }
 
 /** The plaintext item document (spec 02 §3). `type` is chosen at creation, never changes. */

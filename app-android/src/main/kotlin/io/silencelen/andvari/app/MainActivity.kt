@@ -1856,6 +1856,8 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
                 )
             }
             card.securityCode?.takeIf { it.isNotBlank() }?.let { SecretCopyRow("Security code", it, ctx, clipClear) }
+            // G3 billing postal — not a secret; Copy parity through the policy-cleared clipboard.
+            card.postalCode?.takeIf { it.isNotBlank() }?.let { CopyRow("Billing ZIP / postal code", it, ctx, clipClear) }
         }
         doc.notes?.takeIf { it.isNotBlank() }?.let { ReadOnlyRow("Notes", it) }
         if (doc.attachments.isNotEmpty()) {
@@ -1945,6 +1947,7 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     var cardExpMonth by rememberSaveable { mutableStateOf(initial.card?.expMonth ?: "") }
     var cardExpYear by rememberSaveable { mutableStateOf(initial.card?.expYear ?: "") }
     var cardSecurityCode by rememberSaveable { mutableStateOf(initial.card?.securityCode ?: "") }
+    var cardPostal by rememberSaveable { mutableStateOf(initial.card?.postalCode ?: "") }
     var notes by rememberSaveable { mutableStateOf(initial.notes ?: "") }
     var attachments by rememberSaveable(stateSaver = attachmentListSaver) { mutableStateOf(initial.attachments) }
     // Pending pick BYTES live in the ViewModel (they can't go in SavedState) — see
@@ -2070,6 +2073,8 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
             // by default. Digits-only is applied once, on Save, beside the other normalizations.
             SecretField("Security code", cardSecurityCode) { cardSecurityCode = it }
             Text("Optional — stored encrypted like everything else.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+            // G3 billing postal — verbatim (alphanumeric), trimmed once on Save.
+            Field("Billing ZIP / postal code", cardPostal, { cardPostal = it }, keyboard = KeyboardType.Number)
         }
         Field("Notes", notes, { notes = it }, singleLine = false)
         Spacer(Modifier.height(12.dp))
@@ -2114,6 +2119,7 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
                     expMonth = expiry?.expMonth ?: CardNormalize.padMonth(cardExpMonth),
                     expYear = expiry?.expYear ?: CardNormalize.yearTo4(cardExpYear),
                     securityCode = CardNormalize.digitsOnly(cardSecurityCode).ifBlank { null },
+                    postalCode = cardPostal.trim().ifBlank { null },
                     brand = CardNormalize.brand(cardNumber),
                 ) else initial.card,
                 attachments = attachments,

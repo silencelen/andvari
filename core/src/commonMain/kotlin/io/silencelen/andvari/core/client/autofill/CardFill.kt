@@ -121,6 +121,10 @@ object CardFill {
             // A single CC_NUMBER box never enters (splitPanChunks needs >1) → unchanged.
             val panBoxes = cluster.filter { it.kind == FieldKind.CC_NUMBER && it.autofillType == AUTOFILL_TYPE_TEXT }
             val consumed = HashSet<Int>() // box indices the pre-pass planned or suppressed → out of the planField loop
+            // [X3-A1](ii) fail-closed ambiguity: >1 CC_POSTAL in ONE cluster fills NONE of them — a
+            // billing zip must never land in the wrong one of two postal boxes. A single postal box
+            // falls through to planField and fills normally.
+            cluster.filter { it.kind == FieldKind.CC_POSTAL }.takeIf { it.size > 1 }?.forEach { consumed.add(it.index) }
             if (panBoxes.size > 1) {
                 val chunks = CardNormalize.splitPanChunks(card.number ?: "", panBoxes.map { it.maxLength })
                 panBoxes.forEachIndexed { i, box ->
@@ -160,6 +164,10 @@ object CardFill {
             FieldKind.CC_EXP_YEAR -> CardNormalize.yearTo4(card.expYear ?: "")
             FieldKind.CC_EXP -> composeExp(card, maxLength)
             FieldKind.CC_CSC -> card.securityCode?.takeIf { it.isNotBlank() }
+            // [X3-A4c] billing postal fills VERBATIM (no digit-strip — postal codes are alphanumeric
+            // internationally); the generic fit-guard below SKIPS a value longer than maxLength
+            // (partial beats wrong, never truncate). A missing/blank postal skips.
+            FieldKind.CC_POSTAL -> card.postalCode?.takeIf { it.isNotBlank() }
             // The DERIVED brand's display label ("Visa") — never the stored brand field, which
             // is display-only and can be stale ([T9]-adjacent: one derivation everywhere).
             // Unknown IIN → null → the kind is missed, never guessed.

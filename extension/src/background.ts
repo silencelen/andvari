@@ -1,5 +1,5 @@
 import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
-import { brand, cardSubtitle, composeShortExpiry, digitsOnly, padMonth, yearTo4 } from "./card";
+import { brand, cardSubtitle, composeShortExpiry, digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import {
   adIdkey,
   adItem,
@@ -19,7 +19,7 @@ import {
   type KdfParams,
 } from "./crypto";
 import { startEvents, type EventsHandle, type WsLike } from "./events";
-import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "./format";
+import { CARD_FORMAT_VERSION, LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "./format";
 import { isNewerVersion } from "./version";
 import { evaluateSignedManifest, MIN_SEQ, updatesEnabled } from "./updateverify";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
@@ -32,6 +32,7 @@ import type {
   EnrollCode,
   FillOutcome,
   MatchItem,
+  PendingCardSave,
   PendingSave,
   Req,
   Res,
@@ -151,6 +152,9 @@ interface CardData {
   expYear?: string;
   securityCode?: string;
   brand?: string;
+  /** G3 (spec 02 §3 / design 2026-07-23 §G3): typed billing postal code — cross-version-safe
+   *  (unknown fields survive re-encrypts via spread; a 0.2.x client can't touch fv2). */
+  postalCode?: string;
 }
 /** Parsed plaintext doc. Unknown fields (notes, favorite, passwordHistory, …) survive re-encrypts
  *  via object spread; `attachments` is typed because a put's wire attachmentIds must mirror it —
@@ -251,6 +255,19 @@ const grants = new Map<number, { itemId: string; expiresMs: number }>();
  *  [U15] redemption composes against grant.kinds (never the live registry: a mint→redeem rescan
  *  could widen egress) and [U12] the content script fills only a current-sig-matching form. */
 const cardGrants = new Map<number, { itemId: string; frameId: number; origin: string; kinds: CardFieldKind[]; sig: string; expiresMs: number }>();
+/** G2 save-card ([X2-A1]): the tab's pending card save — a MODULE-SCOPE Map, NEVER a `TabState`
+ *  field. `persistTabs` serializes the entire tabs map to `storage.session` on every state change,
+ *  so a `TabState.pendingCardSave` would write the FULL PAN at rest across a lock (the [iii] hazard).
+ *  The full number lives ONLY here, SW-side. Single-slot per tab ([X2-A4] — a new capture REPLACES).
+ *  Cleared in doLock ([X2-A2b]), the onUpdated "loading" handler, and onRemoved. */
+const pendingCardSave = new Map<
+  number,
+  { host: string; number: string; expMonth: string; expYear: string; cardholderName: string; postalCode?: string; frameId: number; updatesItemId?: string; updatesItemName?: string }
+>();
+/** G2 [X2-A5]: per-tab capture dedupe key + timestamp, recorded SYNCHRONOUSLY before any await in
+ *  captureCard so a click+submit double-fire of the SAME PAN can't both pass. Memory-only. */
+const cardCaptureDedupe = new Map<number, { key: string; t: number }>();
+const CARD_CAPTURE_DEDUPE_MS = 1500;
 /** In-flight write count — resync must not replace session.items out from under a landing put. */
 let writesInFlight = 0;
 let loadPromise: Promise<void> | null = null;
@@ -646,6 +663,43 @@ function persistTokens(): Promise<void> {
 
 void chrome.action.setBadgeBackgroundColor({ color: BADGE_BG });
 void chrome.action.setBadgeTextColor({ color: BADGE_INK });
+
+// ---- G4 context menu + keyboard command (design 2026-07-23 §G4) ----
+// Data-free discovery: both the "andvari" editable-context menu item and the manifest
+// `_execute_action` command merely OPEN the popup — no in-page picker, no new egress. The popup
+// computes offers against the ACTIVE tab, so opening it as anything other than the popup would break
+// the sole-grant-surface assumption. [X4-A3] idempotent registration at EVERY background load
+// (top-level, not onInstalled-only — Chrome/Firefox event-page persistence differs): removeAll →
+// create. onClicked registers SYNCHRONOUSLY here (MV3 wake requirement) → chrome.action.openPopup()
+// wrapped in try/catch with an explicit NO-OP degrade ([X4-A2]; FORBID tabs.create of popup.html).
+const CTX_MENU_ID = "andvari";
+try {
+  chrome.contextMenus.onClicked.addListener((info) => {
+    if (info.menuItemId !== CTX_MENU_ID) return;
+    try {
+      // openPopup lands on Chrome 127 (the bumped minimum_chrome_version) / Firefox; older/absent →
+      // NO-OP (optional-chain skips the call). NEVER chrome.tabs.create/windows.create of popup.html
+      // ([X4-A2]). The `.catch` delivers the NO-OP degrade for a PRESENT-but-REJECTING call (no
+      // active window) — a sync try/catch can't catch the returned promise's rejection.
+      void (chrome.action as unknown as { openPopup?: () => Promise<unknown> }).openPopup?.()?.catch(() => {});
+    } catch {
+      /* openPopup unsupported here — NO-OP */
+    }
+  });
+} catch {
+  /* contextMenus unavailable on this engine — the toolbar action + keyboard command still open the popup */
+}
+try {
+  chrome.contextMenus.removeAll(() => {
+    try {
+      chrome.contextMenus.create({ id: CTX_MENU_ID, title: "andvari", contexts: ["editable"] });
+    } catch {
+      /* create failed / already exists — the next load's removeAll→create reconciles */
+    }
+  });
+} catch {
+  /* contextMenus unavailable on this engine */
+}
 // A9⊕B5: storage.session TRUSTED_CONTEXTS is a HARD precondition for quick unlock — the armed record
 // is a crackable UVK blob + a LIVE refresh token, so content scripts MUST NOT be able to read it. Both
 // Chrome and Firefox MV3 DEFAULT storage.session to TRUSTED_CONTEXTS (content scripts excluded); this
@@ -889,6 +943,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== "loading") return;
   cardGrants.delete(tabId);
+  pendingCardSave.delete(tabId); // [X2-A2b] a top-level nav voids any pending card save (PAN)
+  cardCaptureDedupe.delete(tabId);
   // V4 (design §V4): a nav invalidates this tab's card registry (below), so a "card here" dot must
   // not outlive the form — clear it NOW, but ONLY when the badge IS that dot. A login count outranks
   // the dot and is repainted by the destination's own pageInfo, so it is left untouched (getBadgeText/
@@ -913,6 +969,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   grants.delete(tabId);
   cardGrants.delete(tabId);
+  pendingCardSave.delete(tabId); // [X2-A2b]
+  cardCaptureDedupe.delete(tabId);
   void (async () => {
     await ensureLoaded();
     if (tabs.delete(tabId)) persistTabs();
@@ -1044,6 +1102,8 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   tabs.clear();
   grants.clear();
   cardGrants.clear();
+  pendingCardSave.clear(); // [X2-A2b] pending card saves hold the PAN — locked means no PAN at rest
+  cardCaptureDedupe.clear();
 
   // Arm decision (attemptArm, computed by armGate above). `signout` skips arming and forces a full wipe;
   // idle/manual attempt to arm — but ONLY when the storage.session compartment is trusted-only (breaker
@@ -1406,6 +1466,10 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return fillFromPopup(msg.itemId);
     case "capturedCredential":
       return capturedCredential(msg, sender);
+    case "captureCard":
+      return captureCard(msg, sender);
+    case "resolvePendingCardSave":
+      return resolvePendingCardSave(msg.action, sender);
     case "pendingSave": {
       const tabId = await contextTabId(sender);
       const p = tabId === undefined ? undefined : tabs.get(tabId)?.pending;
@@ -2471,6 +2535,13 @@ async function revealCardForFill(
     const s = c.securityCode ?? "";
     if (s !== "") fields.cvv = s;
   }
+  // G3 [X3-A4d]: postal composed ONLY when the CHOSEN form declared cardpostal (the grant's frozen
+  // kinds, [U15] — never the live registry). buildCardForm's ambiguity guard already dropped
+  // cardpostal from the form's kinds when >1 survived, so a declared cardpostal here is unambiguous.
+  if (declared.has("cardpostal")) {
+    const pc = c.postalCode ?? "";
+    if (pc !== "") fields.postalCode = pc;
+  }
   // [T9] brand egress double-gate: composed ONLY when the form declared cardnumber TOO — the
   // zero-new-information argument (this very response already carries the PAN the brand derives
   // from) must never come to depend on a future registry shape. Derived, never the stored field
@@ -2497,6 +2568,12 @@ function hostOfUrl(url: string): string | null {
 /** The password (and the owning frameId) NEVER ride a pending-save answer — metadata only. */
 function publicPending(p: PendingSave & { password: string }): PendingSave {
   return { host: p.host, username: p.username, updatesItemId: p.updatesItemId, updatesItemName: p.updatesItemName, updatesItemUsername: p.updatesItemUsername };
+}
+
+/** [X2-A7] the MASKED public shape — the raw PAN (and expiry/frameId) never leave the SW. The
+ *  banner shows `cardSubtitle` ("Visa ••4242"), SW-recomputed from the number, never a stored field. */
+function publicPendingCard(p: { host: string; number: string; updatesItemId?: string; updatesItemName?: string }): PendingCardSave {
+  return { host: p.host, cardSubtitle: cardSubtitle(p.number), updatesItemId: p.updatesItemId, updatesItemName: p.updatesItemName };
 }
 
 /** Content senders carry their tab; the popup asks about the active tab. */
@@ -2622,6 +2699,101 @@ async function resolvePendingSave(
   return result;
 }
 
+// ---- G2 save-card capture → pending card save → resolve (design 2026-07-23 §G2) ----
+// The full PAN enters the SW ONLY here (the reverse of reveal), held in the module-scope
+// `pendingCardSave` Map (NEVER a persisted TabState — [X2-A1]). Every gate fails closed; the offer
+// the content banner receives is the MASKED PendingCardSave (no number — [X2-A7]).
+
+async function captureCard(
+  msg: Extract<Req, { type: "captureCard" }>,
+  sender: chrome.runtime.MessageSender,
+): Promise<Res<"captureCard">> {
+  const tabId = sender.tab?.id;
+  if (tabId === undefined) return { ok: false }; // captures come from pages only
+  const frameId = sender.frameId ?? 0;
+  const number = digitsOnly(msg.fields.number ?? "");
+  if (!luhnValid(number)) return { ok: false }; // SW-side Luhn re-check (content already gated)
+  // [X2-A5] SYNCHRONOUS dedupe BEFORE the first await — a click+submit double-fire of the SAME PAN
+  // records one key and the second is dropped (the one-shot trusted gesture is the primary spam
+  // guard; this closes the double-pass race the same-origin await below would otherwise open).
+  const key = `${frameId}:${number}`;
+  const now = Date.now();
+  const prev = cardCaptureDedupe.get(tabId);
+  if (prev && prev.key === key && now - prev.t < CARD_CAPTURE_DEDUPE_MS) return { ok: true };
+  cardCaptureDedupe.set(tabId, { key, t: now });
+  // [X2-A2] SW same-origin gate: content runs in ALL frames and cannot know the top origin, so a
+  // Stripe/Braintree per-field NUMBER iframe (js.stripe.com) could emit captureCard{number} — a
+  // bogus partial-PAN save. Discard unless the sender's browser-set origin equals the tab's CURRENT
+  // top-level origin (a cross-origin/PSP frame never drives a save).
+  if (typeof sender.origin !== "string" || sender.origin === "" || sender.origin === "null") return { ok: false };
+  const top = await topOrigin(tabId);
+  if (top === null || sender.origin !== top) return { ok: false };
+  // A locked SW holds no vault to match against or seal into — never stash a PAN while locked
+  // (doLock clears the Map anyway; this keeps a locked capture from ever recording one).
+  if (!session) return { ok: false };
+  let host: string;
+  try {
+    host = new URL(top).hostname;
+  } catch {
+    return { ok: false };
+  }
+  // Match an existing card by DIGITS equality only (never expiry/name): an UPDATE refreshes
+  // expiry/name/postal on the same card ([X2-A5b]); a mismatch (or no match) is a NEW card.
+  const existing = number !== "" ? session.items.find((i) => i.doc.type === "card" && digitsOnly(i.doc.card?.number ?? "") === number) : undefined;
+  const rec = {
+    host,
+    number,
+    expMonth: padMonth(msg.fields.expMonth ?? "") ?? "",
+    expYear: yearTo4(msg.fields.expYear ?? "") ?? "",
+    cardholderName: (msg.fields.cardholderName ?? "").trim(),
+    postalCode: (msg.fields.postalCode ?? "").trim() || undefined,
+    frameId,
+    updatesItemId: existing?.itemId,
+    updatesItemName: existing?.doc.name,
+  };
+  pendingCardSave.set(tabId, rec); // [X2-A4] single-slot per tab — a new capture REPLACES
+  return { ok: true, pending: publicPendingCard(rec) };
+}
+
+async function resolvePendingCardSave(
+  action: "save" | "dismiss",
+  sender: chrome.runtime.MessageSender,
+): Promise<Res<"resolvePendingCardSave">> {
+  const tabId = await contextTabId(sender);
+  const rec = tabId === undefined ? undefined : pendingCardSave.get(tabId);
+  if (tabId === undefined || !rec) return { ok: false, error: "nothing pending" };
+  if (action === "dismiss") {
+    pendingCardSave.delete(tabId);
+    return { ok: true };
+  }
+  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
+  if (!luhnValid(rec.number)) {
+    pendingCardSave.delete(tabId);
+    return { ok: false, code: "failed", error: "invalid card number" };
+  }
+  const target = rec.updatesItemId ? session.items.find((i) => i.itemId === rec.updatesItemId && i.doc.type === "card") : undefined;
+  let result: { ok: boolean; code?: SaveErrorCode; error?: string };
+  if (target && digitsOnly(target.doc.card?.number ?? "") === digitsOnly(rec.number)) {
+    // [X2-A5b] UPDATE = spread the existing doc AND card; refresh only expMonth/expYear/cardholderName
+    // (+ postal when captured); NEVER touch securityCode or the number (digits already matched). The
+    // `|| prev` fallback keeps an empty capture (a checkout that omits a name/expiry field) from
+    // CLOBBERING a stored value — the spread already preserves securityCode + any unknown keys.
+    const prevCard = target.doc.card ?? {};
+    const card: CardData = {
+      ...prevCard,
+      expMonth: rec.expMonth || prevCard.expMonth,
+      expYear: rec.expYear || prevCard.expYear,
+      cardholderName: rec.cardholderName || prevCard.cardholderName,
+    };
+    if (rec.postalCode) card.postalCode = rec.postalCode;
+    result = await putCard(target, { ...target.doc, card });
+  } else {
+    result = await putNewCard(rec); // no match / the matched item vanished — a NEW card
+  }
+  if (result.ok) pendingCardSave.delete(tabId);
+  return result;
+}
+
 // ---- writes (seal → push → confirm) ----
 
 /** Seal + push one put over the existing envelope path; answers the per-mutation result.
@@ -2666,10 +2838,11 @@ function saveFailure(status: MutationResult["status"] | undefined): { ok: false;
 }
 
 async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
-  // Monotonic re-seal: never below the fv the item arrived at (web Account.itemFv parity —
-  // the server refuses fv downgrades). The extension's per-doc floor is constant
-  // LOGIN_FORMAT_VERSION: every putExisting caller filters type==="login", and the extension
-  // never writes card docs (a card's floor would be 2).
+  // Monotonic re-seal: never below the fv the item arrived at (web Account.itemFv parity — the
+  // server refuses fv downgrades). This is the LOGIN re-seal path only: every putExisting caller
+  // filters type==="login", so the floor is LOGIN_FORMAT_VERSION. G2 [X2-A6] lifted the older
+  // "the extension never writes card docs" invariant — CARDS re-seal via the card-aware putCard
+  // (floor CARD_FORMAT_VERSION), NEVER here (a login floor would down-seal a card).
   const fv = Math.max(LOGIN_FORMAT_VERSION, target.formatVersion);
   const r = await putItem(target.itemId, target.vaultId, doc, target.rev, fv);
   if (r?.status !== "applied") return saveFailure(r?.status);
@@ -2684,11 +2857,51 @@ async function putNewLogin(host: string, username: string, password: string): Pr
   if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked or no personal vault" };
   const itemId = crypto.randomUUID();
   const doc: ItemDoc = { type: "login", name: host, login: { username, password, uris: [`https://${host}`] } };
-  // NEW items seal at the login doc floor — the extension only ever creates logins (format.ts).
+  // NEW logins seal at the login doc floor (format.ts). G2 added card creation via a SEPARATE
+  // card-aware seal (CARD_FORMAT_VERSION); this path is logins-only.
   const r = await putItem(itemId, session.personalVaultId, doc, 0, LOGIN_FORMAT_VERSION);
   if (r?.status !== "applied") return saveFailure(r?.status);
   const rev = r.newItemRev ?? 1; // matchable immediately:
   session.items.push({ itemId, vaultId: session.personalVaultId, rev, formatVersion: LOGIN_FORMAT_VERSION, doc });
+  persistSession();
+  return { ok: true };
+}
+
+/** [X2-A6] NEW card (G2 save-card) — sealed at CARD_FORMAT_VERSION, NOT putNewLogin's login floor.
+ *  The card-aware create path; the extension now creates cards as well as logins (format.ts). */
+async function putNewCard(rec: {
+  host: string;
+  number: string;
+  expMonth: string;
+  expYear: string;
+  cardholderName: string;
+  postalCode?: string;
+}): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
+  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked or no personal vault" };
+  const itemId = crypto.randomUUID();
+  const card: CardData = { number: rec.number };
+  if (rec.expMonth) card.expMonth = rec.expMonth;
+  if (rec.expYear) card.expYear = rec.expYear;
+  if (rec.cardholderName) card.cardholderName = rec.cardholderName;
+  if (rec.postalCode) card.postalCode = rec.postalCode;
+  const doc: ItemDoc = { type: "card", name: rec.host, card };
+  const r = await putItem(itemId, session.personalVaultId, doc, 0, CARD_FORMAT_VERSION);
+  if (r?.status !== "applied") return saveFailure(r?.status);
+  const rev = r.newItemRev ?? 1;
+  session.items.push({ itemId, vaultId: session.personalVaultId, rev, formatVersion: CARD_FORMAT_VERSION, doc });
+  persistSession();
+  return { ok: true };
+}
+
+/** [X2-A6] card-aware re-seal — floors at max(CARD_FORMAT_VERSION, target.formatVersion), NOT the
+ *  login putExisting (LOGIN_FORMAT_VERSION floor). Monotonic; the server refuses fv downgrades. */
+async function putCard(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
+  const fv = Math.max(CARD_FORMAT_VERSION, target.formatVersion);
+  const r = await putItem(target.itemId, target.vaultId, doc, target.rev, fv);
+  if (r?.status !== "applied") return saveFailure(r?.status);
+  target.doc = doc;
+  target.rev = r.newItemRev ?? target.rev + 1;
+  target.formatVersion = fv;
   persistSession();
   return { ok: true };
 }

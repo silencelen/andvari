@@ -137,8 +137,11 @@ object StructureParser {
      */
     private fun winningSignal(s: FieldSignal, kind: FieldKind): String {
         // A verdict the field's own classify() can't reproduce came from the CardForm.refine
-        // post-pass (the frame-cluster CSC demotion) — no single-signal ablation can name it.
-        if (FieldClassifier.classify(s) != kind) return "refine:csc-demotion"
+        // post-pass — the frame-cluster CSC demotion (CC_CSC) or the G3 anchor-gated postal
+        // promotion (CC_POSTAL); no single-signal ablation can name it.
+        if (FieldClassifier.classify(s) != kind) {
+            return if (kind == FieldKind.CC_POSTAL) "refine:postal-promotion" else "refine:csc-demotion"
+        }
         if (s.hints.isNotEmpty() && FieldClassifier.classify(FieldSignal(hints = s.hints)) == kind) {
             return "hint:" + s.hints.joinToString(",") { it.take(32) }
         }

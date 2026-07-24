@@ -177,4 +177,28 @@ class CardFillVectorTest {
 
     @Test
     fun monthText() = runTextSection("monthText", FieldKind.CC_EXP_MONTH)
+
+    /** [X3-A4c] shared `postalText` CC_POSTAL fill leg — the non-vacuity pin for the new
+     *  textFor(CC_POSTAL) branch (a missing core branch would red here). Driven through the public
+     *  plan with a same-cluster CC_NUMBER anchor: a stored postalCode fills a TEXT cardpostal box
+     *  VERBATIM (fit-guarded — narrower target SKIPS, never truncates); a `select` target derives
+     *  no faithful write (LIST → safe miss); a blank postal skips. */
+    @Test
+    fun postalText() {
+        for (case in v.getValue("postalText").jsonArray.map { it.jsonObject }) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val card = CardData(postalCode = case.str("postalCode"))
+            val target = if (case.getValue("target").jsonPrimitive.content == "select") CardFill.AUTOFILL_TYPE_LIST else CardFill.AUTOFILL_TYPE_TEXT
+            val options = case.getValue("options").jsonArray.map { it.jsonPrimitive.content }
+            val plan = CardFill.plan(
+                listOf(
+                    CardFill.CcField(0, FieldKind.CC_NUMBER, null, CardFill.AUTOFILL_TYPE_TEXT, emptyList()),
+                    CardFill.CcField(1, FieldKind.CC_POSTAL, null, target, options, maxLength = case.int("maxLength")),
+                ),
+                card,
+            )
+            val got = plan.firstOrNull { it.index == 1 }?.value
+            assertEquals(case.str("expected")?.let { CardFill.Value.Text(it) }, got, "postalText: $name")
+        }
+    }
 }
