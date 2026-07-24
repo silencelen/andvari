@@ -33,8 +33,10 @@ async function ask<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promi
 
 let tabHost: string | null = null;
 /** S3: whether the active tab has a same-origin card form we may Fill into, and to which origin.
- *  Fetched once per unlocked render — the active tab can't change while the popup is open. */
-let cardFill: { fillable: boolean; origin: string | null } = { fillable: false, origin: null };
+ *  Fetched once per unlocked render — the active tab can't change while the popup is open.
+ *  `crossOriginFormsOnly` (Tier 2 §6 [U21]) drives the PSP explainer; mutually exclusive with
+ *  `fillable` (SW-computed), so the explainer state can never also render a Fill button. */
+let cardFill: { fillable: boolean; origin: string | null; crossOriginFormsOnly: boolean } = { fillable: false, origin: null, crossOriginFormsOnly: false };
 let totpTimer: number | undefined;
 let searchTimer: number | undefined;
 let searchSeq = 0;
@@ -285,13 +287,17 @@ async function loadUnlocked(): Promise<void> {
   // delayed re-query below is what picks up a form the rescan just surfaced (CSS-revealed step,
   // bfcache return) — freshness without an inline wait on the popup's critical path.
   const offer = await ask({ type: "cardFillOffers" });
-  cardFill = offer ? { fillable: offer.fillable, origin: offer.origin } : { fillable: false, origin: null };
+  cardFill = offer
+    ? { fillable: offer.fillable, origin: offer.origin, crossOriginFormsOnly: offer.crossOriginFormsOnly === true }
+    : { fillable: false, origin: null, crossOriginFormsOnly: false };
   renderCards(cards.items);
   window.setTimeout(() => {
     void (async () => {
       const o2 = await ask({ type: "cardFillOffers" });
-      if (o2 && (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin)) {
-        cardFill = { fillable: o2.fillable, origin: o2.origin };
+      // [U21] pinned: the re-query diffs crossOriginFormsOnly too — a late PSP-frame report
+      // must surface the explainer, not just a late same-origin form the Fill button.
+      if (o2 && (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || (o2.crossOriginFormsOnly === true) !== cardFill.crossOriginFormsOnly)) {
+        cardFill = { fillable: o2.fillable, origin: o2.origin, crossOriginFormsOnly: o2.crossOriginFormsOnly === true };
         const c2 = await ask({ type: "cardItems" });
         if (c2 && !c2.locked) renderCards(c2.items);
       }
@@ -712,12 +718,23 @@ cardsLabel.hidden = true;
 const cardsList = document.createElement("div");
 cardsList.className = "list";
 cardsList.hidden = true;
-el("all-list").after(cardsLabel, cardsList);
+/** Tier 2 §6 [U21] PSP explainer — capability-framed NEUTRAL copy, EXACT design sentence (never
+ *  "this checkout…": the signal is attacker-assertable by any embedded frame and must not vouch
+ *  the page is a checkout). Shown only while the SW reports crossOriginFormsOnly; the Fill
+ *  button never renders in that state (the SW computes the two flags mutually exclusive, and
+ *  cardRow gates Fill on `fillable` alone). */
+const cardsPspNote = document.createElement("div");
+cardsPspNote.className = "empty slim";
+cardsPspNote.textContent = "Andvari can't auto-fill payment forms embedded from another site. Use the copy buttons instead.";
+cardsPspNote.hidden = true;
+el("all-list").after(cardsLabel, cardsPspNote, cardsList);
 
 /** Empty = hidden: login-only hoards see no Cards group at all. */
 function renderCards(items: CardItem[]): void {
   cardsLabel.hidden = items.length === 0;
   cardsList.hidden = items.length === 0;
+  // The explainer needs rows to point at ("use the copy buttons") — a cardless hoard stays bare.
+  cardsPspNote.hidden = items.length === 0 || !cardFill.crossOriginFormsOnly;
   cardsList.replaceChildren();
   for (const it of items) cardsList.append(cardRow(it));
 }
@@ -761,6 +778,8 @@ function cardRow(it: CardItem): HTMLElement {
   }
   if (it.hasNumber) acts.append(actBtn("num", "Copy card number", (btn) => void copyCardField(it.itemId, "number", btn)));
   if (it.hasExpiry) acts.append(actBtn("exp", "Copy expiry (MM/YY)", (btn) => void copyCardField(it.itemId, "expiry", btn)));
+  // Tier 2 §6 copy parity: every surface copies number/expiry/name/CVV.
+  if (it.hasName) acts.append(actBtn("name", "Copy name on card", (btn) => void copyCardField(it.itemId, "name", btn)));
   if (it.hasCvv) acts.append(actBtn("cvv", "Copy security code", (btn) => void copyCardField(it.itemId, "cvv", btn)));
 
   r.append(glyph, body, acts);
@@ -818,7 +837,7 @@ async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void
 
 /** Same secret-clipboard path as copyPassword: the SW answers exactly one field, it goes
  *  straight to the clipboard, the button flashes — the value is never rendered. */
-async function copyCardField(itemId: string, field: "number" | "expiry" | "cvv", btn: HTMLElement): Promise<void> {
+async function copyCardField(itemId: string, field: "number" | "expiry" | "name" | "cvv", btn: HTMLElement): Promise<void> {
   const r = await ask({ type: "revealCardField", itemId, field });
   if (!r?.ok || r.value == null) {
     // #23: the card seam carries no code — one canon sentence, never the SW's raw `error`.

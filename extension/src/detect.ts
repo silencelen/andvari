@@ -10,6 +10,7 @@
  */
 // Explicit .ts so the node --test runner (detect.cards.test.ts) can resolve this transitively —
 // esbuild (bundle) + tsc (allowImportingTsExtensions) accept it too; node ESM needs the extension.
+import { TABLES } from "./cardfill.ts"; // no runtime cycle: cardfill's detect import is type-only
 import { classify, type FieldKind, type FieldSignal } from "./urimatch.ts";
 
 /** A scope that can own a login form: the <form>, a nearest-common container, or the scan root. */
@@ -82,36 +83,42 @@ const CARD_HINTS: Record<string, CardFieldKind> = {
   cctype: "cardtype",
 };
 
-/** Card name/id token runs (whole-token-run matched) → kind — mirrors core
- *  `FieldClassifier.CARD_NAME_KINDS`. Group ORDER matters: exp-month/-year before the generic
- *  exp group ("expmonth" would also whole-run-match a bare "exp" group member). "pan" is
- *  deliberately absent (hazard exceeds value); no bare "exp". */
-const CARD_NAME_KINDS: [readonly string[], CardFieldKind][] = [
-  [["cardnumber", "ccnumber", "ccnum", "cardno", "cardnum"], "cardnumber"],
-  [["expmonth", "expmm", "expirationmonth"], "cardexpmonth"],
-  [["expyear", "expyy", "expirationyear"], "cardexpyear"],
-  [["expiry", "expdate", "ccexp", "expiration", "expirationdate"], "cardexpiry"],
-  [["cvv", "cvc", "csc", "securitycode"], "cardcvv"],
-  [["cardholder", "nameoncard", "ccname"], "cardname"],
-  [["cardtype", "cctype", "cardbrand", "ccbrand", "cbtype"], "cardtype"],
-];
+/** cardfill.json keyword-group kind spellings (engine-neutral autocomplete tokens) → this
+ *  module's kinds — total over the compiled-in TABLES.keywords copy (vector-deep-equalled). */
+const VECTOR_CARD_KIND: Record<string, CardFieldKind> = {
+  "cc-number": "cardnumber",
+  "cc-exp-month": "cardexpmonth",
+  "cc-exp-year": "cardexpyear",
+  "cc-exp": "cardexpiry",
+  "cc-csc": "cardcvv",
+  "cc-name": "cardname",
+  "cc-type": "cardtype",
+};
+
+/** Card name/id/label token runs (whole-token-run matched) → kind — the SINGLE normative
+ *  in-bundle copy is cardfill.ts `TABLES.keywords` ([U8]: ordered groups, deep-equalled against
+ *  cardfill.json; core asserts SEQUENCE equality against the same section). Group ORDER is
+ *  load-bearing: exp-month/-year before the generic exp group ("expirymonth" would also
+ *  whole-run-match the exp group's "expiry"), and the trailing bare-`creditcard` group ([U1])
+ *  fires only when no specific kind matched. */
+const CARD_NAME_KINDS: [readonly string[], CardFieldKind][] = TABLES.keywords.map((g) => [g.keywords, VECTOR_CARD_KIND[g.kind]!]);
 
 /** HTML types the card NAME-keyword fallback may fire from (core `CARD_FALLBACK_HTML_TYPES`
  *  parity): the keyword is the card signal, never numeric-ness; a password type is NEVER
  *  name-classified as a card field here — only the form-level CSC demotion may relabel it. */
 const CARD_FALLBACK_HTML_TYPES = new Set(["", "text", "tel", "number"]);
 
-/** name/id → lowercase ASCII tokens: split on non-alphanumerics, camelCase boundaries, and
+/** name/id/label → lowercase ASCII tokens: split on non-alphanumerics, camelCase boundaries, and
  *  letter↔digit boundaries ("cardVerificationValue" → [card,verification,value]; "cvv2" →
- *  [cvv,2]). The digit boundary is one deliberate widening over core FieldClassifier.tokens()
- *  (which keeps digits glued to letters): checkout CVVs are routinely named cvv2/cvc2 (Visa's
- *  own branding). Since S3 this feeds card CLASSIFICATION and the [T10] gift guard, not just
- *  the CVV save-suppression rule — so trailing-digit names ("cardNumber2", multi-card field
- *  arrays) classify HERE but not in core: a KNOWN, deliberate divergence (the extension errs
- *  wider on detection; aligning core's tokenizer would touch shipped classify() step-2
- *  demotion semantics and rides the Tier-2 vocabulary lane with its own vector sweep).
- *  Pinned both sides: detect.cards.test.ts (ext classifies) + cardform.json
- *  "trailing-digit stays glued" (core does not). */
+ *  [cvv,2] — checkout CVVs are routinely named cvv2/cvc2, Visa's own branding). PARITY since
+ *  Tier 2 ([U9]/§1.4): core FieldClassifier.tokens() carries the same digit boundary at its two
+ *  card call sites (step-2 CSC demotion + step-4 card keywords/gift guard; legacyClassify stays
+ *  substring-based, untouched), so trailing-digit names ("cardNumber2", multi-card field arrays)
+ *  now classify on BOTH engines — pinned by the flipped cardform.json alignment case. One
+ *  recorded residual seam: an anchorless lone `cvv2` password still diverges (core demotes
+ *  field-locally, the extension only form-level) — parity claims must not cover it. Feeds card
+ *  CLASSIFICATION (labels per source string, [U5]), the [T10] gift guard, and the CVV
+ *  save-suppression rule. */
 function tokens(raw: string): string[] {
   const out: string[] = [];
   let sb = "";
@@ -172,7 +179,8 @@ export function isCvvNameOrId(nameOrId: string): boolean {
  *  form. Suppress-only and anchor-only: other card kinds pass untouched (a "giftCardExpiry"
  *  stays cardexpiry — harmless without an anchor). The autocomplete-hint path is deliberately
  *  NOT guarded (an explicit cc-number hint is the site's own claim — Chromium parity). */
-const GIFT_SUPPRESS_TOKENS = ["gift", "egift", "voucher", "loyalty", "coupon"];
+// i18n number tokens ride with i18n suppressors (§1.3): "numeroCarteCadeau" must not anchor.
+const GIFT_SUPPRESS_TOKENS = ["gift", "egift", "voucher", "loyalty", "coupon", "cadeau", "geschenk", "regalo"];
 
 /** One name/id string → card verdict via the token runs. "gift" = a cardnumber verdict was
  *  produced AND suppressed — distinct from null (no verdict at all) because suppression is
@@ -189,6 +197,27 @@ function cardKindFromTokens(raw: string): CardFieldKind | "gift" | null {
   return null;
 }
 
+/** [U6] label-source bounds: a string longer than 60 chars or 8 tokens is IGNORED — help-sentence
+ *  labels over-match ("…cannot be combined with card number payments"). */
+const LABEL_MAX_CHARS = 60;
+const LABEL_MAX_TOKENS = 8;
+
+/** [U5] label source strings, classified PER-STRING: per-string tokenization, per-string verdict,
+ *  per-string [T10] gift guard — a token run must NEVER span a source boundary (aria-label
+ *  "Rewards card" + placeholder "Number of points" would otherwise fabricate a `cardnumber` run),
+ *  so concatenation is forbidden. The first verdict is TERMINAL, gift included — same rule as the
+ *  name→id retry: a string that positively identified a gift-card number must not be out-voted by
+ *  a later, cleaner-looking source. */
+function cardKindFromLabels(labels: readonly string[] | undefined): CardFieldKind | null {
+  if (!labels) return null;
+  for (const s of labels) {
+    if (s.length > LABEL_MAX_CHARS || tokens(s).length > LABEL_MAX_TOKENS) continue; // [U6] ignored, not a verdict
+    const k = cardKindFromTokens(s);
+    if (k !== null) return k === "gift" ? null : k;
+  }
+  return null;
+}
+
 /** Per-field card classification — pure (FieldSignal → kind), no DOM. Fires ONLY in the
  *  `classify() == none` gap (design [A8], core `FieldClassifier` step-4 parity): every field the
  *  login classifier decided keeps its verdict, so a card kind can never outrank USERNAME/PASSWORD
@@ -197,8 +226,12 @@ function cardKindFromTokens(raw: string): CardFieldKind | "gift" | null {
  *  runs, but only for card-fallback HTML types (never a password type — the CSC demotion below is
  *  the only path that relabels a password). §8/F5: the token pass runs over htmlNameOrId first and
  *  RETRIES over htmlId only when the name produced NO card verdict (a suppressed gift verdict IS a
- *  verdict); the gift guard evaluates against whichever string produced the verdict ([T10]). */
-export function classifyCardField(sig: FieldSignal, htmlId?: string | null): CardFieldKind | null {
+ *  verdict); the gift guard evaluates against whichever string produced the verdict ([T10]).
+ *  §1.1/[U5]: label SOURCE STRINGS (collect() builds the ordered list — aria-label · el.labels ·
+ *  aria-labelledby targets · placeholder) are the WEAKEST signal, consulted last and only when
+ *  neither name nor id produced any verdict; same fallback-HTML-type gate as the name pass (a
+ *  password type is never label-classified either). */
+export function classifyCardField(sig: FieldSignal, htmlId?: string | null, labels?: readonly string[]): CardFieldKind | null {
   if (classify(sig) !== "none") return null;
   const hints = (sig.hints ?? []).map((h) => h.toLowerCase().replace(/[_-]/g, ""));
   for (const h of hints) {
@@ -210,7 +243,8 @@ export function classifyCardField(sig: FieldSignal, htmlId?: string | null): Car
   if (byName === "gift") return null;
   if (byName) return byName;
   const byId = htmlId ? cardKindFromTokens(htmlId) : null;
-  return byId === "gift" ? null : byId;
+  if (byId !== null) return byId === "gift" ? null : byId;
+  return cardKindFromLabels(labels);
 }
 
 /** The card kinds a <select> can meaningfully be (§1): one row of an enumerable set. A PAN/CVV/
@@ -220,10 +254,11 @@ export function classifyCardField(sig: FieldSignal, htmlId?: string | null): Car
 const SELECT_CARD_KINDS: ReadonlySet<CardFieldKind> = new Set(["cardexpmonth", "cardexpyear", "cardexpiry", "cardtype"]);
 
 /** Per-select card classification — autocomplete hints first (same normalized CARD_HINTS map),
- *  then name/id token runs (§8 order, gift guard per-string). Deliberately NO
+ *  then name/id token runs (§8 order, gift guard per-string), then label source strings ([U5]
+ *  parity with the input path — weakest, last, per-string). Deliberately NO
  *  CARD_FALLBACK_HTML_TYPES check (that's input vocabulary) and NO classify() gap-gate: a select
  *  is definitionally not a login credential, so the login engine is never consulted. */
-export function classifyCardSelect(nameOrId: string | null, htmlId: string | null, hints: readonly string[]): CardFieldKind | null {
+export function classifyCardSelect(nameOrId: string | null, htmlId: string | null, hints: readonly string[], labels?: readonly string[]): CardFieldKind | null {
   const restricted = (k: CardFieldKind | "gift" | null): CardFieldKind | null =>
     k !== null && k !== "gift" && SELECT_CARD_KINDS.has(k) ? k : null;
   for (const h of hints) {
@@ -231,8 +266,10 @@ export function classifyCardSelect(nameOrId: string | null, htmlId: string | nul
     if (k) return restricted(k);
   }
   const byName = cardKindFromTokens(nameOrId ?? "");
-  if (byName !== null) return restricted(byName); // any card verdict (even a restricted-away one) stops the id retry
-  return restricted(htmlId ? cardKindFromTokens(htmlId) : null);
+  if (byName !== null) return restricted(byName); // any card verdict (even a restricted-away one) stops the retries
+  const byId = htmlId ? cardKindFromTokens(htmlId) : null;
+  if (byId !== null) return restricted(byId);
+  return restricted(cardKindFromLabels(labels));
 }
 
 /** Form-level CSC demotion — pure (kind + type + name/id → kind). A password-typed field named
@@ -317,6 +354,45 @@ function isVisible(el: HTMLElement): boolean {
   return el.offsetParent !== null || el.getClientRects().length > 0;
 }
 
+/** [U6] per-sweep-generation label cache: extraction costs textContent walks and a form-sized
+ *  wrapping label must not re-pay them per field per tick. content.ts bumps the generation on
+ *  childList-bearing mutation ticks (the ticks that can change label structure, same cadence as
+ *  the shadow-root sweep [U16]); attribute-only ticks reuse. Staleness is bounded at one
+ *  childList tick, never invalidated mid-sweep. */
+let labelGeneration = 0;
+const labelCache = new WeakMap<FillableControl, { gen: number; sources: string[] }>();
+export function bumpLabelGeneration(): void {
+  labelGeneration++;
+}
+
+/** [U7] the ORDERED label source list for one control — each entry stays a SEPARATE string
+ *  ([U5]: classification never concatenates across sources): `aria-label` attr · `el.labels`
+ *  texts (native <label for>/wrapping resolution, root-scoped — never document.querySelector,
+ *  which is wrong under shadow scoping and id escaping) · each `aria-labelledby` id resolved via
+ *  `getRootNode().getElementById` (one string per target, listed order) · placeholder (inputs
+ *  only; selects have none). Bounds ([U6]) live in the classifier, not here — the cache stores
+ *  raw sources. Exported for the pure suite's cache/order pins (structural: runs on stubs). */
+export function labelSourcesOf(el: FillableControl): string[] {
+  const hit = labelCache.get(el);
+  if (hit && hit.gen === labelGeneration) return hit.sources;
+  const sources: string[] = [];
+  const aria = el.getAttribute("aria-label");
+  if (aria) sources.push(aria);
+  if (el.labels) for (const l of el.labels) sources.push(l.textContent ?? "");
+  const by = el.getAttribute("aria-labelledby");
+  if (by) {
+    const root = el.getRootNode() as Document | ShadowRoot;
+    for (const id of by.split(/\s+/)) {
+      if (id === "") continue;
+      const t = typeof root.getElementById === "function" ? root.getElementById(id) : null;
+      if (t) sources.push(t.textContent ?? "");
+    }
+  }
+  if (el instanceof HTMLInputElement && el.placeholder) sources.push(el.placeholder);
+  labelCache.set(el, { gen: labelGeneration, sources });
+  return sources;
+}
+
 function collect(root: Document | ShadowRoot): Field[] {
   const out: Field[] = [];
   for (const el of root.querySelectorAll("input, select")) {
@@ -330,7 +406,9 @@ function collect(root: Document | ShadowRoot): Field[] {
         kind === "none" &&
         (t === "text" || t === "email") &&
         !NAME_NEGATIVE_RX.test((el.name || el.id).toLowerCase());
-      const cardKind = classifyCardField(sig, el.id); // §8: id rides alongside for the token retry
+      // §8: id rides alongside for the token retry; [U5]/[U7]: label sources are the weakest,
+      // gap-only signal — extraction is skipped outright for login-claimed fields.
+      const cardKind = classifyCardField(sig, el.id, kind === "none" ? labelSourcesOf(el) : undefined);
       if (kind !== "none" || textLike || cardKind !== null)
         out.push({ input: el, kind, isNewPassword: sig.isNewPassword, textLike, cardKind });
     } else if (el instanceof HTMLSelectElement) {
@@ -340,7 +418,7 @@ function collect(root: Document | ShadowRoot): Field[] {
       // contributes nothing, so it isn't collected at all.
       if (el.disabled || !isVisible(el) || el.type !== "select-one") continue;
       const sig = fieldSignalOf(el);
-      const cardKind = classifyCardSelect(sig.htmlNameOrId ?? null, el.id, sig.hints ?? []);
+      const cardKind = classifyCardSelect(sig.htmlNameOrId ?? null, el.id, sig.hints ?? [], labelSourcesOf(el));
       if (cardKind !== null) out.push({ input: el, kind: "none", isNewPassword: false, textLike: false, cardKind });
     }
   }

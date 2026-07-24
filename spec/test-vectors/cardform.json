@@ -575,7 +575,7 @@
             "formKind": "login"
         },
         {
-            "name": "trailing digit stays glued (cardNumber2 -> none): deliberate divergence from the extension tokenizer, Tier-2 alignment",
+            "name": "trailing digit splits (cardNumber2 -> cc-number): tokenizer aligned with the extension ([U9] letter-digit boundary)",
             "fields": [
                 {
                     "hints": [],
@@ -584,6 +584,151 @@
                     "htmlType": "tel",
                     "htmlNameOrId": "cardNumber2",
                     "htmlId": null,
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "label-only card form: PAN, expiry, and CVV classify off labelText alone (weakest signal, last)",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "field_1",
+                    "htmlId": null,
+                    "labelText": "Card number",
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "field_2",
+                    "htmlId": null,
+                    "labelText": "Expiration date",
+                    "maxLength": 7,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-exp"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "field_3",
+                    "htmlId": null,
+                    "labelText": "Security code",
+                    "maxLength": 4,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-csc"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "gift-card label suppresses the PAN verdict and never anchors a card form ([T10] per-string)",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "field_1",
+                    "htmlId": null,
+                    "labelText": "Gift card number",
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "none"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "name beats label: an expiry name keeps its verdict over a card-number label",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "expiry",
+                    "htmlId": null,
+                    "labelText": "Card number",
+                    "maxLength": 7,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "cc-exp"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "label-poisoned login form ([U7] accepted): a card-number label classifies the in-gap text field; login verdicts stand",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "username",
+                    "htmlId": null,
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "site.example",
+                    "expected": "username"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "password",
+                    "htmlId": null,
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "site.example",
+                    "expected": "password"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "field_3",
+                    "htmlId": null,
+                    "labelText": "Card number",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "site.example",
+                    "expected": "cc-number"
+                }
+            ],
+            "formKind": "mixed"
+        },
+        {
+            "name": "per-string classification: name and label token runs never concatenate across strings ([U5])",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "card",
+                    "htmlId": null,
+                    "labelText": "Number",
                     "maxLength": null,
                     "inputMode": null,
                     "frameDomain": "shop.example",

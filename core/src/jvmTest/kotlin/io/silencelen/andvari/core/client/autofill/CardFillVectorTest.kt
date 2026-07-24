@@ -8,6 +8,7 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -40,6 +41,41 @@ class CardFillVectorTest {
         assertEquals(t.getValue("containsWords").jsonObject.mapValues { (_, a) -> a.jsonArray.map { it.jsonPrimitive.content } }, CardFill.BRAND_CONTAINS_WORDS, "containsWords")
         assertEquals(t.strings("monthNames"), CardFill.MONTH_NAMES, "monthNames")
         assertEquals(t.getValue("monthAbbreviations").jsonObject.mapValues { (_, a) -> a.jsonArray.map { it.jsonPrimitive.content } }, CardFill.MONTH_ABBREVIATIONS, "monthAbbreviations")
+    }
+
+    /** [U8] the keyword groups are an ORDERED array and group order is load-bearing (month/year
+     *  before generic exp; the [U1] bare-creditcard group LAST) — so this asserts SEQUENCE
+     *  equality: kinds AND order AND contents. A named-key map compare (the [T14] shape above)
+     *  would stay silently green across a reorder — the vacuity trap the design names. */
+    @Test
+    fun keywordGroupsMatchTheNormativeOrderedCopy() {
+        val expected = v.getValue("tables").jsonObject.getValue("keywords").jsonArray.map { g ->
+            g.jsonObject.let { it.strings("keywords") to vectorFieldKind(it.getValue("kind").jsonPrimitive.content) }
+        }
+        assertEquals(expected, FieldClassifier.CARD_NAME_KINDS, "tables.keywords sequence")
+    }
+
+    /** dateLeg (core-only section, [U8]/§5): DATE-node combined expiry → epoch ms of
+     *  (year, month, day 1) UTC — driven through the public plan like every other section,
+     *  so the CC_EXP-only + anchor-cluster plumbing is exercised on each vector. */
+    @Test
+    fun dateLeg() {
+        for (case in v.getValue("dateLeg").jsonArray.map { it.jsonObject }) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val card = CardData(expMonth = case.str("expMonth"), expYear = case.str("expYear"))
+            val plan = CardFill.plan(
+                listOf(
+                    CardFill.CcField(0, FieldKind.CC_NUMBER, null, CardFill.AUTOFILL_TYPE_TEXT, emptyList()),
+                    CardFill.CcField(1, FieldKind.CC_EXP, null, CardFill.AUTOFILL_TYPE_DATE, emptyList()),
+                    // A month-half on a DATE node must always skip — a date would fabricate the day+year.
+                    CardFill.CcField(2, FieldKind.CC_EXP_MONTH, null, CardFill.AUTOFILL_TYPE_DATE, emptyList()),
+                ),
+                card,
+            )
+            val expectedMs = case.getValue("expectedMs").jsonPrimitive.long
+            assertEquals(CardFill.Value.DateMs(expectedMs), plan.firstOrNull { it.index == 1 }?.value, name)
+            assertEquals(null, plan.firstOrNull { it.index == 2 }, "$name: non-CC_EXP kind on a DATE node")
+        }
     }
 
     /** `shared` select cases: options are plain strings = Android's autofillOptions label list;

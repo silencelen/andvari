@@ -3,7 +3,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { brand, brandLabel, cardSubtitle, composeShortExpiry, digitsOnly, maskedLast4, padMonth, yearTo4 } from "../../extension/src/card";
 import { isCvvNameOrId } from "../../extension/src/detect";
+import type { CardFieldKind } from "../../extension/src/detect";
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "../../extension/src/format";
+import { chooseCardTarget } from "../../extension/src/messages";
 import type { ItemDoc } from "./api/types";
 import {
   brand as webBrand,
@@ -23,6 +25,13 @@ import {
  * extension's crypto parity (noble-extension-poc.test.ts). Editing a pinned value must break
  * this file first, deliberately.
  */
+
+/** messages.ts (imported above for the PURE chooseCardTarget export — §9 [U11]) types its send()
+ *  helper against the chrome runtime, which the web program lacks (`types: ["node"]`). Type-only
+ *  shim: nothing here ever CALLS send(), so no chrome value is evaluated at runtime. */
+declare global {
+  const chrome: { runtime: { sendMessage(req: unknown): Promise<unknown> } };
+}
 
 const extensionSrc = fileURLToPath(new URL("../../extension/src/", import.meta.url));
 const vectorsDir = fileURLToPath(new URL("../../spec/test-vectors/", import.meta.url));
@@ -253,5 +262,126 @@ describe("Tier-1 card autofill pins ([T15]/[T9]/[T11]/§7) — structural anchor
 
   it('[T11] asCardFillOutcome accepts "partial" — a rejected partial reports unreachable AFTER fields landed', () => {
     expect(bg).toMatch(/function asCardFillOutcome[\s\S]*?f === "card" \|\| f === "partial" \|\| f === "nothing"/);
+  });
+});
+
+describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — structural + behavioral anchors", () => {
+  const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+  const ct = readFileSync(extensionSrc + "content.ts", "utf-8");
+  const pp = readFileSync(extensionSrc + "popup.ts", "utf-8");
+
+  const spanOf = (src: string, from: string, to: string): string => {
+    const a = src.indexOf(from);
+    const b = src.indexOf(to);
+    expect(a, `span start missing: ${from}`).toBeGreaterThan(-1);
+    expect(b, `span end missing/out of order: ${to}`).toBeGreaterThan(a);
+    return src.slice(a, b);
+  };
+
+  const F = (frameId: number, ...forms: CardFieldKind[][]): { frameId: number; forms: CardFieldKind[][] } => ({ frameId, forms });
+
+  it("[U11] frame 0 wins with ANY eligible form — a same-origin sub-frame never out-bids the visible top checkout", () => {
+    // The chooser is pure + exported from messages.ts (chrome-free at import) exactly so this
+    // suite can pin the RULE, not just its source shape.
+    expect(chooseCardTarget([F(3, ["cardnumber", "cardexpiry", "cardcvv", "cardname"]), F(0, ["cardnumber"])])).toEqual({ frameId: 0, kinds: ["cardnumber"] });
+    // Frame 0 recorded but formless → it does NOT bid; the richest sub-frame wins…
+    expect(chooseCardTarget([F(0), F(7, ["cardnumber"]), F(2, ["cardnumber", "cardcvv"])])).toEqual({ frameId: 2, kinds: ["cardnumber", "cardcvv"] });
+    // …and a richness tie goes to the LOWEST frameId, regardless of input order.
+    expect(chooseCardTarget([F(9, ["cardnumber", "cardcvv"]), F(4, ["cardexpiry", "cardname"])])).toEqual({ frameId: 4, kinds: ["cardexpiry", "cardname"] });
+    // Richest FORM within the chosen frame: most DISTINCT kinds; a tie keeps document order.
+    expect(chooseCardTarget([F(0, ["cardnumber"], ["cardnumber", "cardexpiry", "cardcvv"])])).toEqual({ frameId: 0, kinds: ["cardnumber", "cardexpiry", "cardcvv"] });
+    expect(chooseCardTarget([F(0, ["cardnumber", "cardcvv"], ["cardexpiry", "cardname"])])).toEqual({ frameId: 0, kinds: ["cardnumber", "cardcvv"] });
+    // Duplicate kinds must not inflate richness (twin expiry boxes ≠ a richer form).
+    expect(chooseCardTarget([F(0, ["cardnumber", "cardnumber", "cardnumber"], ["cardnumber", "cardcvv"])])).toEqual({ frameId: 0, kinds: ["cardnumber", "cardcvv"] });
+    expect(chooseCardTarget([])).toBe(null);
+    // Source anchors: the frame-0 branch exists in the pure chooser, and the SW actually WIRES it
+    // at grant mint (freezing the chosen form's kinds + sig — [U12]/[U15], not a live registry read).
+    const ms = readFileSync(extensionSrc + "messages.ts", "utf-8");
+    expect(ms).toContain("f.frameId === 0 && f.forms.length > 0");
+    expect(bg).toContain("const target = chooseCardTarget(eligible)");
+    expect(bg).toContain("kinds: target.kinds, sig,");
+  });
+
+  it("[U12] grant-sig targeting fails CLOSED — sig-match only, never an index fallback", () => {
+    // Content side: redemption re-scans and takes the FIRST current-sig match; a non-string sig
+    // (mid-update mixed-version SW) refuses rather than guesses.
+    const bySig = spanOf(ct, "function cardFormBySig(", "function applyCardFill(");
+    expect(bySig).toContain('.join(",") === sig');
+    expect(bySig).toContain("?? null");
+    const fillEntry = spanOf(ct, "async function fillCardIntoForm(", "function maybeOpen(");
+    expect(fillEntry).toContain('typeof sig === "string" ? cardFormBySig(sig) : null');
+    expect(fillEntry).toContain('code: "no_form"');
+    // The Tier-1 shape this replaced — any positional pick — must never come back on this path.
+    for (const [name, span] of [["cardFormBySig", bySig], ["fillCardIntoForm", fillEntry]] as const) {
+      expect(span, `${name} has an index fallback`).not.toMatch(/\[0\]|\.at\(|forms\[/);
+    }
+    // SW side ([U14]/[A3]): a malformed grant (missing kinds/sig) refuses before ANY compose.
+    expect(bg).toMatch(/!Array\.isArray\(grant\.kinds\) \|\| typeof grant\.sig !== "string"/);
+  });
+
+  it("[U15] reveal composes against the GRANT's frozen kinds — never the live registry, never a frame union", () => {
+    expect(bg).toContain("const declared = new Set(grant.kinds)");
+    // Exactly ONE declared-set construction — a second (e.g. a registry-fed union) would widen
+    // the [T9] brand gate across forms after a mint→redeem rescan.
+    expect(bg.match(/const declared = new Set\(/g)).toHaveLength(1);
+    expect(spanOf(bg, "async function revealCardForFill(", "const declared = new Set(grant.kinds)")).not.toContain(".cardForms");
+  });
+
+  it("[U13] the registry idempotence sig is JSON.stringify(forms) — join would alias [[a,b]] ≡ [[a],[b]]", () => {
+    const report = spanOf(ct, "function reportCardForm(", "function cardTargetOf(");
+    expect(report).toContain("const sig = JSON.stringify(forms)");
+    expect(report).not.toContain(".join(");
+    // The GRANT sig stays single-level kinds.join(",") (unambiguous over a flat list) — the two
+    // sigs are different beasts and must not converge on one encoding by refactor.
+    expect(bg).toContain('const sig = target.kinds.join(",")');
+  });
+
+  it("[U17] composedPath()[0] retargets the FOUR shadow-blind paths: focusin, input, keydown, click-reopen", () => {
+    // Exactly four `[0]` retarget sites — reverting any one to e.target drops the count (the
+    // submit listener and the click submit-control probe are deliberate non-members: submit does
+    // not compose, and the control probe walks the WHOLE path). The `[=(]` prefix keeps the
+    // count over CODE shapes only — the [U17] doc comment quotes the literal in backticks.
+    expect(ct.match(/[=(] ?e\.composedPath\(\)\[0\]/g)).toHaveLength(4);
+    expect(ct).toMatch(/"focusin",[\s\S]{0,120}?maybeOpen\(e\.composedPath\(\)\[0\] \?\? null\)/);
+    expect(ct).toMatch(/"input",[\s\S]{0,120}?e\.composedPath\(\)\[0\] \?\? e\.target/);
+    expect(ct).toMatch(/"keydown",[\s\S]{0,120}?e\.composedPath\(\)\[0\] \?\? e\.target/);
+    expect(ct).toMatch(/"click",[\s\S]{0,200}?e\.composedPath\(\)\[0\]/);
+  });
+
+  it("[U16] the shadow sweep skips our own closed-shadow UI host (no self-observation loop)", () => {
+    // chrome.dom.openOrClosedShadowRoot PIERCES closed roots, so the sweep would otherwise
+    // discover + observe our own dropdown/banner/toast root — and every UI render would re-enter
+    // onMutations, self-sustaining a ~150 ms re-render loop in the multi-step auto-open window.
+    // No runtime test can catch this (jsdom has no chrome.dom); the guard is the pin.
+    const cu = readFileSync(extensionSrc + "content-ui.ts", "utf-8");
+    expect(cu).toMatch(/export function isOwnUiHost\(/);
+    // The sweep must consult it BEFORE probing an element's shadow root, and skip on a match.
+    expect(ct).toMatch(/if \(isOwnUiHost\(n as Element\)\) continue;[\s\S]{0,120}?shadowRootOf\(/);
+  });
+
+  it("[U18] setValue: full event envelope in order, then ONE re-assert gated on an EMPTY read-back", () => {
+    const sv = spanOf(ct, "function setValue(", "function setSelectedIndex(");
+    // Order is the fidelity contract: focus → keydown → native write → input → keyup → change,
+    // and the re-assert guard sits strictly AFTER the envelope.
+    expect(sv).toMatch(
+      /input\.focus\(\);[\s\S]*?new KeyboardEvent\("keydown"[\s\S]*?nativeValueSetter\.call\(input, value\);[\s\S]*?new InputEvent\("input"[\s\S]*?new KeyboardEvent\("keyup"[\s\S]*?new Event\("change"[\s\S]*?if \(input\.value === ""\)/,
+    );
+    // Exactly TWO writes: the envelope's + the guarded re-assert. A third (or an unguarded
+    // second) is the blind re-assert [U18] forbids — a masker's reformat is SUCCESS, not a miss.
+    expect(sv.match(/nativeValueSetter\.call\(input, value\)/g)).toHaveLength(2);
+  });
+
+  it("[U21] crossOriginFormsOnly: exact neutral copy, mutually-exclusive flags, Fill gated on fillable alone", () => {
+    // Byte-exact design sentence — capability-framed, never vouching the page is a checkout.
+    expect(pp).toContain("Andvari can't auto-fill payment forms embedded from another site. Use the copy buttons instead.");
+    // The SW computes the two flags mutually exclusive in ONE return — an eligible frame can
+    // never also raise the explainer, so gating Fill on `fillable` alone renders no Fill button
+    // in the explainer state.
+    expect(bg).toContain("return { fillable: eligible, origin: eligible ? top : null, crossOriginFormsOnly: recorded && !eligible };");
+    expect(pp).toMatch(/if \(cardFill\.fillable\) \{\s*acts\.append\(\s*actBtn\("fill"/);
+    expect(pp).toContain("cardsPspNote.hidden = items.length === 0 || !cardFill.crossOriginFormsOnly");
+    // The popup's delayed re-query diffs the flag too (a late PSP-frame report must surface the
+    // explainer), folding a missing field (mixed-version SW) to false.
+    expect(pp).toContain("(o2.crossOriginFormsOnly === true) !== cardFill.crossOriginFormsOnly");
   });
 });

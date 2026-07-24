@@ -35,7 +35,7 @@
 import { brandLabel, digitsOnly, padMonth, yearTo4 } from "./card.ts";
 import type { CardFieldKind } from "./detect.ts";
 
-/** [T14] the compiled-in synonym/contains/month tables — the NORMATIVE copy lives in
+/** [T14] the compiled-in synonym/contains/month/keyword tables — the NORMATIVE copy lives in
  *  cardfill.json's `tables` section; each engine deep-equals its compiled-in copy against the
  *  vector, so drift on either side reds that side. Never edit here without editing the vector
  *  (and core) in the same change. */
@@ -44,6 +44,7 @@ export const TABLES: {
   containsWords: Record<string, readonly string[]>;
   monthNames: readonly string[];
   monthAbbreviations: Record<string, readonly string[]>;
+  keywords: readonly { kind: string; keywords: readonly string[] }[];
 } = {
   synonyms: {
     visa: ["visa", "vi", "v", "001"],
@@ -72,6 +73,22 @@ export const TABLES: {
     "11": ["nov"],
     "12": ["dec"],
   },
+  // [U8] the ORDERED card name/id/label keyword groups — the single normative in-bundle copy
+  // (detect.ts imports it; kinds ride the engine-neutral autocomplete spellings). Sequence is
+  // load-bearing: exp-month/-year before the generic exp group, and the trailing bare
+  // `creditcard` group ([U1]) fires only when no specific kind matched — `credit_card_cvv`
+  // must never collapse to a PAN verdict. "pan" stays absent; no bare "exp"/"expires" ([U4]);
+  // `securitynumber`/`verificationnumber`/`cid` deliberately dropped ([U2]/[U3]).
+  keywords: [
+    { kind: "cc-number", keywords: ["cardnumber", "ccnumber", "ccnum", "cardno", "cardnum", "ccno", "kartennummer", "kreditkartennummer", "numerocarte", "numerotarjeta", "numerocartao"] },
+    { kind: "cc-exp-month", keywords: ["expmonth", "expmm", "expirationmonth", "expirymonth", "cardmonth"] },
+    { kind: "cc-exp-year", keywords: ["expyear", "expyy", "expirationyear", "expiryyear", "cardyear"] },
+    { kind: "cc-exp", keywords: ["expiry", "expdate", "ccexp", "expiration", "expirationdate", "expiredate", "expirydate", "validthru", "validthrough", "goodthru", "goodthrough", "validuntil", "ablaufdatum", "gueltigbis", "dateexpiration", "vencimiento"] },
+    { kind: "cc-csc", keywords: ["cvv", "cvc", "csc", "securitycode", "cvn", "cardcode", "xcardcode", "verificationvalue", "cardverificationcode", "cardverificationvalue", "cryptogramme", "pruefnummer", "kartenpruefnummer", "codigoseguridad"] },
+    { kind: "cc-name", keywords: ["cardholder", "nameoncard", "ccname", "holdername", "cardholdername", "cardholdersname", "titulaire", "titular", "karteninhaber"] },
+    { kind: "cc-type", keywords: ["cardtype", "cctype", "cardbrand", "ccbrand", "cbtype"] },
+    { kind: "cc-number", keywords: ["creditcard"] },
+  ],
 };
 
 /** The one write shape crossing to the executor — text for inputs, INDEX for selects ([T8]). */
@@ -196,6 +213,46 @@ export function typeTextFor(brand: string | null | undefined, maxLength: number 
   const label = brandLabel(brand);
   if (label === null) return null;
   return maxLength !== null && label.length > maxLength ? null : label;
+}
+
+// ---- §4 split PAN (F18) ----------------------------------------------------------------------
+
+/** Multi-box PAN chunk table (§4; `applyCardFill`'s >1-cardnumber pre-pass): eligible only when
+ *  EVERY box declares maxLength 1..8 and the boxes jointly fit the whole PAN (sum ≥ digits) —
+ *  otherwise null, and the caller's whole-PAN-to-first-box fallback runs under the fit-guard
+ *  ([U19]: a declared-but-insufficient box set nulls the write there, truthful miss; the
+ *  fallback only ever lands for undeclared-maxLength shapes). Chunks are sequential digit runs;
+ *  the FINAL box may take a short remainder — 4-4-4-4 and Amex 4-6-5 fall out of the same rule. */
+export function splitPan(pan: string | null | undefined, maxLengths: readonly (number | null)[]): string[] | null {
+  const d = digitsOnly(pan ?? "");
+  if (d === "" || maxLengths.length < 2) return null; // one box is not a split
+  const lens: number[] = [];
+  let sum = 0;
+  for (const m of maxLengths) {
+    if (m === null || !Number.isInteger(m) || m < 1 || m > 8) return null;
+    lens.push(m);
+    sum += m;
+  }
+  if (sum < d.length) return null;
+  const chunks: string[] = [];
+  let at = 0;
+  for (const m of lens) {
+    chunks.push(d.slice(at, at + m));
+    at += m;
+  }
+  return chunks;
+}
+
+/** [U19] split read-back: auto-advance maskers redistribute digits ACROSS boxes, so landed-ness
+ *  is the concatenation of every box's digitsOnly equalling the full PAN (per-box chunk equality
+ *  is merely the executor's fast path). Any shortfall or residue fails the whole split — the
+ *  kind files missed, nothing is auto-cleared (partial beats wrong). */
+export function verifySplitPanLanded(pan: string, observed: readonly string[]): boolean {
+  const want = digitsOnly(pan);
+  if (want === "") return false;
+  let got = "";
+  for (const s of observed) got += digitsOnly(s);
+  return got === want;
 }
 
 // ---- select matching -------------------------------------------------------------------------

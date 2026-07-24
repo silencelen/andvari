@@ -791,6 +791,102 @@
             "htmlType": "text",
             "htmlNameOrId": "expirationYear",
             "expected": "cc-exp-year"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "expiry_year",
+            "expected": "cc-exp-year"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "expiry_month",
+            "expected": "cc-exp-month"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "cvv2",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "tel",
+            "htmlNameOrId": "cardNumber2",
+            "expected": "cc-number"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "credit_card_cvv",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "credit_card_expiry",
+            "expected": "cc-exp"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "credit_card_type",
+            "expected": "cc-type"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "creditCardExpirationMonth",
+            "expected": "cc-exp-month"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "social_security_number",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "tel",
+            "htmlNameOrId": "phone_verification_number",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "c_id",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "session_expires",
+            "expected": "none"
         }
     ],
     "classifyCardFreeRegression": [

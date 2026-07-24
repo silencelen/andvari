@@ -563,6 +563,21 @@
             "expMonth": "12",
             "expYear": "202",
             "expected": null
+        },
+        {
+            "expMonth": "",
+            "expYear": "2027",
+            "expected": null
+        },
+        {
+            "expMonth": "12",
+            "expYear": "",
+            "expected": null
+        },
+        {
+            "expMonth": "",
+            "expYear": "",
+            "expected": null
         }
     ]
 }

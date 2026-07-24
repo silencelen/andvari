@@ -1,5 +1,5 @@
 {
- "_doc": "Tier-1 card fill vectors (design 2026-07-23-card-autofill-tier1 \u00a711). `tables` is the NORMATIVE copy of the brand-synonym / contains-word / month tables \u2014 each engine deep-equals its compiled-in tables against these, so drift on either side reds that side ([T14]). `selectIndexShared` = label-only <option> lists (options as plain strings; [T8] pins opt.value's attr-absent\u2192text fallback, so the value pass \u2261 the text pass and one string per option is lossless) \u2014 BOTH engines run these through their select matcher; `expected` is the 0-based option index, null = no match (safe miss, never a guess). Matching is PASS-MAJOR ([T2]): pass 1 whole-parse, 2 digit-extraction, 3 month-name (FIRST maximal ASCII-letter run, lowercased, EQUALITY against fullName/abbreviation \u2014 prefix matching forbidden, [T3]), 4 combined-expiry digits, 5 cc-type synonym-exact-else-contains-primary; the earliest pass with any match wins, options in document order within a pass. `selectIndexDom` = value\u2260text option pairs ({value,text}; within an option value is checked before text) \u2014 TS engine ONLY (Android exposes one string per option). `expiryText`/`yearText`/`monthText` = the \u00a74 text-target adapters; stored halves are canonical (expMonth 'MM', expYear 4-digit); maxLength null = undeclared (DOM -1); any case with a non-null placeholder carries tsOnly:true (core has no placeholder signal \u2014 its \u00a79 table is exactly the placeholder-null slice). The [T16] separator comes ONLY from the anchored /m{1,2}\\s*([-/.])\\s*y/i sniff on the placeholder (default '/') \u2014 never a bare contains-scan. cc-type cases carry the stored number AND its derived brand (consistent by CardNormalize.brand \u2014 each engine consumes whichever its API takes).",
+ "_doc": "Tier-1 card fill vectors (design 2026-07-23-card-autofill-tier1 \u00a711). `tables` is the NORMATIVE copy of the brand-synonym / contains-word / month tables \u2014 each engine deep-equals its compiled-in tables against these, so drift on either side reds that side ([T14]). `selectIndexShared` = label-only <option> lists (options as plain strings; [T8] pins opt.value's attr-absent\u2192text fallback, so the value pass \u2261 the text pass and one string per option is lossless) \u2014 BOTH engines run these through their select matcher; `expected` is the 0-based option index, null = no match (safe miss, never a guess). Matching is PASS-MAJOR ([T2]): pass 1 whole-parse, 2 digit-extraction, 3 month-name (FIRST maximal ASCII-letter run, lowercased, EQUALITY against fullName/abbreviation \u2014 prefix matching forbidden, [T3]), 4 combined-expiry digits, 5 cc-type synonym-exact-else-contains-primary; the earliest pass with any match wins, options in document order within a pass. `selectIndexDom` = value\u2260text option pairs ({value,text}; within an option value is checked before text) \u2014 TS engine ONLY (Android exposes one string per option). `expiryText`/`yearText`/`monthText` = the \u00a74 text-target adapters; stored halves are canonical (expMonth 'MM', expYear 4-digit); maxLength null = undeclared (DOM -1); any case with a non-null placeholder carries tsOnly:true (core has no placeholder signal \u2014 its \u00a79 table is exactly the placeholder-null slice). The [T16] separator comes ONLY from the anchored /m{1,2}\\s*([-/.])\\s*y/i sniff on the placeholder (default '/') \u2014 never a bare contains-scan. cc-type cases carry the stored number AND its derived brand (consistent by CardNormalize.brand \u2014 each engine consumes whichever its API takes). Tier-2 (design 2026-07-23-card-autofill-tier2 \u00a71.3 [U8]): `tables.keywords` is the ORDERED [{kind, keywords}] group array \u2014 the normative name/id vocabulary; group order is load-bearing (month/year groups before the generic exp group; the TRAILING [U1] {cc-number: [creditcard]} group fires only when no specific kind matched, so bare credit_card \u2192 number while credit_card_cvv/_expiry/_type keep their specific verdicts) and BOTH engines assert SEQUENCE equality against it \u2014 kinds AND order AND contents, never per-key lookups (a per-key assert stays vacuously green on a reorder). `dateLeg` = CORE-ONLY consumer (the Android CC_EXP AUTOFILL_TYPE_DATE leg, \u00a75): expectedMs is the epoch ms of (expYear, expMonth, day 1) UTC via days-from-civil. `splitPan` = EXT-ONLY consumer (applyCardFill's split-PAN pre-pass, \u00a74/[U19]): boxes = declared maxLengths in document order (null = undeclared); every box declared 1..8 AND sum \u2265 PAN length \u2192 sequential digit chunks, final box may take a short remainder; expected null = no split (the whole-PAN fallback + fit-guard governs). dateLeg/splitPan are whole SINGLE-CONSUMER sections \u2014 the tsOnly flag has no inverse, so a mixed section would red the wrong engine.",
  "tables": {
   "synonyms": {
    "visa": [
@@ -94,7 +94,115 @@
    "12": [
     "dec"
    ]
-  }
+  },
+  "keywords": [
+   {
+    "kind": "cc-number",
+    "keywords": [
+     "cardnumber",
+     "ccnumber",
+     "ccnum",
+     "cardno",
+     "cardnum",
+     "ccno",
+     "kartennummer",
+     "kreditkartennummer",
+     "numerocarte",
+     "numerotarjeta",
+     "numerocartao"
+    ]
+   },
+   {
+    "kind": "cc-exp-month",
+    "keywords": [
+     "expmonth",
+     "expmm",
+     "expirationmonth",
+     "expirymonth",
+     "cardmonth"
+    ]
+   },
+   {
+    "kind": "cc-exp-year",
+    "keywords": [
+     "expyear",
+     "expyy",
+     "expirationyear",
+     "expiryyear",
+     "cardyear"
+    ]
+   },
+   {
+    "kind": "cc-exp",
+    "keywords": [
+     "expiry",
+     "expdate",
+     "ccexp",
+     "expiration",
+     "expirationdate",
+     "expiredate",
+     "expirydate",
+     "validthru",
+     "validthrough",
+     "goodthru",
+     "goodthrough",
+     "validuntil",
+     "ablaufdatum",
+     "gueltigbis",
+     "dateexpiration",
+     "vencimiento"
+    ]
+   },
+   {
+    "kind": "cc-csc",
+    "keywords": [
+     "cvv",
+     "cvc",
+     "csc",
+     "securitycode",
+     "cvn",
+     "cardcode",
+     "xcardcode",
+     "verificationvalue",
+     "cardverificationcode",
+     "cardverificationvalue",
+     "cryptogramme",
+     "pruefnummer",
+     "kartenpruefnummer",
+     "codigoseguridad"
+    ]
+   },
+   {
+    "kind": "cc-name",
+    "keywords": [
+     "cardholder",
+     "nameoncard",
+     "ccname",
+     "holdername",
+     "cardholdername",
+     "cardholdersname",
+     "titulaire",
+     "titular",
+     "karteninhaber"
+    ]
+   },
+   {
+    "kind": "cc-type",
+    "keywords": [
+     "cardtype",
+     "cctype",
+     "cardbrand",
+     "ccbrand",
+     "cbtype"
+    ]
+   },
+   {
+    "kind": "cc-number",
+    "keywords": [
+     "creditcard"
+    ]
+   }
+  ]
  },
  "selectIndexShared": [
   {
@@ -740,6 +848,103 @@
    "expMonth": "12",
    "maxLength": 3,
    "expected": "12"
+  }
+ ],
+ "dateLeg": [
+  {
+   "name": "epoch origin",
+   "expMonth": "01",
+   "expYear": "1970",
+   "expectedMs": 0
+  },
+  {
+   "name": "leap february 2024",
+   "expMonth": "02",
+   "expYear": "2024",
+   "expectedMs": 1706745600000
+  },
+  {
+   "name": "non-leap february 2027",
+   "expMonth": "02",
+   "expYear": "2027",
+   "expectedMs": 1801440000000
+  },
+  {
+   "name": "december after leap 2032",
+   "expMonth": "12",
+   "expYear": "2032",
+   "expectedMs": 1985472000000
+  },
+  {
+   "name": "march 2000 (century leap year)",
+   "expMonth": "03",
+   "expYear": "2000",
+   "expectedMs": 951868800000
+  },
+  {
+   "name": "december 2099 (pivot-window ceiling)",
+   "expMonth": "12",
+   "expYear": "2099",
+   "expectedMs": 4099766400000
+  }
+ ],
+ "splitPan": [
+  {
+   "name": "sixteen digits across 4-4-4-4 boxes",
+   "boxes": [
+    4,
+    4,
+    4,
+    4
+   ],
+   "pan": "4242424242424242",
+   "expected": [
+    "4242",
+    "4242",
+    "4242",
+    "4242"
+   ]
+  },
+  {
+   "name": "amex fifteen across 4-6-5 boxes",
+   "boxes": [
+    4,
+    6,
+    5
+   ],
+   "pan": "378282246310005",
+   "expected": [
+    "3782",
+    "822463",
+    "10005"
+   ]
+  },
+  {
+   "name": "final box takes the short remainder: amex fifteen across 4-4-4-4",
+   "boxes": [
+    4,
+    4,
+    4,
+    4
+   ],
+   "pan": "378282246310005",
+   "expected": [
+    "3782",
+    "8224",
+    "6310",
+    "005"
+   ]
+  },
+  {
+   "name": "an undeclared-maxLength box disables the split (whole-PAN fallback + fit-guard governs)",
+   "boxes": [
+    4,
+    4,
+    null,
+    4
+   ],
+   "pan": "4242424242424242",
+   "expected": null
   }
  ]
 }

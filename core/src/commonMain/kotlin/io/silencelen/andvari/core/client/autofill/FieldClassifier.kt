@@ -27,6 +27,16 @@ data class FieldSignal(
     // and vector stays bit-identical; unlike its neighbors above, classify() DOES read it
     // (steps 2 + 4 — card path + CSC demotion only, the login steps never see it).
     val htmlId: String? = null,
+    // ONE label string (Android: ViewNode.hint — the platform has no multi-source label list;
+    // the extension classifies its label sources per-string on its own side). Appended LAST,
+    // null default (construction sites are named-arg). The WEAKEST signal: consulted only in
+    // the step-4 card gap, after the name and id passes both produced nothing — never by the
+    // login steps or the CSC demotion. DELIBERATELY UN-BOUNDED here: the extension caps its
+    // label sources at 60 chars / 8 tokens ([U6], a defense against form-sized wrapping <label>
+    // over-match), but a ViewNode.hint is a short single control hint, not scraped page text —
+    // there is no long-sentence hazard to bound, and the whole-token-run matcher already refuses
+    // partial-token hits. Revisit only if a real over-matching hint surfaces.
+    val labelText: String? = null,
 ) {
     companion object {
         // AOSP android.text.InputType constants (stable).
@@ -67,18 +77,26 @@ object FieldClassifier {
     private val NAME_POSITIVE_USER = listOf("user", "email", "login", "account", "userid")
     private val NAME_POSITIVE_PASS = listOf("pass", "pwd", "passwd")
     private val NAME_NEGATIVE = listOf("search", "otp", "captcha", "code", "query", "phone")
-    // Card keywords — whole-token-run matched against the tokenized name/id (see tokenMatch),
-    // never substring. "pan" is deliberately absent (hazard exceeds its value); no bare "exp".
-    // Group order matters: exp-month/-year before the generic exp group ("cc_exp_month" also
-    // whole-run-matches "ccexp"; "expiration_month" also whole-run-matches "expiration").
-    private val CARD_NAME_KINDS = listOf(
-        listOf("cardnumber", "ccnumber", "ccnum", "cardno", "cardnum") to FieldKind.CC_NUMBER,
-        listOf("expmonth", "expmm", "expirationmonth") to FieldKind.CC_EXP_MONTH,
-        listOf("expyear", "expyy", "expirationyear") to FieldKind.CC_EXP_YEAR,
-        listOf("expiry", "expdate", "ccexp", "expiration", "expirationdate") to FieldKind.CC_EXP,
-        listOf("cvv", "cvc", "csc", "securitycode") to FieldKind.CC_CSC,
-        listOf("cardholder", "nameoncard", "ccname") to FieldKind.CC_NAME,
+    // Card keywords — whole-token-run matched against the tokenized name/id/label (see
+    // tokenMatch), never substring. "pan" is deliberately absent (hazard exceeds its value);
+    // no bare "exp"/"expires" ([U4]: session_expires); no "cid" ([U3]: run-match makes it
+    // c_id) and no "securitynumber"/"verificationnumber" ([U2]: SSN/OTP fields). Group order
+    // matters: exp-month/-year before the generic exp group ("cc_exp_month" also
+    // whole-run-matches "ccexp"; "expiration_month" also whole-run-matches "expiration"),
+    // and bare "creditcard" rides a TRAILING cc-number group consulted after every other
+    // kind ([U1]: credit_card_cvv/_expiry/_type must keep their specific verdicts — only a
+    // bare credit_card collapses to the PAN). The NORMATIVE ordered copy is cardfill.json
+    // tables.keywords; CardFillVectorTest asserts SEQUENCE equality (kinds AND order AND
+    // contents) and the extension asserts the same file — lockstep by construction.
+    internal val CARD_NAME_KINDS = listOf(
+        listOf("cardnumber", "ccnumber", "ccnum", "cardno", "cardnum", "ccno", "kartennummer", "kreditkartennummer", "numerocarte", "numerotarjeta", "numerocartao") to FieldKind.CC_NUMBER,
+        listOf("expmonth", "expmm", "expirationmonth", "expirymonth", "cardmonth") to FieldKind.CC_EXP_MONTH,
+        listOf("expyear", "expyy", "expirationyear", "expiryyear", "cardyear") to FieldKind.CC_EXP_YEAR,
+        listOf("expiry", "expdate", "ccexp", "expiration", "expirationdate", "expiredate", "expirydate", "validthru", "validthrough", "goodthru", "goodthrough", "validuntil", "ablaufdatum", "gueltigbis", "dateexpiration", "vencimiento") to FieldKind.CC_EXP,
+        listOf("cvv", "cvc", "csc", "securitycode", "cvn", "cardcode", "xcardcode", "verificationvalue", "cardverificationcode", "cardverificationvalue", "cryptogramme", "pruefnummer", "kartenpruefnummer", "codigoseguridad") to FieldKind.CC_CSC,
+        listOf("cardholder", "nameoncard", "ccname", "holdername", "cardholdername", "cardholdersname", "titulaire", "titular", "karteninhaber") to FieldKind.CC_NAME,
         listOf("cardtype", "cctype", "cardbrand", "ccbrand", "cbtype") to FieldKind.CC_TYPE,
+        listOf("creditcard") to FieldKind.CC_NUMBER,
     )
     // Gift/store-value suppressors ([T10]): a CC_NUMBER verdict from the name/id token path is
     // killed when one of these matches THE SAME token list that produced the verdict — a gift
@@ -86,7 +104,9 @@ object FieldClassifier {
     // other string never resurrects it). Suppress-only: no other kind is touched, and the
     // autocomplete-hint path is deliberately unguarded (an explicit cc-number hint is the
     // site's own claim — Chromium parity).
-    private val GIFT_SUPPRESSORS = listOf("gift", "egift", "voucher", "loyalty", "coupon")
+    // i18n suppressors ride with the i18n number vocab: numeroCarteCadeau / Geschenkkarte /
+    // tarjetaRegalo must never anchor a card form any more than giftCardNumber does.
+    private val GIFT_SUPPRESSORS = listOf("gift", "egift", "voucher", "loyalty", "coupon", "cadeau", "geschenk", "regalo")
     // Whole-run-matchable forms only: "cardverification" covers cardVerificationValue
     // ([card,verification,value] — the run card+verification) — the old "cardverif" prefix hack
     // is gone with prefix-span matching.
@@ -128,10 +148,12 @@ object FieldClassifier {
         //    the one deliberate 0.7.0 reorder: fields the legacy tel/number→NONE early return gave
         //    up on (<input type="tel" name="cardNumber">) still classify, without a card keyword
         //    ever outranking a login verdict. Never on password types (only step 2 may demote).
-        //    The name pass runs first; the id pass ONLY when the name produced nothing — so a
-        //    verdict (or its gift suppression) always binds to the string that produced it.
+        //    The name pass runs first; the id pass ONLY when the name produced nothing; the
+        //    labelText pass (the weakest signal) ONLY when both attr strings produced nothing —
+        //    so a verdict (or its gift suppression) always binds to the string that produced it,
+        //    per-string terminality included ([U5]: token runs never span a source boundary).
         if (htmlType in CARD_FALLBACK_HTML_TYPES) {
-            (cardKeywordPass(toks) ?: cardKeywordPass(idToks))?.let { return it }
+            (cardKeywordPass(toks) ?: cardKeywordPass(idToks) ?: cardKeywordPass(tokens(s.labelText ?: "")))?.let { return it }
         }
         return FieldKind.NONE
     }
@@ -178,8 +200,10 @@ object FieldClassifier {
         return FieldKind.NONE
     }
 
-    /** name/id → lowercase tokens: split on non-alphanumerics + camelCase boundaries
-     *  ("cardVerificationValue" → [card, verification, value]; "CVVCode" → [cvv, code]). */
+    /** name/id/label → lowercase tokens: split on non-alphanumerics + camelCase boundaries +
+     *  the letter↔digit boundary ("cardVerificationValue" → [card, verification, value];
+     *  "CVVCode" → [cvv, code]; "cardNumber2" → [card, number, 2] — [U9] extension-tokenizer
+     *  parity; both call sites are the card path, steps 2 + 4, so login verdicts can't move). */
     private fun tokens(raw: String): List<String> {
         val out = ArrayList<String>()
         val sb = StringBuilder()
@@ -187,10 +211,14 @@ object FieldClassifier {
         for ((i, c) in raw.withIndex()) {
             if (!c.isLetterOrDigit()) { flush(); continue }
             // sb non-empty ⇒ raw[i-1] was appended (separators flush), so it is the previous token char.
-            if (sb.isNotEmpty() && c.isUpperCase()) {
+            if (sb.isNotEmpty()) {
                 val prev = raw[i - 1]
-                val nextLower = i + 1 < raw.length && raw[i + 1].isLowerCase()
-                if (prev.isLowerCase() || prev.isDigit() || (prev.isUpperCase() && nextLower)) flush()
+                if (c.isDigit() != prev.isDigit()) {
+                    flush() // [U9] letter↔digit boundary, both directions ("cvv2", "3dsecure")
+                } else if (c.isUpperCase()) {
+                    val nextLower = i + 1 < raw.length && raw[i + 1].isLowerCase()
+                    if (prev.isLowerCase() || (prev.isUpperCase() && nextLower)) flush()
+                }
             }
             sb.append(c)
         }

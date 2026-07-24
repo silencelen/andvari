@@ -8,14 +8,15 @@
 import {
   closeDropdown,
   dropdownWillConsumeEnter,
+  isOwnUiHost,
   openDropdown,
   showLinkOffer,
   showSaveBanner,
   showToast,
   type DropdownState,
 } from "./content-ui";
-import { deriveCardWrite, verifyLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
-import { findCardForms, findLoginForms, isSubmitLike, type CardFieldKind, type CardForm, type FillableControl, type LoginForm } from "./detect";
+import { deriveCardWrite, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
+import { bumpLabelGeneration, findCardForms, findLoginForms, isSubmitLike, type CardFieldKind, type CardForm, type FillableControl, type LoginForm } from "./detect";
 import { fillErrorCopy, saveErrorCopy } from "./errors";
 import {
   send,
@@ -38,12 +39,105 @@ function safeSend<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promis
   return send(req).catch(() => undefined);
 }
 
+// ---- §3 shadow DOM (Tier 2, F14) ----
+// Open AND closed roots join the scan scopes: chrome.dom.openOrClosedShadowRoot (Chrome) /
+// el.openOrClosedShadowRoot (Firefox content scripts) / el.shadowRoot. OPEN-shadow logins get
+// dropdown + fill + input capture; CLOSED-shadow gets popup-driven fill only (composedPath
+// truncates at closed boundaries — our own dropdown host relies on exactly that).
+
+const SHADOW_MAX_DEPTH = 8;
+const SHADOW_MAX_ROOTS = 64;
+const SHADOW_MAX_VISITED = 20_000;
+
+/** The cached root list. [U16]: re-swept ONLY on childList-bearing mutation ticks (attribute
+ *  toggles cannot create shadow roots; the walk is ~130k API calls/s worst case if run per
+ *  attribute tick). `attachShadow` on an existing element stays invisible until the next
+ *  childList tick — accepted residual. Pin: shadow-free pages stay byte-identical (roots=[]). */
+let shadowRoots: ShadowRoot[] = [];
+
+/** [U16] one observer PER root (a shared observer has no per-root unobserve), reconciled each
+ *  sweep, hard-capped at SHADOW_MAX_ROOTS live. */
+const shadowObservers = new Map<ShadowRoot, MutationObserver>();
+
+function shadowRootOf(el: Element): ShadowRoot | null {
+  try {
+    const sr = chrome.dom?.openOrClosedShadowRoot?.(el as HTMLElement);
+    if (sr) return sr;
+  } catch {
+    /* chrome.dom unavailable / detached element — fall through to the standard probes */
+  }
+  const ff = (el as Element & { openOrClosedShadowRoot?: ShadowRoot | null }).openOrClosedShadowRoot;
+  return ff ?? el.shadowRoot;
+}
+
+/** Recursive root discovery via TreeWalker. Caps are per sweep and stop DISCOVERY while keeping
+ *  everything already found ([U16] — partial beats nothing). Roots land in document order, so
+ *  the first-64 are the page's first-64. */
+function sweepShadowRoots(): void {
+  const roots: ShadowRoot[] = [];
+  let visited = 0;
+  let stopped = false;
+  const walk = (scope: Document | ShadowRoot, depth: number): void => {
+    const w = document.createTreeWalker(scope, NodeFilter.SHOW_ELEMENT);
+    for (let n = w.nextNode(); n !== null && !stopped; n = w.nextNode()) {
+      if (++visited > SHADOW_MAX_VISITED) {
+        stopped = true;
+        return;
+      }
+      // Our own closed-shadow UI host is opaque to the scan: chrome.dom pierces closed roots, so
+      // without this the sweep would observe our dropdown/toast root and every render would loop
+      // back through onMutations. Skip the host AND its subtree (never descend into our own UI).
+      if (isOwnUiHost(n as Element)) continue;
+      const sr = shadowRootOf(n as Element);
+      if (sr === null) continue;
+      if (roots.length >= SHADOW_MAX_ROOTS) {
+        stopped = true;
+        return;
+      }
+      roots.push(sr);
+      if (depth < SHADOW_MAX_DEPTH) walk(sr, depth + 1);
+    }
+  };
+  walk(document, 1);
+  shadowRoots = roots;
+  reconcileShadowObservers();
+}
+
+/** The §7 observer options, shared by the document observer and every per-root observer — the
+ *  attributeFilter literal is PINNED verbatim (extension-pins): a CSS-toggle reveal (class/style/
+ *  hidden flip on a pre-rendered checkout) must re-scan; attribute ticks reuse the cached root
+ *  list and label cache under the same 150 ms debounce; the sig guard stops redundant sends. */
+const OBSERVE_OPTS: MutationObserverInit = { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "hidden"] };
+
+function reconcileShadowObservers(): void {
+  const live = new Set(shadowRoots);
+  for (const [root, ob] of shadowObservers) {
+    if (!live.has(root) || !root.host.isConnected) {
+      ob.disconnect(); // per-observer disconnect — the reconcile IS the unobserve
+      shadowObservers.delete(root);
+    }
+  }
+  for (const root of shadowRoots) {
+    if (shadowObservers.size >= SHADOW_MAX_ROOTS) break; // hard cap on LIVE observers
+    if (shadowObservers.has(root)) continue;
+    const ob = new MutationObserver(onMutations);
+    ob.observe(root, OBSERVE_OPTS);
+    shadowObservers.set(root, ob);
+  }
+}
+
+/** Every scan scope, document first then roots in discovery (document) order — findLoginForms/
+ *  findCardForms run per scope and concatenate, keeping document-order semantics. */
+function scanScopes(): (Document | ShadowRoot)[] {
+  return [document, ...shadowRoots];
+}
+
 // ---- form scan, cached per animation frame (focusin/input storms reuse one scan) ----
 
 let formsCache: LoginForm[] | null = null;
 function scanForms(): LoginForm[] {
   if (!formsCache) {
-    formsCache = findLoginForms(document);
+    formsCache = scanScopes().flatMap((s) => findLoginForms(s));
     requestAnimationFrame(() => {
       formsCache = null;
     });
@@ -63,13 +157,25 @@ const nativeValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.proto
 const nativeSelectedIndexSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "selectedIndex")!.set!;
 
 /** React/Vue value tracking swallows direct `.value=` writes (the state stays empty while the
- *  text looks filled) — write through the native prototype setter, then dispatch the composed
- *  event pair frameworks listen for. */
+ *  text looks filled) — write through the native prototype setter, dispatched inside the [U18]
+ *  event envelope (shared with the login fill DELIBERATELY — the fidelity gap bites logins too;
+ *  Bitwarden ships the same pattern): focus → keydown → write → input (insertReplacementText) →
+ *  keyup → change. Key events carry NO key identity; they are synthetic (!isTrusted), and every
+ *  capture listener of ours is isTrusted-gated so our own events never self-trigger. [U18]: NO
+ *  blind re-assert — ONE re-assert only when the read-back is EMPTY (a masker's reformat is
+ *  success under the [T7] canonical verify; a masker that re-clears after the single re-assert
+ *  ends as a truthful miss, accepted). */
 function setValue(input: HTMLInputElement, value: string): void {
   input.focus();
+  input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, composed: true }));
   nativeValueSetter.call(input, value);
   input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: value, inputType: "insertReplacementText" }));
+  input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, composed: true }));
   input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+  if (input.value === "") {
+    nativeValueSetter.call(input, value);
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: value, inputType: "insertReplacementText" }));
+  }
 }
 
 /** [T8] Selects are written BY INDEX through the native prototype setter — a `.value=` write
@@ -159,29 +265,24 @@ async function scheduleClipboardClear(): Promise<void> {
 // {fillCard} to THIS frame only, we redeem via revealCardForFill (the value round-trip), and the
 // revealed card fields stay strictly function-local — never snapshotted, never save-bannerable ([A6]).
 
-/** The current frame's card form (first one found), cached for the fill round-trip. */
-let cardForm: CardForm | null = null;
-/** Last reported kind signature — skip redundant cardFormInfo sends on quiet mutations. NULL (not
- *  "") until the first report (§7): the first reportCardForm after injection ALWAYS sends, even
- *  empty, clearing the SW's stale record for the new document in this frame slot. */
+/** Last reported registry signature — skip redundant cardFormInfo sends on quiet mutations. NULL
+ *  (not "") until the first report (§7): the first reportCardForm after injection ALWAYS sends,
+ *  even empty, clearing the SW's stale record for the new document in this frame slot. [U13]:
+ *  the idempotence sig is JSON.stringify(forms) — a join(",") over nested arrays would alias
+ *  [[a,b]] ≡ [[a],[b]] and swallow structural changes. */
 let lastCardSig: string | null = null;
 
-/** Re-scan and report this frame's card form to the SW (metadata only). Empty ⇒ the form went
- *  away and the SW clears our record. Idempotent: a stable kind-set never re-sends. */
+/** Re-scan and report ALL of this frame's card forms to the SW (metadata only, document order
+ *  across [document, …shadowRoots] — §2 [U13]). Empty ⇒ every form went away and the SW clears
+ *  our record. Idempotent: a stable structure never re-sends. */
 function reportCardForm(): void {
-  cardForm = findCardForms(document)[0] ?? null;
-  const kinds: CardFieldKind[] = cardForm ? cardForm.fields.map((f) => f.kind) : [];
-  const sig = kinds.join(",");
+  const forms: CardFieldKind[][] = scanScopes()
+    .flatMap((s) => findCardForms(s))
+    .map((f) => f.fields.map((x) => x.kind));
+  const sig = JSON.stringify(forms);
   if (sig === lastCardSig) return;
   lastCardSig = sig;
-  void safeSend({ type: "cardFormInfo", fields: kinds });
-}
-
-/** Re-resolve to the live card form (an SPA may have swapped the subtree since detection). */
-function liveCardForm(): CardForm | null {
-  if (cardForm && cardForm.fields.length > 0 && cardForm.fields.every((f) => f.input.isConnected)) return cardForm;
-  cardForm = findCardForms(document)[0] ?? null;
-  return cardForm;
+  void safeSend({ type: "cardFormInfo", forms });
 }
 
 /** The live control → the metadata surface cardfill.ts derives against (§4). The caller-side DOM
@@ -193,6 +294,17 @@ function cardTargetOf(el: FillableControl): CardTargetMeta {
     return { tag: "select", type: el.type, maxLength: null, placeholder: null, options: [...el.options].map((o) => ({ value: o.value, text: o.text })) };
   }
   return { tag: "input", type: el.type, maxLength: el.maxLength === -1 ? null : el.maxLength, placeholder: el.placeholder === "" ? null : el.placeholder, options: null };
+}
+
+/** [U12] grant-redemption targeting: a FRESH scan (the SPA may have swapped subtrees since the
+ *  popup click), then the FIRST form (document order) whose CURRENT kind-signature equals the
+ *  grant's — kinds drift only when the form structurally changed, and filling a changed form is
+ *  "wrong beats nothing"; NO index fallback, no match → the caller answers no_form.
+ *  Identical-sig twins go document-order-first (a reorder among identical-sig forms is a
+ *  harmless retarget — accepted + documented). */
+function cardFormBySig(sig: string): CardForm | null {
+  const forms = scanScopes().flatMap((s) => findCardForms(s));
+  return forms.find((f) => f.fields.map((x) => x.kind).join(",") === sig) ?? null;
 }
 
 /** Drive cardfill.ts per field ref (§4/§5), CVV LAST (some checkouts validate CVV against the
@@ -208,9 +320,44 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
   const file = (list: CardFieldKind[], kind: CardFieldKind): void => {
     if (!list.includes(kind)) list.push(kind);
   };
+  let lastWritten: FillableControl | null = null;
   filling = true;
   try {
+    // §4 [U19] split-PAN pre-pass: >1 cardnumber INPUT → cardfill.splitPan chunks when every box
+    // declares maxLength 1..8 and the boxes jointly fit the PAN; otherwise the whole PAN goes to
+    // the FIRST box ONLY, under the ordinary fit-guard (a declared-but-insufficient box nulls the
+    // write there → truthful miss; the fallback only ever lands for undeclared-maxLength shapes).
+    const panBoxes = form.fields.flatMap((f) => (f.kind === "cardnumber" && f.input instanceof HTMLInputElement && f.input.isConnected ? [f.input] : []));
+    const splitRan = panBoxes.length > 1;
+    if (splitRan) {
+      const chunks = splitPan(values.number, panBoxes.map((b) => (b.maxLength === -1 ? null : b.maxLength)));
+      if (chunks !== null) {
+        for (let i = 0; i < panBoxes.length; i++) {
+          // A PAN shorter than the boxes' joint capacity leaves trailing chunks empty — don't
+          // write "" into them (a no-op that would still aim the closing blur/[U18] re-assert at
+          // an untouched box); lastWritten stays on the last box that actually received digits.
+          if (chunks[i] === "") continue;
+          setValue(panBoxes[i]!, chunks[i]!);
+          lastWritten = panBoxes[i]!;
+        }
+        // [U19] landed-ness = the CONCATENATION of every box's digitsOnly vs the full PAN —
+        // auto-advance maskers redistribute digits across boxes, so per-box equality would
+        // fail a successful fill. Mismatch leaves the residue in place (never auto-clear).
+        file(verifySplitPanLanded(values.number ?? "", panBoxes.map((b) => b.value)) ? filledKinds : missedKinds, "cardnumber");
+      } else {
+        const first = panBoxes[0]!;
+        const write = deriveCardWrite("cardnumber", cardTargetOf(first), values);
+        if (write !== null && write.kind === "text") {
+          setValue(first, write.value);
+          lastWritten = first;
+          file(verifyLanded("cardnumber", write, { kind: "text", value: first.value }) ? filledKinds : missedKinds, "cardnumber");
+        } else {
+          file(missedKinds, "cardnumber");
+        }
+      }
+    }
     for (const { kind, input } of [...form.fields.filter((f) => f.kind !== "cardcvv"), ...form.fields.filter((f) => f.kind === "cardcvv")]) {
+      if (splitRan && kind === "cardnumber") continue; // the pre-pass owned the PAN verdict
       if (!input.isConnected) {
         file(missedKinds, kind);
         continue;
@@ -224,14 +371,23 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
       if (write.kind === "index" && input instanceof HTMLSelectElement) {
         setSelectedIndex(input, write.index);
         observed = { kind: "index", index: input.selectedIndex };
+        lastWritten = input;
       } else if (write.kind === "text" && input instanceof HTMLInputElement) {
         setValue(input, write.value);
         observed = { kind: "text", value: input.value };
+        lastWritten = input;
       } else {
         file(missedKinds, kind); // write/control shape mismatch — unreachable by construction, but never guess
         continue;
       }
       file(verifyLanded(kind, write, observed) ? filledKinds : missedKinds, kind);
+    }
+    // §4 card path only: end with blur + focusout on the last-written field, INSIDE the
+    // filling bracket — validate-on-blur checkouts must run their checks NOW, while our own
+    // focusin suppression still holds (blur does not bubble; focusout does).
+    if (lastWritten !== null) {
+      lastWritten.dispatchEvent(new FocusEvent("blur", { composed: true }));
+      lastWritten.dispatchEvent(new FocusEvent("focusout", { bubbles: true, composed: true }));
     }
   } finally {
     filling = false;
@@ -246,9 +402,11 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
 }
 
 /** Popup-granted card fill: redeem the one-shot grant (the SW verifies frameId + origin + live
- *  top-origin), then write the returned fields. The card values never persist past this call. */
-async function fillCardIntoForm(itemId: string): Promise<CardFillOutcome> {
-  const form = liveCardForm();
+ *  top-origin), then write the returned fields. The card values never persist past this call.
+ *  [U12]/[A3]: `sig` is the grant's kind-signature — a non-string (a mid-update mixed-version
+ *  SW) refuses rather than guesses, same fail-closed law as the SW side. */
+async function fillCardIntoForm(itemId: string, sig: unknown): Promise<CardFillOutcome> {
+  const form = typeof sig === "string" ? cardFormBySig(sig) : null;
   if (!form) return { filled: "nothing", filledKinds: [], missedKinds: [], code: "no_form" };
   const r = await safeSend({ type: "revealCardForFill", itemId });
   if (!r) return { filled: "nothing", filledKinds: [], missedKinds: [], code: "unreachable" };
@@ -425,11 +583,52 @@ function offerBanner(pending: PendingSave): void {
 
 // ---- wiring ----
 
+/** The ONE mutation sink — the document observer and every per-root shadow observer feed it.
+ *  §7: attributes join the childList triggers (OBSERVE_OPTS) — a CSS-toggle reveal re-scans
+ *  under the same 150 ms debounce; the sig guard stops redundant sends. Bounded: the attribute
+ *  path re-walks findCardForms at most ~6×/s. [U16]: ONLY childList-bearing ticks re-sweep the
+ *  shadow roots and bump detect.ts's label-cache generation (attribute toggles can create
+ *  neither shadow roots nor label restructures the cache key survives; without the bump the
+ *  label WeakMap would serve stale text forever on dynamic pages). */
+let mutateTimer = 0;
+let sweepPending = false;
+function onMutations(records: MutationRecord[]): void {
+  if (records.some((r) => r.type === "childList")) sweepPending = true;
+  window.clearTimeout(mutateTimer);
+  mutateTimer = window.setTimeout(() => {
+    if (sweepPending) {
+      sweepPending = false;
+      bumpLabelGeneration();
+      sweepShadowRoots();
+    }
+    formsCache = null;
+    reportCardForm(); // S3: a checkout card form may have just rendered (or gone away)
+    // Multi-step: step 1 was captured and the password page/fragment just rendered with
+    // focus already on the password field — offer without another user gesture.
+    if (Date.now() - usernameStepAt < 120_000) {
+      const a = document.activeElement;
+      if (a instanceof HTMLInputElement && a.type === "password") {
+        lastOpen = null;
+        maybeOpen(a);
+      }
+    }
+  }, 150);
+}
+
+// [U17] retargeting: `e.composedPath()[0]` replaces `e.target` in FOUR paths — focusin,
+// click-reopen, the input listener (capture), and the keydown Enter-capture. Events crossing an
+// OPEN shadow boundary retarget to the host, leaving instanceof gates silently dead for shadow
+// fields; composedPath()[0] is the real innermost target (and truncates back to the host at
+// CLOSED boundaries — popup-driven fill only there, which is also what keeps our own
+// closed-shadow dropdown host opaque). DOCUMENTED RESIDUALS: the `submit` listener (submit does
+// not compose — shadow form submits stay uncaptured) and the mutation auto-open's
+// `document.activeElement` (= host).
+
 function init(): void {
   document.addEventListener(
     "focusin",
     (e) => {
-      if (e.isTrusted) maybeOpen(e.target);
+      if (e.isTrusted) maybeOpen(e.composedPath()[0] ?? null);
     },
     true,
   );
@@ -437,8 +636,9 @@ function init(): void {
   document.addEventListener(
     "input",
     (e) => {
-      if (!e.isTrusted || !(e.target instanceof HTMLInputElement)) return;
-      const f = formFor(e.target);
+      const t = e.composedPath()[0] ?? e.target;
+      if (!e.isTrusted || !(t instanceof HTMLInputElement)) return;
+      const f = formFor(t);
       if (f) updateSnapshot(f);
     },
     true,
@@ -447,15 +647,16 @@ function init(): void {
   document.addEventListener(
     "keydown",
     (e) => {
-      if (!e.isTrusted || e.key !== "Enter" || !(e.target instanceof HTMLInputElement)) return;
+      const t = e.composedPath()[0] ?? e.target;
+      if (!e.isTrusted || e.key !== "Enter" || !(t instanceof HTMLInputElement)) return;
       // Cut N review: when the dropdown is about to consume this Enter as a row pick, it is NOT a
       // login submit — snapshotting the (possibly junk partial) field here would offer to overwrite
       // the stored password. This listener runs BEFORE the dropdown's Enter handler, so the flag is
       // still accurate. (Enter with no active row still submits the page form → capture stays valid.)
       if (dropdownWillConsumeEnter()) return;
-      const f = formFor(e.target);
+      const f = formFor(t);
       if (!f) return;
-      if (e.target.type === "password" || (f.kind === "username-step" && f.username === e.target)) captureNow(f);
+      if (t.type === "password" || (f.kind === "username-step" && f.username === t)) captureNow(f);
     },
     true,
   );
@@ -476,7 +677,8 @@ function init(): void {
     "click",
     (e) => {
       if (!e.isTrusted) return;
-      if (e.target instanceof HTMLInputElement) maybeOpen(e.target); // reopen after dismissal
+      const t = e.composedPath()[0];
+      if (t instanceof HTMLInputElement) maybeOpen(t); // reopen after dismissal
       const control = e.composedPath().find((n): n is Element => n instanceof Element && isSubmitLike(n));
       if (!control) return;
       const all = scanForms();
@@ -492,26 +694,7 @@ function init(): void {
   window.addEventListener("popstate", closeDropdown);
   window.addEventListener("hashchange", closeDropdown);
 
-  let mutateTimer = 0;
-  new MutationObserver(() => {
-    window.clearTimeout(mutateTimer);
-    mutateTimer = window.setTimeout(() => {
-      formsCache = null;
-      reportCardForm(); // S3: a checkout card form may have just rendered (or gone away)
-      // Multi-step: step 1 was captured and the password page/fragment just rendered with
-      // focus already on the password field — offer without another user gesture.
-      if (Date.now() - usernameStepAt < 120_000) {
-        const a = document.activeElement;
-        if (a instanceof HTMLInputElement && a.type === "password") {
-          lastOpen = null;
-          maybeOpen(a);
-        }
-      }
-    }, 150);
-    // §7: attributes join the childList triggers — a CSS-toggle reveal (class/style/hidden flip on
-    // a pre-rendered checkout) re-scans under the same 150 ms debounce; the sig guard stops the
-    // redundant sends. Bounded: the attribute path re-walks findCardForms at most ~6×/s.
-  }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "hidden"] });
+  new MutationObserver(onMutations).observe(document.documentElement, OBSERVE_OPTS);
 
   chrome.runtime.onMessage.addListener(
     (msg: TabMsg, _sender, sendResponse: (o: FillOutcome | CardFillOutcome | { ok: true }) => void) => {
@@ -532,7 +715,8 @@ function init(): void {
       if (msg.type === "fillCard") {
         // S3: the SW sent this to THIS frame only (frameId-targeted). We redeem the one-shot card
         // grant and write the returned fields; the SW re-verifies frameId + origin + top origin.
-        void fillCardIntoForm(msg.itemId).then(sendResponse);
+        // [U12]: msg.sig picks the form — first current-sig match in document order, else no_form.
+        void fillCardIntoForm(msg.itemId, msg.sig).then(sendResponse);
         return true; // keep the channel open for the async outcome
       }
       if (msg.type === "rescanCardForms") {
@@ -552,7 +736,8 @@ function init(): void {
   );
 
   void safeSend({ type: "pageInfo", host: location.hostname });
-  reportCardForm(); // S3: report any card form present at load (metadata only)
+  sweepShadowRoots(); // §3: roots present at load join the very first scan/report
+  reportCardForm(); // S3: report any card forms present at load (metadata only)
 
   // Post-navigation re-offer — top frame only, or every iframe would grow a banner.
   if (isTop) {
