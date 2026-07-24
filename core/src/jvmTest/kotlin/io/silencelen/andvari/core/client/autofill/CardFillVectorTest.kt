@@ -31,9 +31,11 @@ class CardFillVectorTest {
     private fun JsonObject.strings(k: String): List<String> = getValue(k).jsonArray.map { it.jsonPrimitive.content }
     private fun JsonObject.tsOnly(): Boolean = this["tsOnly"]?.jsonPrimitive?.content == "true"
 
-    /** [T14] the compiled-in tables EQUAL the vector's normative copy — drift on either side
-     *  (a synonym added in TS but not here, an abbreviation edited in one engine) reds that
-     *  side's gate instead of silently forking the two matchers. */
+    /** [T14]/[W13] the compiled-in tables EQUAL the vector's normative copy — drift on either
+     *  side (a synonym added in TS but not here, a fold digraph or locale name edited in one
+     *  engine) reds that side's gate instead of silently forking the two matchers. The KEY-SET
+     *  assert closes the [W13] vacuity hole: a NEW `tables` entry added to the vector without a
+     *  Kotlin mirror + a per-table assert below reds here rather than shipping unchecked. */
     @Test
     fun tablesMatchTheNormativeVectorCopy() {
         val t = v.getValue("tables").jsonObject
@@ -41,6 +43,13 @@ class CardFillVectorTest {
         assertEquals(t.getValue("containsWords").jsonObject.mapValues { (_, a) -> a.jsonArray.map { it.jsonPrimitive.content } }, CardFill.BRAND_CONTAINS_WORDS, "containsWords")
         assertEquals(t.strings("monthNames"), CardFill.MONTH_NAMES, "monthNames")
         assertEquals(t.getValue("monthAbbreviations").jsonObject.mapValues { (_, a) -> a.jsonArray.map { it.jsonPrimitive.content } }, CardFill.MONTH_ABBREVIATIONS, "monthAbbreviations")
+        assertEquals(t.getValue("asciiFold").jsonObject.entries.associate { (k, a) -> k.single() to a.jsonPrimitive.content }, FieldClassifier.ASCII_FOLD, "asciiFold")
+        assertEquals(t.getValue("monthNamesByLocale").jsonObject.mapValues { (_, a) -> a.jsonArray.map { it.jsonPrimitive.content } }, CardFill.MONTH_NAMES_BY_LOCALE, "monthNamesByLocale")
+        assertEquals(
+            setOf("synonyms", "containsWords", "monthNames", "monthAbbreviations", "keywords", "asciiFold", "monthNamesByLocale"),
+            t.keys,
+            "tables key-set (a new vector table needs a Kotlin mirror + a per-table assert above)",
+        )
     }
 
     /** [U8] the keyword groups are an ORDERED array and group order is load-bearing (month/year
@@ -113,6 +122,50 @@ class CardFillVectorTest {
             )
             val got = plan.firstOrNull { it.index == 1 }?.value
             assertEquals(case.str("expected")?.let { CardFill.Value.Text(it) }, got, "$section: $name")
+        }
+    }
+
+    /** [W2] shared `splitPan`: CardNormalize.splitPanChunks byte-mirrors the extension `splitPan`
+     *  — BOTH engines assert the SAME chunk arrays against this section. `boxes` = declared
+     *  maxLengths in document order (null = undeclared); `expected` null = no split. */
+    @Test
+    fun splitPan() {
+        for (case in v.getValue("splitPan").jsonArray.map { it.jsonObject }) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val boxes = case.getValue("boxes").jsonArray.map { if (it is JsonNull) null else it.jsonPrimitive.int }
+            val pan = case.getValue("pan").jsonPrimitive.content
+            val expected = case["expected"]?.takeIf { it !is JsonNull }?.jsonArray?.map { it.jsonPrimitive.content }
+            assertEquals(expected, CardNormalize.splitPanChunks(pan, boxes), name)
+        }
+    }
+
+    /** [W1] core-only `splitPanPlan`: the CardFill.plan split integration. `clusters` flatten to
+     *  CcFields in order (box index = position across ALL clusters' boxes) so the >1-CC_NUMBER-
+     *  TEXT-box pre-pass is exercised through the public plan, per cluster and after the anchor
+     *  gate. `expectedPlanned` = [{index, text}] for the filled TEXT boxes ONLY; a box absent from
+     *  it is SKIPPED (ineligible-fallback suppression or a hostile-frame zero-fill). */
+    @Test
+    fun splitPanPlan() {
+        for (case in v.getValue("splitPanPlan").jsonArray.map { it.jsonObject }) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val card = CardData(number = case.str("pan"), expMonth = case.str("expMonth"), expYear = case.str("expYear"))
+            val fields = ArrayList<CardFill.CcField>()
+            var idx = 0
+            for (cl in case.getValue("clusters").jsonArray.map { it.jsonObject }) {
+                val frame = cl.str("frameDomain")
+                for (box in cl.getValue("boxes").jsonArray.map { it.jsonObject }) {
+                    fields.add(
+                        CardFill.CcField(
+                            idx++, vectorFieldKind(box.getValue("kind").jsonPrimitive.content), frame,
+                            box.getValue("autofillType").jsonPrimitive.int, emptyList(), maxLength = box.int("maxLength"),
+                        ),
+                    )
+                }
+            }
+            val expected = case.getValue("expectedPlanned").jsonArray.map { it.jsonObject }
+                .map { it.getValue("index").jsonPrimitive.int to it.getValue("text").jsonPrimitive.content }
+            val actual = CardFill.plan(fields, card).map { it.index to (it.value as CardFill.Value.Text).text }
+            assertEquals(expected, actual, name)
         }
     }
 

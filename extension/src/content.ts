@@ -15,8 +15,8 @@ import {
   showToast,
   type DropdownState,
 } from "./content-ui";
-import { deriveCardWrite, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
-import { bumpLabelGeneration, findCardForms, findLoginForms, isSubmitLike, type CardFieldKind, type CardForm, type FillableControl, type LoginForm } from "./detect";
+import { deriveCardWrite, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
+import { bumpLabelGeneration, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
 import { fillErrorCopy, saveErrorCopy } from "./errors";
 import {
   send,
@@ -189,6 +189,21 @@ function setSelectedIndex(sel: HTMLSelectElement, index: number): void {
   sel.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
 }
 
+/** [W9] V3 radio card-type write — the ONLY card write that never goes through setValue: a radio's
+ *  `.value` is its brand token, so setValue + a text verifyLanded would bless an UNSELECTED group.
+ *  Select the winner via `.checked` (the read-back verify reads `.checked === true`, [W9]), then
+ *  dispatch the events a real pick fires — `click` (its default action + PAGE listeners, which need
+ *  no isTrusted), `input`, `change`. Called INSIDE the filling bracket ([A6]-safe: our own selection
+ *  never reopens the dropdown). [W11]: the caller runs this LAST — a click may submit/navigate. */
+function setRadioChecked(group: HTMLInputElement[], index: number): HTMLInputElement {
+  const winner = group[index]!;
+  winner.checked = true;
+  winner.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
+  winner.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+  winner.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+  return winner;
+}
+
 /** Suppresses focusin→dropdown while OUR setValue calls input.focus() (those events are trusted). */
 let filling = false;
 
@@ -356,7 +371,13 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
         }
       }
     }
-    for (const { kind, input } of [...form.fields.filter((f) => f.kind !== "cardcvv"), ...form.fields.filter((f) => f.kind === "cardcvv")]) {
+    // [W9] cardtype RADIO refs are held back from this text/select loop entirely — deriveCardWrite
+    // would hand a cardtype/input target a text write, setValue would stamp the radio's `.value`,
+    // and a text verifyLanded would falsely report "filled" on an unselected group. They fill LAST,
+    // via the `.checked` branch below ([W11]).
+    const isRadioRef = (f: CardFormFieldRef): boolean => f.input instanceof HTMLInputElement && f.input.type === "radio";
+    const nonRadio = form.fields.filter((f) => !isRadioRef(f));
+    for (const { kind, input } of [...nonRadio.filter((f) => f.kind !== "cardcvv"), ...nonRadio.filter((f) => f.kind === "cardcvv")]) {
       if (splitRan && kind === "cardnumber") continue; // the pre-pass owned the PAN verdict
       if (!input.isConnected) {
         file(missedKinds, kind);
@@ -381,6 +402,31 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
         continue;
       }
       file(verifyLanded(kind, write, observed) ? filledKinds : missedKinds, kind);
+    }
+    // [W9][W10][W11][W12] cardtype RADIO groups LAST — a synthetic click fires PAGE listeners (no
+    // isTrusted needed) and runs the radio's default action, which may advance/submit/navigate and
+    // DETACH unfilled PAN/expiry inputs, so this runs only after every text/select field is written.
+    // Synthetic options come from THIS form's own collected group members ([W10] never a
+    // document-wide `name` re-query — a colliding name in another block must stay unreachable);
+    // buildCardForm already collapsed same-name members to ONE ref ([W12]), so each group fills once.
+    // NO setValue: radioIndexFor picks the winner, `.checked` writes it, `.checked === true` verifies.
+    // lastWritten is left on the last DATA field so the closing blur validates that, not the radio.
+    for (const ref of form.fields.filter(isRadioRef)) {
+      const live = (ref.group ?? [ref.input as HTMLInputElement]).filter((r) => r.isConnected);
+      if (live.length === 0) {
+        file(missedKinds, ref.kind);
+        continue;
+      }
+      const idx = radioIndexFor(
+        live.map((r) => ({ value: r.value, text: labelSourcesOf(r).join(" ") })),
+        values.brand,
+      );
+      if (idx === null) {
+        file(missedKinds, ref.kind);
+        continue;
+      }
+      const winner = setRadioChecked(live, idx);
+      file(winner.checked ? filledKinds : missedKinds, ref.kind);
     }
     // §4 card path only: end with blur + focusout on the last-written field, INSIDE the
     // filling bracket — validate-on-blur checkouts must run their checks NOW, while our own

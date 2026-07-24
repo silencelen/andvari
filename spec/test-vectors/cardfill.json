@@ -1,5 +1,5 @@
 {
- "_doc": "Tier-1 card fill vectors (design 2026-07-23-card-autofill-tier1 \u00a711). `tables` is the NORMATIVE copy of the brand-synonym / contains-word / month tables \u2014 each engine deep-equals its compiled-in tables against these, so drift on either side reds that side ([T14]). `selectIndexShared` = label-only <option> lists (options as plain strings; [T8] pins opt.value's attr-absent\u2192text fallback, so the value pass \u2261 the text pass and one string per option is lossless) \u2014 BOTH engines run these through their select matcher; `expected` is the 0-based option index, null = no match (safe miss, never a guess). Matching is PASS-MAJOR ([T2]): pass 1 whole-parse, 2 digit-extraction, 3 month-name (FIRST maximal ASCII-letter run, lowercased, EQUALITY against fullName/abbreviation \u2014 prefix matching forbidden, [T3]), 4 combined-expiry digits, 5 cc-type synonym-exact-else-contains-primary; the earliest pass with any match wins, options in document order within a pass. `selectIndexDom` = value\u2260text option pairs ({value,text}; within an option value is checked before text) \u2014 TS engine ONLY (Android exposes one string per option). `expiryText`/`yearText`/`monthText` = the \u00a74 text-target adapters; stored halves are canonical (expMonth 'MM', expYear 4-digit); maxLength null = undeclared (DOM -1); any case with a non-null placeholder carries tsOnly:true (core has no placeholder signal \u2014 its \u00a79 table is exactly the placeholder-null slice). The [T16] separator comes ONLY from the anchored /m{1,2}\\s*([-/.])\\s*y/i sniff on the placeholder (default '/') \u2014 never a bare contains-scan. cc-type cases carry the stored number AND its derived brand (consistent by CardNormalize.brand \u2014 each engine consumes whichever its API takes). Tier-2 (design 2026-07-23-card-autofill-tier2 \u00a71.3 [U8]): `tables.keywords` is the ORDERED [{kind, keywords}] group array \u2014 the normative name/id vocabulary; group order is load-bearing (month/year groups before the generic exp group; the TRAILING [U1] {cc-number: [creditcard]} group fires only when no specific kind matched, so bare credit_card \u2192 number while credit_card_cvv/_expiry/_type keep their specific verdicts) and BOTH engines assert SEQUENCE equality against it \u2014 kinds AND order AND contents, never per-key lookups (a per-key assert stays vacuously green on a reorder). `dateLeg` = CORE-ONLY consumer (the Android CC_EXP AUTOFILL_TYPE_DATE leg, \u00a75): expectedMs is the epoch ms of (expYear, expMonth, day 1) UTC via days-from-civil. `splitPan` = EXT-ONLY consumer (applyCardFill's split-PAN pre-pass, \u00a74/[U19]): boxes = declared maxLengths in document order (null = undeclared); every box declared 1..8 AND sum \u2265 PAN length \u2192 sequential digit chunks, final box may take a short remainder; expected null = no split (the whole-PAN fallback + fit-guard governs). dateLeg/splitPan are whole SINGLE-CONSUMER sections \u2014 the tsOnly flag has no inverse, so a mixed section would red the wrong engine.",
+ "_doc": "Tier-1 card fill vectors (design 2026-07-23-card-autofill-tier1 \u00a711). `tables` is the NORMATIVE copy of the brand-synonym / contains-word / month tables \u2014 each engine deep-equals its compiled-in tables against these, so drift on either side reds that side ([T14]). `selectIndexShared` = label-only <option> lists (options as plain strings; [T8] pins opt.value's attr-absent\u2192text fallback, so the value pass \u2261 the text pass and one string per option is lossless) \u2014 BOTH engines run these through their select matcher; `expected` is the 0-based option index, null = no match (safe miss, never a guess). Matching is PASS-MAJOR ([T2]): pass 1 whole-parse, 2 digit-extraction, 3 month-name (FIRST maximal ASCII-letter run, lowercased, EQUALITY against fullName/abbreviation \u2014 prefix matching forbidden, [T3]), 4 combined-expiry digits, 5 cc-type synonym-exact-else-contains-primary; the earliest pass with any match wins, options in document order within a pass. `selectIndexDom` = value\u2260text option pairs ({value,text}; within an option value is checked before text) \u2014 TS engine ONLY (Android exposes one string per option). `expiryText`/`yearText`/`monthText` = the \u00a74 text-target adapters; stored halves are canonical (expMonth 'MM', expYear 4-digit); maxLength null = undeclared (DOM -1); any case with a non-null placeholder carries tsOnly:true (core has no placeholder signal \u2014 its \u00a79 table is exactly the placeholder-null slice). The [T16] separator comes ONLY from the anchored /m{1,2}\\s*([-/.])\\s*y/i sniff on the placeholder (default '/') \u2014 never a bare contains-scan. cc-type cases carry the stored number AND its derived brand (consistent by CardNormalize.brand \u2014 each engine consumes whichever its API takes). Tier-2 (design 2026-07-23-card-autofill-tier2 \u00a71.3 [U8]): `tables.keywords` is the ORDERED [{kind, keywords}] group array \u2014 the normative name/id vocabulary; group order is load-bearing (month/year groups before the generic exp group; the TRAILING [U1] {cc-number: [creditcard]} group fires only when no specific kind matched, so bare credit_card \u2192 number while credit_card_cvv/_expiry/_type keep their specific verdicts) and BOTH engines assert SEQUENCE equality against it \u2014 kinds AND order AND contents, never per-key lookups (a per-key assert stays vacuously green on a reorder). `dateLeg` = CORE-ONLY consumer (the Android CC_EXP AUTOFILL_TYPE_DATE leg, \u00a75): expectedMs is the epoch ms of (expYear, expMonth, day 1) UTC via days-from-civil. `splitPan` = SHARED dual-consumer since Tier 3 [W2] \u2014 BOTH engines assert the SAME chunk arrays (core mirrors ext `splitPan` as `CardNormalize.splitPanChunks`): boxes = declared maxLengths in document order (null = undeclared); a split needs >1 box, every box declared 1..8, AND sum \u2265 PAN length \u2192 sequential digit chunks, final box a short remainder; a chunk is \"\" ONLY when earlier boxes already consumed every digit ([8,8,8]/15 \u2192 box3 \"\", whereas [4,4,4,4]/15 \u2192 a 3-digit last chunk); expected null = no split (one box, an undeclared box, or sum < digits \u2014 the whole-PAN fallback + fit-guard governs). The read-back `verifySplitPanLanded` stays the only ext-only split piece. `splitPanPlan` = CORE-ONLY consumer [W1] (the CardFill.plan integration): `clusters[{frameDomain, boxes[{kind, autofillType, maxLength}]}]` flatten to CcFields in order (box index = position across ALL clusters' boxes); `autofillType` is the CardFill.AUTOFILL_TYPE_* int (1 TEXT / 3 LIST / 4 DATE); `pan`/`expMonth`/`expYear` drive CardData. The >1-CC_NUMBER-TEXT-box split pre-pass runs PER frame cluster AFTER the anchor gate, so a cluster with no CC_NUMBER anchor is zero-filled; an ineligible (undeclared-maxLength) >1-box shape fills the FIRST box whole-PAN and SUPPRESSES the rest ([W1]); a single CC_NUMBER box is unchanged (whole PAN \u2014 the design's \"single-box \u2192 whole PAN\" lives here in the plan, not in the pure `splitPan`, which returns null for one box). `expectedPlanned` = [{index, text}] for the filled TEXT boxes ONLY; a box absent from it is SKIPPED. dateLeg/splitPanPlan are whole CORE-ONLY sections; splitPan/tables are dual \u2014 the tsOnly flag has no inverse, so a mixed single-consumer section would red the wrong engine. `tables.asciiFold` = the shared [W3] char\u2192STRING digraph fold (explicit, NOT normalize(\"NFD\")), asserted by BOTH engines; the non-decomposables (\u00df \u00f8 \u00e6 \u0153 \u0142 \u0111 \u00f0 \u00fe) are the pin that reds an NFD-style fork, uppercase forms map identically, unmapped chars pass through. `tables.monthNamesByLocale` = the shared [W5] locale\u2192[12 FOLDED full month names] for de/fr/es/pt/it/nl, authored in the asciiFold alphabet (M\u00e4rz\u2192maerz \u2014 the design doc agrees since the review-fold (entries MUST be fold-stable \u2014 the matcher folds the page option with the same table); authored maerz so a folded \"M\u00e4rz\" option actually matches), asserted by BOTH engines and consulted post-fold in the month-name select pass only (zero cross-month collisions vs every listed locale + en, verified). `radioIndexFor` = EXT-ONLY [W9]/[T14] (V3 radio card-type): {options:[{value,text}], brand} \u2192 index|null, the pure cc-type matcher (synonym-exact across all options, then contains-primary) reused for a radio group.",
  "tables": {
   "synonyms": {
    "visa": [
@@ -202,7 +202,180 @@
      "creditcard"
     ]
    }
-  ]
+  ],
+  "asciiFold": {
+   "\u00df": "ss",
+   "\u00e4": "ae",
+   "\u00c4": "ae",
+   "\u00f6": "oe",
+   "\u00d6": "oe",
+   "\u00fc": "ue",
+   "\u00dc": "ue",
+   "\u00e6": "ae",
+   "\u00c6": "ae",
+   "\u0153": "oe",
+   "\u0152": "oe",
+   "\u00f8": "o",
+   "\u00d8": "o",
+   "\u00f0": "d",
+   "\u00d0": "d",
+   "\u00fe": "th",
+   "\u00de": "th",
+   "\u0142": "l",
+   "\u0141": "l",
+   "\u0111": "d",
+   "\u0110": "d",
+   "\u00e0": "a",
+   "\u00c0": "a",
+   "\u00e2": "a",
+   "\u00c2": "a",
+   "\u00e1": "a",
+   "\u00c1": "a",
+   "\u00e3": "a",
+   "\u00c3": "a",
+   "\u00e5": "a",
+   "\u00c5": "a",
+   "\u0101": "a",
+   "\u0100": "a",
+   "\u00e7": "c",
+   "\u00c7": "c",
+   "\u0107": "c",
+   "\u0106": "c",
+   "\u010d": "c",
+   "\u010c": "c",
+   "\u00e9": "e",
+   "\u00c9": "e",
+   "\u00e8": "e",
+   "\u00c8": "e",
+   "\u00ea": "e",
+   "\u00ca": "e",
+   "\u00eb": "e",
+   "\u00cb": "e",
+   "\u0113": "e",
+   "\u0112": "e",
+   "\u00ed": "i",
+   "\u00cd": "i",
+   "\u00ee": "i",
+   "\u00ce": "i",
+   "\u00ef": "i",
+   "\u00cf": "i",
+   "\u00ec": "i",
+   "\u00cc": "i",
+   "\u012b": "i",
+   "\u012a": "i",
+   "\u00f1": "n",
+   "\u00d1": "n",
+   "\u0144": "n",
+   "\u0143": "n",
+   "\u00f3": "o",
+   "\u00d3": "o",
+   "\u00f4": "o",
+   "\u00d4": "o",
+   "\u00f5": "o",
+   "\u00d5": "o",
+   "\u00f2": "o",
+   "\u00d2": "o",
+   "\u014d": "o",
+   "\u014c": "o",
+   "\u00fa": "u",
+   "\u00da": "u",
+   "\u00fb": "u",
+   "\u00db": "u",
+   "\u00f9": "u",
+   "\u00d9": "u",
+   "\u016b": "u",
+   "\u016a": "u",
+   "\u00fd": "y",
+   "\u00dd": "y",
+   "\u00ff": "y",
+   "\u0178": "y"
+  },
+  "monthNamesByLocale": {
+   "de": [
+    "januar",
+    "februar",
+    "maerz",
+    "april",
+    "mai",
+    "juni",
+    "juli",
+    "august",
+    "september",
+    "oktober",
+    "november",
+    "dezember"
+   ],
+   "fr": [
+    "janvier",
+    "fevrier",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "aout",
+    "septembre",
+    "octobre",
+    "novembre",
+    "decembre"
+   ],
+   "es": [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre"
+   ],
+   "pt": [
+    "janeiro",
+    "fevereiro",
+    "marco",
+    "abril",
+    "maio",
+    "junho",
+    "julho",
+    "agosto",
+    "setembro",
+    "outubro",
+    "novembro",
+    "dezembro"
+   ],
+   "it": [
+    "gennaio",
+    "febbraio",
+    "marzo",
+    "aprile",
+    "maggio",
+    "giugno",
+    "luglio",
+    "agosto",
+    "settembre",
+    "ottobre",
+    "novembre",
+    "dicembre"
+   ],
+   "nl": [
+    "januari",
+    "februari",
+    "maart",
+    "april",
+    "mei",
+    "juni",
+    "juli",
+    "augustus",
+    "september",
+    "oktober",
+    "november",
+    "december"
+   ]
+  }
  },
  "selectIndexShared": [
   {
@@ -515,6 +688,46 @@
    "number": "4242424242424242",
    "brand": "visa",
    "expected": 1
+  },
+  {
+   "name": "V2b positive: German month list fills via the folded locale table (Marz via ae-fold = maerz)",
+   "kind": "cc-exp-month",
+   "options": [
+    "Januar",
+    "Februar",
+    "M\u00e4rz",
+    "April",
+    "Mai",
+    "Juni",
+    "Juli",
+    "August",
+    "September",
+    "Oktober",
+    "November",
+    "Dezember"
+   ],
+   "expMonth": "03",
+   "expected": 2
+  },
+  {
+   "name": "V2b positive: French month list fills (ao\u00fbt folds to aout; d\u00e9cembre to decembre)",
+   "kind": "cc-exp-month",
+   "options": [
+    "janvier",
+    "f\u00e9vrier",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "ao\u00fbt",
+    "septembre",
+    "octobre",
+    "novembre",
+    "d\u00e9cembre"
+   ],
+   "expMonth": "08",
+   "expected": 7
   }
  ],
  "selectIndexDom": [
@@ -944,6 +1157,262 @@
     4
    ],
    "pan": "4242424242424242",
+   "expected": null
+  },
+  {
+   "name": "empty trailing chunk: [8,8,8] over amex fifteen leaves box3 empty (boxes 1-2 already hold all 15 digits)",
+   "boxes": [
+    8,
+    8,
+    8
+   ],
+   "pan": "378282246310005",
+   "expected": [
+    "37828224",
+    "6310005",
+    ""
+   ]
+  },
+  {
+   "name": "sum shortfall disables the split: 4-4-4-4 cannot hold a seventeen-digit PAN",
+   "boxes": [
+    4,
+    4,
+    4,
+    4
+   ],
+   "pan": "60111111111111117",
+   "expected": null
+  },
+  {
+   "name": "single box -> null from the PURE helper (boxes>1 required; the plan fills a lone box whole via textFor, pinned in splitPanPlan)",
+   "boxes": [
+    16
+   ],
+   "pan": "4242424242424242",
+   "expected": null
+  }
+ ],
+ "splitPanPlan": [
+  {
+   "name": "ineligible split ([W1]): two undeclared-maxLength CC_NUMBER TEXT boxes fill box0 whole-PAN, box1 SKIPPED (never full-PAN-into-every-box)",
+   "pan": "4242424242424242",
+   "clusters": [
+    {
+     "frameDomain": null,
+     "boxes": [
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": null
+      },
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": null
+      }
+     ]
+    }
+   ],
+   "expectedPlanned": [
+    {
+     "index": 0,
+     "text": "4242424242424242"
+    }
+   ]
+  },
+  {
+   "name": "eligible split: four maxLength-4 CC_NUMBER boxes over sixteen digits get per-box chunks (non-vacuity: the fit-guard alone would skip every box)",
+   "pan": "4242424242424242",
+   "clusters": [
+    {
+     "frameDomain": null,
+     "boxes": [
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": 4
+      },
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": 4
+      },
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": 4
+      },
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": 4
+      }
+     ]
+    }
+   ],
+   "expectedPlanned": [
+    {
+     "index": 0,
+     "text": "4242"
+    },
+    {
+     "index": 1,
+     "text": "4242"
+    },
+    {
+     "index": 2,
+     "text": "4242"
+    },
+    {
+     "index": 3,
+     "text": "4242"
+    }
+   ]
+  },
+  {
+   "name": "multi-cluster: an eligible split cluster fills per-box; a hostile 2nd-frame cluster with no CC_NUMBER anchor is zero-filled (pre-pass runs after the anchor gate; the lone CC_EXP would fill 07/27 if the gate leaked)",
+   "pan": "4242424242424242",
+   "expMonth": "07",
+   "expYear": "2027",
+   "clusters": [
+    {
+     "frameDomain": "shop.example",
+     "boxes": [
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": 4
+      },
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": 4
+      },
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": 4
+      },
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": 4
+      }
+     ]
+    },
+    {
+     "frameDomain": "psp.example",
+     "boxes": [
+      {
+       "kind": "cc-exp",
+       "autofillType": 1,
+       "maxLength": null
+      }
+     ]
+    }
+   ],
+   "expectedPlanned": [
+    {
+     "index": 0,
+     "text": "4242"
+    },
+    {
+     "index": 1,
+     "text": "4242"
+    },
+    {
+     "index": 2,
+     "text": "4242"
+    },
+    {
+     "index": 3,
+     "text": "4242"
+    }
+   ]
+  },
+  {
+   "name": "single CC_NUMBER box is unchanged: it fills the whole PAN (the >1-box split pre-pass never fires)",
+   "pan": "4242424242424242",
+   "clusters": [
+    {
+     "frameDomain": null,
+     "boxes": [
+      {
+       "kind": "cc-number",
+       "autofillType": 1,
+       "maxLength": 16
+      }
+     ]
+    }
+   ],
+   "expectedPlanned": [
+    {
+     "index": 0,
+     "text": "4242424242424242"
+    }
+   ]
+  }
+ ],
+ "radioIndexFor": [
+  {
+   "name": "value match: a radio whose value is a brand synonym is selected (value checked before label)",
+   "options": [
+    {
+     "value": "visa",
+     "text": "Option 1"
+    },
+    {
+     "value": "mc",
+     "text": "Option 2"
+    }
+   ],
+   "brand": "visa",
+   "expected": 0
+  },
+  {
+   "name": "label match: the adjacent label carries the brand when the value is an opaque code",
+   "options": [
+    {
+     "value": "1",
+     "text": "Visa"
+    },
+    {
+     "value": "2",
+     "text": "American Express"
+    }
+   ],
+   "brand": "amex",
+   "expected": 1
+  },
+  {
+   "name": "contains-primary fallback: 'Pay with Visa' matches when no exact synonym row exists",
+   "options": [
+    {
+     "value": "x",
+     "text": "Pay with Visa"
+    },
+    {
+     "value": "y",
+     "text": "Pay with Mastercard"
+    }
+   ],
+   "brand": "visa",
+   "expected": 0
+  },
+  {
+   "name": "no match: an unknown brand set checks nothing (safe miss, never a guess)",
+   "options": [
+    {
+     "value": "maestro",
+     "text": "Maestro"
+    },
+    {
+     "value": "jcb",
+     "text": "JCB"
+    }
+   ],
+   "brand": "visa",
    "expected": null
   }
  ]

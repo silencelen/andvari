@@ -35,6 +35,35 @@
 import { brandLabel, digitsOnly, padMonth, yearTo4 } from "./card.ts";
 import type { CardFieldKind } from "./detect.ts";
 
+/** [W3] the shared ASCII-fold digraph table, char→STRING (NEVER normalize("NFD") — NFD leaves
+ *  ß/ø/æ/œ/ł/đ undecomposed and emits ü→u, which can't reach the shipped German ue/oe/ae vocab).
+ *  Authored as fold-target groups (one target, its source chars) purely to keep the 85-entry table
+ *  legible; the flattened char→string map is `TABLES.asciiFold`, deep-equalled against the vector
+ *  ([T14]/[W3] — the non-decomposables ß ø æ œ ł đ ð þ are the pin that reds an NFD-style fork).
+ *  Uppercase accented forms map to the same (lowercase) target; unmapped chars pass through. */
+const FOLD_GROUPS: Record<string, string> = {
+  ss: "ß",
+  ae: "äÄæÆ",
+  oe: "öÖœŒ",
+  ue: "üÜ",
+  d: "ðÐđĐ",
+  th: "þÞ",
+  l: "łŁ",
+  a: "àÀâÂáÁãÃåÅāĀ",
+  c: "çÇćĆčČ",
+  e: "éÉèÈêÊëËēĒ",
+  i: "íÍîÎïÏìÌīĪ",
+  n: "ñÑńŃ",
+  o: "øØóÓôÔõÕòÒōŌ",
+  u: "úÚûÛùÙūŪ",
+  y: "ýÝÿŸ",
+};
+function buildAsciiFold(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [target, chars] of Object.entries(FOLD_GROUPS)) for (const ch of chars) out[ch] = target;
+  return out;
+}
+
 /** [T14] the compiled-in synonym/contains/month/keyword tables — the NORMATIVE copy lives in
  *  cardfill.json's `tables` section; each engine deep-equals its compiled-in copy against the
  *  vector, so drift on either side reds that side. Never edit here without editing the vector
@@ -45,6 +74,8 @@ export const TABLES: {
   monthNames: readonly string[];
   monthAbbreviations: Record<string, readonly string[]>;
   keywords: readonly { kind: string; keywords: readonly string[] }[];
+  asciiFold: Record<string, string>;
+  monthNamesByLocale: Record<string, readonly string[]>;
 } = {
   synonyms: {
     visa: ["visa", "vi", "v", "001"],
@@ -89,7 +120,30 @@ export const TABLES: {
     { kind: "cc-type", keywords: ["cardtype", "cctype", "cardbrand", "ccbrand", "cbtype"] },
     { kind: "cc-number", keywords: ["creditcard"] },
   ],
+  asciiFold: buildAsciiFold(),
+  // [W5] localized FULL month names (abbreviations DEFERRED — the collision surface) for
+  // de/fr/es/pt/it/nl, authored in the folded alphabet (März→maerz) — consulted post-fold in the
+  // month-name select pass only. [W5] committed collision + fold-fixed-point guards live in
+  // cardfill.test.ts (TS) and MonthNameCollisionTest.kt (Kotlin). Deep-equalled against the vector.
+  monthNamesByLocale: {
+    de: ["januar", "februar", "maerz", "april", "mai", "juni", "juli", "august", "september", "oktober", "november", "dezember"],
+    fr: ["janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout", "septembre", "octobre", "novembre", "decembre"],
+    es: ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"],
+    pt: ["janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"],
+    it: ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"],
+    nl: ["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"],
+  },
 };
+
+/** [W3][W4] ASCII-fold a string via `TABLES.asciiFold` (mapped chars → their digraph/letter, all
+ *  others verbatim). Case of unmapped letters is preserved (the tokenizer lowercases later). Used
+ *  ext-side at the `cardKindFromTokens` chokepoint (detect.ts) and in the localized month-name
+ *  select pass ([W6]); NEVER on the `tokens()`/`isCvvNameOrId` login-capture path. */
+export function fold(s: string): string {
+  let out = "";
+  for (const ch of s) out += TABLES.asciiFold[ch] ?? ch;
+  return out;
+}
 
 /** The one write shape crossing to the executor — text for inputs, INDEX for selects ([T8]). */
 export type CardWrite = { kind: "text"; value: string } | { kind: "index"; index: number };
@@ -285,16 +339,22 @@ function passesFor(kind: CardFieldKind, v: CardFillValues): OptionPredicate[] | 
     case "cardexpmonth": {
       const mm = padMonth(v.expMonth ?? "");
       if (mm === null) return null;
-      const full = TABLES.monthNames[monthNumber(mm) - 1]!;
+      const mIdx = monthNumber(mm) - 1;
+      const full = TABLES.monthNames[mIdx]!;
       const abbr = TABLES.monthAbbreviations[mm]!;
+      // [W5] this month's FULL name in every listed locale (authored folded) — consulted post-fold.
+      const localized = Object.values(TABLES.monthNamesByLocale).map((names) => names[mIdx]!);
       return [
         (s) => padMonth(s) === mm,
         (s) => padMonth(digitsOnly(s)) === mm,
         // [T3] letter-run EQUALITY against fullName/abbreviation — prefix matching is FORBIDDEN
         // (fi "marraskuu" starts with "mar" but is November; it must degrade to a safe miss).
+        // [W6] the option is ASCII-folded FIRST ("März"→"maerz" reaches the de table); passes 1-2
+        // stay on the raw option so digit lists are unaffected. Match against en full/abbr AND this
+        // month's full name in any listed locale (zero cross-month collisions, [W5]).
         (s) => {
-          const run = firstLetterRun(s);
-          return run !== null && (run === full || abbr.includes(run));
+          const run = firstLetterRun(fold(s));
+          return run !== null && (run === full || abbr.includes(run) || localized.includes(run));
         },
       ];
     }
@@ -316,26 +376,30 @@ function passesFor(kind: CardFieldKind, v: CardFillValues): OptionPredicate[] | 
         },
       ];
     }
-    case "cardtype": {
-      const syn = v.brand !== undefined ? TABLES.synonyms[v.brand] : undefined;
-      const words = v.brand !== undefined ? TABLES.containsWords[v.brand] : undefined;
-      if (!syn || !words) return null; // unknown/absent brand → missed, never guessed
-      // TWO ordered passes (core CC_TYPE parity: exact-synonym across ALL options BEFORE any
-      // contains match). Folding them into one per-option predicate would let an earlier
-      // contains-only row — a brand-enumerating header ("Card type (Visa, …)") or "Visa
-      // Electron" — outrank the real exact "Visa" row below it: the [T2] option-major bug in
-      // miniature, and verifyLanded would bless the wrong pick (index equality).
-      return [
-        (s) => syn.includes(normalizeType(s)),
-        (s) => {
-          const n = normalizeType(s);
-          return n !== "" && words.some((w) => n.includes(w));
-        },
-      ];
-    }
+    case "cardtype":
+      return cardTypePasses(v.brand);
     default:
       return null; // cardnumber/cardcvv/cardname can never be selects (§0 invariant)
   }
+}
+
+/** The TWO ordered cc-type option passes for a brand — exact-synonym across ALL options BEFORE any
+ *  contains match — shared by the select `cardtype` pass and the V3 `radioIndexFor` matcher ([W9]).
+ *  Folding them into one per-option predicate would let an earlier contains-only row — a
+ *  brand-enumerating header ("Card type (Visa, …)") or "Visa Electron" — outrank the real exact
+ *  "Visa" row below it: the [T2] option-major bug in miniature, and verifyLanded would bless the
+ *  wrong pick (index equality). null = unknown/absent brand → missed, never guessed. */
+function cardTypePasses(brand: string | null | undefined): OptionPredicate[] | null {
+  const syn = brand != null ? TABLES.synonyms[brand] : undefined;
+  const words = brand != null ? TABLES.containsWords[brand] : undefined;
+  if (!syn || !words) return null;
+  return [
+    (s) => syn.includes(normalizeType(s)),
+    (s) => {
+      const n = normalizeType(s);
+      return n !== "" && words.some((w) => n.includes(w));
+    },
+  ];
 }
 
 /** [T2] PASS-MAJOR select matching (core `listIndexFor` parity): the passes are the OUTER loop —
@@ -347,6 +411,23 @@ function passesFor(kind: CardFieldKind, v: CardFillValues): OptionPredicate[] | 
  *  all options before any contains match, core parity). null = safe miss, never a guess. */
 export function selectIndexFor(kind: CardFieldKind, options: readonly SelectOptionMeta[], v: CardFillValues): number | null {
   const passes = passesFor(kind, v);
+  if (passes === null) return null;
+  for (const pass of passes) {
+    for (let i = 0; i < options.length; i++) {
+      const o = options[i]!;
+      if (pass(o.value) || pass(o.text)) return i;
+    }
+  }
+  return null;
+}
+
+/** [W9] V3 radio card-type: the PURE cc-type matcher over a radio group's synthetic options
+ *  ({value: radio.value, text: adjacent label}), reusing selectIndexFor's cardtype passes
+ *  (synonym-exact across ALL options, then contains-primary; value checked before text). Returns
+ *  the winning option index or null (safe miss, never a guess). The executor (content.ts) sets
+ *  group[i].checked = true — a radio NEVER reaches deriveCardWrite/setValue/text verifyLanded. */
+export function radioIndexFor(options: readonly SelectOptionMeta[], brand: string | null | undefined): number | null {
+  const passes = cardTypePasses(brand);
   if (passes === null) return null;
   for (const pass of passes) {
     for (let i = 0; i < options.length; i++) {

@@ -116,5 +116,41 @@ object CardNormalize {
         return "$m/$y"
     }
 
+    /**
+     * Multi-box PAN chunking ([W2], design 2026-07-23-card-autofill-tier3 §V1) — the byte-mirror
+     * of the extension's `splitPan` (cardfill.ts): sequential ASCII-digit chunks across
+     * [maxLengths] iff there is MORE THAN ONE box, EVERY box declares a length in 1..8, AND the
+     * boxes jointly fit the PAN (Σ maxLength ≥ digit count); else null (CardFill.plan's
+     * whole-PAN-to-FIRST-box fallback + fit-guard governs every ineligible shape). box_i takes its
+     * maxLength_i digits in document order; the FINAL box takes a short remainder, and a shape
+     * whose earlier boxes already hold every digit leaves a trailing "" ([8,8,8]/15 → box3 "",
+     * whereas [4,4,4,4]/15 → a 3-digit last chunk). Pure slicing, no read-back — the ext-only
+     * `verifySplitPanLanded` is the split's only ext-exclusive half. BOTH engines assert the SAME
+     * cardfill.json `splitPan` chunk arrays, so a drift on either side reds that side.
+     */
+    fun splitPanChunks(pan: String, maxLengths: List<Int?>): List<String>? {
+        val d = digitsOnly(pan)
+        if (d.isEmpty() || maxLengths.size < 2) return null // one box is not a split
+        val lens = ArrayList<Int>(maxLengths.size)
+        var sum = 0
+        for (m in maxLengths) {
+            if (m == null || m < 1 || m > 8) return null // an undeclared/out-of-range box disables the split
+            lens.add(m)
+            sum += m
+        }
+        if (sum < d.length) return null // the boxes cannot jointly hold the PAN
+        val chunks = ArrayList<String>(lens.size)
+        var at = 0
+        for (m in lens) {
+            // slice(at, at+m) semantics: clamp both ends into [0, d.length] so an overrun box
+            // takes the remainder and a spent box takes "".
+            val start = if (at < d.length) at else d.length
+            val end = if (at + m < d.length) at + m else d.length
+            chunks.add(d.substring(start, end))
+            at += m
+        }
+        return chunks
+    }
+
     private val AMEX_IIN = setOf("34", "37")
 }

@@ -8,7 +8,7 @@
 // directions ([A8]) and the capture/save gate ([A7]) are anchored here.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { bumpLabelGeneration, classifyCardField, classifyCardSelect, demoteCsc, formlessGroups, isCvvNameOrId, labelSourcesOf } from "./detect.ts";
+import { bumpLabelGeneration, classifyCardField, classifyCardRadio, classifyCardSelect, demoteCsc, formlessGroups, isCvvNameOrId, labelSourcesOf } from "./detect.ts";
 import type { FieldSignal } from "./urimatch.ts";
 
 const sig = (over: Partial<FieldSignal>): FieldSignal => ({ hints: [], htmlType: "text", htmlNameOrId: null, ...over });
@@ -236,6 +236,17 @@ test("[U2]/[U3]/[U4] dropped tokens stay none — SSN/OTP/customer-id/session fa
   assert.equal(classifyCardField(sig({ htmlNameOrId: "session_expires" })), null); // bare "expires" dropped
 });
 
+test("[W4] accented name/label classification folds at the cardKindFromTokens chokepoint (reds if the fold is removed)", () => {
+  // "Prüfnummer" → fold → "pruefnummer" → the shipped cc-csc keyword matches. Un-folded, tokens()
+  // treats ü as a separator ([pr, fnummer]) and never matches — so removing the fold reds these.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "Prüfnummer" })), "cardcvv");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "Kartenprüfnummer" })), "cardcvv");
+  // the label path folds per-source-string too: "Gültig bis" → gueltig+bis → gueltigbis (cc-exp).
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Gültig bis"]), "cardexpiry");
+  // id-retry path folds as well (garbage name, accented id).
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_7" }), "Prüfnummer"), "cardcvv");
+});
+
 test("§1.3 i18n gift suppressors — cadeau/geschenk/regalo kill the PAN anchor per-string", () => {
   assert.equal(classifyCardField(sig({ htmlNameOrId: "numeroCarteCadeau" })), null);
   assert.equal(classifyCardField(sig({ htmlNameOrId: "geschenk_kartennummer" })), null);
@@ -322,8 +333,8 @@ class StubSelect extends StubNode {}
 (globalThis as any).HTMLInputElement = StubInput;
 (globalThis as any).HTMLSelectElement = StubSelect;
 
-const stubField = (input: StubNode, kind: string, cardKind: string | null = null) =>
-  ({ input, kind, isNewPassword: false, textLike: false, cardKind }) as any;
+const stubField = (input: StubNode, kind: string, cardKind: string | null = null, textLike = false) =>
+  ({ input, kind, isNewPassword: false, textLike, cardKind }) as any;
 
 test("[T1] formless clustering is select-blind: expiry selects + password CVV beside a PAN row stay ONE cluster", () => {
   // <div P> <div row1> <select expMonth> <select expYear> <input password cvv> </div>
@@ -340,8 +351,11 @@ test("[T1] formless clustering is select-blind: expiry selects + password CVV be
   const pan = new StubInput();
   row1.append(selMonth, selYear, cvv);
   row2.append(pan);
+  // [W7] the text PAN is login-eligible (textLike true, as real collect() marks a text cardnumber),
+  // so it stays in the clustering pool exactly as under the old instanceof partition. (The
+  // tel-typed variant below covers the textLike=false path.)
   const groups = formlessGroups(
-    [stubField(selMonth, "none", "cardexpmonth"), stubField(selYear, "none", "cardexpyear"), stubField(cvv, "password"), stubField(pan, "none", "cardnumber")] as any,
+    [stubField(selMonth, "none", "cardexpmonth"), stubField(selYear, "none", "cardexpyear"), stubField(cvv, "password"), stubField(pan, "none", "cardnumber", true)] as any,
     root as any,
   );
   // Pre-[T1] regression shape: the CVV's climb stopped at row1 (the selects satisfied the
@@ -349,6 +363,28 @@ test("[T1] formless clustering is select-blind: expiry selects + password CVV be
   assert.equal(groups.length, 1);
   assert.equal(groups[0]!.container, p as any); // the climb passed row1 — only ONE input-backed field there
   assert.deepEqual(new Set(groups[0]!.fields.map((f: any) => f.input)), new Set([selMonth, selYear, cvv, pan]));
+});
+
+test("[W7] a TEL-typed PAN (textLike=false) still drives the password-CVV clustering (review-fold)", () => {
+  // Same shape as the [T1] case but the PAN is type=tel — collect() admits it via cardKind alone
+  // (kind none, textLike FALSE). The eligibility predicate must keep every NON-RADIO card input
+  // in the clustering pool, or the CVV's climb stops a level low, the PAN is severed from the
+  // cluster (no anchor → no demotion, no CVV fill) and the [A7] save-suppression loses its gate.
+  const root = new StubNode();
+  const p = new StubNode();
+  const row1 = new StubNode();
+  const row2 = new StubNode();
+  root.append(p);
+  p.append(row1, row2);
+  const cvv = new StubInput();
+  const pan = new StubInput();
+  (pan as any).type = "tel";
+  row1.append(cvv);
+  row2.append(pan);
+  const groups = formlessGroups([stubField(cvv, "password"), stubField(pan, "none", "cardnumber")] as any, root as any);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0]!.container, p as any); // ONE cluster — the tel PAN satisfied the early-stop at p
+  assert.deepEqual(new Set(groups[0]!.fields.map((f: any) => f.input)), new Set([cvv, pan]));
 });
 
 test("[T1] a select outside every formed group rides the root leftover group", () => {
@@ -367,6 +403,47 @@ test("[T1] a select outside every formed group rides the root leftover group", (
   assert.deepEqual(new Set(groups[0]!.fields.map((f: any) => f.input)), new Set([user, pass]));
   assert.equal(groups[1]!.container, root as any);
   assert.deepEqual(groups[1]!.fields.map((f: any) => f.input), [stray]);
+});
+
+// ---- V3 [W8]/[W7] radio card-type: cardtype-only classifier + login-inert grouping ----
+
+test("[W8] classifyCardRadio — cardtype-only (name=cardType → cardtype; a month/year/shipping/rememberLogin radio → none)", () => {
+  // both name directions + hint + id-retry yield cardtype…
+  assert.equal(classifyCardRadio("cardType", null, []), "cardtype");
+  assert.equal(classifyCardRadio("cc_type", null, []), "cardtype");
+  assert.equal(classifyCardRadio("ccBrand", null, []), "cardtype");
+  assert.equal(classifyCardRadio(null, null, ["cc-type"]), "cardtype"); // hint path (normalized)
+  assert.equal(classifyCardRadio("field_1", "cardBrand", []), "cardtype"); // id retry
+  assert.equal(classifyCardRadio("field_1", null, [], ["Card type"]), "cardtype"); // label path (weakest)
+  // …but it is TIGHTER than the select set — a month/year radio must NOT classify (only cardtype rides).
+  assert.equal(classifyCardRadio("cardMonth", null, []), null);
+  assert.equal(classifyCardRadio("expiryYear", null, []), null);
+  assert.equal(classifyCardRadio("field_1", null, [], ["Card number"]), null); // §0-style: not cardtype → none
+  // NEVER the login classify(): a shipping / remember radio is inert (none), never username.
+  assert.equal(classifyCardRadio("shipping", null, []), null);
+  assert.equal(classifyCardRadio("rememberLogin", null, []), null);
+  // a non-cardtype name verdict still stops the id/label retries (kind-restricted-away → null).
+  assert.equal(classifyCardRadio("cardMonth", "cardType", []), null);
+});
+
+test("[W7] formlessGroups — a password beside a cardtype radio group groups byte-identically to today", () => {
+  // <div w> <input password> <input radio cardtype> <input radio cardtype> </div>
+  const root = new StubNode();
+  const w = new StubNode();
+  root.append(w);
+  const pass = new StubInput();
+  const r1 = new StubInput();
+  const r2 = new StubInput();
+  (r1 as any).type = "radio";
+  (r2 as any).type = "radio";
+  w.append(pass, r1, r2);
+  // The radios are login-inert via the TYPE check (review-fold: card-classified non-radio inputs
+  // stay eligible) — they do NOT drive the password's early-stop (which stays a singleton), then
+  // attach post-hoc by container. Net grouping is byte-identical to the old instanceof partition.
+  const groups = formlessGroups([stubField(pass, "password"), stubField(r1, "none", "cardtype"), stubField(r2, "none", "cardtype")] as any, root as any);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0]!.container, w as any);
+  assert.deepEqual(new Set(groups[0]!.fields.map((f: any) => f.input)), new Set([pass, r1, r2]));
 });
 
 // ---- [U7] label source extraction: ordered sources + the per-generation cache ----

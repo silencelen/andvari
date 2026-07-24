@@ -736,6 +736,57 @@
                 }
             ],
             "formKind": "login"
+        },
+        {
+            "name": "accented CSC label classifies ONLY after the ASCII-fold ([W3]/\u00a7V2a): Pr\u00fcfnummer \u2192 cc-csc (reds if the fold is removed); the PAN name-anchors the card form",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "htmlId": null,
+                    "labelText": null,
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "field_2",
+                    "htmlId": null,
+                    "labelText": "Pr\u00fcfnummer",
+                    "maxLength": 4,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-csc"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "German SSN label never demotes to cc-csc even post-fold ([U2]-class guard): Sozialversicherungsnummer \u2192 none",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "field_9",
+                    "htmlId": null,
+                    "labelText": "Sozialversicherungsnummer",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "none"
+                }
+            ],
+            "formKind": "login"
         }
     ]
 }
