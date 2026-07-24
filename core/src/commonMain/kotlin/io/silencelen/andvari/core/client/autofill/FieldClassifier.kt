@@ -8,7 +8,7 @@ package io.silencelen.andvari.core.client.autofill
  * 0.6.x classifier decided keeps its verdict, so login verdicts on card-free forms are
  * bit-identical to pre-0.7.0 — pinned by urimatch.json (classify + classifyCardFreeRegression).
  */
-enum class FieldKind { USERNAME, PASSWORD, NONE, CC_NUMBER, CC_EXP_MONTH, CC_EXP_YEAR, CC_EXP, CC_NAME, CC_CSC, CC_TYPE }
+enum class FieldKind { USERNAME, PASSWORD, NONE, CC_NUMBER, CC_EXP_MONTH, CC_EXP_YEAR, CC_EXP, CC_NAME, CC_CSC, CC_TYPE, CC_POSTAL }
 
 /** Signals extracted at the Android boundary; InputType constants are stable AOSP values. */
 data class FieldSignal(
@@ -88,6 +88,11 @@ object FieldClassifier {
     // bare credit_card collapses to the PAN). The NORMATIVE ordered copy is cardfill.json
     // tables.keywords; CardFillVectorTest asserts SEQUENCE equality (kinds AND order AND
     // contents) and the extension asserts the same file — lockstep by construction.
+    // G3 [X3-A1] the cc-postal vocabulary — single-sourced into CARD_NAME_KINDS below AND
+    // [postalKind]. Declared BEFORE CARD_NAME_KINDS (object-property init order). Bare `postalcode`
+    // fires ONLY in the anchored gap (it also stays a login NEGATIVE_HINT for the autofill-hint
+    // path, [X3-A2]); prefixed billing*/card* forms win.
+    internal val CC_POSTAL_KEYWORDS = listOf("billingzip", "billingpostal", "cardpostal", "cardzip", "avszip", "postalcode")
     internal val CARD_NAME_KINDS = listOf(
         listOf("cardnumber", "ccnumber", "ccnum", "cardno", "cardnum", "ccno", "kartennummer", "kreditkartennummer", "numerocarte", "numerotarjeta", "numerocartao") to FieldKind.CC_NUMBER,
         listOf("expmonth", "expmm", "expirationmonth", "expirymonth", "cardmonth") to FieldKind.CC_EXP_MONTH,
@@ -96,8 +101,19 @@ object FieldClassifier {
         listOf("cvv", "cvc", "csc", "securitycode", "cvn", "cardcode", "xcardcode", "verificationvalue", "cardverificationcode", "cardverificationvalue", "cryptogramme", "pruefnummer", "kartenpruefnummer", "codigoseguridad") to FieldKind.CC_CSC,
         listOf("cardholder", "nameoncard", "ccname", "holdername", "cardholdername", "cardholdersname", "titulaire", "titular", "karteninhaber") to FieldKind.CC_NAME,
         listOf("cardtype", "cctype", "cardbrand", "ccbrand", "cbtype") to FieldKind.CC_TYPE,
+        // G3 [X3-A1] cc-postal group — placed AFTER cc-type and BEFORE the trailing bare-creditcard
+        // [U1] group so no cross-kind run overlaps. It rides CARD_NAME_KINDS for the cardfill.json
+        // sequence pin + the fill leg, but is ANCHOR-GATED: cardKeywordPass SKIPS it so classify()
+        // never surfaces CC_POSTAL (login-inert bare — urimatch standalone pins NONE); CardForm.refine
+        // re-derives it inside a CC_NUMBER-anchored cluster via [postalKind].
+        CC_POSTAL_KEYWORDS to FieldKind.CC_POSTAL,
         listOf("creditcard") to FieldKind.CC_NUMBER,
     )
+    // G3 [X3-A1](i) shipping-suppressor ([T10] gift-guard shape, per-string, terminal): a would-be
+    // cc-postal string whose SAME token list also whole-run-matches a shipping token is a delivery
+    // zip, never billing — suppressed to NONE so billing postal never fills/overwrites a shipping
+    // zip on a mixed single-form checkout. i18n runs with the vocab (lieferung/livraison/…).
+    private val SHIPPING_SUPPRESSORS = listOf("ship", "shipping", "delivery", "deliver", "recipient", "lieferung", "liefer", "livraison", "envio", "spedizione")
     // Gift/store-value suppressors ([T10]): a CC_NUMBER verdict from the name/id token path is
     // killed when one of these matches THE SAME token list that produced the verdict — a gift
     // number must never anchor a card form (and a killed anchor is terminal for the field: the
@@ -199,11 +215,32 @@ object FieldClassifier {
      *  the guard binds to the verdict-producing string, and a suppressed anchor is a decided
      *  "this is a gift field", never an invitation to consult the other string). */
     private fun cardKeywordPass(toks: List<String>): FieldKind? {
-        for ((kws, kind) in CARD_NAME_KINDS) if (kws.any { tokenMatch(toks, it) }) {
-            if (kind == FieldKind.CC_NUMBER && GIFT_SUPPRESSORS.any { tokenMatch(toks, it) }) return FieldKind.NONE
-            return kind
+        for ((kws, kind) in CARD_NAME_KINDS) {
+            // [X3-A1] CC_POSTAL is anchor-gated: it rides CARD_NAME_KINDS for the sequence pin +
+            // fill leg, but classify() must stay login-inert on it (urimatch standalone billingZip/
+            // postalCode = NONE) — CardForm.refine promotes it via [postalKind] under a PAN anchor.
+            if (kind == FieldKind.CC_POSTAL) continue
+            if (kws.any { tokenMatch(toks, it) }) {
+                if (kind == FieldKind.CC_NUMBER && GIFT_SUPPRESSORS.any { tokenMatch(toks, it) }) return FieldKind.NONE
+                return kind
+            }
         }
         return null
+    }
+
+    /** [X3-A1] Anchor-gated CC_POSTAL detection — [CardForm.refine] ONLY (classify() is login-inert
+     *  bare per urimatch standalone). Per-string over name→id→label: the FIRST source whose tokens
+     *  whole-run-match a cc-postal keyword binds (terminal, [U5]-shape), and the shipping-suppressor
+     *  ([X3-A1](i)) is checked against THAT string — a shippingPostalCode (matches postalcode AND
+     *  ship) is suppressed to NONE. No cc-postal hit on any source → NONE. */
+    internal fun postalKind(s: FieldSignal): FieldKind {
+        for (raw in listOf(s.htmlNameOrId, s.htmlId, s.labelText)) {
+            val toks = tokens(raw ?: "")
+            if (CC_POSTAL_KEYWORDS.any { tokenMatch(toks, it) }) {
+                return if (SHIPPING_SUPPRESSORS.any { tokenMatch(toks, it) }) FieldKind.NONE else FieldKind.CC_POSTAL
+            }
+        }
+        return FieldKind.NONE
     }
 
     /** The 0.6.x classifier, verbatim: HTML input type + name/id keywords → Android InputType

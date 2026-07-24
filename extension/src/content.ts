@@ -10,20 +10,24 @@ import {
   dropdownWillConsumeEnter,
   isOwnUiHost,
   openDropdown,
+  showCardSaveBanner,
   showLinkOffer,
   showSaveBanner,
   showToast,
   type DropdownState,
 } from "./content-ui";
-import { deriveCardWrite, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
+import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
+import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import { bumpLabelGeneration, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
 import { fillErrorCopy, saveErrorCopy } from "./errors";
 import {
   send,
+  type CaptureCardFields,
   type CardFillFields,
   type CardFillOutcome,
   type FillOutcome,
   type MatchItem,
+  type PendingCardSave,
   type PendingSave,
   type Req,
   type RevealedSecret,
@@ -460,6 +464,103 @@ async function fillCardIntoForm(itemId: string, sig: unknown): Promise<CardFillO
   return applyCardFill(form, r.fields);
 }
 
+// ---- G2 save-card capture (design 2026-07-23 §G2 [X2-A3]) ----
+// SEPARATE from the login captureNow. A trusted gesture (an isTrusted submit-like click OR an
+// isTrusted Enter) is the ONLY thing that can drive a card capture: capture fires directly on the
+// gesture, one-shot via `consumed`; a kept `submit`-event path (for requestSubmit()-driven forms
+// with no submit-like click) captures ONLY when an UNCONSUMED trusted gesture is <1 s old and
+// consumes it immediately — never a free 1 s window. Our own fill events are !isTrusted, so they
+// can never be the gesture. The full card values (NEVER the CVV) go to the SW, which same-origin-
+// gates + Luhn-rechecks them; the raw PAN is used only inside readCardFormFields' call frame.
+
+let trustedGesture: { t: number; consumed: boolean } | null = null;
+function recordTrustedGesture(): void {
+  trustedGesture = { t: Date.now(), consumed: false };
+}
+/** Consume a fresh (<1 s) unconsumed trusted gesture; true iff one was consumed. */
+function consumeTrustedGesture(): boolean {
+  if (trustedGesture && !trustedGesture.consumed && Date.now() - trustedGesture.t < 1000) {
+    trustedGesture.consumed = true;
+    return true;
+  }
+  return false;
+}
+
+/** All card forms in every scan scope, document order. */
+function allCardForms(): CardForm[] {
+  return scanScopes().flatMap((s) => findCardForms(s));
+}
+
+/** The card form owning an input (an Enter target), or null. */
+function cardFormForInput(input: HTMLInputElement): CardForm | null {
+  return allCardForms().find((f) => f.fields.some((x) => x.input === input)) ?? null;
+}
+
+/** The card form a submit-like control belongs to: its own (form ?? container), else — when the
+ *  page has exactly one card form — that one (a formless checkout's Pay button can sit outside the
+ *  fields' container, mirroring the login click path). */
+function cardFormNear(control: Element): CardForm | null {
+  const forms = allCardForms();
+  return forms.find((f) => (f.form ?? f.container).contains(control)) ?? (forms.length === 1 ? forms[0]! : null);
+}
+
+/** Read a detected card form's OWN inputs into the capture set — number/expMonth/expYear/
+ *  cardholderName/postalCode, NEVER the CVV ([X2-A3]). Content-side Luhn gate ([X2-N2]): a form
+ *  whose PAN boxes don't Luhn-validate yields null (no capture). Values are read verbatim off the
+ *  live controls; expiry is taken from separate month/year fields, falling back to parsing a
+ *  combined "MM/YY" field. Used strictly inside captureCardNow's call frame. */
+function readCardFormFields(cf: CardForm): CaptureCardFields | null {
+  let numberRaw = "";
+  for (const f of cf.fields) if (f.kind === "cardnumber") numberRaw += f.input.value; // split-PAN boxes concatenate
+  if (!luhnValid(numberRaw)) return null;
+  let expMonth = "";
+  let expYear = "";
+  const monthF = cf.fields.find((f) => f.kind === "cardexpmonth");
+  const yearF = cf.fields.find((f) => f.kind === "cardexpyear");
+  const expiryF = cf.fields.find((f) => f.kind === "cardexpiry");
+  if (monthF) expMonth = padMonth(monthF.input.value) ?? "";
+  if (yearF) expYear = yearTo4(yearF.input.value) ?? "";
+  if ((expMonth === "" || expYear === "") && expiryF) {
+    const p = parseExpiryParts(expiryF.input.value);
+    if (p) {
+      if (expMonth === "") expMonth = p.expMonth;
+      if (expYear === "") expYear = p.expYear;
+    }
+  }
+  const nameF = cf.fields.find((f) => f.kind === "cardname");
+  const postalF = cf.fields.find((f) => f.kind === "cardpostal");
+  const fields: CaptureCardFields = {
+    number: digitsOnly(numberRaw),
+    expMonth,
+    expYear,
+    cardholderName: nameF ? nameF.input.value.trim() : "",
+  };
+  const postal = postalF ? postalF.input.value.trim() : "";
+  if (postal !== "") fields.postalCode = postal;
+  return fields;
+}
+
+function captureCardNow(cf: CardForm): void {
+  const fields = readCardFormFields(cf);
+  if (!fields) return; // no PAN / not Luhn-valid
+  void (async () => {
+    const res = await safeSend({ type: "captureCard", fields });
+    if (res?.pending) offerCardBanner(res.pending);
+  })();
+}
+
+function offerCardBanner(pending: PendingCardSave): void {
+  showCardSaveBanner(
+    pending,
+    async () => {
+      const r = await safeSend({ type: "resolvePendingCardSave", action: "save" });
+      if (r?.ok) return { ok: true, text: "Card saved to the hoard." };
+      return { ok: false, text: saveErrorCopy(r?.code) };
+    },
+    () => void safeSend({ type: "resolvePendingCardSave", action: "dismiss" }),
+  );
+}
+
 // ---- dropdown ----
 
 let lastOpen: { input: HTMLInputElement; t: number } | null = null;
@@ -732,6 +833,47 @@ function init(): void {
       // when the page has exactly one login form, any submit-shaped click belongs to it.
       const f = all.find((x) => (x.form ?? x.container).contains(control)) ?? (all.length === 1 ? all[0]! : null);
       if (f) captureNow(f);
+    },
+    true,
+  );
+
+  // ---- G2 card-submit capture wiring ([X2-A3]) — SEPARATE from the login capture listeners above.
+  // A submit-like click / an Enter in a card field is the trusted gesture; capture fires directly on
+  // it. The submit-event path captures ONLY when an unconsumed gesture is <1 s old (requestSubmit()
+  // forms with no submit-like click) — never a free window. Our own fill events are !isTrusted.
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (!e.isTrusted) return;
+      const control = e.composedPath().find((n): n is Element => n instanceof Element && isSubmitLike(n));
+      if (!control) return;
+      recordTrustedGesture(); // a submit-like click IS a trusted gesture (a native submit may consume it below)
+      const cf = cardFormNear(control);
+      if (cf && consumeTrustedGesture()) captureCardNow(cf);
+    },
+    true,
+  );
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      const t = e.composedPath()[0] ?? e.target;
+      if (!e.isTrusted || e.key !== "Enter" || !(t instanceof HTMLInputElement)) return;
+      const cf = cardFormForInput(t);
+      if (!cf) return; // Enter outside a card field is not a card-submit gesture
+      recordTrustedGesture();
+      if (consumeTrustedGesture()) captureCardNow(cf);
+    },
+    true,
+  );
+  document.addEventListener(
+    "submit",
+    (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLFormElement)) return;
+      const cf = allCardForms().find((x) => x.form === t);
+      // NOT isTrusted-gated (requestSubmit() dispatches a trusted submit with no user gesture), so
+      // the trusted-gesture consume IS the gate: a synthetic submit with no prior click/Enter can't fire.
+      if (cf && consumeTrustedGesture()) captureCardNow(cf);
     },
     true,
   );

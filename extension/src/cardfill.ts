@@ -118,6 +118,12 @@ export const TABLES: {
     { kind: "cc-csc", keywords: ["cvv", "cvc", "csc", "securitycode", "cvn", "cardcode", "xcardcode", "verificationvalue", "cardverificationcode", "cardverificationvalue", "cryptogramme", "pruefnummer", "kartenpruefnummer", "codigoseguridad"] },
     { kind: "cc-name", keywords: ["cardholder", "nameoncard", "ccname", "holdername", "cardholdername", "cardholdersname", "titulaire", "titular", "karteninhaber"] },
     { kind: "cc-type", keywords: ["cardtype", "cctype", "cardbrand", "ccbrand", "cbtype"] },
+    // G3 [X3-A1]/[X3-A4c]: the DISTINCT cc-postal group — placed AFTER cc-type and BEFORE the
+    // trailing bare-creditcard [U1] group so no cross-kind run overlaps (shipping* names never
+    // match a postal keyword; the shipping-SUPPRESSOR fires only on a string that first produced a
+    // postal verdict, detect.ts). CC_POSTAL is anchor-gated: login-inert per-field, emerging only
+    // in an anchored card form's refine (buildCardForm), so login grouping stays bit-identical.
+    { kind: "cc-postal", keywords: ["billingzip", "billingpostal", "cardpostal", "cardzip", "avszip", "postalcode"] },
     { kind: "cc-number", keywords: ["creditcard"] },
   ],
   asciiFold: buildAsciiFold(),
@@ -176,6 +182,10 @@ export interface CardFillValues {
   /** composed MM/YY back-compat (popup copy path) — the fill adapters use the halves. */
   expiry?: string;
   brand?: string;
+  /** G3 [X3-A4c]: stored billing postal code — filled VERBATIM (postal codes are alphanumeric
+   *  internationally; no digit-strip), fit-guarded. Composed SW-side only when the chosen form
+   *  declared cardpostal ([X3-A4d]). */
+  postalCode?: string;
 }
 
 // ---- §4 text-target adapters ----------------------------------------------------------------
@@ -256,6 +266,16 @@ export function cvvTextFor(v: string | null | undefined, maxLength: number | nul
 }
 
 export function nameTextFor(v: string | null | undefined, maxLength: number | null): string | null {
+  const s = v ?? "";
+  if (s === "") return null;
+  return maxLength !== null && s.length > maxLength ? null : s;
+}
+
+/** G3 [X3-A4c] postal text targets: the stored postal code VERBATIM — NO digit-strip (postal
+ *  codes are alphanumeric internationally, e.g. UK "SW1A 1AA"), fit-guarded (never truncated); a
+ *  missing/empty postal skips. A cardpostal <select> derives nothing (deriveCardWrite's select
+ *  branch → passesFor default → null): a postal is free text, never enumerable. */
+export function postalTextFor(v: string | null | undefined, maxLength: number | null): string | null {
   const s = v ?? "";
   if (s === "") return null;
   return maxLength !== null && s.length > maxLength ? null : s;
@@ -441,10 +461,11 @@ export function radioIndexFor(options: readonly SelectOptionMeta[], brand: strin
 // ---- read-back verify ------------------------------------------------------------------------
 
 /** parseExpiry-equivalent for the [T7] read-back compare (web vault/card.ts parity — kept local:
- *  card.ts stays parseExpiry-free, the extension still neither creates nor edits cards). Accepts
- *  M[M]<sep>YY|YYYY (sep = any non-digit run) and the separator-free MYY/MMYY/MYYYY/MMYYYY runs;
- *  2-digit years pivot 2000–2099. */
-function parseExpiryParts(raw: string): { expMonth: string; expYear: string } | null {
+ *  card.ts stays parseExpiry-free). Accepts M[M]<sep>YY|YYYY (sep = any non-digit run) and the
+ *  separator-free MYY/MMYY/MYYYY/MMYYYY runs; 2-digit years pivot 2000–2099. Exported for the G2
+ *  card-capture path (content.ts): a combined "MM/YY" expiry input is split into the canonical
+ *  {expMonth "MM", expYear "YYYY"} halves the capture set stores. */
+export function parseExpiryParts(raw: string): { expMonth: string; expYear: string } | null {
   const groups = raw.match(/[0-9]+/g) ?? []; // [0-9] = ASCII-only, deliberately not \d
   let m: string;
   let y: string;
@@ -503,6 +524,9 @@ export function verifyLanded(kind: CardFieldKind, intended: CardWrite, observed:
     }
     case "cardname":
     case "cardtype":
+    // G3: a postal is written verbatim; read-back compares trimmed case-insensitive (a page may
+    // re-space "SW1A1AA" → "SW1A 1AA"). Never digit-only — postal codes are alphanumeric.
+    case "cardpostal":
       return want.trim().toLowerCase() === got.trim().toLowerCase();
   }
 }
@@ -541,6 +565,9 @@ export function deriveCardWrite(kind: CardFieldKind, target: CardTargetMeta, v: 
       break;
     case "cardtype":
       value = typeTextFor(v.brand, target.maxLength);
+      break;
+    case "cardpostal":
+      value = postalTextFor(v.postalCode, target.maxLength);
       break;
   }
   return value === null ? null : { kind: "text", value };

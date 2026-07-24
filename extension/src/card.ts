@@ -107,6 +107,33 @@ export function composeShortExpiry(expMonth: string, expYear: string): string | 
   return `${m}/${y}`;
 }
 
+/**
+ * [X2-N2] Luhn gate for the save-card capture flow (G2) — CardNormalize.luhnValid parity (web
+ * card.ts / core CardNormalize). Accepts digit groups separated by spaces/dashes/dots; ANY other
+ * character fails, as does a digit count outside 12..19 (ISO/IEC 7812) — so a lone "0" or a phone
+ * number can never look like a savable card. The loop counts from the RIGHT (Kotlin
+ * reversed().withIndex() parity) and does ASCII `code - 48` arithmetic, so Unicode digits (already
+ * stripped by digitsOnly, but present in `raw` here) are rejected by the char-class guard.
+ */
+export function luhnValid(raw: string): boolean {
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw.charAt(i);
+    if (!isAsciiDigitCode(raw.charCodeAt(i)) && ch !== " " && ch !== "-" && ch !== ".") return false;
+  }
+  const d = digitsOnly(raw);
+  if (d.length < 12 || d.length > 19) return false;
+  let sum = 0;
+  for (let i = 0; i < d.length; i++) {
+    let v = d.charCodeAt(d.length - 1 - i) - 48;
+    if (i % 2 === 1) {
+      v *= 2;
+      if (v > 9) v -= 9;
+    }
+    sum += v;
+  }
+  return sum % 10 === 0;
+}
+
 /** Human-readable brand ("Visa"), null for unknown/absent — callers pick their own fallback. */
 export function brandLabel(b: string | null | undefined): string | null {
   switch (b) {

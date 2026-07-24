@@ -14,7 +14,7 @@
  * distinctive treasury surface is harder for a page to convincingly fake — so the mark is
  * drawn as SVG geometry (sigilSpan), never a runic codepoint that tofus on font-poor hosts.
  */
-import type { MatchItem, PendingSave } from "./messages";
+import type { MatchItem, PendingCardSave, PendingSave } from "./messages";
 
 const UI_CSS = `
 :host { all: initial; }
@@ -635,6 +635,54 @@ export function showSaveBanner(
       actions.remove();
       body.appendChild(span(r.ok ? "result ok" : "result err", r.text));
       announceLive(r.text); // Cut N: the verdict is spoken, not just painted (the banner auto-closes)
+      window.setTimeout(() => closeBanner(bar), r.ok ? 4000 : 8000);
+    });
+  });
+  ghost.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    window.clearTimeout(idle);
+    closeBanner(bar);
+    onDismiss();
+  });
+}
+
+/** G2 save-card offer (design 2026-07-23 §G2). Shows ONLY the masked `cardSubtitle` ("Visa
+ *  ••4242") — never the PAN/expiry/CVV (the raw values stay in the SW's pendingCardSave slot).
+ *  Mirrors showSaveBanner's structure; onSave resolves to the honest result line. */
+export function showCardSaveBanner(
+  pending: PendingCardSave,
+  onSave: () => Promise<{ ok: boolean; text: string }>,
+  onDismiss: () => void,
+): void {
+  const { bar, body } = bannerShell();
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  if (pending.updatesItemId) {
+    msg.append("Update the card ", span("hl", pending.updatesItemName ?? pending.cardSubtitle));
+    msg.append(" (", span("hl", pending.cardSubtitle), ")?");
+  } else msg.append("Save this card ", span("hl", pending.cardSubtitle), " to andvari?");
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const primary = document.createElement("button");
+  primary.className = "primary";
+  primary.textContent = pending.updatesItemId ? "Update" : "Save";
+  const ghost = document.createElement("button");
+  ghost.className = "ghost";
+  ghost.textContent = "Not now";
+  actions.append(primary, ghost);
+  body.append(msg, actions);
+  announceLive(`andvari: ${msg.textContent ?? ""}`);
+
+  const idle = window.setTimeout(() => closeBanner(bar), 30_000);
+  primary.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    window.clearTimeout(idle);
+    primary.disabled = true;
+    ghost.disabled = true;
+    void onSave().then((r) => {
+      actions.remove();
+      body.appendChild(span(r.ok ? "result ok" : "result err", r.text));
+      announceLive(r.text);
       window.setTimeout(() => closeBanner(bar), r.ok ? 4000 : 8000);
     });
   });

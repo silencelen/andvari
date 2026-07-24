@@ -19,6 +19,7 @@ internal fun vectorFieldKind(s: String): FieldKind = when (s) {
     "cc-name" -> FieldKind.CC_NAME
     "cc-csc" -> FieldKind.CC_CSC
     "cc-type" -> FieldKind.CC_TYPE
+    "cc-postal" -> FieldKind.CC_POSTAL
     else -> error("unknown FieldKind vector value: $s")
 }
 

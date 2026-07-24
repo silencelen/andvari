@@ -120,6 +120,12 @@ data class CardData(
     val expYear: String? = null,
     val securityCode: String? = null,
     val brand: String? = null,
+    // G3 billing postal (design 2026-07-23-card-autofill-gated §G3 [X3-N1]): a TYPED optional
+    // field, serializer-safe cross-version (ExtrasOverlaySerializer round-trips it; a pre-G3
+    // 0.19.x client sees it as an unknown key and preserves it — NO formatVersion bump).
+    // Alphanumeric internationally, so stored VERBATIM (never digits-only). Appended LAST with a
+    // null default so every existing positional/copy() card writer stays bit-identical.
+    val postalCode: String? = null,
     @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
 )
 

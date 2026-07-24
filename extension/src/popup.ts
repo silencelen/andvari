@@ -797,6 +797,7 @@ const CARD_KIND_LABEL: Record<CardFieldKind, string> = {
   cardname: "name on card",
   cardcvv: "security code",
   cardtype: "card type",
+  cardpostal: "postal code", // G3: a missed billing postal (no copy button — postal isn't a stored copy field)
 };
 
 function cardLabels(kinds: CardFieldKind[]): string[] {

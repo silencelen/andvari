@@ -243,6 +243,23 @@ test("deriveCardWrite — the wiring surface: kind + target metadata + values �
   assert.equal(deriveCardWrite("cardnumber", sel(monthOpts), values), null); // §0: a select is never a PAN
 });
 
+test("postalText / deriveCardWrite — G3 CC_POSTAL fill leg (verbatim, fit-guarded, select → null)", () => {
+  const targetOf = (c: { target: string; maxLength: number | null; options: string[] }) =>
+    c.target === "select"
+      ? ({ tag: "select", type: "select-one", maxLength: null, placeholder: null, options: c.options.map((s) => ({ value: s, text: s })) } as any)
+      : ({ tag: "input", type: "text", maxLength: c.maxLength, placeholder: null, options: null } as any);
+  for (const c of v.postalText) {
+    const w = deriveCardWrite("cardpostal" as CardFieldKind, targetOf(c), { postalCode: c.postalCode });
+    const got = w === null ? null : w.kind === "text" ? w.value : `index:${w.index}`;
+    assert.equal(got, c.expected, c.name);
+  }
+  const input = (over: object = {}) => ({ tag: "input", type: "text", maxLength: null, placeholder: null, options: null, ...over }) as any;
+  // verbatim (alphanumeric — NEVER digit-stripped, e.g. UK "SW1A 1AA"), fit-guard skips, never truncates.
+  assert.deepEqual(deriveCardWrite("cardpostal" as CardFieldKind, input(), { postalCode: "SW1A 1AA" }), { kind: "text", value: "SW1A 1AA" });
+  assert.equal(deriveCardWrite("cardpostal" as CardFieldKind, input({ maxLength: 4 }), { postalCode: "98101" }), null);
+  assert.equal(deriveCardWrite("cardpostal" as CardFieldKind, input(), {}), null); // missing postal → skip (never guessed)
+});
+
 test("[W5] collision guard (TS mirror of MonthNameCollisionTest.kt): no folded locale name is a different month anywhere", () => {
   // Universe: every listed locale's full names + the en Tier-1 tables — full names AND
   // abbreviations (the matcher equality-checks abbreviations in the same pass, so a locale name

@@ -16,6 +16,11 @@
  *    that detected the card form, bound to browser-set `sender.origin` + `sender.frameId` + a live
  *    top-origin recheck, one-shot (design 2026-07-10-extension-card-fill). Neither ever routes a
  *    card value into a `snapshots`/save-banner path.
+ *  - A card PAN ENTERS the SW only via `captureCard` (G2 save-card, the reverse of `reveal`): the
+ *    content script reads a detected card form's OWN inputs on a trusted submit gesture, NEVER the
+ *    CVV. The SW gates it same-origin (`sender.origin === topOrigin(tabId)`), holds the PAN in a
+ *    module-scope Map (never a persisted `TabState`, so a lock never writes it at rest), and answers
+ *    the MASKED PendingCardSave (no number). Resolving it seals a card doc at CARD_FORMAT_VERSION.
  *  - Locked state is FIRST-CLASS: list calls answer `{locked:true}` rather than
  *    pretending "no matches", so the UI can render an honest locked state.
  */
@@ -79,6 +84,9 @@ export interface CardFillFields {
    *  form declared cardtype AND cardnumber — the zero-new-information argument (the same response
    *  already carries the PAN) must never depend on a future registry shape. */
   brand?: string;
+  /** G3 [X3-A4d]: stored billing postal code — present ONLY when the chosen form declared
+   *  cardpostal. Filled verbatim (alphanumeric; no digit-strip). */
+  postalCode?: string;
 }
 
 /** Why an in-page card fill wrote NOTHING (parity with FillFailCode; the copy lives in the
@@ -116,6 +124,31 @@ export interface FillOutcome {
   filled: "both" | "username" | "password" | "nothing";
   /** Set iff filled === "nothing". */
   code?: FillFailCode;
+}
+
+/** G2 save-card capture (design 2026-07-23 §G2 [X2-A3]) — the card fields the content script reads
+ *  from a detected card form's OWN inputs on a trusted submit gesture, Luhn-gated content-side, and
+ *  sends to the SW via `captureCard`. This is the ONE page→SW PAN egress (the reverse of `reveal`):
+ *  the full number crosses so the SW can offer to save/update a card doc. NEVER the CVV — the CVV is
+ *  write-only from the vault ([X2-A3] capture set = number/expMonth/expYear/cardholderName/postalCode?).
+ *  Halves are canonical: expMonth "MM" (padMonth), expYear 4-digit (yearTo4). */
+export interface CaptureCardFields {
+  number: string;
+  expMonth: string;
+  expYear: string;
+  cardholderName: string;
+  postalCode?: string;
+}
+
+/** [X2-A7] the MASKED public shape of a pending card save — what the SW hands the in-page banner.
+ *  OMITS `number` (and expiry/CVV): the raw PAN never leaves the SW (pinned like the [A9] card-fill
+ *  egress anchors). `cardSubtitle` is the SW-computed identity line ("Visa ••4242"); `updatesItemId`
+ *  is set when the captured PAN matches an existing card (an UPDATE of expiry/name, not a new card). */
+export interface PendingCardSave {
+  host: string;
+  cardSubtitle: string;
+  updatesItemId?: string;
+  updatesItemName?: string;
 }
 
 export interface PendingSave {
@@ -260,6 +293,14 @@ export type Req =
   /** Content: page captured a submitted credential. SW decides save-vs-update and
    *  stores it as the pending save for the tab (survives navigation). */
   | { type: "capturedCredential"; url: string; username: string; password: string }
+  /** Content (G2 [X2-A3]): a card form was submitted under a trusted gesture — the frame's OWN card
+   *  inputs, Luhn-gated content-side, NEVER the CVV. The SW re-Luhns, discards any capture whose
+   *  `sender.origin !== topOrigin(tabId)` ([X2-A2] same-origin gate — a cross-origin/PSP frame never
+   *  drives a save), and offers a save/update against the tab's `pendingCardSave` slot. Carries the
+   *  PAN (the reverse of `reveal`); the answer is the MASKED PendingCardSave, never the number. */
+  | { type: "captureCard"; fields: CaptureCardFields }
+  /** Content: resolve the tab's pending card save (G2). */
+  | { type: "resolvePendingCardSave"; action: "save" | "dismiss" }
   /** Content (on load) / popup: is there a pending save to (re-)offer for this tab? */
   | { type: "pendingSave" }
   /** Content/popup: resolve the tab's pending save. */
@@ -359,6 +400,12 @@ export type Res<T extends Req["type"]> = T extends "status"
                   { ok: boolean; outcome?: FillOutcome; code?: FillFailCode; error?: string }
                 : T extends "capturedCredential"
                   ? { ok: boolean; pending?: PendingSave }
+                  : T extends "captureCard"
+                    ? /** G2: `pending` is the MASKED offer (no PAN); absent when the capture was
+                       *  discarded (cross-origin frame, non-Luhn, dedupe, locked). */
+                      { ok: boolean; pending?: PendingCardSave }
+                  : T extends "resolvePendingCardSave"
+                    ? { ok: boolean; code?: SaveErrorCode; error?: string }
                   : T extends "pendingSave"
                     ? { pending: PendingSave | null }
                     : T extends "resolvePendingSave"
