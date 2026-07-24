@@ -93,10 +93,12 @@ object SaveExtractor {
         var password: String? = null
         var domain: String? = null
         // Raw card captures — first value per kind wins, like the login capture. The ONE
-        // exception is CC_NUMBER below: gift/loyalty/membership inputs also classify
-        // CC_NUMBER (their names token-match "cardnumber") and typically sit ABOVE the
-        // payment block, so a plain first-wins would let a filled gift code displace — or,
-        // via the Luhn gate, entirely discard — the real PAN.
+        // exception is CC_NUMBER below: membership/rewards-style inputs can still classify
+        // CC_NUMBER (the [T10] gift guard suppresses gift/egift/voucher/loyalty/coupon NAMES,
+        // but the vocabulary is deliberately narrow and autocomplete-hint claims are always
+        // honored) and such inputs typically sit ABOVE the payment block, so a plain
+        // first-wins would let a filled non-payment code displace — or, via the Luhn gate,
+        // entirely discard — the real PAN.
         var ccNumber: String? = null
         var ccName: String? = null
         var ccExpMonth: String? = null

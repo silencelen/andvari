@@ -1,7 +1,8 @@
 /**
  * Pure field-detection engine — no chrome.*, no side effects. Classification defers to the
  * canonical, vector-tested classify() in urimatch.ts (verbatim port of web/src/vault/urimatch.ts);
- * this module only adapts DOM inputs into FieldSignals and groups them into fillable login forms.
+ * this module only adapts DOM inputs (and, Tier 1, card-only selects) into FieldSignals and
+ * groups them into fillable login forms.
  *
  * Scans are visible-fields-only: hidden inputs are where sites stash tokens and where phishing
  * kits hide credential sinks — and a multi-step page's not-yet-shown password field must NOT
@@ -13,6 +14,14 @@ import { classify, type FieldKind, type FieldSignal } from "./urimatch.ts";
 
 /** A scope that can own a login form: the <form>, a nearest-common container, or the scan root. */
 export type Scope = Element | Document | ShadowRoot;
+
+/** What a Field may be backed by (Tier 1, design 2026-07-23-card-autofill-tier1 §1): selects
+ *  join the pool for the select-meaningful CARD kinds only. LoginForm's slots stay
+ *  HTMLInputElement — selects are hard-set kind:"none"/textLike:false at collect(), so they can
+ *  never reach a login slot; every narrowing back to HTMLInputElement is an `instanceof` guard,
+ *  and `as HTMLInputElement` casts are FORBIDDEN here ([T15] — a cast would compile a select
+ *  into content.ts's setValue, which throws). */
+export type FillableControl = HTMLInputElement | HTMLSelectElement;
 
 export interface LoginForm {
   /** "username-step": a lone username field + submit control, no password (multi-step step 1). */
@@ -52,7 +61,7 @@ const CVV_TOKENS = ["cvv", "cvc", "csc", "securitycode", "cardverification"];
 /** Card field kinds the in-page card-fill path (S3) recognises — the extension's projection of
  *  core `FieldKind`'s CC_* set. Reported to the SW as METADATA ONLY (never values, design [A2])
  *  and index the fill executor's per-field value setter. */
-export type CardFieldKind = "cardnumber" | "cardexpiry" | "cardexpmonth" | "cardexpyear" | "cardname" | "cardcvv";
+export type CardFieldKind = "cardnumber" | "cardexpiry" | "cardexpmonth" | "cardexpyear" | "cardname" | "cardcvv" | "cardtype";
 
 /** Card autocomplete hints (normalized: lowercase, [-_] stripped) → kind — mirrors core
  *  `FieldClassifier.CARD_HINTS`. fieldSignalOf already maps cc-number→cardnumber and
@@ -70,6 +79,7 @@ const CARD_HINTS: Record<string, CardFieldKind> = {
   creditcardexpirationdate: "cardexpiry",
   ccexp: "cardexpiry",
   ccname: "cardname",
+  cctype: "cardtype",
 };
 
 /** Card name/id token runs (whole-token-run matched) → kind — mirrors core
@@ -83,6 +93,7 @@ const CARD_NAME_KINDS: [readonly string[], CardFieldKind][] = [
   [["expiry", "expdate", "ccexp", "expiration", "expirationdate"], "cardexpiry"],
   [["cvv", "cvc", "csc", "securitycode"], "cardcvv"],
   [["cardholder", "nameoncard", "ccname"], "cardname"],
+  [["cardtype", "cctype", "cardbrand", "ccbrand", "cbtype"], "cardtype"],
 ];
 
 /** HTML types the card NAME-keyword fallback may fire from (core `CARD_FALLBACK_HTML_TYPES`
@@ -94,8 +105,13 @@ const CARD_FALLBACK_HTML_TYPES = new Set(["", "text", "tel", "number"]);
  *  letter↔digit boundaries ("cardVerificationValue" → [card,verification,value]; "cvv2" →
  *  [cvv,2]). The digit boundary is one deliberate widening over core FieldClassifier.tokens()
  *  (which keeps digits glued to letters): checkout CVVs are routinely named cvv2/cvc2 (Visa's
- *  own branding), and this feeds a SUPPRESSION rule only — it can mute a save banner, never
- *  classify a fill target — so widening is fail-safe. */
+ *  own branding). Since S3 this feeds card CLASSIFICATION and the [T10] gift guard, not just
+ *  the CVV save-suppression rule — so trailing-digit names ("cardNumber2", multi-card field
+ *  arrays) classify HERE but not in core: a KNOWN, deliberate divergence (the extension errs
+ *  wider on detection; aligning core's tokenizer would touch shipped classify() step-2
+ *  demotion semantics and rides the Tier-2 vocabulary lane with its own vector sweep).
+ *  Pinned both sides: detect.cards.test.ts (ext classifies) + cardform.json
+ *  "trailing-digit stays glued" (core does not). */
 function tokens(raw: string): string[] {
   const out: string[] = [];
   let sb = "";
@@ -151,14 +167,38 @@ export function isCvvNameOrId(nameOrId: string): boolean {
   return CVV_TOKENS.some((kw) => tokenMatch(toks, kw));
 }
 
+/** Gift/loyalty negative guard (§3/F13, [T10]): a name/id-token cardnumber verdict is SUPPRESSED
+ *  when the SAME string's tokens also read gift-ish — a gift-card PAN must never anchor a card
+ *  form. Suppress-only and anchor-only: other card kinds pass untouched (a "giftCardExpiry"
+ *  stays cardexpiry — harmless without an anchor). The autocomplete-hint path is deliberately
+ *  NOT guarded (an explicit cc-number hint is the site's own claim — Chromium parity). */
+const GIFT_SUPPRESS_TOKENS = ["gift", "egift", "voucher", "loyalty", "coupon"];
+
+/** One name/id string → card verdict via the token runs. "gift" = a cardnumber verdict was
+ *  produced AND suppressed — distinct from null (no verdict at all) because suppression is
+ *  TERMINAL for the field: the string positively identified a gift-card number, so the §8 htmlId
+ *  retry must not resurrect it off a cleaner-looking id. */
+function cardKindFromTokens(raw: string): CardFieldKind | "gift" | null {
+  const toks = tokens(raw);
+  for (const [kws, kind] of CARD_NAME_KINDS) {
+    if (kws.some((kw) => tokenMatch(toks, kw))) {
+      if (kind === "cardnumber" && GIFT_SUPPRESS_TOKENS.some((kw) => tokenMatch(toks, kw))) return "gift";
+      return kind;
+    }
+  }
+  return null;
+}
+
 /** Per-field card classification — pure (FieldSignal → kind), no DOM. Fires ONLY in the
  *  `classify() == none` gap (design [A8], core `FieldClassifier` step-4 parity): every field the
  *  login classifier decided keeps its verdict, so a card kind can never outrank USERNAME/PASSWORD
  *  and login verdicts on card-free forms stay bit-identical. Autocomplete card hints win first
  *  (a masked cc-csc password is a NEGATIVE login hint → lands in the gap here); then name/id token
  *  runs, but only for card-fallback HTML types (never a password type — the CSC demotion below is
- *  the only path that relabels a password). */
-export function classifyCardField(sig: FieldSignal): CardFieldKind | null {
+ *  the only path that relabels a password). §8/F5: the token pass runs over htmlNameOrId first and
+ *  RETRIES over htmlId only when the name produced NO card verdict (a suppressed gift verdict IS a
+ *  verdict); the gift guard evaluates against whichever string produced the verdict ([T10]). */
+export function classifyCardField(sig: FieldSignal, htmlId?: string | null): CardFieldKind | null {
   if (classify(sig) !== "none") return null;
   const hints = (sig.hints ?? []).map((h) => h.toLowerCase().replace(/[_-]/g, ""));
   for (const h of hints) {
@@ -166,18 +206,44 @@ export function classifyCardField(sig: FieldSignal): CardFieldKind | null {
     if (k) return k;
   }
   if (!CARD_FALLBACK_HTML_TYPES.has((sig.htmlType ?? "").toLowerCase())) return null;
-  const toks = tokens(sig.htmlNameOrId ?? "");
-  for (const [kws, kind] of CARD_NAME_KINDS) if (kws.some((kw) => tokenMatch(toks, kw))) return kind;
-  return null;
+  const byName = cardKindFromTokens(sig.htmlNameOrId ?? "");
+  if (byName === "gift") return null;
+  if (byName) return byName;
+  const byId = htmlId ? cardKindFromTokens(htmlId) : null;
+  return byId === "gift" ? null : byId;
 }
 
-/** Form-level CSC demotion — pure (kind + type + name → kind). A password-typed field named like a
- *  security code, sitting ON a card form (a cardnumber anchor is present — the caller only invokes
- *  this then), IS the CVV: name-based parity with core `CardForm.refine`'s cluster demotion. This
- *  keeps login verdicts bit-identical (it never runs on a card-free form) while letting the fill
- *  executor reach a masked CVV box. */
-export function demoteCsc(kind: CardFieldKind | null, htmlType: string, nameOrId: string): CardFieldKind | null {
-  if (!kind && htmlType.toLowerCase() === "password" && isCvvNameOrId(nameOrId)) return "cardcvv";
+/** The card kinds a <select> can meaningfully be (§1): one row of an enumerable set. A PAN/CVV/
+ *  cardholder name is free text — a select claiming one is decoration or garbage, so any other
+ *  card verdict returns null here (never remapped, never anchoring — §0: a <select> can never
+ *  anchor nor be a PAN/CVV/name field). */
+const SELECT_CARD_KINDS: ReadonlySet<CardFieldKind> = new Set(["cardexpmonth", "cardexpyear", "cardexpiry", "cardtype"]);
+
+/** Per-select card classification — autocomplete hints first (same normalized CARD_HINTS map),
+ *  then name/id token runs (§8 order, gift guard per-string). Deliberately NO
+ *  CARD_FALLBACK_HTML_TYPES check (that's input vocabulary) and NO classify() gap-gate: a select
+ *  is definitionally not a login credential, so the login engine is never consulted. */
+export function classifyCardSelect(nameOrId: string | null, htmlId: string | null, hints: readonly string[]): CardFieldKind | null {
+  const restricted = (k: CardFieldKind | "gift" | null): CardFieldKind | null =>
+    k !== null && k !== "gift" && SELECT_CARD_KINDS.has(k) ? k : null;
+  for (const h of hints) {
+    const k = CARD_HINTS[h.toLowerCase().replace(/[_-]/g, "")];
+    if (k) return restricted(k);
+  }
+  const byName = cardKindFromTokens(nameOrId ?? "");
+  if (byName !== null) return restricted(byName); // any card verdict (even a restricted-away one) stops the id retry
+  return restricted(htmlId ? cardKindFromTokens(htmlId) : null);
+}
+
+/** Form-level CSC demotion — pure (kind + type + name/id → kind). A password-typed field named
+ *  like a security code, sitting ON a card form (a cardnumber anchor is present — the caller only
+ *  invokes this then), IS the CVV: name-based parity with core `CardForm.refine`'s cluster
+ *  demotion. This keeps login verdicts bit-identical (it never runs on a card-free form) while
+ *  letting the fill executor reach a masked CVV box. §8/F29: name and id are checked
+ *  INDEPENDENTLY — the shipped single `name || id` let `name="field_7" id="cardCvc"` slip the
+ *  demotion; suppression-side widening is fail-safe. */
+export function demoteCsc(kind: CardFieldKind | null, htmlType: string, name: string, id: string): CardFieldKind | null {
+  if (!kind && htmlType.toLowerCase() === "password" && (isCvvNameOrId(name) || isCvvNameOrId(id))) return "cardcvv";
   return kind;
 }
 
@@ -194,10 +260,12 @@ const NON_FILLABLE_TYPES = new Set([
  *  widgets near <body>. */
 const FORMLESS_SCOPE_DEPTH = 6;
 
-/** DOM input → FieldSignal. autocomplete tokens pass through as hints — classify() lowercases
- *  and strips [-_], so "current-password"/"new-password" land on the canonical hint sets;
- *  the map above covers the three whose Android-hint spelling differs. */
-export function fieldSignalOf(input: HTMLInputElement): FieldSignal & { isNewPassword: boolean } {
+/** DOM input/select → FieldSignal. autocomplete tokens pass through as hints — classify()
+ *  lowercases and strips [-_], so "current-password"/"new-password" land on the canonical hint
+ *  sets; the map above covers the three whose Android-hint spelling differs. Selects ride the
+ *  same shape: `htmlType` = el.type ("select-one") — never login-classified (collect() hard-sets
+ *  their kind), but the card path reads hints/name off the identical signal. */
+export function fieldSignalOf(input: FillableControl): FieldSignal & { isNewPassword: boolean } {
   const tokens = (input.getAttribute("autocomplete") ?? "")
     .trim()
     .toLowerCase()
@@ -224,7 +292,7 @@ export function isSubmitLike(el: Element): boolean {
 }
 
 interface Field {
-  input: HTMLInputElement;
+  input: FillableControl;
   kind: FieldKind;
   isNewPassword: boolean;
   /** Username-fallback eligibility: unclassified text/email with no negative name signal. */
@@ -234,6 +302,16 @@ interface Field {
   cardKind: CardFieldKind | null;
 }
 
+/** [T15] the ONE narrowing shape back to input-backed fields — an `instanceof` type guard, never
+ *  a cast. Selects are hard-set kind:"none"/textLike:false at collect(), so every password/
+ *  username/textLike discharge below is runtime-guaranteed to pass this guard. */
+interface InputField extends Field {
+  input: HTMLInputElement;
+}
+function isInputField(f: Field): f is InputField {
+  return f.input instanceof HTMLInputElement;
+}
+
 /** offsetParent is null for position:fixed elements even when visible — hence the rects check. */
 function isVisible(el: HTMLElement): boolean {
   return el.offsetParent !== null || el.getClientRects().length > 0;
@@ -241,19 +319,30 @@ function isVisible(el: HTMLElement): boolean {
 
 function collect(root: Document | ShadowRoot): Field[] {
   const out: Field[] = [];
-  for (const input of root.querySelectorAll("input")) {
-    if (input.disabled || input.readOnly || !isVisible(input)) continue;
-    if (NON_FILLABLE_TYPES.has(input.type)) continue; // never fill a checkbox/submit, whatever its name
-    const sig = fieldSignalOf(input);
-    const kind = classify(sig);
-    const t = input.type;
-    const textLike =
-      kind === "none" &&
-      (t === "text" || t === "email") &&
-      !NAME_NEGATIVE_RX.test((input.name || input.id).toLowerCase());
-    const cardKind = classifyCardField(sig);
-    if (kind !== "none" || textLike || cardKind !== null)
-      out.push({ input, kind, isNewPassword: sig.isNewPassword, textLike, cardKind });
+  for (const el of root.querySelectorAll("input, select")) {
+    if (el instanceof HTMLInputElement) {
+      if (el.disabled || el.readOnly || !isVisible(el)) continue;
+      if (NON_FILLABLE_TYPES.has(el.type)) continue; // never fill a checkbox/submit, whatever its name
+      const sig = fieldSignalOf(el);
+      const kind = classify(sig);
+      const t = el.type;
+      const textLike =
+        kind === "none" &&
+        (t === "text" || t === "email") &&
+        !NAME_NEGATIVE_RX.test((el.name || el.id).toLowerCase());
+      const cardKind = classifyCardField(sig, el.id); // §8: id rides alongside for the token retry
+      if (kind !== "none" || textLike || cardKind !== null)
+        out.push({ input: el, kind, isNewPassword: sig.isNewPassword, textLike, cardKind });
+    } else if (el instanceof HTMLSelectElement) {
+      // readOnly stays input-gated (selects have no readOnly); only select-one qualifies — a
+      // multi-select cannot hold ONE expiry/type. Selects NEVER enter the login pool: kind is
+      // hard-set "none"/textLike false and classify() is not consulted (§1) — a card-less select
+      // contributes nothing, so it isn't collected at all.
+      if (el.disabled || !isVisible(el) || el.type !== "select-one") continue;
+      const sig = fieldSignalOf(el);
+      const cardKind = classifyCardSelect(sig.htmlNameOrId ?? null, el.id, sig.hints ?? []);
+      if (cardKind !== null) out.push({ input: el, kind: "none", isNewPassword: false, textLike: false, cardKind });
+    }
   }
   return out;
 }
@@ -277,11 +366,20 @@ function hasNearbySubmit(el: Element): boolean {
 
 /** Split formless fields into clusters: for each password, its group is the nearest ancestor
  *  that also contains another candidate field (two side-by-side login widgets stay separate).
- *  Leftover password-less fields form one root-scoped group (username-step candidate). */
-function formlessGroups(loose: Field[], root: Document | ShadowRoot): { container: Scope; fields: Field[] }[] {
-  const remaining = new Set(loose);
+ *  [T1] the clustering is select-BLIND: the per-password early-stop counts input-backed Fields
+ *  ONLY, so every shipped grouping decision stays bit-identical — a formless expiry-<select> row
+ *  beside a password CVV would otherwise satisfy the early-stop a level too low and split the
+ *  PAN off the cluster (killing the shipped CVV fill + demotion). After the groups form, each
+ *  select Field attaches to the FIRST group whose container contains it (document order), else
+ *  it rides the root leftover group. Leftover password-less fields form one root-scoped group
+ *  (username-step candidate). Exported for the pure suite ([T1] §11): the algorithm is
+ *  structural (parentElement climbs + contains) and runs against node stubs — no live DOM. */
+export function formlessGroups(loose: Field[], root: Document | ShadowRoot): { container: Scope; fields: Field[] }[] {
+  const inputs = loose.filter((f) => f.input instanceof HTMLInputElement);
+  const selects = loose.filter((f) => !(f.input instanceof HTMLInputElement));
+  const remaining = new Set(inputs);
   const groups: { container: Scope; fields: Field[] }[] = [];
-  for (const f of loose) {
+  for (const f of inputs) {
     if (f.kind !== "password" || !remaining.has(f)) continue;
     let group: { container: Scope; fields: Field[] } | null = null;
     // Bounded climb: a real login widget keeps username+password within a few levels. Climbing
@@ -299,12 +397,20 @@ function formlessGroups(loose: Field[], root: Document | ShadowRoot): { containe
     for (const x of group.fields) remaining.delete(x);
     groups.push(group);
   }
-  if (remaining.size > 0) groups.push({ container: root, fields: [...remaining] });
+  const leftover = [...remaining];
+  for (const s of selects) {
+    const g = groups.find((x) => x.container.contains(s.input));
+    if (g) g.fields.push(s);
+    else leftover.push(s);
+  }
+  if (leftover.length > 0) groups.push({ container: root, fields: leftover });
   return groups;
 }
 
 function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: Field[]): LoginForm | null {
-  const passwords = fields.filter((f) => f.kind === "password");
+  // Login slots take input-backed fields only ([T15] instanceof narrowing) — runtime-redundant
+  // (selects are always kind "none"/!textLike) but it is what makes the slot types honest.
+  const passwords = fields.filter(isInputField).filter((f) => f.kind === "password");
   // [A7] formKind gate: ANY form carrying a detected card-NUMBER field is a card form and is
   // excluded from the login capture/save path — an "update" here would overwrite a stored merchant
   // password with a PAN/CVV. This is the general fix; the lone-CVV rule below is the narrower one.
@@ -313,7 +419,7 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
   if (passwords.length === 0) {
     // Multi-step step 1: exactly one CLASSIFIED username (fallback pool doesn't qualify)
     // plus a way to advance — otherwise it's just a stray text field.
-    const users = fields.filter((f) => f.kind === "username");
+    const users = fields.filter(isInputField).filter((f) => f.kind === "username");
     if (users.length !== 1) return null;
     // A real form scopes its own submit; a formless single needs one NEARBY (bounded), not
     // anywhere in the document — otherwise a lone newsletter email reads as a login step.
@@ -345,15 +451,17 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
   const pIdx = fields.indexOf(primary);
   let username: HTMLInputElement | null = null;
   for (let i = pIdx - 1; i >= 0; i--) {
-    if (fields[i]!.kind === "username") {
-      username = fields[i]!.input;
+    const c = fields[i]!;
+    if (c.kind === "username" && isInputField(c)) {
+      username = c.input;
       break;
     }
   }
   if (!username) {
     for (let i = pIdx - 1; i >= 0; i--) {
-      if (fields[i]!.textLike) {
-        username = fields[i]!.input;
+      const c = fields[i]!;
+      if (c.textLike && isInputField(c)) {
+        username = c.input;
         break;
       }
     }
@@ -363,10 +471,14 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
   // classify()'d password off a name keyword can't be a CVV box), and only when it is the
   // form's ONLY password field — a real username+password+cvv checkout keeps its banner path
   // (not lone), and a login form named normally is untouched. [A7] a card form (cardnumber
-  // anchor present) also suppresses, regardless of the password count.
+  // anchor present) also suppresses, regardless of the password count. §8/F29: name and id are
+  // checked INDEPENDENTLY (the shipped `name || id` let a garbage name shadow a CVV id;
+  // suppression-side widening is fail-safe).
   const suppressSave =
     isCardForm ||
-    (passwords.length === 1 && primary.input.type === "password" && isCvvNameOrId(primary.input.name || primary.input.id));
+    (passwords.length === 1 &&
+      primary.input.type === "password" &&
+      (isCvvNameOrId(primary.input.name) || isCvvNameOrId(primary.input.id)));
 
   return { kind: "login", form, container, username, password: primary.input, newPasswords, isSignup, suppressSave };
 }
@@ -414,7 +526,7 @@ export function findLoginForms(root: Document | ShadowRoot): LoginForm[] {
  *  index-aligned card kinds + their inputs (CSC demotion applied) for the S3 fill executor. */
 export interface CardFormFieldRef {
   kind: CardFieldKind;
-  input: HTMLInputElement;
+  input: FillableControl;
 }
 export interface CardForm {
   form: HTMLFormElement | null;
@@ -426,7 +538,7 @@ function buildCardForm(form: HTMLFormElement | null, container: Scope, fields: F
   if (!fields.some((f) => f.cardKind === "cardnumber")) return null; // a card form REQUIRES the PAN anchor
   const refs: CardFormFieldRef[] = [];
   for (const f of fields) {
-    const kind = demoteCsc(f.cardKind, f.input.type, f.input.name || f.input.id);
+    const kind = demoteCsc(f.cardKind, f.input.type, f.input.name, f.input.id);
     if (kind) refs.push({ kind, input: f.input });
   }
   return { form, container, fields: refs };

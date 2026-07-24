@@ -1,10 +1,12 @@
-// Minimal card display/copy helpers — the extension's port of web/src/vault/card.ts (itself
-// the TS mirror of core CardNormalize.kt). ONLY what the popup's copy-only Cards group needs
-// rides here: digitsOnly/brand/brandLabel/maskedLast4/cardSubtitle for the masked identity
-// line, and composeShortExpiry (+ its padMonth/yearTo2/trimAscii innards) for the MM/YY copy.
+// Minimal card display/copy + fill-adapter helpers — the extension's port of web/src/vault/card.ts
+// (itself the TS mirror of core CardNormalize.kt). ONLY what the extension port needs rides
+// here: digitsOnly/brand/brandLabel/maskedLast4/cardSubtitle for the popup's masked identity
+// line, composeShortExpiry (+ its yearTo2/trimAscii innards) for the MM/YY copy, and the
+// padMonth/yearTo4 canonicalizers the Tier-1 fill layer (cardfill.ts) adapts values with.
 // The IIN table and the ASCII-digit discipline match the web/core ports EXACTLY — cross-port
-// parity is pinned against spec/test-vectors/card.json by web/src/extension-pins.test.ts.
-// No editor, no Luhn, no parseExpiry: the extension neither creates nor edits cards.
+// parity is pinned against spec/test-vectors/card.json by web/src/extension-pins.test.ts
+// (padMonth/yearTo4 included). No editor, no Luhn, no parseExpiry: the extension neither
+// creates nor edits cards (cardfill.ts carries its own read-back parse for verify only).
 //
 // "Digit" throughout means ASCII '0'..'9' ONLY (explicit charCode checks — never \d,
 // parseInt, or Number()): Unicode digits are stripped by digitsOnly and REJECTED by the
@@ -68,13 +70,22 @@ export function brand(raw: string): string | null {
 }
 
 /** Month adapter: "1"/"01".."12" → zero-padded canonical; null otherwise. */
-function padMonth(raw: string): string | null {
+export function padMonth(raw: string): string | null {
   const t = trimAscii(raw);
   if (t.length === 0 || t.length > 2) return null;
   for (let i = 0; i < t.length; i++) if (!isAsciiDigitCode(t.charCodeAt(i))) return null;
   const m = intOf(t);
   if (m < 1 || m > 12) return null;
   return m < 10 ? `0${m}` : String(m);
+}
+
+/** Year adapter for 4-digit targets: "27" pivots to "2027", 4-digit passes through; null otherwise. */
+export function yearTo4(raw: string): string | null {
+  const t = trimAscii(raw);
+  for (let i = 0; i < t.length; i++) if (!isAsciiDigitCode(t.charCodeAt(i))) return null;
+  if (t.length === 2) return `20${t}`;
+  if (t.length === 4) return t;
+  return null;
 }
 
 /** Year adapter for 2-digit targets: "2027" → "27", 2-digit passes through; null otherwise. */

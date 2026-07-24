@@ -220,6 +220,11 @@
 
         <p id="server-msg" class="msg" role="status" hidden></p>
 
+        <!-- Card autofill Tier 1 §10: the honest injection state. Autofill stays dormant until the
+             broad all-sites permission is held (the Connect gesture above requests it alongside the
+             per-origin fetch grant; the popup's banner is the other grant surface). -->
+        <p id="autofill-status" class="lede" role="status">Autofill injection: …</p>
+
         <p class="anti-phish">
           andvari never asks for your master password or PIN on a web page — only in this options tab
           and the toolbar popup. The address above is the exact origin this browser will connect to.

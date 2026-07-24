@@ -57,12 +57,26 @@ export interface RevealedSecret {
 /** S3 in-page card fill: the values a `revealCardForFill` redemption returns — composed SW-side,
  *  and ONLY for the kinds the detected form declared ([A2]/egress step 4: "CVV only if a CVV
  *  field was detected"). Held strictly function-local in the content script; never snapshotted,
- *  never rendered ([A6]). `expiry` is the MM/YY composed per CardNormalize parity. */
+ *  never rendered ([A6]). v2 (Tier 1 §6): the expiry HALVES ride INDEPENDENTLY — a parseable
+ *  month with a junk year still fills month-only targets; combined targets need both. cardfill.ts
+ *  `CardFillValues` is this shape's structural twin (the pure leaf must not import this
+ *  chrome-typed file) — keep them in lockstep. */
 export interface CardFillFields {
   number?: string;
+  /** Composed MM/YY (CardNormalize parity) — BACK-COMPAT only: the fill adapters use the halves
+   *  below; this survives for the popup copy path and pre-v2 receivers. */
   expiry?: string;
   name?: string;
   cvv?: string;
+  /** Canonical "MM" (card.ts padMonth), independent of the year half. */
+  expMonth?: string;
+  /** yearTo2/yearTo4 of the stored year, independent of the month half. */
+  expYear2?: string;
+  expYear4?: string;
+  /** SW-derived brand id ("visa"…), NEVER a stored field. [T9] double-gate: composed ONLY when the
+   *  form declared cardtype AND cardnumber — the zero-new-information argument (the same response
+   *  already carries the PAN) must never depend on a future registry shape. */
+  brand?: string;
 }
 
 /** Why an in-page card fill wrote NOTHING (parity with FillFailCode; the copy lives in the
@@ -70,9 +84,15 @@ export interface CardFillFields {
  *  origin/frame/top-origin check refused. */
 export type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable";
 
-/** The content script's honest card-fill outcome — `card` when at least one card field landed. */
+/** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
+ *  landed (read-back verified); `partial` = some landed, some didn't; `nothing` as before. A kind
+ *  with no derivable value (absent stored field, unparseable half, no option match, fit-guard
+ *  skip, read-back mismatch) files in `missedKinds` — the popup names them so the copy buttons
+ *  can cover the gap. Set iff filled === "nothing": `code`. */
 export interface CardFillOutcome {
-  filled: "card" | "nothing";
+  filled: "card" | "partial" | "nothing";
+  filledKinds: CardFieldKind[];
+  missedKinds: CardFieldKind[];
   code?: CardFillFailCode;
 }
 
@@ -385,7 +405,13 @@ export type TabMsg =
   /** SW → content (S3): fill this card into the granted frame's card form. Sent to ONE frameId
    *  only; the frame redeems via `revealCardForFill` (the value round-trip), never receiving the
    *  card values on this message. */
-  | { type: "fillCard"; itemId: string };
+  | { type: "fillCard"; itemId: string }
+  /** SW → content (S3 §7, broadcast to ALL frames — [T5] popup fast-path): drop the sig sentinel
+   *  and caches, then re-report the frame's card form NOW. [T4]: the receiver resets lastCardSig
+   *  FIRST — bfcache restores JS state on a back-navigation, so without the reset the rescan's
+   *  own report is swallowed by its own sig guard and the offer is lost for the document's life.
+   *  Answers `{ok:true}` (delivery signal only — the report rides its own cardFormInfo). */
+  | { type: "rescanCardForms" };
 
 /** Typed sendMessage helper both UIs use. */
 export function send<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promise<Res<T>> {

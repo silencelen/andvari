@@ -175,7 +175,9 @@ class CardFillTest {
 
     // (i) Fit-guard: a value longer than the control's declared maxLength is never emitted —
     // the platform's LengthFilter would truncate "2027" in a 2-char box into "20", a WRONG
-    // year. The one adaptation: 4-digit year → 2-digit form; everything else skips.
+    // year. Adaptations are per-kind tables (year 4→2-digit; combined expiry per the design
+    // §9 capacity table — "1227" IS the truthful 4-char form); everything else skips. The
+    // table's full branch coverage lives in CardFillVectorTest (cardfill.json expiryText).
     @Test
     fun maxLengthFitGuardAdaptsYearAndSkipsEverythingElse() {
         val plan = CardFill.plan(
@@ -183,15 +185,17 @@ class CardFillTest {
                 field(0, FieldKind.CC_NUMBER),                       // anchor
                 field(1, FieldKind.CC_EXP_YEAR, maxLength = 2),      // adapts: "2027" → "27"
                 field(2, FieldKind.CC_EXP_YEAR, maxLength = 4),      // fits: "2027"
-                field(3, FieldKind.CC_EXP, maxLength = 4),           // "12/27" can't fit → skip
+                field(3, FieldKind.CC_EXP, maxLength = 4),           // packs MMYY: "1227" (§9 table)
                 field(4, FieldKind.CC_NUMBER, maxLength = 12),       // 16-digit PAN can't fit → skip
                 field(5, FieldKind.CC_EXP_YEAR, maxLength = 1),      // nothing fits → skip
+                field(6, FieldKind.CC_EXP, maxLength = 3),           // no truthful expiry in 3 chars → skip
             ),
             fullCard,
         )
         assertEquals(CardFill.Value.Text("27"), plan.at(1))
         assertEquals(CardFill.Value.Text("2027"), plan.at(2))
-        assertEquals(listOf(0, 1, 2), plan.map { it.index })
+        assertEquals(CardFill.Value.Text("1227"), plan.at(3))
+        assertEquals(listOf(0, 1, 2, 3), plan.map { it.index })
     }
 
     // (j) LIST two-pass: a digit-bearing placeholder row ("Year (e.g. 2026)") never outranks

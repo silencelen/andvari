@@ -170,7 +170,8 @@ object StructureParser {
         fun attr(name: String): String? = attrs?.firstOrNull { it.first == name }?.second
         // Prefer HTML name/id (web forms); fall back to the Android resource id entry
         // (native apps), which is only exposed from API 30.
-        val nameOrId = attr("name")
+        val nameAttr = attr("name")
+        val nameOrId = nameAttr
             ?: attr("id")
             ?: (if (Build.VERSION.SDK_INT >= 30) runCatching { node.idEntry }.getOrNull() else null)
         val inputClass = inputType and CLASS_MASK
@@ -188,6 +189,10 @@ object StructureParser {
                 ?: node.maxTextLength.takeIf { it > 0 },
             inputMode = attr("inputmode") ?: (if (inputClass == FieldSignal.CLASS_NUMBER) "numeric" else null),
             frameDomain = frameDomain,
+            // The id rides htmlId ONLY when a name attr exists — even name="" counts (that is
+            // precisely the shadowing case: the empty name won the ?: above and buried the id).
+            // With no name attr the id already rode htmlNameOrId and must not be fed twice.
+            htmlId = if (nameAttr != null) attr("id") else null,
         )
     }
 }

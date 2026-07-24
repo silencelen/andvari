@@ -6,10 +6,11 @@
  * TOTP chips re-polled each second. The SW holds all key material — this page only messages it.
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
+import type { CardFieldKind } from "./detect";
 import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
 import { getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
-import { shouldRouteToOptions } from "./grantflow";
+import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
 import { displaySite, safeSiteUrl } from "./siteurl";
 
 const FLASH_MS = 1200;
@@ -279,10 +280,23 @@ async function loadUnlocked(): Promise<void> {
   renderList(el("all-list"), all.items, "The hoard is empty");
   const cards = await ask({ type: "cardItems" });
   if (!cards || cards.locked) return relocked();
-  // S3: may we offer in-page card fill for this tab? (popup-only query; the SW derives the origin)
+  // S3: may we offer in-page card fill for this tab? (popup-only query; the SW derives the
+  // origin). The SW answers off its registry IMMEDIATELY and fires a rescan broadcast; the one
+  // delayed re-query below is what picks up a form the rescan just surfaced (CSS-revealed step,
+  // bfcache return) — freshness without an inline wait on the popup's critical path.
   const offer = await ask({ type: "cardFillOffers" });
   cardFill = offer ? { fillable: offer.fillable, origin: offer.origin } : { fillable: false, origin: null };
   renderCards(cards.items);
+  window.setTimeout(() => {
+    void (async () => {
+      const o2 = await ask({ type: "cardFillOffers" });
+      if (o2 && (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin)) {
+        cardFill = { fillable: o2.fillable, origin: o2.origin };
+        const c2 = await ask({ type: "cardItems" });
+        if (c2 && !c2.locked) renderCards(c2.items);
+      }
+    })();
+  }, 350);
   startTotp();
   el<HTMLInputElement>("search").focus();
 }
@@ -753,14 +767,50 @@ function cardRow(it: CardItem): HTMLElement {
   return r;
 }
 
-/** S3: mint the SW's one-shot card grant for the active tab's detected card form and fill it. Like
- *  the login row fill, close only when a field actually landed; else render the canon seam copy. */
+/** §5 partial-outcome copy: human labels per detected kind. The three expiry kinds deliberately
+ *  share ONE label — "couldn't fill expiry, expiry" would read as a stutter, and the user's
+ *  remedy (the expiry copy button) is the same for all three. */
+const CARD_KIND_LABEL: Record<CardFieldKind, string> = {
+  cardnumber: "number",
+  cardexpiry: "expiry",
+  cardexpmonth: "expiry",
+  cardexpyear: "expiry",
+  cardname: "name on card",
+  cardcvv: "security code",
+  cardtype: "card type",
+};
+
+function cardLabels(kinds: CardFieldKind[]): string[] {
+  const labels: string[] = [];
+  for (const k of kinds) {
+    const l = CARD_KIND_LABEL[k];
+    if (!labels.includes(l)) labels.push(l);
+  }
+  return labels;
+}
+
+/** S3: mint the SW's one-shot card grant for the active tab's detected card form and fill it.
+ *  [T11]: the verdict is `r.outcome.filled`, NOT `r.ok` — "card" (everything landed) closes like
+ *  the login fill; "partial" keeps the popup OPEN and names what's missing (the row's copy
+ *  buttons, right beneath, are the remedy); anything else renders the canon seam copy. */
 async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void> {
   btn.disabled = true;
   const r = await ask({ type: "fillCardFromPopup", itemId });
   btn.disabled = false;
-  if (r?.ok) {
-    window.close(); // the card fill really landed in the page
+  const filled = r?.outcome?.filled;
+  if (filled === "card") {
+    window.close(); // the card fill really landed in the page, in full
+  } else if (filled === "partial" && r?.outcome) {
+    // A label can appear on BOTH sides (month filled, year missed → both read "expiry") —
+    // "Filled expiry — couldn't fill expiry" is nonsense, so the missed side owns shared labels.
+    const missed = cardLabels(r.outcome.missedKinds);
+    const landed = cardLabels(r.outcome.filledKinds).filter((l) => !missed.includes(l));
+    showMsg(
+      "info",
+      landed.length > 0
+        ? `Filled ${landed.join(", ")} — couldn't fill ${missed.join(", ")}. Copy instead:`
+        : `Couldn't fill ${missed.join(", ")}. Copy instead:`,
+    );
   } else {
     showMsg("err", fillErrorCopy(r?.code));
   }
@@ -1269,6 +1319,33 @@ el("host-grant-cta").addEventListener("click", () => {
   window.close();
 });
 
+/** F3 fresh-install grant banner (card autofill Tier 1 §10): Chrome grants NO optional host
+ *  permission at install, so the dynamic autofill script injects nowhere and every card/login
+ *  in-page surface is silently dormant. When the broad grant is missing, un-hide the banner; the
+ *  probe failing (permissions API absent) shows nothing — a false banner whose button can't work
+ *  is worse than staying quiet (the grantflow null discipline). */
+async function detectMissingBroadGrant(): Promise<void> {
+  try {
+    el("autofill-grant").hidden = await chrome.permissions.contains({ origins: [BROAD_ORIGIN_PATTERN] });
+  } catch {
+    /* permissions API unavailable — banner stays hidden (no false CTA) */
+  }
+}
+
+el("autofill-grant").addEventListener("click", () => {
+  // permissions.request MUST be the first async call — this popup click is the user gesture it
+  // needs (§10). On grant, just hide the banner: the background permissions.onAdded listener does
+  // the content-script re-registration (NO SW plumbing here — one reconcile path, not two).
+  void (async () => {
+    try {
+      const granted = await chrome.permissions.request({ origins: [BROAD_ORIGIN_PATTERN] });
+      if (granted) el("autofill-grant").hidden = true;
+    } catch {
+      /* dismissed / not requestable — the banner stays as the retry affordance */
+    }
+  })();
+});
+
 void renderServerOrigin();
 // Probe biometric capability BEFORE the first status render so the bio enroll shortcuts appear on the
 // first paint (not only after an interaction re-renders). The probe is fast and never throws out.
@@ -1277,3 +1354,4 @@ void renderUpdate();
 // Passive connectivity dot — quiet ping on open, result only in the header dot.
 void ask({ type: "ping" }).then((r) => setConn(r?.ok === true));
 void detectMissingHostGrant();
+void detectMissingBroadGrant();

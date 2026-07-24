@@ -8,7 +8,7 @@ data class RefinedForm(val kinds: List<FieldKind>, val formKind: FormKind)
 
 val FieldKind.isCardKind: Boolean
     get() = this == FieldKind.CC_NUMBER || this == FieldKind.CC_EXP_MONTH || this == FieldKind.CC_EXP_YEAR ||
-        this == FieldKind.CC_EXP || this == FieldKind.CC_NAME || this == FieldKind.CC_CSC
+        this == FieldKind.CC_EXP || this == FieldKind.CC_NAME || this == FieldKind.CC_CSC || this == FieldKind.CC_TYPE
 
 /**
  * Form-level card refinement — the pure post-pass over a form's classified fields, shared by all
