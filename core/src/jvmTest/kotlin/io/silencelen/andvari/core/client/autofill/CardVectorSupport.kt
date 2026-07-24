@@ -43,5 +43,6 @@ internal fun vectorFieldSignal(o: JsonObject): FieldSignal {
         inputMode = str("inputMode"),
         frameDomain = str("frameDomain"),
         htmlId = str("htmlId"),
+        labelText = str("labelText"),
     )
 }

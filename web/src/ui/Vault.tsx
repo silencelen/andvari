@@ -8,7 +8,7 @@ import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import { randomBytes } from "../crypto/provider";
 import { normalizeTotp, parseOtpauthUri, totpCode, totpSecondsRemaining } from "../crypto/totp";
 import type { Account } from "../vault/account";
-import { CARD_CREATE_ENABLED, brand, brandLabel, cardSubtitle, digitsOnly, expiryLabel, groupNumber, isExpired, luhnValid, padMonth, yearTo4 } from "../vault/card";
+import { CARD_CREATE_ENABLED, brand, brandLabel, cardSubtitle, composeShortExpiry, digitsOnly, expiryLabel, groupNumber, isExpired, luhnValid, padMonth, yearTo4 } from "../vault/card";
 import {
   CopyDeniedError,
   ItemChangedError,
@@ -1022,6 +1022,11 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
               <div className="secret-row" style={{ alignItems: "center" }}>
                 <input readOnly className="mono" value={expiryLabel(doc.card)!} />
                 {isExpired(doc.card.expMonth, doc.card.expYear) && <span className="tag expired">expired</span>}
+                {/* Copy hands combined checkout inputs the canonical MM/YY (Tier 2 §6 parity) —
+                    a half that won't canonicalize keeps the row copy-less, never copies junk. */}
+                {composeShortExpiry(doc.card.expMonth ?? "", doc.card.expYear ?? "") !== null && (
+                  <button className="ghost" onClick={() => copy("expiry", composeShortExpiry(doc.card!.expMonth ?? "", doc.card!.expYear ?? "")!)}>Copy</button>
+                )}
               </div>
             </div>
           )}

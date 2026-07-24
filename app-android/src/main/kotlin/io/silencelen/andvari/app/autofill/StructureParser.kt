@@ -193,6 +193,10 @@ object StructureParser {
             // precisely the shadowing case: the empty name won the ?: above and buried the id).
             // With no name attr the id already rode htmlNameOrId and must not be fed twice.
             htmlId = if (nameAttr != null) attr("id") else null,
+            // Android's ONE label source (§1.2): the node's hint (floating label / placeholder
+            // text) — the weakest signal, consulted only in classify()'s step-4 card gap.
+            // signalOf never read a placeholder attr, so this is not a double-feed.
+            labelText = node.hint?.takeIf { it.isNotEmpty() },
         )
     }
 }

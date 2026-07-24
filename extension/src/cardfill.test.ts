@@ -1,8 +1,11 @@
 // Runs under Node's built-in runner (node --test); type-stripped natively.
 // Excluded from tsc (tsconfig `exclude`) — like detect.cards.test.ts. `npm test` runs it.
 //
-// The extension half of the cardfill.json lockstep (design 2026-07-23-card-autofill-tier1 §11):
-// TABLES deep-equals the vector's normative copy ([T14] — drift on either side reds that side);
+// The extension half of the cardfill.json lockstep (design 2026-07-23-card-autofill-tier1 §11 +
+// tier2 §1.3/§4): TABLES deep-equals the vector's normative copy ([T14] — drift on either side
+// reds that side; since Tier 2 that includes the ORDERED `keywords` groups [U8], so sequence,
+// kinds, and contents are all covered by the one assert). `splitPan` is a single-consumer
+// EXT-ONLY vector section (§9 — like core's `dateLeg`; the tsOnly flag has no inverse);
 // `selectIndexShared` encodes options as single strings ([T8]: opt.value's attr-absent→text
 // fallback makes value pass ≡ text pass on label-only options, so one string is lossless);
 // `selectIndexDom` (value≠text pairs) is TS-only. The §4 text adapters run EVERY case including
@@ -21,8 +24,10 @@ import {
   nameTextFor,
   numberTextFor,
   selectIndexFor,
+  splitPan,
   typeTextFor,
   verifyLanded,
+  verifySplitPanLanded,
   yearTextFor,
 } from "./cardfill.ts";
 import type { CardFieldKind } from "./detect.ts";
@@ -94,6 +99,33 @@ test("number/cvv/name/type text — fit-guard skips, never truncates", () => {
   assert.equal(typeTextFor("visa", null), "Visa"); // the SW-derived brand's label, never a stored field
   assert.equal(typeTextFor("visa", 3), null);
   assert.equal(typeTextFor(null, null), null); // unknown IIN → no brand rode the wire → missed
+});
+
+test("splitPan — §4 chunk table (ext-only vector section): 4-4-4-4, Amex 4-6-5, short remainder, missing maxLength", () => {
+  for (const c of v.splitPan) {
+    assert.deepEqual(splitPan(c.pan, c.boxes), c.expected, c.name);
+  }
+});
+
+test("splitPan — eligibility edges: sum shortfall, out-of-range maxLength, degenerate shapes", () => {
+  assert.equal(splitPan("4242424242424242", [4, 4, 4]), null); // sum 12 < 16 → caller's fallback governs
+  assert.equal(splitPan("4242424242424242", [4, 4, 4, 0]), null); // 0 is outside the declared 1..8 window
+  assert.equal(splitPan("4242424242424242", [9, 9]), null); // 9 declares whole-PAN-ish boxes, not split chunks
+  assert.equal(splitPan("4242424242424242", [8]), null); // one box is not a split (>1-cardnumber pre-pass)
+  assert.deepEqual(splitPan("4242 4242 4242 4242", [4, 4, 4, 4]), ["4242", "4242", "4242", "4242"]); // display sugar stripped
+  assert.deepEqual(splitPan("378282246310005", [8, 8]), ["37828224", "6310005"]); // remainder rule at 2 boxes too
+  assert.equal(splitPan("", [4, 4, 4, 4]), null);
+  assert.equal(splitPan(undefined, [4, 4, 4, 4]), null);
+});
+
+test("verifySplitPanLanded — [U19] concatenation verify: masker redistribution passes, truncation fails", () => {
+  assert.equal(verifySplitPanLanded("4242424242424242", ["4242", "4242", "4242", "4242"]), true); // per-box fast-path shape
+  assert.equal(verifySplitPanLanded("4242424242424242", ["42424", "24242", "42424", "2"]), true); // auto-advance redistributed
+  assert.equal(verifySplitPanLanded("4242424242424242", ["4242 4242", "42424242", "", ""]), true); // re-spacing + emptied tail
+  assert.equal(verifySplitPanLanded("4242424242424242", ["4242", "4242", "4242"]), false); // truncation
+  assert.equal(verifySplitPanLanded("4242424242424242", ["4242", "4242", "4242", "4243"]), false); // wrong digits
+  assert.equal(verifySplitPanLanded("4242424242424242", ["4242", "4242", "4242", "42421"]), false); // residue
+  assert.equal(verifySplitPanLanded("", []), false);
 });
 
 test("verifyLanded — [T7] canonicalized read-back compare", () => {

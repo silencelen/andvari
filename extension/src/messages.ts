@@ -45,6 +45,8 @@ export interface CardItem {
   /** true only when the stored halves compose to MM/YY (card.ts composeShortExpiry). */
   hasExpiry: boolean;
   hasCvv: boolean;
+  /** Tier 2 §6 copy parity: gates the cardholder-name copy button (appended — additive rule). */
+  hasName: boolean;
 }
 
 export interface RevealedSecret {
@@ -251,8 +253,10 @@ export type Req =
   /** Popup ONLY (the SW refuses senders with a tab, i.e. content scripts): one card field
    *  for a copy — the value goes straight to the popup's clipboard write, never into a page
    *  or the popup DOM. Cards are deliberately not uri-bound, so there is no host gate; the
-   *  gate is the explicit click on a copy button in OUR popup plus the unlocked session. */
-  | { type: "revealCardField"; itemId: string; field: "number" | "expiry" | "cvv" }
+   *  gate is the explicit click on a copy button in OUR popup plus the unlocked session.
+   *  Tier 2 §6: `"name"` joins the union (copy parity — every surface copies number/expiry/
+   *  name/CVV); additive, same popup-only guard + doc.type==="card" gate. */
+  | { type: "revealCardField"; itemId: string; field: "number" | "expiry" | "name" | "cvv" }
   /** Content: page captured a submitted credential. SW decides save-vs-update and
    *  stores it as the pending save for the tab (survives navigation). */
   | { type: "capturedCredential"; url: string; username: string; password: string }
@@ -274,11 +278,14 @@ export type Req =
   /** Popup: is a newer extension version published to /downloads? Non-secret and vault-free —
    *  the SW answers whether locked or not (the check reads only the public downloads manifest). */
   | { type: "updateStatus" }
-  /** Content (per frame, passive, S3): a same-origin card form was detected in THIS frame.
-   *  METADATA ONLY — kinds, never values, and [A2] NO page-controlled host (the SW binds frame
-   *  identity to browser-set `sender.origin`; a `msg.host` would be a spoofable offer-manufacture
-   *  input). `fields:[]` ⇒ the frame's card form went away and its record is cleared. */
-  | { type: "cardFormInfo"; fields: CardFieldKind[] }
+  /** Content (per frame, passive, S3): ALL of this frame's same-origin card forms, document
+   *  order across [document, …shadow roots] (Tier 2 §2/§3). METADATA ONLY — kinds, never values,
+   *  and [A2] NO page-controlled host (the SW binds frame identity to browser-set
+   *  `sender.origin`; a `msg.host` would be a spoofable offer-manufacture input). `forms:[]` ⇒
+   *  the frame's card forms went away and its record is cleared. [U14]: this REPLACED Tier 1's
+   *  `fields: CardFieldKind[]` — a design-authorized breach of the additive rule; the SW
+   *  discards any persisted pre-update `{fields}` record on read (fail-closed, rescan restores). */
+  | { type: "cardFormInfo"; forms: CardFieldKind[][] }
   /** Popup ONLY (the SW refuses tab senders): may the Cards group show a Fill button for the
    *  active tab, and to which origin? `fillable` iff a recorded card form's origin equals the
    *  tab's CURRENT top-level origin (SW-derived from `tab.url` under `activeTab`, [A4]). */
@@ -385,7 +392,15 @@ export type Res<T extends Req["type"]> = T extends "status"
                                       : T extends "cardFormInfo"
                                         ? { ok: boolean }
                                         : T extends "cardFillOffers"
-                                          ? { fillable: boolean; origin: string | null }
+                                          ? {
+                                              fillable: boolean;
+                                              origin: string | null;
+                                              /** Tier 2 §6 [U21]: the tab's registry holds ≥1 card form but NO frame is
+                                               *  origin-eligible (PSP-iframe checkout). SW-derived from browser-set
+                                               *  per-frame origins vs the top origin — never page data. The popup renders
+                                               *  the neutral explainer and NEVER a Fill button in this state. */
+                                              crossOriginFormsOnly: boolean;
+                                            }
                                           : T extends "fillCardFromPopup"
                                             ? { ok: boolean; outcome?: CardFillOutcome; code?: CardFillFailCode; error?: string }
                                             : T extends "revealCardForFill"
@@ -404,14 +419,58 @@ export type TabMsg =
   | { type: "offerPendingSave"; pending: PendingSave }
   /** SW → content (S3): fill this card into the granted frame's card form. Sent to ONE frameId
    *  only; the frame redeems via `revealCardForFill` (the value round-trip), never receiving the
-   *  card values on this message. */
-  | { type: "fillCard"; itemId: string }
+   *  card values on this message. Tier 2 [U12]: `sig` is the grant's kind-signature
+   *  (`kinds.join(",")` of the chosen form) — the receiver fills the FIRST form (document order)
+   *  whose CURRENT signature equals it; no match → `no_form`, NEVER an index fallback. */
+  | { type: "fillCard"; itemId: string; sig: string }
   /** SW → content (S3 §7, broadcast to ALL frames — [T5] popup fast-path): drop the sig sentinel
    *  and caches, then re-report the frame's card form NOW. [T4]: the receiver resets lastCardSig
    *  FIRST — bfcache restores JS state on a back-navigation, so without the reset the rescan's
    *  own report is swallowed by its own sig guard and the offer is lost for the document's life.
    *  Answers `{ok:true}` (delivery signal only — the report rides its own cardFormInfo). */
   | { type: "rescanCardForms" };
+
+/** Tier 2 §2 [U11] — the SW's grant-target choice over the eligible registry entries, factored
+ *  PURE and exported here (background.ts is chrome-bound at module eval and has no test harness,
+ *  so the suite imports the chooser from this chrome-free-at-import contract file — §9).
+ *  Frame 0 wins whenever it holds ANY eligible form (Tier-1 rule, unchanged — a same-origin
+ *  sub-frame must never out-bid the visible top checkout by kind-count); only when frame 0 has
+ *  none does the richest eligible sub-frame win (most distinct kinds in its richest form; tie →
+ *  lowest frameId). Richest-FORM selection (most distinct kinds; tie → first in document order)
+ *  applies WITHIN the chosen frame. Empty input / no forms anywhere → null. */
+export function chooseCardTarget(
+  frames: ReadonlyArray<{ frameId: number; forms: CardFieldKind[][] }>,
+): { frameId: number; kinds: CardFieldKind[] } | null {
+  const richestForm = (forms: CardFieldKind[][]): CardFieldKind[] | null => {
+    let best: CardFieldKind[] | null = null;
+    let bestN = 0; // an empty form (0 distinct kinds) never wins — a grant with no kinds fills nothing
+    for (const f of forms) {
+      const n = new Set(f).size;
+      if (n > bestN) {
+        best = f;
+        bestN = n; // strict > keeps the FIRST on ties — document order
+      }
+    }
+    return best;
+  };
+  const top = frames.find((f) => f.frameId === 0 && f.forms.length > 0);
+  if (top) {
+    const kinds = richestForm(top.forms);
+    return kinds ? { frameId: 0, kinds } : null;
+  }
+  let chosen: { frameId: number; kinds: CardFieldKind[] } | null = null;
+  let chosenN = -1;
+  for (const f of [...frames].sort((a, b) => a.frameId - b.frameId)) {
+    const kinds = richestForm(f.forms);
+    if (kinds === null) continue;
+    const n = new Set(kinds).size;
+    if (n > chosenN) {
+      chosen = { frameId: f.frameId, kinds };
+      chosenN = n; // strict > + ascending sort keeps the LOWEST frameId on ties
+    }
+  }
+  return chosen;
+}
 
 /** Typed sendMessage helper both UIs use. */
 export function send<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promise<Res<T>> {

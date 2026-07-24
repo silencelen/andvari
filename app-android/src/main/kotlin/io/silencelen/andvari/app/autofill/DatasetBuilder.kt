@@ -34,7 +34,8 @@ import io.silencelen.andvari.core.client.autofill.UriMatch
  * [FillTarget] embeds that field's own frame domain (only when the requesting package is a
  * trusted browser — otherwise null → androidapp:// package matching only), so one frame's
  * domain can never fill another frame's field. CARD datasets (0.7.0) are appended after the
- * login datasets under the same [MAX_DATASETS] cap: every `type=="card"` item is offered
+ * login datasets under the same [MAX_DATASETS] cap — with [loginDatasetCap]'s [U20] headroom
+ * so login rows can't consume every slot on a card-eligible form: every `type=="card"` item is offered
  * (deliberately NOT UriMatch-bound — wallet posture), values planned by the pure core
  * [CardFill.plan] (frame-cluster zero-fill + type-pinning), gated by an EXPLICIT browser-trust
  * check (a known-but-untrusted browser gets ZERO card datasets). Provides a dropdown
@@ -185,9 +186,14 @@ object DatasetBuilder {
     ): List<Dataset> {
         val specs = inlineSpecs(inlineRequest)
         val maxInline = if (Build.VERSION.SDK_INT >= 30 && inlineRequest != null) inlineRequest.maxSuggestionCount else 0
+        // [U20] headroom: count the card datasets this form can actually yield BEFORE the login
+        // loop, so a login-heavy vault can't fill every slot and shut cards out of their own
+        // checkout. Zero buildable cards → cap stays MAX_DATASETS (logins are never starved
+        // for cards that don't exist); the counting rail degrades to exactly that.
+        val loginCap = loginDatasetCap(runCatching { countBuildableCardDatasets(items, form, trusted) }.getOrDefault(0))
         val out = ArrayList<Dataset>()
         for (item in items) {
-            if (out.size >= MAX_DATASETS) break
+            if (out.size >= loginCap) break
             if (item.doc.type != "login") continue
             val login = item.doc.login ?: continue
             val username = login.username?.takeIf { it.isNotEmpty() }
@@ -234,9 +240,7 @@ object DatasetBuilder {
     ) {
         if (form.ccFields.isEmpty()) return
         if (form.appPackage in BrowserCertPins.TABLE && !trusted) return // explicit trust gate
-        val ccFields = form.ccFields.mapIndexed { i, f ->
-            CardFill.CcField(index = i, kind = f.kind, frameDomain = f.webDomain, autofillType = f.autofillType, options = f.options, maxLength = f.maxLength)
-        }
+        val ccFields = ccFillFields(form)
         for (item in items) {
             if (out.size >= MAX_DATASETS) break
             if (item.doc.type != "card") continue
@@ -250,6 +254,36 @@ object DatasetBuilder {
             }
         }
     }
+
+    private fun ccFillFields(form: ParsedForm): List<CardFill.CcField> = form.ccFields.mapIndexed { i, f ->
+        CardFill.CcField(index = i, kind = f.kind, frameDomain = f.webDomain, autofillType = f.autofillType, options = f.options, maxLength = f.maxLength)
+    }
+
+    /**
+     * [U20] pre-count for the headroom cap: how many card datasets [appendCardDatasets] would
+     * build — same eligibility gates (classified cc fields + explicit browser trust) and the
+     * same per-item test (a non-empty [CardFill.plan]), WITHOUT constructing framework
+     * Datasets. Deliberately uncapped: the caller's `min(builtCards, 3)` does the clamping.
+     */
+    private fun countBuildableCardDatasets(items: List<VaultItem>, form: ParsedForm, trusted: Boolean): Int {
+        if (form.ccFields.isEmpty()) return 0
+        if (form.appPackage in BrowserCertPins.TABLE && !trusted) return 0
+        val ccFields = ccFillFields(form)
+        return items.count { item ->
+            item.doc.type == "card" && item.doc.card?.let { card ->
+                runCatching { CardFill.plan(ccFields, card).isNotEmpty() }.getOrDefault(false)
+            } == true
+        }
+    }
+
+    /**
+     * [U20] the pure headroom rule (unit-tested — framework Datasets can't be constructed in a
+     * JVM test, so the cap must stand alone): login rows on a card-eligible form leave room
+     * for up to 3 card rows. The reserve never trims below what cards will consume (cards
+     * append under [MAX_DATASETS] after logins, so ≥ min(builtCards, 3) slots remain) and a
+     * zero-card form keeps the full [MAX_DATASETS] for logins.
+     */
+    internal fun loginDatasetCap(builtCards: Int): Int = MAX_DATASETS - minOf(builtCards, 3)
 
     /**
      * One card dataset. Presentation: [CardFill.presentationLine] — brand + masked last4
@@ -275,6 +309,7 @@ object DatasetBuilder {
             f.id to when (val v = p.value) {
                 is CardFill.Value.Text -> AutofillValue.forText(v.text)
                 is CardFill.Value.ListIndex -> AutofillValue.forList(v.index)
+                is CardFill.Value.DateMs -> AutofillValue.forDate(v.ms)
             }
         }
         if (values.isEmpty()) return null

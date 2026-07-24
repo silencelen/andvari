@@ -24,6 +24,7 @@ import { isNewerVersion } from "./version";
 import { evaluateSignedManifest, MIN_SEQ, updatesEnabled } from "./updateverify";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
 import type { CardFieldKind } from "./detect";
+import { chooseCardTarget } from "./messages";
 import type {
   CardFillFields,
   CardFillOutcome,
@@ -215,11 +216,13 @@ interface TabState {
    *  `frameId` is the frame that captured it: a DIFFERENT frame may not overwrite a live pending,
    *  so a hostile sub-frame can't silently redirect the top frame's Save banner to its own login. */
   pending?: (PendingSave & { password: string; frameId: number }) | undefined;
-  /** S3 per-frame card-form registry: frameId → { the frame's browser-set origin, the card-field
-   *  kinds it declared }. METADATA ONLY (never card values). `origin` is `sender.origin` ([A2]);
-   *  every card offer/redemption re-derives the tab's top origin and compares against it, so a
-   *  stale record can never leak a fill across origins. Cleared with the tab (onRemoved / lock). */
-  cardForms?: Record<number, { origin: string; fields: CardFieldKind[] }>;
+  /** S3 per-frame card-form registry: frameId → { the frame's browser-set origin, ALL its card
+   *  forms' kinds in document order (Tier 2 §2) }. METADATA ONLY (never card values). `origin` is
+   *  `sender.origin` ([A2]); every card offer/redemption re-derives the tab's top origin and
+   *  compares against it, so a stale record can never leak a fill across origins. Cleared with
+   *  the tab (onRemoved / lock). [U14]: a persisted pre-update `{fields}` record is DISCARDED on
+   *  read (ensureLoaded) — fail-closed, the rescan broadcast restores fresh records. */
+  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][] }>;
 }
 
 let session: Session | null = null;
@@ -235,8 +238,11 @@ const grants = new Map<number, { itemId: string; expiresMs: number }>();
  *  tab, so sharing it would let a card grant clobber a live login grant (and let one path's
  *  redemption consume the other's). A card grant carries the two extra bindings the contract needs
  *  — the frame that detected the form (`frameId`) and its browser-set `origin` — and is consumed
- *  ONLY by `revealCardForFill` (never the login `reveal()`, nor the reverse). One-shot, 30 s. */
-const cardGrants = new Map<number, { itemId: string; frameId: number; origin: string; expiresMs: number }>();
+ *  ONLY by `revealCardForFill` (never the login `reveal()`, nor the reverse). One-shot, 30 s.
+ *  Tier 2 §2: the grant FREEZES the chosen form's `kinds` + kind-signature `sig` at mint —
+ *  [U15] redemption composes against grant.kinds (never the live registry: a mint→redeem rescan
+ *  could widen egress) and [U12] the content script fills only a current-sig-matching form. */
+const cardGrants = new Map<number, { itemId: string; frameId: number; origin: string; kinds: CardFieldKind[]; sig: string; expiresMs: number }>();
 /** In-flight write count — resync must not replace session.items out from under a landing put. */
 let writesInFlight = 0;
 let loadPromise: Promise<void> | null = null;
@@ -932,7 +938,20 @@ function ensureLoaded(): Promise<void> {
       clipboardClearSeconds = clampClipboardClearSeconds(snap.clipboardClearSeconds, DEFAULT_CLIPBOARD_CLEAR_SECONDS);
     }
     const t = got[TKEY] as Record<string, TabState> | undefined;
-    if (t) tabs = new Map(Object.entries(t).map(([id, st]) => [Number(id), st]));
+    if (t) {
+      tabs = new Map(Object.entries(t).map(([id, st]) => [Number(id), st]));
+      // [U14] the Tier-2 registry shape ({forms}) deliberately broke the additive rule — a record
+      // persisted by the pre-update build ({fields}) is DISCARDED here, never reinterpreted
+      // (fail-closed; the popup's rescan broadcast restores fresh records within one open).
+      for (const st of tabs.values()) {
+        const reg = st.cardForms;
+        if (reg === undefined) continue;
+        for (const [fid, rec] of Object.entries(reg)) {
+          if (!Array.isArray((rec as { forms?: unknown }).forms)) delete reg[Number(fid)];
+        }
+        if (Object.keys(reg).length === 0) delete st.cardForms;
+      }
+    }
   })();
   return loadPromise;
 }
@@ -2048,6 +2067,7 @@ function toCardItem(it: DecryptedItem): CardItem {
     hasNumber: digitsOnly(c?.number ?? "") !== "",
     hasExpiry: composeShortExpiry(c?.expMonth ?? "", c?.expYear ?? "") !== null,
     hasCvv: (c?.securityCode ?? "") !== "",
+    hasName: (c?.cardholderName ?? "") !== "",
   };
 }
 
@@ -2114,6 +2134,11 @@ function revealCardField(
     case "expiry": {
       const e = composeShortExpiry(c.expMonth ?? "", c.expYear ?? "");
       return e !== null ? { ok: true, value: e } : { ok: false, error: "no expiry on this card" };
+    }
+    case "name": {
+      // Tier 2 §6 copy parity: the cardholder name, verbatim (same gates as its siblings).
+      const nm = c.cardholderName ?? "";
+      return nm !== "" ? { ok: true, value: nm } : { ok: false, error: "no name on this card" };
     }
     case "cvv": {
       const s = c.securityCode ?? "";
@@ -2198,17 +2223,17 @@ async function cardFormInfo(
     return { ok: false };
   }
   const st = tabs.get(tabId) ?? {};
-  const forms = st.cardForms ?? {};
-  if (msg.fields.length === 0) {
+  const reg = st.cardForms ?? {};
+  if (msg.forms.length === 0) {
     // §7: the first-report-always-sends sentinel means every frame of every navigation files an
     // empty report — when it deletes nothing, skip the persistTabs() storage write (a
     // per-frame-per-navigation write for a no-op would dominate the SW's storage traffic).
-    if (!(frameId in forms)) return { ok: true };
-    delete forms[frameId];
+    if (!(frameId in reg)) return { ok: true };
+    delete reg[frameId];
   } else {
-    forms[frameId] = { origin: sender.origin, fields: msg.fields };
+    reg[frameId] = { origin: sender.origin, forms: msg.forms };
   }
-  st.cardForms = forms;
+  st.cardForms = reg;
   tabs.set(tabId, st);
   persistTabs();
   return { ok: true };
@@ -2225,13 +2250,15 @@ function broadcastRescanCardForms(tabId: number): void {
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Registry read both popup entry points share: does any recorded frame's card form belong to the
- *  tab's current top origin? */
-function eligibleCardFrames(tabId: number, top: string): number[] {
-  const forms = tabs.get(tabId)?.cardForms ?? {};
-  return Object.entries(forms)
-    .filter(([, f]) => f.origin === top)
-    .map(([fid]) => Number(fid));
+/** Registry read both popup entry points share: every recorded frame whose card forms belong to
+ *  the tab's current top origin, with the forms themselves (chooseCardTarget's input). The
+ *  Array.isArray re-check keeps [A3] fail-closed even if a pre-update record dodged the
+ *  ensureLoaded [U14] discard (e.g. written by a mid-update content script). */
+function eligibleCardFrames(tabId: number, top: string): { frameId: number; forms: CardFieldKind[][] }[] {
+  const reg = tabs.get(tabId)?.cardForms ?? {};
+  return Object.entries(reg)
+    .filter(([, f]) => f.origin === top && Array.isArray(f.forms) && f.forms.length > 0)
+    .map(([fid, f]) => ({ frameId: Number(fid), forms: f.forms }));
 }
 
 /** Popup ONLY: is the active tab fillable, and to which origin? Fillable iff a recorded card
@@ -2242,15 +2269,21 @@ function eligibleCardFrames(tabId: number, top: string): number[] {
  *  freshness with one delayed re-query (~350 ms) that re-renders if the offer state changed.
  *  fillCardFromPopup keeps its own miss-path 250 ms wait — grant minting needs the record NOW. */
 async function cardFillOffers(sender: chrome.runtime.MessageSender): Promise<Res<"cardFillOffers">> {
-  if (sender.tab !== undefined) return { fillable: false, origin: null }; // popup-only guard
-  if (!session) return { fillable: false, origin: null };
+  if (sender.tab !== undefined) return { fillable: false, origin: null, crossOriginFormsOnly: false }; // popup-only guard
+  const none: Res<"cardFillOffers"> = { fillable: false, origin: null, crossOriginFormsOnly: false };
+  if (!session) return none;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id === undefined) return { fillable: false, origin: null };
+  if (tab?.id === undefined) return none;
   const top = await topOrigin(tab.id);
-  if (top === null) return { fillable: false, origin: null };
+  if (top === null) return none;
   broadcastRescanCardForms(tab.id);
   const eligible = eligibleCardFrames(tab.id, top).length > 0;
-  return { fillable: eligible, origin: eligible ? top : null };
+  // §6 [U21]: forms exist but NO frame is origin-eligible → the PSP explainer signal. Derived
+  // from browser-set per-frame origins vs tab.url's top origin only — never page data; it is the
+  // same class of fact as "this tab has a login form" (trusted-chrome metadata). Fail-quiet:
+  // un-granted pages never inject → no records → false → no explainer (accepted).
+  const recorded = Object.values(tabs.get(tab.id)?.cardForms ?? {}).some((f) => Array.isArray(f.forms) && f.forms.length > 0);
+  return { fillable: eligible, origin: eligible ? top : null, crossOriginFormsOnly: recorded && !eligible };
 }
 
 /** Shape-check the granted frame's sendResponse before trusting it (mirrors asFillOutcome).
@@ -2292,13 +2325,17 @@ async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageS
     await delay(250);
     eligible = eligibleCardFrames(tab.id, top);
   }
-  if (eligible.length === 0) return { ok: false, code: "no_form", error: "no eligible card form" };
-  const frameId = eligible.includes(0) ? 0 : eligible[0]!;
-  cardGrants.set(tab.id, { itemId, frameId, origin: top, expiresMs: Date.now() + GRANT_TTL_MS });
-  const msg: TabMsg = { type: "fillCard", itemId };
+  // [U11] frame-0 preference (pinned): the top frame wins whenever it holds ANY eligible form;
+  // richest-frame/richest-form selection only ever runs below it (chooseCardTarget, pure —
+  // messages.ts). The grant freezes the chosen form's kinds + sig ([U12]/[U15]).
+  const target = chooseCardTarget(eligible);
+  if (target === null) return { ok: false, code: "no_form", error: "no eligible card form" };
+  const sig = target.kinds.join(","); // single-level, unambiguous (the nested [U13] sig is registry-side)
+  cardGrants.set(tab.id, { itemId, frameId: target.frameId, origin: top, kinds: target.kinds, sig, expiresMs: Date.now() + GRANT_TTL_MS });
+  const msg: TabMsg = { type: "fillCard", itemId, sig };
   let raw: unknown;
   try {
-    raw = await chrome.tabs.sendMessage(tab.id, msg, { frameId });
+    raw = await chrome.tabs.sendMessage(tab.id, msg, { frameId: target.frameId });
   } catch {
     cardGrants.delete(tab.id);
     return { ok: false, code: "unreachable", error: "frame not reachable — reload the tab and retry" };
@@ -2326,6 +2363,10 @@ async function revealCardForFill(
   if (tabId === undefined) return { ok: false, error: "not a page sender" };
   const grant = cardGrants.get(tabId);
   if (!grant || grant.itemId !== msg.itemId || grant.expiresMs <= Date.now()) return { ok: false, error: "no card grant" };
+  // [U14] [A3] extension: the kinds/sig bindings are load-bearing egress gates — undefined or
+  // malformed at ANY check refuses (a grant shape from a mid-update SW must never fall through
+  // to a live-registry read).
+  if (!Array.isArray(grant.kinds) || typeof grant.sig !== "string") return { ok: false, error: "no grant kinds" };
   // Frame + origin: fail-closed on undefined (first-ever sender.origin reliance in the extension),
   // then the positive equality binding.
   const frameOk = sender.frameId === grant.frameId;
@@ -2341,8 +2382,11 @@ async function revealCardForFill(
   const item = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "card");
   const c = item?.doc.card;
   if (!c) return { ok: false, error: "unknown item" }; // consumes nothing
-  // Compose ONLY the kinds the detected form declared ("CVV only if a CVV field was detected").
-  const declared = new Set(tabs.get(tabId)?.cardForms?.[grant.frameId]?.fields ?? []);
+  // Compose ONLY the kinds the CHOSEN form declared ("CVV only if a CVV field was detected").
+  // [U15] declared = the GRANT's frozen kinds — never the live registry (Tier 1's live read let
+  // a mint→redeem rescan widen egress) and never a frame union (a union could satisfy the [T9]
+  // cardnumber+cardtype gate across TWO forms and compose brand for a PAN-less form). Pinned.
+  const declared = new Set(grant.kinds);
   const fields: CardFillFields = {};
   if (declared.has("cardnumber")) {
     const n = digitsOnly(c.number ?? "");

@@ -8,7 +8,7 @@
 // directions ([A8]) and the capture/save gate ([A7]) are anchored here.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { classifyCardField, classifyCardSelect, demoteCsc, formlessGroups, isCvvNameOrId } from "./detect.ts";
+import { bumpLabelGeneration, classifyCardField, classifyCardSelect, demoteCsc, formlessGroups, isCvvNameOrId, labelSourcesOf } from "./detect.ts";
 import type { FieldSignal } from "./urimatch.ts";
 
 const sig = (over: Partial<FieldSignal>): FieldSignal => ({ hints: [], htmlType: "text", htmlNameOrId: null, ...over });
@@ -155,11 +155,12 @@ test("classifyCardField — [T10] gift guard suppresses the token-path PAN verdi
   assert.equal(classifyCardField(sig({ hints: ["cardnumber"], htmlNameOrId: "giftCardNumber" })), "cardnumber");
 });
 
-test("classifyCardField — trailing-digit names classify HERE, not in core (deliberate divergence)", () => {
-  // The ext tokenizer's letter↔digit boundary makes "cardNumber2" → [card,number,2] → the
-  // whole-run "cardnumber" matches; core keeps digits glued ([card,number2] → NONE). Both sides
-  // pin their OWN behavior (core: cardform.json "trailing digit stays glued") until the Tier-2
-  // vocabulary lane aligns the tokenizers — see the tokens() doc comment in detect.ts.
+test("classifyCardField — trailing-digit names classify on BOTH engines (tokenizer PARITY, [U9])", () => {
+  // The letter↔digit boundary makes "cardNumber2" → [card,number,2] → the whole-run "cardnumber"
+  // matches. Core's tokens() gained the same boundary at its two card call sites (Tier 2 §1.4);
+  // the flipped cardform.json alignment case pins the core side (cardNumber2 → cc-number,
+  // formKind card). Recorded residual seam: an anchorless lone `cvv2` PASSWORD still diverges
+  // (core demotes field-locally; the extension only form-level via demoteCsc).
   assert.equal(classifyCardField(sig({ htmlType: "tel", htmlNameOrId: "cardNumber2" })), "cardnumber");
 });
 
@@ -195,6 +196,108 @@ test("classifyCardSelect — restricted to select-meaningful kinds, hints first,
   assert.equal(classifyCardSelect("cardNumber", "expYear", []), null);
   // no card signal at all → null.
   assert.equal(classifyCardSelect("country", null, []), null);
+});
+
+// ---- Tier 2 (design 2026-07-23-card-autofill-tier2 §1): vocabulary widening + label signals ----
+
+test("§1.3 vocabulary widening — i18n + phrase tokens, group order load-bearing", () => {
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "kartennummer" })), "cardnumber");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "numeroTarjeta" })), "cardnumber");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "ccno" })), "cardnumber");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "validThru" })), "cardexpiry");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "dateExpiration" })), "cardexpiry");
+  // [U10] mirror of the urimatch classifyCard vectors: the month/year groups are ORDERED before
+  // the generic exp group, else "expiryYear"'s "expiry" run would land cardexpiry.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "expiryYear" })), "cardexpyear");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "expiryMonth" })), "cardexpmonth");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "cryptogramme" })), "cardcvv");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "kartenpruefnummer" })), "cardcvv");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "titulaire" })), "cardname");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "cardHolderName" })), "cardname");
+});
+
+test("[U1] bare `creditcard` is the TRAILING group — composites keep their specific kinds", () => {
+  // Mirrors the urimatch classifyCard vector set at the ext pure level (§9): without the trailing
+  // placement, ~50 `credit_card_*` composites would collapse to PAN and mis-arm the split-PAN
+  // pre-pass + richest-form counting.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "credit_card" })), "cardnumber");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "creditCard" })), "cardnumber");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "credit_card_cvv" })), "cardcvv");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "credit_card_expiry" })), "cardexpiry");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "credit_card_type" })), "cardtype");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "credit_card_holder_name" })), "cardname");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "creditCardExpirationMonth" })), "cardexpmonth");
+});
+
+test("[U2]/[U3]/[U4] dropped tokens stay none — SSN/OTP/customer-id/session false positives", () => {
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "social_security_number" })), null);
+  assert.equal(classifyCardField(sig({ htmlType: "tel", htmlNameOrId: "phone_verification_number" })), null);
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "c_id" })), null); // run-match makes cid == c+id
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "session_expires" })), null); // bare "expires" dropped
+});
+
+test("§1.3 i18n gift suppressors — cadeau/geschenk/regalo kill the PAN anchor per-string", () => {
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "numeroCarteCadeau" })), null);
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "geschenk_kartennummer" })), null);
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "numero_tarjeta_regalo" })), null);
+  // control: the same number tokens WITHOUT a suppressor anchor normally.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "numeroCarte" })), "cardnumber");
+});
+
+test("[U5] label source strings classify PER-STRING — concatenation across sources is FORBIDDEN", () => {
+  // aria-label "Rewards card" + placeholder "Number of points": neither string alone carries a
+  // card run; a concatenated [rewards,card,number,of,points] would fabricate "cardnumber".
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Rewards card", "Number of points"]), null);
+  // label-only positives (no name/id signal at all):
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Card number"]), "cardnumber");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["CVV"]), "cardcvv");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Expiry date"]), "cardexpiry");
+  // first verdict wins across the ordered sources:
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Postal code", "Card number"]), "cardnumber");
+});
+
+test("[U6] label bounds — a string over 60 chars or 8 tokens is IGNORED, not a verdict", () => {
+  const at61 = "x".repeat(49) + " card number"; // 61 chars → ignored (help-sentence over-match)
+  assert.equal(at61.length, 61);
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, [at61]), null);
+  const at60 = "x".repeat(48) + " card number"; // 60 chars → still classified
+  assert.equal(at60.length, 60);
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, [at60]), "cardnumber");
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["one two three four five six seven card number"]), null); // 9 tokens
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["one two three four five six card number"]), "cardnumber"); // 8 tokens
+  // an ignored string is NOT terminal — a later in-bounds source may still classify.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, [at61, "Card number"]), "cardnumber");
+});
+
+test("[T10] gift guard on labels — per-string, terminal (name→id terminality parity)", () => {
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Gift card number"]), null);
+  // terminal: the first string positively identified a gift-card number — a later, cleaner
+  // source must not resurrect the anchor.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Gift card number", "Card number"]), null);
+  // suppress-only: non-anchor kinds on a gifty label are untouched.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), null, ["Gift card expiry"]), "cardexpiry");
+});
+
+test("labels are the WEAKEST signal — name/id/hint verdicts always precede ([U5] order)", () => {
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "expMonth" }), null, ["Card number"]), "cardexpmonth"); // name beats label
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "field_1" }), "expYear", ["Card number"]), "cardexpyear"); // id beats label
+  assert.equal(classifyCardField(sig({ hints: ["cardnumber"], htmlNameOrId: "field_1" }), null, ["CVV"]), "cardnumber"); // hint beats label
+  // a gift verdict on the NAME is terminal — labels are never consulted after it.
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "giftCardNumber" }), null, ["Card number"]), null);
+  // [U7] accepted + vectored label poisoning: a distant/attacker-authored same-origin label makes
+  // an in-gap text field on a login page classify cardnumber (no cross-origin egress — fill still
+  // requires the explicit popup pick). A choice, not an accident.
+  assert.equal(classifyCardField(sig({ htmlType: "text", htmlNameOrId: "field_1" }), null, ["Card number"]), "cardnumber");
+  // the login gap-gate still wins over any label: a password-typed field never label-classifies.
+  assert.equal(classifyCardField(sig({ htmlType: "password", htmlNameOrId: "field_1" }), null, ["CVV"]), null);
+});
+
+test("classifyCardSelect — label param parity: weakest, per-string, kind-restricted (§1.1)", () => {
+  assert.equal(classifyCardSelect("field_1", null, [], ["Expiry month"]), "cardexpmonth");
+  assert.equal(classifyCardSelect("field_1", null, [], ["Card type"]), "cardtype");
+  assert.equal(classifyCardSelect("field_1", null, [], ["Card number"]), null); // §0 restriction holds on labels too
+  assert.equal(classifyCardSelect("cardNumber", null, [], ["Expiry month"]), null); // a name verdict stops the label pass
+  assert.equal(classifyCardSelect("field_1", "expYear", [], ["Expiry month"]), "cardexpyear"); // id beats label
 });
 
 // ---- [T1] formless grouping: select-blind clustering + post-attach ----
@@ -264,4 +367,43 @@ test("[T1] a select outside every formed group rides the root leftover group", (
   assert.deepEqual(new Set(groups[0]!.fields.map((f: any) => f.input)), new Set([user, pass]));
   assert.equal(groups[1]!.container, root as any);
   assert.deepEqual(groups[1]!.fields.map((f: any) => f.input), [stray]);
+});
+
+// ---- [U7] label source extraction: ordered sources + the per-generation cache ----
+// labelSourcesOf is structural over the control's own surface (getAttribute / labels /
+// getRootNode().getElementById / placeholder), so element stubs suffice — same convention as the
+// [T1] suite above (StubInput discharges the `instanceof HTMLInputElement` placeholder gate).
+
+test("[U7] labelSourcesOf — ordered sources: aria-label · el.labels · labelledby ids (one string per target) · placeholder", () => {
+  const root = {
+    getElementById: (id: string) => (id === "a" ? { textContent: "Expiry" } : id === "b" ? { textContent: "date" } : null),
+  };
+  const el = new StubInput() as any;
+  el.getAttribute = (n: string) => (n === "aria-label" ? "Payment details" : n === "aria-labelledby" ? "a b missing" : null);
+  el.labels = [{ textContent: "Card number" }];
+  el.getRootNode = () => root;
+  el.placeholder = "MM / YY";
+  // each source stays a SEPARATE string ([U5]) — labelledby targets one string per id, listed order.
+  assert.deepEqual(labelSourcesOf(el), ["Payment details", "Card number", "Expiry", "date", "MM / YY"]);
+  // a select stub (not an HTMLInputElement) contributes no placeholder leg.
+  const sel = new StubSelect() as any;
+  sel.getAttribute = () => null;
+  sel.labels = [{ textContent: "Expiry month" }];
+  sel.getRootNode = () => root;
+  assert.deepEqual(labelSourcesOf(sel), ["Expiry month"]);
+});
+
+test("[U6] labelSourcesOf — WeakMap cache holds within a sweep generation, invalidates on bump", () => {
+  let reads = 0;
+  const el = new StubInput() as any;
+  el.getAttribute = (n: string) => (n === "aria-label" ? (reads++, "Card number") : null);
+  el.labels = null;
+  el.getRootNode = () => ({});
+  el.placeholder = "";
+  assert.deepEqual(labelSourcesOf(el), ["Card number"]);
+  labelSourcesOf(el);
+  assert.equal(reads, 1); // cached — a form-sized wrapping label costs once per tick, not per field visit
+  bumpLabelGeneration(); // content.ts calls this on childList-bearing ticks ([U16] cadence)
+  labelSourcesOf(el);
+  assert.equal(reads, 2); // invalidated per sweep generation
 });

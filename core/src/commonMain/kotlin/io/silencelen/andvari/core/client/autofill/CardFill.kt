@@ -39,6 +39,7 @@ object CardFill {
     // Mirrors android.view.View autofill type constants (pure ints so core stays platform-free).
     const val AUTOFILL_TYPE_TEXT = 1
     const val AUTOFILL_TYPE_LIST = 3
+    const val AUTOFILL_TYPE_DATE = 4
 
     // ── Option-matching tables. The NORMATIVE copy lives in spec/test-vectors/cardfill.json
     // "tables" and CardFillVectorTest asserts these EQUAL it ([T14]) — the extension's TS twin
@@ -71,15 +72,18 @@ object CardFill {
         val index: Int,              // caller-side handle; returned in Planned
         val kind: FieldKind,         // one of the CC_* kinds (from CardForm.refine)
         val frameDomain: String?,    // the field's own frame domain (null = native/main frame)
-        val autofillType: Int,       // AUTOFILL_TYPE_TEXT | AUTOFILL_TYPE_LIST (others -> field skipped)
+        val autofillType: Int,       // TEXT | LIST | DATE (DATE takes a CC_EXP only); others -> field skipped
         val options: List<String>,   // LIST nodes' choice labels (metadata, not values); empty otherwise
         val maxLength: Int? = null,  // the control's declared capacity (null = undeclared) — the fit-guard input
     )
 
-    /** What to put in a field: text for TEXT nodes, a choice index for LIST nodes — never crossed. */
+    /** What to put in a field: text for TEXT nodes, a choice index for LIST nodes, epoch ms
+     *  for DATE nodes — never crossed (sealed: the DatasetBuilder `when` is exhaustive, so a
+     *  new value shape cannot ship without its AutofillValue mapping). */
     sealed interface Value {
         data class Text(val text: String) : Value
         data class ListIndex(val index: Int) : Value
+        data class DateMs(val ms: Long) : Value
     }
 
     /** One fill decision, keyed back to the caller's [CcField.index]. */
@@ -102,7 +106,10 @@ object CardFill {
     private fun planField(f: CcField, card: CardData): Planned? = when (f.autofillType) {
         AUTOFILL_TYPE_TEXT -> textFor(f.kind, card, f.maxLength)?.let { Planned(f.index, Value.Text(it)) }
         AUTOFILL_TYPE_LIST -> listIndexFor(f, card)?.let { Planned(f.index, Value.ListIndex(it)) }
-        else -> null // unknown autofillType → skip (type-pinning has no third leg)
+        // DATE nodes take ONLY a combined expiry (CC_EXP) — a month- or year-half as a date
+        // would fabricate the missing half; every other kind on a DATE node skips.
+        AUTOFILL_TYPE_DATE -> if (f.kind == FieldKind.CC_EXP) expiryDateMs(card)?.let { Planned(f.index, Value.DateMs(it)) } else null
+        else -> null // unknown autofillType → skip (type-pinning has no fourth leg)
     }
 
     /**
@@ -151,6 +158,29 @@ object CardFill {
             maxLength == 6 -> "$m$y4"
             else -> "$m/$y4" // 7
         }
+    }
+
+    /**
+     * DATE-node expiry: epoch ms of (expYear, expMonth, day 1) at UTC midnight — day-1
+     * semantics are the industry convention (a validator comparing against *today* mid-month
+     * may read it as past; accepted, design §5). Both halves must parse, as everywhere.
+     * Pure days-from-civil (Hinnant) so core stays platform-free — no java.time in
+     * commonMain; vector-pinned by cardfill.json dateLeg (leap/century/pivot cases).
+     */
+    private fun expiryDateMs(card: CardData): Long? {
+        val m = (CardNormalize.padMonth(card.expMonth ?: "") ?: return null).toInt()
+        val y = (CardNormalize.yearTo4(card.expYear ?: "") ?: return null).toInt()
+        return daysFromCivil(y, m, 1) * 86_400_000L
+    }
+
+    /** Days since 1970-01-01 of a proleptic-Gregorian civil date (Hinnant's algorithm). */
+    private fun daysFromCivil(y: Int, m: Int, d: Int): Long {
+        val yy = y - if (m <= 2) 1 else 0
+        val era = (if (yy >= 0) yy else yy - 399) / 400
+        val yoe = yy - era * 400                                     // [0, 399]
+        val doy = (153 * (m + if (m > 2) -3 else 9) + 2) / 5 + d - 1 // [0, 365]
+        val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy              // [0, 146096]
+        return era * 146_097L + doe - 719_468L
     }
 
     /**

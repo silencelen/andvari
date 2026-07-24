@@ -1848,7 +1848,12 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
             card.number?.takeIf { it.isNotBlank() }?.let { SecretCopyRow("Card number", it, ctx, clipClear, display = CardDisplay.groupNumber(it)) }
             CardDisplay.expiryLabel(card)?.let { label ->
                 val today = java.time.LocalDate.now()
-                ExpiryRow(label, CardDisplay.isExpired(card.expMonth, card.expYear, today.year, today.monthValue))
+                // L6 copy parity: Copy hands over the composed MM/YY (what a checkout's combined
+                // box wants); a half-missing expiry keeps the row read-only (null copyValue).
+                ExpiryRow(
+                    label, CardDisplay.isExpired(card.expMonth, card.expYear, today.year, today.monthValue),
+                    CardNormalize.composeShortExpiry(card.expMonth ?: "", card.expYear ?: ""), ctx, clipClear,
+                )
             }
             card.securityCode?.takeIf { it.isNotBlank() }?.let { SecretCopyRow("Security code", it, ctx, clipClear) }
         }
@@ -1947,6 +1952,7 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     val pendingUploads = vm.editorPendingUploads
     var attachError by remember { mutableStateOf<String?>(null) }
     var totpError by remember { mutableStateOf<String?>(null) }
+    var cardExpiryError by remember { mutableStateOf<String?>(null) }
     var confirmDiscard by remember { mutableStateOf(false) }
     val crypto = remember { createCryptoProvider() }
     val scope = rememberCoroutineScope()
@@ -2045,17 +2051,21 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
                 Text("this number doesn’t pass the usual check — you can still save it", color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
             }
             // Free-text expiry (this file has no select idiom) — padMonth/yearTo4 normalize on
-            // Save, so "1"/"27" store as "01"/"2027". Every card field is optional. A half that
-            // doesn't parse is stored ABSENT (overwriting any stored value), so warn — never
-            // block — while it can't be read (desktop Ui.kt parity; web's selects make bad
-            // input impossible).
-            Field("Expiry month (MM)", cardExpMonth, { cardExpMonth = it }, mono = true, keyboard = KeyboardType.Number)
-            Field("Expiry year (YYYY)", cardExpYear, { cardExpYear = it }, mono = true, keyboard = KeyboardType.Number)
-            if ((cardExpMonth.isNotBlank() && CardNormalize.padMonth(cardExpMonth) == null) ||
-                (cardExpYear.isNotBlank() && CardNormalize.yearTo4(cardExpYear) == null)
-            ) {
-                Text("expiry wants a month 1–12 and a 2- or 4-digit year — a part that can’t be read won’t be saved", color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+            // Save, so "1"/"27" store as "01"/"2027". Every card field is optional. L7 (design
+            // §7): a COMBINED expiry typed into the month box ("07/27", "07/2027") is
+            // parse-assisted into both halves at save — only while the year box is blank (a
+            // separately typed year would mean guessing which year wins); a non-blank half
+            // that STILL can't be read now BLOCKS the save (the old warn-but-drop silently
+            // overwrote stored halves with absence). Desktop Ui.kt parity; web's selects make
+            // bad input impossible.
+            Field("Expiry month (MM)", cardExpMonth, { cardExpMonth = it; cardExpiryError = null }, mono = true, keyboard = KeyboardType.Number)
+            Field("Expiry year (YYYY)", cardExpYear, { cardExpYear = it; cardExpiryError = null }, mono = true, keyboard = KeyboardType.Number)
+            // [U22] the live warning must accept parse-assistable combined input — warning iff
+            // the save would block, never a lie mid-typing "07/27".
+            if (cardExpiryBlocked(cardExpMonth, cardExpYear)) {
+                Text("expiry wants a month 1–12 and a 2- or 4-digit year (or both as MM/YY in the month box) — fix the part that can’t be read", color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
             }
+            InlineError(cardExpiryError)
             // Masked-with-reveal: a CVV is glanceable-short and worth shielding from shoulders
             // by default. Digits-only is applied once, on Save, beside the other normalizations.
             SecretField("Security code", cardSecurityCode) { cardSecurityCode = it }
@@ -2086,37 +2096,59 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
         Spacer(Modifier.height(16.dp))
         // copy()-based edit, never a field-by-field rebuild: carries favorite, passwordHistory,
         // extra URIs beyond the first, and unknown-field extras (spec 02 §3) through the save.
-        fun builtDoc(totpValue: String) = initial.copy(
-            name = name.trim(), notes = notes.ifBlank { null },
-            login = if (isLogin) (initial.login ?: LoginData()).copy(
-                username = username, password = password,
-                uris = buildList { if (website.isNotBlank()) add(website); addAll(initial.login?.uris.orEmpty().drop(1)) },
-                totp = totpValue.ifBlank { null },
-            ) else null,
-            // Cards normalize ONCE here (mirrors the web submit): .copy() on the EXISTING
-            // CardData so unknown-field extras survive; blanks → null; brand is ALWAYS
-            // recomputed from the number — the stored field is display-only, never stale.
-            card = if (isCard) (initial.card ?: CardData()).copy(
-                cardholderName = cardholder.trim().ifBlank { null },
-                number = CardNormalize.digitsOnly(cardNumber).ifBlank { null },
-                expMonth = CardNormalize.padMonth(cardExpMonth),
-                expYear = CardNormalize.yearTo4(cardExpYear),
-                securityCode = CardNormalize.digitsOnly(cardSecurityCode).ifBlank { null },
-                brand = CardNormalize.brand(cardNumber),
-            ) else initial.card,
-            attachments = attachments,
-        )
+        fun builtDoc(totpValue: String): ItemDoc {
+            val expiry = cardExpiryAssist(cardExpMonth, cardExpYear) // L7: split a combined month-box expiry
+            return initial.copy(
+                name = name.trim(), notes = notes.ifBlank { null },
+                login = if (isLogin) (initial.login ?: LoginData()).copy(
+                    username = username, password = password,
+                    uris = buildList { if (website.isNotBlank()) add(website); addAll(initial.login?.uris.orEmpty().drop(1)) },
+                    totp = totpValue.ifBlank { null },
+                ) else null,
+                // Cards normalize ONCE here (mirrors the web submit): .copy() on the EXISTING
+                // CardData so unknown-field extras survive; blanks → null; brand is ALWAYS
+                // recomputed from the number — the stored field is display-only, never stale.
+                card = if (isCard) (initial.card ?: CardData()).copy(
+                    cardholderName = cardholder.trim().ifBlank { null },
+                    number = CardNormalize.digitsOnly(cardNumber).ifBlank { null },
+                    expMonth = expiry?.expMonth ?: CardNormalize.padMonth(cardExpMonth),
+                    expYear = expiry?.expYear ?: CardNormalize.yearTo4(cardExpYear),
+                    securityCode = CardNormalize.digitsOnly(cardSecurityCode).ifBlank { null },
+                    brand = CardNormalize.brand(cardNumber),
+                ) else initial.card,
+                attachments = attachments,
+            )
+        }
         PrimaryButton("Save", enabled = name.isNotBlank() && !ui.busy, busy = ui.busy) {
             // A5: ONE shared TOTP normalize — core Totp.normalize (the private copy this
             // file carried is deleted). Blank stays blank: normalize is only for values.
             val normalizedTotp = if (isLogin && totp.isNotBlank()) Totp.normalize(totp) else ""
             if (isLogin && totp.isNotBlank() && runCatching { Totp.parseUri(normalizedTotp) }.isFailure) {
                 totpError = "TOTP secret isn't valid base32 or an otpauth:// link"
+            } else if (isCard && cardExpiryBlocked(cardExpMonth, cardExpYear)) {
+                // L7: BLOCK, never silently drop a typed half (the pre-Tier-2 behavior stored
+                // an unreadable half as ABSENT, overwriting whatever the card had).
+                cardExpiryError = "expiry can’t be read — fix or clear it to save"
             } else {
                 onSave(builtDoc(normalizedTotp), pendingUploads.toList(), targetVaultId)
             }
         }
     }
+}
+
+/** L7 parse-assist (design §7): a COMBINED expiry in the month box splits via
+ *  [CardNormalize.parseExpiry] — ONLY while the year box is blank (a separately typed year
+ *  would force a guess at which year wins; that shape blocks instead). */
+private fun cardExpiryAssist(month: String, year: String): CardNormalize.Expiry? =
+    if (month.isNotBlank() && CardNormalize.padMonth(month) == null && year.isBlank()) CardNormalize.parseExpiry(month) else null
+
+/** ONE predicate for the live warning AND the save gate ([U22]: they must never disagree —
+ *  a warning that shows while the save would succeed lies, and vice versa). True iff a
+ *  non-blank half still can't be read after parse-assist. */
+private fun cardExpiryBlocked(month: String, year: String): Boolean {
+    val monthBad = month.isNotBlank() && CardNormalize.padMonth(month) == null && cardExpiryAssist(month, year) == null
+    val yearBad = year.isNotBlank() && CardNormalize.yearTo4(year) == null
+    return monthBad || yearBad
 }
 
 /**
@@ -2914,10 +2946,13 @@ private fun SecretCopyRow(label: String, value: String, ctx: Context, clearSecon
     }
 }
 
-/** Read-only expiry line with the "expired" marker — flagged strictly AFTER the last moment
- *  of the printed month (a card is good THROUGH it); absent/garbled halves never flag. */
+/** Expiry line with the "expired" marker — flagged strictly AFTER the last moment of the
+ *  printed month (a card is good THROUGH it); absent/garbled halves never flag. L6: gains
+ *  the Copy affordance ([CopyRow]'s idiom) when [copyValue] (composed MM/YY) exists — an
+ *  expiry is not a secret, so no reveal gate, but the clipboard still auto-clears. */
 @Composable
-private fun ExpiryRow(label: String, expired: Boolean) {
+private fun ExpiryRow(label: String, expired: Boolean, copyValue: String?, ctx: Context, clearSeconds: Int) {
+    var copied by remember { mutableStateOf(false) }
     Column(Modifier.padding(vertical = 6.dp)) {
         Text("Expiry", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2926,6 +2961,13 @@ private fun ExpiryRow(label: String, expired: Boolean) {
                 Spacer(Modifier.width(8.dp))
                 Text("expired", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
             }
+            if (copyValue != null) {
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = { copyToClipboard(ctx, "Expiry", copyValue, clearSeconds); copied = true }) { Text(if (copied) "Copied ✓" else "Copy") }
+            }
+        }
+        if (copied) {
+            CopiedNote(clearSeconds) { copied = false }
         }
     }
 }

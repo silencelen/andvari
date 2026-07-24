@@ -213,6 +213,16 @@ export interface DropdownHandlers {
 
 let shadow: ShadowRoot | null = null;
 let hostEl: HTMLElement | null = null;
+
+/** True for the div that hosts our own closed-shadow UI. The Tier-2 shadow sweep (content.ts)
+ *  probes every element with `chrome.dom.openOrClosedShadowRoot`, which PIERCES closed roots —
+ *  so without this exclusion the sweep would discover our own dropdown/banner/toast root, observe
+ *  it, and every UI render (an open, a row .active toggle, a live-region announce) would re-enter
+ *  onMutations: a self-sustaining re-render loop in the multi-step auto-open window. The scan must
+ *  treat our host as opaque, exactly as the pre-Tier-2 document observer did. */
+export function isOwnUiHost(el: Element): boolean {
+  return hostEl !== null && el === hostEl;
+}
 let dropdownEl: HTMLElement | null = null;
 let anchorEl: HTMLElement | null = null;
 let bannerEl: HTMLElement | null = null;

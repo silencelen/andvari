@@ -2267,6 +2267,11 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
             // Reveal shows the grouped form; Copy hands checkout forms the bare digits (web parity).
             card.number?.takeIf { it.isNotBlank() }?.let { CopyRow("Card number", it, secret = true, clearSeconds = clipClear, display = CardDisplay.groupNumber(it)) }
             CardDisplay.expiryLabel(card)?.let { exp ->
+                // L6 copy parity: Copy hands over the composed MM/YY (what a checkout's combined
+                // box wants) through the same auto-cleared clipboard as CopyRow; a half-missing
+                // expiry (null composeShortExpiry) keeps the row read-only.
+                val shortExpiry = CardNormalize.composeShortExpiry(card.expMonth ?: "", card.expYear ?: "")
+                var expCopied by remember { mutableStateOf(false) }
                 Column(Modifier.padding(vertical = 6.dp)) {
                     Text("Expiry", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2276,6 +2281,18 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
                             Spacer(Modifier.width(8.dp))
                             Text("expired", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                         }
+                        if (shortExpiry != null) {
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { copyWithAutoClear(shortExpiry, clipClear); expCopied = true }) { Text(if (expCopied) "Copied ✓" else "Copy") }
+                        }
+                    }
+                    if (expCopied) {
+                        Text(
+                            if (clipClear > 0) "Copied — clears from the clipboard in ${clipClear}s" else "Copied",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        LaunchedEffect(Unit) { delay(3500); expCopied = false }
                     }
                 }
             }
@@ -2461,6 +2478,7 @@ private fun Editor(
     var pending by remember { mutableStateOf(listOf<PendingUpload>()) }
     var attachError by remember { mutableStateOf<String?>(null) }
     var totpError by remember { mutableStateOf<String?>(null) }
+    var cardExpiryError by remember { mutableStateOf<String?>(null) }
     val crypto = remember { createCryptoProvider() }
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         // Busy-gated like every other dialog's Cancel here: a mid-save click would unmount
@@ -2509,18 +2527,24 @@ private fun Editor(
                 Text("this number doesn’t pass the usual check — you can still save it", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
             }
             // Free-typed expiry (keyboard-first, unlike web's selects): padMonth/yearTo4 accept
-            // "1" and "27" and normalize at save; a half that can't be read is stored absent,
-            // so warn (never block) while it doesn't parse.
+            // "1" and "27" and normalize at save. L7 (design §7): a COMBINED expiry in the
+            // month box ("07/27", "07/2027") is parse-assisted into both halves at save —
+            // only while the year box is blank (a separately typed year would mean guessing
+            // which year wins); a non-blank half that STILL can't be read BLOCKS the save
+            // (the old warn-but-drop silently overwrote stored halves with absence).
             androidx.compose.foundation.layout.Row(Modifier.fillMaxWidth()) {
-                OutlinedTextField(expMonth, { expMonth = it }, Modifier.weight(1f).padding(vertical = 4.dp), label = { Text("Expiry month (MM)") }, singleLine = true,
+                OutlinedTextField(expMonth, { expMonth = it; cardExpiryError = null }, Modifier.weight(1f).padding(vertical = 4.dp), label = { Text("Expiry month (MM)") }, singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace))
                 Spacer(Modifier.width(8.dp))
-                OutlinedTextField(expYear, { expYear = it }, Modifier.weight(1f).padding(vertical = 4.dp), label = { Text("Expiry year (YYYY)") }, singleLine = true,
+                OutlinedTextField(expYear, { expYear = it; cardExpiryError = null }, Modifier.weight(1f).padding(vertical = 4.dp), label = { Text("Expiry year (YYYY)") }, singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace))
             }
-            if ((expMonth.isNotBlank() && CardNormalize.padMonth(expMonth) == null) || (expYear.isNotBlank() && CardNormalize.yearTo4(expYear) == null)) {
-                Text("expiry wants a month 1–12 and a 2- or 4-digit year — a part that can’t be read won’t be saved", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+            // ONE predicate for the live warning AND the save gate ([U22] parity with Android:
+            // combined parse-assistable input must never warn while the save would succeed).
+            if (cardExpiryBlocked(expMonth, expYear)) {
+                Text("expiry wants a month 1–12 and a 2- or 4-digit year (or both as MM/YY in the month box) — fix the part that can’t be read", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
             }
+            cardExpiryError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp)) }
             // Masked-with-reveal (unlike the login password's plain field): a CVV is glanceable-
             // short and worth shielding from shoulders by default. Digits-only at save.
             Secret("Security code (optional — stored encrypted like everything else)", securityCode) { securityCode = it }
@@ -2562,21 +2586,24 @@ private fun Editor(
         // month, 4-digit year (a half that doesn't parse is stored absent), and brand ALWAYS
         // recomputed from the number — display-only, never authored, so it can never go stale.
         // CardData.copy preserves its @Transient extras (the house rule vs the 0.2.x rebuild bug).
-        fun builtDoc(totpValue: String) = initial.copy(name = name.trim(), notes = notes.ifBlank { null },
-            login = if (isLogin) (initial.login ?: LoginData()).copy(
-                username = username, password = password,
-                uris = buildList { if (website.isNotBlank()) add(website); addAll(initial.login?.uris.orEmpty().drop(1)) },
-                totp = totpValue.ifBlank { null },
-            ) else null,
-            card = if (isCard) (initial.card ?: CardData()).copy(
-                cardholderName = cardholder.trim().ifEmpty { null },
-                number = CardNormalize.digitsOnly(cardNumber).ifEmpty { null },
-                expMonth = CardNormalize.padMonth(expMonth),
-                expYear = CardNormalize.yearTo4(expYear),
-                securityCode = CardNormalize.digitsOnly(securityCode).ifEmpty { null },
-                brand = CardNormalize.brand(cardNumber),
-            ) else initial.card,
-            attachments = attachments)
+        fun builtDoc(totpValue: String): ItemDoc {
+            val expiry = cardExpiryAssist(expMonth, expYear) // L7: split a combined month-box expiry
+            return initial.copy(name = name.trim(), notes = notes.ifBlank { null },
+                login = if (isLogin) (initial.login ?: LoginData()).copy(
+                    username = username, password = password,
+                    uris = buildList { if (website.isNotBlank()) add(website); addAll(initial.login?.uris.orEmpty().drop(1)) },
+                    totp = totpValue.ifBlank { null },
+                ) else null,
+                card = if (isCard) (initial.card ?: CardData()).copy(
+                    cardholderName = cardholder.trim().ifEmpty { null },
+                    number = CardNormalize.digitsOnly(cardNumber).ifEmpty { null },
+                    expMonth = expiry?.expMonth ?: CardNormalize.padMonth(expMonth),
+                    expYear = expiry?.expYear ?: CardNormalize.yearTo4(expYear),
+                    securityCode = CardNormalize.digitsOnly(securityCode).ifEmpty { null },
+                    brand = CardNormalize.brand(cardNumber),
+                ) else initial.card,
+                attachments = attachments)
+        }
         // F71: a failed save lands its error HERE, beside the Save it belongs to — the
         // editor stays open with everything typed still editable; per-upload progress
         // shows while `busy` disables Save.
@@ -2590,11 +2617,29 @@ private fun Editor(
             val normalizedTotp = if (isLogin && totp.isNotBlank()) Totp.normalize(totp) else ""
             if (isLogin && totp.isNotBlank() && runCatching { Totp.parseUri(normalizedTotp) }.isFailure) {
                 totpError = "TOTP secret isn't valid base32 or an otpauth:// link"
+            } else if (isCard && cardExpiryBlocked(expMonth, expYear)) {
+                // L7: BLOCK, never silently drop a typed half (the pre-Tier-2 behavior stored
+                // an unreadable half as ABSENT, overwriting whatever the card had).
+                cardExpiryError = "expiry can’t be read — fix or clear it to save"
             } else {
                 onSave(builtDoc(normalizedTotp), pending, vaultId)
             }
         }
     }
+}
+
+/** L7 parse-assist (design §7; MainActivity parity): a COMBINED expiry in the month box
+ *  splits via [CardNormalize.parseExpiry] — ONLY while the year box is blank (a separately
+ *  typed year would force a guess at which year wins; that shape blocks instead). */
+private fun cardExpiryAssist(month: String, year: String): CardNormalize.Expiry? =
+    if (month.isNotBlank() && CardNormalize.padMonth(month) == null && year.isBlank()) CardNormalize.parseExpiry(month) else null
+
+/** ONE predicate for the live warning AND the save gate ([U22]: they must never disagree).
+ *  True iff a non-blank half still can't be read after parse-assist. */
+private fun cardExpiryBlocked(month: String, year: String): Boolean {
+    val monthBad = month.isNotBlank() && CardNormalize.padMonth(month) == null && cardExpiryAssist(month, year) == null
+    val yearBad = year.isNotBlank() && CardNormalize.yearTo4(year) == null
+    return monthBad || yearBad
 }
 
 /** One attachment row: name + human size on the left, an action slot on the right. */
