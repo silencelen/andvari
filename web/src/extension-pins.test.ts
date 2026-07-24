@@ -385,3 +385,111 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(pp).toContain("(o2.crossOriginFormsOnly === true) !== cardFill.crossOriginFormsOnly");
   });
 });
+
+describe("Tier-3 card autofill pins (design 2026-07-23-…-tier3.md §7) — V1–V4 structural anchors", () => {
+  const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+  const ct = readFileSync(extensionSrc + "content.ts", "utf-8");
+  const dt = readFileSync(extensionSrc + "detect.ts", "utf-8");
+
+  const spanOf = (src: string, from: string, to: string): string => {
+    const a = src.indexOf(from);
+    const b = src.indexOf(to);
+    expect(a, `span start missing: ${from}`).toBeGreaterThan(-1);
+    expect(b, `span end missing/out of order: ${to}`).toBeGreaterThan(a);
+    return src.slice(a, b);
+  };
+
+  it("[W9] the radio card-type write commits via .checked and NEVER setValue/the native value setter", () => {
+    // A radio's `.value` is its brand token, so a text write + a text verifyLanded would bless an
+    // UNSELECTED group as "filled". setRadioChecked is the ONE card write that must stay off the
+    // setValue path — select the winner by `.checked`, verify `.checked === true`.
+    const radioWrite = spanOf(ct, "function setRadioChecked(", "let filling = false");
+    expect(radioWrite).toContain(".checked = true");
+    expect(radioWrite, "radio write must not call setValue").not.toContain("setValue(");
+    expect(radioWrite, "radio write must not touch the native value setter").not.toContain("nativeValueSetter");
+  });
+
+  it("[W9] the radio fill branch routes through radioIndexFor + setRadioChecked, never deriveCardWrite/setValue", () => {
+    // The radio arm picks with the pure radioIndexFor and commits with setRadioChecked — it must
+    // never fall into the deriveCardWrite → setValue text arm (which would stamp a radio's brand
+    // token into `.value` and falsely verify a filled group).
+    const radioBranch = spanOf(ct, "for (const ref of form.fields.filter(isRadioRef))", "// §4 card path only");
+    expect(radioBranch).toContain("radioIndexFor(");
+    expect(radioBranch).toContain("setRadioChecked(");
+    expect(radioBranch, "radio branch reaches deriveCardWrite").not.toContain("deriveCardWrite(");
+    expect(radioBranch, "radio branch reaches setValue").not.toContain("setValue(");
+    // Radios are held OUT of the text/select loop by ref shape (type==="radio") so one can never
+    // reach the setValue/setSelectedIndex arm in the first place.
+    expect(ct).toMatch(/const isRadioRef = \(f: CardFormFieldRef\): boolean =>[\s\S]{0,80}?\.type === "radio"/);
+    expect(ct).toContain("const nonRadio = form.fields.filter((f) => !isRadioRef(f));");
+  });
+
+  it("[W11] the radio group fills LAST — after the whole text/select loop, before the closing blur", () => {
+    // A synthetic radio click fires PAGE listeners (no isTrusted needed) and may submit/navigate,
+    // detaching unfilled PAN/expiry inputs — so every text/select field is written first, and the
+    // closing blur/focusout still lands on the last DATA field, not the radio.
+    const textLoop = ct.indexOf("for (const { kind, input } of [...nonRadio");
+    const radioLoop = ct.indexOf("for (const ref of form.fields.filter(isRadioRef))");
+    const closingBlur = ct.indexOf('lastWritten.dispatchEvent(new FocusEvent("blur"');
+    expect(textLoop, "text/select loop present").toBeGreaterThan(-1);
+    expect(radioLoop, "radio loop present").toBeGreaterThan(-1);
+    expect(radioLoop, "radio loop must run AFTER the text/select loop").toBeGreaterThan(textLoop);
+    expect(closingBlur, "closing blur must run AFTER the radio loop").toBeGreaterThan(radioLoop);
+  });
+
+  it("[W7] formlessGroups' inert remainder is EXACTLY selects + cardtype radios (review-fold predicate)", () => {
+    // [T1] re-scoped to "login-inert-control-blind": a cardtype RADIO is an input but login-inert
+    // (excluded by its TYPE) and a select is input-inert — both ride the inert remainder or a
+    // brand-radio/expiry-<select> row beside a password CVV would satisfy the early-stop a level too
+    // low and split the PAN off the cluster. Review-fold: every OTHER card-classified input
+    // (tel/number PANs, negative-name CVVs — kind "none"/!textLike but cardKind non-null) must STAY
+    // in the pool via the cardKind clause, or the shipped password-CVV↔PAN clustering splits and
+    // the [A7] save-suppression loses its anchor. The pin is the FULL predicate.
+    const fg = spanOf(dt, "export function formlessGroups(", "const remaining = new Set(inputs)");
+    expect(fg).toContain(
+      'f.input instanceof HTMLInputElement && (f.kind !== "none" || f.textLike || (f.cardKind !== null && f.input.type !== "radio"))',
+    );
+    expect(fg).toContain("const inputs = loose.filter(loginEligible);");
+    expect(fg).toContain("const inert = loose.filter((f) => !loginEligible(f));");
+  });
+
+  it("[W4] the ASCII-fold lives at the cardKindFromTokens chokepoint, NEVER inside tokens()", () => {
+    // tokens() also feeds isCvvNameOrId → buildLoginForm.suppressSave, a login-capture verdict that
+    // MUST stay byte-identical; folding there would move a login verdict. The card path folds ONE
+    // level up (tokens(fold(raw)) at cardKindFromTokens) so only card classification sees the folded
+    // alphabet. Reverting to tokens(raw) — or sliding fold into tokens() — must red this pin.
+    const cardKind = spanOf(dt, "function cardKindFromTokens(", "/** [U6] label-source bounds");
+    expect(cardKind).toContain("tokens(fold(raw))");
+    const toks = spanOf(dt, "function tokens(raw: string)", "function tokenMatch(");
+    expect(toks, "tokens() must not fold — it feeds the login suppressSave verdict").not.toContain("fold(");
+  });
+
+  it("[V4] the discovery badge paints CARD_BADGE_TEXT only when a card form is eligible AND there is no login count", () => {
+    // refreshTabBadge is the tab's SINGLE badge authority so the login count and the card dot never
+    // clobber each other: login count takes precedence; the dot paints ONLY when loginCount === 0
+    // and an eligible same-origin card frame exists.
+    expect(bg).toContain('const CARD_BADGE_TEXT = "•"');
+    // Review-fold: refreshTabBadge went SYNC — its origin now comes from the recorded top-frame
+    // sender.origin (st.topOrigin), never a tab.url read; no await, no lock interleave.
+    const badge = spanOf(bg, "function refreshTabBadge(", "/** Popup ONLY:");
+    // The [A4] discipline extends to the badge: no tab.url / topOrigin(tabId) read in its body.
+    expect(badge).not.toContain("await topOrigin(");
+    expect(badge).not.toMatch(/tab\.url/);
+    expect(badge).toContain("const loginCount = host !== \"\" ? matchesFor(host).length : 0;");
+    expect(badge).toContain("loginCount > 0 ? String(loginCount) : top !== null && eligibleCardFrames(tabId, top).length > 0 ? CARD_BADGE_TEXT : \"\"");
+    expect(badge).toContain("chrome.action.setBadgeText({ tabId, text })");
+  });
+
+  it("[V4] a top-level navigation clears the card dot in the [A4] loading handler, beside the cardForms delete", () => {
+    // The dot must not outlive the form: the same loading handler that voids the card registry
+    // clears the badge — but ONLY when the badge IS the dot (getBadgeText === CARD_BADGE_TEXT), so a
+    // live login count is left for the destination's own pageInfo to repaint. No `.url` read (that
+    // would be a `tabs`-permission bump — already pinned by [A4] above).
+    const handler =
+      bg.match(/onUpdated\.addListener\(\(tabId, changeInfo\) => \{\s*if \(changeInfo\.status !== "loading"\) return;[\s\S]*?\n\}\);/)?.[0] ?? "";
+    expect(handler.length, "the status===loading card-clear handler must exist").toBeGreaterThan(0);
+    expect(handler).toContain("getBadgeText({ tabId })");
+    expect(handler).toContain('cur === CARD_BADGE_TEXT ? chrome.action.setBadgeText({ tabId, text: "" })');
+    expect(handler).toContain("delete st.cardForms");
+  });
+});

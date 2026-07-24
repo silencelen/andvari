@@ -115,6 +115,42 @@ object FieldClassifier {
     // from bare CLASS_NUMBER InputType — the keyword, not the numeric-ness, is the card signal.
     private val CARD_FALLBACK_HTML_TYPES = setOf(null, "", "text", "tel", "number")
 
+    // [W3] shared explicit char→STRING ASCII fold — NOT Char lowercasing + NFD: NFD leaves
+    // ß/ø/æ/œ/ł/đ/ð/þ undecomposed and emits ü→u (unreachable for the shipped German ue/oe/ae
+    // vocab), so the digraphs are decided EXPLICITLY and both engines compile the SAME table
+    // (parity by construction). Uppercase forms fold identically; unmapped chars pass through.
+    // NORMATIVE copy = cardfill.json tables.asciiFold (CardFillVectorTest asserts equality).
+    internal val ASCII_FOLD: Map<Char, String> = mapOf(
+        // German digraphs (gueltigbis / pruefnummer / kartenpruefnummer).
+        'ß' to "ss", 'ä' to "ae", 'Ä' to "ae", 'ö' to "oe", 'Ö' to "oe", 'ü' to "ue", 'Ü' to "ue",
+        // Non-decomposable Latin — decided explicitly, never left to NFD (the parity pins).
+        'æ' to "ae", 'Æ' to "ae", 'œ' to "oe", 'Œ' to "oe", 'ø' to "o", 'Ø' to "o",
+        'ð' to "d", 'Ð' to "d", 'þ' to "th", 'Þ' to "th", 'ł' to "l", 'Ł' to "l", 'đ' to "d", 'Đ' to "d",
+        // Accented single letters.
+        'à' to "a", 'À' to "a", 'â' to "a", 'Â' to "a", 'á' to "a", 'Á' to "a", 'ã' to "a", 'Ã' to "a",
+        'å' to "a", 'Å' to "a", 'ā' to "a", 'Ā' to "a",
+        'ç' to "c", 'Ç' to "c", 'ć' to "c", 'Ć' to "c", 'č' to "c", 'Č' to "c",
+        'é' to "e", 'É' to "e", 'è' to "e", 'È' to "e", 'ê' to "e", 'Ê' to "e", 'ë' to "e", 'Ë' to "e",
+        'ē' to "e", 'Ē' to "e",
+        'í' to "i", 'Í' to "i", 'î' to "i", 'Î' to "i", 'ï' to "i", 'Ï' to "i", 'ì' to "i", 'Ì' to "i",
+        'ī' to "i", 'Ī' to "i",
+        'ñ' to "n", 'Ñ' to "n", 'ń' to "n", 'Ń' to "n",
+        'ó' to "o", 'Ó' to "o", 'ô' to "o", 'Ô' to "o", 'õ' to "o", 'Õ' to "o", 'ò' to "o", 'Ò' to "o",
+        'ō' to "o", 'Ō' to "o",
+        'ú' to "u", 'Ú' to "u", 'û' to "u", 'Û' to "u", 'ù' to "u", 'Ù' to "u", 'ū' to "u", 'Ū' to "u",
+        'ý' to "y", 'Ý' to "y", 'ÿ' to "y", 'Ÿ' to "y",
+    )
+
+    /** [W3] apply [ASCII_FOLD] over a string — card path only. Used inside [tokens] (whose every
+     *  call site is a card step, so [legacyClassify]'s raw-`nameId` login verdicts stay
+     *  bit-identical) and by CardFill's month-name select pass. Fast-paths the all-ASCII common case. */
+    internal fun asciiFold(s: String): String {
+        if (s.none { it in ASCII_FOLD }) return s
+        val sb = StringBuilder(s.length)
+        for (c in s) sb.append(ASCII_FOLD[c] ?: c.toString())
+        return sb.toString()
+    }
+
     fun classify(s: FieldSignal): FieldKind {
         val hints = s.hints.map { it.lowercase().replace("_", "").replace("-", "") }
         // 1. Autofill hints win.
@@ -203,11 +239,13 @@ object FieldClassifier {
     /** name/id/label → lowercase tokens: split on non-alphanumerics + camelCase boundaries +
      *  the letter↔digit boundary ("cardVerificationValue" → [card, verification, value];
      *  "CVVCode" → [cvv, code]; "cardNumber2" → [card, number, 2] — [U9] extension-tokenizer
-     *  parity; both call sites are the card path, steps 2 + 4, so login verdicts can't move). */
+     *  parity). Each token is then ASCII-FOLDED ([W3] "Prüfnummer" → "pruefnummer", the run
+     *  "Gültig"+"bis" → "gueltig"+"bis"); every call site is the card path (steps 2 + 4), so the
+     *  fold cannot move a login verdict. */
     private fun tokens(raw: String): List<String> {
         val out = ArrayList<String>()
         val sb = StringBuilder()
-        fun flush() { if (sb.isNotEmpty()) { out.add(sb.toString().lowercase()); sb.clear() } }
+        fun flush() { if (sb.isNotEmpty()) { out.add(asciiFold(sb.toString().lowercase())); sb.clear() } }
         for ((i, c) in raw.withIndex()) {
             if (!c.isLetterOrDigit()) { flush(); continue }
             // sb non-empty ⇒ raw[i-1] was appended (separators flush), so it is the previous token char.

@@ -23,8 +23,9 @@ import io.silencelen.andvari.core.client.ItemDoc
  *  - **Type-pinning:** an [AUTOFILL_TYPE_TEXT] field only ever gets [Value.Text]; an
  *    [AUTOFILL_TYPE_LIST] field only ever gets [Value.ListIndex], resolved by [listIndexFor]'s
  *    PASS-MAJOR matching — numeric parses first ("1"/"01"/"January (01)" all match month 01,
- *    "27"/"2027" match 2027), then the [T3] en month-name pass, then the CC_TYPE brand
- *    synonym/contains passes. No option match, or any other autofillType → the field is SKIPPED.
+ *    "27"/"2027" match 2027), then the [T3]/[W6] month-name pass (en + the V2b listed locales,
+ *    folded, equality-only), then the CC_TYPE brand synonym/contains passes. No option match,
+ *    or any other autofillType → the field is SKIPPED.
  *  - **Partial fill beats wrong fill:** a card field that is missing or does not parse to its
  *    canonical form skips its target field rather than guessing — and a value LONGER than the
  *    target's declared max length is never emitted (the platform's LengthFilter would silently
@@ -66,6 +67,19 @@ object CardFill {
         "05" to listOf("may"), "06" to listOf("jun"), "07" to listOf("jul"), "08" to listOf("aug"),
         "09" to listOf("sep", "sept"), "10" to listOf("oct"), "11" to listOf("nov"), "12" to listOf("dec"),
     )
+    // [W5] localized FULL month names (abbreviations DEFERRED — the collision surface) for
+    // de/fr/es/pt/it/nl, authored in the FieldClassifier.ASCII_FOLD alphabet (März → "maerz") so a
+    // folded option string matches directly. Consulted post-fold in the month-name SELECT pass
+    // ONLY (numeric passes 1-2 untouched). NORMATIVE copy = cardfill.json tables.monthNamesByLocale
+    // (both engines assert); zero cross-month collisions vs every listed locale + en (MonthNameCollisionTest).
+    internal val MONTH_NAMES_BY_LOCALE: Map<String, List<String>> = mapOf(
+        "de" to listOf("januar", "februar", "maerz", "april", "mai", "juni", "juli", "august", "september", "oktober", "november", "dezember"),
+        "fr" to listOf("janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout", "septembre", "octobre", "novembre", "decembre"),
+        "es" to listOf("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"),
+        "pt" to listOf("janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"),
+        "it" to listOf("gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"),
+        "nl" to listOf("januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"),
+    )
 
     /** One classified cc field as the platform consumer sees it — metadata only, no values. */
     data class CcField(
@@ -98,7 +112,26 @@ object CardFill {
         for (cluster in fields.groupBy { it.frameDomain }.values) {
             // Hostile-iframe rule: no CC_NUMBER anchor in this frame cluster → zero fill.
             if (cluster.none { it.kind == FieldKind.CC_NUMBER }) continue
-            for (f in cluster) planField(f, card)?.let { out.add(it) }
+            // [W1] split-PAN pre-pass (design §V1), PER cluster and AFTER the anchor gate (a
+            // hostile 2nd-frame lone box still zero-fills): >1 CC_NUMBER TEXT box is a multi-box
+            // PAN. splitPanChunks non-null → each box takes its sequential chunk (a "" trailing
+            // chunk emits NOTHING); ineligible (undeclared maxLength) → the FIRST box takes the
+            // whole PAN (fit-guarded through textFor), the rest are SUPPRESSED — never the
+            // full-PAN-into-every-box bug V1 exists to kill (matches ext content.ts panBoxes[0]).
+            // A single CC_NUMBER box never enters (splitPanChunks needs >1) → unchanged.
+            val panBoxes = cluster.filter { it.kind == FieldKind.CC_NUMBER && it.autofillType == AUTOFILL_TYPE_TEXT }
+            val consumed = HashSet<Int>() // box indices the pre-pass planned or suppressed → out of the planField loop
+            if (panBoxes.size > 1) {
+                val chunks = CardNormalize.splitPanChunks(card.number ?: "", panBoxes.map { it.maxLength })
+                panBoxes.forEachIndexed { i, box ->
+                    consumed.add(box.index)
+                    when {
+                        chunks != null -> if (chunks[i].isNotEmpty()) out.add(Planned(box.index, Value.Text(chunks[i])))
+                        i == 0 -> planField(box, card)?.let { out.add(it) } // ineligible: first box whole-PAN
+                    }
+                }
+            }
+            for (f in cluster) if (f.index !in consumed) planField(f, card)?.let { out.add(it) }
         }
         return out.sortedBy { it.index }
     }
@@ -195,7 +228,8 @@ object CardFill {
             val m = CardNormalize.padMonth(card.expMonth ?: "") ?: return null
             // Pass 1 whole-parse (pure-numeric "12"/"01" rows — padMonth rejects any other
             // char), pass 2 digit extraction (what makes "December (12)" selects fillable at
-            // all), pass 3 English month names (name-only selects with no digits anywhere).
+            // all), pass 3 month names (name-only selects with no digits anywhere — en + the
+            // V2b listed locales, folded, equality-only).
             f.options.indexOfFirst { CardNormalize.padMonth(it) == m }.takeIf { it >= 0 }
                 ?: f.options.indexOfFirst { CardNormalize.padMonth(CardNormalize.digitsOnly(it)) == m }.takeIf { it >= 0 }
                 ?: f.options.indexOfFirst { monthNameMatches(it, m) }.takeIf { it >= 0 }
@@ -230,14 +264,18 @@ object CardFill {
         else -> null
     }
 
-    /** [T3] month-name matching: the option's FIRST maximal ASCII-letter run (leading digits/
-     *  punctuation skipped, lowercased) must EQUAL the month's full English name or one of its
-     *  abbreviations. Prefix matching is FORBIDDEN — fi "marraskuu" starts with "mar" but is
-     *  November; equality degrades every localized list to a safe miss, never a wrong month
-     *  (pinned by the cardfill.json Marraskuu negative). */
+    /** [T3]/[W6] month-name matching: the option is ASCII-FOLDED first (März → "maerz"), then its
+     *  FIRST maximal ASCII-letter run (leading digits/punctuation skipped, lowercased) must EQUAL
+     *  the month's full English name, one of its abbreviations, OR its full name in ANY listed
+     *  locale (V2b). Prefix matching is FORBIDDEN — fi "marraskuu" starts with "mar" but is
+     *  November; equality degrades every unlisted localized list to a safe miss, never a wrong
+     *  month (pinned by the cardfill.json Marraskuu negative). The fold reaches THIS pass only —
+     *  the numeric passes 1-2 run on the raw option so digit lists are unaffected. */
     private fun monthNameMatches(option: String, mm: String): Boolean {
-        val run = firstAsciiLetterRun(option) ?: return false
-        return run == MONTH_NAMES[mm.toInt() - 1] || run in MONTH_ABBREVIATIONS.getValue(mm)
+        val run = firstAsciiLetterRun(FieldClassifier.asciiFold(option)) ?: return false
+        val i = mm.toInt() - 1
+        return run == MONTH_NAMES[i] || run in MONTH_ABBREVIATIONS.getValue(mm) ||
+            MONTH_NAMES_BY_LOCALE.values.any { it[i] == run }
     }
 
     private fun firstAsciiLetterRun(s: String): String? {

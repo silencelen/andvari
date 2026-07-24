@@ -887,6 +887,14 @@
             "htmlType": "text",
             "htmlNameOrId": "session_expires",
             "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "text",
+            "htmlNameOrId": "pr\u00fcfnummer",
+            "expected": "cc-csc"
         }
     ],
     "classifyCardFreeRegression": [

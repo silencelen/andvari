@@ -10,7 +10,7 @@
  */
 // Explicit .ts so the node --test runner (detect.cards.test.ts) can resolve this transitively —
 // esbuild (bundle) + tsc (allowImportingTsExtensions) accept it too; node ESM needs the extension.
-import { TABLES } from "./cardfill.ts"; // no runtime cycle: cardfill's detect import is type-only
+import { TABLES, fold } from "./cardfill.ts"; // no runtime cycle: cardfill's detect import is type-only
 import { classify, type FieldKind, type FieldSignal } from "./urimatch.ts";
 
 /** A scope that can own a login form: the <form>, a nearest-common container, or the scan root. */
@@ -187,7 +187,11 @@ const GIFT_SUPPRESS_TOKENS = ["gift", "egift", "voucher", "loyalty", "coupon", "
  *  TERMINAL for the field: the string positively identified a gift-card number, so the §8 htmlId
  *  retry must not resurrect it off a cleaner-looking id. */
 function cardKindFromTokens(raw: string): CardFieldKind | "gift" | null {
-  const toks = tokens(raw);
+  // [W4] ASCII-fold at THIS chokepoint (not inside tokens(), which also feeds isCvvNameOrId →
+  // suppressSave, a login-capture verdict that MUST stay byte-identical): "Prüfnummer" → folded
+  // "pruefnummer" → tokens → the shipped cc-csc keyword matches (raw tokens() splits at ü and never
+  // does). Covers classifyCardField name+id, classifyCardSelect, cardKindFromLabels, classifyCardRadio.
+  const toks = tokens(fold(raw));
   for (const [kws, kind] of CARD_NAME_KINDS) {
     if (kws.some((kw) => tokenMatch(toks, kw))) {
       if (kind === "cardnumber" && GIFT_SUPPRESS_TOKENS.some((kw) => tokenMatch(toks, kw))) return "gift";
@@ -211,7 +215,10 @@ const LABEL_MAX_TOKENS = 8;
 function cardKindFromLabels(labels: readonly string[] | undefined): CardFieldKind | null {
   if (!labels) return null;
   for (const s of labels) {
-    if (s.length > LABEL_MAX_CHARS || tokens(s).length > LABEL_MAX_TOKENS) continue; // [U6] ignored, not a verdict
+    // [U6] budget on the FOLDED tokenization — the same stream the verdict runs on (the fold is
+    // char→string within a token, so counts can't diverge today; keeping one stream makes that
+    // an invariant instead of a coincidence).
+    if (s.length > LABEL_MAX_CHARS || tokens(fold(s)).length > LABEL_MAX_TOKENS) continue; // [U6] ignored, not a verdict
     const k = cardKindFromTokens(s);
     if (k !== null) return k === "gift" ? null : k;
   }
@@ -267,6 +274,24 @@ export function classifyCardSelect(nameOrId: string | null, htmlId: string | nul
   }
   const byName = cardKindFromTokens(nameOrId ?? "");
   if (byName !== null) return restricted(byName); // any card verdict (even a restricted-away one) stops the retries
+  const byId = htmlId ? cardKindFromTokens(htmlId) : null;
+  if (byId !== null) return restricted(byId);
+  return restricted(cardKindFromLabels(labels));
+}
+
+/** [W8] V3 radio card-type classifier — a cardtype-ONLY restriction (TIGHTER than SELECT_CARD_KINDS:
+ *  a cardMonth/expiryYear radio must NOT classify), so only a brand radio group is ever collected.
+ *  Same name/id/label/hint order + per-string gift guard as classifyCardSelect, but NEVER the login
+ *  classify() — a `name=rememberLogin` radio must be inert (none), never poison the login pool. Any
+ *  non-cardtype card verdict on name still stops the id/label retries (kind-restricted-away → null).*/
+export function classifyCardRadio(nameOrId: string | null, htmlId: string | null, hints: readonly string[], labels?: readonly string[]): CardFieldKind | null {
+  const restricted = (k: CardFieldKind | "gift" | null): CardFieldKind | null => (k === "cardtype" ? "cardtype" : null);
+  for (const h of hints) {
+    const k = CARD_HINTS[h.toLowerCase().replace(/[_-]/g, "")];
+    if (k) return restricted(k);
+  }
+  const byName = cardKindFromTokens(nameOrId ?? "");
+  if (byName !== null) return restricted(byName);
   const byId = htmlId ? cardKindFromTokens(htmlId) : null;
   if (byId !== null) return restricted(byId);
   return restricted(cardKindFromLabels(labels));
@@ -398,6 +423,15 @@ function collect(root: Document | ShadowRoot): Field[] {
   for (const el of root.querySelectorAll("input, select")) {
     if (el instanceof HTMLInputElement) {
       if (el.disabled || el.readOnly || !isVisible(el)) continue;
+      // [W8] dedicated radio arm BEFORE the NON_FILLABLE_TYPES skip: a radio is collected ONLY as a
+      // cardtype (classifyCardRadio is cardtype-only + never the login classify()), hard-set kind
+      // "none"/textLike false so it stays login-inert ([W7] keeps it out of the login cluster pool).
+      if (el.type === "radio") {
+        const sig = fieldSignalOf(el);
+        const cardKind = classifyCardRadio(sig.htmlNameOrId ?? null, el.id, sig.hints ?? [], labelSourcesOf(el));
+        if (cardKind !== null) out.push({ input: el, kind: "none", isNewPassword: false, textLike: false, cardKind });
+        continue;
+      }
       if (NON_FILLABLE_TYPES.has(el.type)) continue; // never fill a checkbox/submit, whatever its name
       const sig = fieldSignalOf(el);
       const kind = classify(sig);
@@ -444,17 +478,28 @@ function hasNearbySubmit(el: Element): boolean {
 
 /** Split formless fields into clusters: for each password, its group is the nearest ancestor
  *  that also contains another candidate field (two side-by-side login widgets stay separate).
- *  [T1] the clustering is select-BLIND: the per-password early-stop counts input-backed Fields
- *  ONLY, so every shipped grouping decision stays bit-identical — a formless expiry-<select> row
- *  beside a password CVV would otherwise satisfy the early-stop a level too low and split the
- *  PAN off the cluster (killing the shipped CVV fill + demotion). After the groups form, each
- *  select Field attaches to the FIRST group whose container contains it (document order), else
- *  it rides the root leftover group. Leftover password-less fields form one root-scoped group
- *  (username-step candidate). Exported for the pure suite ([T1] §11): the algorithm is
- *  structural (parentElement climbs + contains) and runs against node stubs — no live DOM. */
+ *  [T1]/[W7] the clustering is LOGIN-INERT-CONTROL-BLIND: the per-password early-stop counts only
+ *  LOGIN-ELIGIBLE Fields (input-backed AND (kind !== "none" || textLike)), NOT `instanceof
+ *  HTMLInputElement` — a cardtype RADIO is an input but login-inert (excluded by its TYPE), and a
+ *  select is input-inert; both must ride as the remainder or a formless expiry-<select>/brand-radio
+ *  row beside a password CVV would satisfy the early-stop a level too low and split the PAN off the
+ *  cluster (killing the shipped CVV fill + demotion). Every OTHER card-classified input (tel/number
+ *  PANs, negative-name CVVs) stays IN the pool — the shipped clustering depends on it. After the groups form, each login-inert Field
+ *  attaches to the FIRST group whose container contains it (document order), else it rides the root
+ *  leftover group. Leftover password-less fields form one root-scoped group (username-step
+ *  candidate). Exported for the pure suite ([T1] §11): the algorithm is structural (parentElement
+ *  climbs + contains) and runs against node stubs — no live DOM. */
 export function formlessGroups(loose: Field[], root: Document | ShadowRoot): { container: Scope; fields: Field[] }[] {
-  const inputs = loose.filter((f) => f.input instanceof HTMLInputElement);
-  const selects = loose.filter((f) => !(f.input instanceof HTMLInputElement));
+  // Review-fold (Tier 3): the inert remainder is EXACTLY selects + cardtype radios. A bare
+  // (kind!=="none" || textLike) predicate silently demoted tel/number-typed card INPUTS too —
+  // collect() admits them via cardKind alone (textLike needs type text/email) — splitting the
+  // shipped password-CVV↔PAN clustering on formless checkouts (no demotion, no CVV fill, and
+  // the [A7] save-suppression lost its anchor). Non-radio card inputs must cluster exactly as
+  // they did under the old instanceof partition.
+  const loginEligible = (f: Field): boolean =>
+    f.input instanceof HTMLInputElement && (f.kind !== "none" || f.textLike || (f.cardKind !== null && f.input.type !== "radio"));
+  const inputs = loose.filter(loginEligible);
+  const inert = loose.filter((f) => !loginEligible(f));
   const remaining = new Set(inputs);
   const groups: { container: Scope; fields: Field[] }[] = [];
   for (const f of inputs) {
@@ -476,7 +521,7 @@ export function formlessGroups(loose: Field[], root: Document | ShadowRoot): { c
     groups.push(group);
   }
   const leftover = [...remaining];
-  for (const s of selects) {
+  for (const s of inert) {
     const g = groups.find((x) => x.container.contains(s.input));
     if (g) g.fields.push(s);
     else leftover.push(s);
@@ -605,6 +650,12 @@ export function findLoginForms(root: Document | ShadowRoot): LoginForm[] {
 export interface CardFormFieldRef {
   kind: CardFieldKind;
   input: FillableControl;
+  /** V3 [W12]: for a cardtype RADIO ref, the group's members — same `name`, THIS form's own
+   *  collected cardtype refs only ([W10]: never a document-wide `name` re-query). N members collapse
+   *  to ONE ref (this one; `input` is the group representative), so the executor builds synthetic
+   *  options [{value, text: adjacent label}] from `group` and fills the group ONCE (radioIndexFor +
+   *  `.checked`), filled LAST ([W11]). Absent for inputs and selects. */
+  group?: HTMLInputElement[];
 }
 export interface CardForm {
   form: HTMLFormElement | null;
@@ -615,9 +666,25 @@ export interface CardForm {
 function buildCardForm(form: HTMLFormElement | null, container: Scope, fields: Field[]): CardForm | null {
   if (!fields.some((f) => f.cardKind === "cardnumber")) return null; // a card form REQUIRES the PAN anchor
   const refs: CardFormFieldRef[] = [];
+  // [W12] same-name cardtype radios collapse to ONE ref within THIS form ([W10] never document-wide):
+  // the first member owns the ref (+ a growing `group` array of members); later members fold in.
+  const radioGroups = new Map<string, HTMLInputElement[]>();
   for (const f of fields) {
     const kind = demoteCsc(f.cardKind, f.input.type, f.input.name, f.input.id);
-    if (kind) refs.push({ kind, input: f.input });
+    if (!kind) continue;
+    if (f.input instanceof HTMLInputElement && f.input.type === "radio") {
+      const name = f.input.name;
+      const existing = name !== "" ? radioGroups.get(name) : undefined;
+      if (existing) {
+        existing.push(f.input); // folds into the representative's `group` (same array reference)
+        continue;
+      }
+      const members = [f.input];
+      if (name !== "") radioGroups.set(name, members);
+      refs.push({ kind, input: f.input, group: members });
+      continue;
+    }
+    refs.push({ kind, input: f.input });
   }
   return { form, container, fields: refs };
 }

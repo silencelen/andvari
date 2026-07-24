@@ -20,9 +20,11 @@ import {
   cvvTextFor,
   deriveCardWrite,
   expiryTextFor,
+  fold,
   monthTextFor,
   nameTextFor,
   numberTextFor,
+  radioIndexFor,
   selectIndexFor,
   splitPan,
   typeTextFor,
@@ -51,8 +53,51 @@ const valuesOf = (c: { expMonth?: string; expYear?: string; brand?: string }) =>
   brand: c.brand,
 });
 
-test("tables — compiled-in TABLES deep-equal the normative vector copy ([T14])", () => {
+test("tables — compiled-in TABLES deep-equal the normative vector copy ([T14], now incl. asciiFold + monthNamesByLocale)", () => {
   assert.deepEqual(TABLES, v.tables);
+});
+
+test("fold — [W3] shared asciiFold digraph table over the whole vector input set (reds an NFD-style fork)", () => {
+  // every char the vector maps folds to its declared STRING (char→string, never NFD).
+  for (const [ch, expected] of Object.entries(v.tables.asciiFold)) assert.equal(fold(ch as string), expected, ch);
+  // the non-decomposables are the pin — NFD leaves these undecomposed / forks on them:
+  assert.equal(fold("ß"), "ss");
+  assert.equal(fold("ø"), "o");
+  assert.equal(fold("æ"), "ae");
+  assert.equal(fold("œ"), "oe");
+  assert.equal(fold("ł"), "l");
+  assert.equal(fold("đ"), "d");
+  assert.equal(fold("ð"), "d");
+  assert.equal(fold("þ"), "th");
+  // German digraphs the shipped ue/oe/ae vocab needs (NFD's ü→u could never reach these):
+  assert.equal(fold("Prüfnummer"), "Pruefnummer"); // case of unmapped letters preserved (tokenizer lowercases)
+  assert.equal(fold("Gültig"), "Gueltig");
+  assert.equal(fold("März"), "Maerz");
+  // unmapped ASCII passes through verbatim.
+  assert.equal(fold("cardNumber2"), "cardNumber2");
+  assert.equal(fold(""), "");
+});
+
+test("selectIndexFor — [W5]/[W6] localized full month names match post-fold across every listed locale", () => {
+  const m = "cardexpmonth" as CardFieldKind;
+  const opt = (arr: string[]) => arr.map((s) => ({ value: s, text: s }));
+  // German März → folded maerz → month 03; passes 1-2 (raw) miss, the folded name pass lands.
+  assert.equal(selectIndexFor(m, opt(["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"]), { expMonth: "03" }), 2);
+  // French août → folded aout → month 08.
+  assert.equal(selectIndexFor(m, opt(["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"]), { expMonth: "08" }), 7);
+  // Spanish diciembre → month 12.
+  assert.equal(selectIndexFor(m, opt(["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]), { expMonth: "12" }), 11);
+  // Dutch maart → month 03.
+  assert.equal(selectIndexFor(m, opt(["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"]), { expMonth: "03" }), 2);
+  // an UNLISTED locale still degrades to a safe miss (fi marraskuu is November, EQUALITY not prefix).
+  assert.equal(selectIndexFor(m, opt(["Tammikuu", "Helmikuu", "Maaliskuu"]), { expMonth: "03" }), null);
+});
+
+test("radioIndexFor — [W9] pure cc-type matcher over radio options (value-then-text; synonym-exact then contains-primary)", () => {
+  for (const c of v.radioIndexFor) assert.equal(radioIndexFor(c.options, c.brand), c.expected, c.name);
+  // absent/unknown brand → safe miss (never guessed), parity with selectIndexFor cardtype.
+  assert.equal(radioIndexFor([{ value: "visa", text: "Visa" }], undefined), null);
+  assert.equal(radioIndexFor([{ value: "visa", text: "Visa" }], null), null);
 });
 
 test("selectIndexShared — label-only options, pass-major ([T2]) incl. the [T3] month-name negatives", () => {
@@ -196,4 +241,37 @@ test("deriveCardWrite — the wiring surface: kind + target metadata + values �
   // …no matching option / select-impossible kind → null.
   assert.equal(deriveCardWrite("cardexpmonth", sel([{ value: "--", text: "--" }]), values), null);
   assert.equal(deriveCardWrite("cardnumber", sel(monthOpts), values), null); // §0: a select is never a PAN
+});
+
+test("[W5] collision guard (TS mirror of MonthNameCollisionTest.kt): no folded locale name is a different month anywhere", () => {
+  // Universe: every listed locale's full names + the en Tier-1 tables — full names AND
+  // abbreviations (the matcher equality-checks abbreviations in the same pass, so a locale name
+  // colliding with an en abbrev for another month would fill the wrong month all the same).
+  const universe: [string, [number, string][]][] = [
+    ...Object.entries(TABLES.monthNamesByLocale).map(
+      ([loc, names]) => [loc, names.map((n, i) => [i, n] as [number, string])] as [string, [number, string][]],
+    ),
+    ["en", TABLES.monthNames.map((n, i) => [i, n] as [number, string])],
+    [
+      "en-abbrev",
+      Object.entries(TABLES.monthAbbreviations).flatMap(([mm, abbrs]) =>
+        abbrs.map((a) => [Number(mm) - 1, a] as [number, string]),
+      ),
+    ],
+  ];
+  for (const [locale, names] of Object.entries(TABLES.monthNamesByLocale)) {
+    names.forEach((name, month) => {
+      for (const [otherLocale, entries] of universe) {
+        for (const [otherMonth, other] of entries) {
+          assert.ok(
+            name !== other || month === otherMonth,
+            `${locale} month ${month + 1} ('${name}') collides with ${otherLocale} month ${otherMonth + 1}`,
+          );
+        }
+      }
+      // Fold-fixed-point: the tables are authored folded and the matcher folds the option with
+      // the SAME table — an entry that is not its own fold could never match anything.
+      assert.equal(fold(name), name, `${locale} '${name}' is not fold-stable`);
+    });
+  }
 });

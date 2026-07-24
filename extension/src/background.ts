@@ -112,6 +112,11 @@ const UPDATE_MIN_GAP_MS = 20 * 60 * 60 * 1000; // floor between real fetches —
 const GRANT_TTL_MS = 30_000; // popup fill grant: covers the content script's reveal round-trip
 const BADGE_BG = "#d0a94a"; //  aged gold on…
 const BADGE_INK = "#1a1509"; // …treasury charcoal (web --gold / --btn-ink)
+// V4 (design §V4) discovery dot — a card-only page (no login match) is no longer silent. A single
+// non-numeric glyph so it can never be confused with a login count; login counts always outrank it
+// (refreshTabBadge), and it is the sentinel the [A4] loading handler clears so it never outlives the
+// form. Same gold/charcoal chip — no separate color, no new permission.
+const CARD_BADGE_TEXT = "•";
 // formatVersion discipline lives in format.ts (MAX_ITEM_FORMAT_VERSION read ceiling;
 // LOGIN_FORMAT_VERSION new-login seal fv) — chrome-free so the web pin suite imports it.
 // Automated (non-user) messages that must NOT re-arm the idle lock — else a page auto-reloading
@@ -223,6 +228,9 @@ interface TabState {
    *  the tab (onRemoved / lock). [U14]: a persisted pre-update `{fields}` record is DISCARDED on
    *  read (ensureLoaded) — fail-closed, the rescan broadcast restores fresh records. */
   cardForms?: Record<number, { origin: string; forms: CardFieldKind[][] }>;
+  /** V4 badge: the top frame's BROWSER-SET sender.origin, recorded at pageInfo — the badge's only
+   *  origin source ([A4]: never tab.url outside the popup window). Cleared with the registry. */
+  topOrigin?: string;
 }
 
 let session: Session | null = null;
@@ -881,11 +889,23 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== "loading") return;
   cardGrants.delete(tabId);
+  // V4 (design §V4): a nav invalidates this tab's card registry (below), so a "card here" dot must
+  // not outlive the form — clear it NOW, but ONLY when the badge IS that dot. A login count outranks
+  // the dot and is repainted by the destination's own pageInfo, so it is left untouched (getBadgeText/
+  // setBadgeText need no new permission). Covers content-less destinations (chrome://, un-granted
+  // origins) where no pageInfo would ever arrive to clear a stale dot.
+  chrome.action
+    .getBadgeText({ tabId })
+    .then((cur) => (cur === CARD_BADGE_TEXT ? chrome.action.setBadgeText({ tabId, text: "" }) : undefined))
+    .catch(() => {});
   void (async () => {
     await ensureLoaded();
     const st = tabs.get(tabId);
-    if (st?.cardForms === undefined) return; // nothing recorded — skip the storage write
-    delete st.cardForms;
+    if (st === undefined || (st.cardForms === undefined && st.topOrigin === undefined)) return; // nothing recorded — skip the storage write
+    if (st.cardForms !== undefined) delete st.cardForms;
+    // The badge's recorded top origin dies with the document too — a stale origin could paint
+    // the NEXT document's badge off the previous page's identity (review-fold, [A4]-adjacent).
+    if (st.topOrigin !== undefined) delete st.topOrigin;
     persistTabs();
   })();
 });
@@ -1411,9 +1431,18 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       const locked = session === null;
       const matchCount = locked ? 0 : matchesFor(msg.host).length;
       const tabId = sender.tab?.id;
-      // Badge from the top frame only — an iframe's count must not repaint the tab's signal.
+      // V4: the badge is the tab's ONE authority now (refreshTabBadge — login count precedence, else
+      // the card discovery dot). Top frame only — an iframe's load must not repaint the tab's signal.
+      // Review-fold ([A4]): record the top origin from the BROWSER-SET sender.origin of the
+      // top-frame report — the badge must never read tab.url outside the popup-open window (the
+      // pinned [A4] constraint); the same identity source cardFormInfo already trusts.
       if (tabId !== undefined && (sender.frameId === undefined || sender.frameId === 0)) {
-        chrome.action.setBadgeText({ tabId, text: !locked && matchCount > 0 ? String(matchCount) : "" }).catch(() => {});
+        if (typeof sender.origin === "string" && sender.origin !== "" && sender.origin !== "null") {
+          const st = tabs.get(tabId) ?? {};
+          st.topOrigin = sender.origin;
+          tabs.set(tabId, st);
+        }
+        void refreshTabBadge(tabId);
       }
       return { matchCount, locked } satisfies Res<"pageInfo">;
     }
@@ -2236,6 +2265,7 @@ async function cardFormInfo(
   st.cardForms = reg;
   tabs.set(tabId, st);
   persistTabs();
+  void refreshTabBadge(tabId); // V4: a card form just appeared/left — repaint (login count still wins)
   return { ok: true };
 }
 
@@ -2259,6 +2289,34 @@ function eligibleCardFrames(tabId: number, top: string): { frameId: number; form
   return Object.entries(reg)
     .filter(([, f]) => f.origin === top && Array.isArray(f.forms) && f.forms.length > 0)
     .map(([fid, f]) => ({ frameId: Number(fid), forms: f.forms }));
+}
+
+/** V4 (design §V4): the tab's SINGLE badge authority, so the login count and the card discovery dot
+ *  never clobber each other. Login precedence — matchesFor(top host) > 0 paints the count (the
+ *  pre-V4 behavior, unchanged); ONLY when there is no login match does an eligible same-origin card
+ *  form paint CARD_BADGE_TEXT. Both signals are trusted-chrome metadata (host match; browser-set
+ *  per-frame origins vs the tab's top origin) — zero card data. `topOrigin` reads `tab.url`, which is
+ *  visible under the host permission that content injection already required (no new permission).
+ *  Locked → early return: doLock clears every tab's badge wholesale, and a late in-flight message
+ *  must not repaint a count we can no longer serve. */
+function refreshTabBadge(tabId: number): void {
+  // Locked → CLEAR (a stale pre-lock count/dot must not outlive the session; review-fold).
+  // [A4] review-fold: the top origin comes from the RECORDED top-frame sender.origin (pageInfo) —
+  // never a tab-URL read; outside the popup-open activeTab window that read is exactly what the
+  // [A4] pin forbids. No record (un-granted page, pre-report) → no badge, fail-quiet.
+  // Synchronous now: no await, so no lock/session interleave to re-check.
+  const top = session !== null ? (tabs.get(tabId)?.topOrigin ?? null) : null;
+  let host = "";
+  if (top !== null) {
+    try {
+      host = new URL(top).hostname;
+    } catch {
+      host = "";
+    }
+  }
+  const loginCount = host !== "" ? matchesFor(host).length : 0;
+  const text = loginCount > 0 ? String(loginCount) : top !== null && eligibleCardFrames(tabId, top).length > 0 ? CARD_BADGE_TEXT : "";
+  chrome.action.setBadgeText({ tabId, text }).catch(() => {});
 }
 
 /** Popup ONLY: is the active tab fillable, and to which origin? Fillable iff a recorded card
