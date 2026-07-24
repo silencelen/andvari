@@ -1,5 +1,34 @@
 # andvari — changelog
 
+## 0.20.0 (2026-07-24) — card autofill campaign: audit + Tiers 1–3 + gated items · fleet 0.20.0, extension 0.18.0
+
+The result of an audit-driven campaign that rebuilt payment-card autofill against how the AAA
+password managers do it. Extension **0.18.0**; fleet (web/desktop/android/server) **0.20.0**.
+
+**Extension (the card-fill engine):**
+- **Selects, card type, and expiry now fill.** The extension collects and fills `<select>`
+  dropdowns (expiry month/year, card type), a new card-type kind driven by the derived brand,
+  and per-target expiry adaptation (4-digit years, `MMYY` masks, separator sniffing) — the
+  classic "expiration and card type left empty" gap is closed. Partial fills are truthful: the
+  popup names what didn't land and offers copy buttons.
+- **Broader detection:** `<label>`/`aria`/placeholder signals, multi-form pages, shadow-DOM
+  checkouts, radio-button card types, and ASCII-folded + localized (de/fr/es/pt/it/nl)
+  classification. A per-tab discovery badge marks a fillable card form.
+- **Save a card typed at checkout** (never the CVV) — memory-only, never written at rest.
+- **Billing ZIP** fills into card-anchored AVS fields (shipping-vs-billing aware, fail-closed
+  on ambiguity).
+- **Open andvari from the page or a keyboard shortcut** (context menu + assignable command).
+  Adds the `contextMenus` permission — both merely open the popup; neither reads page content.
+- Cross-origin PSP iframe fill (Stripe Elements et al.) was evaluated and **deliberately not
+  built** — no binding can tell a merchant's PSP frame from an attacker's; the copy-fallback
+  stays the posture there.
+
+**Fleet (web/desktop/android):** a **billing postal code** field on cards (stored, filled,
+copyable), serializer-safe with no format-version bump.
+
+Every lane was design→breaker→build→adversarial-review gated; the shared spec/test-vectors keep
+the two engines (Kotlin core + TypeScript) in lockstep.
+
 ## 0.19.1 (2026-07-21) — two-factor sign-in messaging catches up with the public model · web/server/apps 0.19.1, extension unchanged
 
 Copy-only release, no wire or behavior change. Server-TOTP has been an *optional, recommended*
