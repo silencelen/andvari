@@ -8,7 +8,7 @@ package io.silencelen.andvari.core.client.autofill
  * 0.6.x classifier decided keeps its verdict, so login verdicts on card-free forms are
  * bit-identical to pre-0.7.0 — pinned by urimatch.json (classify + classifyCardFreeRegression).
  */
-enum class FieldKind { USERNAME, PASSWORD, NONE, CC_NUMBER, CC_EXP_MONTH, CC_EXP_YEAR, CC_EXP, CC_NAME, CC_CSC }
+enum class FieldKind { USERNAME, PASSWORD, NONE, CC_NUMBER, CC_EXP_MONTH, CC_EXP_YEAR, CC_EXP, CC_NAME, CC_CSC, CC_TYPE }
 
 /** Signals extracted at the Android boundary; InputType constants are stable AOSP values. */
 data class FieldSignal(
@@ -22,6 +22,11 @@ data class FieldSignal(
     val maxLength: Int? = null,        // declared max length; null when undeclared (DOM reports -1 → map to null)
     val inputMode: String? = null,     // HTML inputmode attr, or a platform equivalent the caller maps in
     val frameDomain: String? = null,   // owning frame's webDomain; null = native app / undeclared frame
+    // The html `id` attr when a `name` attr ALSO exists (else the id already rode htmlNameOrId —
+    // never feed it twice). Appended LAST with a null default so every pre-0.19.x construction
+    // and vector stays bit-identical; unlike its neighbors above, classify() DOES read it
+    // (steps 2 + 4 — card path + CSC demotion only, the login steps never see it).
+    val htmlId: String? = null,
 ) {
     companion object {
         // AOSP android.text.InputType constants (stable).
@@ -57,6 +62,7 @@ object FieldClassifier {
         "creditcardexpirationyear" to FieldKind.CC_EXP_YEAR, "ccexpyear" to FieldKind.CC_EXP_YEAR,
         "creditcardexpirationdate" to FieldKind.CC_EXP, "ccexp" to FieldKind.CC_EXP,
         "ccname" to FieldKind.CC_NAME,
+        "cctype" to FieldKind.CC_TYPE,
     )
     private val NAME_POSITIVE_USER = listOf("user", "email", "login", "account", "userid")
     private val NAME_POSITIVE_PASS = listOf("pass", "pwd", "passwd")
@@ -72,7 +78,15 @@ object FieldClassifier {
         listOf("expiry", "expdate", "ccexp", "expiration", "expirationdate") to FieldKind.CC_EXP,
         listOf("cvv", "cvc", "csc", "securitycode") to FieldKind.CC_CSC,
         listOf("cardholder", "nameoncard", "ccname") to FieldKind.CC_NAME,
+        listOf("cardtype", "cctype", "cardbrand", "ccbrand", "cbtype") to FieldKind.CC_TYPE,
     )
+    // Gift/store-value suppressors ([T10]): a CC_NUMBER verdict from the name/id token path is
+    // killed when one of these matches THE SAME token list that produced the verdict — a gift
+    // number must never anchor a card form (and a killed anchor is terminal for the field: the
+    // other string never resurrects it). Suppress-only: no other kind is touched, and the
+    // autocomplete-hint path is deliberately unguarded (an explicit cc-number hint is the
+    // site's own claim — Chromium parity).
+    private val GIFT_SUPPRESSORS = listOf("gift", "egift", "voucher", "loyalty", "coupon")
     // Whole-run-matchable forms only: "cardverification" covers cardVerificationValue
     // ([card,verification,value] — the run card+verification) — the old "cardverif" prefix hack
     // is gone with prefix-span matching.
@@ -92,11 +106,17 @@ object FieldClassifier {
         val nameId = s.htmlNameOrId?.lowercase() ?: ""
         val negativeName = NAME_NEGATIVE.any { it in nameId }
         val toks = tokens(s.htmlNameOrId ?: "")
+        // htmlId only exists when a name attr shadowed the id (FieldSignal contract) — the card
+        // path checks BOTH strings; the login steps stay htmlNameOrId-only (bit-identity gate).
+        val idToks = tokens(s.htmlId ?: "")
         val htmlType = s.htmlType?.lowercase()
 
         // 2. CSC demotion: a password input NAMED like a card security code is the CVV, never the
-        //    account password — filling the vault password here hands it to the merchant.
-        if (htmlType == "password" && CSC_DEMOTION.any { tokenMatch(toks, it) }) return FieldKind.CC_CSC
+        //    account password — filling the vault password here hands it to the merchant. Fires on
+        //    name OR id ([T12]) — widening a SUPPRESSION is fail-safe, and without the id leg
+        //    <input type=password name=field_7 id=cardCvc> would offer the vault password into
+        //    the merchant's CVV box.
+        if (htmlType == "password" && (CSC_DEMOTION.any { tokenMatch(toks, it) } || CSC_DEMOTION.any { tokenMatch(idToks, it) })) return FieldKind.CC_CSC
 
         // 3. The FULL legacy (0.6.x) classifier. Any verdict it produces STANDS — the bit-identity
         //    gate: adding card kinds can never flip a verdict 0.6.x already produced (passport_expiry
@@ -108,10 +128,24 @@ object FieldClassifier {
         //    the one deliberate 0.7.0 reorder: fields the legacy tel/number→NONE early return gave
         //    up on (<input type="tel" name="cardNumber">) still classify, without a card keyword
         //    ever outranking a login verdict. Never on password types (only step 2 may demote).
+        //    The name pass runs first; the id pass ONLY when the name produced nothing — so a
+        //    verdict (or its gift suppression) always binds to the string that produced it.
         if (htmlType in CARD_FALLBACK_HTML_TYPES) {
-            for ((kws, kind) in CARD_NAME_KINDS) if (kws.any { tokenMatch(toks, it) }) return kind
+            (cardKeywordPass(toks) ?: cardKeywordPass(idToks))?.let { return it }
         }
         return FieldKind.NONE
+    }
+
+    /** One string's card-keyword verdict, or null when its tokens matched no group. NONE (not
+     *  null) on a gift-suppressed CC_NUMBER — suppression must TERMINATE the fallback ([T10]:
+     *  the guard binds to the verdict-producing string, and a suppressed anchor is a decided
+     *  "this is a gift field", never an invitation to consult the other string). */
+    private fun cardKeywordPass(toks: List<String>): FieldKind? {
+        for ((kws, kind) in CARD_NAME_KINDS) if (kws.any { tokenMatch(toks, it) }) {
+            if (kind == FieldKind.CC_NUMBER && GIFT_SUPPRESSORS.any { tokenMatch(toks, it) }) return FieldKind.NONE
+            return kind
+        }
+        return null
     }
 
     /** The 0.6.x classifier, verbatim: HTML input type + name/id keywords → Android InputType

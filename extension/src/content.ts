@@ -14,7 +14,8 @@ import {
   showToast,
   type DropdownState,
 } from "./content-ui";
-import { findCardForms, findLoginForms, isSubmitLike, type CardFieldKind, type CardForm, type LoginForm } from "./detect";
+import { deriveCardWrite, verifyLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
+import { findCardForms, findLoginForms, isSubmitLike, type CardFieldKind, type CardForm, type FillableControl, type LoginForm } from "./detect";
 import { fillErrorCopy, saveErrorCopy } from "./errors";
 import {
   send,
@@ -59,6 +60,7 @@ function formFor(input: HTMLInputElement): LoginForm | null {
 // ---- fill ----
 
 const nativeValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+const nativeSelectedIndexSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "selectedIndex")!.set!;
 
 /** React/Vue value tracking swallows direct `.value=` writes (the state stays empty while the
  *  text looks filled) — write through the native prototype setter, then dispatch the composed
@@ -68,6 +70,17 @@ function setValue(input: HTMLInputElement, value: string): void {
   nativeValueSetter.call(input, value);
   input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: value, inputType: "insertReplacementText" }));
   input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+}
+
+/** [T8] Selects are written BY INDEX through the native prototype setter — a `.value=` write
+ *  binds to the FIRST option with a duplicate value (tripping the read-back verify), and React's
+ *  change-event path for selects reads `target.value` at event time, so unlike inputs there is no
+ *  value-tracker to bypass. Same composed input/change pair as setValue. */
+function setSelectedIndex(sel: HTMLSelectElement, index: number): void {
+  sel.focus();
+  nativeSelectedIndexSetter.call(sel, index);
+  sel.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+  sel.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
 }
 
 /** Suppresses focusin→dropdown while OUR setValue calls input.focus() (those events are trusted). */
@@ -148,8 +161,10 @@ async function scheduleClipboardClear(): Promise<void> {
 
 /** The current frame's card form (first one found), cached for the fill round-trip. */
 let cardForm: CardForm | null = null;
-/** Last reported kind signature — skip redundant cardFormInfo sends on quiet mutations. */
-let lastCardSig = "";
+/** Last reported kind signature — skip redundant cardFormInfo sends on quiet mutations. NULL (not
+ *  "") until the first report (§7): the first reportCardForm after injection ALWAYS sends, even
+ *  empty, clearing the SW's stale record for the new document in this frame slot. */
+let lastCardSig: string | null = null;
 
 /** Re-scan and report this frame's card form to the SW (metadata only). Empty ⇒ the form went
  *  away and the SW clears our record. Idempotent: a stable kind-set never re-sends. */
@@ -169,61 +184,75 @@ function liveCardForm(): CardForm | null {
   return cardForm;
 }
 
-/** Map a detected card kind to its fill value. Split MM/YY feeds standalone month/year inputs. */
-function cardValueFor(kind: CardFieldKind, v: CardFillFields): string | null {
-  switch (kind) {
-    case "cardnumber":
-      return v.number ?? null;
-    case "cardexpiry":
-      return v.expiry ?? null;
-    case "cardexpmonth":
-      return v.expiry ? v.expiry.slice(0, 2) : null; // "MM" of "MM/YY"
-    case "cardexpyear":
-      return v.expiry ? v.expiry.slice(3) : null; //    "YY" of "MM/YY"
-    case "cardname":
-      return v.name ?? null;
-    case "cardcvv":
-      return v.cvv ?? null;
+/** The live control → the metadata surface cardfill.ts derives against (§4). The caller-side DOM
+ *  mappings the pure leaf must never see: `maxLength === -1` is the DOM's "undeclared" → null;
+ *  select options read `opt.value` (its native attr-absent→text fallback is wanted — [T8]: it
+ *  makes the value pass ≡ the text pass on label-only options). */
+function cardTargetOf(el: FillableControl): CardTargetMeta {
+  if (el instanceof HTMLSelectElement) {
+    return { tag: "select", type: el.type, maxLength: null, placeholder: null, options: [...el.options].map((o) => ({ value: o.value, text: o.text })) };
   }
+  return { tag: "input", type: el.type, maxLength: el.maxLength === -1 ? null : el.maxLength, placeholder: el.placeholder === "" ? null : el.placeholder, options: null };
 }
 
-/** Write the revealed card fields into the form's inputs, CVV LAST (some checkouts validate CVV
- *  against the entered PAN). [A6]: NEVER updateSnapshot / touch `snapshots` — the values are used
- *  synchronously inside this call frame and implicitly cleared with it. */
+/** Drive cardfill.ts per field ref (§4/§5), CVV LAST (some checkouts validate CVV against the
+ *  entered PAN): derive the ONE faithful write (null = fit-guard/no-value skip → file missed),
+ *  write it (inputs via setValue, selects BY INDEX via the native setter — [T8]), then
+ *  verifyLanded on an immediate read-back (F16/[T7]) — a mismatch leaves the page's residue in
+ *  place (never auto-clear, it may be user-typed) and files the kind missed. [A6]: the card path
+ *  NEVER feeds the capture engine / save-banner store — the values are used synchronously inside
+ *  this call frame and implicitly cleared with it (pin-anchored, §11). */
 function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome {
-  let wrote = false;
+  const filledKinds: CardFieldKind[] = [];
+  const missedKinds: CardFieldKind[] = [];
+  const file = (list: CardFieldKind[], kind: CardFieldKind): void => {
+    if (!list.includes(kind)) list.push(kind);
+  };
   filling = true;
   try {
-    for (const { kind, input } of form.fields) {
-      if (kind === "cardcvv") continue; // CVV last
-      const val = cardValueFor(kind, values);
-      if (val !== null && input.isConnected) {
-        setValue(input, val);
-        wrote = true;
+    for (const { kind, input } of [...form.fields.filter((f) => f.kind !== "cardcvv"), ...form.fields.filter((f) => f.kind === "cardcvv")]) {
+      if (!input.isConnected) {
+        file(missedKinds, kind);
+        continue;
       }
-    }
-    for (const { kind, input } of form.fields) {
-      if (kind !== "cardcvv") continue;
-      const val = cardValueFor(kind, values);
-      if (val !== null && input.isConnected) {
-        setValue(input, val);
-        wrote = true;
+      const write = deriveCardWrite(kind, cardTargetOf(input), values);
+      if (write === null) {
+        file(missedKinds, kind);
+        continue;
       }
+      let observed: CardWrite;
+      if (write.kind === "index" && input instanceof HTMLSelectElement) {
+        setSelectedIndex(input, write.index);
+        observed = { kind: "index", index: input.selectedIndex };
+      } else if (write.kind === "text" && input instanceof HTMLInputElement) {
+        setValue(input, write.value);
+        observed = { kind: "text", value: input.value };
+      } else {
+        file(missedKinds, kind); // write/control shape mismatch — unreachable by construction, but never guess
+        continue;
+      }
+      file(verifyLanded(kind, write, observed) ? filledKinds : missedKinds, kind);
     }
   } finally {
     filling = false;
   }
-  return wrote ? { filled: "card" } : { filled: "nothing", code: "no_fields" };
+  // Truthful verdict (F9): card = EVERY declared kind landed; partial = both lists non-empty.
+  // Duplicate same-kind refs (twin expiry boxes, multi-block forms): a KIND counts filled when
+  // ANY of its instances landed — "partial" must mean a whole kind is missing from the page,
+  // not that one of two twins missed while its sibling filled.
+  const missed = missedKinds.filter((k) => !filledKinds.includes(k));
+  if (filledKinds.length === 0) return { filled: "nothing", filledKinds, missedKinds: missed, code: "no_fields" };
+  return { filled: missed.length === 0 ? "card" : "partial", filledKinds, missedKinds: missed };
 }
 
 /** Popup-granted card fill: redeem the one-shot grant (the SW verifies frameId + origin + live
  *  top-origin), then write the returned fields. The card values never persist past this call. */
 async function fillCardIntoForm(itemId: string): Promise<CardFillOutcome> {
   const form = liveCardForm();
-  if (!form) return { filled: "nothing", code: "no_form" };
+  if (!form) return { filled: "nothing", filledKinds: [], missedKinds: [], code: "no_form" };
   const r = await safeSend({ type: "revealCardForFill", itemId });
-  if (!r) return { filled: "nothing", code: "unreachable" };
-  if (!r.ok || !r.fields) return { filled: "nothing", code: "not_allowed" };
+  if (!r) return { filled: "nothing", filledKinds: [], missedKinds: [], code: "unreachable" };
+  if (!r.ok || !r.fields) return { filled: "nothing", filledKinds: [], missedKinds: [], code: "not_allowed" };
   return applyCardFill(form, r.fields);
 }
 
@@ -479,10 +508,13 @@ function init(): void {
         }
       }
     }, 150);
-  }).observe(document.documentElement, { childList: true, subtree: true });
+    // §7: attributes join the childList triggers — a CSS-toggle reveal (class/style/hidden flip on
+    // a pre-rendered checkout) re-scans under the same 150 ms debounce; the sig guard stops the
+    // redundant sends. Bounded: the attribute path re-walks findCardForms at most ~6×/s.
+  }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "hidden"] });
 
   chrome.runtime.onMessage.addListener(
-    (msg: TabMsg, _sender, sendResponse: (o: FillOutcome | CardFillOutcome) => void) => {
+    (msg: TabMsg, _sender, sendResponse: (o: FillOutcome | CardFillOutcome | { ok: true }) => void) => {
       if (msg.type === "fillItem") {
         // Popup-granted fill: the SW minted a one-shot grant, so the normal host-bound reveal
         // path clears it — single secret-egress path. Cut M (v2 #14): the REAL outcome goes back
@@ -502,6 +534,17 @@ function init(): void {
         // grant and write the returned fields; the SW re-verifies frameId + origin + top origin.
         void fillCardIntoForm(msg.itemId).then(sendResponse);
         return true; // keep the channel open for the async outcome
+      }
+      if (msg.type === "rescanCardForms") {
+        // §7 [T4]: reset the sig sentinel FIRST — bfcache restores this script's JS state on a
+        // back-navigation, so without the reset the rescan's own report would be swallowed by its
+        // own sig guard and the offer lost for the document's life. formsCache drops too (the SPA
+        // that warranted a rescan invalidated the login scan as well).
+        lastCardSig = null;
+        formsCache = null;
+        reportCardForm();
+        sendResponse({ ok: true });
+        return undefined;
       }
       if (msg.type === "offerPendingSave" && isTop) offerBanner(msg.pending);
       return undefined;

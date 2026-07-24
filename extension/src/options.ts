@@ -8,7 +8,7 @@
  *
  * External module only (MV3 CSP forbids inline). No key material ever reaches here.
  */
-import { requestServerGrants } from "./grantflow";
+import { BROAD_ORIGIN_PATTERN, requestServerGrants } from "./grantflow";
 import { send } from "./messages";
 import { canonicalizeServerUrl, getServerUrl, originMatchPattern, setServerUrl } from "./serverurl";
 import { trustGateView } from "./trustgate";
@@ -33,6 +33,7 @@ const gateConnect = el<HTMLButtonElement>("gate-connect");
 const serverMsg = el("server-msg");
 const purgeBtn = el<HTMLButtonElement>("purge");
 const purgeMsg = el("purge-msg");
+const autofillStatus = el("autofill-status");
 
 /** The canonical origin the Trust Gate is currently offering — set at Continue, read at Connect. The
  *  Connect handler MUST compute its permission pattern from this WITHOUT an intervening await, so the
@@ -54,6 +55,19 @@ async function renderCurrent(): Promise<void> {
   const current = await getServerUrl();
   originNow.textContent = current;
   if (!input.value.trim()) input.value = current; // prefill so a Firefox first-run just Continues → Connects
+}
+
+/** Card autofill Tier 1 §10: the honest injection state — held broad grant = autofill can inject;
+ *  missing (or an unreadable permissions API) reads as OFF, never a false "on" (the grantflow
+ *  fail-safe direction: dormant is honest, "on" while injecting nowhere is the F3 bug itself). */
+async function renderAutofillStatus(): Promise<void> {
+  let held = false;
+  try {
+    held = await chrome.permissions.contains({ origins: [BROAD_ORIGIN_PATTERN] });
+  } catch {
+    /* permissions API unavailable — report off */
+  }
+  autofillStatus.textContent = `Autofill injection: ${held ? "on" : "off"} (all-sites permission)`;
 }
 
 function hideGate(): void {
@@ -118,6 +132,7 @@ async function connect(): Promise<void> {
     setMsg(serverMsg, "err", "Couldn't switch servers. Nothing changed — try again.");
   } finally {
     gateConnect.disabled = false;
+    void renderAutofillStatus(); // the Connect gesture is where the broad grant can land — re-read it
   }
 }
 
@@ -166,3 +181,4 @@ purgeBtn.addEventListener("blur", () => {
 });
 
 void renderCurrent();
+void renderAutofillStatus();

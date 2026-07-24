@@ -31,6 +31,15 @@
       Finish setup — allow andvari to reach your server in Options.
     </button>
 
+    <!-- F3 fresh-install broad-grant banner (card autofill Tier 1 §10): with no all-sites host
+         permission the dynamic autofill script injects NOWHERE — dropdown, save banner, and card
+         fill are all silently dormant. The button calls chrome.permissions.request directly (a
+         popup click is a valid gesture); background permissions.onAdded re-registers the scripts.
+         Hidden whenever the grant is held (detectMissingBroadGrant). -->
+    <button id="autofill-grant" class="host-grant-cta" type="button" hidden>
+      Autofill is off — turn on for all sites
+    </button>
+
     <!-- Self-update signal (both views). Shown only when a strictly-newer build is published;
          unpacked extensions can't self-install, so this points to the download + a reload. -->
     <div id="update" class="update-banner" role="status" hidden>

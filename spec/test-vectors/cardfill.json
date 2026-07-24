@@ -1,0 +1,745 @@
+{
+ "_doc": "Tier-1 card fill vectors (design 2026-07-23-card-autofill-tier1 \u00a711). `tables` is the NORMATIVE copy of the brand-synonym / contains-word / month tables \u2014 each engine deep-equals its compiled-in tables against these, so drift on either side reds that side ([T14]). `selectIndexShared` = label-only <option> lists (options as plain strings; [T8] pins opt.value's attr-absent\u2192text fallback, so the value pass \u2261 the text pass and one string per option is lossless) \u2014 BOTH engines run these through their select matcher; `expected` is the 0-based option index, null = no match (safe miss, never a guess). Matching is PASS-MAJOR ([T2]): pass 1 whole-parse, 2 digit-extraction, 3 month-name (FIRST maximal ASCII-letter run, lowercased, EQUALITY against fullName/abbreviation \u2014 prefix matching forbidden, [T3]), 4 combined-expiry digits, 5 cc-type synonym-exact-else-contains-primary; the earliest pass with any match wins, options in document order within a pass. `selectIndexDom` = value\u2260text option pairs ({value,text}; within an option value is checked before text) \u2014 TS engine ONLY (Android exposes one string per option). `expiryText`/`yearText`/`monthText` = the \u00a74 text-target adapters; stored halves are canonical (expMonth 'MM', expYear 4-digit); maxLength null = undeclared (DOM -1); any case with a non-null placeholder carries tsOnly:true (core has no placeholder signal \u2014 its \u00a79 table is exactly the placeholder-null slice). The [T16] separator comes ONLY from the anchored /m{1,2}\\s*([-/.])\\s*y/i sniff on the placeholder (default '/') \u2014 never a bare contains-scan. cc-type cases carry the stored number AND its derived brand (consistent by CardNormalize.brand \u2014 each engine consumes whichever its API takes).",
+ "tables": {
+  "synonyms": {
+   "visa": [
+    "visa",
+    "vi",
+    "v",
+    "001"
+   ],
+   "mastercard": [
+    "mastercard",
+    "mc",
+    "002"
+   ],
+   "amex": [
+    "amex",
+    "americanexpress",
+    "ax",
+    "amx",
+    "003"
+   ],
+   "discover": [
+    "discover",
+    "disc",
+    "di",
+    "004"
+   ]
+  },
+  "containsWords": {
+   "visa": [
+    "visa"
+   ],
+   "mastercard": [
+    "mastercard"
+   ],
+   "amex": [
+    "americanexpress",
+    "amex"
+   ],
+   "discover": [
+    "discover"
+   ]
+  },
+  "monthNames": [
+   "january",
+   "february",
+   "march",
+   "april",
+   "may",
+   "june",
+   "july",
+   "august",
+   "september",
+   "october",
+   "november",
+   "december"
+  ],
+  "monthAbbreviations": {
+   "01": [
+    "jan"
+   ],
+   "02": [
+    "feb"
+   ],
+   "03": [
+    "mar"
+   ],
+   "04": [
+    "apr"
+   ],
+   "05": [
+    "may"
+   ],
+   "06": [
+    "jun"
+   ],
+   "07": [
+    "jul"
+   ],
+   "08": [
+    "aug"
+   ],
+   "09": [
+    "sep",
+    "sept"
+   ],
+   "10": [
+    "oct"
+   ],
+   "11": [
+    "nov"
+   ],
+   "12": [
+    "dec"
+   ]
+  }
+ },
+ "selectIndexShared": [
+  {
+   "name": "padded numeric month list whole-parses",
+   "kind": "cc-exp-month",
+   "options": [
+    "01",
+    "02",
+    "03",
+    "04",
+    "05",
+    "06",
+    "07",
+    "08",
+    "09",
+    "10",
+    "11",
+    "12"
+   ],
+   "expMonth": "07",
+   "expected": 6
+  },
+  {
+   "name": "unpadded numeric month list whole-parses",
+   "kind": "cc-exp-month",
+   "options": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10",
+    "11",
+    "12"
+   ],
+   "expMonth": "07",
+   "expected": 6
+  },
+  {
+   "name": "decorated month rows match by digit extraction",
+   "kind": "cc-exp-month",
+   "options": [
+    "Select month",
+    "January (01)",
+    "February (02)",
+    "March (03)",
+    "April (04)",
+    "May (05)",
+    "June (06)",
+    "July (07)",
+    "August (08)",
+    "September (09)",
+    "October (10)",
+    "November (11)",
+    "December (12)"
+   ],
+   "expMonth": "12",
+   "expected": 12
+  },
+  {
+   "name": "digit-bearing placeholder never outranks the real month row (pass-major)",
+   "kind": "cc-exp-month",
+   "options": [
+    "Month (12)",
+    "01",
+    "02",
+    "03",
+    "04",
+    "05",
+    "06",
+    "07",
+    "08",
+    "09",
+    "10",
+    "11",
+    "12"
+   ],
+   "expMonth": "12",
+   "expected": 12
+  },
+  {
+   "name": "english full month names match by letter-run equality",
+   "kind": "cc-exp-month",
+   "options": [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December"
+   ],
+   "expMonth": "11",
+   "expected": 10
+  },
+  {
+   "name": "english month abbreviations match, incl the sept variant",
+   "kind": "cc-exp-month",
+   "options": [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sept",
+    "Oct",
+    "Nov",
+    "Dec"
+   ],
+   "expMonth": "09",
+   "expected": 8
+  },
+  {
+   "name": "localized month list degrades to a safe miss \u2014 marraskuu is november, never march",
+   "kind": "cc-exp-month",
+   "options": [
+    "Tammikuu",
+    "Helmikuu",
+    "Maaliskuu",
+    "Huhtikuu",
+    "Toukokuu",
+    "Kes\u00e4kuu",
+    "Hein\u00e4kuu",
+    "Elokuu",
+    "Syyskuu",
+    "Lokakuu",
+    "Marraskuu",
+    "Joulukuu"
+   ],
+   "expMonth": "03",
+   "expected": null
+  },
+  {
+   "name": "two-digit year option list",
+   "kind": "cc-exp-year",
+   "options": [
+    "25",
+    "26",
+    "27",
+    "28"
+   ],
+   "expYear": "2027",
+   "expected": 2
+  },
+  {
+   "name": "four-digit year option list",
+   "kind": "cc-exp-year",
+   "options": [
+    "2025",
+    "2026",
+    "2027",
+    "2028"
+   ],
+   "expYear": "2027",
+   "expected": 2
+  },
+  {
+   "name": "year list behind a text placeholder row",
+   "kind": "cc-exp-year",
+   "options": [
+    "Year",
+    "2026",
+    "2027",
+    "2028"
+   ],
+   "expYear": "2027",
+   "expected": 2
+  },
+  {
+   "name": "combined expiry select matches MMYY digits",
+   "kind": "cc-exp",
+   "options": [
+    "Select",
+    "05/25",
+    "07/27",
+    "09/29"
+   ],
+   "expMonth": "07",
+   "expYear": "2027",
+   "expected": 2
+  },
+  {
+   "name": "combined expiry select matches MMYYYY digits",
+   "kind": "cc-exp",
+   "options": [
+    "07/2026",
+    "07/2027"
+   ],
+   "expMonth": "07",
+   "expYear": "2027",
+   "expected": 1
+  },
+  {
+   "name": "cc-type label list exact-matches visa",
+   "kind": "cc-type",
+   "options": [
+    "Select card type",
+    "Visa",
+    "Mastercard",
+    "American Express",
+    "Discover"
+   ],
+   "number": "4242424242424242",
+   "brand": "visa",
+   "expected": 1
+  },
+  {
+   "name": "cc-type label list exact-matches the spaced american express label",
+   "kind": "cc-type",
+   "options": [
+    "Select card type",
+    "Visa",
+    "Mastercard",
+    "American Express",
+    "Discover"
+   ],
+   "number": "378282246310005",
+   "brand": "amex",
+   "expected": 3
+  },
+  {
+   "name": "cc-type value-code list matches mastercard 002",
+   "kind": "cc-type",
+   "options": [
+    "001",
+    "002",
+    "003",
+    "004"
+   ],
+   "number": "5555555555554444",
+   "brand": "mastercard",
+   "expected": 1
+  },
+  {
+   "name": "cc-type value-code list matches discover 004",
+   "kind": "cc-type",
+   "options": [
+    "001",
+    "002",
+    "003",
+    "004"
+   ],
+   "number": "6011111111111117",
+   "brand": "discover",
+   "expected": 3
+  },
+  {
+   "name": "cc-type falls back to contains-primary-word",
+   "kind": "cc-type",
+   "options": [
+    "Pay with Visa",
+    "Pay with Mastercard"
+   ],
+   "number": "4242424242424242",
+   "brand": "visa",
+   "expected": 0
+  },
+  {
+   "name": "month list with no parseable rows misses",
+   "kind": "cc-exp-month",
+   "options": [
+    "--",
+    "N/A"
+   ],
+   "expMonth": "05",
+   "expected": null
+  },
+  {
+   "name": "cc-type list of unknown brands misses",
+   "kind": "cc-type",
+   "options": [
+    "Maestro",
+    "JCB",
+    "UnionPay"
+   ],
+   "number": "4242424242424242",
+   "brand": "visa",
+   "expected": null
+  },
+  {
+   "name": "cc-type: brand-enumerating header never outranks the exact row (exact pass sweeps ALL options first)",
+   "kind": "cc-type",
+   "options": [
+    "Card type (Visa, Mastercard, Amex)",
+    "Visa"
+   ],
+   "number": "4242424242424242",
+   "brand": "visa",
+   "expected": 1
+  },
+  {
+   "name": "cc-type: contains-only 'Visa Electron' never outranks the exact 'Visa' below it",
+   "kind": "cc-type",
+   "options": [
+    "Visa Electron",
+    "Visa"
+   ],
+   "number": "4242424242424242",
+   "brand": "visa",
+   "expected": 1
+  }
+ ],
+ "selectIndexDom": [
+  {
+   "name": "cybersource numeric value codes behind brand texts",
+   "kind": "cc-type",
+   "options": [
+    {
+     "value": "",
+     "text": "Card Type"
+    },
+    {
+     "value": "001",
+     "text": "Visa"
+    },
+    {
+     "value": "002",
+     "text": "Mastercard"
+    },
+    {
+     "value": "003",
+     "text": "American Express"
+    },
+    {
+     "value": "004",
+     "text": "Discover"
+    }
+   ],
+   "number": "4242424242424242",
+   "brand": "visa",
+   "expected": 1
+  },
+  {
+   "name": "two-letter value codes match on the value side",
+   "kind": "cc-type",
+   "options": [
+    {
+     "value": "AM",
+     "text": "American Express"
+    },
+    {
+     "value": "VI",
+     "text": "Visa"
+    },
+    {
+     "value": "MC",
+     "text": "Mastercard"
+    }
+   ],
+   "number": "4242424242424242",
+   "brand": "visa",
+   "expected": 1
+  },
+  {
+   "name": "one-letter value code matches on the value side",
+   "kind": "cc-type",
+   "options": [
+    {
+     "value": "v",
+     "text": "Visa"
+    },
+    {
+     "value": "m",
+     "text": "Mastercard"
+    },
+    {
+     "value": "a",
+     "text": "Amex"
+    },
+    {
+     "value": "d",
+     "text": "Discover"
+    }
+   ],
+   "number": "4242424242424242",
+   "brand": "visa",
+   "expected": 0
+  },
+  {
+   "name": "numeric month value behind a decorated text",
+   "kind": "cc-exp-month",
+   "options": [
+    {
+     "value": "",
+     "text": "Month"
+    },
+    {
+     "value": "01",
+     "text": "01 - January"
+    },
+    {
+     "value": "02",
+     "text": "02 - February"
+    }
+   ],
+   "expMonth": "01",
+   "expected": 1
+  },
+  {
+   "name": "duplicate values resolve by index off the text pass",
+   "kind": "cc-exp-month",
+   "options": [
+    {
+     "value": "0",
+     "text": "January"
+    },
+    {
+     "value": "0",
+     "text": "February"
+    },
+    {
+     "value": "0",
+     "text": "March"
+    }
+   ],
+   "expMonth": "02",
+   "expected": 1
+  }
+ ],
+ "expiryText": [
+  {
+   "name": "maxLength 4 packs MMYY",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": 4,
+   "placeholder": null,
+   "expected": "0727"
+  },
+  {
+   "name": "maxLength 5 separates MM/YY with the default slash",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": 5,
+   "placeholder": null,
+   "expected": "07/27"
+  },
+  {
+   "name": "maxLength 5 honors the sniffed dash separator",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": 5,
+   "placeholder": "MM-YY",
+   "expected": "07-27",
+   "tsOnly": true
+  },
+  {
+   "name": "maxLength 6 packs MMYYYY",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": 6,
+   "placeholder": null,
+   "expected": "072027"
+  },
+  {
+   "name": "maxLength 7 corroborated by a yyyy placeholder",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": 7,
+   "placeholder": "MM/YYYY",
+   "expected": "07/2027",
+   "tsOnly": true
+  },
+  {
+   "name": "maxLength 7 corroborated by the space-masked MM / YY placeholder",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": 7,
+   "placeholder": "MM / YY",
+   "expected": "07/27",
+   "tsOnly": true
+  },
+  {
+   "name": "maxLength 7 without a placeholder takes the chromium MM/YYYY default",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": 7,
+   "placeholder": null,
+   "expected": "07/2027"
+  },
+  {
+   "name": "maxLength 3 cannot hold any truthful expiry",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": 3,
+   "placeholder": null,
+   "expected": null
+  },
+  {
+   "name": "undeclared maxLength defaults to MM/YY",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": null,
+   "placeholder": null,
+   "expected": "07/27"
+  },
+  {
+   "name": "undeclared maxLength with a yyyy placeholder widens to MM/YYYY",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": null,
+   "placeholder": "MM/YYYY",
+   "expected": "07/2027",
+   "tsOnly": true
+  },
+  {
+   "name": "undeclared maxLength honors the sniffed dash in the yyyy branch",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": null,
+   "placeholder": "MM-YYYY",
+   "expected": "07-2027",
+   "tsOnly": true
+  },
+  {
+   "name": "anchored sniff ignores the dot in an e.g. placeholder",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": null,
+   "placeholder": "e.g. 12/28",
+   "expected": "07/27",
+   "tsOnly": true
+  },
+  {
+   "name": "maxLength 8 falls into the sniff default MM/YY",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": 8,
+   "placeholder": null,
+   "expected": "07/27"
+  },
+  {
+   "name": "maxLength 8 with a yyyy placeholder widens to MM/YYYY",
+   "expMonth": "07",
+   "expYear": "2027",
+   "maxLength": 8,
+   "placeholder": "MM/YYYY",
+   "expected": "07/2027",
+   "tsOnly": true
+  },
+  {
+   "name": "a combined target needs BOTH halves",
+   "expMonth": "07",
+   "expYear": null,
+   "maxLength": 5,
+   "placeholder": null,
+   "expected": null
+  }
+ ],
+ "yearText": [
+  {
+   "name": "maxLength 2 emits YY",
+   "expYear": "2027",
+   "maxLength": 2,
+   "placeholder": null,
+   "expected": "27"
+  },
+  {
+   "name": "maxLength 4 emits YYYY",
+   "expYear": "2027",
+   "maxLength": 4,
+   "placeholder": null,
+   "expected": "2027"
+  },
+  {
+   "name": "undeclared maxLength defaults to YYYY (deliberate flip of the shipped always-YY)",
+   "expYear": "2027",
+   "maxLength": null,
+   "placeholder": null,
+   "expected": "2027"
+  },
+  {
+   "name": "yyyy placeholder keeps YYYY",
+   "expYear": "2027",
+   "maxLength": null,
+   "placeholder": "YYYY",
+   "expected": "2027",
+   "tsOnly": true
+  },
+  {
+   "name": "yy placeholder narrows to YY",
+   "expYear": "2027",
+   "maxLength": null,
+   "placeholder": "YY",
+   "expected": "27",
+   "tsOnly": true
+  },
+  {
+   "name": "fit-guard shrinks YYYY to YY when only 3 chars fit",
+   "expYear": "2027",
+   "maxLength": 3,
+   "placeholder": null,
+   "expected": "27"
+  },
+  {
+   "name": "maxLength 1 cannot hold any truthful year",
+   "expYear": "2027",
+   "maxLength": 1,
+   "placeholder": null,
+   "expected": null
+  },
+  {
+   "name": "declared maxLength 2 beats a yyyy placeholder",
+   "expYear": "2027",
+   "maxLength": 2,
+   "placeholder": "YYYY",
+   "expected": "27",
+   "tsOnly": true
+  }
+ ],
+ "monthText": [
+  {
+   "name": "undeclared maxLength emits canonical MM",
+   "expMonth": "07",
+   "maxLength": null,
+   "expected": "07"
+  },
+  {
+   "name": "maxLength 2 fits canonical MM",
+   "expMonth": "07",
+   "maxLength": 2,
+   "expected": "07"
+  },
+  {
+   "name": "maxLength 1 cannot hold any truthful month \u2014 never strip the pad",
+   "expMonth": "07",
+   "maxLength": 1,
+   "expected": null
+  },
+  {
+   "name": "maxLength 3 fits MM with room to spare",
+   "expMonth": "12",
+   "maxLength": 3,
+   "expected": "12"
+  }
+ ]
+}

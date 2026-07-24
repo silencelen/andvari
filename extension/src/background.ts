@@ -1,5 +1,5 @@
 import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
-import { cardSubtitle, composeShortExpiry, digitsOnly } from "./card";
+import { brand, cardSubtitle, composeShortExpiry, digitsOnly, padMonth, yearTo4 } from "./card";
 import {
   adIdkey,
   adItem,
@@ -862,6 +862,25 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     } catch {
       /* content not injected in that tab (yet) — its own pendingSave poll covers it */
     }
+  })();
+});
+
+// S3 registry hygiene (F28, Tier 1 §7): a top-level navigation invalidates every frame's recorded
+// card form AND any armed card grant — clear both the moment the tab starts LOADING, before the
+// new document could be offered against a stale record. Reads ONLY `changeInfo.status` — NEVER
+// `changeInfo.url`/`tab.url` ([A4], pinned [T15]: a url read outside the popup-open activeTab
+// window would be a `tabs`-permission bump; the status === "complete" listener above is the
+// permission-less precedent). bfcache back-navigations never re-fire content init — there the
+// [T4] rescanCardForms sig reset is what restores the offer.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== "loading") return;
+  cardGrants.delete(tabId);
+  void (async () => {
+    await ensureLoaded();
+    const st = tabs.get(tabId);
+    if (st?.cardForms === undefined) return; // nothing recorded — skip the storage write
+    delete st.cardForms;
+    persistTabs();
   })();
 });
 
@@ -2180,16 +2199,48 @@ async function cardFormInfo(
   }
   const st = tabs.get(tabId) ?? {};
   const forms = st.cardForms ?? {};
-  if (msg.fields.length === 0) delete forms[frameId];
-  else forms[frameId] = { origin: sender.origin, fields: msg.fields };
+  if (msg.fields.length === 0) {
+    // §7: the first-report-always-sends sentinel means every frame of every navigation files an
+    // empty report — when it deletes nothing, skip the persistTabs() storage write (a
+    // per-frame-per-navigation write for a no-op would dominate the SW's storage traffic).
+    if (!(frameId in forms)) return { ok: true };
+    delete forms[frameId];
+  } else {
+    forms[frameId] = { origin: sender.origin, fields: msg.fields };
+  }
   st.cardForms = forms;
   tabs.set(tabId, st);
   persistTabs();
   return { ok: true };
 }
 
+/** [T5]/[T6]: nudge every frame of [tabId] to re-scan + re-report its card form (no frameId =
+ *  all frames). The `.catch(() => {})` is LOAD-BEARING [T6]: `tabs.sendMessage` REJECTS whenever
+ *  the tab has no receiver at all (chrome://, PDFs, un-injected pages) — a large fraction of
+ *  popup opens — and an unhandled rejection here would spam the SW console on every one. */
+function broadcastRescanCardForms(tabId: number): void {
+  const msg: TabMsg = { type: "rescanCardForms" };
+  void chrome.tabs.sendMessage(tabId, msg).catch(() => {});
+}
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Registry read both popup entry points share: does any recorded frame's card form belong to the
+ *  tab's current top origin? */
+function eligibleCardFrames(tabId: number, top: string): number[] {
+  const forms = tabs.get(tabId)?.cardForms ?? {};
+  return Object.entries(forms)
+    .filter(([, f]) => f.origin === top)
+    .map(([fid]) => Number(fid));
+}
+
 /** Popup ONLY: is the active tab fillable, and to which origin? Fillable iff a recorded card
- *  form's origin equals the tab's current top-level origin (SW-derived). Refuses tab senders. */
+ *  form's origin equals the tab's current top-level origin (SW-derived). Refuses tab senders.
+ *  [T5] as revised at review-fold: this ALWAYS answers immediately off the registry — an inline
+ *  wait here sat on the popup's critical path (Cards render, TOTP start, search focus) on EVERY
+ *  open, card form or not. The broadcast still fires so a rescan is in flight; the POPUP owns
+ *  freshness with one delayed re-query (~350 ms) that re-renders if the offer state changed.
+ *  fillCardFromPopup keeps its own miss-path 250 ms wait — grant minting needs the record NOW. */
 async function cardFillOffers(sender: chrome.runtime.MessageSender): Promise<Res<"cardFillOffers">> {
   if (sender.tab !== undefined) return { fillable: false, origin: null }; // popup-only guard
   if (!session) return { fillable: false, origin: null };
@@ -2197,16 +2248,22 @@ async function cardFillOffers(sender: chrome.runtime.MessageSender): Promise<Res
   if (tab?.id === undefined) return { fillable: false, origin: null };
   const top = await topOrigin(tab.id);
   if (top === null) return { fillable: false, origin: null };
-  const forms = tabs.get(tab.id)?.cardForms ?? {};
-  const eligible = Object.values(forms).some((f) => f.origin === top);
+  broadcastRescanCardForms(tab.id);
+  const eligible = eligibleCardFrames(tab.id, top).length > 0;
   return { fillable: eligible, origin: eligible ? top : null };
 }
 
-/** Shape-check the granted frame's sendResponse before trusting it (mirrors asFillOutcome). */
+/** Shape-check the granted frame's sendResponse before trusting it (mirrors asFillOutcome).
+ *  [T11]: `"partial"` is a FIRST-CLASS verdict here — rejecting it would turn every partial into
+ *  `ok:false "unreachable"` AFTER the fields already landed in the page. */
 function asCardFillOutcome(v: unknown): CardFillOutcome | null {
   if (typeof v !== "object" || v === null) return null;
   const f = (v as { filled?: unknown }).filled;
-  return f === "card" || f === "nothing" ? (v as CardFillOutcome) : null;
+  if (!(f === "card" || f === "partial" || f === "nothing")) return null;
+  // The kind lists are part of the shape: the popup ITERATES both on "partial" — a verdict
+  // without its arrays would dead-end the partial copy after fields already landed.
+  const { filledKinds, missedKinds } = v as { filledKinds?: unknown; missedKinds?: unknown };
+  return Array.isArray(filledKinds) && Array.isArray(missedKinds) ? (v as CardFillOutcome) : null;
 }
 
 /** Popup ONLY: mint the tab's one-shot CARD grant for the eligible frame, then send `fillCard` to
@@ -2223,9 +2280,18 @@ async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageS
   const top = await topOrigin(tab.id);
   if (top === null) return { ok: false, code: "not_allowed", error: "no top origin" };
   // The eligible frame = a recorded card form whose origin equals the current top origin. Prefer
-  // the top frame (0) when it qualifies; else the first eligible frame.
-  const forms = tabs.get(tab.id)?.cardForms ?? {};
-  const eligible = Object.entries(forms).filter(([, f]) => f.origin === top).map(([fid]) => Number(fid));
+  // the top frame (0) when it qualifies; else the first eligible frame. [T5] fast-path: a
+  // registry hit proceeds immediately; only a miss pays the rescan + 250 ms re-read (the offer
+  // that lit this button may predate a soft navigation's purge). Unlike cardFillOffers, a hit
+  // fires NO background broadcast here: a rescan racing the grant redemption could delete/replace
+  // the frame's declared-kind record between mint and redeem — there is no "next query" to keep
+  // fresh on this path, only the in-flight fill to keep coherent.
+  let eligible = eligibleCardFrames(tab.id, top);
+  if (eligible.length === 0) {
+    broadcastRescanCardForms(tab.id);
+    await delay(250);
+    eligible = eligibleCardFrames(tab.id, top);
+  }
   if (eligible.length === 0) return { ok: false, code: "no_form", error: "no eligible card form" };
   const frameId = eligible.includes(0) ? 0 : eligible[0]!;
   cardGrants.set(tab.id, { itemId, frameId, origin: top, expiresMs: Date.now() + GRANT_TTL_MS });
@@ -2283,6 +2349,15 @@ async function revealCardForFill(
     if (n !== "") fields.number = n;
   }
   if (declared.has("cardexpiry") || declared.has("cardexpmonth") || declared.has("cardexpyear")) {
+    // v2 (§6): the halves ride INDEPENDENTLY — a parseable month with a junk year still fills
+    // month-only targets (and vice versa); only the combined back-compat `expiry` needs both.
+    const m = padMonth(c.expMonth ?? "");
+    if (m !== null) fields.expMonth = m;
+    const y4 = yearTo4(c.expYear ?? "");
+    if (y4 !== null) {
+      fields.expYear4 = y4;
+      fields.expYear2 = y4.slice(2); // ≡ card.ts yearTo2 (same 2/4-ASCII-digit domain); yearTo2 itself is module-private
+    }
     const e = composeShortExpiry(c.expMonth ?? "", c.expYear ?? "");
     if (e !== null) fields.expiry = e;
   }
@@ -2293,6 +2368,14 @@ async function revealCardForFill(
   if (declared.has("cardcvv")) {
     const s = c.securityCode ?? "";
     if (s !== "") fields.cvv = s;
+  }
+  // [T9] brand egress double-gate: composed ONLY when the form declared cardnumber TOO — the
+  // zero-new-information argument (this very response already carries the PAN the brand derives
+  // from) must never come to depend on a future registry shape. Derived, never the stored field
+  // (which is display-only and could be stale); unknown IIN → no brand → the kind files missed.
+  if (declared.has("cardnumber") && declared.has("cardtype")) {
+    const b = brand(c.number ?? "");
+    if (b !== null) fields.brand = b;
   }
   cardGrants.delete(tabId); // one-shot: success consumes the grant
   return { ok: true, fields };

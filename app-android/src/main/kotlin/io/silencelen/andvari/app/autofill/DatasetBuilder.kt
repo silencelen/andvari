@@ -121,11 +121,12 @@ object DatasetBuilder {
         // the submitted structure carries expiry/name/CSC values for the extractor.
         // Card-only forms: the design contract is CC_NUMBER as the SOLE required id — the
         // platform shows the save UI only once EVERY required view changed, so requiring every
-        // PAN-ish field (a gift/loyalty input also classifies CC_NUMBER via the token fallback)
-        // would silently suppress the prompt whenever one stays empty. Pick the anchor of the
-        // RICHEST frame cluster (the real payment block has expiry/CVV siblings; a lone gift
-        // input doesn't), tree order on ties. Residual platform limit (no OR semantics): a user
-        // who fills only a DIFFERENT PAN field gets no prompt — documented, accepted.
+        // PAN-ish field (a membership/rewards input can still classify CC_NUMBER — the [T10]
+        // gift guard's suppressor vocabulary is deliberately narrow and hint claims are always
+        // honored) would silently suppress the prompt whenever one stays empty. Pick the anchor
+        // of the RICHEST frame cluster (the real payment block has expiry/CVV siblings; a lone
+        // membership input doesn't), tree order on ties. Residual platform limit (no OR
+        // semantics): a user who fills only a DIFFERENT PAN field gets no prompt — accepted.
         val requiredCc = ccNumber.maxByOrNull { anchor -> form.ccFields.count { it.webDomain == anchor.webDomain } }
         val required = (if (pw.isNotEmpty()) user + pw else listOfNotNull(requiredCc)).map { it.id }
         val optional = form.ccFields.map { it.id }.filterNot { it in required }

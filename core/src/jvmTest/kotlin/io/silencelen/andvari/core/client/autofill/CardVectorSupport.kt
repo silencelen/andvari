@@ -18,6 +18,7 @@ internal fun vectorFieldKind(s: String): FieldKind = when (s) {
     "cc-exp" -> FieldKind.CC_EXP
     "cc-name" -> FieldKind.CC_NAME
     "cc-csc" -> FieldKind.CC_CSC
+    "cc-type" -> FieldKind.CC_TYPE
     else -> error("unknown FieldKind vector value: $s")
 }
 
@@ -41,5 +42,6 @@ internal fun vectorFieldSignal(o: JsonObject): FieldSignal {
         maxLength = int("maxLength"),
         inputMode = str("inputMode"),
         frameDomain = str("frameDomain"),
+        htmlId = str("htmlId"),
     )
 }

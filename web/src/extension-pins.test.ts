@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { brand, brandLabel, cardSubtitle, composeShortExpiry, digitsOnly, maskedLast4 } from "../../extension/src/card";
+import { brand, brandLabel, cardSubtitle, composeShortExpiry, digitsOnly, maskedLast4, padMonth, yearTo4 } from "../../extension/src/card";
 import { isCvvNameOrId } from "../../extension/src/detect";
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "../../extension/src/format";
 import type { ItemDoc } from "./api/types";
@@ -11,6 +11,8 @@ import {
   composeShortExpiry as webCompose,
   digitsOnly as webDigitsOnly,
   maskedLast4 as webMaskedLast4,
+  padMonth as webPadMonth,
+  yearTo4 as webYearTo4,
 } from "./vault/card";
 
 /**
@@ -75,6 +77,23 @@ describe("card display port ≡ web port ≡ card.json (IIN table + masking pari
     for (const c of v.composeShortExpiry) {
       expect(composeShortExpiry(c.expMonth, c.expYear), `compose ${c.expMonth}/${c.expYear}`).toBe(c.expected);
       expect(composeShortExpiry(c.expMonth, c.expYear)).toBe(webCompose(c.expMonth, c.expYear));
+    }
+  });
+
+  // Tier 1 (design 2026-07-23-card-autofill-tier1.md §6/§11): revealCardForFill composes the v2
+  // expMonth/expYear2/expYear4 halves through these canonicalizers — a divergence from the web
+  // twin would fill a checkout with a different value than the vault itself displays.
+  it("padMonth — every vector case, and bit-parity with the web port", () => {
+    for (const c of v.padMonth) {
+      expect(padMonth(c.raw), `padMonth ${c.raw}`).toBe(c.expected);
+      expect(padMonth(c.raw), `padMonth parity ${c.raw}`).toBe(webPadMonth(c.raw));
+    }
+  });
+
+  it("yearTo4 — every vector case, and bit-parity with the web port", () => {
+    for (const c of v.yearTo4) {
+      expect(yearTo4(c.raw), `yearTo4 ${c.raw}`).toBe(c.expected);
+      expect(yearTo4(c.raw), `yearTo4 parity ${c.raw}`).toBe(webYearTo4(c.raw));
     }
   });
 
@@ -148,5 +167,91 @@ describe("S3 card-fill egress pins ([A9]) — the safety-critical background.ts 
     // Both minting an offer and enumerating offers must be popup-only — a page can never invoke them.
     expect(bg).toMatch(/async function cardFillOffers[\s\S]*?sender\.tab !== undefined/);
     expect(bg).toMatch(/async function fillCardFromPopup[\s\S]*?sender\.tab !== undefined/);
+  });
+});
+
+describe("Tier-1 card autofill pins ([T15]/[T9]/[T11]/§7) — structural anchors", () => {
+  const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+  const ct = readFileSync(extensionSrc + "content.ts", "utf-8");
+
+  /** The card-path spans the [A6]/[A4] pins assert over. Both boundary anchors must exist and be
+   *  ordered, or a refactor that moved a function would silently shrink the span to nothing and
+   *  the negative assertions below would pass vacuously. */
+  const spanOf = (src: string, from: string, to: string): string => {
+    const a = src.indexOf(from);
+    const b = src.indexOf(to);
+    expect(a, `span start missing: ${from}`).toBeGreaterThan(-1);
+    expect(b, `span end missing/out of order: ${to}`).toBeGreaterThan(a);
+    return src.slice(a, b);
+  };
+
+  it("[A4] the card-clear onUpdated handler reads ONLY changeInfo.status and clears BOTH stores", () => {
+    // Extract THE "loading" handler — its guard is its first statement, so the shipped
+    // status==="complete" listener can never anchor the match start.
+    const handler =
+      bg.match(/onUpdated\.addListener\(\(tabId, changeInfo\) => \{\s*if \(changeInfo\.status !== "loading"\) return;[\s\S]*?\n\}\);/)?.[0] ?? "";
+    expect(handler.length, "the status===loading card-clear handler must exist").toBeGreaterThan(0);
+    // A top-level navigation must void the recorded forms AND any armed grant — leaving either
+    // would offer (or redeem) against the previous document's record.
+    expect(handler).toContain("cardGrants.delete(tabId)");
+    expect(handler).toContain("delete st.cardForms");
+    // Any `.url` read here (changeInfo.url / tab.url) is a `tabs`-permission bump outside the
+    // popup-open activeTab window — the handler may consult NOTHING but changeInfo.status.
+    expect(handler).not.toMatch(/\.url\b/);
+  });
+
+  it("§7 content anchors: NULL sig sentinel, attribute-reveal observer, rescan protocol", () => {
+    // NULL (not "") sentinel — the first report after injection must ALWAYS send, even empty,
+    // or a stale SW record survives the new document.
+    expect(ct).toContain("lastCardSig: string | null = null");
+    // CSS-toggle reveals (class/style/hidden flips on pre-rendered checkouts) must re-scan;
+    // dropping the filter (or a key from it) makes those checkouts invisible until a DOM mutation.
+    expect(ct).toContain('attributeFilter: ["class", "style", "hidden"]');
+    // [T4]: the rescan handler resets the sig BEFORE reporting (bfcache restores this script's
+    // JS state — an unreset sig swallows the rescan's own report for the document's life), then
+    // acks so the SW's 250 ms re-read has something to read.
+    expect(ct).toMatch(
+      /msg\.type === "rescanCardForms"[\s\S]*?lastCardSig = null;[\s\S]*?reportCardForm\(\);[\s\S]*?sendResponse\(\{ ok: true \}\)/,
+    );
+    // The message rides the typed wire on all three hops (a rename on one side is a silent no-op).
+    expect(readFileSync(extensionSrc + "messages.ts", "utf-8")).toContain('"rescanCardForms"');
+    expect(bg).toContain('"rescanCardForms"');
+  });
+
+  it("[A6] the card fill path never feeds the capture engine (no snapshots, no save banner)", () => {
+    // Scope: the card fill function bodies (cardTargetOf → applyCardFill → fillCardIntoForm), the
+    // shared write helpers they drive (setValue/setSelectedIndex), and the pure leaf. The login
+    // path's updateSnapshot calls (fillForm, generated-password capture) are LEGITIMATE and live
+    // outside these spans — this pin must not widen to the whole file.
+    const cardPath = spanOf(ct, "function cardTargetOf(", "function maybeOpen(");
+    // The fill bodies must actually live inside the extracted span — a move must come back and
+    // re-scope this pin deliberately, not drain it silently.
+    expect(cardPath).toContain("function applyCardFill(");
+    expect(cardPath).toContain("function fillCardIntoForm(");
+    const writeHelpers = spanOf(ct, "const nativeValueSetter", "let filling = false");
+    const leaf = readFileSync(extensionSrc + "cardfill.ts", "utf-8");
+    for (const [name, span] of [
+      ["content card path", cardPath],
+      ["write helpers", writeHelpers],
+      ["cardfill.ts", leaf],
+    ] as const) {
+      expect(span, `${name} calls updateSnapshot`).not.toContain("updateSnapshot(");
+      expect(span, `${name} references the snapshot store`).not.toMatch(/\bsnapshots\b/);
+    }
+  });
+
+  it("[T9] brand egress double-gate — the cardnumber check PRECEDES the one brand write", () => {
+    // The zero-new-information argument (the same response already carries the PAN the brand
+    // derives from) must never depend on a future registry shape: the gate is spelled in code,
+    // cardnumber FIRST, and it is the gate of the write itself.
+    expect(bg).toMatch(/declared\.has\("cardnumber"\) && declared\.has\("cardtype"\)[\s\S]{0,300}?fields\.brand = b/);
+    // Derived from the number at reveal time — NEVER the stored display field (could be stale).
+    expect(bg).toContain("brand(c.number");
+    // Exactly ONE brand egress site — a second, ungated write would dodge the window above.
+    expect(bg.match(/fields\.brand\s*=/g)).toHaveLength(1);
+  });
+
+  it('[T11] asCardFillOutcome accepts "partial" — a rejected partial reports unreachable AFTER fields landed', () => {
+    expect(bg).toMatch(/function asCardFillOutcome[\s\S]*?f === "card" \|\| f === "partial" \|\| f === "nothing"/);
   });
 });

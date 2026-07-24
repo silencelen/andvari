@@ -391,6 +391,206 @@
                 }
             ],
             "formKind": "card"
+        },
+        {
+            "name": "cc-type hint classifies over a meaningless name",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "htmlId": null,
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [
+                        "cc-type"
+                    ],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "field_3",
+                    "htmlId": null,
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "cc-type"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "cardtype name token classifies in the legacy NONE gap",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "htmlId": null,
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "cardType",
+                    "htmlId": null,
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "cc-type"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "gift card number is suppressed and never anchors a card form",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "giftCardNumber",
+                    "htmlId": null,
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "none"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "gift guard binds to the id that produced the verdict",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "acct",
+                    "htmlId": "giftCardNumber",
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "none"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "garbage name recovers off a classifiable id",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "field_2",
+                    "htmlId": "wag-cko-pm-in-cc-num",
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "empty name attr shadows; the id still classifies",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "",
+                    "htmlId": "cardNumber",
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "password with a garbage name demotes on its cvc id, no refine signals needed",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber",
+                    "htmlId": null,
+                    "maxLength": 19,
+                    "inputMode": "numeric",
+                    "frameDomain": "shop.example",
+                    "expected": "cc-number"
+                },
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "password",
+                    "htmlNameOrId": "field_7",
+                    "htmlId": "cardCvc",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "cc-csc"
+                }
+            ],
+            "formKind": "card"
+        },
+        {
+            "name": "gift suppression is TERMINAL: a name-side gift verdict is never resurrected off the id",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "text",
+                    "htmlNameOrId": "giftCardNumber",
+                    "htmlId": "ccnumber",
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "none"
+                }
+            ],
+            "formKind": "login"
+        },
+        {
+            "name": "trailing digit stays glued (cardNumber2 -> none): deliberate divergence from the extension tokenizer, Tier-2 alignment",
+            "fields": [
+                {
+                    "hints": [],
+                    "inputTypeClass": 1,
+                    "inputTypeVariation": 0,
+                    "htmlType": "tel",
+                    "htmlNameOrId": "cardNumber2",
+                    "htmlId": null,
+                    "maxLength": null,
+                    "inputMode": null,
+                    "frameDomain": "shop.example",
+                    "expected": "none"
+                }
+            ],
+            "formKind": "login"
         }
     ]
 }
