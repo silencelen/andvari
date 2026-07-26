@@ -6,10 +6,14 @@
  * this frame only host-bound, popup-granted, or via an explicit search-all pick (ZK).
  */
 import {
+  cardChipIsOpen,
+  closeCardChip,
+  repositionCardChip,
   closeDropdown,
   dropdownWillConsumeEnter,
   isOwnUiHost,
   openDropdown,
+  showCardChip,
   showCardSaveBanner,
   showLinkOffer,
   showSaveBanner,
@@ -149,6 +153,13 @@ function scanForms(): LoginForm[] {
   return formsCache;
 }
 
+/** [K2] the card mirror of formsCache. allCardForms was UNCACHED — a full document + up-to-64-
+ *  shadow-root re-classify — so routing the chip's per-focusin trigger through it would re-scan on
+ *  every tab stop. Cleared in onMutations BESIDE formsCache (the rAF clear never fires in a
+ *  throttled background tab, so onMutations is the real self-heal) and by the rescan handler; the
+ *  shipped G2 resolvers read through it too. */
+let cardFormsCache: CardForm[] | null = null;
+
 function formFor(input: HTMLInputElement): LoginForm | null {
   return (
     scanForms().find((f) => f.username === input || f.password === input || f.newPasswords.includes(input)) ?? null
@@ -210,6 +221,24 @@ function setRadioChecked(group: HTMLInputElement[], index: number): HTMLInputEle
 
 /** Suppresses focusin→dropdown while OUR setValue calls input.focus() (those events are trusted). */
 let filling = false;
+
+// C1 chip module state — declared HERE, immediately after `filling`, because the [A6]/[W9] write-
+// helper spans END at `let filling = false`: anything landing between it and `nativeValueSetter`
+// joins pins it has no business in. [K4] every slot below is CHIP-PRIVATE — the chip never reads
+// or writes the dropdown's `lastOpen`/`suppressOpenUntil` (sharing them would let an Esc'd chip
+// gag the LOGIN dropdown for 400 ms).
+/** [K12] generation counter: the offer round-trip is async, so a newer focus (or any dismissal)
+ *  must invalidate an answer still in flight rather than let it paint a stale chip. */
+let chipGen = 0;
+/** 400 ms focusin+click pair guard, the chip's own copy of maybeOpen's dedupe. */
+let lastChip: { input: FillableControl; t: number } | null = null;
+/** [K3] the field an Escape dismissed. Escape moves no focus (the chip is never focusable), so no
+ *  focusout fires — the sentinel must suppress that field's next FOCUSIN but never a fresh click
+ *  on it; it dies with the focus that set it (the focusout listener clears it). */
+let chipEscaped: FillableControl | null = null;
+/** Our mirror of the live chip's anchor: the [K8] mutation/route/Escape dismissals read it, and
+ *  content-ui owns the surface slot itself. */
+let chipAnchor: FillableControl | null = null;
 
 /** Between dropdown-open and the user's pick, an SPA can swap the form subtree, detaching the
  *  captured field refs — filling would write into orphan nodes that never reach the page. If the
@@ -295,9 +324,7 @@ let lastCardSig: string | null = null;
  *  across [document, …shadowRoots] — §2 [U13]). Empty ⇒ every form went away and the SW clears
  *  our record. Idempotent: a stable structure never re-sends. */
 function reportCardForm(): void {
-  const forms: CardFieldKind[][] = scanScopes()
-    .flatMap((s) => findCardForms(s))
-    .map((f) => f.fields.map((x) => x.kind));
+  const forms: CardFieldKind[][] = allCardForms().map((f) => f.fields.map((x) => x.kind));
   const sig = JSON.stringify(forms);
   if (sig === lastCardSig) return;
   lastCardSig = sig;
@@ -486,13 +513,25 @@ function consumeTrustedGesture(): boolean {
   return false;
 }
 
-/** All card forms in every scan scope, document order. */
+/** All card forms in every scan scope, document order — [K2] one scan per animation frame, the
+ *  card twin of scanForms. Every card-form consumer (reportCardForm, the G2 resolvers below, the
+ *  C1 chip) reads through here; nothing calls findCardForms directly except the sig-targeted
+ *  redemption path, which deliberately forces a FRESH scan. */
 function allCardForms(): CardForm[] {
-  return scanScopes().flatMap((s) => findCardForms(s));
+  if (!cardFormsCache) {
+    cardFormsCache = scanScopes().flatMap((s) => findCardForms(s));
+    requestAnimationFrame(() => {
+      cardFormsCache = null;
+    });
+  }
+  return cardFormsCache;
 }
 
-/** The card form owning an input (an Enter target), or null. */
-function cardFormForInput(input: HTMLInputElement): CardForm | null {
+/** The card form owning a control — an Enter target (G2) or a focused field (C1). [K16] the param
+ *  is FillableControl, not HTMLInputElement: expiry month/year and card type are routinely
+ *  `<select>`, and a user who tabs into the expiry select first must still be resolvable. ONE
+ *  resolver for both callers — a twin would drift from the registry the SW was told about. */
+function cardFormForInput(input: FillableControl): CardForm | null {
   return allCardForms().find((f) => f.fields.some((x) => x.input === input)) ?? null;
 }
 
@@ -559,6 +598,83 @@ function offerCardBanner(pending: PendingCardSave): void {
     },
     () => void safeSend({ type: "resolvePendingCardSave", action: "dismiss" }),
   );
+}
+
+// ---- C1 in-page card chip (design 2026-07-26) ----
+// A NEW trigger path parallel to maybeOpen, deliberately NOT routed through formFor (login-only):
+// `formFor` matches username/password/newPassword, so a card field never opened anything and the
+// user had no way to learn at the field that andvari can fill it (audit F4). The chip is a
+// SIGNPOST: it carries no data, mints no grant, and its click only asks the SW to open the popup —
+// every card value still leaves the SW solely through the popup-minted, origin+frameId-bound
+// revealCardForFill redemption ([A2]/[A5]/[A9] untouched). It resolves its form through the
+// SHIPPED cardFormForInput above; no twin resolver exists, and none may be added here ([U12]).
+
+/** [K8] the one dismissal path: drops OUR mirror, invalidates any offer still in flight ([K12] —
+ *  a late answer must never resurrect what the user just dismissed), and clears the surface. */
+function dismissCardChip(): void {
+  chipAnchor = null;
+  chipGen++;
+  closeCardChip();
+}
+
+/** [K9] the chip's own activation already removed the surface (content-ui closes before calling
+ *  back); this drops our mirror, then asks the SW to open the popup.
+ *  [S-BREAK3]/[K14] the chip is an INDICATOR whose click ATTEMPTS a shortcut, never a feature that
+ *  depends on `chrome.action.openPopup()`: runtime.onMessage carries no user activation (and
+ *  handle() awaits ensureLoaded before dispatch), so on Firefox — which historically requires an
+ *  input handler — the call is EXPECTED to reject and the toast is the primary path, not a
+ *  fallback. Resolution is the only signal either engine gives, so claim nothing more: never toast
+ *  on opened:true (the popup now covers the page — a toast under it is noise) and never
+ *  optimistically before the answer. An unreachable SW folds into the same honest sentence. */
+async function activateCardChip(): Promise<void> {
+  dismissCardChip();
+  const r = await safeSend({ type: "openPopupForCards" });
+  if (r?.opened !== true) showToast("Open andvari from the toolbar to fill this card");
+}
+
+/** The chip trigger. `viaClick` distinguishes the two call sites [K15] folds into one retarget
+ *  each: a fresh CLICK on an Esc-dismissed field re-offers, its focusin does not. */
+async function maybeCardChip(target: EventTarget | null, viaClick = false): Promise<void> {
+  if (filling) return;
+  // Review #5: TOP FRAME ONLY. The SW gate is frameId===0 STRICT ([S1]), so a sub-frame's offer is
+  // guaranteed to be refused — and PSP iframes (Stripe/Adyen/Braintree) are exactly where card
+  // fields get focused, so without this every keystroke-field in a real checkout paid a futile SW
+  // wake. It also closes an unbounded wake vector: a page could focus-loop a fake card form in an
+  // iframe at rAF rate, and the SW's per-tab throttle sits BEHIND its frame check.
+  if (!isTop) return;
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return;
+  // [K16] a brand RADIO is excluded: one member of a group is a poor anchor, and it is never a
+  // text entry point the user tabs into expecting help.
+  if (target instanceof HTMLInputElement && target.type === "radio") return;
+  if (chipEscaped === target && !viaClick) return; // [K3] Escape's refocus must not reopen
+  // [K1] LOGIN PRECEDENCE (binding): a field the login engine claims keeps the DROPDOWN. Card
+  // kinds live in the classify()==none gap, which is exactly the login pool's textLike
+  // username-fallback pool — on a type=password-CVV checkout buildLoginForm already yields
+  // {password:<cvv>, username:<nameOnCard>} and the dropdown opens there TODAY. Without this rule
+  // both surfaces render on one anchor. formFor reads the per-frame scanForms cache: one lookup.
+  if (target instanceof HTMLInputElement && formFor(target) !== null) return;
+  // Review #6: the CHEAP dedupe runs before the O(page) card scan. The focusin+click pair arrives
+  // 50-300 ms apart — a different animation frame, so the [K2] cache is cold and the second call
+  // would re-walk every scope for a result the guard is about to discard.
+  const now = Date.now();
+  if (lastChip && lastChip.input === target && now - lastChip.t < 400) return; // focusin+click pair
+  if (cardFormForInput(target) === null) return;
+  lastChip = { input: target, t: now };
+  // [K12] the gate is a round-trip, so every fact is re-checked at RENDER time, not trigger time.
+  const gen = ++chipGen;
+  const r = await safeSend({ type: "cardChipOffer" });
+  if (gen !== chipGen) return; // superseded by a newer focus, or dismissed while in flight
+  // [K5] applyCardFill focuses each field (a trusted focusin per field), so a request issued
+  // before a fill and answered after `filling` flipped back would pop a chip on top of a
+  // just-completed fill — re-read it here, not only at trigger time.
+  if (filling) return;
+  if (!r?.fillable || !target.isConnected) return;
+  // NOT document.activeElement: that is the shadow HOST for a field inside a shadow root, so the
+  // document-level form would silently disable the chip on exactly the shadow-DOM checkouts
+  // Tier 2 was built for.
+  if ((target.getRootNode() as Document | ShadowRoot).activeElement !== target) return;
+  chipAnchor = target;
+  showCardChip(target, { locked: r.locked }, { onActivate: () => void activateCardChip() });
 }
 
 // ---- dropdown ----
@@ -749,6 +865,14 @@ function onMutations(records: MutationRecord[]): void {
       sweepShadowRoots();
     }
     formsCache = null;
+    cardFormsCache = null; // [K2] the rAF clear never fires in a throttled background tab
+    // [K8] an SPA step-swap with no scroll and no resize would otherwise leave a live chip
+    // floating over nothing (a latent dropdown bug the chip must not inherit).
+    // Review #13: a live chip also RE-ANCHORS on this tick. Inline validation ("Card number is
+    // invalid") inserted above a field shifts it without any scroll or resize, and a fixed-position
+    // chip would stay put — ending up overlapping the field it was placed above.
+    if (chipAnchor && !chipAnchor.isConnected) dismissCardChip();
+    else if (chipAnchor) repositionCardChip();
     reportCardForm(); // S3: a checkout card form may have just rendered (or gone away)
     // Multi-step: step 1 was captured and the password page/fragment just rendered with
     // focus already on the password field — offer without another user gesture.
@@ -772,10 +896,53 @@ function onMutations(records: MutationRecord[]): void {
 // `document.activeElement` (= host).
 
 function init(): void {
+  // [K15] ONE retarget bound to `t`, reused by both surfaces: [U17] counts composedPath()[0] CODE
+  // SHAPES, so a second literal-argument call here would make that count 6. The login dropdown is
+  // driven FIRST, and [K1] keeps the two mutually exclusive on any one anchor.
   document.addEventListener(
     "focusin",
     (e) => {
-      if (e.isTrusted) maybeOpen(e.composedPath()[0] ?? null);
+      if (!e.isTrusted) return;
+      const t = e.composedPath()[0] ?? null;
+      maybeOpen(t);
+      void maybeCardChip(t);
+    },
+    true,
+  );
+
+  // [K3] the Escape sentinel, chip-private ([K4]). The CLOSE itself belongs to content-ui's own
+  // capture handler; this listener is registered at load — i.e. BEFORE content-ui's lazily-created
+  // one — so cardChipIsOpen() is still true when it reads it. Escape moves no focus (the chip is
+  // never focusable), so no focusout follows to clear the sentinel: it survives exactly until the
+  // user leaves the field, suppressing the refocus focusin but never a fresh click.
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (!e.isTrusted || e.key !== "Escape") return;
+      // Review #1: bump UNCONDITIONALLY — the dangerous window is the one where NO chip is
+      // rendered yet but an offer is in flight (a cold SW start is hundreds of ms). Gating this on
+      // cardChipIsOpen() let both Escape handlers early-return, so nothing invalidated the
+      // generation and every [K12] guard still passed (Escape moves no focus) — the chip popped up
+      // on the field the user had just dismissed. Chip-private, so [K4] is untouched.
+      chipGen++;
+      if (!cardChipIsOpen()) return;
+      chipEscaped = chipAnchor;
+      chipAnchor = null;
+    },
+    true,
+  );
+
+  document.addEventListener(
+    "focusout",
+    (e) => {
+      // [K10] exempt our own host: the chip activates on mousedown+preventDefault so focus never
+      // enters it, but a relatedTarget inside our closed root retargets to hostEl — never dismiss
+      // on that. Deliberately target-FREE otherwise: e.target retargets to the shadow host for a
+      // field inside a shadow root, and a composedPath()[0] here would break the [U17] count.
+      if (!e.isTrusted) return; // applyCardFill dispatches its own closing focusout — not a dismissal
+      if (e.relatedTarget instanceof Element && isOwnUiHost(e.relatedTarget)) return;
+      chipEscaped = null; // [K3] the sentinel is per-field: it dies with the focus that set it
+      dismissCardChip(); // [K8] leaving the field ends the offer
     },
     true,
   );
@@ -826,6 +993,7 @@ function init(): void {
       if (!e.isTrusted) return;
       const t = e.composedPath()[0];
       if (t instanceof HTMLInputElement) maybeOpen(t); // reopen after dismissal
+      void maybeCardChip(t ?? null, true); // [K15] REUSES `t` — a second retarget shape here would red [U17]
       const control = e.composedPath().find((n): n is Element => n instanceof Element && isSubmitLike(n));
       if (!control) return;
       const all = scanForms();
@@ -878,9 +1046,11 @@ function init(): void {
     true,
   );
 
-  // SPA route changes: an open dropdown is anchored to nodes that may be on their way out.
+  // SPA route changes: an open dropdown (or chip) is anchored to nodes that may be on their way out.
   window.addEventListener("popstate", closeDropdown);
   window.addEventListener("hashchange", closeDropdown);
+  window.addEventListener("popstate", dismissCardChip); // [K8]
+  window.addEventListener("hashchange", dismissCardChip);
 
   new MutationObserver(onMutations).observe(document.documentElement, OBSERVE_OPTS);
 
@@ -914,7 +1084,17 @@ function init(): void {
         // that warranted a rescan invalidated the login scan as well).
         lastCardSig = null;
         formsCache = null;
+        cardFormsCache = null;
         reportCardForm();
+        sendResponse({ ok: true });
+        return undefined;
+      }
+      if (msg.type === "reportPageInfo") {
+        // [S4] repair ping. `st.topOrigin` is the SW's per-tab record the C1 gate (and the shipped
+        // V4 badge) match sender.origin against, and pageInfo fires exactly ONCE per document at
+        // init — so an MV3 idle-death silently voids it for the document's life. Re-send it now;
+        // the message is permission-free and carries only the frame's own hostname.
+        void safeSend({ type: "pageInfo", host: location.hostname });
         sendResponse({ ok: true });
         return undefined;
       }
@@ -935,8 +1115,12 @@ function init(): void {
     })();
   }
 
-  // Autofocus bootstrap: the page put the cursor in a login field before we loaded.
+  // Autofocus bootstrap: the page put the cursor in a login (or card) field before we loaded.
+  // Documented residual, shared with the mutation auto-open: document.activeElement is the shadow
+  // HOST for a field inside a shadow root, so a shadow-scoped autofocus resolves to no form here
+  // and simply waits for the user's first real focusin.
   maybeOpen(document.activeElement);
+  void maybeCardChip(document.activeElement);
 }
 
 if (location.hostname !== "") init();

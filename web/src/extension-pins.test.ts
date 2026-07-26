@@ -345,7 +345,16 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     // submit-control probe stay deliberate non-members (submit does not compose; the control probe
     // walks the WHOLE path). The `[=(]` prefix keeps the count over CODE shapes only.
     expect(ct.match(/[=(] ?e\.composedPath\(\)\[0\]/g)).toHaveLength(5);
-    expect(ct).toMatch(/"focusin",[\s\S]{0,120}?maybeOpen\(e\.composedPath\(\)\[0\] \?\? null\)/);
+    // [K15] RE-SCOPED (design 2026-07-26 §Gate+pins, deliberate): the C1 chip adds a SECOND
+    // consumer to the focusin listener, and the design's binding resolution is
+    // `const t = e.composedPath()[0] ?? null; maybeOpen(t); void maybeCardChip(t);` — ONE retarget
+    // site feeding both surfaces, so the count above legitimately stays 5. The literal-argument
+    // form `maybeOpen(e.composedPath()[0] ?? null)` is therefore RETIRED: keeping it would have
+    // forced a second `composedPath()[0]` (count 6) purely to satisfy a pin — the tripwire firing
+    // on a real shape change, not a weakening. The anchor still proves BOTH surfaces are wired to
+    // the RETARGETED node (an `e.target` regression re-blinds shadow-DOM checkouts) and that the
+    // login dropdown is still driven first.
+    expect(ct).toMatch(/"focusin",[\s\S]{0,160}?maybeOpen\(t\)[\s\S]{0,80}?maybeCardChip\(t\)/);
     expect(ct).toMatch(/"input",[\s\S]{0,120}?e\.composedPath\(\)\[0\] \?\? e\.target/);
     expect(ct).toMatch(/"keydown",[\s\S]{0,120}?e\.composedPath\(\)\[0\] \?\? e\.target/);
     expect(ct).toMatch(/"click",[\s\S]{0,200}?e\.composedPath\(\)\[0\]/);
@@ -495,5 +504,213 @@ describe("Tier-3 card autofill pins (design 2026-07-23-…-tier3.md §7) — V1�
     expect(handler).toContain("getBadgeText({ tabId })");
     expect(handler).toContain('cur === CARD_BADGE_TEXT ? chrome.action.setBadgeText({ tabId, text: "" })');
     expect(handler).toContain("delete st.cardForms");
+  });
+});
+
+describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-data, [A4]/[A5] anchors", () => {
+  const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+  const cu = readFileSync(extensionSrc + "content-ui.ts", "utf-8");
+  const ms = readFileSync(extensionSrc + "messages.ts", "utf-8");
+
+  const spanOf = (src: string, from: string, to: string): string => {
+    const a = src.indexOf(from);
+    const b = src.indexOf(to);
+    expect(a, `span start missing: ${from}`).toBeGreaterThan(-1);
+    expect(b, `span end missing/out of order: ${to}`).toBeGreaterThan(a);
+    return src.slice(a, b);
+  };
+
+  it("[S7] the two chip messages carry NO VALUES — exact request literals, boolean-only responses", () => {
+    // [A2]: a page-controlled member (host/kinds/frameId) is the shape already struck once. The
+    // request literals must stay MEMBERLESS, so adding one is a contract edit a reviewer sees.
+    expect(ms).toContain('{ type: "cardChipOffer" }');
+    expect(ms).toContain('{ type: "openPopupForCards" }');
+    // The Res branches admit no `string` type — no origin echo, no item name, no masked identity.
+    expect(ms).toMatch(/T extends "cardChipOffer"\s*\?\s*\{ fillable: boolean; locked: boolean \}/);
+    expect(ms).toMatch(/T extends "openPopupForCards"\s*\?\s*\{ opened: boolean \}/);
+    // [S4b] the repair nudge rides the typed wire (a rename on one side is a silent no-op).
+    expect(ms).toContain('{ type: "reportPageInfo" }');
+    expect(bg).toContain('{ type: "reportPageInfo" }');
+  });
+
+  it("[C2] cardChipOffer is PASSIVE (a focus loop must not defer the idle autolock); the click is NOT", () => {
+    // [K13]: page script can fire *trusted* focus at frame rate, so the offer stream is page-driven
+    // traffic, not user activity. `openPopupForCards` rides a real isTrusted click and stays out.
+    const set = bg.match(/const PASSIVE_MSGS = new Set<Req\["type"\]>\(\[([^\]]*)\]\)/)?.[1] ?? "";
+    expect(set.length, "PASSIVE_MSGS literal must exist").toBeGreaterThan(0);
+    expect(set).toContain('"cardChipOffer"');
+    expect(set).not.toContain("openPopupForCards");
+  });
+
+  it("[S4a] the pageInfo topOrigin write PERSISTS (regression pin for the shipped V4 badge bug)", () => {
+    // Shipped defect: the write lived only in SW memory, so it died with the ~30 s MV3 idle-death —
+    // and `pageInfo` fires ONCE at content init, so nothing rewrote it and the card discovery dot
+    // silently stopped appearing. Every other TabState mutation persists; so must this one.
+    const pageInfo = spanOf(bg, 'case "pageInfo": {', 'case "updateStatus":');
+    const write = pageInfo.indexOf("st.topOrigin = sender.origin;");
+    const persist = pageInfo.indexOf("persistTabs();");
+    expect(write, "the pageInfo topOrigin write must exist").toBeGreaterThan(-1);
+    expect(persist, "the topOrigin write must be followed by persistTabs()").toBeGreaterThan(write);
+    // The badge repaint stays — the record and the paint are one unit.
+    expect(pageInfo).toContain("void refreshTabBadge(tabId);");
+  });
+
+  it("[S2] a top-level nav marks the tab stale SYNCHRONOUSLY — before the async topOrigin erase", () => {
+    // The erase can only run after `await ensureLoaded()`; between navigation-start and that
+    // microtask the map still holds the PREVIOUS document's top origin, which is exactly what the
+    // chip gate compares `sender.origin` against. The marker is added beside `cardGrants.delete`
+    // (pre-await) and released in a `finally` so a failed hydrate can't blind the tab forever.
+    expect(bg).toContain("const topOriginPendingClear = new Set<number>();");
+    const handler =
+      bg.match(/onUpdated\.addListener\(\(tabId, changeInfo\) => \{\s*if \(changeInfo\.status !== "loading"\) return;[\s\S]*?\n\}\);/)?.[0] ?? "";
+    expect(handler.length, "the status===loading card-clear handler must exist").toBeGreaterThan(0);
+    expect(handler).toMatch(/cardGrants\.delete\(tabId\);[\s\S]{0,400}?topOriginPendingClear\.add\(tabId\);[\s\S]*?await ensureLoaded\(\)/);
+    expect(handler).toMatch(/finally \{[\s\S]{0,400}?topOriginPendingClear\.delete\(tabId\);/);
+  });
+
+  it("[S8]/[S1]/[S3] the cardChipOffer gate: no tab URL, no topOrigin() read, strict frame 0, no vault condition", () => {
+    // PLACEMENT: the handler lives inside the refreshTabBadge → "Popup ONLY" span so the shipped
+    // [V4] negatives cover it too; these are the gate's OWN pins (the [A4] pin is scoped to the
+    // onUpdated handler and [V4] to refreshTabBadge — neither would catch a brand-new handler, and
+    // a tab-URL read is the exact defect class the Tier-3 review-fold caught in the badge: it works
+    // on broad-grant installs and silently fails on per-site grants).
+    const gate = spanOf(bg, "async function cardChipOffer(", "/** C1 §C4");
+    expect(gate).not.toMatch(/tab\.url/);
+    expect(gate).not.toContain("topOrigin("); // `topOriginPendingClear` has no paren — the real read does
+    // [S1] STRICTLY frameId 0. The shipped badge's `frameId === undefined || frameId === 0`
+    // disjunct is a fail-OPEN admission — tolerable for a badge repaint, never for a per-frame
+    // render decision. Reproducing it here must red this pin.
+    expect(gate).toContain('typeof frameId !== "number" || frameId !== 0');
+    expect(gate, "the gate must not inherit the badge's fail-open frameId disjunct").not.toContain("frameId === undefined ||");
+    // The origin comparison is browser-set on BOTH sides.
+    expect(gate).toContain("sender.origin !== top");
+    // [S2] mid-nav tabs are refused.
+    expect(gate).toContain("topOriginPendingClear.has(tabId)");
+    // [S3] NO vault condition on `fillable` — a chip whose presence tracked "vault holds ≥1 card"
+    // (or unlock state) would turn an elementFromPoint hit-test into a live vault-state monitor.
+    // `locked` is reported separately as the copy selector, never as a presence gate.
+    expect(gate, "fillable must carry no vault condition").not.toContain("session.items");
+    expect(gate).toContain("const locked = session === null;");
+    // [S-rate] + [S4b]: the gate is throttled, and a MISSING record repairs (never a refusal —
+    // a hostile frame must not be able to retry a "no" into a "yes").
+    expect(gate).toContain("CHIP_OFFER_MIN_GAP_MS");
+    expect(gate).toMatch(/if \(top === undefined \|\| !hasForm\) \{[\s\S]{0,200}?repairPageRecords\(tabId, now\);/);
+    // Re-scoped (review #7): the repair's rescan is now FRAME-0 SCOPED, not the tab-wide
+    // broadcast. The wide form messaged every frame incl. cross-origin ones, each doing a full
+    // document + shadow-root scan — a top frame that deletes its own registry entry could drive
+    // that as a cross-origin CPU amplifier, and the chip only ever needs frame 0's record.
+    expect(bg).toMatch(
+      /function repairPageRecords\([\s\S]{0,900}?CHIP_REPAIR_MIN_GAP_MS[\s\S]{0,1200}?rescanCardForms[\s\S]{0,200}?\{ frameId: 0 \}/,
+    );
+    expect(bg, "the repair must not tab-broadcast the rescan").not.toMatch(
+      /function repairPageRecords\([\s\S]{0,1400}?broadcastRescanCardForms\(/,
+    );
+    expect(bg).toContain('chrome.tabs.sendMessage(tabId, msg, { frameId: 0 })');
+  });
+
+  it("[C4] openPopupForCards ATTEMPTS the one API and answers honestly — never tabs.create, never a pre-mint", () => {
+    const act = spanOf(bg, "async function openPopupForCards(", "/** Popup ONLY:");
+    // FORBIDDEN: opening popup.html as a tab/window — the popup computes offers against the ACTIVE
+    // tab and would see itself.
+    expect(act).not.toMatch(/tabs\.create|windows\.create/);
+    expect(act).toContain("openPopup");
+    // [K14]: an honest `{opened}` needs the RESULT, so G4's fire-and-forget shape is not reusable.
+    expect(act).toMatch(/return \{ opened: false \}/);
+    expect(act).toMatch(/return \{ opened: true \}/);
+    // [S9]: openPopup targets the FOCUSED window's active tab — a click from a tab that is no
+    // longer that tab would open trusted chrome pointed at a different origin than the user clicked.
+    expect(act).toContain("sender.tab?.active !== true");
+    expect(act).toContain("chrome.tabs.query({ active: true, currentWindow: true })");
+    // [A5]: the click mints nothing, pre-selects nothing, enumerates nothing — the card grant stays
+    // a popup-only mint, and no tab URL is read ([A4]).
+    expect(act, "the chip click must not touch the grant store").not.toContain("cardGrants");
+    expect(act, "the chip click must not enumerate the vault").not.toContain("session.items");
+    expect(act, "the chip click must not reach an item doc").not.toMatch(/\bdoc\b/);
+    expect(act).not.toMatch(/tab\.url/);
+  });
+
+  it("[K6] exactly ONE attachShadow call site in content-ui.ts — isOwnUiHost is an IDENTITY test", () => {
+    // The chip renders into ui()'s EXISTING closed root. A SECOND host would be pierced by
+    // chrome.dom.openOrClosedShadowRoot, join `shadowRoots`, get an observer, and — since
+    // OBSERVE_OPTS filters class/style/hidden — turn every re-anchor `style` write into an observed
+    // mutation: the [U16] self-observation loop, worse. If a second host is ever required,
+    // isOwnUiHost becomes a Set test IN THE SAME COMMIT and this pin moves with it.
+    expect(cu.match(/attachShadow\(/g)).toHaveLength(1);
+  });
+
+  it("[S10] no andvari in-page surface may EVER contain a password input, in any state or path", () => {
+    // The structural bound on every habituation argument: the chip may teach "in-page andvari UI
+    // exists"; it must never be able to teach "andvari asks for the master password in-page".
+    // Any quoting form (attribute or property literal); `type === "password"` comparisons are not
+    // matched (no assignment/colon), so field-skipping logic stays legal.
+    expect(cu, "content-ui.ts must contain no password input").not.toMatch(/type\s*[=:]\s*["'`]?password/i);
+  });
+
+  it("[C1] the chip surface is ZERO-DATA — one boolean in, string literals out", () => {
+    // The chip's render input is `{ locked: boolean }` and NOTHING else: no card identity, no item
+    // name, no count, no origin. The span is the whole surface (show → close).
+    expect(cu).toMatch(/function showCardChip\([\s\S]{0,200}?state: \{ locked: boolean \}/);
+    const chip = spanOf(cu, "function showCardChip(", "function closeCardChip(");
+    for (const bad of ["MatchItem", "CardItem", "subtitle", "cvv", "expiry", "postal", "brand"]) {
+      expect(chip, `chip surface references ${bad}`).not.toMatch(new RegExp(bad, "i"));
+    }
+    // `number` is BOTH a card field and a TS primitive: strip TYPE positions first so the pin fires
+    // on `values.number` / `card.number` and never on the [K11] geometry's arithmetic signatures.
+    const chipData = chip.replace(/:\s*number\b/g, ": <t>").replace(/\bas number\b/g, "as <t>").replace(/<number\b/g, "<t");
+    expect(chipData, "chip surface references a card number").not.toMatch(/\bnumber\b/i);
+    // …and it reads no state member other than `locked` (the copy selector).
+    expect(chip.match(/state\.(\w+)/g) ?? [], "chip reads a state member other than locked").toEqual(
+      (chip.match(/state\.(\w+)/g) ?? []).filter((m) => m === "state.locked"),
+    );
+    // Review #4: the labels must be STRING LITERALS. A template literal in this span is the one
+    // shape that could interpolate a value into page-adjacent UI without tripping any pin above.
+    expect(chip, "chip surface builds text with a template literal").not.toMatch(/`/);
+  });
+
+  it("[S3] the chip box is state-INDEPENDENT — a fixed width/height, no intrinsic sizing", () => {
+    // Review #2: the fixed box IS the hit-test defence. `document.elementFromPoint` retargets to
+    // our closed-shadow host, so a page can probe the chip's rect; if the locked and unlocked
+    // copies produced different boxes, that rect would encode LIVE VAULT LOCK STATE — and a page
+    // can force trusted focus at frame rate, turning it into a continuous monitor. Deleting the
+    // `width` line alone would restore content-sizing (flex default) with every other pin green.
+    const rule = spanOf(cu, ".chip {", ".chip:hover");
+    expect(rule, "the .chip box must declare an explicit width").toMatch(/width:\s*\d+px/);
+    expect(rule, "the .chip box must declare an explicit height (the locked copy wraps)").toMatch(/height:\s*\d+px/);
+    expect(rule, "intrinsic sizing re-opens the locked/unlocked width oracle").not.toMatch(
+      /(?:max|min|fit)-content|width:\s*auto/,
+    );
+  });
+
+  it("[S6]/[K-label] the chip copy is verbatim: the locked line names the TOOLBAR, and neither reads as a submit", () => {
+    // Review #3: the locked sentence teaches "unlocking happens in browser chrome, never in-page".
+    // Reverting it to "Unlock to fill card" would invert that teaching silently — the page controls
+    // the anchor position and could seat the REAL chip against a page-drawn master-password box.
+    const chip = spanOf(cu, "function showCardChip(", "function closeCardChip(");
+    expect(chip).toContain("andvari is locked — click the andvari toolbar icon");
+    expect(chip).toContain("Fill card with andvari");
+    // [K-label] neither label may match detect.ts's SUBMIT_TEXT_RX, or our own chip would read as
+    // a submit control to the G2 capture gesture path.
+    const submitRx = /sign.?in|log.?in|continue|next|submit|anmelden|einloggen/i;
+    for (const label of ["Fill card with andvari", "andvari is locked — click the andvari toolbar icon"]) {
+      expect(submitRx.test(label), `chip label "${label}" reads as a submit control`).toBe(false);
+    }
+  });
+
+  it("[S3-lock] a lock retains ONLY page-known facts — never `pending` (plaintext password)", () => {
+    // Review #1: a bare tabs.clear() made chip presence an EDGE-TRIGGER for "the vault just
+    // locked" — the moment a fake in-page unlock prompt is most credible. The retention is an
+    // ALLOW-LIST of fresh objects so a future TabState field is dropped by default.
+    const lock = spanOf(bg, "[S3-lock] Retain ONLY", "grants.clear()");
+    expect(lock).toMatch(/tabs\.set\(tabId, \{ topOrigin: st\.topOrigin, cardForms: st\.cardForms \}\)/);
+    // Strip comment lines before the negative: the rationale comment must be free to NAME the
+    // fields it forbids (that is the whole point of writing it down). The pin's subject is the
+    // CODE — a retention that actually copies `pending`/`lastUsername` across a lock.
+    const lockCode = lock
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+    for (const secret of ["pending", "lastUsername", "password"]) {
+      expect(lockCode, `the lock retention copies ${secret}`).not.toContain(secret);
+    }
   });
 });
