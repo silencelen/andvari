@@ -124,7 +124,11 @@ const CARD_BADGE_TEXT = "•";
 // (pageInfo) or the popup's 1 s status/TOTP poll would defer autolock forever while the user is
 // away. `status` is here too: merely leaving the popup open (it polls status every second for
 // liveness) is not activity; real interaction (matches/reveal/search/save/…) still re-arms.
-const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status", "cardFormInfo"]);
+// [K13]/[C2] `cardChipOffer` belongs here too: it is PAGE-triggered (a focusin the page can drive
+// with `HTMLElement.focus()`, which fires *trusted* events at frame rate), not user activity — a
+// focus loop would otherwise defer the idle autolock forever. `openPopupForCards` deliberately
+// stays OUT: it rides a real isTrusted click on our own chip, i.e. genuine user activity.
+const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status", "cardFormInfo", "cardChipOffer"]);
 
 /** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
  *  account.ts:40 parity). The unlock mapper carries it to the popup as code "identity_mismatch" —
@@ -264,6 +268,14 @@ const pendingCardSave = new Map<
   number,
   { host: string; number: string; expMonth: string; expYear: string; cardholderName: string; postalCode?: string; frameId: number; updatesItemId?: string; updatesItemName?: string }
 >();
+/** C1 [S2] — tabs whose recorded `topOrigin` is KNOWN-STALE but not yet erased. The onUpdated
+ *  "loading" handler can only `delete st.topOrigin` AFTER `await ensureLoaded()`, so between
+ *  navigation-start and that microtask the map still holds the PREVIOUS document's top origin —
+ *  and the chip gate compares `sender.origin` against exactly that. The tabId is added
+ *  SYNCHRONOUSLY in the listener (before the first await) and removed once the clear has landed;
+ *  the gate refuses any tab in the set. Memory-only: an SW death that loses the set also loses the
+ *  stale record it guards, so there is nothing to fail open into. */
+const topOriginPendingClear = new Set<number>();
 /** G2 [X2-A5]: per-tab capture dedupe key + timestamp, recorded SYNCHRONOUSLY before any await in
  *  captureCard so a click+submit double-fire of the SAME PAN can't both pass. Memory-only. */
 const cardCaptureDedupe = new Map<number, { key: string; t: number }>();
@@ -943,6 +955,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== "loading") return;
   cardGrants.delete(tabId);
+  // C1 [S2]: the topOrigin erase below is ASYNC (it must await ensureLoaded), so mark the tab
+  // stale SYNCHRONOUSLY — right here, before the first await — or the chip gate would spend that
+  // window comparing the NEW document's sender.origin against the OLD document's recorded origin.
+  topOriginPendingClear.add(tabId);
   pendingCardSave.delete(tabId); // [X2-A2b] a top-level nav voids any pending card save (PAN)
   cardCaptureDedupe.delete(tabId);
   // V4 (design §V4): a nav invalidates this tab's card registry (below), so a "card here" dot must
@@ -955,14 +971,21 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     .then((cur) => (cur === CARD_BADGE_TEXT ? chrome.action.setBadgeText({ tabId, text: "" }) : undefined))
     .catch(() => {});
   void (async () => {
-    await ensureLoaded();
-    const st = tabs.get(tabId);
-    if (st === undefined || (st.cardForms === undefined && st.topOrigin === undefined)) return; // nothing recorded — skip the storage write
-    if (st.cardForms !== undefined) delete st.cardForms;
-    // The badge's recorded top origin dies with the document too — a stale origin could paint
-    // the NEXT document's badge off the previous page's identity (review-fold, [A4]-adjacent).
-    if (st.topOrigin !== undefined) delete st.topOrigin;
-    persistTabs();
+    try {
+      await ensureLoaded();
+      const st = tabs.get(tabId);
+      if (st === undefined || (st.cardForms === undefined && st.topOrigin === undefined)) return; // nothing recorded — skip the storage write
+      if (st.cardForms !== undefined) delete st.cardForms;
+      // The badge's recorded top origin dies with the document too — a stale origin could paint
+      // the NEXT document's badge off the previous page's identity (review-fold, [A4]-adjacent).
+      if (st.topOrigin !== undefined) delete st.topOrigin;
+      persistTabs();
+    } finally {
+      // [S2] close the window in a `finally`: EVERY path above (the nothing-recorded early return,
+      // a rejected ensureLoaded) must reopen the gate, or one failed hydrate would blind the chip
+      // on that tab for the rest of the SW's life.
+      topOriginPendingClear.delete(tabId);
+    }
   })();
 });
 
@@ -971,6 +994,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   cardGrants.delete(tabId);
   pendingCardSave.delete(tabId); // [X2-A2b]
   cardCaptureDedupe.delete(tabId);
+  // C1 hygiene: the per-tab chip throttles + the [S2] stale marker die with the tab (a closed tab
+  // can never send again, so this is memory reclamation only — never a gate that opens).
+  topOriginPendingClear.delete(tabId);
+  chipOfferLast.delete(tabId);
+  chipRepairLast.delete(tabId);
   void (async () => {
     await ensureLoaded();
     if (tabs.delete(tabId)) persistTabs();
@@ -1099,7 +1127,21 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   clearPendingTotp(); // and any in-flight TOTP challenge (covers sign-out; a normal lock has none)
   autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
   clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
-  tabs.clear();
+  // [S3-lock] Retain ONLY the two PAGE-KNOWN facts across a lock; drop everything else.
+  // Rationale (chip review #1): a bare tabs.clear() erased `topOrigin`+`cardForms`, so the chip
+  // vanished at the instant of lock and returned a beat later with the locked copy — a page
+  // hit-testing elementFromPoint at ~4 Hz got a clean EDGE-TRIGGER for "the vault just locked",
+  // which is exactly when a page-drawn fake unlock prompt is most credible. Persisting the records
+  // ([S4a]) is what made that edge unambiguous, so this is the other half of that fix: the chip's
+  // presence must stay a function of page-known facts ONLY, in every session state.
+  // ALLOW-LIST, never a deny-list: each entry is a FRESH object carrying exactly the two fields
+  // the page already knows (its own top origin; which card-form kinds its own DOM has). Anything
+  // else — `pending` (PLAINTEXT PASSWORD) and `lastUsername` — is structurally absent rather than
+  // deleted, so a future TabState field is dropped by default instead of silently surviving.
+  for (const [tabId, st] of [...tabs]) {
+    if (st.topOrigin === undefined && st.cardForms === undefined) tabs.delete(tabId);
+    else tabs.set(tabId, { topOrigin: st.topOrigin, cardForms: st.cardForms });
+  }
   grants.clear();
   cardGrants.clear();
   pendingCardSave.clear(); // [X2-A2b] pending card saves hold the PAN — locked means no PAN at rest
@@ -1128,6 +1170,11 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
 
   api.setTokens(null, null); // the api forgets the pair; while armed it lives ONLY in QKEY.lockedTokens
   await chrome.storage.session.remove([SKEY, TKEY]); // full vault snapshot always erased — locked reports locked
+  // …then re-persist the [S3-lock] allow-listed remainder (top origin + card-form KINDS only — no
+  // pending, no password, no username). The blanket remove above is what guarantees the sensitive
+  // half never survives; this writes back only what the page already knows, so the chip's presence
+  // stays lock-invariant even after the SW idles out. Skipped when nothing survived.
+  if (tabs.size > 0) persistTabs();
   // Write the reason AFTER the [SKEY,TKEY] remove so it survives it (a notice only from the idle
   // path — web parity); manual/signout renders no reason line. storage.session clears on browser exit.
   if (reason === "idle") {
@@ -1505,6 +1552,14 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
           const st = tabs.get(tabId) ?? {};
           st.topOrigin = sender.origin;
           tabs.set(tabId, st);
+          // [S4a] SHIPPED-BUG FIX (design 2026-07-26 §C2): this write had NO persistTabs(), so the
+          // recorded top origin lived only in SW memory and died with the ~30 s MV3 idle-death —
+          // and `pageInfo` fires ONCE at content init, so nothing ever rewrote it. The V4 card
+          // discovery dot therefore stopped appearing after the first SW idle, silently. Every
+          // other TabState mutation persists; this one now does too (the map is already
+          // storage.session-backed — memory-backed browser storage, never disk, and an origin is
+          // trusted-chrome metadata, not a secret).
+          persistTabs();
         }
         void refreshTabBadge(tabId);
       }
@@ -1514,6 +1569,10 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return updateStatus();
     case "cardFormInfo":
       return cardFormInfo(msg, sender);
+    case "cardChipOffer":
+      return cardChipOffer(sender); // C1 §C2 — page-triggered, so it is in PASSIVE_MSGS ([K13])
+    case "openPopupForCards":
+      return openPopupForCards(sender); // C1 §C4 — a real isTrusted click, deliberately NOT passive
     case "cardFillOffers":
       return cardFillOffers(sender);
     case "fillCardFromPopup":
@@ -2381,6 +2440,139 @@ function refreshTabBadge(tabId: number): void {
   const loginCount = host !== "" ? matchesFor(host).length : 0;
   const text = loginCount > 0 ? String(loginCount) : top !== null && eligibleCardFrames(tabId, top).length > 0 ? CARD_BADGE_TEXT : "";
   chrome.action.setBadgeText({ tabId, text }).catch(() => {});
+}
+
+// ---- C1 in-page card chip (design 2026-07-26) ----
+// PLACEMENT IS LOAD-BEARING: both handlers sit INSIDE the refreshTabBadge → "Popup ONLY" pin span
+// on purpose, so that span's shipped [V4] negatives — no awaited top-origin helper call, no tab-URL
+// read — enforce the [A4] discipline on this new gate for free ([S8]). Moving either function out
+// of this span silently drops that enforcement; move the pin with it, in the same commit.
+// (Both forbidden literals are deliberately UNSPELLED above: the pin is a substring test over this
+// very span, so quoting them here would red it.)
+
+/** [S-rate] gate throttle: a page can drive TRUSTED focus at frame rate (`HTMLElement.focus()`),
+ *  so an unthrottled gate is a page-driven SW wake loop. One answered offer per tab per 250 ms;
+ *  the rest REPLAY the tab's last computed answer (review #3 — a hard refusal here silently lost
+ *  the chip when tabbing between the fields of one card form). */
+const CHIP_OFFER_MIN_GAP_MS = 250;
+/** [S4b] repair throttle — at most ONE repair burst per tab per 2 s. */
+const CHIP_REPAIR_MIN_GAP_MS = 2000;
+const chipOfferLast = new Map<number, { t: number; answer: Res<"cardChipOffer"> }>();
+const chipRepairLast = new Map<number, number>();
+
+/** [S4b] Repair on MISSING RECORD — the post-idle and post-lock states. `pageInfo` fires once at
+ *  content init and `rescanCardForms` re-sends only `cardFormInfo`, so once the recorded top origin
+ *  or the frame's card-form entry is gone (MV3 idle-death; doLock's `tabs.clear()` erase) NOTHING
+ *  would ever rewrite them and the chip would be permanently dark on that document. Both nudges are
+ *  permission-free and carry no payload: the frame answers with its own `pageInfo`/`cardFormInfo`
+ *  reports, i.e. the SAME browser-set-identity path the records came from originally. Fired ONLY on
+ *  a missing record — never on a refusal, or a hostile frame could retry a "no" into a "yes". */
+function repairPageRecords(tabId: number, now: number): void {
+  const last = chipRepairLast.get(tabId);
+  if (last !== undefined && now - last < CHIP_REPAIR_MIN_GAP_MS) return;
+  chipRepairLast.set(tabId, now);
+  const msg: TabMsg = { type: "reportPageInfo" };
+  // The `.catch` is load-bearing [T6]: sendMessage REJECTS when the tab has no receiver at all.
+  void chrome.tabs.sendMessage(tabId, msg, { frameId: 0 }).catch(() => {});
+  // Review #7: scope the rescan to frame 0 too. The broadcast form messages EVERY frame incl.
+  // cross-origin ones, each doing a full document + shadow-root card scan — a top frame that
+  // deletes its own registry entry could drive that as a cross-origin CPU amplifier. The chip
+  // only ever needs frame 0's record, so the wide broadcast bought nothing here.
+  const rescan: TabMsg = { type: "rescanCardForms" };
+  void chrome.tabs.sendMessage(tabId, rescan, { frameId: 0 }).catch(() => {});
+}
+
+/** C1 §C2 — may THIS frame render the offer chip? Answers TWO BOOLEANS and nothing else: no item
+ *  name, no count, no masked identity, no origin echo, no kinds (the request carries no members
+ *  either — [A2]/[S7]). Every input is browser-set; the page contributes nothing but the fact that
+ *  it focused one of its own fields. ALL of the following are required, each fail-closed ([A3]):
+ *
+ *   1. [S1] `sender.frameId` is a number and STRICTLY 0. Deliberately NOT the shipped badge's
+ *      `frameId === undefined || frameId === 0` disjunct — that is a fail-OPEN admission, tolerable
+ *      for a badge repaint, never for a per-frame render decision.
+ *   2. `sender.origin` is a usable string (non-empty, not the opaque "null").
+ *   3. the tab is not mid-navigation with a known-stale record ([S2] `topOriginPendingClear`).
+ *   4. `sender.origin` equals the RECORDED top-frame origin — browser-set on both sides, so this
+ *      gate reads no tab URL at all ([A4]). Consequence: a cross-origin PSP frame is never fillable
+ *      → no chip (the G1 exclusion; the popup carries the copy-instead explainer).
+ *   5. this frame has a recorded card form with at least one entry.
+ *
+ *  [S3] There is deliberately NO vault condition on `fillable` (the deleted "session holds ≥1 card"
+ *  test). `document.elementFromPoint()` retargets to our CLOSED shadow host, so a page can hit-test
+ *  the anchor's neighbourhood for the chip's presence and width; with vault state feeding presence,
+ *  and page script able to force trusted focus at frame rate, that is not a one-shot disclosure but
+ *  a CONTINUOUS vault-state monitor (a hostile merchant could detect the instant of unlock and time
+ *  a fake overlay to it). So chip presence is a function ONLY of facts the page already possesses,
+ *  `locked` rides separately as the copy selector, and the surface keeps ONE fixed width in both
+ *  states. Everything the chip can do is "open the popup" — the trusted surface it cannot draw. */
+async function cardChipOffer(sender: chrome.runtime.MessageSender): Promise<Res<"cardChipOffer">> {
+  const locked = session === null;
+  const no: Res<"cardChipOffer"> = { fillable: false, locked }; // the one refusal shape — never a third state
+  const tabId = sender.tab?.id;
+  const frameId = sender.frameId;
+  if (tabId === undefined || typeof frameId !== "number" || frameId !== 0) return no; // [S1] strict
+  if (typeof sender.origin !== "string" || sender.origin === "" || sender.origin === "null") return no;
+  const now = Date.now();
+  const last = chipOfferLast.get(tabId);
+  // [S-rate] Review #3: a throttled call REPLAYS the tab's last computed answer instead of
+  // refusing. A hard `no` here was silently losing the chip on ordinary use — tabbing
+  // expiry-month → expiry-year → CVV moves faster than the window, and the content script treats
+  // a refusal as final and never re-asks. Replay keeps the rate limit (no recompute, no repair
+  // round-trip) while ordinary field-to-field movement still shows the chip. A stale `locked` is
+  // harmless: the popup is the truth, and presence carries no vault state ([S3]).
+  if (last !== undefined && now - last.t < CHIP_OFFER_MIN_GAP_MS) return last.answer;
+  chipOfferLast.set(tabId, { t: now, answer: no }); // pessimistic until a positive verdict lands
+  if (topOriginPendingClear.has(tabId)) return no; // [S2] mid-nav: the recorded origin is the PREVIOUS document's
+  const st = tabs.get(tabId);
+  const top = st?.topOrigin;
+  const rec = st?.cardForms?.[frameId];
+  // The record's own `origin` is the same browser-set value this frame reported at scan time; an
+  // Array.isArray re-check keeps a mid-update/pre-[U14] persisted record fail-closed.
+  const hasForm = rec !== undefined && rec.origin === sender.origin && Array.isArray(rec.forms) && rec.forms.length > 0;
+  if (top === undefined || !hasForm) {
+    repairPageRecords(tabId, now); // [S4b] MISSING record (idle-death / post-lock erase) → repair, answer no
+    return no;
+  }
+  if (sender.origin !== top) return no; // a real cross-origin frame — a refusal, NOT a repair case
+  const yes: Res<"cardChipOffer"> = { fillable: true, locked };
+  chipOfferLast.set(tabId, { t: now, answer: yes }); // replayable for the throttle window
+  return yes;
+}
+
+/** C1 §C4 — the chip was clicked: ATTEMPT `chrome.action.openPopup()` and answer HONESTLY whether
+ *  it opened. [A5]: this handler mints nothing, pre-selects nothing and enumerates nothing — the
+ *  one card grant is still minted only by a click in the popup itself, so it must never reference
+ *  `cardGrants`, `session.items` or a `doc`. FORBIDDEN: `tabs.create`/`windows.create` of
+ *  popup.html — the popup computes its offers against the ACTIVE tab and would see itself.
+ *  [S9]: `openPopup()` targets the FOCUSED window's active tab, so a click delivered from a tab
+ *  that is no longer the focused window's active one would open trusted chrome pointed at a
+ *  DIFFERENT origin than the one the user clicked in — refuse instead ([A3] fail-closed on an
+ *  undefined/absent match). Reads no tab URL ([A4]).
+ *  [K14]: G4's `void …openPopup?.()?.catch(() => {})` line is NOT reusable — it discards the very
+ *  result this honest `{opened}` needs — and its gesture context is dead here regardless (`handle()`
+ *  awaits `ensureLoaded()` before dispatch, and no user activation crosses extension messaging).
+ *  Chrome 127+ needs none; FIREFOX 121+ historically REQUIRES an input handler, so there this call
+ *  is expected to REJECT and the content script's "open andvari from the toolbar" toast is the
+ *  PRIMARY path, not a fallback. Resolution is the only signal either engine gives — claim nothing
+ *  more from it. */
+async function openPopupForCards(sender: chrome.runtime.MessageSender): Promise<Res<"openPopupForCards">> {
+  const tabId = sender.tab?.id;
+  if (tabId === undefined || sender.tab?.active !== true) return { opened: false }; // [S9] pages only, and only the active one
+  // Review #6: frame-0 only, matching the offer gate's strict [S1]. Unreachable today (the chip
+  // renders only in frame 0), but this is the handler with the SIDE EFFECT — opening trusted
+  // chrome — and it must not be the one pair-member that fails open on frame identity.
+  if (sender.frameId !== 0) return { opened: false };
+  // …and that active tab must be the FOCUSED window's — the exact tab openPopup would land on.
+  const [current] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (current?.id === undefined || current.id !== tabId) return { opened: false };
+  const fn = (chrome.action as unknown as { openPopup?: () => Promise<unknown> }).openPopup;
+  if (typeof fn !== "function") return { opened: false }; // absent → honest false
+  try {
+    await fn.call(chrome.action);
+    return { opened: true }; // resolve ⇒ opened
+  } catch {
+    return { opened: false }; // reject ⇒ not opened (the toast names the toolbar)
+  }
 }
 
 /** Popup ONLY: is the active tab fillable, and to which origin? Fillable iff a recorded card

@@ -19,8 +19,8 @@ import type { MatchItem, PendingCardSave, PendingSave } from "./messages";
 const UI_CSS = `
 :host { all: initial; }
 
-.dropdown, .banner, .toast { all: initial; }
-.dropdown, .banner, .toast {
+.dropdown, .banner, .toast, .chip { all: initial; }
+.dropdown, .banner, .toast, .chip {
   --anv-bg: #1e1b15;
   --anv-bg-deep: #14120e;
   --anv-bg-input: #262119;
@@ -43,7 +43,7 @@ const UI_CSS = `
   --anv-shadow: 0 18px 50px -20px rgba(0, 0, 0, .7);
 }
 @media (prefers-color-scheme: light) {
-  .dropdown, .banner, .toast {
+  .dropdown, .banner, .toast, .chip {
     --anv-bg: #fbf8f1;
     --anv-bg-deep: #f4efe4;
     --anv-bg-input: #fff;
@@ -63,7 +63,7 @@ const UI_CSS = `
 }
 
 @keyframes anv-in { from { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .dropdown, .banner, .toast { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .dropdown, .banner, .toast, .chip { animation: none; } }
 
 /* a11y 6d: off-screen live-region carrier — visually hidden but in the AT tree (a closed
    shadow root still reaches AT). Toast text is mirrored here so it is spoken. */
@@ -195,6 +195,34 @@ button.ghost:disabled { opacity: .5; cursor: default; }
   animation: anv-in .16s ease-out;
 }
 .toast .sigil { color: var(--anv-gold); align-self: center; display: inline-flex; }
+
+/* C1 chip — [S3] ONE fixed width, identical in both states (rationale on showCardChip). This
+   block is inside a template literal esbuild does NOT minify: every byte ships to every page. */
+.chip {
+  position: fixed; z-index: 2147483647;
+  box-sizing: border-box;
+  width: 372px; max-width: calc(100vw - 16px);
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 7px 13px;
+  background: var(--anv-bg);
+  border: 1px solid var(--anv-edge-strong);
+  border-radius: 999px;
+  box-shadow: var(--anv-shadow);
+  color: var(--anv-ink);
+  font: 12.5px/1.4 var(--anv-sans);
+  cursor: pointer;
+  user-select: none;
+  /* Review #5: the locked sentence is the anti-phishing payload ("…click the andvari toolbar
+     icon"). With nowrap+ellipsis it truncated to "…click the andva…" under a user MINIMUM FONT
+     SIZE (14-16px is common for low-vision users), deleting the instruction. It wraps instead, on
+     a FIXED two-line height so the box stays byte-identical between the locked and unlocked
+     states — [S3]'s hit-test indistinguishability is a property of the BOX, not the text. */
+  height: 46px;
+  animation: anv-in .16s ease-out;
+}
+.chip:hover { border-color: var(--anv-gold); }
+.chip .sigil { color: var(--anv-gold); display: inline-flex; flex: none; }
+.chip .label { min-width: 0; overflow: hidden; }
 `;
 
 export interface DropdownState {
@@ -225,6 +253,16 @@ export function isOwnUiHost(el: Element): boolean {
 }
 let dropdownEl: HTMLElement | null = null;
 let anchorEl: HTMLElement | null = null;
+/** C1: the ONE live chip and its anchor — a module slot, cleared like closeDropdown. [K6] it
+ *  shares hostEl's single closed root: a SECOND attachShadow host would be pierced by
+ *  chrome.dom.openOrClosedShadowRoot, join content.ts's `shadowRoots`, get an observer, and —
+ *  since OBSERVE_OPTS filters on ["class","style","hidden"] — turn every re-anchor style write
+ *  into an observed mutation (isOwnUiHost is an IDENTITY test against the one hostEl). */
+let chipEl: HTMLElement | null = null;
+let chipAnchor: HTMLElement | null = null;
+/** [K7] one re-anchor per scroll burst — a getBoundingClientRect()+offsetWidth read per scroll
+ *  event is a forced layout on every frame of a momentum scroll. */
+let chipRafPending = false;
 let bannerEl: HTMLElement | null = null;
 let toastEl: HTMLElement | null = null;
 let toastTimer = 0;
@@ -287,6 +325,113 @@ function setActive(i: number): void {
   announceLive(`${rowLabel(cur.el)}, ${idx + 1} of ${n}`);
 }
 
+// ---- C1 in-page card chip (design 2026-07-26) ----
+// Declared ABOVE ui() (which forward-references it, exactly as it already forward-references
+// positionDropdown/closeDropdown) so that the pinned showCardChip→closeCardChip span is the
+// function body and nothing else: an indexOf-based span anchor would otherwise latch onto ui()'s
+// own closeCardChip() call and invert.
+
+/** C1: the field-anchored card affordance. It carries ZERO data — no card identity, no item name,
+ *  no count, no origin, and no "recognized"/"saved for this site" framing (cards are NOT uri-bound,
+ *  so the chip appears identically on a phishing checkout and on the real one; any copy implying
+ *  verification is a lie the extension cannot back). Its ONLY action is "open the popup" — which is
+ *  precisely why spoofing and clickjacking it buy an attacker nothing: the popup is trusted chrome
+ *  the page can neither draw, read, nor script.
+ *  [S3] `.chip` carries ONE fixed width, identical in both states and never intrinsically sized:
+ *  document.elementFromPoint() RETARGETS to our closed-shadow host, so a page can hit-test the
+ *  anchor's neighbourhood and, by scanning x-coordinates, read our width. A content-sized pill
+ *  would make locked/unlocked distinguishable — and since page script can force
+ *  HTMLElement.focus() (which fires TRUSTED focus events) at frame rate, that is not a one-shot
+ *  disclosure but a CONTINUOUS vault-state monitor: a hostile merchant could detect the instant
+ *  the user unlocks and time a fake overlay to it. The box is sized for the LONGER (locked)
+ *  sentence so it never ellipses away its anti-phishing payload; the short unlocked label centres
+ *  in the same box, and the max-width clamp is state-independent too. */
+export function showCardChip(anchor: HTMLElement, state: { locked: boolean }, handlers: { onActivate: () => void }): void {
+  const root = ui();
+  chipEl?.remove(); // one live chip at a time — the module slot, cleared like closeDropdown
+  chipAnchor = anchor;
+  const chip = document.createElement("div");
+  chip.className = "chip";
+  // [K10] role=button but NEVER tabbable: real focus stays in the page's own field (the dropdown's
+  // shipped discipline), so there is no tabindex and activation is mousedown + preventDefault.
+  chip.setAttribute("role", "button");
+  // [S6] both sentences are VERBATIM and load-bearing. The locked line mirrors the shipped
+  // locked-dropdown announcement and teaches that unlocking happens in browser chrome, NEVER
+  // in-page: "Unlock to fill card" teaches the opposite, and since the page controls the anchor
+  // position it could butt the REAL chip flush against a page-drawn master-password box.
+  // [K-label]: neither string matches detect.ts's SUBMIT_TEXT_RX — a label like "Continue with
+  // saved card" would turn our own chip into a G2 submit gesture.
+  const text = state.locked ? "andvari is locked — click the andvari toolbar icon" : "Fill card with andvari";
+  chip.append(sigilSpan(12), span("label", text));
+  // [S5] the listener binds to the CHIP inside the closed root, never to hostEl — hostEl is a
+  // page-reachable node, so a host-bound listener would fire on hostEl.click(). isTrusted first,
+  // matching every shipped activation path.
+  const activate = (e: Event): void => {
+    if (!e.isTrusted) return;
+    e.preventDefault(); // keep focus in the page field — the chip must never take it
+    closeCardChip(); // [K9] the surface goes before the action: the popup is about to cover the page
+    handlers.onActivate();
+  };
+  chip.addEventListener("mousedown", activate);
+  // Review #4: AT activation dispatches a CLICK, not a mousedown. Without this the chip is
+  // announced as a button to a screen-reader user who then has no way to trigger it. Same in-root
+  // element and same isTrusted gate, so [S5] is unchanged; the mousedown path already closed the
+  // surface, making this a no-op for pointer users (closeCardChip clears chipEl).
+  chip.addEventListener("click", activate);
+  root.appendChild(chip);
+  chipEl = chip;
+  positionChip();
+  announceLive(text); // focus never enters the chip — without this it is invisible to AT
+}
+
+/** Review #13: re-anchor a live chip from the content script's mutation tick — layout shifts that
+ *  fire neither scroll nor resize (inline validation inserted above the field) would otherwise
+ *  leave the fixed-position chip overlapping its own anchor. No-op when no chip is live. */
+export function repositionCardChip(): void {
+  if (chipEl) positionChip();
+}
+
+export function closeCardChip(): void {
+  chipEl?.remove();
+  chipEl = null;
+  chipAnchor = null;
+}
+
+/** [K3]/[K4] the chip's Escape sentinel is CHIP-PRIVATE state owned by content.ts; this is its
+ *  read-only liveness probe (same contract shape as dropdownWillConsumeEnter). */
+export function cardChipIsOpen(): boolean {
+  return chipEl !== null;
+}
+
+/** [K11] a pill, not the dropdown: anchored to the field's inline-END edge (inline-START under
+ *  `direction: rtl`), clamped into the viewport with an 8 px gutter, and preferring ABOVE the
+ *  field — below collides with both the browser's native autofill list and the site's own
+ *  suggestion popup. Deliberately does NOT inherit positionDropdown's min-width:260px/left-clamp:
+ *  the width is FIXED in CSS ([S3]) and only read back here, never derived from the anchor.
+ *  [K8]: an anchor that left the DOM, or scrolled out of the viewport, ends the chip — a fixed
+ *  pill floating over an off-screen field is worse than no chip at all. */
+function positionChip(): void {
+  if (!chipEl || !chipAnchor) return;
+  if (!chipAnchor.isConnected) {
+    closeCardChip();
+    return;
+  }
+  const r = chipAnchor.getBoundingClientRect();
+  if (r.bottom < 0 || r.top > window.innerHeight || r.right < 0 || r.left > window.innerWidth) {
+    closeCardChip();
+    return;
+  }
+  const w = chipEl.offsetWidth;
+  const edge = getComputedStyle(chipAnchor).direction === "rtl" ? r.left : r.right - w;
+  chipEl.style.left = `${Math.min(Math.max(edge, 8), Math.max(8, window.innerWidth - w - 8))}px`;
+  // Review #12: the below-fallback needs its own clamp — a tall or near-bottom anchor would
+  // otherwise place the chip partly off-screen, where it reads as broken rather than absent.
+  const h = chipEl.offsetHeight;
+  const above = r.top - 4 - h;
+  const top = above > 8 ? above : r.bottom + 4;
+  chipEl.style.top = `${Math.min(Math.max(top, 8), Math.max(8, window.innerHeight - h - 8))}px`;
+}
+
 function ui(): ShadowRoot {
   if (shadow) return shadow;
   hostEl = document.createElement("div");
@@ -308,24 +453,51 @@ function ui(): ShadowRoot {
 
   // Outside-close: composedPath() at document level is truncated at the CLOSED shadow
   // boundary, so inner nodes never appear in it — test for the HOST element (which is in
-  // the retargeted path for any click inside our UI). The anchor is exempt so clicking the
-  // field again refreshes rather than close-then-reopen.
+  // the retargeted path for any click inside our UI). Each surface's own anchor is exempt so
+  // clicking the field again refreshes it rather than close-then-reopen.
+  // [K9] that hostEl test is necessarily SHARED: closed-root truncation makes a chip click and a
+  // dropdown click indistinguishable here, so this handler can only ever say "inside our UI" —
+  // each surface dismisses itself from its own in-root handler.
   document.addEventListener("mousedown", (e) => {
-    if (!dropdownEl || !e.isTrusted) return;
+    if ((!dropdownEl && !chipEl) || !e.isTrusted) return;
     const path = e.composedPath();
     if (hostEl && path.includes(hostEl)) return;
-    if (anchorEl && path.includes(anchorEl)) return;
-    closeDropdown();
+    if (dropdownEl && !(anchorEl && path.includes(anchorEl))) closeDropdown();
+    if (chipEl && !(chipAnchor && path.includes(chipAnchor))) closeCardChip();
   });
   // Cut N (v2 #18): keyboard operability, on document-level CAPTURE so the keys are seen while
   // focus sits in the page's own input (or in our shadow search box, whose stopPropagation runs
-  // later at target phase). Keys are swallowed ONLY while the dropdown is open — and Enter only
-  // while a row is active, so a plain Enter still submits the page's form. isTrusted-gated like
+  // later at target phase). Keys are swallowed ONLY while a surface is live — Escape while either
+  // is, everything else only for the dropdown, and Enter only while a row is active, so a plain
+  // Enter still submits the page's form. isTrusted-gated like
   // every activation path here (anti-spoof: a page-synthesized KeyboardEvent cannot fill).
   document.addEventListener(
     "keydown",
     (e) => {
-      if (!dropdownEl || !e.isTrusted) return;
+      if ((!dropdownEl && !chipEl) || !e.isTrusted) return;
+      // [K9] Escape is the ONE key both surfaces answer (hoisted so a co-live chip on another
+      // anchor is not left floating when the dropdown consumes the key). Everything past the
+      // chip-only early return reads or writes DROPDOWN state — decisively closeDropdown() and
+      // suppressOpenUntil, which [K4] forbids the chip from touching: an Esc'd chip must never
+      // gag a real login dropdown for 400 ms.
+      if (e.key === "Escape") {
+        closeCardChip();
+        // Review #2: a chip-only Escape must NOT be consumed. The chip renders on every card-field
+        // focus, so swallowing the key would eat the first Escape on any checkout whose card form
+        // lives in a modal/drawer — the page never sees it and the modal never closes. Only the
+        // DROPDOWN (a focus-trapping surface with its own row state) earns preventDefault.
+        if (!dropdownEl) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const origin = anchorEl;
+        closeDropdown();
+        // Return focus to the origin field; the suppression window keeps the trusted focusin
+        // this fires (content.ts focusin → openDropdown) from instantly reopening.
+        suppressOpenUntil = Date.now() + 400;
+        if (origin?.isConnected) origin.focus();
+        return;
+      }
+      if (!dropdownEl) return; // a lone chip owns no other key — never trap the page's keys
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         if (listRows.length === 0) return;
         e.preventDefault();
@@ -337,15 +509,6 @@ function ui(): ShadowRoot {
         e.preventDefault();
         e.stopPropagation();
         listRows[activeIdx]?.act();
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        const origin = anchorEl;
-        closeDropdown();
-        // Return focus to the origin field; the suppression window keeps the trusted focusin
-        // this fires (content.ts focusin → openDropdown) from instantly reopening.
-        suppressOpenUntil = Date.now() + 400;
-        if (origin?.isConnected) origin.focus();
       } else if (e.key === "Tab") {
         closeDropdown(); // never trap — the Tab itself proceeds (a login-field target reopens naturally)
       }
@@ -354,6 +517,16 @@ function ui(): ShadowRoot {
   );
   const reanchor = (): void => {
     if (dropdownEl) positionDropdown();
+    // [K7] the chip joins THIS handler (never its own listener pair), coalesced into ONE rAF per
+    // burst. Without a re-anchor a position:fixed chip stays pinned to the viewport while the
+    // field scrolls away — worse than not showing it at all.
+    if (chipEl && !chipRafPending) {
+      chipRafPending = true;
+      requestAnimationFrame(() => {
+        chipRafPending = false;
+        if (chipEl) positionChip();
+      });
+    }
   };
   document.addEventListener("scroll", reanchor, { capture: true, passive: true });
   window.addEventListener("resize", reanchor, { passive: true });

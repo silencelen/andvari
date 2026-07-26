@@ -21,6 +21,13 @@
  *    CVV. The SW gates it same-origin (`sender.origin === topOrigin(tabId)`), holds the PAN in a
  *    module-scope Map (never a persisted `TabState`, so a lock never writes it at rest), and answers
  *    the MASKED PendingCardSave (no number). Resolving it seals a card doc at CARD_FORMAT_VERSION.
+ *  - The C1 in-page card chip messages (`cardChipOffer`/`openPopupForCards`, design
+ *    2026-07-26) carry NO VALUES IN EITHER DIRECTION. The requests have no members at all
+ *    ([A2]/[S7]: a page-controlled member is the shape already struck once — every input the SW's
+ *    gate reads is browser-set `sender.origin`/`sender.frameId`/`sender.tab.id`), and the answers
+ *    are booleans only — no item name, no count, no masked identity, no origin echo, no kinds.
+ *    The chip is a SIGNPOST: it mints nothing, and every card value still leaves the SW only
+ *    through the popup-minted one-shot `revealCardForFill` ([A5] unchanged).
  *  - Locked state is FIRST-CLASS: list calls answer `{locked:true}` rather than
  *    pretending "no matches", so the UI can render an honest locked state.
  */
@@ -327,6 +334,23 @@ export type Req =
    *  `fields: CardFieldKind[]` — a design-authorized breach of the additive rule; the SW
    *  discards any persisted pre-update `{fields}` record on read (fail-closed, rescan restores). */
   | { type: "cardFormInfo"; forms: CardFieldKind[][] }
+  /** Content (C1 chip, design 2026-07-26 §C2): may THIS frame render the offer chip? EXACTLY this
+   *  literal — **no `host`, no `kinds`, no `frameId` member** ([A2]/[S7]). A page-controlled member
+   *  would be an offer-manufacture input; the gate reads only browser-set sender fields (origin ===
+   *  the recorded top-frame origin, frameId STRICTLY 0 — [S1] never the badge's fail-OPEN
+   *  `frameId === undefined ||` disjunct). Answers two booleans, nothing else. [S3]: `fillable`
+   *  carries NO vault condition — chip presence is a function only of facts the page already has,
+   *  or a hit-test on the closed-shadow host would become a live vault-state monitor. [K13]: joins
+   *  PASSIVE_MSGS — page script can fire *trusted* focus at frame rate, so this stream is not user
+   *  activity and must never defer the idle autolock. */
+  | { type: "cardChipOffer" }
+  /** Content (C1 chip, §C4): the chip was clicked under a trusted gesture → the SW ATTEMPTS
+   *  `chrome.action.openPopup()`. Mints nothing, selects nothing, enumerates nothing ([A5] — the
+   *  card grant stays a popup-only mint); FORBIDDEN: `tabs.create`/`windows.create` of popup.html.
+   *  `opened` is the honest resolution of that ONE call and claims nothing more ([K14]: on Firefox
+   *  it is EXPECTED to reject, and the content script's toolbar toast is the primary path there).
+   *  NON-passive: it rides a real isTrusted click, i.e. genuine user activity. */
+  | { type: "openPopupForCards" }
   /** Popup ONLY (the SW refuses tab senders): may the Cards group show a Fill button for the
    *  active tab, and to which origin? `fillable` iff a recorded card form's origin equals the
    *  tab's CURRENT top-level origin (SW-derived from `tab.url` under `activeTab`, [A4]). */
@@ -454,7 +478,15 @@ export type Res<T extends Req["type"]> = T extends "status"
                                               ? { ok: boolean; fields?: CardFillFields; error?: string }
                                               : T extends "purgeServerData"
                                                 ? { ok: boolean }
-                                                : never;
+                                                : /** C1 §C2 [S7]: the branch matches ONLY these two booleans — no `string` type is
+                                                   *  admitted here, so an "origin"/"name"/"subtitle" field can never be added to the
+                                                   *  chip's answer without editing this contract line first. */
+                                                  T extends "cardChipOffer"
+                                                  ? { fillable: boolean; locked: boolean }
+                                                  : /** C1 §C4: the honest resolution of the ONE openPopup attempt — nothing else. */
+                                                    T extends "openPopupForCards"
+                                                    ? { opened: boolean }
+                                                    : never;
 
 /** SW → content (chrome.tabs.sendMessage): fill this item now (popup-granted). The
  *  content script performs its normal `reveal` round-trip with its own host — the SW
@@ -475,7 +507,14 @@ export type TabMsg =
    *  FIRST — bfcache restores JS state on a back-navigation, so without the reset the rescan's
    *  own report is swallowed by its own sig guard and the offer is lost for the document's life.
    *  Answers `{ok:true}` (delivery signal only — the report rides its own cardFormInfo). */
-  | { type: "rescanCardForms" };
+  | { type: "rescanCardForms" }
+  /** SW → content frame 0 (C1 [S4b] repair nudge): re-send `pageInfo` NOW. `pageInfo` fires once at
+   *  content init, so the SW's recorded `topOrigin` — the chip gate's and the V4 badge's ONLY
+   *  origin source — is unrecoverable after an MV3 idle-death or a lock's `tabs.clear()` erase.
+   *  Sent (rate-limited, ≤1/tab/2 s) exactly when the gate fails for a MISSING record, never on a
+   *  refusal: a real cross-origin/stale-origin answer must not be retried into existence. Carries
+   *  no payload and needs no answer — the repair rides the frame's own `pageInfo` round-trip. */
+  | { type: "reportPageInfo" };
 
 /** Tier 2 §2 [U11] — the SW's grant-target choice over the eligible registry entries, factored
  *  PURE and exported here (background.ts is chrome-bound at module eval and has no test harness,
