@@ -7,19 +7,45 @@ import java.util.concurrent.ConcurrentHashMap
  * — one process, one server; that's the whole deployment.
  */
 class RateLimiter {
-    private class Window(var windowStart: Long, var count: Int)
+    private class Window(var windowStart: Long, var count: Int, val windowMs: Long)
     private val windows = ConcurrentHashMap<String, Window>()
+    private val callsSincePrune = java.util.concurrent.atomic.AtomicInteger()
 
     fun allow(key: String, limit: Int, windowMs: Long): Boolean {
+        prune()
         val now = now()
         val w = windows.compute(key) { _, existing ->
-            if (existing == null || now - existing.windowStart >= windowMs) Window(now, 0) else existing
+            if (existing == null || now - existing.windowStart >= windowMs) Window(now, 0, windowMs) else existing
         }!!
         synchronized(w) {
             if (w.count >= limit) return false
             w.count++
             return true
         }
+    }
+
+    /**
+     * Amortized eviction (polish audit 2026-07-27 bug-server--3): the keys include per-IP buckets
+     * on public-reachable routes, so the key space is attacker-expandable (a botnet, one IPv6 /64)
+     * and the map would otherwise grow for the process lifetime — the same reasoning that gave
+     * sibling [EmailBackoff] its prune (review 2026-07-16 D2). An EXPIRED window is semantically
+     * absent already ([allow] resets it in place), so dropping one changes no admission decision;
+     * the worst race (removeIf vs a concurrent same-key reset) fails open for at most one window —
+     * the trade EmailBackoff documents. Between sweeps at most [PRUNE_EVERY] entries can be
+     * inserted, so the map stays bounded by live-window keys + PRUNE_EVERY.
+     */
+    private fun prune() {
+        if (callsSincePrune.incrementAndGet() < PRUNE_EVERY) return
+        callsSincePrune.set(0)
+        val now = now()
+        windows.entries.removeIf { now - it.value.windowStart >= it.value.windowMs }
+    }
+
+    /** Test hook: live entry count (RateLimiterTest pins the eviction bound). */
+    internal fun size(): Int = windows.size
+
+    internal companion object {
+        const val PRUNE_EVERY = 4096
     }
 }
 

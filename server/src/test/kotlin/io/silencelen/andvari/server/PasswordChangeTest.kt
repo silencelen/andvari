@@ -104,4 +104,33 @@ class PasswordChangeTest : P4TestSupport() {
         }
         assertEquals(HttpStatusCode.Unauthorized, old.status)
     }
+
+    /**
+     * bug-server--5: the route carries a per-user 5/min bucket — every attempt costs the server a
+     * memory-hard argon2 verify (64 MiB under production params) plus an audit row per miss, so a
+     * wrong-currentAuthKey loop must hit 429, exactly like its recovery-route siblings.
+     */
+    @Test
+    fun passwordChange_wrongKeyLoop_hitsRateBucket() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val vc = VirtualClient("pwrate@x.com", "rate bucket password one", fast = true)
+        client.register(vc, bootstrapToken)
+        val change = vc.buildPasswordChange("rotated password value 3")
+
+        // The first 5 attempts inside the window reach the verifier (401 on a wrong key)…
+        repeat(5) {
+            val bad = client.put("/api/v1/account/password") {
+                contentType(ContentType.Application.Json); authed(vc)
+                setBody(change.copy(currentAuthKey = Bytes.toB64(crypto.randomBytes(32))))
+            }
+            assertEquals(HttpStatusCode.Unauthorized, bad.status, bad.bodyAsText())
+        }
+        // …the 6th is refused up front — no argon2 work, no audit row growth.
+        val limited = client.put("/api/v1/account/password") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(change)
+        }
+        assertEquals(HttpStatusCode.TooManyRequests, limited.status, limited.bodyAsText())
+    }
 }

@@ -33,6 +33,10 @@ class ResyncRequired : Exception()
 class Conflict(val reason: String) : Exception()
 class Gone(val reason: String) : Exception()
 
+// Upstream (HIBP relay) failure → 502: distinct from a client-input 400 so "HIBP is down"
+// never reads as "your prefix was malformed" (polish audit 2026-07-27 bug-server--2).
+class BadGateway(val reason: String) : Exception()
+
 /** X-Andvari-Client: <platform>/<semver>; used for version pins + audit. */
 data class ClientId(val platform: String, val version: String)
 

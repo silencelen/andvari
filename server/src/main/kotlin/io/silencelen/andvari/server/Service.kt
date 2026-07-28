@@ -110,8 +110,32 @@ class Service(
      * stays admin-settable (household knob) under the env floor, tighten-only: the env can forbid,
      * never force-allow.
      */
+    // The decoded STORED policy, cached (polish audit 2026-07-27 quality-perf--7): policy() rides
+    // the hottest paths — twice per issueSession via the TTL getters, once per attachment-bearing
+    // mutation inside the push tx — and the policies row changes only through setPolicy, which
+    // invalidates it. Single process, so no cross-node invalidation concern; the per-call copy()
+    // overlay below stays (serverTime must be fresh on every read).
+    //
+    // The Db lock is the whole ordering story (parity--2). Read AND publish happen inside ONE hold
+    // of it, and setPolicy invalidates inside its tx — i.e. under that same lock. Publishing outside
+    // it was a permanent-poison race: the decode could straddle a concurrent setPolicy, so the
+    // pre-write value landed in the cache AFTER the invalidation and, since nothing else ever
+    // expires this field, the server then served a stale ClientPolicy for the rest of its life.
+    // The lock is reentrant, so the nested repo read below — and policy() called from INSIDE the
+    // push tx (attachment quota) — are both fine.
+    @Volatile private var cachedStoredPolicy: ClientPolicy? = null
+
     fun policy(publicOrigin: Boolean = false): ClientPolicy {
-        val stored = repo.policyJson()?.let { json.decodeFromString(ClientPolicy.serializer(), it) } ?: ClientPolicy()
+        // Fast path: a published hit needs no lock at all (that IS the perf win). It can only ever
+        // return a value that was current when the call began — the write that races it is not yet
+        // committed — which is exactly what an uncached read would have returned too.
+        val stored = cachedStoredPolicy ?: repo.db.read { c ->
+            // Re-check under the lock: a writer may have invalidated, or another reader published,
+            // while this thread queued for it.
+            cachedStoredPolicy
+                ?: (repo.policyJsonOn(c)?.let { json.decodeFromString(ClientPolicy.serializer(), it) } ?: ClientPolicy())
+                    .also { cachedStoredPolicy = it }
+        }
         return stored.copy(
             recoveryFingerprint = config.recoveryFingerprint,
             serverTime = now(),
@@ -124,26 +148,33 @@ class Service(
         )
     }
 
-    fun setPolicy(p: ClientPolicy, byUserId: String? = null, ip: String? = null) = repo.db.tx { c ->
-        // Strip EVERY read-time overlay field back to its wire default before persisting (§2.2 —
-        // widened from the original serverTime-only strip): policy() re-overlays them from config on
-        // every read, so an old admin client PUTting back the whole object it GOT (overlay values
-        // included) round-trips losslessly and can never persist — let alone clobber — operator
-        // stance. offlineCacheAllowed is NOT stripped: it is the admin-settable knob (floor applies
-        // at read). The audit row rides the SAME tx as the policy write (INFO-5): no crash window
-        // where the org policy changed with no policy_update row.
-        val d = ClientPolicy()
-        val stored = p.copy(
-            serverTime = d.serverTime,
-            recoveryFingerprint = d.recoveryFingerprint,
-            signupMode = d.signupMode,
-            totpRequired = d.totpRequired,
-            instanceName = d.instanceName,
-            canonicalOrigin = d.canonicalOrigin,
-            selfHostDocsUrl = d.selfHostDocsUrl,
-        )
-        repo.setPolicyJsonOn(c, json.encodeToString(ClientPolicy.serializer(), stored))
-        repo.auditOn(c, "policy_update", byUserId, null, ip)
+    fun setPolicy(p: ClientPolicy, byUserId: String? = null, ip: String? = null) {
+        repo.db.tx { c ->
+            // Strip EVERY read-time overlay field back to its wire default before persisting (§2.2 —
+            // widened from the original serverTime-only strip): policy() re-overlays them from config on
+            // every read, so an old admin client PUTting back the whole object it GOT (overlay values
+            // included) round-trips losslessly and can never persist — let alone clobber — operator
+            // stance. offlineCacheAllowed is NOT stripped: it is the admin-settable knob (floor applies
+            // at read). The audit row rides the SAME tx as the policy write (INFO-5): no crash window
+            // where the org policy changed with no policy_update row.
+            val d = ClientPolicy()
+            val stored = p.copy(
+                serverTime = d.serverTime,
+                recoveryFingerprint = d.recoveryFingerprint,
+                signupMode = d.signupMode,
+                totpRequired = d.totpRequired,
+                instanceName = d.instanceName,
+                canonicalOrigin = d.canonicalOrigin,
+                selfHostDocsUrl = d.selfHostDocsUrl,
+            )
+            repo.setPolicyJsonOn(c, json.encodeToString(ClientPolicy.serializer(), stored))
+            repo.auditOn(c, "policy_update", byUserId, null, ip)
+            // Invalidate INSIDE the tx (parity--2), as its LAST statement: only here is it ordered
+            // against a concurrent policy() population, which holds the same Db lock. Rollback-safe
+            // because the cleared value is "unknown", never a wrong one — a rolled-back write just
+            // costs the next reader one re-read of the still-old row.
+            cachedStoredPolicy = null
+        }
     }
 
     // ---- prelogin ----
@@ -333,8 +364,22 @@ class Service(
         return TotpStatus(enrolled = u.totpSecret != null, pendingSetup = u.totpPendingSecret != null)
     }
 
-    fun totpSetup(userId: String): TotpSetupResponse {
+    fun totpSetup(userId: String, code: String? = null): TotpSetupResponse {
         val u = repo.userById(userId) ?: throw Unauthorized()
+        // Rotation gate (polish audit 2026-07-27 bug-server--0): an ENROLLED account must prove
+        // the CURRENT factor before staging a replacement — otherwise a hijacked session could
+        // rotate the secret and then totpDisable with a code it controls, bypassing the
+        // current-code guard totpDisable enforces. Same verify + guarded totpLastStep consume as
+        // login (TOCTOU), so a rotation code can be neither replayed here nor reused to log in.
+        val enrolled = u.totpSecret
+        if (enrolled != null) {
+            val current = code ?: throw BadRequest("totp_code_required")
+            val step = verifyTotpCode(enrolled, current, u.totpLastStep) ?: throw BadRequest("bad_totp_code")
+            val consumed = repo.db.tx { c ->
+                c.exec("UPDATE users SET totpLastStep=? WHERE userId=? AND totpLastStep<?", step, userId, step)
+            }
+            if (consumed != 1) throw BadRequest("bad_totp_code")
+        }
         val secret = Base32.encode(crypto.randomBytes(20))
         repo.db.tx { c -> c.exec("UPDATE users SET totpPendingSecret=? WHERE userId=?", secret, userId) }
         val label = "andvari:${u.email}"
@@ -345,9 +390,12 @@ class Service(
         val u = repo.userById(userId) ?: throw Unauthorized()
         val pending = u.totpPendingSecret ?: throw BadRequest("no_pending_totp")
         val step = verifyTotpCode(pending, code, 0) ?: throw BadRequest("bad_totp_code")
+        // A confirm that replaces a LIVE secret is a rotation, not a first enrollment — audit it
+        // under its own type so intrusion review can spot a factor swap (bug-server--0).
+        val auditType = if (u.totpSecret != null) "totp_rotate" else "totp_enroll"
         repo.db.tx { c ->
             c.exec("UPDATE users SET totpSecret=?, totpPendingSecret=NULL, totpEnrolledAt=?, totpLastStep=? WHERE userId=?", pending, now(), step, userId)
-            repo.auditOn(c, "totp_enroll", userId, null, ip)
+            repo.auditOn(c, auditType, userId, null, ip)
         }
     }
 
@@ -703,8 +751,23 @@ class Service(
         // Unlinking mid-tx would orphan the file if a later mutation throws and rolls the tx
         // back (item restored, ciphertext gone). Empty on any rollback (nothing committed).
         val filesToUnlink = mutableListOf<String>()
-        val results = repo.db.tx { c ->
-            mutations.map { m -> applyMutation(c, principal, m, affectedUsers, filesToUnlink, ip) }
+        // Denied-write audit metas are COLLECTED during the batch and written in their own tx
+        // after the batch tx resolves — success or throw (polish audit 2026-07-27 bug-server--1).
+        // Audited in-batch they rode the batch tx, so a LATER malformed mutation (bad_op,
+        // unknown_attachment, …) rolled the push_denied rows back while the stdout/Loki line
+        // stood — but a denied write is an intrusion event that MUST leave a row (spec 03 §5).
+        // Same commit-survives-the-throw discipline as restoreItem's fv_downgrade audit.
+        val deniedMetas = mutableListOf<String>()
+        val results = try {
+            repo.db.tx { c ->
+                mutations.map { m -> applyMutation(c, principal, m, affectedUsers, filesToUnlink, deniedMetas) }
+            }
+        } finally {
+            if (deniedMetas.isNotEmpty()) {
+                repo.db.tx { c ->
+                    deniedMetas.forEach { repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, it) }
+                }
+            }
         }
         // Post-commit unlink carries the same TOCTOU as sweepOrphans' swept-row pass
         // (2026-07-09 review): an idempotent re-upload of one of these ids, its commit tx
@@ -783,7 +846,7 @@ class Service(
         return repo.db.read { repo.currentRev(it) }
     }
 
-    private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>, filesToUnlink: MutableList<String>, ip: String): MutationResult {
+    private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>, filesToUnlink: MutableList<String>, deniedMetas: MutableList<String>): MutationResult {
         // Idempotency: replay the stored result verbatim.
         c.queryOne("SELECT resultJson FROM mutations WHERE deviceId=? AND mutationId=?", principal.deviceId, m.mutationId) { rs ->
             rs.getString(1)
@@ -792,22 +855,23 @@ class Service(
         val role = repo.grantRole(c, principal.userId, m.vaultId)
         val existing = if (role == null || role == "reader") null else repo.itemById(c, m.itemId)
         val result = if (role == null || role == "reader") {
-            // spec 03 §5: a denied write is an intrusion event and MUST be audited.
+            // spec 03 §5: a denied write is an intrusion event and MUST be audited (deferred to
+            // push's post-batch tx so a sibling mutation's throw can't roll it back, bug-server--1).
             // A push against a tombstoned vault gets the `deleted:` meta prefix
             // (spec 03 §11) so intrusion review can exclude routine lifecycle fallout.
             val deletedPrefix = if (role == null && repo.vaultDeletedAt(c, m.vaultId) != null) "deleted:" else ""
-            repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, "$deletedPrefix${m.vaultId}:${m.itemId}")
+            deniedMetas += "$deletedPrefix${m.vaultId}:${m.itemId}"
             MutationResult(m.mutationId, "denied")
         } else if (existing != null && existing.vaultId != m.vaultId) {
             // An item cannot move vaults (its blob AD binds to (vaultId,itemId), spec 02 §2).
             // Return a per-mutation `denied` — NOT a thrown BadRequest — so a buggy/old client
             // (which re-encrypts a shared item under its personal vault) drops the mutation and
             // keeps syncing instead of wedging its queue forever; other members stay protected.
-            repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, "vault_mismatch:${m.vaultId}:${m.itemId}")
+            deniedMetas += "vault_mismatch:${m.vaultId}:${m.itemId}"
             MutationResult(m.mutationId, "denied")
         } else {
             when (m.op) {
-                "put" -> applyPut(c, principal, m, existing, affected, ip)
+                "put" -> applyPut(c, m, existing, affected, deniedMetas)
                 "delete" -> applyDelete(c, m, existing, affected, filesToUnlink)
                 else -> throw BadRequest("bad_op")
             }
@@ -826,7 +890,7 @@ class Service(
         return result
     }
 
-    private fun applyPut(c: Connection, principal: Principal, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, ip: String): MutationResult {
+    private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, deniedMetas: MutableList<String>): MutationResult {
         val item = m.item ?: throw BadRequest("put_without_item")
         validateAttachmentRefs(c, m, item.attachmentIds)
         val vaultUsers = vaultMemberIds(c, m.vaultId).also { affected.addAll(it) }
@@ -846,7 +910,7 @@ class Service(
         // conflict handling: even a "conflict" put overwrites the live blob and burns a history
         // slot, and this write must touch neither. Never dedup-cached (denied, see applyMutation).
         if (item.formatVersion < existing.formatVersion) {
-            repo.auditOn(c, "push_denied", principal.userId, principal.deviceId, ip, "fv_downgrade:${m.vaultId}:${m.itemId}")
+            deniedMetas += "fv_downgrade:${m.vaultId}:${m.itemId}"
             return MutationResult(m.mutationId, "denied")
         }
         // Existing item. Conflict iff the client wrote against a stale rev, OR it's edit-over-tombstone.

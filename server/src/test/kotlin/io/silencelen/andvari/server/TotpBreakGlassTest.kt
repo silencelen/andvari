@@ -145,4 +145,79 @@ class TotpBreakGlassTest : P4TestSupport() {
         assertEquals(HttpStatusCode.Unauthorized, internal.status, internal.bodyAsText())
         assertEquals("totp_required", errorOf(internal))
     }
+
+    /**
+     * bug-server--0: setup on an ALREADY-ENROLLED account is a rotation and must prove the CURRENT
+     * factor first — otherwise a hijacked session could stage its own secret, confirm it with a code
+     * it controls, and then totpDisable with that code, bypassing the guard totpDisable enforces.
+     * The rotation code rides the same guarded totpLastStep consume as login, so it cannot be
+     * replayed; the completed rotation audits as totp_rotate, never masquerading as totp_enroll.
+     */
+    @Test
+    fun setupWhileEnrolled_requiresCurrentCode_thenRotates() = testApplication {
+        application { andvariModule(buildServices(config(publicHostname = publicHost), Notifier())) }
+        val client = jsonClient(this)
+        val vc = VirtualClient("bg3@x.com", "break glass password three")
+        client.register(vc, bootstrapToken) // bootstrap invite → admin (auditRows below)
+
+        // Fresh enrollment: no body, exactly the fielded wire shape.
+        val setup1 = json.decodeFromString(
+            TotpSetupResponse.serializer(),
+            client.post("/api/v1/account/totp/setup") { authed(vc) }.bodyAsText(),
+        )
+        val confirm1 = client.post("/api/v1/account/totp/confirm") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(totpCode(setup1.secretBase32)))
+        }
+        assertEquals(HttpStatusCode.OK, confirm1.status, confirm1.bodyAsText())
+
+        // Enrolled + no current code → refused, and nothing was staged (pendingSetup stays false).
+        val noCode = client.post("/api/v1/account/totp/setup") { authed(vc) }
+        assertEquals(HttpStatusCode.BadRequest, noCode.status, noCode.bodyAsText())
+        assertEquals("totp_code_required", errorOf(noCode))
+        assertEquals(TotpStatus(enrolled = true, pendingSetup = false), client.totpStatus(vc))
+
+        // Enrolled + a WRONG current code → refused.
+        val badCode = client.post("/api/v1/account/totp/setup") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(wrongCode(setup1.secretBase32)))
+        }
+        assertEquals(HttpStatusCode.BadRequest, badCode.status)
+        assertEquals("bad_totp_code", errorOf(badCode))
+
+        // Enrolled + a valid unused current code → rotation stages a FRESH secret…
+        val rotCode = totpCode(setup1.secretBase32, stepOffset = 1) // confirm consumed the current step
+        val rotResp = client.post("/api/v1/account/totp/setup") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(rotCode))
+        }
+        assertEquals(HttpStatusCode.OK, rotResp.status, rotResp.bodyAsText())
+        val setup2 = json.decodeFromString(TotpSetupResponse.serializer(), rotResp.bodyAsText())
+        assertTrue(setup2.secretBase32 != setup1.secretBase32, "a rotation must mint a new secret")
+
+        // REPLAY: the consumed rotation code cannot authorize a second setup.
+        val replay = client.post("/api/v1/account/totp/setup") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(rotCode))
+        }
+        assertEquals(HttpStatusCode.BadRequest, replay.status)
+        assertEquals("bad_totp_code", errorOf(replay))
+
+        // Confirm with the NEW secret's code completes the rotation.
+        val confirm2 = client.post("/api/v1/account/totp/confirm") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(totpCode(setup2.secretBase32)))
+        }
+        assertEquals(HttpStatusCode.OK, confirm2.status, confirm2.bodyAsText())
+        assertEquals(TotpStatus(enrolled = true, pendingSetup = false), client.totpStatus(vc))
+
+        // The OLD secret is dead; the NEW one logs in (its current step was consumed by confirm2).
+        assertEquals(HttpStatusCode.Unauthorized, client.publicLogin(vc, totpCode(setup1.secretBase32, stepOffset = 1)).status)
+        val ok = client.publicLogin(vc, totpCode(setup2.secretBase32, stepOffset = 1))
+        assertEquals(HttpStatusCode.OK, ok.status, ok.bodyAsText())
+
+        // Audit: one first-time enroll, one rotation — the rotation never hides as totp_enroll.
+        assertEquals(1, client.auditRows(vc, "totp_enroll").size)
+        assertEquals(1, client.auditRows(vc, "totp_rotate").size)
+    }
 }
