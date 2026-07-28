@@ -47,5 +47,6 @@ for (const target of ["firefox", "chrome"]) {
   execFileSync("zip", ["-rX", `../${zip}`, "."], { cwd: "dist", stdio: "inherit" });
   console.log(`packaged ${zip} (${(statSync(zip).size / 1024).toFixed(0)} KiB, content.js ${(contentSize / 1024).toFixed(1)} KiB)`);
 }
-console.log(`\nextension ${version} packaged. Publish both zips to CT122 /opt/andvari/downloads`);
-console.log("and merge a browserExtension entry into manifest.json (see ops/windows-build.md for the merge pattern).");
+console.log(`\nextension ${version} packaged. Publish both zips to the server's downloads directory`);
+console.log("(ANDVARI_DOWNLOADS_DIR) and merge a browserExtension entry into its manifest.json —");
+console.log("keep the existing linux/windows entries and bump only browserExtension.version + the urls.");

@@ -1,5 +1,5 @@
 # andvari — build the Windows MSI installer. Run on a Windows box with JDK 17 + WiX.
-# See ops/windows-build.md for prerequisites. Produces dist\andvari-<version>.msi + sha256.
+# Prerequisites: JDK 17 and the WiX Toolset on PATH. Produces dist\andvari-<version>.msi + sha256.
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
@@ -21,4 +21,4 @@ Copy-Item $msi.FullName $dest -Force
 $sha = (Get-FileHash $dest -Algorithm SHA256).Hash.ToLower()
 Write-Host "[build-windows] $dest"
 Write-Host "[build-windows] sha256 $sha"
-Write-Host "[build-windows] To publish: see the 'Publish' section of ops/windows-build.md"
+Write-Host "[build-windows] To publish: copy the .msi to the server's downloads directory and bump the windows entry in its manifest.json"

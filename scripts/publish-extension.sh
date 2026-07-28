@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Publish the andvari browser extension to BOTH stores from a build host (huginn):
+# Publish the andvari browser extension to BOTH stores from the build host:
 #   * Chrome Web Store  — unlisted, via the Publish API (OAuth2)
 #   * Firefox AMO       — self-distribution / unlisted, via `web-ext sign`
 #
 #   scripts/publish-extension.sh [--version X.Y.Z] [--chrome] [--firefox] [--dry-run]
 #
 # Default = BOTH browsers, version read from extension/manifest.json.
-# This is the local-publish pattern (like ship.sh / publish-image.sh) — deliberately
-# NOT CI (this account's GitHub Actions billing is broken). Zips must already be built
+# This is the local-publish pattern (like publish-image.sh) — deliberately NOT CI
+# (no hosted-runner minutes for this project). Zips must already be built
 # (extension/package.mjs). NOTE: each store STILL REVIEWS the update before it goes
 # live — this automates the upload + submit, not Google's/Mozilla's review wait.
 #
@@ -121,9 +121,11 @@ publish_firefox() {
     || { echo "[firefox] ERROR: web-ext sign failed" >&2; rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
 
+  # web-ext names its output andvari-<ver>.xpi; RENAME (not copy) to the hosted name — a cp left a
+  # byte-identical twin of every signed build sitting in artifacts/ forever.
   local xpi named; xpi=$(ls -1t "$out"/*.xpi 2>/dev/null | head -1)
   named="$out/andvari-extension-firefox-$VERSION.xpi"
-  [ "$xpi" = "$named" ] || cp "$xpi" "$named"
+  [ "$xpi" = "$named" ] || mv "$xpi" "$named"
 
   # Auto-update channel: the manifest bakes gecko.update_url → /downloads/firefox-updates.json.
   # Assert the SIGNED bytes actually carry it (a build regression here silently strands every
@@ -148,10 +150,29 @@ publish_firefox() {
   echo "          (ANDVARI_DOWNLOADS_DIR) — installs poll updates.json and self-update to newer signed builds."
 }
 
+# ------------------------------ checksums ------------------------------
+# The deb/msi checksums are authoritative in the SIGNED update manifest and the APK's live in
+# dist/latest.json — the extension zips/xpi had no emitter at all, so the one SHA256SUMS file that
+# exists was hand-made, mis-titled with the FLEET version, and skipped for the next release.
+# Emit it here instead, named for the EXTENSION version, over whatever this run produced.
+emit_checksums() {
+  local out="$REPO_DIR/extension/artifacts" sums
+  sums="$out/SHA256SUMS-$VERSION.txt"
+  local files=(); local f
+  for f in "$out/andvari-extension-chrome-$VERSION.zip" "$out/andvari-extension-firefox-$VERSION.zip" \
+           "$out/andvari-extension-firefox-$VERSION.xpi"; do
+    [ -f "$f" ] && files+=("$f")
+  done
+  [ "${#files[@]}" -gt 0 ] || { echo "[publish-ext] no $VERSION artifacts to checksum"; return 0; }
+  (cd "$out" && sha256sum "${files[@]#"$out"/}" > "$sums")
+  echo "[publish-ext] checksums: ${sums#"$REPO_DIR"/} (${#files[@]} file(s))"
+}
+
 # Run every requested leg even if an earlier one hard-fails (a chrome block must not
 # strand the firefox sign — bitten 2026-07-17); exit nonzero if any leg truly failed.
 RC=0
 [ "$DO_CHROME"  = 1 ] && { publish_chrome  || RC=1; }
 [ "$DO_FIREFOX" = 1 ] && { publish_firefox || RC=1; }
+[ "$DRY" = 1 ] || emit_checksums
 [ "$RC" = 0 ] && echo "[publish-ext] done (version $VERSION)." || echo "[publish-ext] finished WITH FAILURES (version $VERSION) — see above." >&2
 exit "$RC"

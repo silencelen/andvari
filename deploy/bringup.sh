@@ -208,7 +208,7 @@ if [ -z "$(get_env ANDVARI_RECOVERY_PUBKEY)" ] || [ -z "$(get_env ANDVARI_RECOVE
   say "      * store sheets + USB in two separate secure places"
   say "      * never photograph it to a networked device; never store it digitally"
   say "      * afterwards, clear this terminal's scrollback (e.g. clear + printf '\\e[3J')"
-  say "    (Ideal-practice note: ops/breakglass.md runs keygen on an air-gapped machine."
+  say "    (Ideal practice: run the keygen on an air-gapped machine instead."
   say "     You can do that instead and paste the two ANDVARI_RECOVERY_* values into"
   say "     $ENV_FILE yourself before re-running this script.)"
   if [ "$ASSUME_YES" != 1 ]; then
