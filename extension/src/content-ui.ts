@@ -266,6 +266,14 @@ let anchorEl: HTMLElement | null = null;
  *  into an observed mutation (isOwnUiHost is an IDENTITY test against the one hostEl). */
 let chipEl: HTMLElement | null = null;
 let chipAnchor: HTMLElement | null = null;
+/** The live chip's activation, hoisted out of showCardChip so the document-capture keydown can
+ *  reach it (a11y-webext--12) — [K10] forbids a tabindex, so the key IS the keyboard path. */
+let chipActivate: (() => void) | null = null;
+/** [K8] the surface's own dismissal callback into content.ts. content-ui closes the chip from four
+ *  places content.ts cannot see (outside-mousedown, Escape, and positionChip's two auto-closes);
+ *  without this hook those closes left content.ts's `chipAnchor` mirror set and its `chipGen`
+ *  un-bumped, so an offer still in flight could repaint the chip the user had just dismissed. */
+let chipDismissed: (() => void) | null = null;
 /** [K7] one re-anchor per scroll burst — a getBoundingClientRect()+offsetWidth read per scroll
  *  event is a forced layout on every frame of a momentum scroll. */
 let chipRafPending = false;
@@ -352,10 +360,15 @@ function setActive(i: number): void {
  *  the user unlocks and time a fake overlay to it. The box is sized for the LONGER (locked)
  *  sentence so it never ellipses away its anti-phishing payload; the short unlocked label centres
  *  in the same box, and the max-width clamp is state-independent too. */
-export function showCardChip(anchor: HTMLElement, state: { locked: boolean }, handlers: { onActivate: () => void }): void {
+export function showCardChip(
+  anchor: HTMLElement,
+  state: { locked: boolean },
+  handlers: { onActivate: () => void; onDismiss: () => void },
+): void {
   const root = ui();
   chipEl?.remove(); // one live chip at a time — the module slot, cleared like closeDropdown
   chipAnchor = anchor;
+  chipDismissed = handlers.onDismiss;
   const chip = document.createElement("div");
   chip.className = "chip";
   // [K10] role=button but NEVER tabbable: real focus stays in the page's own field (the dropdown's
@@ -368,6 +381,12 @@ export function showCardChip(anchor: HTMLElement, state: { locked: boolean }, ha
   // [K-label]: neither string matches detect.ts's SUBMIT_TEXT_RX — a label like "Continue with
   // saved card" would turn our own chip into a G2 submit gesture.
   const text = state.locked ? "andvari is locked — click the andvari toolbar icon" : "Fill card with andvari";
+  // The spoken form of the same two sentences, each with the a11y-webext--12 activation chord
+  // appended. Spelled out as WHOLE literals rather than composed: [C1] forbids any interpolation
+  // form in this surface, and the visible [S6] copy above must stay byte-exact either way.
+  const spoken = state.locked
+    ? "andvari is locked — click the andvari toolbar icon. Press Alt plus Down Arrow to open andvari."
+    : "Fill card with andvari. Press Alt plus Down Arrow to open andvari.";
   chip.append(sigilSpan(12), span("label", text));
   // [S5] the listener binds to the CHIP inside the closed root, never to hostEl — hostEl is a
   // page-reachable node, so a host-bound listener would fire on hostEl.click(). isTrusted first,
@@ -384,10 +403,16 @@ export function showCardChip(anchor: HTMLElement, state: { locked: boolean }, ha
   // element and same isTrusted gate, so [S5] is unchanged; the mousedown path already closed the
   // surface, making this a no-op for pointer users (closeCardChip clears chipEl).
   chip.addEventListener("click", activate);
+  // a11y-webext--12: the same action from the keyboard. The chip has no listener of its own for it
+  // — [K10] keeps it untabbable so real focus stays in the page's card field, so the key can only
+  // be seen by the document-capture handler, which reads this slot while a chip is live.
+  chipActivate = () => handlers.onActivate();
   root.appendChild(chip);
   chipEl = chip;
   positionChip();
-  announceLive(text); // focus never enters the chip — without this it is invisible to AT
+  // focus never enters the chip — without this it is invisible to AT. The chord rides along
+  // because an untabbable surface advertises its key or the key does not exist for the user.
+  announceLive(spoken);
 }
 
 /** Review #13: re-anchor a live chip from the content script's mutation tick — layout shifts that
@@ -397,10 +422,26 @@ export function repositionCardChip(): void {
   if (chipEl) positionChip();
 }
 
+/** The surface primitive: content.ts's [K8] dismissal calls THIS (it has already dropped its own
+ *  mirror), so it must never call back — dismissChipSurface below is the direction that does. */
 export function closeCardChip(): void {
   chipEl?.remove();
   chipEl = null;
   chipAnchor = null;
+  chipActivate = null;
+  chipDismissed = null;
+}
+
+/** [K8] every close that ORIGINATES in this module — the user clicked away, pressed Escape, or the
+ *  anchor left the viewport — routes through here so content.ts's mirror and its [K12] generation
+ *  counter move with the surface. Without it the "one dismissal path" the design claims was three
+ *  silent side doors: the outside-mousedown one is reachable on any site whose own widget
+ *  preventDefault()s mousedown (custom menus, date pickers) — no blur, no focusout, so content.ts
+ *  never learned, and an offer still in flight repainted the chip the user had just clicked away. */
+function dismissChipSurface(): void {
+  const onDismiss = chipDismissed;
+  closeCardChip();
+  onDismiss?.();
 }
 
 /** [K3]/[K4] the chip's Escape sentinel is CHIP-PRIVATE state owned by content.ts; this is its
@@ -419,12 +460,12 @@ export function cardChipIsOpen(): boolean {
 function positionChip(): void {
   if (!chipEl || !chipAnchor) return;
   if (!chipAnchor.isConnected) {
-    closeCardChip();
+    dismissChipSurface();
     return;
   }
   const r = chipAnchor.getBoundingClientRect();
   if (r.bottom < 0 || r.top > window.innerHeight || r.right < 0 || r.left > window.innerWidth) {
-    closeCardChip();
+    dismissChipSurface();
     return;
   }
   const w = chipEl.offsetWidth;
@@ -469,7 +510,7 @@ function ui(): ShadowRoot {
     const path = e.composedPath();
     if (hostEl && path.includes(hostEl)) return;
     if (dropdownEl && !(anchorEl && path.includes(anchorEl))) closeDropdown();
-    if (chipEl && !(chipAnchor && path.includes(chipAnchor))) closeCardChip();
+    if (chipEl && !(chipAnchor && path.includes(chipAnchor))) dismissChipSurface(); // [K8]
   });
   // Cut N (v2 #18): keyboard operability, on document-level CAPTURE so the keys are seen while
   // focus sits in the page's own input (or in our shadow search box, whose stopPropagation runs
@@ -480,14 +521,20 @@ function ui(): ShadowRoot {
   document.addEventListener(
     "keydown",
     (e) => {
-      if ((!dropdownEl && !chipEl) || !e.isTrusted) return;
-      // [K9] Escape is the ONE key both surfaces answer (hoisted so a co-live chip on another
+      if ((!dropdownEl && !chipEl && !bannerEl) || !e.isTrusted) return;
+      // [K9] Escape is the ONE key every surface answers (hoisted so a co-live chip on another
       // anchor is not left floating when the dropdown consumes the key). Everything past the
       // chip-only early return reads or writes DROPDOWN state — decisively closeDropdown() and
       // suppressOpenUntil, which [K4] forbids the chip from touching: an Esc'd chip must never
       // gag a real login dropdown for 400 ms.
       if (e.key === "Escape") {
-        closeCardChip();
+        dismissChipSurface(); // [K8] the mirror moves with the surface
+        // a11y-webext--0: the banner answers Escape too. Its buttons ARE focusable, but the host
+        // is appended to documentElement, so reaching them means tabbing the WHOLE page — inside
+        // the 30 s idle close. Escape runs the ghost path (close + onDismiss), and like the chip
+        // it is NOT consumed here, for Review #2's reason: a save banner sits over whatever modal
+        // the site just opened, and swallowing that first Escape would trap the user.
+        bannerDecline?.();
         // Review #2: a chip-only Escape must NOT be consumed. The chip renders on every card-field
         // focus, so swallowing the key would eat the first Escape on any checkout whose card form
         // lives in a modal/drawer — the page never sees it and the modal never closes. Only the
@@ -501,6 +548,20 @@ function ui(): ShadowRoot {
         // this fires (content.ts focusin → openDropdown) from instantly reopening.
         suppressOpenUntil = Date.now() + 400;
         if (origin?.isConnected) origin.focus();
+        return;
+      }
+      // a11y-webext--12: the chip's keyboard activation. [K10] keeps it untabbable — real focus
+      // must stay in the page's own card field — so a pure-keyboard user could see the chip and
+      // had no way to trigger the one action it exists for (SR users have had the Review #4 click
+      // path since C1). One low-collision chord, the combobox idiom, only while a chip is live and
+      // no dropdown owns the keys. [K4] holds: this touches no dropdown state, suppressOpenUntil
+      // included. A trusted keydown is a user gesture, so the SW's openPopup path is unchanged.
+      if (chipEl && !dropdownEl && e.altKey && e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        const act = chipActivate;
+        dismissChipSurface(); // [K9] the surface goes before the action, exactly as the pointer path does
+        act?.();
         return;
       }
       if (!dropdownEl) return; // a lone chip owns no other key — never trap the page's keys
@@ -598,16 +659,29 @@ function registerRow(row: HTMLElement, act: () => void): void {
   listRows.push({ el: row, act });
 }
 
+/** Review #4 (widened 2026-07-27 to the dropdown rows): AT activation — NVDA/JAWS browse-mode
+ *  Enter, VoiceOver VO+Space, touch double-tap — dispatches a trusted CLICK, never a mousedown, so
+ *  a mousedown-only row is announced as an option a screen-reader user then cannot pick. The chip
+ *  already carried this pair; the rows are the extension's CORE fill surface and were left out.
+ *  Both listeners run the same isTrusted-gated, focus-preserving act ([S5] unchanged): for a
+ *  pointer user the mousedown fires first and pick() closes the dropdown, so the click that
+ *  follows lands on a detached row — the chip's documented no-double-fire reasoning. */
+function bindRowActivation(row: HTMLElement, act: () => void): void {
+  const activate = (e: Event): void => {
+    if (!e.isTrusted) return;
+    e.preventDefault(); // keep focus on the page field so it stays fillable
+    act();
+  };
+  row.addEventListener("mousedown", activate);
+  row.addEventListener("click", activate);
+}
+
 function matchRow(m: MatchItem, pick: () => void): HTMLElement {
   const row = document.createElement("div");
   row.className = "row";
   row.appendChild(span("name", m.name));
   if (m.username) row.appendChild(span("user", m.username));
-  row.addEventListener("mousedown", (e) => {
-    if (!e.isTrusted) return;
-    e.preventDefault(); // keep focus on the page field so it stays fillable
-    pick();
-  });
+  bindRowActivation(row, pick);
   registerRow(row, pick);
   return row;
 }
@@ -616,11 +690,7 @@ function actionRow(label: string, act: () => void): HTMLElement {
   const row = document.createElement("div");
   row.className = "row action";
   row.textContent = label;
-  row.addEventListener("mousedown", (e) => {
-    if (!e.isTrusted) return;
-    e.preventDefault();
-    act();
-  });
+  bindRowActivation(row, act);
   registerRow(row, act);
   return row;
 }
@@ -759,6 +829,12 @@ function bannerShell(): { bar: HTMLElement; body: HTMLElement } {
   bannerEl?.remove(); // one banner at a time — newest wins
   const bar = document.createElement("div");
   bar.className = "banner";
+  // a11y-webext--0: a LABELLED group, so the offer is not an anonymous run of text at the tail of
+  // the document; and script-focusable only (tabindex -1, never a tab stop) for the same reason
+  // [K10] gives the chip — real focus belongs to the page until the user chooses our surface.
+  bar.setAttribute("role", "group");
+  bar.setAttribute("aria-label", "andvari");
+  bar.tabIndex = -1;
   bar.appendChild(brandHeader());
   const body = document.createElement("div");
   body.className = "body";
@@ -770,7 +846,84 @@ function bannerShell(): { bar: HTMLElement; body: HTMLElement } {
 
 function closeBanner(which: HTMLElement): void {
   which.remove();
-  if (bannerEl === which) bannerEl = null;
+  if (bannerEl === which) {
+    bannerEl = null;
+    bannerDecline = null;
+  }
+}
+
+/** a11y-webext--0: the live banner's ghost path, reachable from the document-capture Escape.
+ *  Null once the offer is answered — Escape must never re-fire a dismissal over a verdict line. */
+let bannerDecline: (() => void) | null = null;
+
+/** The per-banner parts. Everything NOT here — the shell, the announce-offer-then-verdict ordering
+ *  (a Cut N a11y contract), the isTrusted gates, the disable-both, the result span, the idle and
+ *  post-verdict closes, and the Escape/focus contract — is identical across the three offers and
+ *  lives in offerBanner. It used to be three ~95%-identical copies, so every a11y fix had to be
+ *  made (and remembered) three times; a11y-webext--0 is exactly the fix that was not. */
+interface BannerSpec {
+  /** Composes the message node: each offer builds its own `hl` runs, and the assembled
+   *  `textContent` is what the live region speaks. */
+  buildMsg(msg: HTMLElement): void;
+  primaryLabel: string;
+  ghostLabel: string;
+  /** Unanswered-offer close. NOT a dismissal: an ignored banner leaves the SW's pending slot
+   *  alone, so the offer can be re-raised — only the ghost/Escape path declines. */
+  idleMs: number;
+  /** Post-verdict closes; a failure line is left up roughly twice as long as a success one. */
+  okMs: number;
+  errMs: number;
+  run(): Promise<{ ok: boolean; text: string }>;
+  onDismiss?: () => void;
+}
+
+function offerBanner(spec: BannerSpec): void {
+  const { bar, body } = bannerShell();
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  spec.buildMsg(msg);
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const primary = document.createElement("button");
+  primary.className = "primary";
+  primary.textContent = spec.primaryLabel;
+  const ghost = document.createElement("button");
+  ghost.className = "ghost";
+  ghost.textContent = spec.ghostLabel;
+  actions.append(primary, ghost);
+  body.append(msg, actions);
+  // Cut N (v2 #18): banners appear without any focus change and auto-dismiss — announce the
+  // offer (and, below, its verdict) or a screen-reader user never knows it existed.
+  announceLive(`andvari: ${msg.textContent ?? ""}`);
+
+  const idle = window.setTimeout(() => closeBanner(bar), spec.idleMs);
+  const decline = (): void => {
+    window.clearTimeout(idle);
+    closeBanner(bar); // clears bannerDecline — a second Escape falls through to the page
+    spec.onDismiss?.();
+  };
+  bannerDecline = decline;
+  primary.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    window.clearTimeout(idle);
+    bannerDecline = null; // answered: Escape must not decline what is already being saved
+    primary.disabled = true;
+    ghost.disabled = true;
+    void spec.run().then((r) => {
+      actions.remove();
+      body.appendChild(span(r.ok ? "result ok" : "result err", r.text));
+      // a11y-webext--0: actions.remove() just deleted the element the user was focused on, which
+      // drops focus to <body> — mid-page for a keyboard user. Park it on the labelled group that
+      // now holds the verdict instead; the page's own tab order is untouched (tabindex -1).
+      bar.focus();
+      announceLive(r.text); // Cut N: the verdict is spoken, not just painted (the banner auto-closes)
+      window.setTimeout(() => closeBanner(bar), r.ok ? spec.okMs : spec.errMs);
+    });
+  });
+  ghost.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    decline();
+  });
 }
 
 /** Save/update offer. Never shows the password itself — only host/name (ZK: the secret stays
@@ -780,48 +933,23 @@ export function showSaveBanner(
   onSave: () => Promise<{ ok: boolean; text: string }>,
   onDismiss: () => void,
 ): void {
-  const { bar, body } = bannerShell();
-  const msg = document.createElement("div");
-  msg.className = "msg";
-  if (pending.updatesItemId) {
-    // Show the existing item's username too — auto-saved items are named after the host, so the
-    // name alone can't distinguish a password change from a wrong-account merge (2b guard).
-    msg.append("Update the password for ", span("hl", pending.updatesItemName ?? "this login"));
-    if (pending.updatesItemUsername) msg.append(" (", span("hl", pending.updatesItemUsername), ")");
-    msg.append("?");
-  } else msg.append("Save this login for ", span("hl", pending.host), " to andvari?");
-  const actions = document.createElement("div");
-  actions.className = "actions";
-  const primary = document.createElement("button");
-  primary.className = "primary";
-  primary.textContent = pending.updatesItemId ? "Update" : "Save";
-  const ghost = document.createElement("button");
-  ghost.className = "ghost";
-  ghost.textContent = "Not now";
-  actions.append(primary, ghost);
-  body.append(msg, actions);
-  // Cut N (v2 #18): banners appear without any focus change and auto-dismiss — announce the
-  // offer (and, below, its verdict) or a screen-reader user never knows it existed.
-  announceLive(`andvari: ${msg.textContent ?? ""}`);
-
-  const idle = window.setTimeout(() => closeBanner(bar), 30_000);
-  primary.addEventListener("click", (e) => {
-    if (!e.isTrusted) return;
-    window.clearTimeout(idle);
-    primary.disabled = true;
-    ghost.disabled = true;
-    void onSave().then((r) => {
-      actions.remove();
-      body.appendChild(span(r.ok ? "result ok" : "result err", r.text));
-      announceLive(r.text); // Cut N: the verdict is spoken, not just painted (the banner auto-closes)
-      window.setTimeout(() => closeBanner(bar), r.ok ? 4000 : 8000);
-    });
-  });
-  ghost.addEventListener("click", (e) => {
-    if (!e.isTrusted) return;
-    window.clearTimeout(idle);
-    closeBanner(bar);
-    onDismiss();
+  offerBanner({
+    buildMsg: (msg) => {
+      if (pending.updatesItemId) {
+        // Show the existing item's username too — auto-saved items are named after the host, so
+        // the name alone can't distinguish a password change from a wrong-account merge (2b guard).
+        msg.append("Update the password for ", span("hl", pending.updatesItemName ?? "this login"));
+        if (pending.updatesItemUsername) msg.append(" (", span("hl", pending.updatesItemUsername), ")");
+        msg.append("?");
+      } else msg.append("Save this login for ", span("hl", pending.host), " to andvari?");
+    },
+    primaryLabel: pending.updatesItemId ? "Update" : "Save",
+    ghostLabel: "Not now",
+    idleMs: 30_000,
+    okMs: 4000,
+    errMs: 8000,
+    run: onSave,
+    onDismiss,
   });
 }
 
@@ -833,82 +961,37 @@ export function showCardSaveBanner(
   onSave: () => Promise<{ ok: boolean; text: string }>,
   onDismiss: () => void,
 ): void {
-  const { bar, body } = bannerShell();
-  const msg = document.createElement("div");
-  msg.className = "msg";
-  if (pending.updatesItemId) {
-    msg.append("Update the card ", span("hl", pending.updatesItemName ?? pending.cardSubtitle));
-    msg.append(" (", span("hl", pending.cardSubtitle), ")?");
-  } else msg.append("Save this card ", span("hl", pending.cardSubtitle), " to andvari?");
-  const actions = document.createElement("div");
-  actions.className = "actions";
-  const primary = document.createElement("button");
-  primary.className = "primary";
-  primary.textContent = pending.updatesItemId ? "Update" : "Save";
-  const ghost = document.createElement("button");
-  ghost.className = "ghost";
-  ghost.textContent = "Not now";
-  actions.append(primary, ghost);
-  body.append(msg, actions);
-  announceLive(`andvari: ${msg.textContent ?? ""}`);
-
-  const idle = window.setTimeout(() => closeBanner(bar), 30_000);
-  primary.addEventListener("click", (e) => {
-    if (!e.isTrusted) return;
-    window.clearTimeout(idle);
-    primary.disabled = true;
-    ghost.disabled = true;
-    void onSave().then((r) => {
-      actions.remove();
-      body.appendChild(span(r.ok ? "result ok" : "result err", r.text));
-      announceLive(r.text);
-      window.setTimeout(() => closeBanner(bar), r.ok ? 4000 : 8000);
-    });
-  });
-  ghost.addEventListener("click", (e) => {
-    if (!e.isTrusted) return;
-    window.clearTimeout(idle);
-    closeBanner(bar);
-    onDismiss();
+  offerBanner({
+    buildMsg: (msg) => {
+      if (pending.updatesItemId) {
+        msg.append("Update the card ", span("hl", pending.updatesItemName ?? pending.cardSubtitle));
+        msg.append(" (", span("hl", pending.cardSubtitle), ")?");
+      } else msg.append("Save this card ", span("hl", pending.cardSubtitle), " to andvari?");
+    },
+    primaryLabel: pending.updatesItemId ? "Update" : "Save",
+    ghostLabel: "Not now",
+    idleMs: 30_000,
+    okMs: 4000,
+    errMs: 8000,
+    run: onSave,
+    onDismiss,
   });
 }
 
-/** Post-fill URI backfill offer for an out-of-match (search-all) fill. */
+/** Post-fill URI backfill offer for an out-of-match (search-all) fill. The only offer whose action
+ *  answers a bare boolean (there is no seam code to render) — adapted to the shared shape here. */
 export function showLinkOffer(itemName: string, host: string, onLink: () => Promise<boolean>): void {
-  const { bar, body } = bannerShell();
-  const msg = document.createElement("div");
-  msg.className = "msg";
-  msg.append("Link ", span("hl", itemName), " to ", span("hl", host), "?");
-  const actions = document.createElement("div");
-  actions.className = "actions";
-  const primary = document.createElement("button");
-  primary.className = "primary";
-  primary.textContent = "Link";
-  const ghost = document.createElement("button");
-  ghost.className = "ghost";
-  ghost.textContent = "No";
-  actions.append(primary, ghost);
-  body.append(msg, actions);
-  announceLive(`andvari: ${msg.textContent ?? ""}`); // Cut N (v2 #18): see showSaveBanner
-
-  const idle = window.setTimeout(() => closeBanner(bar), 20_000);
-  primary.addEventListener("click", (e) => {
-    if (!e.isTrusted) return;
-    window.clearTimeout(idle);
-    primary.disabled = true;
-    ghost.disabled = true;
-    void onLink().then((ok) => {
-      actions.remove();
-      const text = ok ? "Linked." : "Could not link.";
-      body.appendChild(span(ok ? "result ok" : "result err", text));
-      announceLive(text); // Cut N: spoken verdict
-      window.setTimeout(() => closeBanner(bar), ok ? 3000 : 6000);
-    });
-  });
-  ghost.addEventListener("click", (e) => {
-    if (!e.isTrusted) return;
-    window.clearTimeout(idle);
-    closeBanner(bar);
+  offerBanner({
+    buildMsg: (msg) => msg.append("Link ", span("hl", itemName), " to ", span("hl", host), "?"),
+    primaryLabel: "Link",
+    ghostLabel: "No",
+    idleMs: 20_000,
+    okMs: 3000,
+    errMs: 6000,
+    run: async () => {
+      const ok = await onLink();
+      return { ok, text: ok ? "Linked." : "Could not link." };
+    },
   });
 }
 

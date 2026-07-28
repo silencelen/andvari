@@ -8,8 +8,9 @@
  */
 import type { CardFieldKind } from "./detect";
 import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
+import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
-import { getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
+import { DEFAULT_SERVER_URL, getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
 import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
 import { displaySite, safeSiteUrl } from "./siteurl";
 
@@ -59,6 +60,18 @@ let totpBadCount = 0;
  *  lost its authenticator still shows the button and degrades to the master-password fallback. */
 let bioCapable = false;
 
+/** The connector's RP-ID claim rides the manifest's install-time host permission for the reference
+ *  instance (design 2026-07-18 §3), which the browser can withhold at runtime. Same pattern the SW
+ *  broker probes — kept as one derivation from DEFAULT_SERVER_URL rather than a second literal.
+ *  A missing permissions API answers TRUE (never hide a working button on an unaskable engine). */
+async function bioRpPermissionHeld(): Promise<boolean> {
+  try {
+    return await chrome.permissions.contains({ origins: [`${DEFAULT_SERVER_URL}/*`] });
+  } catch {
+    return true;
+  }
+}
+
 /** Cosmetic platform label for the biometric buttons — the ceremony itself works regardless. */
 function bioLabel(): string {
   const ua = navigator.userAgent;
@@ -67,12 +80,22 @@ function bioLabel(): string {
   return "your device";
 }
 
+/** bug-ext-gating--4: this probed ONLY for a platform authenticator, and that single boolean both
+ *  reveals and hides the enroll/unlock buttons. Two things it said nothing about, each of which
+ *  makes the ceremony impossible rather than merely likely to fail — and both of which surfaced as
+ *  "Setup was cancelled — try again when you're ready.", forever, on every retry:
+ *   - extension-page WebAuthn support (Firefox needs 150+, while manifest.firefox.json admits 121);
+ *   - the RP host permission, which can be runtime-withheld (Chrome "site access: on click",
+ *     Firefox optional-by-default) and which the SW's ceremony broker now probes for the same
+ *     reason. A capability that cannot work must not be offered. */
 async function probeBioCapable(): Promise<void> {
   try {
     bioCapable =
       typeof PublicKeyCredential !== "undefined" &&
       typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === "function" &&
-      (await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable());
+      typeof navigator.credentials?.create === "function" &&
+      (await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()) &&
+      (await bioRpPermissionHeld());
   } catch {
     bioCapable = false;
   }
@@ -81,20 +104,14 @@ async function probeBioCapable(): Promise<void> {
 }
 
 function showMsg(kind: "err" | "info", text: string): void {
-  const m = el("msg");
-  m.className = `msg ${kind}`;
-  // a11y 2a — ORDER MATTERS (the static-read caveat): the region must be in the a11y tree
-  // (unhidden) with its live role set BEFORE its text mutates, or the first message is dropped.
-  // unhide → role → text. Errors are assertive (role=alert), info is polite (role=status).
-  m.hidden = false;
-  m.setAttribute("role", kind === "err" ? "alert" : "status");
-  m.textContent = text;
+  // a11y 2a — ORDER MATTERS (the static-read caveat); the rule and its rationale live in
+  // livemsg.ts now, because two other copies of this idiom had it inverted. Errors are assertive
+  // (role=alert), info is polite (role=status).
+  setLiveMsg(el("msg"), `msg ${kind}`, kind === "err" ? "alert" : "status", text);
 }
 
 function clearMsg(): void {
-  const m = el("msg");
-  m.textContent = "";
-  m.hidden = true;
+  clearLiveMsg(el("msg"));
 }
 
 function setConn(ok: boolean): void {
@@ -138,7 +155,7 @@ function showView(unlocked: boolean): void {
     el("all-list").replaceChildren();
     renderCards([]); // empties AND hides the Cards group
     el<HTMLInputElement>("search").value = "";
-    el("gen-pass").textContent = "";
+    setGeneratedPassword(""); // a11y-webext--10 owns this node's content — never write it raw
     el("generator").hidden = true;
     el("gen-toggle").classList.remove("on");
     el("gen-toggle").setAttribute("aria-expanded", "false"); // a11y 5c: collapsed on lock
@@ -205,11 +222,15 @@ async function renderUpdate(): Promise<void> {
     // distinct from the gold "update available" banner AND from silence. A sig-stripping
     // server must not be able to train the household on scary noise, so never a banner/nag.
     const reason = r?.quietReason ?? null;
-    quiet.textContent = reason ? updateQuietCopy(reason) : "";
+    // a11y 2a (livemsg.ts): these two role="status" containers were populated WHILE HIDDEN and
+    // unhidden afterwards — the inverted order, so the update-channel note was announced to
+    // nobody. Unhide first here too; the text is a child write, so the shared helper doesn't fit.
     quiet.hidden = !reason;
+    quiet.textContent = reason ? updateQuietCopy(reason) : "";
     return;
   }
   quiet.hidden = true; // an offer supersedes the quiet note (mutually exclusive)
+  banner.hidden = false; // a11y 2a: in the tree before its text lands (see above)
   el("update-text").textContent = `Update available — andvari ${r.latest}. `;
   // Firefox gets the Firefox zip; everything else (Chrome/Edge/Brave) the Chrome zip. Fall back
   // to whichever URL exists so a single-target publish still links somewhere real.
@@ -222,7 +243,6 @@ async function renderUpdate(): Promise<void> {
   } else {
     link.hidden = true; // a version with no usable link: still tell them one exists
   }
-  banner.hidden = false;
 }
 
 /** M-D4b muted update-channel copy (surface owns the sentences; the seam carries only a reason
@@ -364,14 +384,16 @@ function renderList(list: HTMLElement, items: MatchItem[], emptyText: string, sl
 }
 
 /** Row = open the item's detail on click (nested copy/TOTP buttons stop propagation, so the
- *  row can't be a <button> itself — divs with button semantics instead). Fill moved INTO the
- *  detail as an explicit action: a blind row-click fill fails on every non-fillable tab. */
+ *  row can't be a <button> itself). a11y-webext--5: the container is no longer a role="button"
+ *  either — that recreated the same invalid structure semantically, since ARIA's `button` role is
+ *  Children-Presentational and this row CONTAINS the TOTP chip and the copy buttons. The named
+ *  open-control is now the `.body` block (glyph aside, chip and copies as siblings), so the tab
+ *  order reads open → chip → copy, each a valid control, and the row's accessible name is the item
+ *  name + username instead of a button that swallows its own children. Fill moved INTO the detail
+ *  as an explicit action: a blind row-click fill fails on every non-fillable tab. */
 function row(it: MatchItem): HTMLElement {
   const r = document.createElement("div");
   r.className = "item";
-  r.setAttribute("role", "button");
-  r.tabIndex = 0;
-  r.title = "View details";
 
   const glyph = document.createElement("span");
   glyph.className = "glyph";
@@ -381,6 +403,9 @@ function row(it: MatchItem): HTMLElement {
 
   const body = document.createElement("div");
   body.className = "body";
+  body.setAttribute("role", "button"); // the row's ONE named control — nothing interactive inside it
+  body.tabIndex = 0;
+  body.title = "View details";
   const name = document.createElement("div");
   name.className = "name";
   name.textContent = it.name;
@@ -399,8 +424,8 @@ function row(it: MatchItem): HTMLElement {
   r.append(acts);
 
   const open = () => openDetail(it);
-  r.addEventListener("click", open);
-  r.addEventListener("keydown", (e) => {
+  r.addEventListener("click", open); // the whole row stays a pointer target (the glyph, the padding)
+  body.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       open();
@@ -685,12 +710,22 @@ async function tickTotp(): Promise<void> {
     relocked();
     return;
   }
-  for (const chip of document.querySelectorAll<HTMLElement>(".totp-chip")) {
-    const itemId = chip.dataset["item"];
+  // quality-perf--4: the asks go out CONCURRENTLY. Serially awaiting one message per chip made the
+  // codes flip visibly staggered across the second at double-digit chip counts, and stretched the
+  // popup⇄SW round-trips over the whole tick. No protocol change — same N messages, in flight at
+  // once — so the SW's per-item handler is untouched.
+  const chips = [...document.querySelectorAll<HTMLElement>(".totp-chip")];
+  const answers = await Promise.all(
+    chips.map(async (chip) => {
+      const itemId = chip.dataset["item"];
+      return itemId ? await ask({ type: "totp", itemId }) : undefined;
+    }),
+  );
+  chips.forEach((chip, i) => {
     const code = chip.querySelector<HTMLElement>(".code");
     const ring = chip.querySelector<HTMLElement>(".ring");
-    if (!itemId || !code || !ring) continue;
-    const r = await ask({ type: "totp", itemId });
+    if (!chip.dataset["item"] || !code || !ring) return;
+    const r = answers[i];
     if (r?.ok && r.code) {
       if (Date.now() >= Number(code.dataset["hold"] ?? 0)) {
         code.textContent = r.code.replace(/^(\d{3})(\d{3})$/, "$1 $2");
@@ -702,7 +737,7 @@ async function tickTotp(): Promise<void> {
     } else {
       chip.hidden = true; // locked mid-poll / item no longer carries a code
     }
-  }
+  });
 }
 
 /* ---- cards: copy group beneath the logins (cards design 2026-07-09; S3 in-page fill 2026-07-10)
@@ -868,9 +903,33 @@ el<HTMLInputElement>("search").addEventListener("input", () => {
 
 /* ---- generator: one collapsible section; every Regenerate is a fresh SW `generate` ---- */
 
+/** a11y-webext--10: #gen-pass is the button whose CONTENT is the generated password, and it carried
+ *  aria-label="Copy generated password" — an aria-label REPLACES the content in the accessible
+ *  name, so browse-mode and focus both announced only the label and the password itself was not in
+ *  the a11y tree at all. A blind user could copy it but never review or transcribe it (to type on
+ *  another device), and got no signal that Regenerate had changed anything. A visually-hidden
+ *  PREFIX instead: the name computes as "Generated password: <pw>", per-character review works,
+ *  the visible pill is unchanged, and the secrets-in-DOM posture is untouched (the password was
+ *  already the button's text). The value is kept here rather than re-read from textContent, which
+ *  now carries the prefix — the copy path must never ship the label with it.
+ *  The static aria-label in popup.html is removed here for the same reason it is written here. */
+let generatedPw = "";
+function setGeneratedPassword(pw: string): void {
+  const btn = el("gen-pass");
+  generatedPw = pw;
+  btn.removeAttribute("aria-label");
+  btn.textContent = "";
+  if (pw === "") return;
+  const prefix = document.createElement("span");
+  prefix.className = "visually-hidden";
+  prefix.textContent = "Generated password: ";
+  btn.append(prefix, document.createTextNode(pw));
+}
+
 async function regenerate(): Promise<void> {
   const r = await ask({ type: "generate" });
-  el("gen-pass").textContent = r?.password ?? "";
+  setGeneratedPassword(r?.password ?? "");
+  if (generatedPw) announce("New password generated"); // a11y 2d: Regenerate is otherwise silent
 }
 
 el("gen-toggle").addEventListener("click", () => {
@@ -878,13 +937,13 @@ el("gen-toggle").addEventListener("click", () => {
   g.hidden = !g.hidden;
   el("gen-toggle").classList.toggle("on", !g.hidden);
   el("gen-toggle").setAttribute("aria-expanded", String(!g.hidden)); // a11y 5c
-  if (!g.hidden && !el("gen-pass").textContent) void regenerate();
+  if (!g.hidden && !generatedPw) void regenerate();
 });
 
 el("gen-again").addEventListener("click", () => void regenerate());
 
 el("gen-pass").addEventListener("click", async () => {
-  const pw = el("gen-pass").textContent;
+  const pw = generatedPw; // NOT textContent — that now carries the visually-hidden name prefix
   if (pw && (await toClipboard(pw))) {
     announce("Password copied"); // a11y 2d
     const f = el("gen-flash");
@@ -1241,12 +1300,34 @@ el("qu-toggle").addEventListener("click", async () => {
     openEnroll();
   }
 });
+/** ux-parity--1: sign-out was a ONE-CLICK unconfirmed wipe here while every other surface confirms
+ *  (desktop and Android both raise a dialog; web confirms on unsynced changes) — and a mis-click in
+ *  this footer, one button away from "Lock", destroys the browser's quick-unlock enrollment, so the
+ *  user has to re-run the PIN or biometric setup to get back to where they were. The popup has no
+ *  dialog surface and shouldn't grow one for this, so the confirm is the house's OWN inline idiom:
+ *  the options page's two-click arm, disarmed on blur, with the consequence stated in the live
+ *  message region (which the SR user hears, per a11y 2a). */
+let signOutArmed = false;
+const signOutLabel = el("sign-out").textContent ?? "Sign out";
+function disarmSignOut(): void {
+  if (!signOutArmed) return;
+  signOutArmed = false;
+  el("sign-out").textContent = signOutLabel;
+}
 el("sign-out").addEventListener("click", async () => {
+  if (!signOutArmed) {
+    signOutArmed = true;
+    el("sign-out").textContent = "Sign out? Click again to confirm";
+    showMsg("info", "Signing out removes this browser's quick unlock (PIN or biometric) and its saved session. Your vault on the server is untouched.");
+    return;
+  }
+  disarmSignOut();
   await ask({ type: "signOut" }); // full wipe: blob + co-key + tokens + session (spec 01 §8.4)
   clearMsg();
   pinFallback = false;
   await refresh();
 });
+el("sign-out").addEventListener("blur", disarmSignOut); // any move away cancels a half-armed confirm
 
 /* ---- footer ---- */
 
@@ -1308,6 +1389,11 @@ async function renderServerOrigin(): Promise<void> {
   const node = el("server-origin");
   node.textContent = middleTruncateOrigin(origin);
   node.title = origin;
+  // a11y-webext--5: the element is a bare <span> (role=generic), and aria-label is PROHIBITED on a
+  // generic role — some AT drops it, which would silently defeat the whole point of exposing the
+  // untruncated origin to a screen-reader user on an anti-phishing display. `note` is a labelable
+  // role that says what this is (an aside about the current state), so the name lands.
+  node.setAttribute("role", "note");
   node.setAttribute("aria-label", `Connected server: ${origin}`);
 }
 

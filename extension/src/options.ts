@@ -9,6 +9,7 @@
  * External module only (MV3 CSP forbids inline). No key material ever reaches here.
  */
 import { BROAD_ORIGIN_PATTERN, requestServerGrants } from "./grantflow";
+import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send } from "./messages";
 import { canonicalizeServerUrl, getServerUrl, originMatchPattern, setServerUrl } from "./serverurl";
 import { trustGateView } from "./trustgate";
@@ -40,14 +41,17 @@ const autofillStatus = el("autofill-status");
  *  user gesture is still live when requestServerGrants calls permissions.request. */
 let pendingCanonical: string | null = null;
 
+/** a11y 2a (livemsg.ts owns the rule): this wrote text into a HIDDEN region and unhid it after —
+ *  the inverted order, so the first outcome an SR user got here ("Connected to …", the
+ *  declined-grant explanation) was a static read nothing announced. The role stays "status" for
+ *  every kind, matching what options.html declares statically on #server-msg/#purge-msg: this page
+ *  has no modal flow an assertive interrupt would serve, and the popup's alert/status split is
+ *  about its unlock errors. */
 function setMsg(node: HTMLElement, kind: "ok" | "err" | "info", text: string): void {
-  node.className = `msg ${kind}`;
-  node.textContent = text;
-  node.hidden = false;
+  setLiveMsg(node, `msg ${kind}`, "status", text);
 }
 function clearMsg(node: HTMLElement): void {
-  node.hidden = true;
-  node.textContent = "";
+  clearLiveMsg(node);
 }
 
 /** Read + render the current configured origin (raw, exactly as it will be dialed). */
@@ -71,6 +75,13 @@ async function renderAutofillStatus(): Promise<void> {
 }
 
 function hideGate(): void {
+  // a11y-webext--7: both exits (Cancel, and a successful Connect) hid this container while one of
+  // its own buttons held focus, so focus fell to <body> — on the most consequential decision the
+  // page offers, leaving a keyboard user to Tab in from the top and an SR user with no place. Put
+  // it back on the address field the gate was opened from, whenever focus is actually inside the
+  // gate (never yank it from wherever else the user has since gone). Same fix shape as the
+  // popup's named "a11y 4a" relock bug.
+  if (gate.contains(document.activeElement)) input.focus();
   gate.hidden = true;
   pendingCanonical = null;
 }

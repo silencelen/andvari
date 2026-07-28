@@ -1,4 +1,5 @@
 import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
+import type { BioReq, BioResult } from "./bioprotocol";
 import { brand, cardSubtitle, composeShortExpiry, digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import {
   adIdkey,
@@ -483,15 +484,27 @@ async function benchPinParams(): Promise<KdfParams> {
 // under its own gesture; the SW never touches WebAuthn. The 32-byte PRF secret is base64 on the wire and
 // zeroized the moment K_bio is derived (engine side). Device-binding is the co-key (breaker A1), not the
 // PRF — a synced passkey on another device re-derives the PRF but cannot open the co-key-wrapped blob.
-type BioReq =
-  | { op: "enroll"; prfSalt: string; userHandleB64: string; userName: string; reuse?: { credentialId: string; prfSalt: string } }
-  | { op: "eval"; credentialId: string; prfSalt: string };
-type BioResult =
-  | { ok: true; op: "enroll"; credentialId: string; prfEnabled: boolean; prfSalt: string; secretB64: string }
-  | { ok: true; op: "eval"; secretB64: string }
-  | { ok: false; error?: string };
+// quality-deadcode--5: BioReq/BioResult are DECLARED ONCE, in bioprotocol.ts — the hand-duplicated
+// pair here and in connector.ts had already drifted on `error`'s optionality.
 let pendingBio: { req: BioReq; resolve: (r: BioResult) => void; windowId?: number } | null = null;
 const CONNECTOR_URL = chrome.runtime.getURL("connector.html");
+/** bug-ext-gating--4: the RP-ID claim rides the manifest's install-time host permission for the
+ *  reference instance (design 2026-07-18 §3 — deliberately independent of the configured server, so
+ *  a self-hoster's domain never has to be dragged through an optional-permission prompt). But that
+ *  permission can be RUNTIME-WITHHELD (Chrome "site access: on click"; Firefox optional-by-default
+ *  host perms), and the design mandates a probe on that exact ground: without it the ceremony
+ *  throws SecurityError, which the engine maps to bio_cancelled, which renders as "Setup was
+ *  cancelled — try again when you're ready." A capability that CANNOT work, reported forever as if
+ *  the user had dismissed a prompt. The probe turns it into the honest bio_unsupported line, which
+ *  also points at the PIN. Same literal as connector.ts's RP_ID: one origin, derived in both. */
+const BIO_RP_ORIGIN_PATTERN = `${DEFAULT_SERVER_URL}/*`;
+async function bioRpPermissionHeld(): Promise<boolean> {
+  try {
+    return await chrome.permissions.contains({ origins: [BIO_RP_ORIGIN_PATTERN] });
+  } catch {
+    return true; // no permissions API to ask (Firefox event page edge) — never block on the probe
+  }
+}
 
 /** Resolve (and clear) the in-flight ceremony exactly once — from a connector "result" post OR from
  *  the window being closed (onRemoved) BEFORE a result arrived (→ cancel = bio_cancelled). */
@@ -565,6 +578,11 @@ const biometricDep: QuBiometric = {
   async enroll(prfSalt) {
     dropEnrollSecretCache();
     lastBioEnroll = null;
+    // bug-ext-gating--4: the designed probe. A withheld RP host permission is a CAPABILITY loss,
+    // not a cancellation — answer it through the existing prfEnabled=false channel, which
+    // QuickUnlock.enrollBio already maps to bio_unsupported ("This device can't do biometric quick
+    // unlock — set up a PIN instead."). Nothing is written either way, so the prior record is safe.
+    if (!(await bioRpPermissionHeld())) return { credentialId: "", prfEnabled: false, prfSalt };
     const userId = session?.userId ?? "";
     // A stable, non-reversible user handle (WebAuthn stores it in the passkey; we key by credentialId).
     const userHandleB64 = toB64(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("andvari-bio|" + userId))));
@@ -590,6 +608,12 @@ const biometricDep: QuBiometric = {
       enrollSecretCache = null;
       return s;
     }
+    // bug-ext-gating--4, redeem lane: the same probe, but the redeem has no "unsupported" code to
+    // return (BeginRedeemBio's union is deliberately narrow), so this stays a throw → bio_cancelled
+    // → the master-password fallback the user needs anyway. The BUTTON is what must not lie: the
+    // popup's probeBioCapable runs the same check, so a withheld permission hides it rather than
+    // offering an unlock that can only ever fail.
+    if (!(await bioRpPermissionHeld())) throw new Error("bio RP host permission withheld");
     const r = await brokerBioCeremony({ op: "eval", credentialId, prfSalt: toB64(prfSalt) });
     if (!r.ok || r.op !== "eval") throw new Error("bio eval ceremony failed");
     return fromB64(r.secretB64);
@@ -1505,6 +1529,10 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return { locked: false, matches: matchesFor(msg.host).map((i) => toMatchItem(i, true)) } satisfies Res<"matches">;
     }
     case "allItems": {
+      // Deliberately NOT sender-gated: the in-page "Search all logins…" dropdown must work inside
+      // iframe-hosted login forms, so this answers any injected frame while unlocked — the popup
+      // issues the identical call. See the messages.ts contract header for the full statement of
+      // the trade (isolated world + closed shadow root bound it; no secret ever rides a list).
       if (!session) return { locked: true, items: [] } satisfies Res<"allItems">;
       const q = (msg.query ?? "").trim().toLowerCase();
       const items = loginItems()
@@ -2205,8 +2233,21 @@ function decryptItems(sync: SyncResponse, vaultKeys: Map<string, Uint8Array>): D
 
 // ---- matching ----
 
+/** ux-parity--2: ONE list order fleet-wide. Web sorts by name (store.ts localeCompare) and
+ *  desktop/Android get core's `sortedBy { it.doc.name.lowercase() }`; the extension listed items in
+ *  server change-feed order, so the popup's hoard and the in-page dropdown reshuffled whenever an
+ *  item was edited. Transliterates CORE's comparator rather than web's: Kotlin's `sortedBy` on a
+ *  String is natural (UTF-16 code-unit) order, which is exactly what `<`/`>` are here — a
+ *  locale-aware collator would be a THIRD order. Sorted at the one projection every login surface
+ *  reads through (matchesFor, `allItems`, `matches`), on the fresh array `filter` returns. */
+const byName = (a: DecryptedItem, b: DecryptedItem): number => {
+  const x = a.doc.name.toLowerCase();
+  const y = b.doc.name.toLowerCase();
+  return x < y ? -1 : x > y ? 1 : 0;
+};
+
 function loginItems(): DecryptedItem[] {
-  return session ? session.items.filter((i) => i.doc.type === "login") : [];
+  return session ? session.items.filter((i) => i.doc.type === "login").sort(byName) : [];
 }
 
 /** Login items whose saved uris match the page host — canonical urimatch (spec 02 §3.1) over a
@@ -2233,7 +2274,7 @@ function toMatchItem(it: DecryptedItem, siteMatch: boolean): MatchItem {
 // ---- cards (popup copy-only group — the fill/save paths above stay login-only by design) ----
 
 function cardItems(): DecryptedItem[] {
-  return session ? session.items.filter((i) => i.doc.type === "card") : [];
+  return session ? session.items.filter((i) => i.doc.type === "card").sort(byName) : []; // ux-parity--2
 }
 
 /** Masked, list-safe projection — the number/expiry/CVV never ride a list (messages contract). */
@@ -2819,12 +2860,21 @@ async function capturedCredential(
   // A live pending belongs to the frame that captured it. Reject an overwrite from a DIFFERENT
   // frame (a hostile sub-frame firing a synthetic submit to hijack the top frame's Save banner);
   // the owning frame may still update its own capture (user corrects the password).
-  if (msg.password && st.pending && st.pending.frameId !== frameId) return { ok: true };
+  // bug-ext-gating--1: …EXCEPT that the top frame OUTRANKS a sub-frame. First-writer-wins with no
+  // priority made the slot squattable: a sub-frame (ad/widget — content.js runs allFrames) that
+  // captures first owns the tab's ONE pending slot, and every later top-frame login is refused
+  // here, so offerPendingSave never fires and the user's real password is silently never offered
+  // for saving. The refusal stands for every other pairing (sub-over-top, sub-over-sub).
+  if (msg.password && st.pending && st.pending.frameId !== frameId && frameId !== 0) return { ok: true };
 
   if (!msg.password) {
     // Username-only page (multi-step step 1) — remember it for the password page. Sticky for
     // the tab's life so a wrong-password retry still has it; newer captures overwrite.
-    if (msg.username) {
+    // bug-ext-gating--1: TOP FRAME ONLY. This branch had no frame check at all, and the value is
+    // sticky for the tab's life and feeds both the stored username and saveTargetFor below — so a
+    // sub-frame could poison it and steer the user's next real save away from the right item,
+    // turning an intended update into a duplicate. A multi-step step 1 is a top-frame page.
+    if (msg.username && frameId === 0) {
       st.lastUsername = msg.username;
       tabs.set(tabId, st);
       persistTabs();

@@ -42,21 +42,11 @@ export function base32Decode(text: string): Uint8Array {
   return Uint8Array.from(out);
 }
 
-export function base32Encode(bytes: Uint8Array): string {
-  let out = "";
-  let buffer = 0;
-  let bits = 0;
-  for (const b of bytes) {
-    buffer = (buffer << 8) | b;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      out += ALPHABET[(buffer >> bits) & 0x1f];
-    }
-  }
-  if (bits > 0) out += ALPHABET[(buffer << (5 - bits)) & 0x1f];
-  return out;
-}
+// quality-deadcode--3: `base32Encode` lived here with zero callers — the extension only ever
+// DECODES a stored secret to compute a code; nothing in it mints or re-serialises one (that is the
+// web vault's editor, whose own copy is live and vector-tested). Deleted rather than kept "for
+// symmetry": this module is bundled into the service worker, and an unreferenced export is weight
+// plus a second implementation to keep honest.
 
 export type TotpAlgorithm = "SHA1" | "SHA256" | "SHA512";
 
