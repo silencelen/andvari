@@ -18,8 +18,8 @@
 #   * -Dcompose.accessibility.enable=true   (best-effort; recorded, not trusted)
 #   * assistive_technologies via the JVM accessibility.properties mechanism
 #
-# THIS BOX (huginn LXC 117) HAS NO DISPLAY/Xvfb/at-spi2-core, so running it here
-# is expected to bail at the dependency check. It is written to be runnable on a
+# A HEADLESS BUILD HOST (no DISPLAY/Xvfb/at-spi2-core) is expected to bail at the
+# dependency check below. It is written to be runnable on a
 # Linux GUI box (a GNOME VM). Record what it observed in docs/accessibility.md.
 #
 # Usage:
@@ -40,7 +40,7 @@ LAUNCH_SECONDS="${LAUNCH_SECONDS:-25}"   # how long to let the app settle before
 say() { printf '%s\n' "$*"; }
 hr()  { printf '%s\n' "----------------------------------------------------------------------"; }
 
-# ---- 1. dependency gate (this is where huginn bails — no GUI stack) ----------
+# ---- 1. dependency gate (this is where a headless host bails — no GUI stack) --
 missing=()
 for dep in Xvfb dbus-run-session busctl; do
   command -v "$dep" >/dev/null 2>&1 || missing+=("$dep")

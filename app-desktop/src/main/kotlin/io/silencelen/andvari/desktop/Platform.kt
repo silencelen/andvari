@@ -199,19 +199,26 @@ private fun compareVersions(a: String, b: String): Int {
     return 0
 }
 
-/** Plain clipboard copy, NO auto-clear — for setup material the user pastes elsewhere (TOTP URI/secret). */
-fun copyPlain(value: String) {
-    Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(value), null)
-}
+/** Plain clipboard copy, NO auto-clear — for setup material the user pastes elsewhere (TOTP URI/secret).
+ *  False = the write failed (ux-error--3: `setContents` throws IllegalStateException while another
+ *  process holds the clipboard open — RDP, clipboard managers, Office on Windows) — guarded like
+ *  every other clipboard call in this file, so a Copy click can never crash the app; callers own
+ *  the honest feedback. */
+fun copyPlain(value: String): Boolean =
+    runCatching { Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(value), null) }.isSuccess
 
 /**
  * Copy to the system clipboard and auto-clear after [clearSeconds] (best-effort). Vault-secret
  * call sites pass `max(1, policy.clipboardClearSeconds)` — clamped exactly like web's useCopy,
  * so a policy of 0 still clears after 1 s (never "keep forever" for secrets).
+ * False = the write failed (ux-error--3, [copyPlain]'s guard rationale); nothing landed on the
+ * clipboard, so [lastSecretCopied] is NOT set and no clear is scheduled.
  */
-fun copyWithAutoClear(value: String, clearSeconds: Int = 30) {
-    val clipboard = Toolkit.getDefaultToolkit().systemClipboard
-    clipboard.setContents(StringSelection(value), null)
+fun copyWithAutoClear(value: String, clearSeconds: Int = 30): Boolean {
+    // The systemClipboard ACCESSOR can throw too (headless JVM; some Linux setups without a
+    // system clipboard) — guard the whole acquire-and-write, not just setContents.
+    val clipboard = runCatching { Toolkit.getDefaultToolkit().systemClipboard }.getOrNull() ?: return false
+    if (runCatching { clipboard.setContents(StringSelection(value), null) }.isFailure) return false
     lastSecretCopied = value
     clipboardCleaner.schedule({
         runCatching {
@@ -220,4 +227,5 @@ fun copyWithAutoClear(value: String, clearSeconds: Int = 30) {
         }
         if (lastSecretCopied == value) lastSecretCopied = null // cleared (or superseded elsewhere)
     }, clearSeconds.toLong(), TimeUnit.SECONDS)
+    return true
 }
