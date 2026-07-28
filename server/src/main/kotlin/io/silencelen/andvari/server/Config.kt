@@ -32,8 +32,20 @@ class Config(
     // Cap on concurrent streaming uploads per user; in-flight .part bytes also count
     // toward the user quota mid-stream (LOW-6).
     val uploadMaxConcurrentPerUser: Int = 4,
-    // Netty request-read timeout, seconds (0 = off). Stays OFF until idle-WS survival
-    // under the timeout is verified on the deployment (ping keepalive vs Netty reaper).
+    // Netty request-read timeout, seconds (0 = off) — the slow-loris reaper for stalled
+    // request bodies (LOW-6; design 2026-07-06 §"New env keys" wanted 300).
+    //
+    // STANDING DECISION (2026-07-27, bug-server--6): OFF stays the default, and this is no
+    // longer "pending" anything. Half the precondition shipped — the 30 s ping keepalive is
+    // installed (App.kt WebSockets) so a healthy idle /events socket has recurring inbound
+    // traffic — but the open question was never the keepalive: it is whether Netty's
+    // ReadTimeoutHandler is even reset by post-upgrade WebSocket frame reads. That is a
+    // property of the running deployment, not of this repo, and it cannot be settled from a
+    // unit test. If it is NOT reset, a non-zero value silently drops every idle dirty-bell at
+    // the interval and web sync stalls until remount (web has no poll fallback). Failing
+    // closed to 0 costs a defence-in-depth reaper in front of a household-scale server that
+    // already caps body size and concurrent uploads; failing open costs silent sync loss.
+    // An operator who has confirmed WS survival on their own deployment sets the env to 300.
     val requestReadTimeoutSeconds: Int = 0,
     // Netty response-WRITE timeout, seconds (0 = off). Netty's built-in default is 10 s,
     // which severs any response that takes >10 s to flush to a SLOW client — truncating
@@ -202,10 +214,32 @@ class Config(
             "ANDVARI_FORCE_HSTS", "ANDVARI_LOGIN_RATE_PER_MIN", "ANDVARI_STRICT_ENV",
         )
 
-        private val INT_ENV = setOf(
-            "ANDVARI_PORT", "ANDVARI_SMTP_PORT", "ANDVARI_MIN_KDF_MEM", "ANDVARI_MIN_KDF_OPS",
-            "ANDVARI_UPLOAD_MAX_CONCURRENT", "ANDVARI_REQUEST_READ_TIMEOUT_S", "ANDVARI_RESPONSE_WRITE_TIMEOUT_S",
-            "ANDVARI_VAULT_GRACE_DAYS", "ANDVARI_TRANSFER_TTL_DAYS", "ANDVARI_LOGIN_RATE_PER_MIN",
+        /**
+         * Every numeric ANDVARI_* var and the range it may take — ONE table, read by BOTH
+         * [envLint] (which names anything outside it) and [numEnv] (which falls back to the
+         * documented default), so a lint-clean value is always one [fromEnv] can consume.
+         *
+         * They used to disagree (bug-server--7): lint accepted any `Long` while fromEnv called
+         * bare `toInt()`, so `ANDVARI_PORT=3000000000` linted clean and then threw
+         * NumberFormatException out of fromEnv — an unhandled stack at boot, including under
+         * ANDVARI_STRICT_ENV=1 where the operator was promised a clean problem list. Nothing
+         * rejected negatives either, so `ANDVARI_VAULT_GRACE_DAYS=-7` booted clean and stamped
+         * every purgeAt in the past (next janitor sweep purges with the grace window gone).
+         *
+         * Bounds reject the impossible, not the unwise — they are not policy. Grace 0 (purge at
+         * once) is an operator's call; a NEGATIVE grace is not a setting, it is a fault.
+         */
+        internal val NUM_ENV_RANGES: Map<String, LongRange> = mapOf(
+            "ANDVARI_PORT" to 1L..65_535L,
+            "ANDVARI_SMTP_PORT" to 1L..65_535L,
+            "ANDVARI_MIN_KDF_MEM" to 0L..(1L shl 40), // 0 = floor off (test/dev); ceiling 1 TiB
+            "ANDVARI_MIN_KDF_OPS" to 0L..1_000_000L,
+            "ANDVARI_UPLOAD_MAX_CONCURRENT" to 1L..1_024L,
+            "ANDVARI_REQUEST_READ_TIMEOUT_S" to 0L..86_400L, // 0 = off
+            "ANDVARI_RESPONSE_WRITE_TIMEOUT_S" to 0L..86_400L, // 0 = off
+            "ANDVARI_VAULT_GRACE_DAYS" to 0L..3_650L,
+            "ANDVARI_TRANSFER_TTL_DAYS" to 1L..3_650L, // a 0-day offer TTL expires every offer on sight
+            "ANDVARI_LOGIN_RATE_PER_MIN" to 1L..100_000L,
         )
         private val BOOL_ENV = setOf(
             "ANDVARI_JANITOR_DRYRUN", "ANDVARI_TOTP_REQUIRED", "ANDVARI_OFFLINE_CACHE_ALLOWED",
@@ -232,8 +266,12 @@ class Config(
                     problems += "unknown env var $name (typo? renamed?)"
                 }
             }
-            for (name in INT_ENV) env[name]?.let { v ->
-                if (v.trim().toLongOrNull() == null) problems += "invalid $name: '$v' is not a number"
+            for ((name, range) in NUM_ENV_RANGES) env[name]?.let { v ->
+                val n = v.trim().toLongOrNull()
+                when {
+                    n == null -> problems += "invalid $name: '$v' is not a number"
+                    n !in range -> problems += "invalid $name: $n is outside ${range.first}..${range.last}"
+                }
             }
             for (name in BOOL_ENV) env[name]?.let { v ->
                 if (parseBool(v) == null) problems += "invalid $name: '$v' is not a boolean (use 1/0/true/false)"
@@ -264,6 +302,12 @@ class Config(
         // both paths while CF-Connecting-Ip is not. An all-CF deployment can re-add it via env.
         val DEFAULT_TRUSTED_IP_HEADERS = listOf("X-Forwarded-For")
 
+        /** The ONE reader for every var in [NUM_ENV_RANGES]. FORGIVING, like the §2.1 vars below:
+         *  a non-numeric or out-of-range value degrades to [default] rather than crashing the boot,
+         *  and [envLint] is the loud channel that names it. */
+        private fun numEnv(env: (String) -> String?, name: String, default: Long): Long =
+            env(name)?.trim()?.toLongOrNull()?.takeIf { it in NUM_ENV_RANGES.getValue(name) } ?: default
+
         fun fromEnv(env: (String) -> String? = System::getenv): Config {
             val recoveryPub = env("ANDVARI_RECOVERY_PUBKEY")?.let { Bytes.fromB64(it) } ?: ByteArray(0)
             require(recoveryPub.isEmpty() || recoveryPub.size == 32) {
@@ -277,7 +321,7 @@ class Config(
             require(enumSecret.size >= 32) { "ANDVARI_ENUM_SECRET must decode to >=32 bytes" }
             return Config(
                 host = env("ANDVARI_HOST") ?: "127.0.0.1",
-                port = env("ANDVARI_PORT")?.toInt() ?: 8080,
+                port = numEnv(env, "ANDVARI_PORT", 8080).toInt(),
                 dbPath = env("ANDVARI_DB") ?: "andvari.db",
                 blobDir = env("ANDVARI_BLOB_DIR") ?: "blobs",
                 webDir = env("ANDVARI_WEB_DIR"),
@@ -288,19 +332,19 @@ class Config(
                 publicHostname = env("ANDVARI_PUBLIC_HOSTNAME"),
                 bootstrapToken = env("ANDVARI_BOOTSTRAP_TOKEN"),
                 // Production KDF floor (spec 01 §9's hard rule: never below 64 MiB / ops 3).
-                minKdfMemBytes = env("ANDVARI_MIN_KDF_MEM")?.toLong() ?: 67_108_864L,
-                minKdfOps = env("ANDVARI_MIN_KDF_OPS")?.toLong() ?: 3L,
+                minKdfMemBytes = numEnv(env, "ANDVARI_MIN_KDF_MEM", 67_108_864L),
+                minKdfOps = numEnv(env, "ANDVARI_MIN_KDF_OPS", 3L),
                 trustedIpHeaders = env("ANDVARI_TRUSTED_IP_HEADERS")
                     ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
                     ?: DEFAULT_TRUSTED_IP_HEADERS,
-                uploadMaxConcurrentPerUser = env("ANDVARI_UPLOAD_MAX_CONCURRENT")?.toInt() ?: 4,
-                requestReadTimeoutSeconds = env("ANDVARI_REQUEST_READ_TIMEOUT_S")?.toInt() ?: 0,
-                responseWriteTimeoutSeconds = env("ANDVARI_RESPONSE_WRITE_TIMEOUT_S")?.toInt() ?: 0,
-                vaultGraceDays = env("ANDVARI_VAULT_GRACE_DAYS")?.toInt() ?: 7,
-                transferTtlDays = env("ANDVARI_TRANSFER_TTL_DAYS")?.toInt() ?: 14,
+                uploadMaxConcurrentPerUser = numEnv(env, "ANDVARI_UPLOAD_MAX_CONCURRENT", 4).toInt(),
+                requestReadTimeoutSeconds = numEnv(env, "ANDVARI_REQUEST_READ_TIMEOUT_S", 0L).toInt(),
+                responseWriteTimeoutSeconds = numEnv(env, "ANDVARI_RESPONSE_WRITE_TIMEOUT_S", 0L).toInt(),
+                vaultGraceDays = numEnv(env, "ANDVARI_VAULT_GRACE_DAYS", 7L).toInt(),
+                transferTtlDays = numEnv(env, "ANDVARI_TRANSFER_TTL_DAYS", 14L).toInt(),
                 janitorDryRun = env("ANDVARI_JANITOR_DRYRUN")?.let { it == "1" || it.equals("true", ignoreCase = true) } ?: false,
                 smtpHost = env("ANDVARI_SMTP_HOST"),
-                smtpPort = env("ANDVARI_SMTP_PORT")?.toInt() ?: 587,
+                smtpPort = numEnv(env, "ANDVARI_SMTP_PORT", 587L).toInt(),
                 smtpUser = env("ANDVARI_SMTP_USER"),
                 smtpPass = env("ANDVARI_SMTP_PASS"),
                 smtpFrom = env("ANDVARI_SMTP_FROM"),
@@ -319,7 +363,7 @@ class Config(
                 selfHostDocsUrl = env("ANDVARI_SELFHOST_DOCS_URL"),
                 offlineCacheAllowedFloor = parseBool(env("ANDVARI_OFFLINE_CACHE_ALLOWED")) ?: true,
                 forceHsts = parseBool(env("ANDVARI_FORCE_HSTS")) ?: false,
-                loginRatePerMin = env("ANDVARI_LOGIN_RATE_PER_MIN")?.toIntOrNull()?.takeIf { it > 0 } ?: 5,
+                loginRatePerMin = numEnv(env, "ANDVARI_LOGIN_RATE_PER_MIN", 5L).toInt(),
             )
         }
     }

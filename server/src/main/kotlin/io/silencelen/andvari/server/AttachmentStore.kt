@@ -264,8 +264,13 @@ class AttachmentStore(
         // …then stray files (crash between file write and row insert, or failed rename).
         // Files already unlinked above fail delete() and are not double-counted.
         dirFiles.forEach { f ->
+            // ONE predicate: rowless AND past the TTL. In-flight .part files need no separate
+            // arm — ATT-1 names them "$attachmentId.<random>.part" (createTempFile above), so
+            // stripping the suffix leaves "$attachmentId.<random>", which is never a bare
+            // attachmentId in [known]; a stale .part therefore always falls through here, and
+            // a live one is held back by the same mtime cutoff.
             val name = f.name.removeSuffix(".part")
-            if ((f.name.endsWith(".part") || name !in known) && f.lastModified() < cutoff && name !in known) {
+            if (name !in known && f.lastModified() < cutoff) {
                 if (f.delete()) removed++
             }
         }

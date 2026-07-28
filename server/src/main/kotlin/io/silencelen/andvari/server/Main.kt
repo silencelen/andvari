@@ -27,9 +27,10 @@ fun main() {
                 host = config.host
                 port = config.port
             }
-            // 0 = off. Reaps stalled request bodies (slow-loris uploads, LOW-6); enable via
-            // ANDVARI_REQUEST_READ_TIMEOUT_S only after verifying idle-WS survival on the
-            // deployment (30 s ping keepalive must reset the reaper).
+            // 0 = off by standing decision — see Config.requestReadTimeoutSeconds for why it
+            // is not a "pending verification". An operator enables it (300 s) via
+            // ANDVARI_REQUEST_READ_TIMEOUT_S once idle-WS survival is confirmed on their own
+            // deployment.
             requestReadTimeoutSeconds = config.requestReadTimeoutSeconds
             // 0 = off (override Netty's 10 s default, which truncates slow large-file
             // downloads mid-body). See Config.responseWriteTimeoutSeconds.

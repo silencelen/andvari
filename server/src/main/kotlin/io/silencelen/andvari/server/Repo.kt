@@ -266,9 +266,6 @@ class Repo(val db: Db) {
     fun userById(id: String): UserRow? =
         db.read { it.queryOne("SELECT * FROM users WHERE userId=?", id, map = ::userRow) }
 
-    fun escrowFingerprint(userId: String): String? =
-        db.read { it.queryOne("SELECT fingerprint FROM escrow WHERE userId=?", userId) { rs -> rs.getString(1) } }
-
     // member recovery (design 2026-07-12 §F) — the per-member self-service recovery row.
     fun memberRecoveryRow(userId: String): MemberRecoveryRow? =
         db.read { it.queryOne("SELECT userId,recoveryWrappedUvk,recoveryVerifier,pieceId,setupDeviceId FROM member_recovery WHERE userId=?", userId, map = ::memberRecoveryRowOf) }
@@ -301,12 +298,6 @@ class Repo(val db: Db) {
 
     fun sessionByRefreshHash(hash: String): SessionRow? = db.read {
         it.queryOne("SELECT * FROM sessions WHERE refreshHash=?", hash, map = ::sessionRow)
-    }
-
-    fun deviceRevoked(deviceId: String): Boolean = db.read {
-        it.queryOne("SELECT revokedAt FROM devices WHERE deviceId=?", deviceId) { rs ->
-            rs.getLong(1).let { v -> !rs.wasNull() && v > 0 }
-        } ?: true
     }
 
     // sync pull (single read transaction for snapshot consistency)

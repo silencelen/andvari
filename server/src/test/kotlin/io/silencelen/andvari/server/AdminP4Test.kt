@@ -131,4 +131,60 @@ class AdminP4Test : P4TestSupport() {
         assertEquals(HttpStatusCode.BadRequest, ghost.status)
         assertEquals("no_such_user", errorOf(ghost))
     }
+
+    /**
+     * bug-server--8: revoking an id that names no device used to run both UPDATEs against zero
+     * rows, write a device_revoke audit row for the phantom, and answer "ok". An admin who
+     * mistyped or pasted a stale id was told the compromised device was locked out while it was
+     * still live, and the incident reviewer later read that row as a completed revocation.
+     * Refusal shape is disableUser's: audited INSIDE the tx, thrown OUTSIDE it.
+     */
+    @Test
+    fun revokingAnUnknownDeviceRefuses_andAuditsTheDenialNotARevocation() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("root@x.com", "admin password value")
+        client.register(admin, bootstrapToken)
+
+        val ghostDevice = "00000000-0000-4000-8000-0000000000ff"
+        val resp = client.post("/api/v1/admin/devices/$ghostDevice/revoke") { authed(admin) }
+        assertEquals(HttpStatusCode.NotFound, resp.status, resp.bodyAsText())
+        assertEquals("no_such_device", errorOf(resp))
+
+        assertTrue(
+            client.auditRows(admin, "device_revoke").none { it.deviceId == ghostDevice },
+            "a device that never existed must not appear as a completed revocation",
+        )
+        val denied = client.auditRows(admin, "device_revoke_denied").single()
+        assertEquals(ghostDevice, denied.deviceId)
+        assertEquals("no_such_device", denied.meta)
+
+        // The real device still revokes cleanly (the guard is the only thing that changed).
+        val own = client.get("/api/v1/admin/users/${admin.userId}/devices") { authed(admin) }
+        val device = json.decodeFromString(ListSerializer(AdminDeviceSummary.serializer()), own.bodyAsText()).single()
+        assertEquals(HttpStatusCode.OK, client.post("/api/v1/admin/devices/${device.deviceId}/revoke") { authed(admin) }.status)
+    }
+
+    /**
+     * bug-server--9: a member with no escrow row is a state-of-the-world miss, not a malformed
+     * request — 404 like no_such_user / not_a_member, so the Admin UI can tell "waived, no
+     * backstop" from "you sent a bad id". (The UI keys off the body code either way, which is
+     * why this is a low: the taxonomy was the defect, not the behavior.)
+     */
+    @Test
+    fun escrowFetchForAUserWithoutOne_isNotFound_notBadRequest() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("root@x.com", "admin password value")
+        client.register(admin, bootstrapToken)
+
+        // Well-formed id, no such user ⇒ no escrow row.
+        val resp = client.get("/api/v1/admin/users/00000000-0000-4000-8000-000000000000/escrow") { authed(admin) }
+        assertEquals(HttpStatusCode.NotFound, resp.status, resp.bodyAsText())
+        assertEquals("no_escrow", errorOf(resp))
+        // A malformed id stays a 400 — the two failures remain distinguishable.
+        val bad = client.get("/api/v1/admin/users/123/escrow") { authed(admin) }
+        assertEquals(HttpStatusCode.BadRequest, bad.status)
+        assertEquals("bad_user_id", errorOf(bad))
+    }
 }

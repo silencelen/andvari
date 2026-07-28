@@ -41,6 +41,4 @@ object ServerCrypto {
     /** Deterministic 16-byte fake salt for unknown emails (looks real, leaks nothing). */
     fun fakeSalt(enumSecret: ByteArray, email: String): ByteArray =
         crypto.hmacSha256(enumSecret, email.lowercase().encodeToByteArray()).copyOf(16)
-
-    fun randomB64(n: Int): String = Bytes.toB64(crypto.randomBytes(n))
 }

@@ -125,10 +125,19 @@ class SyncEngine(
     private val api: AndvariApi,
     private val account: Account,
     private val cache: VaultCache,
+    /** ux-error--4: where anti-replay diagnostics go. Defaults to [CoreLog.Silent] — a host
+     *  that wires nothing behaves exactly as before. */
+    private val log: CoreLog = CoreLog.Silent,
 ) {
     private companion object {
         const val SERVER_BATCH_MAX = 200 // server rejects a push batch larger than this (Service.push)
         const val DAY_MS = 86_400_000L
+        /** The name every surface shows when a vault's own name is unavailable (undecryptable
+         *  meta, or a row we hold no VK for). Web twin: the same literal in store.ts, which
+         *  also carries [vaultInfos]'s sentinel compare against it — so a vault a user
+         *  genuinely NAMED "(vault)" is relabelled Personal/Shared on both engines alike.
+         *  Dropping that sentinel is a two-engine change; the constant is not. */
+        const val VAULT_NAME_FALLBACK = "(vault)"
     }
 
     // ---- vault lifecycle state (spec 03 §11); session-scoped — the durable halves
@@ -261,7 +270,7 @@ class SyncEngine(
             VaultInfo(
                 vaultId = v.vaultId,
                 type = v.type,
-                name = if (!name.isNullOrEmpty() && name != "(vault)") name else if (v.type == "personal") "Personal" else "Shared",
+                name = if (!name.isNullOrEmpty() && name != VAULT_NAME_FALLBACK) name else if (v.type == "personal") "Personal" else "Shared",
                 role = account.roleFor(v.vaultId),
             )
         }
@@ -353,7 +362,7 @@ class SyncEngine(
         // pre-purge name drives the copy). Empty on a since=0 / fresh-device pull.
         val prePullNames = HashMap<String, String>()
         for (v in cache.vaults()) {
-            if (account.hasVault(v.vaultId)) prePullNames[v.vaultId] = account.decryptVaultName(v.vaultId, v.metaBlob) ?: "(vault)"
+            if (account.hasVault(v.vaultId)) prePullNames[v.vaultId] = account.decryptVaultName(v.vaultId, v.metaBlob) ?: VAULT_NAME_FALLBACK
         }
         var resyncing = false
         val resp = try {
@@ -416,7 +425,7 @@ class SyncEngine(
         if (replayDeniedByVault.isEmpty()) return
         for ((vid, n) in replayDeniedByVault) {
             val name = cache.vaults().find { it.vaultId == vid }
-                ?.let { account.decryptVaultName(vid, it.metaBlob) } ?: "(vault)"
+                ?.let { account.decryptVaultName(vid, it.metaBlob) } ?: VAULT_NAME_FALLBACK
             pushNotice(LifecycleNotice(account.newItemId(), vid, name, "replay-denied", parkedCount = n))
         }
         replayDeniedByVault.clear()
@@ -508,7 +517,7 @@ class SyncEngine(
                 }
                 val name = prePullNames[vaultId]
                     ?: held.grant?.let { account.peekVaultName(it, held.vault.metaBlob) }
-                    ?: "(vault)"
+                    ?: VAULT_NAME_FALLBACK
                 reinstated.add(ReinstatedVault(vaultId, name))
             }
             // Revoked memberships (spec 03 §11 tri-state). F21: this MUST NOT throw — a bad
@@ -549,8 +558,9 @@ class SyncEngine(
             val heldV = metaV(held)
             val deliveredV = metaV(delivered)
             if (deliveredV < heldV) {
-                println(
-                    "andvari: vault ${delivered.vaultId} delivered metaV $deliveredV regressed below held $heldV" +
+                log.warn(
+                    CoreLog.EVENT_VAULT_META_REPLAY,
+                    "vault ${delivered.vaultId} delivered metaV $deliveredV regressed below held $heldV" +
                         " — replayed metaBlob; keeping the newer local one",
                 )
                 delivered.copy(metaBlob = held.metaBlob)
@@ -617,7 +627,7 @@ class SyncEngine(
         }
 
         // Snapshot ciphertext + move to holding BEFORE forgetting the VK.
-        val parkedCount = moveToHolding(vaultId, reason, info, verdict == "valid", cachedName)
+        val parkedCount = moveToHolding(vaultId, reason, info, verdict == "valid")
 
         when {
             verdict == "left" -> pushNotice(LifecycleNotice(account.newItemId(), vaultId, cachedName, "left"))
@@ -657,13 +667,14 @@ class SyncEngine(
      * flushed queued mutations for the vault (they would only be denied) + anything already
      * held. Returns the parked count for the notice. The item snapshot reuses the cache's
      * ciphertext envelopes verbatim — nothing is re-encrypted, nothing plaintext at rest.
+     * The pre-pull name is NOT taken: the holding record stores no plaintext name, and the
+     * "Recently removed" surface re-derives it from the retained grant ([heldVaults]).
      */
     private fun moveToHolding(
         vaultId: String,
         reason: String,
         info: RemovedGrantInfo?,
         verifiedDelete: Boolean,
-        @Suppress("UNUSED_PARAMETER") cachedName: String,
     ): Int {
         val items = cache.envelopes().filter { it.vaultId == vaultId && !it.deleted }
         val staged = preParkedByVault.remove(vaultId)?.map { it.mutation } ?: emptyList()
@@ -727,7 +738,7 @@ class SyncEngine(
                 if (LifecycleProof.verify(expected, pt.proof)) {
                     incomingByVault[vaultId] = IncomingTransfer(
                         vaultId = vaultId,
-                        vaultName = account.decryptVaultName(vaultId, vault.metaBlob) ?: "(vault)",
+                        vaultName = account.decryptVaultName(vaultId, vault.metaBlob) ?: VAULT_NAME_FALLBACK,
                         offerId = pt.offerId,
                         seq = pt.seq,
                         expiresAt = pt.expiresAt,
@@ -743,7 +754,7 @@ class SyncEngine(
                 val expected = LifecycleProof.acceptFromHash(crypto, key, vaultId, lt.offerId, lt.newOwnerUserId, lt.seq, wrapHash)
                 LifecycleProof.verify(expected, lt.acceptProof)
             }.getOrDefault(false)
-            val name = account.decryptVaultName(vaultId, vault.metaBlob) ?: "(vault)"
+            val name = account.decryptVaultName(vaultId, vault.metaBlob) ?: VAULT_NAME_FALLBACK
             if (verified) {
                 cache.setLastVerifiedTransferSeq(vaultId, lt.seq)
                 // A verified completion supersedes any earlier unverified-sighting warning.
@@ -788,7 +799,7 @@ class SyncEngine(
         return cache.heldVaults().map { h ->
             HeldVaultInfo(
                 vaultId = h.vault.vaultId,
-                name = h.grant?.let { account.peekVaultName(it, h.vault.metaBlob) } ?: "(vault)",
+                name = h.grant?.let { account.peekVaultName(it, h.vault.metaBlob) } ?: VAULT_NAME_FALLBACK,
                 reason = h.reason,
                 verified = h.verified,
                 purgeAt = h.purgeAt,
@@ -843,10 +854,10 @@ class SyncEngine(
     /** The caller's own in-grace deleted vaults — re-opens each VK from the wrappedVk it
      *  already owned so the name shows AND restore can mint its proof (ZK-clean). */
     suspend fun listDeleted(): List<DeletedVaultInfo> = api.deletedVaults().map { d ->
-        var name = "(vault)"
+        var name = VAULT_NAME_FALLBACK
         runCatching {
             account.addGrant(WireGrant(d.vaultId, account.userId, "owner", d.wrappedVk, 0, null))
-            name = account.decryptVaultName(d.vaultId, d.metaBlob) ?: "(vault)"
+            name = account.decryptVaultName(d.vaultId, d.metaBlob) ?: VAULT_NAME_FALLBACK
         } // can't open — placeholder; restore will fail loudly if truly lost
         DeletedVaultInfo(d.vaultId, name, d.deletedAt, d.purgeAt, d.deleteId)
     }
