@@ -48,6 +48,9 @@ import kotlinx.io.IOException
  *  - [WEAK_KDF_ACTION]                ← web crypto/keys.ts WEAK_KDF_MESSAGE
  *  - [SERVER_PROBLEM]                 ← web Recover.tsx verifyErrorMessage/resetErrorMessage ApiError branch
  *  - [SAVE_FAILED]                    ← extension saveErrorCopy("failed")
+ *  - [replayDeniedNotice]             ← web Vault.tsx noticeBody "replay-denied" (BOTH count
+ *    branches; web carries them as template literals, pinned byte-equal against this file's
+ *    literals by web/src/ui/vault-copy.test.ts)
  *
  * NATIVE-PINNED (sentences the natives already show today, promoted here byte-equal so
  * next-wave adoption is a zero-copy-diff swap; the android/desktop friendlyError maps and
@@ -164,6 +167,34 @@ object HouseholdCopy {
     /** NATIVE-PINNED: AutofillUnlockActivity's offline-with-no-cached-keys sentence. For
      *  that lane (it knows the cache state); [forUnlockError] itself maps IO → [UNREACHABLE]. */
     const val UNLOCK_OFFLINE_NO_KEYS = "Offline, and no saved keys — open andvari once while online."
+
+    // ---- lifecycle-notice copy (spec 03 §11) ----
+
+    /**
+     * TWIN of web Vault.tsx noticeBody's "replay-denied" branch (android SharingScreen +
+     * desktop Ui call this directly). Not an error map: the §11 notices are calm statements,
+     * and this is the one whose sentence INTERPOLATES (count + vault name) — which is why it
+     * stayed hand-written on all three surfaces and drifted three ways (ux-copy--3, polish
+     * audit 2026-07-27) while every surface's comment claimed to mirror the others. Wording
+     * decisions, recorded so the next editor doesn't re-litigate them:
+     *  - "your access", not the natives' "your role": role is the mechanically accurate term
+     *    (the member's role likely changed across the grace) but it is jargon to a family
+     *    member, and the sibling notice already says "Your access to “X” was removed."
+     *  - the reason clause stays (web's half): a notice that only says "couldn't be applied"
+     *    invites the reader to suspect data loss — naming the cause IS the reassurance.
+     *  - "while the vault was deleted", not web's "while it was deleted" — "it" sat next to
+     *    "your access" and could be read as the edit.
+     *  - "A recovered edit", not the natives' "1 recovered edit": the article idiom its own
+     *    banner neighbour already uses ("An offline change to “X” was refused").
+     * [count] is the notice's `parkedCount` with a null taken as 0, and [vaultName] is already
+     * resolved by the caller — every §11 notice falls back to "a vault" for a blank name.
+     */
+    fun replayDeniedNotice(count: Int, vaultName: String): String =
+        if (count == 1) {
+            "A recovered edit to “$vaultName” couldn't be applied — your access may have changed while the vault was deleted."
+        } else {
+            "$count recovered edits to “$vaultName” couldn't be applied — your access may have changed while the vault was deleted."
+        }
 
     // ---- general mapper ----
 

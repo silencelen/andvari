@@ -25,6 +25,44 @@ function canonStatusRow(status: number): string {
   return m![1]!;
 }
 
+/**
+ * The two branch literals of HouseholdCopy.replayDeniedNotice, in source order (singular first).
+ * Read off the function BODY, not its KDoc — the KDoc quotes the retired wordings on purpose.
+ */
+function canonReplayDenied(): { one: string; many: string } {
+  const fn = householdKt.match(/fun replayDeniedNotice\([\s\S]*?\n\n/);
+  expect(fn, "HouseholdCopy.replayDeniedNotice moved or was renamed — update the pin").not.toBeNull();
+  const literals = [...fn![0].matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+  expect(literals, "expected exactly the two count branches").toHaveLength(2);
+  return { one: literals[0]!, many: literals[1]! };
+}
+
+/** Kotlin `$name` interpolation → the JS template expression Vault.tsx interpolates there. */
+const asTemplate = (kotlin: string) =>
+  "`" + kotlin.replace("$vaultName", "${name}").replace("$count", "${count}") + "`";
+
+/**
+ * ux-copy--3 (polish audit 2026-07-27): the §11 "replay-denied" notice was the one lifecycle
+ * sentence with interpolation, so no constant carried it and all three surfaces hand-wrote it —
+ * web and the natives had drifted three ways at once (clause order, "your access may have changed
+ * while it was deleted" vs "your role may have changed", "A recovered edit" vs "1 recovered
+ * edit"), each side's comment claiming to mirror the other. It now lives in core HouseholdCopy;
+ * android/desktop call it, and web's byte-equal templates are pinned here the same token-lockstep
+ * way as the sentences above.
+ */
+describe("Vault.tsx §11 replay-denied notice — the core HouseholdCopy twin", () => {
+  it("carries both count branches byte-equal to the canon", () => {
+    const { one, many } = canonReplayDenied();
+    expect(vaultTsx).toContain(asTemplate(one));
+    expect(vaultTsx).toContain(asTemplate(many));
+  });
+
+  it("no longer carries either drifted wording", () => {
+    expect(vaultTsx).not.toContain("your role may have changed");
+    expect(vaultTsx).not.toContain("while it was deleted");
+  });
+});
+
 describe("Vault.tsx error copy — canon sentences, never wire text", () => {
   it("the editor's 413 shows core HouseholdCopy's 413 row, byte-equal", () => {
     expect(vaultTsx).toContain(`"${canonStatusRow(413)}"`);

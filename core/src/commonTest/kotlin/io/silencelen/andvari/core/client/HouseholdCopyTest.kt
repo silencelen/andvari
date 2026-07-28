@@ -84,6 +84,41 @@ class HouseholdCopyTest {
         assertEquals("Offline, and no saved keys — open andvari once while online.", HouseholdCopy.UNLOCK_OFFLINE_NO_KEYS)
     }
 
+    // ---- lifecycle-notice copy (spec 03 §11) ----
+
+    /**
+     * ux-copy--3 (polish audit 2026-07-27): the replay-denied notice was hand-written on web,
+     * android and desktop and had forked three ways (clause order, "access" vs "role", "A
+     * recovered edit" vs "1 recovered edit"). Same verbatim idiom as the constants above, plus
+     * both count branches — and web's byte-equal templates are pinned to THIS file's literals by
+     * web/src/ui/vault-copy.test.ts, so a reword must land on every surface at once.
+     */
+    @Test
+    fun replayDeniedNotice_pinnedVerbatim_bothCountBranches() {
+        // Curly quotes U+201C/U+201D around the name (all §11 notices), em dash U+2014, ASCII
+        // apostrophe in "couldn't" (the canon's house style).
+        assertEquals(
+            "A recovered edit to “Household” couldn't be applied — your access may have changed while the vault was deleted.",
+            HouseholdCopy.replayDeniedNotice(1, "Household"),
+        )
+        assertEquals(
+            "3 recovered edits to “Household” couldn't be applied — your access may have changed while the vault was deleted.",
+            HouseholdCopy.replayDeniedNotice(3, "Household"),
+        )
+        // 0 is reachable (a null parkedCount is taken as 0 by every caller) and must stay plural.
+        assertEquals(
+            "0 recovered edits to “Household” couldn't be applied — your access may have changed while the vault was deleted.",
+            HouseholdCopy.replayDeniedNotice(0, "Household"),
+        )
+        // The caller resolves a blank name to "a vault" (§11 house rule) — the canon just renders it.
+        assertEquals(
+            "A recovered edit to “a vault” couldn't be applied — your access may have changed while the vault was deleted.",
+            HouseholdCopy.replayDeniedNotice(1, "a vault"),
+        )
+        // The retired wordings must not creep back on any surface (see the KDoc's decision notes).
+        assertFalse(HouseholdCopy.replayDeniedNotice(2, "Household").contains("your role"))
+    }
+
     // ---- forError: the shared map ----
 
     @Test

@@ -55,6 +55,7 @@ import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
 import io.silencelen.andvari.core.client.EnrollLink
 import io.silencelen.andvari.core.client.HeldVaultInfo
+import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ImportHelp
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LifecycleNotice
@@ -1581,8 +1582,9 @@ private fun fmtDay(ms: Long?): String {
 
 /** §11 notice copy — attribution ("by its owner") is EARNED by a verified proof; the
  *  anomaly wordings render in the danger tone. Mirrors Android/web noticeBody — strings
- *  verbatim, curly quotes and apostrophes included. */
-private fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
+ *  verbatim, curly quotes and apostrophes included. `internal` so LifecycleNoticeCopyTest can
+ *  pin the replay-denied row against the canon. */
+internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
     val name = n.vaultName.ifBlank { "a vault" }
     return when (n.kind) {
         "deleted" -> Pair(
@@ -1603,13 +1605,10 @@ private fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
                 "If nobody in your household did this, tell your admin — the server may be misbehaving.",
             true,
         )
-        "replay-denied" -> {
-            val c = n.parkedCount ?: 0
-            Pair(
-                "$c recovered ${if (c == 1) "edit" else "edits"} couldn't be applied to “$name” — your role may have changed.",
-                false,
-            )
-        }
+        // TWIN → core [HouseholdCopy.replayDeniedNotice] (ux-copy--3): the one §11 sentence that
+        // interpolates, and the one every surface hand-wrote — it had drifted three ways from web.
+        // Canon now; web carries the byte-equal template and is pinned to the Kotlin source.
+        "replay-denied" -> Pair(HouseholdCopy.replayDeniedNotice(n.parkedCount ?: 0, name), false)
         else -> Pair( // "anomaly"
             "The server says you lost access to “$name”, but this couldn’t be verified as a real owner action. " +
                 "A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). " +
