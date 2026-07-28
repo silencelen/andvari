@@ -369,6 +369,27 @@ export class AndvariApi {
   eventsTicket(): Promise<WsTicketResponse> {
     return this.json("POST", "/api/v1/events/ticket");
   }
+
+  /** Revoke every server session for this device (POST /auth/logout, spec 03) — the sign-out
+   *  half of the web client.ts logout / desktop-Android bounded-revoke parity. Deliberately NOT
+   *  json(): the endpoint answers plain text ("ok"), and revocation is best-effort — this NEVER
+   *  throws (the caller's local wipe must proceed on any failure). An expired access token still
+   *  rotates once via the shared single-flight so the revoke lands. Token clearing stays with
+   *  the caller (doLock), which owns the pair's lifecycle. Resolves whether the server accepted. */
+  async logout(): Promise<boolean> {
+    const post = (): Promise<Response> => {
+      const headers: Record<string, string> = { "X-Andvari-Client": this.clientHeader };
+      if (this.accessToken) headers["authorization"] = `Bearer ${this.accessToken}`;
+      return fetch(this.baseUrl + "/api/v1/auth/logout", { method: "POST", headers });
+    };
+    try {
+      let resp = await post();
+      if (resp.status === 401 && (await this.tryRefresh())) resp = await post();
+      return resp.ok;
+    } catch {
+      return false; // offline / unreachable — best-effort by contract
+    }
+  }
 }
 
 /** A refused server response, carrying the parsed BODY code (spec 03 §8) — surfaces map the code

@@ -38,7 +38,11 @@ export interface LoginForm {
   /** CVV-negative rule (cards design 2026-07-09): true when the form's LONE password-typed
    *  field is name/id-token-matched cvv|cvc|csc — a checkout CVV box, not a login password.
    *  The capture engine must not offer save/update for it (an "update" would overwrite the
-   *  stored merchant password with a CVV). Fill/dropdown behavior is deliberately unchanged. */
+   *  stored merchant password with a CVV). Since the 2026-07-27 fix for the owner-reported
+   *  checkout failure, the FILL surfaces consult it too: content.ts maybeOpen cedes a
+   *  suppressSave form's card fields to the C1 chip, and the popup-driven fill skips
+   *  suppressSave forms — core demotes the CVV field-locally BEFORE the password rule, so the
+   *  old "fill/dropdown behavior is deliberately unchanged" stance was a parity gap, not a rule. */
   suppressSave: boolean;
 }
 

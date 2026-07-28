@@ -22,7 +22,7 @@ import {
 } from "./content-ui";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
-import { bumpLabelGeneration, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
+import { bumpLabelGeneration, demoteCsc, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
 import { fillErrorCopy, saveErrorCopy } from "./errors";
 import {
   send,
@@ -535,6 +535,26 @@ function cardFormForInput(input: FillableControl): CardForm | null {
   return allCardForms().find((f) => f.fields.some((x) => x.input === input)) ?? null;
 }
 
+/** DESTINATION-local checkout gate (owner-reported 2026-07-26; widened 2026-07-27): true when a
+ *  suppressSave form's credential DESTINATION is itself a card field — i.e. this "login" is a
+ *  checkout the login engine misread ({password:<cvv>, username:<expiry/PAN/name>}), so NO anchor
+ *  on it may fill. Deliberately not the blunt `f.suppressSave`: suppressSave is a union
+ *  (`isCardForm` ∨ lone-CVV, detect.ts buildLoginForm) and its [A7] `isCardForm` leg fires for ANY
+ *  form carrying a card-number field — a create-account-at-checkout form is suppressSave for SAVE
+ *  reasons while its genuine password field is still a legitimate FILL target. The password anchor
+ *  IS that distinction: a real password is not a card field; a CVV box is.
+ *  Two ways to be a card field, matching core FieldClassifier's field-local CSC demotion:
+ *  membership in a detected card form (the demoted CVV ref included), or — on a lone-CVV form no
+ *  card form claims (no PAN anchor ⇒ no card form exists) — the demotion rule itself. A
+ *  password-less form (username-step) on a card form has no credential destination worth the risk,
+ *  so it stays fully blocked, as the shipped blunt gate had it. */
+function cardMisreadAsLogin(f: LoginForm): boolean {
+  if (!f.suppressSave) return false; // cheap pre-check: keeps the ([K2]-cached) card scan off card-free pages
+  const p = f.password;
+  if (p === null) return true;
+  return cardFormForInput(p) !== null || demoteCsc(null, p.type, p.name, p.id) !== null;
+}
+
 /** The card form a submit-like control belongs to: its own (form ?? container), else — when the
  *  page has exactly one card form — that one (a formless checkout's Pay button can sit outside the
  *  fields' container, mirroring the login click path). */
@@ -647,12 +667,19 @@ async function maybeCardChip(target: EventTarget | null, viaClick = false): Prom
   // text entry point the user tabs into expecting help.
   if (target instanceof HTMLInputElement && target.type === "radio") return;
   if (chipEscaped === target && !viaClick) return; // [K3] Escape's refocus must not reopen
-  // [K1] LOGIN PRECEDENCE (binding): a field the login engine claims keeps the DROPDOWN. Card
-  // kinds live in the classify()==none gap, which is exactly the login pool's textLike
-  // username-fallback pool — on a type=password-CVV checkout buildLoginForm already yields
-  // {password:<cvv>, username:<nameOnCard>} and the dropdown opens there TODAY. Without this rule
-  // both surfaces render on one anchor. formFor reads the per-frame scanForms cache: one lookup.
-  if (target instanceof HTMLInputElement && formFor(target) !== null) return;
+  // [K1] LOGIN PRECEDENCE (binding): a field the login engine claims keeps the DROPDOWN — EXCEPT
+  // a suppressSave claim, which is a checkout CVV misread as a login ({password:<cvv>,
+  // username:<expiry/PAN/name>}). maybeOpen cedes those fields (the owner-reported 2026-07-26
+  // checkout fix), so the chip takes them over: mutual exclusion per anchor is preserved, and one
+  // card form no longer shows the chip on PAN/cardholder but the login dropdown on CVV/expiry.
+  // The condition is deliberately the BLUNT suppressSave, not maybeOpen's destination-local
+  // cardMisreadAsLogin: the two agree exactly on the anchors that reach the card-form check below
+  // (maybeOpen's second leg is card-form membership of this same anchor), and a claimed anchor that
+  // is NOT a card field never renders a chip anyway. formFor reads the per-frame scanForms cache.
+  if (target instanceof HTMLInputElement) {
+    const lf = formFor(target);
+    if (lf !== null && !lf.suppressSave) return;
+  }
   // Review #6: the CHEAP dedupe runs before the O(page) card scan. The focusin+click pair arrives
   // 50-300 ms apart — a different animation frame, so the [K2] cache is cold and the second call
   // would re-walk every scope for a result the guard is about to discard.
@@ -685,6 +712,20 @@ function maybeOpen(target: EventTarget | null): void {
   if (filling || !(target instanceof HTMLInputElement)) return;
   const f = formFor(target);
   if (!f) return;
+  // CVV-negative rule (owner-reported 2026-07-26 real-checkout failure): a checkout misread as a
+  // login ({password:<cvv>, username:<expiry/PAN/name>}) fills vault credentials into card boxes.
+  // Core demotes the CVV field-locally BEFORE the password rule (FieldClassifier CSC demotion; the
+  // spec vector for a hintless type=password name=cvv is cc-csc) — this gate is that demotion's
+  // surface twin, deliberately HERE and not in classify(): the login classify vectors are
+  // byte-frozen with web. TWO legs, because fillForm writes the FORM's slots, not the anchor:
+  //  - cardMisreadAsLogin is DESTINATION-local, so no anchor of a misread checkout can fill (the
+  //    shipped password-equality leg was ANCHOR-local: a dropdown opened on a cardholder-name field
+  //    misread as the username still wrote the vault password into the CVV box);
+  //  - card-form membership of THIS anchor cedes the field to the C1 chip ([K1] mirror in
+  //    maybeCardChip), preserving one-surface-per-anchor on a form the destination leg clears.
+  // A genuine password beside card fields is a card field by neither test, so its dropdown
+  // survives even though the form is suppressSave — matching Android's StructureParser split.
+  if (cardMisreadAsLogin(f) || (f.suppressSave && cardFormForInput(target) !== null)) return;
   const now = Date.now();
   if (lastOpen && lastOpen.input === target && now - lastOpen.t < 400) return; // focusin+click pair
   lastOpen = { input: target, t: now };
@@ -943,6 +984,12 @@ function init(): void {
       if (e.relatedTarget instanceof Element && isOwnUiHost(e.relatedTarget)) return;
       chipEscaped = null; // [K3] the sentinel is per-field: it dies with the focus that set it
       dismissCardChip(); // [K8] leaving the field ends the offer
+      // The dropdown inherits [K8] too: a script-driven focus move (section-expand autofocus, SPA
+      // hydration — no mousedown, no Tab keydown) otherwise leaves it open on the OLD field with
+      // its capture-phase arrow/Enter keys still armed — and co-rendered with the chip when the
+      // new field is a card field. The isOwnUiHost exemption above already protects the search-box
+      // focus handoff into our closed root; a row pick never focus-moves (mousedown+preventDefault).
+      closeDropdown();
     },
     true,
   );
@@ -1062,7 +1109,12 @@ function init(): void {
         // via sendResponse (the SW relays it to the popup, whose ok used to mean mere delivery) —
         // a form-less page answers no_form instead of staying silent.
         const all = scanForms();
-        const f = all.find((x) => x.kind === "login") ?? all[0];
+        // Same DESTINATION-local checkout gate as maybeOpen, so both fill entry points agree: a
+        // form whose "password" IS the CVV box (owner-reported 2026-07-26) is never a popup-fill
+        // target, while a create-account-at-checkout form — suppressSave only because it carries a
+        // PAN ([A7]) — keeps its genuine password destination. Prefer a real login, else the
+        // username-step fallback; a card-only checkout answers no_form.
+        const f = all.find((x) => x.kind === "login" && !cardMisreadAsLogin(x)) ?? all.find((x) => !cardMisreadAsLogin(x));
         if (!f) {
           sendResponse({ filled: "nothing", code: "no_form" });
           return undefined;
