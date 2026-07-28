@@ -216,8 +216,14 @@ button.ghost:disabled { opacity: .5; cursor: default; }
      icon"). With nowrap+ellipsis it truncated to "…click the andva…" under a user MINIMUM FONT
      SIZE (14-16px is common for low-vision users), deleting the instruction. It wraps instead, on
      a FIXED two-line height so the box stays byte-identical between the locked and unlocked
-     states — [S3]'s hit-test indistinguishability is a property of the BOX, not the text. */
-  height: 46px;
+     states — [S3]'s hit-test indistinguishability is a property of the BOX, not the text.
+     The height must actually HOLD those two lines under border-box: 2 × (12.5px × 1.4) = 35px of
+     text + 14px vertical padding + 2px border = 51px (the shipped 46px spilled the sentence
+     outside the pill). overflow:hidden is the [S3] backstop: whatever a user minimum font size or
+     a wide font fallback does to the text, the page-observable painted region — elementFromPoint
+     retargets every shadow descendant to the host — can never exceed this fixed box. */
+  height: 52px;
+  overflow: hidden;
   animation: anv-in .16s ease-out;
 }
 .chip:hover { border-color: var(--anv-gold); }

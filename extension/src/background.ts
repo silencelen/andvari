@@ -123,12 +123,18 @@ const CARD_BADGE_TEXT = "•";
 // Automated (non-user) messages that must NOT re-arm the idle lock — else a page auto-reloading
 // (pageInfo) or the popup's 1 s status/TOTP poll would defer autolock forever while the user is
 // away. `status` is here too: merely leaving the popup open (it polls status every second for
-// liveness) is not activity; real interaction (matches/reveal/search/save/…) still re-arms.
+// liveness) is not activity; real interaction (reveal/search/save/generate/…) still re-arms.
 // [K13]/[C2] `cardChipOffer` belongs here too: it is PAGE-triggered (a focusin the page can drive
 // with `HTMLElement.focus()`, which fires *trusted* events at frame rate), not user activity — a
-// focus loop would otherwise defer the idle autolock forever. `openPopupForCards` deliberately
-// stays OUT: it rides a real isTrusted click on our own chip, i.e. genuine user activity.
-const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status", "cardFormInfo", "cardChipOffer"]);
+// focus loop would otherwise defer the idle autolock forever. The same rule admits `matches`
+// (the login dropdown's open-query rides the SAME trusted focusin, one line above the chip's)
+// and `pendingSave` (polled on every top-frame load — an auto-refreshing tab would re-arm per
+// reload, exactly the pageInfo case): anything a page can drive with focus() or a load is
+// passive. `openPopupForCards` deliberately stays OUT: it rides a real isTrusted click on our
+// own chip, i.e. genuine user activity — as do `reveal` (a dropdown pick), `allItems` (search
+// typing), `capturedCredential`/`resolvePendingSave` (submits + banner clicks) and every popup
+// action, so the timer keeps its real signal.
+const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status", "cardFormInfo", "cardChipOffer", "matches", "pendingSave"]);
 
 /** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
  *  account.ts:40 parity). The unlock mapper carries it to the popup as code "identity_mismatch" —
@@ -938,7 +944,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (!pending) return;
     const msg: TabMsg = { type: "offerPendingSave", pending: publicPending(pending) };
     try {
-      await chrome.tabs.sendMessage(tabId, msg);
+      // Frame 0 only — the render is isTop-gated content-side anyway, so the wide broadcast only
+      // ever delivered the pending metadata into every cross-origin frame's content script.
+      await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
     } catch {
       /* content not injected in that tab (yet) — its own pendingSave poll covers it */
     }
@@ -959,6 +967,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   // stale SYNCHRONOUSLY — right here, before the first await — or the chip gate would spend that
   // window comparing the NEW document's sender.origin against the OLD document's recorded origin.
   topOriginPendingClear.add(tabId);
+  // [S-rate]/[S4b] the throttle caches are nav-lifetime too: a navigation must invalidate the
+  // cached chip verdict exactly as it invalidates cardGrants/pendingCardSave — a replay of the
+  // PREVIOUS document's `fillable:true` inside the 250 ms window would void the [S2] check for
+  // the new document (and a stale repair stamp could deny a fresh document its [S4b] repair).
+  chipOfferLast.delete(tabId);
+  chipRepairLast.delete(tabId);
   pendingCardSave.delete(tabId); // [X2-A2b] a top-level nav voids any pending card save (PAN)
   cardCaptureDedupe.delete(tabId);
   // V4 (design §V4): a nav invalidates this tab's card registry (below), so a "card here" dot must
@@ -1197,7 +1211,14 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
 /** Explicit sign-out / definitive revocation → a FULL wipe of the quick-unlock blob + co-key + tokens,
  *  never the armed-retaining lock (breaker A3⊕B2). Routed here from onRevoked, the popup "Sign out"
  *  action, and every definitive-401 during a quick-unlock redeem. */
-function doSignOut(): Promise<void> {
+async function doSignOut(): Promise<void> {
+  // Server-session revocation FIRST, while api still holds the tokens (Android/desktop parity:
+  // both AWAIT a bounded api.logout() with the same 5 s ceiling — without it "Sign out" leaves
+  // the refresh token valid server-side for ~30 days). Best-effort + bounded: an offline sign-out
+  // must never hang the wipe, and on the already-revoked routes (onRevoked, definitive-401) the
+  // POST is a harmless no-op. Sign-out ONLY — doLock deliberately keeps the session so quick
+  // unlock can re-arm.
+  await Promise.race([api.logout(), delay(5000)]);
   void clearBioCred(); // 0.17.0: explicit sign-out tears down the amendment-4 reuse record too
   return doLock("signout");
 }
@@ -1518,6 +1539,11 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     case "resolvePendingCardSave":
       return resolvePendingCardSave(msg.action, sender);
     case "pendingSave": {
+      // Top frame only (undefined = the popup, which legitimately asks about the active tab —
+      // reveal()'s isTopFrame shape): a cross-origin sub-frame must not read the top frame's
+      // captured host/username/vault-item metadata. The render was always isTop-gated
+      // content-side; this closes the SW half.
+      if (sender.frameId !== undefined && sender.frameId !== 0) return { pending: null } satisfies Res<"pendingSave">;
       const tabId = await contextTabId(sender);
       const p = tabId === undefined ? undefined : tabs.get(tabId)?.pending;
       return { pending: p ? publicPending(p) : null } satisfies Res<"pendingSave">;
@@ -1687,7 +1713,8 @@ function reofferPendingSaves(): void {
   for (const [tabId, st] of tabs) {
     if (!st.pending) continue;
     const m: TabMsg = { type: "offerPendingSave", pending: publicPending(st.pending) };
-    chrome.tabs.sendMessage(tabId, m).catch(() => {
+    // Frame 0 only — same rule as the onUpdated re-offer: the metadata never rides into sub-frames.
+    chrome.tabs.sendMessage(tabId, m, { frameId: 0 }).catch(() => {
       /* content not injected in that tab — its own pendingSave poll covers it */
     });
   }
@@ -2513,6 +2540,10 @@ async function cardChipOffer(sender: chrome.runtime.MessageSender): Promise<Res<
   if (tabId === undefined || typeof frameId !== "number" || frameId !== 0) return no; // [S1] strict
   if (typeof sender.origin !== "string" || sender.origin === "" || sender.origin === "null") return no;
   const now = Date.now();
+  // [S2] mid-nav: the recorded origin is the PREVIOUS document's. Checked BEFORE the [S-rate]
+  // replay (belt to the loading handler's chipOfferLast delete — braces): an [S2]-marked tab must
+  // never be served from the cache, or the new document inherits the old one's verdict.
+  if (topOriginPendingClear.has(tabId)) return no;
   const last = chipOfferLast.get(tabId);
   // [S-rate] Review #3: a throttled call REPLAYS the tab's last computed answer instead of
   // refusing. A hard `no` here was silently losing the chip on ordinary use — tabbing
@@ -2522,7 +2553,6 @@ async function cardChipOffer(sender: chrome.runtime.MessageSender): Promise<Res<
   // harmless: the popup is the truth, and presence carries no vault state ([S3]).
   if (last !== undefined && now - last.t < CHIP_OFFER_MIN_GAP_MS) return last.answer;
   chipOfferLast.set(tabId, { t: now, answer: no }); // pessimistic until a positive verdict lands
-  if (topOriginPendingClear.has(tabId)) return no; // [S2] mid-nav: the recorded origin is the PREVIOUS document's
   const st = tabs.get(tabId);
   const top = st?.topOrigin;
   const rec = st?.cardForms?.[frameId];
@@ -2841,6 +2871,20 @@ async function resolvePendingSave(
   const st = tabId === undefined ? undefined : tabs.get(tabId);
   const pending = st?.pending;
   if (tabId === undefined || !st || !pending) return { ok: false, error: "nothing pending" };
+  // A pending is resolvable ONLY by the frame that captured it, the TOP frame, or the popup (no
+  // tab). The capture side already defends the frame (the cross-frame overwrite reject above);
+  // without this, ANY frame in the tab could commit or silently dismiss the top frame's offer.
+  // Frame 0 is admitted because capture and OFFER live in different frames BY DESIGN: content runs
+  // with allFrames, so a sub-frame login records frameId N, but the re-offer surface is top-frame
+  // only (offerPendingSave is sent { frameId: 0 } and the post-nav poll renders only when isTop).
+  // Capturer-only would answer "nothing pending" forever on every sub-frame login — and worse,
+  // capturedCredential refuses a cross-frame overwrite of a live pending while the dismiss branch
+  // sits BELOW this guard, so the unresolvable pending would squat the tab's single slot for the
+  // tab's life (surviving SW death via storage.session), silently dropping every later capture.
+  // No new exposure: the "pendingSave" read case above already lets frame 0 read any frame's
+  // pending (publicPending strips the password). The card twin stays capturer-only — a top-level
+  // nav deletes pendingCardSave and its banner is only ever rendered by the capturing frame.
+  if (sender.tab !== undefined && sender.frameId !== pending.frameId && sender.frameId !== 0) return { ok: false, error: "nothing pending" };
 
   if (action === "dismiss") {
     st.pending = undefined;
@@ -2954,6 +2998,11 @@ async function resolvePendingCardSave(
   const tabId = await contextTabId(sender);
   const rec = tabId === undefined ? undefined : pendingCardSave.get(tabId);
   if (tabId === undefined || !rec) return { ok: false, error: "nothing pending" };
+  // [X2-A2] resolve half: captureCard hard-gates the capture to the tab's top origin and records
+  // the capturing frame — honor it here too (the login twin's rule), or any cross-origin ad/PSP
+  // iframe could commit the top frame's PAN to the vault (or silently destroy the offer) with no
+  // banner click. The popup (no tab) passes.
+  if (sender.tab !== undefined && sender.frameId !== rec.frameId) return { ok: false, error: "nothing pending" };
   if (action === "dismiss") {
     pendingCardSave.delete(tabId);
     return { ok: true };

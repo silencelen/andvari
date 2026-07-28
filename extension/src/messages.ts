@@ -274,7 +274,9 @@ export type Req =
    *  touching no other origin. `origin` is a raw/canonical origin string; the SW re-canonicalizes it. */
   | { type: "purgeServerData"; origin: string }
   | { type: "ping" }
-  /** Content: logins whose uris match `host` (state-aware). */
+  /** Content: logins whose uris match `host` (state-aware). PASSIVE ([K13]): the dropdown's
+   *  open-query rides the same trusted focusin a page can drive with HTMLElement.focus(), so it
+   *  must never re-arm the idle autolock — the pick (`reveal`) is the user-activity signal. */
   | { type: "matches"; host: string }
   /** Popup/content: all logins, optionally filtered by a query (name/username/uri contains). */
   | { type: "allItems"; query?: string }
@@ -306,11 +308,17 @@ export type Req =
    *  drives a save), and offers a save/update against the tab's `pendingCardSave` slot. Carries the
    *  PAN (the reverse of `reveal`); the answer is the MASKED PendingCardSave, never the number. */
   | { type: "captureCard"; fields: CaptureCardFields }
-  /** Content: resolve the tab's pending card save (G2). */
+  /** Content: resolve the tab's pending card save (G2). Frame-gated like the login twin: only
+   *  the frame captureCard recorded (or the popup) may save/dismiss — any other frame is
+   *  answered "nothing pending" ([X2-A2] resolve half). */
   | { type: "resolvePendingCardSave"; action: "save" | "dismiss" }
-  /** Content (on load) / popup: is there a pending save to (re-)offer for this tab? */
+  /** Content (on load, TOP FRAME) / popup: is there a pending save to (re-)offer for this tab?
+   *  The SW answers sub-frames `{pending:null}` — the metadata (host/username/vault-item names)
+   *  belongs to the top frame that captured it. [K13]-adjacent: PASSIVE (fires on every load, so
+   *  an auto-refreshing tab must not defer the idle autolock). */
   | { type: "pendingSave" }
-  /** Content/popup: resolve the tab's pending save. */
+  /** Content/popup: resolve the tab's pending save. Resolvable ONLY by the frame that captured
+   *  it (or the popup) — the card entry's frame rule, mirrored. */
   | { type: "resolvePendingSave"; action: "save" | "dismiss" }
   /** Append https://<host> to an item's login.uris (additive; preserves the tail). */
   | { type: "linkUri"; itemId: string; host: string }

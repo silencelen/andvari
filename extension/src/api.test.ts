@@ -207,6 +207,47 @@ test("eventsTicket: POSTs /api/v1/events/ticket with the Bearer + client headers
   assert.equal(seen!.headers["X-Andvari-Client"], "extension/1.2.3");
 });
 
+test("sign-out revocation: logout POSTs /auth/logout with Bearer + client headers; text body tolerated", async () => {
+  let seen: { url: string; method: string; headers: Record<string, string> } | undefined;
+  globalThis.fetch = (async (url: string, init: { method: string; headers: Record<string, string> }) => {
+    seen = { url, method: init.method, headers: init.headers };
+    return textResp(200, "ok"); // the server answers plain text, not JSON — logout must not parse
+  }) as unknown as typeof fetch;
+  const api = new AndvariApi("https://x", "1.2.3");
+  api.setTokens("a1", "r1");
+  assert.equal(await api.logout(), true);
+  assert.equal(seen!.url, "https://x/api/v1/auth/logout");
+  assert.equal(seen!.method, "POST");
+  assert.equal(seen!.headers["authorization"], "Bearer a1");
+  assert.equal(seen!.headers["X-Andvari-Client"], "extension/1.2.3");
+});
+
+test("sign-out revocation: an expired access token rotates ONCE so the revoke still lands", async () => {
+  const logoutAuths: (string | undefined)[] = [];
+  globalThis.fetch = (async (url: string, init: { headers: Record<string, string> }) => {
+    if (url.includes("/logout")) {
+      logoutAuths.push(init.headers["authorization"]);
+      return init.headers["authorization"] === "Bearer a2" ? textResp(200, "ok") : textResp(401, "unauthorized");
+    }
+    if (url.includes("/refresh")) return jsonResp(200, { accessToken: "a2", refreshToken: "r2" });
+    throw new Error("unexpected " + url);
+  }) as unknown as typeof fetch;
+  const api = new AndvariApi("https://x", "1.2.3");
+  api.setTokens("a1", "r1");
+  assert.equal(await api.logout(), true);
+  assert.deepEqual(logoutAuths, ["Bearer a1", "Bearer a2"], "the 401 spent one rotation, then the revoke landed");
+});
+
+test("sign-out revocation: logout NEVER throws — offline resolves false and the tokens are untouched", async () => {
+  const api = new AndvariApi("https://x", "1.2.3");
+  globalThis.fetch = (async () => {
+    throw new TypeError("Failed to fetch");
+  }) as unknown as typeof fetch;
+  api.setTokens("a1", "r1");
+  assert.equal(await api.logout(), false); // best-effort: the caller's local wipe proceeds regardless
+  assert.deepEqual(api.getTokens(), { access: "a1", refresh: "r1" }, "token clearing stays with doLock");
+});
+
 test("quick-unlock: getAccountKeys GETs /account/keys with the Bearer + client headers", async () => {
   let seen: { url: string; method: string; headers: Record<string, string> } | undefined;
   const keys = { kdfSalt: "s", kdfParams: { v: 1, alg: "argon2id13", ops: 3, memBytes: 67_108_864 }, wrappedUvk: "w", encryptedIdentitySeed: "e", identityPub: "p" };

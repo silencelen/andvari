@@ -539,7 +539,18 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     const set = bg.match(/const PASSIVE_MSGS = new Set<Req\["type"\]>\(\[([^\]]*)\]\)/)?.[1] ?? "";
     expect(set.length, "PASSIVE_MSGS literal must exist").toBeGreaterThan(0);
     expect(set).toContain('"cardChipOffer"');
+    // 2026-07-27 audit (bug-ext-gating--0): `matches` rides the SAME trusted focusin (the login
+    // dropdown's open-query, one line above the chip's in the focusin listener) and `pendingSave`
+    // fires on every top-frame load — both page-driven, so both must stay passive or a two-field
+    // focus loop / an auto-refreshing tab holds the vault unlocked indefinitely.
+    expect(set).toContain('"matches"');
+    expect(set).toContain('"pendingSave"');
     expect(set).not.toContain("openPopupForCards");
+    // …while genuine user activity keeps re-arming: none of these may ever join the passive set
+    // (each rides an isTrusted gesture in our closed-shadow UI, the popup, or a real submit).
+    for (const active of ["reveal", "allItems", "capturedCredential", "resolvePendingSave", "generate", "linkUri"]) {
+      expect(set, `${active} must re-arm the autolock (real user activity)`).not.toContain(`"${active}"`);
+    }
   });
 
   it("[S4a] the pageInfo topOrigin write PERSISTS (regression pin for the shipped V4 badge bug)", () => {
@@ -566,6 +577,11 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     expect(handler.length, "the status===loading card-clear handler must exist").toBeGreaterThan(0);
     expect(handler).toMatch(/cardGrants\.delete\(tabId\);[\s\S]{0,400}?topOriginPendingClear\.add\(tabId\);[\s\S]*?await ensureLoaded\(\)/);
     expect(handler).toMatch(/finally \{[\s\S]{0,400}?topOriginPendingClear\.delete\(tabId\);/);
+    // 2026-07-27 audit (quality-secdrift--1): the nav must ALSO drop the [S-rate]/[S4b] throttle
+    // caches — leaving them let the replay branch answer the NEW document with the PREVIOUS
+    // document's cached `fillable`, skipping the [S2] check for up to 250 ms.
+    expect(handler).toContain("chipOfferLast.delete(tabId)");
+    expect(handler).toContain("chipRepairLast.delete(tabId)");
   });
 
   it("[S8]/[S1]/[S3] the cardChipOffer gate: no tab URL, no topOrigin() read, strict frame 0, no vault condition", () => {
@@ -584,8 +600,11 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     expect(gate, "the gate must not inherit the badge's fail-open frameId disjunct").not.toContain("frameId === undefined ||");
     // The origin comparison is browser-set on BOTH sides.
     expect(gate).toContain("sender.origin !== top");
-    // [S2] mid-nav tabs are refused.
+    // [S2] mid-nav tabs are refused — and (2026-07-27 audit, quality-secdrift--1) the stale check
+    // PRECEDES the [S-rate] replay branch, so an [S2]-marked tab can never be served from cache
+    // (belt to the loading handler's chipOfferLast delete — braces).
     expect(gate).toContain("topOriginPendingClear.has(tabId)");
+    expect(gate.indexOf("topOriginPendingClear.has(tabId)")).toBeLessThan(gate.indexOf("CHIP_OFFER_MIN_GAP_MS"));
     // [S3] NO vault condition on `fillable` — a chip whose presence tracked "vault holds ≥1 card"
     // (or unlock state) would turn an elementFromPoint hit-test into a live vault-state monitor.
     // `locked` is reported separately as the copy selector, never as a presence gate.
@@ -673,11 +692,30 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     // copies produced different boxes, that rect would encode LIVE VAULT LOCK STATE — and a page
     // can force trusted focus at frame rate, turning it into a continuous monitor. Deleting the
     // `width` line alone would restore content-sizing (flex default) with every other pin green.
-    const rule = spanOf(cu, ".chip {", ".chip:hover");
+    // 2026-07-27 audit re-anchor: a bare ".chip {" start latched onto the shared
+    // `.dropdown, .banner, .toast, .chip {` token block, so every match below could read ANOTHER
+    // surface's declaration (the height check was passing off `.anv-sr`'s 1px). The newline
+    // prefix pins the span to the .chip rule itself.
+    const rule = spanOf(cu, "\n.chip {", ".chip:hover");
     expect(rule, "the .chip box must declare an explicit width").toMatch(/width:\s*\d+px/);
     expect(rule, "the .chip box must declare an explicit height (the locked copy wraps)").toMatch(/height:\s*\d+px/);
     expect(rule, "intrinsic sizing re-opens the locked/unlocked width oracle").not.toMatch(
       /(?:max|min|fit)-content|width:\s*auto/,
+    );
+    // 2026-07-27 audit (quality-secdrift--3): the fixed box must actually HOLD the two lines it
+    // promises. border-box arithmetic over the rule's own declarations: height − vertical padding
+    // − borders ≥ 2 × (font-size × line-height) — the shipped 46px left a 30px content box for
+    // 35px of text, spilling the locked anti-phishing sentence outside the pill. And overflow
+    // must clip: elementFromPoint retargets every shadow descendant to the host, so un-clipped
+    // spill (a user minimum font size, a wide font fallback) makes the page-observable painted
+    // region state-dependent again — the exact oracle [S3] closes.
+    expect(rule, "the .chip box must clip its own text").toMatch(/overflow:\s*hidden/);
+    expect(rule).toMatch(/border:\s*1px/); // the 2px border term below assumes a 1px border
+    const h = Number(rule.match(/height:\s*(\d+(?:\.\d+)?)px/)![1]);
+    const pad = Number(rule.match(/padding:\s*(\d+(?:\.\d+)?)px/)![1]); // first value = vertical
+    const [, fs, lh] = rule.match(/font:\s*(\d+(?:\.\d+)?)px\/(\d+(?:\.\d+)?)/)!;
+    expect(h - 2 * pad - 2, "two lines at the declared font must fit the border-box height").toBeGreaterThanOrEqual(
+      2 * Number(fs) * Number(lh),
     );
   });
 
@@ -712,5 +750,119 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     for (const secret of ["pending", "lastUsername", "password"]) {
       expect(lockCode, `the lock retention copies ${secret}`).not.toContain(secret);
     }
+  });
+});
+
+describe("2026-07-27 polish-release audit pins (extension lane) — checkout gating, frame gating, sign-out revoke", () => {
+  const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+  const ct = readFileSync(extensionSrc + "content.ts", "utf-8");
+
+  const spanOf = (src: string, from: string, to: string): string => {
+    const a = src.indexOf(from);
+    const b = src.indexOf(to);
+    expect(a, `span start missing: ${from}`).toBeGreaterThan(-1);
+    expect(b, `span end missing/out of order: ${to}`).toBeGreaterThan(a);
+    return src.slice(a, b);
+  };
+
+  it("bug-autofill-ux--0: maybeOpen cedes a suppressSave form's card fields (incl. the demoted CVV) — no login dropdown on a checkout card box", () => {
+    // The owner-reported 2026-07-26 real-checkout failure: a hintless <input type=password
+    // name=cvv> built a bogus login form ({password:<cvv>, username:<expiry/PAN/name>}) and a
+    // dropdown pick filled vault credentials into the payment fields. The fix is FIELD-LOCAL at
+    // the surface (core FieldClassifier CSC-demotion parity) — classify() itself stays byte-frozen
+    // with web, so the gate must live in maybeOpen, never in the classifier.
+    const open = spanOf(ct, "function maybeOpen(", "async function openFor(");
+    expect(open).toContain("cardMisreadAsLogin(f) || (f.suppressSave && cardFormForInput(target) !== null)");
+    // ANCHOR-LOCAL IS NOT ENOUGH (the shipped first cut): fillForm writes the FORM's slots, so a
+    // dropdown opened on a cardholder-name field misread as the username — neither f.password nor
+    // a card-form member — still wrote the vault password into the CVV box. The destination leg
+    // must carry the gate; the anchor equality must not come back as the whole rule.
+    expect(open, "the anchor-local password-equality leg cannot close the parity gap").not.toContain("f.password === target");
+  });
+
+  it("bug-autofill-ux--0: the checkout gate is DESTINATION-local — a genuine password beside card fields still fills", () => {
+    // suppressSave is a UNION (detect.ts buildLoginForm): `isCardForm` ∨ lone-CVV, and [A7]
+    // isCardForm fires for ANY form carrying a card-NUMBER field. A create-account-at-checkout
+    // form is therefore suppressSave for SAVE reasons while its real password field is a
+    // legitimate FILL target — so the gate keys on whether the form's password DESTINATION is
+    // itself a card field, never on the blunt form-level flag.
+    const fn = spanOf(ct, "function cardMisreadAsLogin(", "/** The card form a submit-like control");
+    expect(fn).toContain("if (!f.suppressSave) return false;"); //        not suppressSave ⇒ never blocked
+    expect(fn).toContain("if (p === null) return true;"); //              password-less (username-step) on a card form stays blocked
+    // The two ways to BE a card field: card-form membership (which includes the demoted CVV ref),
+    // or — on a lone-CVV form no card form claims (no PAN anchor ⇒ no card form exists) — the
+    // field-local demotion rule itself, core FieldClassifier's CSC demotion.
+    expect(fn).toContain("cardFormForInput(p) !== null || demoteCsc(null, p.type, p.name, p.id) !== null");
+  });
+
+  it("bug-autofill-ux--0: the chip's [K1] login precedence exempts suppressSave claims — the ceded fields get the chip, one surface per anchor", () => {
+    const chip = spanOf(ct, "async function maybeCardChip(", "// ---- dropdown ----");
+    expect(chip).toMatch(/lf !== null && !lf\.suppressSave/);
+  });
+
+  it("bug-autofill-ux--0: the popup-driven fill applies the SAME destination gate (both entry points agree)", () => {
+    // The popup path used the blunt !x.suppressSave, which over-rejected the create-account-at-
+    // checkout form the dropdown now fills — two entry points, one rule.
+    expect(ct).toContain('all.find((x) => x.kind === "login" && !cardMisreadAsLogin(x)) ?? all.find((x) => !cardMisreadAsLogin(x))');
+  });
+
+  it("bug-autofill-ux--2: the focusout listener dismisses the dropdown too, behind the isOwnUiHost exemption", () => {
+    // A script-driven focus move (section-expand autofocus, SPA hydration — no mousedown, no Tab)
+    // must not leave a stale dropdown whose capture-phase arrow/Enter keys still act on the old
+    // form, or co-render it with the chip. The isOwnUiHost exemption keeps the search-box focus
+    // handoff into our closed root alive.
+    expect(ct).toMatch(
+      /addEventListener\(\s*"focusout",[\s\S]{0,900}?isOwnUiHost\(e\.relatedTarget\)[\s\S]{0,900}?dismissCardChip\(\);[\s\S]{0,700}?closeDropdown\(\);/,
+    );
+  });
+
+  it("bug-ext-gating--2 / quality-secdrift--2: pending saves are FRAME-owned — read is top-frame, resolve is capturer-only", () => {
+    // The capture side always defended its frame (background capturedCredential/captureCard);
+    // these close the read/resolve half so a cross-origin sub-frame can neither read the top
+    // frame's captured metadata nor commit / silently dismiss its pending — login and card twins
+    // alike, matching the [S1]/revealCardForFill precedents. The popup (no tab) passes.
+    const read = spanOf(bg, 'case "pendingSave": {', 'case "resolvePendingSave"');
+    expect(read).toContain("sender.frameId !== undefined && sender.frameId !== 0");
+    const login = spanOf(bg, "async function resolvePendingSave(", "// ---- G2 save-card capture");
+    expect(login).toContain("sender.tab !== undefined && sender.frameId !== pending.frameId");
+    const card = spanOf(bg, "async function resolvePendingCardSave(", "// ---- writes");
+    expect(card).toContain("sender.tab !== undefined && sender.frameId !== rec.frameId");
+    expect(card, "the card twin stays capturer-only — its banner never crosses frames").not.toContain("frameId !== 0");
+    // …and both offerPendingSave sends target frame 0: the metadata never rides into sub-frames
+    // (the render was always isTop-gated content-side; the delivery now matches it).
+    expect(bg.match(/\{ type: "offerPendingSave"[\s\S]{0,300}?sendMessage\(tabId, (?:msg|m), \{ frameId: 0 \}\)/g) ?? []).toHaveLength(2);
+  });
+
+  it("bug-ext-gating--2 (regression half): the LOGIN resolve admits frame 0 — capture and offer live in different frames", () => {
+    // Capturer-ONLY deadlocked every sub-frame login: content runs with allFrames, so a sub-frame
+    // login records pending.frameId = N, but the re-offer surface is top-frame only
+    // (offerPendingSave is sent { frameId: 0 }; the post-nav poll renders only when isTop). The
+    // user's Save click therefore always arrives from frame 0 ≠ N → "nothing pending" forever, and
+    // because capturedCredential refuses a cross-frame overwrite of a live pending, that stale
+    // pending then SQUATS the tab's single slot for the tab's life (persisted through SW death),
+    // silently dropping every later capture in the tab — top-frame ones included.
+    const login = spanOf(bg, "async function resolvePendingSave(", "// ---- G2 save-card capture");
+    // Sub-frame capture → resolved from frame 0 → passes the gate…
+    expect(login).toContain("sender.frameId !== pending.frameId && sender.frameId !== 0");
+    // …while a hostile non-zero, non-owning frame is still refused (the disjunction stays an AND
+    // chain: any relaxation to `||` would admit every frame in the tab).
+    expect(login, "the frame gate must stay a conjunction").not.toMatch(/sender\.frameId !== pending\.frameId \|\|/);
+    // Dismiss must be reachable from frame 0 too, or the squat survives the user closing the
+    // banner: the guard sits ABOVE the dismiss branch, so admitting frame 0 clears the slot.
+    expect(login.indexOf("sender.frameId !== 0")).toBeLessThan(login.indexOf('if (action === "dismiss")'));
+    // No new exposure: frame 0 could already READ any frame's pending (password stripped).
+    const read = spanOf(bg, 'case "pendingSave": {', 'case "resolvePendingSave"');
+    expect(read).toContain("sender.frameId !== undefined && sender.frameId !== 0");
+  });
+
+  it("bug-web--0 (extension half): doSignOut revokes the server session — bounded, best-effort, and NEVER from doLock", () => {
+    // Android/desktop both AWAIT a bounded logout on sign-out; without it "Sign out" leaves the
+    // refresh token valid server-side for ~30 days. The revoke fires BEFORE doLock nulls the
+    // tokens; api.logout() never throws and the race caps the wait, so an offline sign-out still
+    // wipes locally. doLock stays revoke-free: a lock KEEPS the session (quick-unlock re-arm).
+    const so = spanOf(bg, "async function doSignOut(", "/** Re-arm the policy idle lock");
+    expect(so).toMatch(/Promise\.race\(\[api\.logout\(\), delay\(5000\)\]\)/);
+    const lock = spanOf(bg, "async function doLock(", "async function doSignOut(");
+    expect(lock).not.toContain("logout(");
   });
 });
