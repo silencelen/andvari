@@ -1,14 +1,15 @@
 import { useMemo, useState } from "react";
 import { ApiClient } from "../api/client";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
-import type { VaultStore } from "../vault/store";
+import type { VaultItem } from "../vault/store";
 import { Msg } from "./Msg";
 import { EmptySigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength } from "./strength";
 import { ViewHeader } from "./ViewHeader";
 
 interface Props {
-  store: VaultStore;
+  /** Vault's live items state (refreshed after every sync/pull) — NOT a store snapshot. */
+  items: VaultItem[];
   client: ApiClient;
   /** CR-08: keys the in-session breach cache per-account so a shared browser never cross-contaminates. */
   userId: string;
@@ -24,27 +25,33 @@ interface Row {
   hasTotp: boolean;
 }
 
+/** bug-web--1: rows derive from Vault's `items` prop, whose identity changes on every applied
+ *  sync — the old `store` prop never changed identity, so a memo keyed on it computed once per
+ *  mount and the WS dirty-bell's live updates froze the whole view until a navigate-away.
+ *  Exported pure so health-rows.test.ts pins the strength/reuse/TOTP derivation. */
+export function healthRows(items: VaultItem[]): Row[] {
+  const logins = items.filter((it) => it.doc.type === "login" && it.doc.login?.password);
+  const byPassword = new Map<string, number>();
+  for (const it of logins) {
+    const pw = it.doc.login!.password!;
+    byPassword.set(pw, (byPassword.get(pw) ?? 0) + 1);
+  }
+  return logins.map((it) => {
+    const pw = it.doc.login!.password!;
+    return {
+      itemId: it.itemId,
+      name: it.doc.name || "(untitled)",
+      password: pw,
+      strength: estimateStrength(pw),
+      reused: (byPassword.get(pw) ?? 1) - 1,
+      hasTotp: !!it.doc.login!.totp,
+    };
+  });
+}
+
 /** Vault-wide password health: strength, reuse, and (on demand) HIBP breach exposure. */
-export function Health({ store, client, userId, onOpenItem }: Props) {
-  const rows = useMemo<Row[]>(() => {
-    const logins = store.list().filter((it) => it.doc.type === "login" && it.doc.login?.password);
-    const byPassword = new Map<string, number>();
-    for (const it of logins) {
-      const pw = it.doc.login!.password!;
-      byPassword.set(pw, (byPassword.get(pw) ?? 0) + 1);
-    }
-    return logins.map((it) => {
-      const pw = it.doc.login!.password!;
-      return {
-        itemId: it.itemId,
-        name: it.doc.name || "(untitled)",
-        password: pw,
-        strength: estimateStrength(pw),
-        reused: (byPassword.get(pw) ?? 1) - 1,
-        hasTotp: !!it.doc.login!.totp,
-      };
-    });
-  }, [store]);
+export function Health({ items, client, userId, onOpenItem }: Props) {
+  const rows = useMemo<Row[]>(() => healthRows(items), [items]);
 
   // itemId → breach count, filled by a scan and cached ON-DEVICE (by itemId — never the plaintext
   // password, which is only the scan's lookup key) so it survives navigating away from Health.

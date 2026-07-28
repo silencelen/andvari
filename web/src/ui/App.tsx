@@ -29,6 +29,7 @@ import {
   makeClient,
   migrateCacheConsentOnce,
   pendingSyncCount,
+  revokeSessionBestEffort,
   SESSION_STORAGE_KEY,
   setOfflineCopyEnabled,
   shouldOfferCacheNudge,
@@ -189,6 +190,10 @@ export function App() {
       kind === "expired" && unsynced > 0
         ? `${notice ? notice + " " : ""}${unsynced} offline ${unsynced === 1 ? "change" : "changes"} could not be synced — this session expired before reconnecting.`
         : notice;
+    // bug-web--0 (spec 03): a USER sign-out revokes the device session server-side BEFORE the
+    // local wipe — bounded + best-effort, mirroring the natives; without it the refresh token
+    // stays refreshable for ~30 days. "expired"/"revoked" skip it (already dead server-side).
+    if (kind === "user") await revokeSessionBestEffort(clientRef.current);
     clearSession();
     clientRef.current?.setTokens(null);
     if (uid) void wipeVaultCache(uid);

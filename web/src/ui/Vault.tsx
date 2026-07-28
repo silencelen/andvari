@@ -21,6 +21,8 @@ import {
 } from "../vault/store";
 import { ImportError, type ImportFormat, type ImportPlan, type ImportReport, type Parsed, type ParsedRow, parseCsvImport, planImport, rowOrdinalsByLine } from "../import/csv";
 import { Admin } from "./Admin";
+import { writeClipboard } from "./clipboard";
+import { CLIPBOARD_FAILED, net, NetworkError, UNREACHABLE } from "./errors";
 import { ExportPanel, type ExportMode } from "./ExportPanel";
 import { Field } from "./Field";
 import { humanSize } from "./format";
@@ -448,7 +450,9 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
 
       <div className="wrap">
         {view === "health" ? (
-          <Health store={store} client={client} userId={account.userId} onOpenItem={goToItem} />
+          // bug-web--1: items (live state, refreshed by syncNow) — never the identity-stable
+          // store, which froze Health's rows for the whole mount.
+          <Health items={items} client={client} userId={account.userId} onOpenItem={goToItem} />
         ) : view === "trash" ? (
           <TrashView store={store} onRestored={refresh} />
         ) : view === "sharing" ? (
@@ -753,12 +757,22 @@ function ReSealBanner({ account, client, escrowFingerprint }: { account: Account
     setBusy(true);
     setErr("");
     try {
-      const pub = await client.recoveryPubkey();
+      // net() wraps only the network legs — a resealEscrowFor throw (fingerprint refusal)
+      // must never read as a connectivity problem.
+      const pub = await net(client.recoveryPubkey());
       const { sealed, fingerprint } = await account.resealEscrowFor(pub, escrowFingerprint);
-      await client.putEscrow(sealed, fingerprint);
+      await net(client.putEscrow(sealed, fingerprint));
       setDone(true);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "re-seal failed — try again, or contact your admin");
+      // ux-copy--2: canon copy, never e.message — an ApiError here carried the server's raw
+      // text ("forbidden", "Failed to fetch") straight into the banner.
+      setErr(
+        e instanceof NetworkError
+          ? UNREACHABLE
+          : e instanceof ApiError
+            ? "The server had a problem answering — try again in a moment."
+            : "Couldn't re-protect this account — try again, or contact your admin.",
+      );
     } finally {
       setBusy(false);
     }
@@ -901,10 +915,19 @@ function ExportMenu({ onBackup, onCsv }: { onBackup: () => void; onCsv: () => vo
 // ---- copy with auto-clear ----
 function useCopy(clearSeconds: number) {
   const [flash, setFlash] = useState<string | null>(null);
+  const [copyErr, setCopyErr] = useState(false);
   const flashTimer = useRef<number | null>(null);
   const wipeTimer = useRef<number | null>(null);
   const copy = async (label: string, value: string) => {
-    await navigator.clipboard.writeText(value);
+    // ux-error--2: writeText rejects in real conditions ("Document is not focused",
+    // permissions-policy) and every call site is fire-and-forget — surface the canon
+    // sentence instead of an unhandled rejection over a clipboard that got nothing.
+    if (!(await writeClipboard(value))) {
+      setFlash(null);
+      setCopyErr(true);
+      return;
+    }
+    setCopyErr(false);
     setFlash(label);
     // Cut J (v2 #10, review fix): the flash-timer id was never STORED, so the dedupe guard
     // was dead code; and each copy stacked a fresh unconditional wipe — copying B after A
@@ -916,13 +939,13 @@ function useCopy(clearSeconds: number) {
     // itself — belt to the caller-side clamp; no useCopy consumer can pin the clipboard.
     wipeTimer.current = window.setTimeout(() => navigator.clipboard.writeText("").catch(() => {}), clampClipboardClearSeconds(clearSeconds) * 1000);
   };
-  return { flash, copy };
+  return { flash, copyErr, copy };
 }
 
 function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets, onEdit, onDelete, onMoved, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; moveTargets: VaultInfo[]; onEdit: () => void; onDelete: () => Promise<void>; onMoved: () => void; onBack: () => void }) {
   // §2.3 clamp (B1-1): a server-declared clipboard window is honored only inside [1, 300 s].
   const clearSecs = clampClipboardClearSeconds(policy?.clipboardClearSeconds ?? 30);
-  const { flash, copy } = useCopy(clearSecs);
+  const { flash, copyErr, copy } = useCopy(clearSecs);
   const [deleting, setDeleting] = useState(false);
   const [delBusy, setDelBusy] = useState(false);
   const [delErr, setDelErr] = useState("");
@@ -954,8 +977,11 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
       {/* BL-1: copy confirmation is polite async info — the visible .copy-flash span mounts
           already-populated (silent), so announce it off this persistent region, named by
           which field was copied ("password copied", "code copied", …). */}
-      <Announcer text={flash ? `${flash} copied` : ""} />
+      <Announcer text={copyErr ? CLIPBOARD_FAILED : flash ? `${flash} copied` : ""} />
       <button className="link" onClick={onBack}>← back to vault</button>
+      {/* ux-error--2: the visible half of the copy-failure surface — same canon sentence the
+          extension popup shows on its toClipboard catch. */}
+      {copyErr && <Msg kind="err">{CLIPBOARD_FAILED}</Msg>}
       <h2 style={{ marginTop: 12 }}>{doc.name}</h2>
       <div className="muted" style={{ marginBottom: 18 }}>
         {/* Cards identify themselves by brand + ••last4 (design contract) — the one line
@@ -1101,8 +1127,12 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
   const [purgingId, setPurgingId] = useState<string | null>(null);
   const [confirmPurgeId, setConfirmPurgeId] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setErr("");
+  // parity--4: `keepErr` — the purge/restore handlers re-list to reconcile a lost-response
+  // success, and that reconcile must not WIPE the failure message they just set (a failed
+  // "Delete forever" then rendered as a clean, unchanged list: indistinguishable from success).
+  // Only the mount/refresh path clears the bar; a load failure of its own still speaks up.
+  const load = useCallback(async (keepErr = false) => {
+    if (!keepErr) setErr("");
     try {
       setItems(await store.deletedItems());
     } catch (e) {
@@ -1117,12 +1147,16 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
     setErr("");
     try {
       await store.purgeDeleted(itemId);
+      // quality-perf--0: drop the row locally — a full load() re-runs one itemVersions
+      // round trip per REMAINING tombstone, so every "Delete forever" used to re-spin
+      // the whole list. Nothing else changed server-side; there is nothing to re-fetch.
+      setItems((prev) => (prev ? prev.filter((d) => d.itemId !== itemId) : prev));
     } catch {
       setErr("Couldn't delete it permanently — try again.");
+      await load(true); // re-list on failure only: a lost-response success reconciles (the row drops out)
     } finally {
       setPurgingId(null);
       setConfirmPurgeId(null);
-      await load();
     }
   };
 
@@ -1137,7 +1171,10 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
       setErr("Restore failed — try again.");
     } finally {
       setRestoringId(null);
-      await load(); // always re-list: the restored item drops out (and a lost-response success reconciles)
+      // Always re-list: the restored item drops out (and a lost-response success reconciles).
+      // keepErr — on the failure arm this would otherwise erase "Restore failed"; on the success
+      // arm the bar was already cleared above, so there is nothing to keep.
+      await load(true);
     }
   };
 
@@ -1296,7 +1333,10 @@ function MoveCopyControl({ item, store, targets, onMoved }: { item: VaultItem; s
         setErr("This item changed while moving — go back, review it, and try again.");
       } else if (e instanceof ApiError && e.status === 403) {
         resetGesture();
-        setErr(e.message);
+        // ux-copy--2: the server's 403 body is the literal word "forbidden" — show the canon
+        // 403 sentence instead (byte-twin of the natives' HouseholdCopy 403 row, the exact
+        // mapping desktop's move flow applies here).
+        setErr("You don't have permission to do that.");
       } else {
         // Transient — keep the gesture so Retry replays the same ids (no duplicate).
         setErr("That didn’t finish. Press Retry — it won’t create a duplicate.");
@@ -1610,7 +1650,9 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { 
     try {
       await onSave(toSave, pending, (done, total) => setProgress({ done, total }), vaultId);
     } catch (err) {
-      setSaveErr(err instanceof ApiError && err.status === 413 ? `Save rejected: ${err.message || "attachment quota exceeded"}.` : "Save failed — nothing was changed.");
+      // ux-copy--2: the 413 sentence is the copy canon's 413 row (byte-twin of core
+      // HouseholdCopy) — never the server's raw message/statusText interpolated.
+      setSaveErr(err instanceof ApiError && err.status === 413 ? "The server refused that upload — it may be too large, or storage may be full." : "Save failed — nothing was changed.");
     } finally {
       setBusy(false);
       setProgress(null);

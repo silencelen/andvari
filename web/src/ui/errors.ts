@@ -39,3 +39,8 @@ export const UNREACHABLE = "Can't reach the andvari server — check your connec
  *  errored", because the caller can't always tell and must not send users VPN-debugging
  *  when the server merely answered 500. */
 export const POLICY_UNAVAILABLE = "Couldn't load the server's settings — it may be briefly unavailable. Try again in a moment.";
+
+/** TWIN of extension/src/errors.ts CLIPBOARD_FAILED (and desktop Ui.kt CLIPBOARD_COPY_FAILED):
+ *  a clipboard write refused by the platform (document not focused, permissions-policy) — the
+ *  canon sentence, never the raw rejection text (pinned byte-equal by clipboard.test.ts). */
+export const CLIPBOARD_FAILED = "Couldn't copy to the clipboard — try again.";
