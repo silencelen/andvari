@@ -28,3 +28,6 @@ dist/
 .DS_Store
 __pycache__/
 *.pyc
+
+# Generated per-release by scripts/release-spec.sh — never committed (it names local build paths).
+release-spec.json
