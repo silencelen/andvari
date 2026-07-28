@@ -4,6 +4,45 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.21.0 (2026-07-27) — polish release: correctness, accessibility, and the public record · fleet 0.21.0, extension 0.20.0
+
+No new features. This release is the result of a full-surface audit of everything already shipped
+(`docs/design/2026-07-27-polish-release-audit.md`), and fixes what that audit found.
+
+**Correctness.** Vault ownership transfer never worked on Android or desktop: the durable cache
+stored five columns for a record carrying nine, and stripped the four lifecycle fields on every
+read — so accepting a transfer failed every time with the consent screen still on screen, the
+owner's pending-offer chip never appeared, and a second offer on the same vault silently never
+reached its target. Fixed by a cache migration; the cross-impl contract test that should have
+caught it now round-trips a fully populated record. A pending offer also survives a restart now,
+on web as well.
+
+**Security.** Rotating a two-factor secret no longer skips the current-code check that disabling
+demands — the guard was bypassable by rotating instead of disabling. Signing out revokes the
+server session on web and in the extension, which both skipped while the native apps did it. A web
+page can no longer hold your vault unlocked indefinitely by refocusing a field. Denied writes are
+audited even when a later mutation in the same batch fails.
+
+**Autofill.** The login dropdown no longer offers credentials on checkout card fields — picking one
+could write your username and password into the CVV and expiry boxes. The destination is now
+checked per field, so a create-account-at-checkout form fills its real password and leaves the card
+boxes alone.
+
+**Accessibility.** The in-page dropdown and card chip can be operated from the keyboard, so
+assistive technology can actually pick a login. Android gained keyboard Done/Next actions
+throughout — pressing Done on the master password now signs you in. Desktop gained its first live
+regions, so errors and confirmations are no longer silent to screen readers. Health rows in the web
+vault no longer hide their own contents from screen readers, and two colour tokens that failed
+contrast in both themes were fixed.
+
+**Elsewhere.** Failures explain themselves instead of leaking raw server text; a failed clipboard
+copy or permanent delete says so instead of looking like success; the web bundle re-downloads
+89 KiB per release instead of 452; and the public documentation — README, specs, store privacy
+policy, roadmap — describes the product that actually shipped.
+
+The release gate now compiles and tests the desktop app, and checks the shipped browser crypto
+engine against the same vectors as the Kotlin one. Neither had ever been covered.
+
 ## extension 0.19.0 (2026-07-26) — the in-page card chip · fleet unchanged at 0.20.0
 
 Extension-only release; the web/desktop/android/server fleet stays at **0.20.0**. Published to

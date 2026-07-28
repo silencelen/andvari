@@ -296,7 +296,7 @@ high-visibility work in the release.
   contradicts shipped behavior — these are *normative* documents.
 - **`docs/self-hosting.md:46`** tells prospective self-hosters "the source repo is private" — the
   exact inverse of the project's pitch.
-- **`docs/ROADMAP.md`** cites huginn's private memory file as the state SSOT (line 4), presents at
+- **`docs/ROADMAP.md`** cites a private, out-of-tree memory file as the state SSOT (line 4), presents at
   least four shipped items as open, and prescribes a retired release process.
 - **20+ files, including normative `spec/03:535` and `spec/04` §4, reference `ops/` and
   `docs/{assess,pentest,recon,drills}/`** which do not exist here. A refuter corrected the mechanism
