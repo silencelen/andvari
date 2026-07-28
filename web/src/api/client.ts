@@ -17,8 +17,10 @@ import type {
   PreloginResponse,
   PushResponse,
   RecoveryCommitRequest,
+  RecoverySelfConfirmRequest,
   RecoverySelfSetupRequest,
   RecoverySelfSetupResponse,
+  RecoveryVerifyRequest,
   RecoveryVerifyResponse,
   RegisterRequest,
   SessionResponse,
@@ -473,7 +475,10 @@ export class ApiClient {
    *  returns the material the client needs to open the UVK + run the identity-pubkey hard-fail. A bad
    *  phrase / unknown email / no-recovery-row all return a uniform 401 (`ApiError`, anti-enumeration). */
   recoverySelfVerify(email: string, recoveryAuthKey: string) {
-    return this.json<RecoveryVerifyResponse>("POST", "/api/v1/recovery/self/verify", { email, recoveryAuthKey }, false);
+    // quality-deadcode--3: the body literal carries its wire type instead of being an untyped
+    // object beside an exported-but-uncalled RecoveryVerifyRequest (the "half-alive" state).
+    const body: RecoveryVerifyRequest = { email, recoveryAuthKey };
+    return this.json<RecoveryVerifyResponse>("POST", "/api/v1/recovery/self/verify", body, false);
   }
 
   /** Phase 2 (§F.3): commit the reset. Unauthenticated — the `recoveryTicket` from phase 1 is the
@@ -505,7 +510,10 @@ export class ApiClient {
    *  server's device-scoped rule applies). No key material rides this (unlike self-setup).
    *  Authenticated; server-refused on the public break-glass origin; rate-limited. Answers "ok". */
   recoverySelfConfirm(pieceId?: string | null) {
-    return this.text("POST", "/api/v1/recovery/self/confirm", pieceId != null ? { pieceId } : undefined);
+    // quality-deadcode--3: ditto — typed here, so the legacy empty-body branch stays visibly
+    // deliberate rather than reading as a body the type just forgot to describe.
+    const body: RecoverySelfConfirmRequest | undefined = pieceId != null ? { pieceId } : undefined;
+    return this.text("POST", "/api/v1/recovery/self/confirm", body);
   }
 
   // ---- attachments (spec 02 §6: body = 24-byte header ‖ ciphertext chunks) ----
@@ -572,7 +580,7 @@ export class ApiClient {
 
   /** F59 recovery step 1 — the user's sealed escrow blob (base64url, text/plain) to carry to
    *  offline `recovery-cli recover`. Sealed to the org recovery PUBLIC key, so safe to hand
-   *  out. Throws ApiError `no_escrow` (400) if the user never enrolled one. */
+   *  out. Throws ApiError `no_escrow` (404) if the user never enrolled one. */
   adminUserEscrow(userId: string) {
     return this.text("GET", `/api/v1/admin/users/${userId}/escrow`);
   }

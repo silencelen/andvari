@@ -13,9 +13,10 @@ import { VaultStore } from "../vault/store";
 import { NullCache, openVaultCache } from "../vault/idbcache";
 import { unlockExistingSession } from "./unlock";
 import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
+import { Busy } from "./Busy";
 import { Field } from "./Field";
 import { fmtDate } from "./format";
-import { Msg } from "./Msg";
+import { Announcer, Msg } from "./Msg";
 import { Recover } from "./Recover";
 import { needsRecoveryCapture, settleRecoveryConfirm, setupAndCommitRecovery } from "./recovery-capture";
 import {
@@ -120,6 +121,16 @@ export function OfflineCopyUnlockLine({ stamp }: { stamp: { lastSyncAt: number |
   );
 }
 
+/**
+ * a11y-webext--11: the Argon2id unseal is ~6 s in which nothing reaches a screen reader — the
+ * only signal was the submit button's own label flipping to "Unsealing…", and a text swap on a
+ * now-DISABLED, focused control is not reliably announced. A blind user heard silence until the
+ * unlocked view moved focus: indistinguishable from a hang, and an invitation to submit again.
+ * Both password forms below now pair the house busy affordance (<Busy>, whose dial is decorative
+ * — the label carries the meaning) with a persistent polite region (BL-1's Announcer idiom).
+ */
+const UNSEALING_NOTICE = "Unsealing your vault — this takes a few seconds.";
+
 /** Reload or F26 lock with an existing session: master password re-derives keys. */
 function Unlock({ client, policy, session, notice, onReady, onForget }: { client: ApiClient; policy: ClientPolicy | null; session: Session; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForget: (notice?: string) => void }) {
   const [password, setPassword] = useState("");
@@ -207,10 +218,12 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
             SPOKEN announce rides App's persistent Announcer (this box is silent-but-visible). */}
         {notice && !err && <Msg kind="info">{notice}</Msg>}
         {err && <Msg kind="err">{err}</Msg>}
+        {/* a11y-webext--11: mounted unconditionally (empty) so the mutation announces. */}
+        <Announcer text={busy ? UNSEALING_NOTICE : ""} />
         <Field label="Master password">
           <input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
         </Field>
-        <button className="primary" disabled={busy || !password}>{busy ? "Unsealing…" : "Unlock"}</button>
+        <button className="primary" disabled={busy || !password}>{busy ? <Busy>Unsealing…</Busy> : "Unlock"}</button>
         <div style={{ textAlign: "center", marginTop: 16 }}>
           <button type="button" className="link" onClick={() => onForget()}>Sign out / use a different account</button>
         </div>
@@ -605,6 +618,8 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
   return (
     <form onSubmit={submit}>
       {err && <Msg kind="err">{err}</Msg>}
+      {/* a11y-webext--11: same silent-unseal fix as the Unlock card above. */}
+      <Announcer text={busy ? UNSEALING_NOTICE : ""} />
       <Field label="Email">
         <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} />
       </Field>
@@ -627,7 +642,7 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
           />
         </Field>
       )}
-      <button className="primary" disabled={busy || !email || !password || (totpNeeded && !totp.trim())}>{busy ? "Unsealing…" : "Sign in"}</button>
+      <button className="primary" disabled={busy || !email || !password || (totpNeeded && !totp.trim())}>{busy ? <Busy>Unsealing…</Busy> : "Sign in"}</button>
       <div style={{ textAlign: "center", marginTop: 12 }}>
         <button type="button" className="link" onClick={onForgot}>Forgot your master password? Recover with your recovery phrase</button>
       </div>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { ApiClient, ApiError, type SessionEndKind } from "../api/client";
 import type { AttachmentRef, ClientPolicy, ItemDoc } from "../api/types";
 import { toB64 } from "../crypto/bytes";
@@ -25,7 +25,7 @@ import { writeClipboard } from "./clipboard";
 import { CLIPBOARD_FAILED, net, NetworkError, UNREACHABLE } from "./errors";
 import { ExportPanel, type ExportMode } from "./ExportPanel";
 import { Field } from "./Field";
-import { humanSize } from "./format";
+import { fmtDay, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
 import { Health } from "./Health";
 import { clampClipboardClearSeconds } from "./policyclamp";
@@ -308,10 +308,27 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const needsUpdate = useMemo(() => store.needsUpdateCount(), [store, items]);
 
-  const startNew = (type: "login" | "note" | "card") => {
-    setSelected(null);
+  /**
+   * quality-deadcode--6: ONE close-every-open-layer routine. This five-setter cluster used to be
+   * hand-inlined at ten navigation/opener call sites, each with its own SUBSET — and the subsets
+   * had already drifted: sharingSettingsVaultId (the layer added last) was missing from three of
+   * them, so the recovery banner's "Go to Settings →" left a Sharing settings layer armed (and
+   * an open Import/Export panel too), which then reappeared instead of the vaults list on the way
+   * back. Callers now close everything and then open the ONE layer they want — the later setter
+   * in the same batch wins — instead of expressing intent by which line they omitted.
+   * Deliberately NOT used by save/remove (post-write teardown) or Detail's Edit (which keeps its
+   * selection), neither of which is navigation. Layer z-order lives in closeTop above.
+   */
+  const closeLayers = useCallback(() => {
+    setEditing(null);
     setImportOpen(false);
     setExportMode(null);
+    setSelected(null);
+    setSharingSettingsVaultId(null);
+  }, []);
+
+  const startNew = (type: "login" | "note" | "card") => {
+    closeLayers();
     setEditing(
       type === "login"
         ? { type, name: "", login: { username: "", password: "", uris: [""] } }
@@ -322,10 +339,8 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   };
 
   const openItem = (it: VaultItem) => {
+    closeLayers();
     setSelected(it.itemId);
-    setImportOpen(false);
-    setExportMode(null);
-    setEditing(null);
   };
 
   const save = async (doc: ItemDoc, newFiles: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => {
@@ -343,15 +358,13 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
 
   const goToItem = (itemId: string) => {
     setView("vault");
-    setEditing(null);
-    setImportOpen(false);
-    setExportMode(null);
+    closeLayers();
     setSelected(itemId);
   };
 
   const navBtn = (v: View, label: string) => (
     // a11yweb-05: aria-current marks the active view for AT (the .active class is visual only).
-    <button className={`navbtn ${view === v ? "active" : ""}`} aria-current={view === v ? "page" : undefined} onClick={() => { if (editing && editorBack.current) return editorBack.current(); setView(v); setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); }}>{label}</button>
+    <button className={`navbtn ${view === v ? "active" : ""}`} aria-current={view === v ? "page" : undefined} onClick={() => { if (editing && editorBack.current) return editorBack.current(); setView(v); closeLayers(); }}>{label}</button>
   );
 
   const current = selected ? store.get(selected) : null;
@@ -369,7 +382,13 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           will sync when you reconnect", never as lost. Cleared by the reconnect flush
           (syncNow/refresh re-render this row). */}
       {store.hasPendingSync(it.itemId) && (
-        <span className="tag" title="Saved on this device — waiting to sync when you reconnect" aria-label="Pending sync" style={{ color: "var(--muted-strong, #8a7a5c)" }}>pending sync</span>
+        // a11y-webext--3: this used to paint with a --muted-strong fallback literal (#8a7a5c)
+        // — the token is declared NOWHERE, so the literal always won, at 4.10:1 (dark) / 3.94:1 (light)
+        // on the row surface: the app's lowest-contrast text on the one tag that says an
+        // edit hasn't synced yet, and invisible to contrast.test.ts (it only reads tokens).
+        // --ink-dim is the AA-cleared "stronger than muted" tone the fallback was reaching
+        // for (6.3:1 / 5.8:1 on --bg-raised), and it is now pinned in that test.
+        <span className="tag" title="Saved on this device — waiting to sync when you reconnect" aria-label="Pending sync" style={{ color: "var(--ink-dim)" }}>pending sync</span>
       )}
       {it.vaultId !== account.personalVaultId && (
         <span className="tag" style={{ color: "var(--gold-text)" }}>{vaultNameById.get(it.vaultId) ?? "shared"}</span>
@@ -415,7 +434,11 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       {mustChange && (
         <div className="banner">
           <span>Recovery sign-in — set a new master password now.</span>
-          <button className="link" onClick={() => { if (editing && editorBack.current) return editorBack.current(); setView("settings"); setEditing(null); setSelected(null); }}>Go to Settings →</button>
+          {/* quality-deadcode--6: this jump used to clear only editing+selected, so an open
+              Import/Export panel or Sharing settings layer survived it and re-appeared on the
+              way back (and left the F76 back guard armed over a layer that was no longer on
+              screen). It closes every layer now, like the nav buttons it imitates. */}
+          <button className="link" onClick={() => { if (editing && editorBack.current) return editorBack.current(); setView("settings"); closeLayers(); }}>Go to Settings →</button>
         </div>
       )}
 
@@ -463,7 +486,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             onSynced={refresh}
             /* A8: "Back up first" leaves Sharing — the settings id clears with the other
                layer state, so the round-trip lands back on the vaults LIST. */
-            onBackup={() => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setSharingSettingsVaultId(null); setExportMode("backup"); }}
+            onBackup={() => { setView("vault"); closeLayers(); setExportMode("backup"); }}
             settingsVaultId={sharingSettingsVaultId}
             onOpenSettings={setSharingSettingsVaultId}
             onCloseSettings={() => setSharingSettingsVaultId(null)}
@@ -478,8 +501,8 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             /* IA P3: backing up from Settings flips to the vault view first so the ExportPanel
                layer renders (the view axis wins over exportMode in this switch), mirroring
                Sharing's "Back up first". Always offered while unlocked (§5.4.2). */
-            onBackup={() => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setSharingSettingsVaultId(null); setExportMode("backup"); }}
-            onCsv={() => { setView("vault"); setSelected(null); setEditing(null); setImportOpen(false); setSharingSettingsVaultId(null); setExportMode("csv"); }}
+            onBackup={() => { setView("vault"); closeLayers(); setExportMode("backup"); }}
+            onCsv={() => { setView("vault"); closeLayers(); setExportMode("csv"); }}
           />
         ) : view === "admin" && isAdmin ? (
           <Admin client={client} policy={policy} />
@@ -529,12 +552,12 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
               {/* Dark until the Option A gate clears (0.2.x MSI retired) — see CARD_CREATE_ENABLED.
                   Everything downstream (row/detail/editor for EXISTING cards) renders regardless. */}
               {CARD_CREATE_ENABLED && <button className="ghost" onClick={() => startNew("card")}>+ Card</button>}
-              <button className="ghost" onClick={() => { setSelected(null); setEditing(null); setExportMode(null); setImportOpen(true); }}>Import</button>
+              <button className="ghost" onClick={() => { closeLayers(); setImportOpen(true); }}>Import</button>
               {/* The two export destinations live under one menu so the toolbar can't crush the
                   search box. Rendered whenever unlocked (§5.4.2 — the origin gate is gone). */}
               <ExportMenu
-                onBackup={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("backup"); }}
-                onCsv={() => { setSelected(null); setEditing(null); setImportOpen(false); setExportMode("csv"); }}
+                onBackup={() => { closeLayers(); setExportMode("backup"); }}
+                onCsv={() => { closeLayers(); setExportMode("csv"); }}
               />
               {/* IA P1: Health — an occasional tool, moved off the nav to a toolbar icon.
                   (The toolbar only shows on the vault view, so these icons only ever navigate
@@ -544,7 +567,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                 className="ghost"
                 aria-label="Vault health"
                 title="Vault health"
-                onClick={() => { setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); setView("health"); }}
+                onClick={() => { closeLayers(); setView("health"); }}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px", marginRight: 5 }}>
                   <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
@@ -559,7 +582,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                 className="ghost"
                 aria-label="Trash"
                 title="Trash"
-                onClick={() => { setEditing(null); setImportOpen(false); setExportMode(null); setSelected(null); setSharingSettingsVaultId(null); setView("trash"); }}
+                onClick={() => { closeLayers(); setView("trash"); }}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px" }}>
                   <path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" />
@@ -645,12 +668,6 @@ function VirtualList({ items, renderRow }: { items: VaultItem[]; renderRow: (it:
       </div>
     </div>
   );
-}
-
-/** "July 14"-style day (spec 03 §11 copy). Falls back gracefully for a missing time. */
-export function fmtDay(ms?: number): string {
-  if (!ms) return "soon";
-  return new Date(ms).toLocaleDateString(undefined, { month: "long", day: "numeric" });
 }
 
 function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
@@ -1117,8 +1134,13 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
 /**
  * Item undelete (feature): "Recently deleted" — the tombstoned items the user can still recover.
  * Each is named from its last archived version (a tombstone's own blob is null); Restore re-creates
- * it live via the dedicated server route (clean un-tombstone, no spurious conflict copy). Honest:
- * retention is unbounded today (F49), so this holds everything ever deleted within reach.
+ * it live via the dedicated server route (clean un-tombstone, no spurious conflict copy).
+ *
+ * bug-web--3: this used to call retention unlimited, contradicting the rendered copy below — the
+ * comment predates the bound F49 shipped. Retention is 30 DAYS, enforced
+ * server-side by the Janitor's rule (c) (ITEM_TOMBSTONE_RETENTION_MS, one constant with the
+ * changes-fence horizon by construction), which is what the copy, desktop and Android all say.
+ * So this list is bounded to 30 days of deletions, not everything ever deleted.
  */
 function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () => void }) {
   const [items, setItems] = useState<{ itemId: string; vaultId: string; deletedAt: number; doc: ItemDoc | null }[] | null>(null);
@@ -1195,7 +1217,11 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
           <div key={d.itemId} className="secret-row" style={{ alignItems: "center", marginTop: 8 }}>
             <span style={{ flex: 1 }}>
               {d.doc ? d.doc.name : <span className="muted">(unrecoverable — no readable version)</span>}
-              <span className="muted mono" style={{ marginLeft: 8 }}>deleted {new Date(d.deletedAt).toISOString().slice(0, 10)}</span>
+              {/* bug-web--6 / ux-parity--6: was toISOString().slice(0,10) — a UTC substring, so
+                  an 11 PM local delete rendered tomorrow's date, in an ISO dialect no other
+                  surface speaks. fmtDay is the house "July 14" form, in the reader's timezone,
+                  and Sharing's own recently-deleted list already uses it. */}
+              <span className="muted mono" style={{ marginLeft: 8 }}>deleted {fmtDay(d.deletedAt)}</span>
             </span>
             {confirmPurgeId === d.itemId ? (
               <>
@@ -1276,7 +1302,8 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
       {versions?.length === 0 && <div className="muted">No earlier versions yet — history starts from the next change.</div>}
       {versions?.map((v) => (
         <div key={v.rev} className="secret-row" style={{ alignItems: "center", marginTop: 6 }}>
-          <span className="muted mono" style={{ minWidth: 92 }}>{new Date(v.archivedAt).toISOString().slice(0, 10)}</span>
+          {/* bug-web--6 / ux-parity--6: same UTC-ISO substring as Trash, same fix. */}
+          <span className="muted mono" style={{ minWidth: 92 }}>{fmtDay(v.archivedAt)}</span>
           {v.doc.type === "login" && v.doc.login?.password ? (
             <PasswordField value={v.doc.login.password} />
           ) : (
@@ -1454,6 +1481,9 @@ function TotpView({ uri, flash, clearSecs, onCopy }: { uri: string; flash: boole
   const [code, setCode] = useState("······");
   const [remaining, setRemaining] = useState(30);
   const [period, setPeriod] = useState(30);
+  // a11y-webext--6: the seconds-left description is addressed by id, so it needs a stable
+  // one per mounted chip (the extension's totpChip mints its own via a counter).
+  const secsId = useId();
   useEffect(() => {
     let cfg;
     try {
@@ -1481,9 +1511,19 @@ function TotpView({ uri, flash, clearSecs, onCopy }: { uri: string; flash: boole
           Detail parent threads `flash` (=== "code") + clearSecs down instead of rendering it. */}
       <label>One-time code {flash && <span className="copy-flash">copied ✓ · clears in {clearSecs}s</span>}</label>
       <div className="totp-wrap">
-        {/* a11yweb-09: name the copy affordance + speak the code (the visible digits are the
-            control's text but "123456, button" gives no hint it copies). */}
-        <button className="totp link" aria-label={`One-time code ${code.replace(/\s/g, "")} — copy`} onClick={() => onCopy(code.replace(/\s/g, ""))} title="copy">{code.replace(/(\d{3})(\d{3})/, "$1 $2")}</button>
+        {/* a11y-webext--6: the extension popup's chip contract, ported verbatim (popup.ts
+            totpChip). a11yweb-09 named the affordance but baked the LIVE code into the name:
+            it re-announced every 30 s (and mid-focus), read six digits as one number, and
+            buried the verb — while the countdown, the one thing a sighted user gets for free,
+            was aria-hidden with no text twin. So: a STABLE name, the digits aria-hidden (they
+            are decoration once the name says what the button does), and seconds-left as an
+            aria-describedby description — read on focus, not re-announced per tick. The one
+            state the name still carries is "invalid": there is no code to copy, and that has
+            to reach AT the way the visible text reaches a sighted user. */}
+        <button className="totp link" aria-label={code === "invalid" ? "One-time code — unreadable" : "Copy one-time code"} aria-describedby={secsId} onClick={() => onCopy(code.replace(/\s/g, ""))} title="copy">
+          <span aria-hidden="true">{code.replace(/(\d{3})(\d{3})/, "$1 $2")}</span>
+          <span className="visually-hidden" id={secsId}>{remaining} seconds left</span>
+        </button>
         {/* aria-hidden: the ring updates every second — it must NOT be a live region. */}
         <div className="ring" aria-hidden="true" style={{ ["--p" as string]: String((remaining / period) * 100) }} title={`${remaining}s`} />
       </div>
@@ -1789,7 +1829,9 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { 
           </div>
           <Field label="Billing ZIP / postal code">
             {/* Verbatim (alphanumeric internationally) — trimmed once, at submit. */}
-            <input inputMode="numeric" autoComplete="off" value={card.postalCode ?? ""} onChange={(e) => setCard({ postalCode: e.target.value })} />
+            {/* No inputMode="numeric": billing postcodes are alphanumeric outside the US (UK/CA/NL),
+                and the G3 store rule above keeps the value verbatim — a numeric keypad would fight it. */}
+            <input autoComplete="off" value={card.postalCode ?? ""} onChange={(e) => setCard({ postalCode: e.target.value })} />
           </Field>
         </>
       )}

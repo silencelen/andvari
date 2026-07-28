@@ -65,3 +65,35 @@ describe("TrashView — a failed purge/restore keeps saying so after the reconci
     expect(restoreSource().slice(restoreSource().indexOf("} finally {"))).toContain("load(true)");
   });
 });
+
+/**
+ * bug-web--6 / ux-parity--6 (polish audit 2026-07-27): Trash and Version history were the only
+ * two surfaces in the app rendering `new Date(x).toISOString().slice(0, 10)` — a UTC substring,
+ * so an item deleted at 11 PM local showed tomorrow's date, in an ISO dialect nothing else here
+ * speaks (Sharing's own recently-deleted list already said "deleted July 14"). Both now go
+ * through ui/format's fmtDay, in the reader's timezone.
+ *
+ * bug-web--3: TrashView's doc comment claimed "retention is unbounded today (F49)" while the
+ * copy three lines below promised a 30-day purge. The REFUTER settled it in the copy's favour —
+ * the server Janitor's rule (c) hard-deletes item tombstones past ITEM_TOMBSTONE_RETENTION_MS —
+ * so the comment was simply stale, and it was talking maintainers out of a bound that ships.
+ */
+describe("Trash / history dates are local and in the house dialect", () => {
+  it("neither surface renders a raw UTC ISO substring any more", () => {
+    expect(vaultTsx).not.toContain("toISOString().slice(0, 10)");
+  });
+
+  it("the Trash row and the history row both call fmtDay", () => {
+    expect(vaultTsx).toContain("deleted {fmtDay(d.deletedAt)}");
+    expect(vaultTsx).toContain("{fmtDay(v.archivedAt)}");
+    expect(vaultTsx).toContain('import { fmtDay, humanSize } from "./format"');
+  });
+
+  it("TrashView's doc comment no longer contradicts its own copy about retention", () => {
+    const doc = vaultTsx.slice(vaultTsx.indexOf("Item undelete (feature)"), vaultTsx.indexOf("function TrashView("));
+    expect(doc).not.toContain("retention is unbounded");
+    expect(doc).toContain("ITEM_TOMBSTONE_RETENTION_MS");
+    // …and the rendered promise it now agrees with.
+    expect(vaultTsx).toContain("kept for 30 days, then removed automatically");
+  });
+});

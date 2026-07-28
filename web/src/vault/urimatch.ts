@@ -94,12 +94,12 @@ export function matches(saved: SavedUri, target: FillTarget, resolve: PslResolve
   return saved.host.includes(".") && page.endsWith("." + saved.host);
 }
 
-export function matchLogins(uris: string[], target: FillTarget, resolve: PslResolve): boolean {
-  return uris.some((u) => {
-    const s = parseSavedUri(u);
-    return s !== null && matches(s, target, resolve);
-  });
-}
+// quality-deadcode--3: `matchLogins` (the uris[] convenience over `matches`) lived here with
+// ZERO callers — the web client has no autofill, so nothing walks a login's uri list. Its live
+// twins are elsewhere and untouched: extension/src/urimatch.ts (background.ts:2219/2265) and
+// core UriMatch.kt (Android's DatasetBuilder/SaveConfirmActivity). The per-uri rules this file
+// does own — parseSavedUri/matches/classify — stay, pinned by urimatch.test.ts against the
+// shared vectors.
 
 // ---- field classification ----
 

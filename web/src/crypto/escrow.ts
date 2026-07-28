@@ -27,9 +27,13 @@ export async function sealUvk(recoveryPub: Uint8Array, userId: string, uvk: Uint
   return sealTo(recoveryPub, await canonicalPayload(userId, KEY_TYPE_UVK, uvk));
 }
 
-export async function sealCanary(recoveryPub: Uint8Array): Promise<Uint8Array> {
-  return sealTo(recoveryPub, await canonicalPayload(CANARY_USER_ID, KEY_TYPE_CANARY, CANARY_KEY));
-}
+// quality-deadcode--3: `sealCanary` had ZERO callers here — only the org's recovery ceremony
+// seals a canary, and that is Kotlin-side (core Escrow.sealCanary, live in recovery-cli and
+// vector-gen). The web client only ever OPENS one: vectors.test.ts feeds a pre-sealed canary
+// from spec/test-vectors through openEscrow below, which is the parity this engine has to hold.
+// The three canary constants stay: they are spec 04 §3 values mirroring core Escrow.kt (and
+// vectors.test.ts checks the opened canary's userId against CANARY_USER_ID), so they document
+// the wire shape this engine has to agree on rather than being leftovers of the seal path.
 
 /** Open + self-validate (sha256 of key must match; spec 04 §3). */
 export async function openEscrow(

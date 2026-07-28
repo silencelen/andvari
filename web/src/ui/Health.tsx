@@ -143,25 +143,19 @@ export function Health({ items, client, userId, onOpenItem }: Props) {
               {sorted.map((r) => {
                 const count = breachByItem?.get(r.itemId);
                 return (
-                  <tr
-                    key={r.itemId}
-                    className="rowlink"
-                    // F80: the row is a click target, so the keyboard gets the same
-                    // affordance (Space is prevented — it must not page-scroll).
-                    // a11yweb-07: role+name so a screen reader announces it as an
-                    // openable control, not a bare table row.
-                    role="button"
-                    aria-label={`Open ${r.name}`}
-                    tabIndex={0}
-                    onClick={() => onOpenItem(r.itemId)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        onOpenItem(r.itemId);
-                      }
-                    }}
-                  >
-                    <td>{r.name}</td>
+                  // F80: the whole row stays a click target for pointer users.
+                  // a11y-webext--2: the keyboard/AT affordance is the real <button> in the
+                  // first cell, NOT role="button" + aria-label on the <tr>. That pair replaced
+                  // the row role (orphaning every <td>) and, being Children-Presentational,
+                  // reduced the row to "Open <name>, button" — hiding the strength/reuse/TOTP/
+                  // breach payload this whole view exists to convey. Row semantics restored;
+                  // .rowlink:focus-within keeps the visual (styles.css).
+                  <tr key={r.itemId} className="rowlink" onClick={() => onOpenItem(r.itemId)}>
+                    <td>
+                      <button type="button" className="link" onClick={(e) => { e.stopPropagation(); onOpenItem(r.itemId); }}>
+                        {r.name}
+                      </button>
+                    </td>
                     <td><StrengthTag score={r.strength} /></td>
                     <td>{r.reused > 0 ? <span className="tone-bad">{r.reused} other{r.reused > 1 ? "s" : ""}</span> : <span className="muted">no</span>}</td>
                     <td>{r.hasTotp ? "yes" : <span className="muted">no</span>}</td>

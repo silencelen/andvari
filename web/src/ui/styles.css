@@ -445,9 +445,11 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .table td.mono, .table .mono { font-family: var(--mono); font-size: 12.5px; }
 .table tr.rowlink { cursor: pointer; transition: background 0.12s; }
 .table tr.rowlink:hover { background: var(--bg-input); }
-/* F80: rowlinks are focusable (tabIndex) — inset outline because the row spans the
-   scroll container edge-to-edge, so an outset ring would be clipped. */
-.table tr.rowlink:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; background: var(--bg-input); }
+/* F80: inset outline because the row spans the scroll container edge-to-edge, so an
+   outset ring would be clipped. a11y-webext--2: the row itself is no longer focusable
+   (its keyboard affordance is now a real button in the first cell, so the <tr> can keep
+   its row role) — :focus-within lights the row when that button takes focus. */
+.table tr.rowlink:focus-within { outline: 2px solid var(--focus); outline-offset: -2px; background: var(--bg-input); }
 .table tr.subrow > td { background: var(--bg-input); padding: 12px 16px; }
 .table.inner { font-size: 13px; }
 .table.inner th, .table.inner td { padding: 6px 10px; border-bottom: 1px solid var(--edge); }
