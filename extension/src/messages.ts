@@ -10,6 +10,18 @@
  *    fill grant minted by an explicit user click in the popup (`fillFromPopup`).
  *  - List/match responses never carry passwords — name/username/uris only. Card lists
  *    carry a MASKED identity line ("Visa ••4242"), never the number/expiry/CVV.
+ *  - `allItems` answers ANY injected frame while unlocked, query or no query — i.e. the whole
+ *    login inventory (name/username/uris per item) is readable from every frame of every page the
+ *    user has granted, not just the top one. This is DELIBERATE, not an oversight: the in-page
+ *    dropdown's "Search all logins…" must work inside iframe-hosted login forms, so there is no
+ *    popup-vs-content distinction to draw here (the popup issues the identical call). The exposure
+ *    is bounded by the content script's ISOLATED WORLD plus the CLOSED shadow root the results
+ *    render into — page JS can neither read the response nor reach chrome.runtime — and by the
+ *    rule above: no password, no TOTP, ever rides a list. `matches` is additionally host-scoped.
+ *    Two consequences worth stating so nobody erodes them by accident: any NEW in-page surface
+ *    that echoes list data back into page-reachable DOM breaks this, and so would relaxing a
+ *    frame gate on a path that does carry a secret. Note `allItems` is where the trade lives —
+ *    `reveal` is not: it is host-matched or one-shot-grant gated, per the first invariant.
  *  - A card secret leaves the SW two ways, both explicit-user-action gated: (1) `revealCardField`
  *    — popup-only (the SW refuses tab senders), one field per request, straight to a clipboard
  *    write; (2) `revealCardForFill` — the S3 in-page fill path, redeemable ONLY by the exact frame

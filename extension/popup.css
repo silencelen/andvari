@@ -266,6 +266,9 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
   color: var(--gold-bright); border: 1px solid var(--edge-strong);
 }
 .item .body { min-width: 0; flex: 1; }
+/* a11y-webext--5: the row's keyboard affordance moved onto .body, and the generic
+   `button:focus-visible` rule below cannot reach it (it is a div with role=button). */
+.item .body:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
 .item .name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .sub { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* S3: the card-fill destination origin, shown under a card row when in-page fill is offered — the
@@ -314,7 +317,9 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
   flex: none; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
   font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.05em; color: var(--gold-bright);
   background: rgba(208, 169, 74, 0.08); border: 1px solid var(--edge-strong);
-  border-radius: 999px; padding: 3px 8px; transition: 0.14s;
+  /* a11y-webext--9 (WCAG 2.5.8): 3px padding left this ~23px tall. The pill keeps its shape;
+     only the vertical padding grows, so the chip reads identically and clears 24px. */
+  border-radius: 999px; padding: 4px 8px; min-height: 24px; transition: 0.14s;
 }
 .item .totp-chip:hover, .detail .totp-chip:hover { border-color: var(--gold-deep); }
 .item .totp-chip .ring, .detail .totp-chip .ring { width: 12px; height: 12px; }
@@ -355,7 +360,10 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 }
 .foot-row { display: flex; align-items: center; gap: 10px; }
 #open-vault, #count { margin-left: auto; }
-.link { color: var(--link); cursor: pointer; background: none; border: 0; font: inherit; font-size: 12.5px; padding: 0; }
+/* a11y-webext--9 (WCAG 2.5.8): these compute to ~16-18px tall on their text alone. The visual
+   treatment stays a bare link — the target is grown with vertical padding and a min-height, and
+   the row's `gap` keeps neighbouring targets from overlapping. */
+.link { color: var(--link); cursor: pointer; background: none; border: 0; font: inherit; font-size: 12.5px; padding: 4px 0; min-height: 24px; display: inline-flex; align-items: center; }
 .link:hover { color: var(--gold-bright); text-decoration: underline; }
 .link.dim { color: var(--ink-faint); font-size: 11px; }
 .link.dim:hover { color: var(--ink-dim); }

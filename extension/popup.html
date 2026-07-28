@@ -186,7 +186,10 @@
       <section id="generator" class="gen" hidden>
         <div class="section-label">New password</div>
         <div class="secret-row">
-          <button id="gen-pass" class="gen-pass" title="Click to copy" aria-label="Copy generated password"></button>
+          <!-- No aria-label: the button's CONTENT is the generated password, and a label would
+               override it so a screen reader announced only "Copy generated password" (a11y-webext--10).
+               popup.ts strips the attribute at runtime too, for older installs of this markup. -->
+          <button id="gen-pass" class="gen-pass" title="Click to copy"></button>
           <button id="gen-again" class="ghost">Regenerate</button>
         </div>
         <span id="gen-flash" class="copy-flash" hidden>copied ✓</span>

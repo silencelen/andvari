@@ -239,6 +239,17 @@ let chipEscaped: FillableControl | null = null;
 /** Our mirror of the live chip's anchor: the [K8] mutation/route/Escape dismissals read it, and
  *  content-ui owns the surface slot itself. */
 let chipAnchor: FillableControl | null = null;
+/** [K13] the CONTENT half of the chip's SW-wake mitigation, specified in the design and left out
+ *  of the shipped cut: the throttle was SW-side ONLY, and the SW's cache is consulted AFTER
+ *  handle()'s `await ensureLoaded()` — i.e. after the wake it exists to avoid. A page that
+ *  focus-loops across distinct card fields (a real checkout has 5-8; a hostile one can render 50)
+ *  therefore bought one runtime message and one wake PER FIELD, and the existing `lastChip` dedupe
+ *  cannot help: it is keyed on the individual input. This is the design's per-document cache, with
+ *  the SW's own window and its own [S-rate] reasoning for why a replay is safe — presence carries
+ *  no vault state ([S3]), `locked` is only the copy selector, and the popup is the truth. Cleared
+ *  in reportCardForm, so a structural change is never answered from the old registry. */
+let chipOffer: { t: number; answer: { fillable: boolean; locked: boolean } } | null = null;
+const CHIP_OFFER_CACHE_MS = 250; // the SW's CHIP_OFFER_MIN_GAP_MS — one window, not two
 
 /** Between dropdown-open and the user's pick, an SPA can swap the form subtree, detaching the
  *  captured field refs — filling would write into orphan nodes that never reach the page. If the
@@ -254,20 +265,35 @@ function liveForm(f: LoginForm): LoginForm | null {
 /** Cut M (v2 #14): fill is truthful — answers exactly which parts landed in the page's fields
  *  (the old void return swallowed every miss: dead form refs, mismatched fields, empty items).
  *  The TOTP side-copy runs only when a credential actually landed — a failed fill must not
- *  half-succeed into the clipboard while the caller reports failure. */
+ *  half-succeed into the clipboard while the caller reports failure.
+ *
+ *  PER-SLOT destination gate (2026-07-27 residual): the entry-point gate (cardMisreadAsLogin) is
+ *  keyed on the form's PASSWORD destination, which is the right question for "may this form fill
+ *  at all" but leaves the USERNAME slot unexamined. On a legitimate create-account-at-checkout
+ *  form — suppressSave for [A7] reasons while its genuine password field is a real fill target —
+ *  detect.ts resolves the username by the "nearest text field above the password" fallback, and
+ *  on a combined checkout that neighbour is routinely a PAN or expiry box that classified as
+ *  `none`. So an account email could still be written into a card field. Every slot therefore
+ *  re-asks isCardField for ITSELF, here, at the write: skipping a slot is a partial fill, and the
+ *  FillOutcome union already says so honestly ("password" when the username slot was skipped;
+ *  "nothing"/no_fields when both were). Also the ONLY gate that survives liveForm's re-resolve —
+ *  an SPA that swapped the form between the entry-point check and the write gets re-examined. */
 function fillForm(f: LoginForm, s: RevealedSecret): FillOutcome {
   const live = liveForm(f);
   if (!live) return { filled: "nothing", code: "no_form" };
   if (!s.username && !s.password) return { filled: "nothing", code: "no_secret" };
+  // Same cheap pre-check cardMisreadAsLogin uses: a form carrying no card field at all has no card
+  // destination, so the ([K2]-cached) card scan stays off ordinary login pages entirely.
+  const guard = live.suppressSave;
   let wroteUser = false;
   let wrotePass = false;
   filling = true;
   try {
-    if (live.username && s.username) {
+    if (live.username && s.username && !(guard && isCardField(live.username))) {
       setValue(live.username, s.username);
       wroteUser = true;
     }
-    if (live.password && s.password) {
+    if (live.password && s.password && !(guard && isCardField(live.password))) {
       setValue(live.password, s.password);
       wrotePass = true;
     }
@@ -328,6 +354,7 @@ function reportCardForm(): void {
   const sig = JSON.stringify(forms);
   if (sig === lastCardSig) return;
   lastCardSig = sig;
+  chipOffer = null; // [K13] the registry the gate answers about just changed — never replay across it
   void safeSend({ type: "cardFormInfo", forms });
 }
 
@@ -552,7 +579,17 @@ function cardMisreadAsLogin(f: LoginForm): boolean {
   if (!f.suppressSave) return false; // cheap pre-check: keeps the ([K2]-cached) card scan off card-free pages
   const p = f.password;
   if (p === null) return true;
-  return cardFormForInput(p) !== null || demoteCsc(null, p.type, p.name, p.id) !== null;
+  return isCardField(p);
+}
+
+/** The FIELD-local half of the destination gate, shared by both consumers ([U12]: one resolver).
+ *  True when this control is a card box rather than a credential slot — either a member of a
+ *  detected card form (the demoted CVV ref included), or, on a lone-CVV form no card form claims
+ *  (no PAN anchor ⇒ no card form exists), the CSC demotion rule itself.
+ *  cardMisreadAsLogin asks it about the form's password DESTINATION (should this form fill at
+ *  all); fillForm asks it about every slot it is about to write (which of them may fill). */
+function isCardField(el: HTMLInputElement): boolean {
+  return cardFormForInput(el) !== null || demoteCsc(null, el.type, el.name, el.id) !== null;
 }
 
 /** The card form a submit-like control belongs to: its own (form ?? container), else — when the
@@ -689,7 +726,11 @@ async function maybeCardChip(target: EventTarget | null, viaClick = false): Prom
   lastChip = { input: target, t: now };
   // [K12] the gate is a round-trip, so every fact is re-checked at RENDER time, not trigger time.
   const gen = ++chipGen;
-  const r = await safeSend({ type: "cardChipOffer" });
+  // [K13] one wake per window per DOCUMENT, not per field. The awaited branch is unchanged; the
+  // replay branch simply skips the message, so every re-check below still runs.
+  const cached = chipOffer !== null && now - chipOffer.t < CHIP_OFFER_CACHE_MS ? chipOffer.answer : null;
+  const r = cached ?? (await safeSend({ type: "cardChipOffer" }));
+  if (r && cached === null) chipOffer = { t: Date.now(), answer: { fillable: r.fillable, locked: r.locked } };
   if (gen !== chipGen) return; // superseded by a newer focus, or dismissed while in flight
   // [K5] applyCardFill focuses each field (a trusted focusin per field), so a request issued
   // before a fill and answered after `filling` flipped back would pop a chip on top of a
@@ -701,7 +742,10 @@ async function maybeCardChip(target: EventTarget | null, viaClick = false): Prom
   // Tier 2 was built for.
   if ((target.getRootNode() as Document | ShadowRoot).activeElement !== target) return;
   chipAnchor = target;
-  showCardChip(target, { locked: r.locked }, { onActivate: () => void activateCardChip() });
+  // [K8] onDismiss is the surface's way back into the ONE dismissal path: content-ui closes the
+  // chip from four places this module cannot observe (outside-mousedown, Escape, and the two
+  // positionChip auto-closes), and each of those left `chipAnchor` set and `chipGen` un-bumped.
+  showCardChip(target, { locked: r.locked }, { onActivate: () => void activateCardChip(), onDismiss: dismissCardChip });
 }
 
 // ---- dropdown ----
@@ -1022,10 +1066,18 @@ function init(): void {
     true,
   );
 
-  // Deliberately not isTrusted-gated: requestSubmit()-driven submits are real logins too.
+  // bug-ext-gating--1: this listener WAS ungated, on the premise that "requestSubmit()-driven
+  // submits are real logins too". The premise is right and the conclusion was wrong: requestSubmit()
+  // is a UA "fire an event", so its `submit` arrives with isTrusted TRUE — the gate costs nothing —
+  // while `dispatchEvent(new SubmitEvent("submit"))` arrives FALSE and reached this handler. Any
+  // frame (content.js runs with allFrames) could therefore forge a capture with chosen field values
+  // and squat the tab's single pending slot, after which the user's real login on the top frame was
+  // refused as a cross-frame overwrite and the Save banner simply never appeared. Same discipline
+  // the card lane already states below, where consumeTrustedGesture() is the equivalent gate.
   document.addEventListener(
     "submit",
     (e) => {
+      if (!e.isTrusted) return;
       const t = e.target;
       if (!(t instanceof HTMLFormElement)) return;
       const f = scanForms().find((x) => x.form === t);

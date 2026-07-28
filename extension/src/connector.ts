@@ -13,17 +13,19 @@
  * this PRF, so a leaked secret still can't open the vault blob without the non-extractable co-key.
  */
 
-const RP_ID = "andvari.monahanhosting.com"; // fixed RP id, authorized by the manifest host_permissions
+import type { BioReq, BioResult } from "./bioprotocol";
+import { DEFAULT_SERVER_URL } from "./serverurl";
+
+/** The RP id is the REFERENCE instance's host, whatever server this browser is configured for
+ *  (design 2026-07-18 §3): the claim rides the manifest's install-time host_permissions entry,
+ *  which is present regardless, whereas a self-hoster's own domain lives only in
+ *  optional_host_permissions and would drag a runtime consent prompt into the unlock path. Derived
+ *  from DEFAULT_SERVER_URL rather than re-spelled, so there is one literal to change and the SW's
+ *  bug-ext-gating--4 permission probe cannot drift off the origin the ceremony actually claims.
+ *  Consequence a self-hoster sees: their passkey is listed under the reference domain. */
+const RP_ID = new URL(DEFAULT_SERVER_URL).hostname;
 const RP_NAME = "andvari";
 const CEREMONY_TIMEOUT_MS = 60_000;
-
-type BioReq =
-  | { op: "enroll"; prfSalt: string; userHandleB64: string; userName: string; reuse?: { credentialId: string; prfSalt: string } }
-  | { op: "eval"; credentialId: string; prfSalt: string };
-type BioResult =
-  | { ok: true; op: "enroll"; credentialId: string; prfEnabled: boolean; prfSalt: string; secretB64: string }
-  | { ok: true; op: "eval"; secretB64: string }
-  | { ok: false; error: string };
 
 // ---- base64url (no Buffer in a page context) ----
 function bytesToB64url(u: Uint8Array): string {
@@ -46,10 +48,15 @@ function setMsg(text: string, kind: "" | "err" | "ok" = ""): void {
   m.textContent = text;
   m.className = kind;
 }
+/** a11y-webext--8: every path that reveals Close does so right after DISABLING the button that had
+ *  focus (or from a fresh page state), which drops focus to <body> in Chromium — so a keyboard user
+ *  ends every failure of this flow stranded in a window whose only control they cannot reach
+ *  without hunting. Reveal and focus are one act here. */
 function showClose(): void {
   const btn = $("cx-close");
   btn.hidden = false;
   btn.addEventListener("click", () => window.close(), { once: true });
+  btn.focus();
 }
 
 // ---- WebAuthn ----
@@ -177,6 +184,9 @@ async function main(): Promise<void> {
   cont.textContent = "Continue";
   cont.hidden = false;
   $("cx-hint").hidden = false;
+  // a11y-webext--8: this window opens fresh with focus on <body>, and Continue is the ONLY thing
+  // it wants — a keyboard user should not have to Tab into a one-button ceremony window.
+  cont.focus();
 
   cont.addEventListener(
     "click",
@@ -210,7 +220,11 @@ async function main(): Promise<void> {
       const done = await pollUntilDone(req!.op);
       if (done) {
         setMsg(isEnroll ? "Quick unlock is on ✓" : "Unlocked ✓ — reopen andvari.", "ok");
-        setTimeout(() => window.close(), 900);
+        // a11y-webext--8: #cx-msg is a POLITE live region, so this announcement waits its turn —
+        // and at 900 ms the window teardown was killing it, deleting the one instruction a blind
+        // user needs from this flow ("reopen andvari"). Long enough for a polite queue to drain;
+        // still short enough that the window does not feel stuck.
+        setTimeout(() => window.close(), 2500);
       } else {
         setMsg("Done — you can close this window and reopen andvari.");
         showClose();
