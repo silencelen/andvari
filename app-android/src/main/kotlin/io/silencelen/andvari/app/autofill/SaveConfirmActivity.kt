@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Spacer
@@ -36,7 +37,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -295,7 +302,7 @@ class SaveConfirmActivity : ComponentActivity() {
                         // Name untouched; only captured (non-null) fields overwrite; number stays
                         // the matched number; brand recomputed (the stored field is display-only).
                         val existing = engine.items().firstOrNull { it.itemId == plan.itemId }
-                            ?: throw SaveStageException("This card is no longer in the vault.")
+                            ?: throw SaveStageException("That card is no longer in your vault.")
                         val c = existing.doc.card ?: CardData()
                         existing.doc.copy(
                             card = c.copy(
@@ -431,14 +438,13 @@ private fun SaveCard(
                 }
                 Spacer(Modifier.height(8.dp))
                 LabeledValue("Password", "•••••••• (will be saved)")
-                if (error != null) {
-                    Spacer(Modifier.height(12.dp))
-                    Text(error, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall)
-                }
+                if (error != null) InlineOverlayError(error)
                 Spacer(Modifier.height(20.dp))
+                val saveLabel = if (update != null) "Update login" else "Save to andvari"
                 Button(onClick = onSave, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                    if (busy) CircularProgressIndicator(Modifier.height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-                    else Text(if (update != null) "Update login" else "Save to andvari")
+                    // a11yand-08: name the busy spinner with the button's action.
+                    if (busy) CircularProgressIndicator(Modifier.height(18.dp).semantics { contentDescription = saveLabel; stateDescription = "working" }, strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                    else Text(saveLabel)
                 }
                 TextButton(onClick = onCancel, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Not now") }
             }
@@ -473,14 +479,13 @@ private fun CardSaveCard(
                 )
                 Spacer(Modifier.height(16.dp))
                 LabeledValue("Card", plan.display)
-                if (error != null) {
-                    Spacer(Modifier.height(12.dp))
-                    Text(error, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall)
-                }
+                if (error != null) InlineOverlayError(error)
                 Spacer(Modifier.height(20.dp))
+                val confirmLabel = if (isUpdate) "Update card" else "Save card"
                 Button(onClick = onConfirm, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                    if (busy) CircularProgressIndicator(Modifier.height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-                    else Text(if (isUpdate) "Update card" else "Save card")
+                    // a11yand-08: name the busy spinner with the button's action.
+                    if (busy) CircularProgressIndicator(Modifier.height(18.dp).semantics { contentDescription = confirmLabel; stateDescription = "working" }, strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                    else Text(confirmLabel)
                 }
                 TextButton(onClick = onSkip, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Not now") }
             }
@@ -507,23 +512,43 @@ private fun UnlockToSaveCard(
                 Text("Unlock to save", style = MaterialTheme.typography.titleLarge)
                 Text("$email · saving $subject", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(16.dp))
+                // a11yand-07: a one-field password form over another app — the IME's Done must
+                // submit it (same gate as the button), not merely close the keyboard.
+                val submit = { if (password.isNotBlank() && !busy) onUnlock(password) }
                 OutlinedTextField(
                     value = password, onValueChange = { password = it }, label = { Text("Master password") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation(),
                     // Cut E (v2 #4): declare the secret to the IME — no suggestions, no learning.
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { submit() }),
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                 )
-                if (error != null) { Spacer(Modifier.height(8.dp)); Text(error, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall) }
+                if (error != null) InlineOverlayError(error)
                 Spacer(Modifier.height(16.dp))
                 Button(onClick = { onUnlock(password) }, enabled = password.isNotBlank() && !busy, modifier = Modifier.fillMaxWidth()) {
-                    if (busy) CircularProgressIndicator(Modifier.height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                    // a11yand-08: name the busy spinner with the button's action.
+                    if (busy) CircularProgressIndicator(Modifier.height(18.dp).semantics { contentDescription = "Unlock"; stateDescription = "working" }, strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                     else Text("Unlock")
                 }
                 TextButton(onClick = onCancel, enabled = !busy) { Text("Cancel") }
             }
         }
     }
+}
+
+/**
+ * a11yand-15: the one inline-error line for this overlay's three cards. They previously used
+ * `onErrorContainer` on a plain Card — a container ink on a non-container surface, and a different
+ * token from the sibling AutofillUnlockActivity for the identical error — and none of them
+ * announced. Now the main app's idiom: `error` on surface, assertive like ErrorBar.
+ */
+@Composable
+private fun InlineOverlayError(msg: String) {
+    Spacer(Modifier.height(12.dp))
+    Text(
+        msg, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Assertive },
+    )
 }
 
 @Composable

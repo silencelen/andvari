@@ -318,6 +318,45 @@ data class UiState(
     val quickUnlockMessage: String? = null,
 )
 
+/**
+ * The shared session-teardown reset for [lock] and [signOut]. Both used to hand-maintain a
+ * near-identical ~25-field `copy()` block, and they had already DRIFTED: signOut never cleared
+ * the export preflights (backupPreflight/backupResult/csvPreflight) or the decrypted trash
+ * caches (deletedItems/itemVersions), and the inline comments show escrowStale, deletedItems
+ * and policyFetchFailed were each retro-fitted after being missed once. One clear-set; each
+ * caller applies only its genuinely-different fields (where it lands, busy, quick-unlock
+ * state, mustChangePassword, upgradeRequired).
+ *
+ * [reason] is F26's per-event explanation line — fresh each time, never carried.
+ */
+internal fun UiState.sessionCleared(reason: String?): UiState = copy(
+    items = emptyList(), needsUpdateCount = 0,
+    notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
+    backupPreflight = null, backupResult = null, csvPreflight = null,
+    lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
+    sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
+    undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
+    copyProgress = null, copiedNote = null, copyVaultId = null, copyOpVaultId = null, moveProgress = null,
+    // Trash holds DECRYPTED tombstone docs (incl. passwords) + item versions; now that
+    // checkIdleLock routinely locks from the Trash screen, they must not outlive the lock.
+    deletedItems = null, itemVersions = null,
+    // P4: the ReSealCard lives in the GLOBAL AttentionArea (it renders on Unlock and Welcome
+    // too), so escrowStale MUST clear here — else a "Later"-deferred re-seal card shows on the
+    // lock screen with a dead action (engine torn down). A fresh unlock re-reads it.
+    escrowStale = false, escrowFingerprint = "",
+    // §F.7/§F.9: the reveal's display form + gate state die with the session (the raw secret is
+    // zeroed by the caller); a fresh unlock re-derives everything.
+    recoveryPhrase = null, recoverySetupWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false,
+    recoverVerified = false,
+    // N2 §3/§6 (review MED): clear the probe-failure flag only when a policy is LOADED — then
+    // it's stale noise. With policy == null the failure is CURRENT (nothing re-probes on the
+    // way to Welcome), and clearing it would strand the enroll tab in the probe-in-flight
+    // "Checking the server…" text with no Retry and no probe. Web parity: signOut never clears
+    // policyError either.
+    policyFetchFailed = policy == null && policyFetchFailed,
+    lockReason = reason,
+)
+
 /** Human label for a detected format — the preview's "From … export" line. Stays under
  *  the universal importer (pin 6: it is FORMAT-keyed, not pick-keyed). Keyed on the core
  *  enum's NAME with an else-fallback (the only remaining format is 1Password, whatever
@@ -2795,34 +2834,9 @@ class AndvariViewModel(
         moveGestures.clear() // gestures reference the dead engine's item state
         movePickerMode = null
         movePickerItemId = null
-        _ui.value = _ui.value.copy(
-            screen = Screen.Unlock(store.load()?.email ?: ""), items = emptyList(), needsUpdateCount = 0,
-            notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
-            backupPreflight = null, backupResult = null, csvPreflight = null,
-            lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
-            sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
-            undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
-            copyProgress = null, copiedNote = null, copyVaultId = null, copyOpVaultId = null, moveProgress = null,
-            // Trash holds DECRYPTED tombstone docs (incl. passwords) + item versions; now that
-            // checkIdleLock routinely locks from the Trash screen, they must not outlive the lock.
-            deletedItems = null, itemVersions = null,
-            // P4: the ReSealCard now lives in the GLOBAL AttentionArea (renders on Unlock too),
-            // so escrowStale MUST clear on lock — else a "Later"-deferred re-seal card shows on
-            // the lock screen with a dead action (engine torn down). Fresh unlock re-reads it.
-            escrowStale = false, escrowFingerprint = "",
-            // §F.7/§F.9: the reveal's display form + gate state die with the lock (the raw secret
-            // was zeroed above); a fresh unlock re-derives everything.
-            recoveryPhrase = null, recoverySetupWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false,
-            recoverVerified = false,
-            // N2 §3/§6 (review MED): clear the probe-failure flag only when a policy is
-            // LOADED — then it's stale noise. With policy == null the failure is CURRENT
-            // (nothing re-probes on the way to Welcome), and clearing it would strand the
-            // enroll tab in the probe-in-flight "Checking the server…" text with no Retry
-            // and no probe. Web parity: signOut never clears policyError either. The lock
-            // reason is THIS event's — fresh, never carried.
-            policyFetchFailed = _ui.value.policy == null && _ui.value.policyFetchFailed,
-            lockReason = reason,
-        )
+        // Everything a dead session must stop showing lives in ONE place (see sessionCleared);
+        // lock() adds only what is genuinely its own — where it lands.
+        _ui.value = _ui.value.sessionCleared(reason).copy(screen = Screen.Unlock(store.load()?.email ?: ""))
     }
 
     /** F26: [reason] is non-null only when a dead session FORCES a sign-out (no such caller
@@ -2873,28 +2887,14 @@ class AndvariViewModel(
                 store.clearFullPasswordStamp(originKey, it)
             }
             store.clear()
-            _ui.value = _ui.value.copy(
-                screen = Screen.Welcome, items = emptyList(), needsUpdateCount = 0, busy = false,
+            // The shared clear-set (sessionCleared) plus sign-out's OWN fields: it lands on
+            // Welcome rather than Unlock, ends the busy op, and drops the account-scoped state a
+            // lock deliberately keeps.
+            _ui.value = _ui.value.sessionCleared(reason).copy(
+                screen = Screen.Welcome, busy = false,
                 quickUnlockEnrolled = false, quickUnlockFresh = false, quickUnlockOffer = false, quickUnlockMessage = null,
                 mustChangePassword = false, // store.clear() dropped the persisted F58 flag with the account
                 upgradeRequired = null, // A9 escape: sign-out must LIFT the 426 block — copy() would otherwise carry it forward and re-brick over Welcome
-
-                notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
-                lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
-                sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
-                undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
-                copyProgress = null, copiedNote = null, copyVaultId = null, copyOpVaultId = null, moveProgress = null,
-                escrowStale = false, escrowFingerprint = "", // P4: global ReSealCard must not linger on Welcome
-                // §F.7/§F.9: reveal display form + gate state never outlive the account (raw secret zeroed above)
-                recoveryPhrase = null, recoverySetupWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false,
-                recoverVerified = false,
-                // N2 §3/§6 (review MED): a probe failure with NO policy loaded is current,
-                // not stale — keep it so Welcome shows the failure + Retry instead of the
-                // dead-end "Checking the server…" (nothing re-probes on this path). With a
-                // policy loaded, clear as before. The reason line shows only for a
-                // session-end sign-out (user-initiated passes null).
-                policyFetchFailed = _ui.value.policy == null && _ui.value.policyFetchFailed,
-                lockReason = reason,
             )
         }
     }
