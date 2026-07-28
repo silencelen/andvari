@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Publish the andvari container image to GHCR — run BY HAND from huginn or devserv.
+# Publish the andvari container image to GHCR — run BY HAND from a build host.
 #
 #   scripts/publish-image.sh <version> [--latest] [--single-arch] [--dry-run]
 #   e.g. scripts/publish-image.sh 0.19.0 --latest
 #
-# DELIBERATELY NOT CI (design 2026-07-15 §8.1): GitHub Actions billing on this
-# account is broken (see memory/aspensplayground-ci-billing-block-2026-07-04), so
-# the public image ghcr.io/silencelen/andvari is built + pushed from the build
-# hosts, exactly like the APK/deb releases. Do not wire this into workflows.
+# DELIBERATELY NOT CI (design 2026-07-15 §8.1): hosted-runner minutes are not
+# available for this project, so the public image ghcr.io/silencelen/andvari is
+# built + pushed from a build host, exactly like the APK/deb releases. Do not
+# wire this into workflows.
 #
 # Requirements on the build host:
 #   * docker with buildx (multi-arch) — --single-arch falls back to plain build/push

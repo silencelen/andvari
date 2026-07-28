@@ -8,10 +8,11 @@
 # Multi-arch (amd64/arm64) friendly: the two build stages are pinned to
 # $BUILDPLATFORM (jars and vite output are architecture-independent), so a
 # `docker buildx build --platform linux/amd64,linux/arm64` compiles ONCE on the
-# build host and only the runtime stage is per-target-arch. Published from
-# huginn/devserv via scripts/publish-image.sh — NOT from CI (GH Actions billing).
+# build host and only the runtime stage is per-target-arch. Published by hand
+# from a maintainer build host via scripts/publish-image.sh — NOT from CI.
 #
-# Build mirrors ops/deploy.sh: gradle :server:shadowJar + web `npm run build`.
+# The build is the same two steps a from-source build does by hand:
+# `gradle :server:shadowJar` + web `npm run build`.
 # NOTE :core is Kotlin Multiplatform with an androidTarget(), so Gradle
 # CONFIGURATION needs an Android SDK even though only JVM jars are built here —
 # the jar stage installs cmdline-tools + platform android-35 (core compileSdk).
@@ -61,7 +62,8 @@ COPY tools/recovery-cli/ tools/recovery-cli/
 COPY spec/test-vectors/ spec/test-vectors/
 # server's processResources bundles the self-host docs + deploy files into the jar's
 # selfhost/ classpath (SERVER-4 / §8.1); absent ⇒ /selfhost serves a stub, never the SPA
-# fallback. ops/deploy.sh has the full checkout, but the GHCR image build needs them here.
+# fallback. A from-source build has the whole checkout on hand; this image copies only the
+# modules it needs, so these files must be named explicitly.
 COPY docs/self-hosting.md docs/self-hosting.md
 COPY deploy/docker-compose.yml deploy/docker-compose.caddy.yml deploy/andvari.env.template deploy/bringup.sh deploy/
 RUN sed -i -e '/":app-android"/d' -e '/":app-desktop"/d' \

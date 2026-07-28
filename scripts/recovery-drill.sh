@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Automated account-recovery drill (docs/drills/account-recovery-drill.md, ROADMAP step 6):
+# Automated account-recovery drill (spec 04 §4, ROADMAP step 6):
 # stands up a scratch server with a recovery keypair generated for THIS run (the seed stands in
 # for the printed sheet — we can't drive the live org key without the owner's physical sheet),
 # then drives the full spec 04 §4 forgot-master-password path end to end with the REAL
