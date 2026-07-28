@@ -50,13 +50,15 @@ import io.silencelen.andvari.core.model.RegisterRequest
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.java.Java
 import io.ktor.http.ContentType
-import io.ktor.http.defaultForFile
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.metrics.micrometer.MicrometerMetrics
+import io.ktor.server.plugins.conditionalheaders.ConditionalHeaders
+import io.ktor.server.plugins.partialcontent.PartialContent
 import io.ktor.server.request.ApplicationReceivePipeline
 import io.ktor.server.request.receiveChannel
 import io.ktor.server.response.respondBytes
+import io.ktor.server.response.respondFile
 import io.ktor.server.response.respondOutputStream
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.readRemaining
@@ -230,7 +232,13 @@ private fun registerPurgeGauges(metrics: PrometheusMeterRegistry, db: Db) {
 }
 
 private suspend fun ApplicationCall.respondFileContent(file: File) {
-    respondBytes(file.readBytes(), ContentType.defaultForFile(file))
+    // STREAMED (LocalFileContent: bounded buffers, Content-Length, a Last-Modified version) —
+    // never file.readBytes(): this serves both the SPA assets and the /downloads installers
+    // (80–150 MB each), and heap-buffering a handful of concurrent desktop updates used to
+    // allocate them all as byte[] at once (polish audit 2026-07-27 quality-perf--1). The
+    // ConditionalHeaders + PartialContent plugins turn the version into 304 revalidation and
+    // Range support (resumable installer downloads).
+    respondFile(file)
 }
 
 /** First-run: if no users exist and a bootstrap token is set, mint the admin invite. */
@@ -268,6 +276,12 @@ fun Application.andvariModule(services: Services) {
         timeoutMillis = 60_000
     }
     install(MicrometerMetrics) { registry = services.metrics }
+    // quality-perf--1: for the streamed file responses (respondFileContent) these turn the file's
+    // Last-Modified version into 304 revalidation and add Range support (resumable installer
+    // downloads). No-ops for the API routes — JSON responses carry no versions and the attachment
+    // GET streams via WriteChannelContent, which PartialContent does not touch.
+    install(ConditionalHeaders)
+    install(PartialContent)
     install(StatusPages) {
         exception<Throwable> { call, cause ->
             when (cause) {
@@ -281,6 +295,7 @@ fun Application.andvariModule(services: Services) {
                 is ResyncRequired -> call.respond(HttpStatusCode.Gone, ApiError("resync_required", "cursor predates retained history"))
                 is RateLimited -> call.respond(HttpStatusCode.TooManyRequests, ApiError("rate_limited", "slow down"))
                 is PayloadTooLarge -> call.respond(HttpStatusCode.PayloadTooLarge, ApiError(cause.reason, "quota exceeded"))
+                is BadGateway -> call.respond(HttpStatusCode.BadGateway, ApiError(cause.reason, "upstream failed"))
                 // PT-L11 (CR-04): Ktor's own malformed-input throwables (a bad/empty JSON body on any
                 // receive route — incl. unauthenticated /auth/*) are CLIENT errors → 400, not a 500 with
                 // "unhandled" log spam. In Ktor 3.0.3 these are disjoint hierarchies
@@ -502,6 +517,11 @@ fun Application.andvariModule(services: Services) {
         }
         put("/api/v1/account/password") {
             val p = requirePrincipal(call, service)
+            // bug-server--5: same bucket shape as the recovery routes — the verify below is a
+            // memory-hard 64 MiB argon2 per attempt (plus an audit row per miss), so it must not
+            // be free to loop. Per-user, not per-IP: the caller is authenticated, matching the
+            // vault_create/lookup/invite buckets.
+            if (!limiter.allow("password_change:${p.userId}", 5, 60_000)) throw RateLimited()
             service.changePassword(p, call.receive<PasswordChangeRequest>(), call.clientIp(config))
             services.notifier.notifyRevokedUserExcept(p.userId, p.deviceId) // M8: lock the user's OTHER devices (this one is kept)
             call.respondText("ok")
@@ -514,7 +534,16 @@ fun Application.andvariModule(services: Services) {
         }
         post("/api/v1/account/totp/setup") {
             val p = requirePrincipal(call, service)
-            call.respond(service.totpSetup(p.userId))
+            // Additive OPTIONAL body (bug-server--0): an ENROLLED account must present its current
+            // code to stage a rotation (Service gates it — 400 totp_code_required when enrolled and
+            // absent); a fresh enrollment sends no body, exactly the fielded wire shape. Body parse
+            // rule mirrors /recovery/self/confirm: blank/absent ⇒ null; non-blank ⇒ TotpCodeRequest,
+            // decode failure ⇒ 400 bad_request.
+            val text = call.receiveText()
+            val code = if (text.isBlank()) null else runCatching {
+                json.decodeFromString(TotpCodeRequest.serializer(), text).code
+            }.getOrElse { throw BadRequest("bad_request") }
+            call.respond(service.totpSetup(p.userId, code))
         }
         post("/api/v1/account/totp/confirm") {
             val p = requirePrincipal(call, service)
@@ -772,7 +801,12 @@ fun Application.andvariModule(services: Services) {
 
         // ---- hibp relay ----
         get("/api/v1/hibp/range/{prefix}") {
-            requirePrincipal(call, service)
+            val p = requirePrincipal(call, service)
+            // bug-server--2: a per-user bucket in the shape of its siblings (lookup 20/min,
+            // client-policy 60/min), sized for the Health breach scan — one request per UNIQUE
+            // password prefix, awaited sequentially and mostly served from the 7-day cache on a
+            // rescan — so a big-vault scan never trips it while a runaway loop stays bounded.
+            if (!limiter.allow("hibp:${p.userId}", 600, 60_000)) throw RateLimited()
             val prefix = call.parameters["prefix"] ?: throw BadRequest("no_prefix")
             // PT-L11 (CR-04): validate the k-anonymity prefix in-route → a clean 400 (bad_prefix)
             // instead of Hibp.range()'s require() throwing IllegalArgumentException down to StatusPages.

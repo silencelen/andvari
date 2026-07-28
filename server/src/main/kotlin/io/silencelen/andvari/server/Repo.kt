@@ -547,7 +547,10 @@ class Repo(val db: Db) {
     }
 
     // policy
-    fun policyJson(): String? = db.read { it.queryOne("SELECT json FROM policies WHERE id=1") { rs -> rs.getString(1) } }
+    // The …On(c) form exists so [Service.policy] can read AND publish its decode inside ONE Db
+    // lock hold (polish review 2026-07-27 parity--2) — see the cache note there.
+    fun policyJsonOn(c: Connection): String? = c.queryOne("SELECT json FROM policies WHERE id=1") { rs -> rs.getString(1) }
+    fun policyJson(): String? = db.read { policyJsonOn(it) }
     fun setPolicyJsonOn(c: Connection, value: String) {
         c.exec("INSERT INTO policies(id,json) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json", value)
     }

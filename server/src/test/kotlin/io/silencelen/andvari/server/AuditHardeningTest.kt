@@ -246,6 +246,45 @@ class AuditHardeningTest : P4TestSupport() {
         )
     }
 
+    /**
+     * bug-server--1: the push_denied row must survive a batch whose LATER mutation throws and rolls
+     * the batch tx back — an attacker probing another member's vault could otherwise append one
+     * malformed mutation to every probe and suppress the intrusion record forever. The denial
+     * audits are now written in their own tx after the batch tx resolves, success or throw.
+     */
+    @Test
+    fun deniedPush_auditSurvivesBatchRollback() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+
+        val user1 = VirtualClient("rb-owner@x.com", "owner vault password rb", fast = true)
+        client.register(user1, bootstrapToken)
+        val inviteResp = client.post("/api/v1/admin/users") {
+            contentType(ContentType.Application.Json); authed(user1)
+            setBody(InviteRequest("rb-intruder@x.com", isAdmin = false))
+        }
+        val invite = json.decodeFromString(InviteResponse.serializer(), inviteResp.bodyAsText())
+        val user2 = VirtualClient("rb-intruder@x.com", "intruder vault password rb", fast = true)
+        client.register(user2, invite.inviteToken)
+
+        // One batch: a no-grant probe into user1's vault (denied + audited), then a mutation with
+        // an unknown op → BadRequest(bad_op) → the WHOLE batch tx rolls back and the request 400s.
+        val probeItem = user2.newItemId()
+        val rolled = client.pushRaw(
+            user2,
+            Mutation(uuid(), "put", probeItem, user1.personalVaultId, 0, user2.encItem(probeItem, """{"type":"note","name":"probe"}""")),
+            Mutation(uuid(), "bogus", user2.newItemId(), user2.personalVaultId, 0, null),
+        )
+        assertEquals(HttpStatusCode.BadRequest, rolled.status)
+        assertEquals("bad_op", errorOf(rolled))
+
+        // The rollback must NOT have taken the intrusion record with it.
+        assertTrue(
+            client.auditRows(user1, "push_denied").any { it.userId == user2.userId },
+            "a push_denied row must survive the sibling mutation's batch rollback",
+        )
+    }
+
     // ---- LOW-8: self escrow upload is audited ----
 
     @Test
@@ -723,6 +762,16 @@ class AuditHardeningTest : P4TestSupport() {
         assertEquals(admin.userId, rows.first().userId)
         val pol = client.get("/api/v1/admin/policy") { authed(admin) }
         assertTrue(pol.bodyAsText().contains("\"autoLockSeconds\":123"), "the change itself must land")
+
+        // quality-perf--7: policy() now serves a cached decode — a SECOND update must invalidate
+        // it, so the next read reflects the new value, never the cached old one.
+        val put2 = client.put("/api/v1/admin/policy") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(ClientPolicy(autoLockSeconds = 456))
+        }
+        assertEquals(HttpStatusCode.OK, put2.status, put2.bodyAsText())
+        val pol2 = client.get("/api/v1/admin/policy") { authed(admin) }
+        assertTrue(pol2.bodyAsText().contains("\"autoLockSeconds\":456"), "setPolicy must invalidate the policy cache")
     }
 
     // ---- INFO-6: admin ids are UUID-validated (400, not a silent no-op UPDATE) ----
