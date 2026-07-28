@@ -1,13 +1,23 @@
 # andvari browser extension (MV3)
 
-PC autofill for Chromium (Chrome/Edge/Brave) + Firefox. **Status: functional (v0.6.1).** Real
-unlock (pure-JS `@noble` crypto, byte-identical to the fleet: `web/src/crypto/noble-extension-poc.test.ts`),
-member grants, Web-Worker KDF, token refresh — plus the 0.6.1 rework: a session that survives the
-MV3 service-worker (chrome.storage.session custody + alarm autolock), a real detection engine
-(delegated focusin + MutationObserver, multi-step, all_frames iframes, React-safe fill), save AND
-update prompts that survive navigation, a themed functional popup, and treasury theming throughout.
-Design + go/no-go: [`docs/design/2026-07-08-browser-extension-spike.md`](../docs/design/2026-07-08-browser-extension-spike.md);
-rework audit + plan: [`docs/design/2026-07-09-extension-rework-plan.md`](../docs/design/2026-07-09-extension-rework-plan.md).
+Desktop autofill for Chromium (Chrome/Edge/Brave) + Firefox — logins and payment cards.
+**Status: shipping.** The version lives in `manifest.json` (0.19.0 as of this writing);
+`package.mjs` refuses to package if `manifest.json`, `manifest.firefox.json`, and
+`package.json` disagree, so that one file is the answer. Per-release detail is in the repo-root
+[`CHANGELOG.md`](../CHANGELOG.md).
+
+It is a full client, not a shim: pure-JS `@noble` crypto (no WASM, no `eval`) byte-identical to
+the fleet, member (shared-vault) grants, a Web-Worker KDF, a session that survives MV3
+service-worker death, and a detection + fill engine for logins and checkout card forms. It talks
+only to the one andvari server you configure — your own instance or the shipped default — and
+holds decrypted items in service-worker memory only.
+
+Design record: the go/no-go spike
+[`docs/design/2026-07-08-browser-extension-spike.md`](../docs/design/2026-07-08-browser-extension-spike.md),
+the rework plan [`docs/design/2026-07-09-extension-rework-plan.md`](../docs/design/2026-07-09-extension-rework-plan.md),
+the endpoint-agnostic model [`docs/design/2026-07-15-multi-tenant-endpoints.md`](../docs/design/2026-07-15-multi-tenant-endpoints.md),
+and the card-fill chain (`2026-07-10-extension-card-fill`, `2026-07-23-card-autofill-*`,
+`2026-07-26-in-page-card-chip`).
 
 ## Build
 
@@ -16,28 +26,57 @@ cd extension
 npm install
 npm run build        # → dist/ dev build (readable, sourcemaps; esbuild — 0 wasm, 0 eval; copies popup.html/popup.css/icons/INSTALL.txt)
 npm run typecheck    # tsc --noEmit
+npm run test         # node --test over src/**/*.test.ts
 npm run package      # → artifacts/andvari-extension-{chrome,firefox}-<ver>.zip (minified release)
 ```
 
-## Distribute (household — no store listing)
+## Tests — where they actually live
 
-`npm run package`, then publish both zips to CT 122 `/opt/andvari/downloads/` and **merge** a
-`browserExtension` entry into `manifest.json` there (merge — never overwrite; the windows/linux
-desktop entries live in the same file, see `ops/windows-build.md`):
+There is **no browser harness in this tree** (no puppeteer, no playwright). On-browser behaviour
+is verified by hand, per the procedure in "Load + verify" and the B2-10 section below. What *is*
+automated:
 
-```json
-"browserExtension": {
-  "version": "0.6.1",
-  "chromeUrl": "/downloads/andvari-extension-chrome-0.6.1.zip",
-  "firefoxUrl": "/downloads/andvari-extension-firefox-0.6.1.zip"
-}
-```
+- **`extension/src/*.test.ts`** — `npm test`, Node's built-in runner (`node --test`, native
+  type-stripping). The security-critical logic is deliberately factored into chrome-free **leaf
+  modules** (`serverurl`, `locksequence`, `quickunlock`, `serverswitch`, `grantflow`, `trustgate`,
+  `updateverify`, `card`, `cardfill`, `detect`, `urimatch`, `totp`, `errors`, …) so the real
+  enforcement is driven under plain node instead of a hand-rolled mirror. The `*.vectors.test.ts`
+  files in that set read `spec/test-vectors/` directly — the same bytes the Kotlin and web engines
+  are graded against (provenance: `spec/test-vectors/README.md`).
+- **`web/src/extension-pins.test.ts`** — the house pattern, stated at that file's top: because the
+  extension has no suite of its own for cross-engine values, its safety-critical constants
+  (`format.ts` format-version ceiling/floor, `card.ts` derivations, `detect.ts` CVV classification,
+  `messages.ts` card-target choice) are pinned **from the web vitest suite**, alongside
+  `web/src/crypto/noble-extension-poc.test.ts`, which proves the `@noble` + `tweetnacl` crypto is
+  byte-identical to libsodium.
+- **`extension/package.mjs`** self-defends before it zips: refuses on manifest version drift, runs
+  the same test glob, and caps `content.js` size so the ~144 KB PSL blob can never leak into the
+  per-page bundle.
 
-The web app's **Settings → Devices** hub reads that entry and shows the download row (private
-origin only). Each zip carries a tester-facing `INSTALL.txt`; Firefox loads are session-temporary
-(`about:debugging`) until we sign an .xpi.
+`scripts/verify.sh` at the repo root runs the extension typecheck + tests together with both
+engines' suites; that is the gate for every ship.
 
-## Load + verify (on a real Chromium — I can't here)
+## Release & distribution
+
+`npm run package` produces both zips, then `scripts/publish-extension.sh` uploads them:
+
+- **Chrome Web Store**, *unlisted* — installable by link, absent from search/browse. Updates
+  auto-install like any store extension.
+- **Firefox AMO self-distribution** — `web-ext sign` returns a Mozilla-signed `.xpi`. The Firefox
+  manifest bakes `browser_specific_settings.gecko.update_url` → the reference instance's
+  `/downloads/firefox-updates.json`, which the publish script emits alongside the signed `.xpi`,
+  so signed installs self-update (Firefox verifies the signature on every update).
+- **Sideload zips** remain the fallback; each carries `INSTALL.txt`. Any instance can host builds
+  in its `/downloads` dir: the web app's **Settings → Devices** hub reads that dir's
+  `manifest.json` and renders whatever a `browserExtension` entry declares, preferring
+  `chromeStoreUrl` and a signed `firefoxUrl` `.xpi` over plain zips. Merge that entry, never
+  overwrite it — the desktop installer entries live in the same file. There is no origin gate:
+  a self-host instance advertises its own `/downloads` exactly like the reference instance does.
+
+Both stores review every update, even unlisted ones. Credentials and the full field kit live in
+[`docs/runbooks/extension-store-publishing.md`](../docs/runbooks/extension-store-publishing.md).
+
+## Load + verify (manual, on a real browser)
 
 1. `chrome://extensions` → Developer mode → **Load unpacked** → select `extension/dist`.
 2. Open the popup → **Test server connection**. Expect "Server reachable." — proves the granted
@@ -49,9 +88,9 @@ origin only). Each zip carries a tester-facing `INSTALL.txt`; Firefox loads are 
 4. Open a login page (e.g. https://fill.dev), unlock in the popup, then click a username/password
    field → the andvari fill dropdown appears; submit an unknown login → the "Save to andvari?" bar.
 
-## What's wired vs next
+## What's wired
 
-- **Wired — the extension unlocks and decrypts for real:**
+- **The extension unlocks and decrypts for real:**
   - `src/crypto.ts` — @noble Argon2id / HKDF / XChaCha20-Poly1305 envelope + the item/UVK/VK
     **associated-data** constructions (byte-exact vs core `Ad.kt`; vector-parity proven).
   - `src/api.ts` — prelogin / login / sync (+ `clientPolicy` smoke test), Bearer JSON, no CORS.
@@ -78,20 +117,35 @@ origin only). Each zip carries a tester-facing `INSTALL.txt`; Firefox loads are 
     from **tweetnacl** (box) + `@noble` blake2b (nonce), verified byte-identical to libsodium
     (`web/src/crypto/noble-extension-poc.test.ts`). Shared-vault logins fill too now.
   - **Token refresh** — a 401 rotates the single-use token pair and retries once.
-  - **Cards, copy-only (0.7.0)** — the popup lists `type:"card"` items in a "Cards" group beneath
-    the logins: a masked identity line only ("Visa ••4242" — the full number/CVV never enter the
-    popup DOM), with hover buttons that copy number / expiry (MM/YY) / security code straight to
-    the clipboard through the same explicit-reveal path as passwords (`revealCardField`, popup-only —
-    the SW refuses it from pages). **In-page card fill is deliberately deferred**: handing a PAN to
-    checkout iframes needs the frame-origin egress contract (a grant redeemable only by the frame
-    that detected the card form) before a card secret may ever cross into page DOM — popup copy
-    covers the household until that ships. With it: the item read ceiling is now fv 2 with per-item
-    carried re-seal fv (new logins still seal at fv 1 — `src/format.ts`, pinned by
-    `web/src/extension-pins.test.ts`), and a lone password-typed field whose name/id token-matches
-    `cvv`/`cvc`/`csc` suppresses the save/update banner, so those checkout security codes can't be
-    offered as an overwrite of a stored login password (names outside that set — e.g.
-    `securityCode` — pick up the core classifier's fuller CSC demotion with the deferred in-page
-    card-fill slice; the id is only consulted when the name is empty).
+  - **Cards** — the popup lists `type:"card"` items in a "Cards" group beneath the logins as a
+    masked identity line only ("Visa ••4242"; the full number/CVV never enter the popup DOM), with
+    copy buttons for number / expiry / security code behind the same explicit-reveal path as
+    passwords (`revealCardField`, popup-only — the SW refuses it from pages). **In-page fill** of
+    merchant-hosted checkout forms is wired too (`src/cardfill.ts` + `src/content.ts`), including
+    `<select>` expiry/type dropdowns, split-PAN boxes, radio card types, and billing ZIP. Every
+    card value crosses into page DOM only through a **one-shot `revealCardForFill` grant minted by
+    a popup click and redeemable by the exact frame that detected the form** — the frame-origin
+    egress contract. Cross-origin PSP iframes (Stripe Elements et al.) are **deliberately not
+    filled**: nothing can distinguish a merchant's PSP frame from an attacker's, so copy stays the
+    posture there. The C1 in-page chip carries zero data and mints no grant — it is a signpost that
+    opens the popup (design `2026-07-26-in-page-card-chip`). Item read ceiling is fv 2 with
+    per-item carried re-seal fv; new logins still seal at fv 1 (`src/format.ts`, pinned by
+    `web/src/extension-pins.test.ts`). A lone password-typed field whose name/id token-matches
+    `cvv`/`cvc`/`csc` suppresses the save/update banner, so a checkout security code can't be
+    offered as an overwrite of a stored login password (the id is consulted only when the name is
+    empty).
+  - **Any server, safely (`src/options.ts`, `serverurl`, `serverswitch`, `trustgate`)** — the
+    options page repoints the extension at any andvari origin behind an anti-phishing Trust Gate
+    that shows the **raw origin only**, never a server-supplied display name. A switch is
+    origin-clean: locks, clears tokens, and namespaces storage per origin.
+  - **Quick unlock (`src/quickunlock.ts`)** — an optional PIN (or platform passkey) that turns the
+    idle relock's full sign-in + multi-second Argon2id into a short one. The UVK is **double**-wrapped:
+    a PIN-derived key over a non-extractable WebCrypto key held in IndexedDB, so the blob alone is
+    not offline-crackable. Session-scoped; never persisted to disk.
+  - **Signed update channel (`src/updateverify.ts`)** — the SW checks a detached-signed
+    `/downloads/manifest.json` with an anti-rollback sequence floor, fails closed and quiet, and
+    runs **only** against the shipped default origin (the pinned key signs that instance's
+    `/downloads` alone). A custom origin gets no fetch at all. Per-instance keys are later work.
 - **Manifests (both):** branded icons (`icons/icon{16,32,48,128}.png` — the treasury coin + ᛅ rune),
   extension-page CSP without `'wasm-unsafe-eval'` (nothing loads wasm). The autofill content script
   is **registered dynamically by the service worker** (`chrome.scripting.registerContentScripts`,
@@ -124,7 +178,11 @@ origin only). Each zip carries a tester-facing `INSTALL.txt`; Firefox loads are 
   enabled, fetch works, and the Firefox first-run grant flow triggers.
 - **Firefox:** `manifest.firefox.json` + `TARGET=firefox npm run build` (background event page instead
   of the SW; `browser_specific_settings`). The `chrome.*` calls work on both.
-- **Next:** in-page card fill (behind the frame-origin egress contract above), more item types
-  beyond logins/cards, a signed Firefox `.xpi` (temporary `about:debugging` loads
-  vanish on restart), and continued on-browser verification on both Chromium and Firefox (a
-  headless-Chromium harness already exercises unlock / save / fill / multi-step / iframe / SPA / SW-kill).
+
+## Next
+
+- More item types in-page beyond logins and cards.
+- Per-instance signing keys for the update channel, so a self-host origin can have one too.
+- A real browser harness. On-browser behaviour is manual today; the B2-10 procedure above is the
+  only thing standing between a host-permission change and a silently disabled extension, and it
+  deserves automation.

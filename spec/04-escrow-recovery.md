@@ -50,7 +50,7 @@ canary). Uploaded at registration and re-uploaded on any future UVK change
 (none in v1) via `PUT /escrow/self`. UVK stability (spec 01 §4) keeps blobs evergreen
 across password changes.
 
-## 4. Ceremony & flows (runbooks live in ops/, these are the normative steps)
+## 4. Ceremony & flows (normative steps; an instance's own operator runbook wraps them)
 
 **Escrow ⊥ vault lifecycle (spec 03 §11).** Escrow seals the UVK only — no VKs, no items.
 `applyRecovery` rewrites verifier / wrappedUvk / kdf and sets `status='active'`, touching
@@ -58,7 +58,9 @@ neither grants nor pending transfers, so a recovered account retains every membe
 ownership, and pending offer. Recovery therefore **doubles as vault succession** for a
 lost/disabled owner (no admin lifecycle route exists — that would be the F16 forgery class):
 recover the owner account → sign in as owner → transfer or delete the orphaned vaults →
-re-secure (`ops/runbooks/vault-succession.md`). A vault deleted during a lockout reconciles
+re-secure the account (the recovery temp password already forces a change at the recovered
+owner's next sign-in — see "Account recovery" step 4 below, so no extra step is needed).
+A vault deleted during a lockout reconciles
 on the recovered account's next sync like any offline device.
 
 **Genesis ceremony (before ANY real account):**
@@ -85,10 +87,12 @@ on the recovered account's next sync like any offline device.
 4. User logs in with temp password → forced password change (normal spec 01 §7
    flow) → all devices re-auth. Escrow blob unchanged (UVK unchanged).
 
-**Annual drill (n8n reminder, July):** `canary verify` from the printed sheet, a
-fleet `verify <seedFile> <escrowDumpJson>` pass over every escrowed account
-(`docs/drills/escrow-canary-drill.md`), + a full recovery of a dedicated drill
-account. Failures are a P1 incident: re-ceremony + re-escrow of ALL accounts
+**Annual drill (calendar it — an instance with no drill has an untested recovery
+path):** `canary verify` from the printed sheet, a fleet
+`verify <seedFile> <escrowDumpJson>` pass over every escrowed account, + a full
+recovery of a dedicated drill account. `scripts/recovery-drill.sh` drives that last leg
+end to end against a scratch server, so the machinery can be exercised without touching a
+live instance. Failures are a P1 incident: re-ceremony + re-escrow of ALL accounts
 (client-side re-seal on next unlock — the server flags each affected account
 `escrowStale` in `AccountKeys` at login/unlock, with policy/`AccountKeys` carrying
 the new fingerprint as the re-seal target).

@@ -44,7 +44,7 @@ Fixed in `app-desktop/build.gradle.kts` — `jdk.accessibility` appended to
 `nativeDistributions.modules(...)`. Shipping a runtime that *cannot* load the bridge is strictly
 wrong, so this lands even though the Windows (Phase-2) NVDA verification is still pending.
 
-**Empirical support for the fix (observed on the build host, huginn, 2026-07-15):** the JDK 17
+**Empirical support for the fix (observed on the build host, 2026-07-15):** the JDK 17
 image at `/usr/lib/jvm/java-17-openjdk-amd64` ships `jmods/jdk.accessibility.jmod`, so jlink can
 bundle it; and that JDK's `conf/accessibility.properties` carries **no uncommented
 `assistive_technologies` directive**, i.e. no AT is wired by default — the bridge only engages
@@ -78,7 +78,7 @@ JetBrains has historically gated desktop a11y behind system properties.
 - **FAIL** = the app is absent from the registry. This is **conclusive** that Orca hears nothing
   (Orca reads the same bus) — no screen reader or human needed to prove it.
 
-**What could / could not be observed in the build environment (huginn LXC 117, 2026-07-15):**
+**What could / could not be observed in the build environment (a headless Linux container, 2026-07-15):**
 The probe **could not execute here** and exited *inconclusive* (exit 2) at its dependency gate.
 This host is a headless LXC with **no `DISPLAY` and no GUI a11y stack** — `Xvfb`, `xvfb-run`,
 `at-spi2-registryd` (at-spi2-core), `python3-pyatspi`, `accerciser`, and `orca` are all absent

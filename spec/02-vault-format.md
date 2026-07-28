@@ -394,13 +394,19 @@ freshness posture above apply to the web cache **verbatim**. Web-specific deltas
 - **No OS-backup exclusion.** The browser profile cannot be excluded from OS backup
   (no web analog of `dataExtractionRules`); OS backups may then hold the ciphertext
   DB — ⊆ the spec 05 T7 backup-theft surface, accepted.
-- **Origin-gated default + per-device controls.** The cache defaults ON on private
-  origins (tailnet/LAN/localhost), OFF on the public break-glass origin (explicit
-  per-device opt-in only). A per-device settings toggle ("Keep an offline copy on
-  this device") opts out — turning it off wipes immediately; the Unlock screen shows
-  a transparency line whenever a durable copy exists on the device. The last-known
-  `offlineCacheAllowed` policy bit is persisted device-locally and honored on
-  OFFLINE boot (native persisted-policy parity), so a device that last saw `false`
-  refuses to re-create a cache until a later successful fetch says otherwise.
+- **Consent-gated, default OFF, on every origin.** The cache is created only after an
+  explicit **per-user, per-device opt-in** — the settings toggle "Keep an offline copy
+  on this device", which is also the accept path of the one-time nudge. There is no
+  origin test: the walk-up browser is the spec 05 T3 case whatever the address bar
+  says. (*Historical:* before the 2026-07-15 endpoint-agnostic pivot the gate defaulted
+  ON for "private" origins and OFF for the public one. That gate is gone, along with
+  the origin classifier behind it; a one-time per-user boot migration adopts a standing
+  pre-pivot cache as evidence of the old default's consent rather than destroying it —
+  design 2026-07-15 §5.4.1 CONTINUITY.) Turning the toggle off wipes immediately; the
+  Unlock screen shows a transparency line whenever a durable copy exists on the device.
+  The last-known `offlineCacheAllowed` policy bit is persisted device-locally and
+  honored on OFFLINE boot (native persisted-policy parity), so a device that last saw
+  `false` refuses to re-create a cache until a later successful fetch says otherwise —
+  policy and consent are ANDed, and either one saying no forbids and wipes.
 - **No quick unlock** (spec 01 §8.3 unchanged): the cache stores ciphertext + wire
   metadata only and never changes what a reload demands — the full master password.

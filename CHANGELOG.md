@@ -1,5 +1,40 @@
 # andvari — changelog
 
+<sub>Older entries occasionally cite paths under `ops/` or `docs/{assess,pentest,recon,drills}/`.
+Those were never in this repository — they are the reference instance's private, out-of-tree
+operational area. Read them as "recorded elsewhere", not as broken links.</sub>
+
+## extension 0.19.0 (2026-07-26) — the in-page card chip · fleet unchanged at 0.20.0
+
+Extension-only release; the web/desktop/android/server fleet stays at **0.20.0**. Published to
+the Chrome Web Store and Firefox AMO on 2026-07-26.
+
+Cards had no in-page prompt at all. Logins have had a field-anchored dropdown since the
+extension shipped, but the card path never got one — so at a real checkout nothing at the card
+number field said andvari could fill it, and the only way in was to remember to click the
+toolbar icon. This release closes that gap with the smallest affordance that can:
+
+- **A chip appears at the card field.** Focus a card number, expiry, or CVV field on a checkout
+  and a small "Fill card with andvari" chip anchors to it; clicking it opens the popup, where you
+  pick the card as before. When the vault is locked the chip instead reads "andvari is locked —
+  click the andvari toolbar icon" — unlocking always happens in browser chrome, never in the
+  page, and no andvari in-page surface ever contains a password field.
+- **The chip carries no data and fills nothing.** It shows no card names, no counts, no masked
+  digits — it is a signpost, not a picker. Every card value still leaves the extension only
+  through the one-shot, origin- and frame-bound grant minted by *your click in the popup*. That
+  makes it strictly less page-adjacent information than the login dropdown, which does render
+  saved usernames in-page. The chip is also drawn identically whether or not you have any cards
+  saved, so a hostile page cannot use it to probe your vault's contents or lock state.
+- **It stays out of the login dropdown's way.** A field that the login detector claims never
+  gets a chip, so a checkout with a `password`-typed CVV shows one surface, not two stacked.
+- **Two shipped bugs fixed en route:** the recorded top-frame origin was not being persisted, so
+  the card discovery badge died whenever the service worker idled between page load and a later
+  dynamically-added card form; and the badge's repair path broadcast a rescan to *every* frame in
+  the tab, which was a cross-origin CPU amplifier — it is now top-frame-only.
+
+No new permissions. Design + the two breaker reviews:
+`docs/design/2026-07-26-in-page-card-chip.md`.
+
 ## 0.20.0 (2026-07-24) — card autofill campaign: audit + Tiers 1–3 + gated items · fleet 0.20.0, extension 0.18.0
 
 The result of an audit-driven campaign that rebuilt payment-card autofill against how the AAA

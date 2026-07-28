@@ -2,6 +2,47 @@
 
 > Method: 8 surface auditors checked shipped code against every stated guarantee (spec 00-07, threat-model T-rows, binding design-contract amendments) plus an OWASP ASVS L2 lens; each candidate finding passed an adversarial refuter (default-refuted if unconfirmed). 21 findings survived (1 refuted); 32 agents, 0 errors. Run wf_e40d1b3c-155.
 
+> **This report is a point-in-time snapshot.** The findings below are stated as they were
+> found on 2026-07-15; **read the closure ledger immediately following before treating any
+> of them as open.** All 20 were remediated the same day.
+
+## Closure ledger (added 2026-07-27)
+
+Every finding below was closed by the 2026-07-15 remediation wave. The table maps each
+CR-id to the commit that fixed it, verified by reading the fix in the current tree — not
+by trusting the commit message. Where the shipped fix differs from the fix *proposed* in
+the finding, the difference is stated.
+
+> Caveat on commit messages: `e09ff15`'s message numbers its own four items 1–4, which do
+> **not** line up with this report's CR-ids. The mapping below is by content.
+
+| CR | sev | status | fix |
+|---|---|---|---|
+| **CR-01** | HIGH | **FIXED** `e09ff15` | `enqueue()` now reports whether the row durably landed (in-tx `mutationId` re-read + `!closed`); a non-landed write demotes the cache and routes through direct send (refuse-not-degrade), a quota error re-throws. New `demoteCache()` fires from idbcache `onversionchange`/`onclose` plus a synchronous Settings belt. e2e PHASE C DRILL 5 covers it. |
+| **CR-02** | MED | **FIXED** `e09ff15` | A 5-min idle auto-lock arms over the recovery-phrase reveal / capture-gate / recover screens (activity-reset, so typing never cuts off); expiry zeroes the secret, drops the Account, lands on sign-in. |
+| **CR-03** | MED | **FIXED** `0b9f608` | The [A7] capture gate shipped with the S3 card-fill slice: any form containing a card-number field is excluded from login save (`suppressSave`), and `isCvvNameOrId` gained core CSC_DEMOTION parity (`securitycode`, `cardverification` — `detect.ts:64`). Pinned by the deliberate `isCvvNameOrId("securityCode")=true` flip in `extension-pins.test.ts`. |
+| **CR-04** | LOW | **FIXED** `794e9d5` | `BadRequestException` and `ContentTransformationException` map to 400 (`App.kt:295-296`); the HIBP prefix is validated in-route. **Narrower than proposed:** a blanket `IllegalArgumentException → 400` was deliberately rejected — `SerializationException` and `NumberFormatException` both extend it, so a corrupt server-persisted row must stay a logged 500, never a silent 400. |
+| **CR-05** | LOW | **FIXED** `794e9d5` | The WS `/events` revocation recheck is register-first-then-recheck, with the recheck inside the `try` so a throwing `db.read` cannot leak a Notifier entry until restart. |
+| **CR-06** | LOW | **FIXED** `2b2be11` | `enroll()` captures the gate-time policy synchronously and threads that exact instance into `enrollOp`; the required-typed path refuses unless `Escrow.shortFormMatches` holds against the **same** instance backing the seal (check-instance == seal-instance, no TOCTOU). Mirrors desktop. |
+| **CR-07** | LOW | **FIXED** `e09ff15` | `maybeKdfUpgrade` refreshes the cached accountKeys after `changePassword` (`onUpgraded` hook). Confirms the finding's own note: desktop already re-cached, so no desktop change. |
+| **CR-08** | LOW | **FIXED** `e09ff15` | The HIBP breach-cache is now an in-memory per-account Map — no localStorage at rest — cleared at the `App.signOut` choke point, with the legacy global key purged. **Stronger than proposed:** persistence was dropped rather than keyed+gated. |
+| **CR-09** | LOW | **RESOLVED (spec amended)** `3e3489b` | The finding offered two sides; the **spec** side was taken, because the code is right: `buildAccountKeys` delivers the current org fingerprint to every account as the F57 re-seal target and pubkey-verification anchor, and that is load-bearing. spec 03 §2 now says so; waived posture is signalled by `users.escrowPolicy` / escrow-row absence, not by this field. |
+| **CR-10** | LOW | **FIXED** `0b9f608` (ext) + `e00e694` (core/desktop) | `MIN_SEQ` anti-rollback floor on both channels, evaluated as `max(storedSeq, MIN_SEQ)`. Note the **deliberate numeric asymmetry** documented at `updateverify.ts:48` and `UpdateVerify.kt:50`: extension `MIN_SEQ = 0`, core `MIN_SEQ = 1`, because desktop refuses `seq < floor` (equal passes) while the extension does not. |
+| **CR-11** | LOW | **FIXED** `0b9f608` | A missing or non-string `signedAt` now fails closed to quiet-stale (`updateverify.ts:142`), matching desktop; the internal inconsistency (unparseable string failed closed, absent value passed) is gone. |
+| **CR-12** | LOW | **FIXED** `0b9f608` | `UQUIET` is read: `updateStatus` carries `quietReason`, rendered as one muted popup line (M-D4b). Folded in from the review: `seq_regression` is the benign steady state after an accept, so it no longer stamps or surfaces as "couldn't be verified" (alert-fatigue guard), behind a read-side actionable-only allowlist. |
+| **CR-13** | LOW | **FIXED** `205b2d4` | `recovery-cli` reads the seed through `readSecret()` (`System.console().readPassword`, `char[]` zeroed, stderr-prompted stdin fallback when piped), wired into both prompts. Review fold: on JDK 17 `System.console()` is null if *either* stream is non-tty, so the redirected-stdout case now emits a loud stderr warning — mirrored into `backup-cli`. |
+| **CR-14** | LOW | **FIXED** `e00e694` | One `metaV` interpretation pinned across all four sites (core `Account.parseMetaV`, web `Number.isSafeInteger`): the value iff a non-negative integer ≤ 2^53−1, else 0. Cross-impl vectors (`2`, `2.0`, `2e3`, `-1`, `1.5`, >2^63, `"2"`) pinned in both suites. |
+| **CR-15** | INFO | **FIXED** `3e3489b` | `users.escrowPolicy` added to the spec 02 §5 zero-knowledge-contract table; the version-history footnote stays as history. |
+| **CR-16** | INFO | **FIXED** `205b2d4` | The `backup-cli --secrets` help + WARNING enumerate the full masked set (card number, security code, note body), made drift-proof via `Redact.SECRET_LABELS` + an init `require`. |
+| **CR-17** | MED | **FIXED in-code** `794e9d5`; **operator half is per-instance** | `Strict-Transport-Security: max-age=31536000; includeSubDomains` is emitted at `App.kt:341`, gated to an armed public origin or `ANDVARI_FORCE_HSTS=1` — deliberately not on by default, since an HSTS pin would brick a plain-http LAN/dev origin. The redirect half (forcing https at the front) is the operator's, not the code's, and is not verifiable from this repository. |
+| **CR-18** | MED | **FIXED** `794e9d5` | The `/metrics` gate now requires loopback peer **and** the absence of any reverse-proxy forwarding header (`Auth.kt hasForwardedHeader`, a real superset of `config.trustedIpHeaders` — enforced, not merely documented). `clientIp()` trust is untouched. |
+| **CR-19** | LOW | **FIXED** `205b2d4` | `update-signer keygen` creates the Ed25519 private key atomically owner-only, refuses to overwrite, and fails hard rather than swallowing a chmod failure. Review fold: `supportedFileAttributeViews` is a provider property, not a mount one, so perms are **verified 0600 before** writing and the file is deleted-and-refused on failure. |
+| **CR-20** | INFO | **FIXED** `e00e694` | `Account.enroll` takes `platform: String = "android"` (trailing, source-compatible); desktop passes `desktopPlatform()`. |
+
+**Nothing from this review is open.** The only residue is CR-17's operator half — an
+always-redirect-to-https rule at whatever front an instance runs — which is a per-instance
+deployment setting, not repository state, and so cannot be closed here.
+
 ## Executive summary
 
 The zero-knowledge core holds: none of the verified findings breaks vault confidentiality, key custody, or the escrow crypto under the stated threat model, and nothing critical was found. That said, **20 unique findings survived adversarial verification** (21 raw; two reports of the Android enroll fingerprint race merged): **1 high, 4 medium, 12 low, 3 info** — and **16 are violations of guarantees the specs/designs/pentest-remediation record state**, several live in shipped/deployed code today: the web offline-cache persist-gate (WC-6) can silently drop online writes on the build deployed to CT122 on 07-15, extension 0.14.0 still ships the design-acknowledged [A7] CVV/PAN capture bug, the public break-glass origin serves over cleartext HTTP with no HSTS, and three 2026-07-13 pentest items (L10, L11, the M6 help-text half) were never remediated. Severities were sanity-checked against the ZK model (server already untrusted): the T1-hostile-server findings are correctly deflated to low already; the single high (CR-01) is an integrity/data-loss defect independent of server trust and is the only finding demanding an immediate fix. One severity was moved *up* during verification (CR-17: the live origin returns HTTP 200 over cleartext, not just a missing header), and one is flagged as borderline (CR-18: metadata-only leak, kept medium solely because the always-on public tunnel has no CF Access).

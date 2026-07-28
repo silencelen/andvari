@@ -25,9 +25,10 @@ auditable.
   (AGPLv3). Third-party dependencies keep their own licenses (see each package's
   manifest / `THIRD-PARTY` notices where present).
 
-## Before publishing (flip checklist)
+## Status
 
-- [x] **`server/LICENSE`** — the verbatim canonical GNU AGPLv3 text is in place
-      (2026-07-16, from spdx/license-list-data; §13 Affero clause verified).
-- [ ] Confirm F1 is still the intended split (owner may overturn at pickup, per the
-      trust-attestation doc).
+The F1 split above is in effect: both canonical texts are in the tree — root `LICENSE`
+(GPLv3) and `server/LICENSE` (the verbatim GNU AGPLv3 from spdx/license-list-data,
+2026-07-16; §13 Affero clause verified) — and the repository was published under them.
+The trust-attestation doc reserved the option to revisit the split; nothing has revisited
+it since.

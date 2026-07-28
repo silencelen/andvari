@@ -3,10 +3,23 @@
 Goal: get **genuine store-signed auto-updates** for the browser extension (the real H2 fix for the
 extension — self-hosted zips have no integrity). Keep it **out of public search** via *unlisted*
 (Chrome) / *self-distribution* (Firefox). Safe for andvari because it's zero-knowledge: no secrets in
-the code, the only host permission is your Tailscale server URL, and it collects/transmits nothing to
-anyone but your own server.
+the code, the only host permission is the andvari server URL the user configures, and it
+collects/transmits nothing to anyone but that server.
 
-**Artifacts to upload** (already built, byte-verified, version 0.14.0):
+> **Which part of this runbook do you want?**
+>
+> - **Publishing a release, today** → skip to **§E. Automated publishing**. One command,
+>   both stores. That is the living procedure.
+> - **Sections A and B below are a point-in-time record of the FIRST submission (2026-07-14)**:
+>   account setup, the store-listing copy, and the privacy answers, captured with the artifact
+>   versions that happened to be current that day (0.13.0/0.14.0). The *steps* are still the
+>   steps if you ever re-do a listing from scratch; the **version numbers are frozen history —
+>   substitute the version you are actually shipping**, which §E reads from
+>   `extension/manifest.json` for you. Note also that the listing copy below was written before
+>   the 2026-07-15 endpoint-agnostic pivot and still describes the extension as Tailscale-bound;
+>   check the live listing text against the current model before reusing it verbatim.
+
+**Artifacts uploaded for that first submission** (built and byte-verified at the time, version 0.14.0):
 - Chrome: `extension/artifacts/andvari-extension-chrome-0.14.0.zip`
 - Firefox: `extension/artifacts/andvari-extension-firefox-0.14.0.zip`
 
@@ -19,8 +32,8 @@ Self-distribution signs your XPI **without any public listing**.
 
 1. Sign in at **https://addons.mozilla.org/developers/** (create an account if needed).
 2. **Submit a New Add-on** → distribution choice **"On your own site"** (this is self-distribution / unlisted).
-3. Upload `andvari-extension-firefox-0.13.0.zip`. Automated validation runs; on pass, AMO **signs it in seconds**.
-4. Download the **signed `.xpi`** and host it at `CT122:/opt/andvari/downloads/` (same place the deb/zip live) — or wherever the extension's update check points. Users install the *signed* XPI; Firefox verifies Mozilla's signature.
+3. Upload `extension/artifacts/andvari-extension-firefox-<version>.zip` (0.13.0 was the one uploaded on the day). Automated validation runs; on pass, AMO **signs it in seconds**.
+4. Download the **signed `.xpi`** and host it in the server's `ANDVARI_DOWNLOADS_DIR` (same place the deb/MSI live), which is where the extension's update check points. Users install the *signed* XPI; Firefox verifies Mozilla's signature.
 5. (optional) For future releases you can automate this with `web-ext sign` + AMO API credentials.
 
 ---
@@ -37,7 +50,7 @@ Privacy · Distribution** (plus one-time Account items). Everything below is pas
   commerce. (Moot if distribution is US-only, but set it anyway; the field is account-level.)
 
 ### Package tab
-- Draft package = `andvari-extension-chrome-0.14.0.zip`. The **Summary** ("description" in
+- Draft package = `andvari-extension-chrome-<version>.zip` (0.14.0 on the day). The **Summary** ("description" in
   `manifest.json`) and the item name come from the package, not the form: *"Zero-knowledge password
   manager — fill and save logins. Requires the andvari server on your Tailscale network."* (110
   chars — fits the 132 limit.) Nothing to do here unless a newer version ships before submission.
@@ -170,10 +183,10 @@ downloadable assets: **https://claude.ai/code/artifact/74b32e72-dded-46f3-a746-4
 ## E. Automated publishing (both stores) — `scripts/publish-extension.sh`
 
 Once the sections above are done manually the *first* time, every subsequent release is one command
-from huginn: **`scripts/publish-extension.sh`** (no args → both browsers, version from
+from the build host: **`scripts/publish-extension.sh`** (no args → both browsers, version from
 `extension/manifest.json`). It uploads + submits to Chrome (Publish API) and signs on AMO
-(`web-ext sign`, unlisted). **Local-publish only — never CI** (this account's Actions billing is broken),
-matching `ship.sh`/`publish-image.sh`.
+(`web-ext sign`, unlisted). **Local-publish only — never CI** (GitHub Actions cannot run release
+builds on this account), matching `scripts/publish-image.sh`.
 
 **Honest caveat:** both stores still *review* every update (even unlisted) — Chrome minutes-to-days,
 AMO usually seconds-to-minutes. The script automates the upload + submit, not the review wait.

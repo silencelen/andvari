@@ -1,9 +1,22 @@
-andvari browser extension — install (household build, loaded from disk)
-========================================================================
+andvari browser extension — manual install (sideload)
+=====================================================
 
-Before you start: the extension comes preconfigured for the household server
-at andvari.monahanhosting.com and reaches it from any network — being on the
-tailnet is no longer required.
+Most people should NOT use this file. There are two easier, auto-updating
+ways to install andvari, both linked from your andvari server's web vault
+under Settings > Devices:
+
+  * Chrome / Edge / Brave — the Chrome Web Store listing (unlisted, so it
+    is install-by-link; the Devices page has the link).
+  * Firefox — a Mozilla-signed .xpi. Click it and Firefox installs it, and
+    it updates itself from then on.
+
+Sideloading from disk, below, is for development or for when you cannot use
+either of those. It does not auto-update.
+
+Before you start: the extension comes preconfigured for the server at
+andvari.monahanhosting.com and reaches it from any network. If you run your
+own andvari server, point the extension at it in the extension's Options
+page after installing.
 
 Keep the unzipped folder somewhere permanent (e.g. Documents\andvari-extension).
 The browser loads the extension FROM that folder — if you delete or move it,
@@ -23,19 +36,20 @@ Chrome / Edge / Brave
 
 Firefox
 -------
-Firefox only keeps unsigned extensions loaded until you close the browser
-(a store-signed version may come later). To load it for a session:
+Prefer the signed .xpi (see the top of this file). Firefox keeps an UNSIGNED
+extension loaded only until you close the browser, so the steps below are a
+development loop, not an install:
 1. Unzip this file.
 2. Go to about:debugging#/runtime/this-firefox
 3. Click "Load Temporary Add-on..." and pick manifest.json inside the folder.
 4. Firefox treats site access as optional: open the extension's entry under
-   about:addons > Permissions and enable "Access your data for
-   andvari.monahanhosting.com" (and "all websites" if you want autofill) —
-   without it, sign-in reports the server as unreachable.
+   about:addons > Permissions and enable "Access your data for" your andvari
+   server (and "all websites" if you want autofill) — without it, sign-in
+   reports the server as unreachable.
 5. After restarting Firefox you'll need to repeat steps 2-4.
 
-Updating (already installed?)
------------------------------
+Updating (already installed this way?)
+--------------------------------------
 1. Download the new zip and unzip it OVER the same folder you used before
    (replace everything).
 2. Open the extensions page and click the reload (circular arrow) icon on
@@ -51,7 +65,8 @@ Using it
 - Submit a login the extension doesn't know: a "Save to andvari?" bar
   appears at the top of the page.
 - The toolbar popup shows lock status; "Lock" wipes the keys from memory.
-- Nothing is stored on disk unencrypted - closing the browser locks it.
+- No vault secrets are written to disk - closing the browser locks it.
 
-Problems? Note the site + what you expected, and send it with the other
-test feedback.
+Problems? Report them on the project's GitHub repo
+(https://github.com/silencelen/andvari), or to whoever runs your andvari
+server. Note the site and what you expected to happen.

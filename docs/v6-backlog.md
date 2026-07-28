@@ -1,5 +1,11 @@
 # andvari v6 backlog
 
+> **Note on paths (2026-07-27).** Several entries below cite `ops/…`, `docs/recon/…`, and
+> `docs/drills/…`. Those paths were never part of *this* repository — they are the reference
+> instance's out-of-tree operational area, private by design and not distributed here. They are
+> left in place because this document is a dated triage record and rewriting its evidence trail
+> would falsify it; read them as "recorded elsewhere", not as broken links to something missing.
+
 > **Provenance.** The v5 recon (2026-07-07) produced **84 findings**. The eight shipped v5 batches (B1–B8) plus the Skipti shared-vault lifecycle (0.5.0) consumed ~39 of them directly. The remaining **45 candidates** were each independently re-verified against the current tree (**HEAD `1f0fcdb`**) on **2026-07-08**; this document is the honest ranked disposition of every one of them. Nothing is silently dropped — all 45 F-ids appear below exactly once as a primary entry.
 
 **Summary of verdicts:** 9 findings turned out to be **already consumed** by v5/Skipti (several fixed by name — the code cites F22/F26/F27/F29/F31 in comments). 19 survive as **quick wins** (all effort-S), grouped here into three concrete reviewable batches by surface. 8 **fold into planned v6 queue items** (skipti-loose-ends ×3, quick-unlock ×2, and one each for totp-qr-hub, importers, extension-spike). 8 need **standalone batches** (grouped into four proposals). 1 is a defensible **won't-fix**. Several "yes" verdicts came back *partial* — the sections below say exactly which half died.
@@ -15,7 +21,7 @@ No remaining work. Listed for traceability; residual polish noted inline.
 | id | title (condensed) | where fixed |
 |----|----|----|
 | **F13** | Shared-vault lifecycle missing at every layer (immortal vaults, owner gripe 1) | **Skipti 0.5.0** end-to-end: delete + 7d grace/restore, leave, two-phase transfer, rename — `App.kt:430-464`, `Service.kt:607/663/726/809/841`, `Janitor.kt`, spec 03 §11 + lifecycleproof vectors, web+Android UI, full test coverage. Residue tracked as `skipti-loose-ends`. |
-| **F14** | Disabled/lost owner permanently orphans a shared vault | **Skipti**: escrow recovery reactivates the account with grants+ownership intact (`AdminService.kt:92`), then transfer/delete applies; admin-forced transfer *deliberately rejected* as F16 forgery class (design doc Q2, spec 03 §11, `ops/runbooks/vault-succession.md`). |
+| **F14** | Disabled/lost owner permanently orphans a shared vault | **Skipti**: escrow recovery reactivates the account with grants+ownership intact (`AdminService.kt:92`), then transfer/delete applies; admin-forced transfer *deliberately rejected* as F16 forgery class (design doc Q2; the normative succession steps are spec 03 §11 + spec 04 §4). |
 | **F15** | Vault rename impossible at every layer | **Skipti**: owner-only `PUT /vaults/{id}/meta` with stale-write guard (`Service.kt:908`), core `buildRenameMeta`/`renameVault`, web `Sharing.tsx` RenameHeader (tagged "F15"), Android rename, tests. |
 | **F22** | Members list shows disabled accounts as normal | **Skipti rider** — code literally says "F22 rider": member status returned additively (`Service.kt:484-495`, `Wire.kt:236-238`), web badges disabled + excludes from transfer picker. *Optional polish: mirror the badge on Android members screen.* |
 | **F26** | Lock/auto-lock/revocation dump to full sign-in with zero explanation | **B7** — `App.tsx:25-118` keeps the session, lands on Welcome-back unlock with reason lines ("Locked.", "Locked in another tab.", revoked vs expired). *Tiny residue: native lock screens show no reason line — ride-along polish only.* |
@@ -59,7 +65,7 @@ The server now fronts a public break-glass origin; these close availability and 
 - **F79** *(yes, medium)* — search ignores notes and every URI after the first; desktop matches name+username only. **Fix:** two one-line predicate extensions (`Vault.tsx:169`, desktop `Ui.kt:199`); optionally mirror on Android.
 - **F75** *(yes, medium)* — export panel promises re-import dedupe that doesn't exist (import panel says the opposite; `planImport` never consults the vault). **Fix now:** one-line copy correction in `ExportPanel.tsx:403` + test (error-truth doctrine). The vault-aware merge half folds into **importers** (see §3).
 - **F76** *(yes, medium)* — zero history-API usage; browser/gesture Back exits the SPA from anywhere, costing an argon2 unlock. **Fix:** sentinel `pushState` + popstate handler that steps view/detail/modal state back instead of leaving (~50 lines, not the full router the original M estimate assumed).
-- **F59** *(partial, medium)* — recovery step 1 tooling: the "no doc exists" half is now FALSE (`ops/runbooks/vault-succession.md` shipped with Skipti); still missing: Admin "Download escrow blob" button, `docs/drills/account-recovery-drill.md`, and actually running the drill (ROADMAP step 6, pre-migration). **Fix:** button + `getUserEscrow()` client call + drill doc + one scratch-server exercise.
+- **F59** ✅ **DONE (0.6.0)** — the Admin "Download escrow blob" button shipped (`Admin.tsx:180`, tagged "F59 recovery step 1", over `client.adminUserEscrow`), and the account-recovery drill was written **and passed**; `scripts/recovery-drill.sh` is the in-repo automation of that exercise (scratch server, real `recovery-cli` jar, full spec 04 §4 path). *(was: partial, medium)* — recovery step 1 tooling: the "no doc exists" half is now FALSE (the succession runbook shipped with Skipti); still missing: Admin "Download escrow blob" button, the account-recovery drill doc, and actually running the drill (ROADMAP step 6, pre-migration). **Fix:** button + `getUserEscrow()` client call + drill doc + one scratch-server exercise.
 - **F64** *(yes, medium value, trivially small)* — session access/refresh TTLs are live policy knobs with no Admin UI fields. **Fix:** two `numField` rows in `Admin.tsx`, clamp >0.
 - **F78** *(yes, low)* — editor password field is bare plaintext; Generate silently overwrites typed input. **Fix:** editable masked PasswordField + auto-reveal and confirm-overwrite on Generate; the length/class popover can wait.
 
@@ -84,7 +90,7 @@ Each planned feature batch inherits this checklist — the fold-ins are part of 
 
 - **F18** ✅ **DONE 2026-07-10** (cycle 4) — vault picker for NEW items on Android + desktop (writable vaults only; shown only when `itemId == null` and >1 choice), vault-name tags on rows/detail, desktop Move/Copy via core `runGesture`. Core `saveWithUploads` computes `effectiveVault = existing?.vaultId ?: vaultId ?: personal`, so an existing item can never be re-homed. *(was: partial, M, medium)* — vault picker for NEW items on natives + vault-name tags. Explicitly deferred by the Skipti design doc ("the F18 vault-picker batch"); severity dropped since Android F19 move/copy shipped, but "silently lands in Personal" is still fully true on desktop, half-true on Android. **Fix:** vault dropdown on new-item editors (core `saveWithUploads(vaultId)` param already exists), vault tag on rows/detail, port MoveCopyControl to desktop for F19 parity.
 - **F20** ✅ **DONE 2026-07-10** (cycle 4) — read-only roster for any grant-holder, `added` notice kind (never on since=0/resync, never for a reinstated, personal, or **owned** vault, once per vault), persistent undecryptable-grant warning that self-clears. *(was: yes, M, low)* — member transparency: non-owners can't see the roster (server already allows it), no "added to vault" notice kind, undecryptable grants silently swallowed. **Fix:** read-only roster for member-role vaults, `added` LifecycleNotice kind (mirror transfer-complete dedup), persistent "can't open this shared vault on this device" warning row. Skipti built the notice pipeline and member panels this reuses.
-- **F49** *(partial, M, low)* — retention: the item_versions 10-cap sub-claim is fixed and spec 02 §7 now documents tombstone-GC dormancy as deliberate (v5), but sessions/changes/mutations/audit/hibp_cache/invites still grow forever. **Fix:** extend the Skipti Janitor (the exact host machinery the finding asked for) with a low-risk pruning pass; leave tombstone GC dormant until the spec'd convergence test exists — do not bundle.
+- **F49** ✅ **DONE 2026-07-10 (0.13.1)** — the pruning pass shipped exactly as scoped: the Janitor now prunes `changes` (advancing `oldestRetainedRev`), dead sessions, dedup/mutation records, old audit rows, expired invites, and stale `hibp_cache` entries on the nightly sweep under conservative 90/180/365-day windows, with per-table counts and a dry-run mode (`Janitor.kt`). *(was: partial, M, low)* — retention: the item_versions 10-cap sub-claim is fixed and spec 02 §7 now documents tombstone-GC dormancy as deliberate (v5), but sessions/changes/mutations/audit/hibp_cache/invites still grow forever. **Fix:** extend the Skipti Janitor (the exact host machinery the finding asked for) with a low-risk pruning pass; leave tombstone GC dormant until the spec'd convergence test exists — do not bundle. *Residue: **Trash retention is still unbounded** (CHANGELOG 0.6.0 names this as F49's windowing decision) — that half was never taken and is the only F49 work left.*
 
 ### → totp-qr-hub
 
@@ -140,9 +146,33 @@ Internally sequenced: F71 first (data-loss-adjacent), F82 second (drift trap), F
 
 ---
 
-## 5. Won't-fix (1)
+## 5. Won't-fix (1) — **F30's trigger has fired; the verdict is REOPENED**
 
-- **F30** — *Web persists the rotating refresh token in localStorage (XSS → multi-day takeover).* **Defense:** signed-off accepted risk (spec 05 R2/T6 — any attacker who can run JS on the origin captures the master password itself, which strictly dominates token theft); B7 deliberately built cross-tab refresh dedup, pair adoption, lock-keeps-session, and revocation signaling ON the persisted pair, so memory-only tokens mean reworking just-shipped machinery plus a device row per tab/reload — not worth M for a tailnet-only household. **Revisit trigger:** if the web client ever goes public beyond break-glass → HttpOnly-cookie refresh (server+web batch); the fix sketch is on file.
+- **F30** — *Web persists the rotating refresh token in localStorage (XSS → multi-day takeover).* **Defense (2026-07-08):** signed-off accepted risk (spec 05 R2/T6 — any attacker who can run JS on the origin captures the master password itself, which strictly dominates token theft); B7 deliberately built cross-tab refresh dedup, pair adoption, lock-keeps-session, and revocation signaling ON the persisted pair, so memory-only tokens mean reworking just-shipped machinery plus a device row per tab/reload — not worth M for a tailnet-only household. **Revisit trigger:** if the web client ever goes public beyond break-glass → HttpOnly-cookie refresh (server+web batch); the fix sketch is on file.
+
+  > **REOPENED 2026-07-27 — the trigger fired and the sign-off's premise is no longer true.**
+  > The 2026-07-15 endpoint-agnostic pivot and the 0.19.0 release made the public origin a
+  > full-service origin, not a break-glass hatch — exactly the stated condition. This entry is
+  > therefore **not** a standing won't-fix any more; it is an **accepted risk awaiting
+  > re-ratification**, and nothing here re-decides it either way.
+  >
+  > What survived the pivot and what did not, so the re-decision starts from facts:
+  > - **Survived:** the dominance argument. Hostile JS on the origin still gets the master
+  >   password at the next unlock, which strictly dominates stealing a refresh token. Nothing
+  >   about the origin being public changes that, and spec 05 T6 still names page-load trust as
+  >   the web client's accepted gap.
+  > - **Did not survive:** "a tailnet-only household". The population that can reach the origin
+  >   is now the internet, the client is self-hostable by strangers, and the machinery the
+  >   sign-off was protecting (B7's persisted-pair design) is no longer "just-shipped" — the
+  >   rework-cost half of the argument has decayed with time.
+  > - **Also changed:** the reference instance is only one instance. A re-decision made for one
+  >   household is not obviously the right default to ship to every self-hoster.
+  >
+  > **The decision needed** is one of: (a) re-accept, with a dated rationale that does not lean
+  > on the tailnet premise; (b) build the HttpOnly-cookie refresh batch (server+web, sketch on
+  > file); or (c) split — accept for the reference instance, offer the cookie mode as a
+  > server-declared option. Whichever is chosen, this ledger must record that the trigger was
+  > evaluated rather than left silently fired.
 
 ---
 
@@ -159,7 +189,7 @@ Round-2 recon (**`docs/recon/2026-07-08-round2-recon.md`** — 7 adversarial len
 | **PRC-1** | ✅ **DONE** (0.6.0-era pre-migration integrity batch; was **P1**/P2) | `recovery-cli recover` writes `tempKdfParams` as a JSON **string** `"{}"`; server field is a `KdfParams` object under a non-lenient `Json` → admin upload 400s. The household's only forgot-master path breaks at the last step; a non-technical admin is stranded holding a valid temp password. | **pre-migration integrity batch** (recovery must work before real secrets). Fix = emit nested object + round-trip test + concrete admin-authed curl in the runbook. Trivial. |
 | **PROD-1** | ✅ **DONE** (`0eebbfd`; was P2) | `logback.xml` nests the `AUDIT` appender *inside* its logger instead of referencing it → "Appender named [AUDIT] not referenced" at boot; **zero** audit lines reach journald/Loki (SQLite `audit` table still written — no data loss, but the tamper-evident off-box copy the Alloy pipeline exists to produce doesn't exist). | QW-1-adjacent server fix (config one-liner + a boot-assert test). |
 | **LC-1** | ✅ **DONE 2026-07-10** (`1f8903c`) | Re-delete during restore-replay: the `replayedMutationIds` fast-path skips a member's parked offline edit → **F21's** offline-edit protection defeated. The one place new lifecycle code introduced a loss path. | **skipti-loose-ends** (§3) — Skipti-seam gap, fresh-context follow-through. |
-| **MSI-1** | P2 | Desktop MSI sends `X-Andvari-Client: android/0.2.0`; a future `minVersion[android]` pin would 426-wedge the owner's daily desktop. Latent (no pin set today; compile-time default `emptyMap`). | Guard-rail for **quick-unlock / MSI-refresh** — desktop must send its own client id *before* any android pin ships. **In-source DONE** (DesktopState.kt sends `desktop/<ver>`); residual = the fielded 0.2.x MSI until the owner rebuilds. |
+| **MSI-1** | ✅ **DONE 2026-07-14** (`0dd0d63`; was P2) | Desktop MSI sends `X-Andvari-Client: android/0.2.0`; a future `minVersion[android]` pin would 426-wedge the owner's daily desktop. Latent (no pin set today; compile-time default `emptyMap`). | Guard-rail for **quick-unlock / MSI-refresh** — desktop must send its own client id *before* any android pin ships. In-source fixed long before (DesktopState.kt sends `desktop/<ver>`); the residual was the **fielded 0.2.x MSI**, and that MSI was **retired at 0.17.0** — the card-create Option-A unhide was explicitly gated on its retirement and fired in `0dd0d63`. No 0.2.x client remains to mislabel itself. |
 
 ### Corroborated (already tracked as F-ids — recon adds live evidence, no new work)
 WS-1/WS-2 ↔ **F54** (dead `notifyRevoked` / `policy` frame). PDD-2 ↔ **F79** (search ignores notes + 2nd URI). PDD-4 ↔ **F10** (single-URI editor). PRC-3 ↔ **F57** (dead `PUT /escrow/self`). PRC-2 ↔ **F58** (post-recovery temp password stays live). ATT-2 ↔ the attachment-integrity family. Autofill P3s (AF-2…6) ↔ **F09 / F11 / F12**. The full recon→F-id map is in the report §1 ("Did the v5 fixes hold?").
