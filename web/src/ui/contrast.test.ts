@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -50,12 +50,15 @@ const AA = 4.5;
 describe("contrast tokens (parsed from styles.css) meet WCAG AA on both surfaces", () => {
   it("resolved the token blocks from the real stylesheet", () => {
     for (const map of [dark, light]) {
-      for (const t of ["--bg", "--bg-raised", "--ink-faint", "--link"]) expect(map[t], t).toMatch(/^#[0-9a-fA-F]{3,8}$/);
+      for (const t of ["--bg", "--bg-raised", "--ink-faint", "--ink-dim", "--link"]) expect(map[t], t).toMatch(/^#[0-9a-fA-F]{3,8}$/);
     }
   });
 
   for (const [theme, map] of [["dark", dark], ["light", light]] as const) {
-    for (const token of ["--ink-faint", "--link"] as const) {
+    // a11y-webext--3 added --ink-dim: the "pending sync" tag paints with it (it used to use a
+    // hardcoded #8a7a5c behind an undeclared token, below AA in BOTH themes), so it now has to
+    // clear the same floor as the other body-text tones.
+    for (const token of ["--ink-faint", "--ink-dim", "--link"] as const) {
       it(`${theme} ${token} ≥ ${AA}:1 on --bg`, () => {
         expect(ratio(map[token]!, map["--bg"]!)).toBeGreaterThanOrEqual(AA);
       });
@@ -130,9 +133,42 @@ describe("Cut A tokens (focus / gold-text / danger-on-plate / button gradient)",
   it("focus rules reference var(--focus), not the old --gold-deep", () => {
     const inputFocus = /input:focus[^{]*\{[^}]*border-color:\s*var\(--([\w-]+)\)/.exec(css);
     expect(inputFocus?.[1]).toBe("focus");
-    const rowlink = /rowlink:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--([\w-]+)\)/.exec(css);
+    // a11y-webext--2: the row's focus style moved to :focus-within (the focusable thing is
+    // now the in-cell button) — the token it paints with must not drift.
+    const rowlink = /rowlink:focus-within\s*\{[^}]*outline:\s*2px solid var\(--([\w-]+)\)/.exec(css);
     expect(rowlink?.[1]).toBe("focus");
     // The global button/link focus ring must exist (buttons had NO indicator before Cut A).
     expect(css).toMatch(/button:focus-visible[^{]*\{[^}]*outline:\s*2px solid var\(--focus\)/);
   });
+});
+
+/**
+ * a11y-webext--3 (polish audit 2026-07-27): the two describes above compute contrast from the
+ * TOKENS — which made them structurally blind to the one place colour actually regressed: an
+ * inline `style={{ color: "var(--muted-strong, #8a7a5c)" }}` in Vault.tsx naming a token declared
+ * nowhere, so the hardcoded fallback shipped in BOTH themes at ~4:1 (Sharing.tsx had the same
+ * shape with `--line`/#333). A fallback is only reachable when the token is missing, so the rule
+ * that closes the hole is simply: every custom property an inline style references must exist in
+ * styles.css. Then the ratio tests above actually cover it.
+ */
+describe("inline styles reference declared tokens only (no fallback literals)", () => {
+  const declared = new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]!));
+  const sources = readdirSync(fileURLToPath(new URL(".", import.meta.url)))
+    .filter((f) => (f.endsWith(".tsx") || f.endsWith(".ts")) && !f.includes(".test."));
+
+  it("resolved the stylesheet's declarations and the UI sources", () => {
+    expect(declared.has("--ink-faint")).toBe(true);
+    expect(sources).toContain("Vault.tsx");
+    expect(sources).toContain("Sharing.tsx");
+  });
+
+  for (const file of sources) {
+    it(`${file} names no undeclared custom property`, () => {
+      const src = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), "utf8");
+      // Only real style values: `var(--x)` / `var(--x, fallback)` inside a quoted string.
+      for (const m of src.matchAll(/["'`][^"'`]*var\((--[\w-]+)/g)) {
+        expect(declared.has(m[1]!), `${file} uses ${m[1]} — declare it in styles.css or use an existing token`).toBe(true);
+      }
+    });
+  }
 });

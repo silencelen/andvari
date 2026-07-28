@@ -18,12 +18,23 @@ import {
 } from "./vault/card";
 
 /**
- * Cross-suite pins for the browser extension's cards slice (design 2026-07-09-cards-wallet.md).
- * The extension has no test harness of its own (build/typecheck/package only), so its
- * safety-critical values live in chrome-free modules (extension/src/{format,card,detect}.ts)
- * and are pinned HERE, from the web vitest suite — the same suite that already anchors the
- * extension's crypto parity (noble-extension-poc.test.ts). Editing a pinned value must break
- * this file first, deliberately.
+ * Cross-suite pins for the browser extension (originally its cards slice, design
+ * 2026-07-09-cards-wallet.md; now its cross-cutting contracts generally).
+ *
+ * The extension DOES have a test harness of its own — `extension/ && npm test`, a node --test
+ * suite of 20-odd files and 250+ tests over its chrome-free leaves (card, detect, savetarget,
+ * quickunlock, urimatch, totp, the crypto vectors, …). That is where per-function behaviour
+ * belongs, and the first place to look. (quality-tests--11: this header used to claim the
+ * extension had "no test harness of its own (build/typecheck/package only)", which stopped being
+ * true when that suite landed, and to point at noble-extension-poc.test.ts as the anchor of the
+ * extension's crypto parity — that file is SKIPPED in every default run; crypto.vectors.test.ts
+ * inside the extension is the live anchor.)
+ *
+ * What lives HERE is what that suite structurally cannot hold: values and code SHAPES that must
+ * stay identical across the extension/web seam (chrome-free modules imported directly), plus
+ * source-text pins over the chrome-bound modules — background.ts, content.ts, content-ui.ts,
+ * popup.ts — which cannot be imported under node at all. Those are read as text and asserted on,
+ * so editing a pinned line must break this file first, deliberately.
  */
 
 /** messages.ts (imported above for the PURE chooseCardTarget export — §9 [U11]) types its send()
@@ -786,13 +797,40 @@ describe("2026-07-27 polish-release audit pins (extension lane) — checkout gat
     // form is therefore suppressSave for SAVE reasons while its real password field is a
     // legitimate FILL target — so the gate keys on whether the form's password DESTINATION is
     // itself a card field, never on the blunt form-level flag.
-    const fn = spanOf(ct, "function cardMisreadAsLogin(", "/** The card form a submit-like control");
+    const fn = spanOf(ct, "function cardMisreadAsLogin(", "/** The FIELD-local half");
     expect(fn).toContain("if (!f.suppressSave) return false;"); //        not suppressSave ⇒ never blocked
     expect(fn).toContain("if (p === null) return true;"); //              password-less (username-step) on a card form stays blocked
+    expect(fn).toContain("return isCardField(p);"); //                    …else the password DESTINATION decides
     // The two ways to BE a card field: card-form membership (which includes the demoted CVV ref),
     // or — on a lone-CVV form no card form claims (no PAN anchor ⇒ no card form exists) — the
-    // field-local demotion rule itself, core FieldClassifier's CSC demotion.
-    expect(fn).toContain("cardFormForInput(p) !== null || demoteCsc(null, p.type, p.name, p.id) !== null");
+    // field-local demotion rule itself, core FieldClassifier's CSC demotion. ONE resolver ([U12]):
+    // the form-level gate and the per-slot gate below must never drift into two spellings of it.
+    const field = spanOf(ct, "function isCardField(", "/** The card form a submit-like control");
+    expect(field).toContain("cardFormForInput(el) !== null || demoteCsc(null, el.type, el.name, el.id) !== null");
+    expect(ct.match(/demoteCsc\(null,/g), "the field-local demotion rule has exactly one call site").toHaveLength(1);
+  });
+
+  it("2026-07-27 residual: fillForm re-asks the destination question PER SLOT — an account email can never land in a card box", () => {
+    // The shipped fix gated on the form's PASSWORD destination, which is the right question for
+    // "may this form fill at all" and leaves the USERNAME slot unexamined. On a legitimate
+    // create-account-at-checkout form (suppressSave for [A7] reasons, genuine password field),
+    // detect.ts resolves the username by "nearest text field above the password" — routinely a PAN
+    // or expiry input that classified as `none`. So the entry-point gate passed the form and
+    // fillForm wrote the user's email into a card box. It is also the ONLY gate that survives
+    // liveForm's re-resolve, which can hand back a DIFFERENT form than the one that was gated.
+    const fill = spanOf(ct, "function fillForm(", "async function copyTotp(");
+    expect(fill).toContain("const guard = live.suppressSave;"); // same cheap pre-check as the form gate
+    expect(fill).toContain("live.username && s.username && !(guard && isCardField(live.username))");
+    expect(fill).toContain("live.password && s.password && !(guard && isCardField(live.password))");
+    // The FillOutcome union already carries a partial honestly, and must keep doing so: a skipped
+    // username slot answers "password" (not "both"), and both slots skipped falls through to the
+    // existing no_fields verdict — which is what makes `fillFromPopup`'s ok:true mean "something
+    // really landed" rather than "the message was delivered" (Cut M) on a checkout too.
+    expect(fill).toContain('if (!wroteUser && !wrotePass) return { filled: "nothing", code: "no_fields" };');
+    expect(fill).toContain('return { filled: wroteUser && wrotePass ? "both" : wroteUser ? "username" : "password" };');
+    // The TOTP side-copy still rides on a real write — a fill reduced to nothing must not leave a
+    // 2FA code in the clipboard.
+    expect(fill.indexOf("if (!wroteUser && !wrotePass)")).toBeLessThan(fill.indexOf("copyTotp(s.totpCode)"));
   });
 
   it("bug-autofill-ux--0: the chip's [K1] login precedence exempts suppressSave claims — the ceded fields get the chip, one surface per anchor", () => {
@@ -864,5 +902,194 @@ describe("2026-07-27 polish-release audit pins (extension lane) — checkout gat
     expect(so).toMatch(/Promise\.race\(\[api\.logout\(\), delay\(5000\)\]\)/);
     const lock = spanOf(bg, "async function doLock(", "async function doSignOut(");
     expect(lock).not.toContain("logout(");
+  });
+});
+
+describe("2026-07-27 polish-release audit pins (extension lane) — in-page a11y, chip dismissal, list order", () => {
+  const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+  const ct = readFileSync(extensionSrc + "content.ts", "utf-8");
+  const cu = readFileSync(extensionSrc + "content-ui.ts", "utf-8");
+  const pu = readFileSync(extensionSrc + "popup.ts", "utf-8");
+
+  const spanOf = (src: string, from: string, to: string): string => {
+    const a = src.indexOf(from);
+    const b = src.indexOf(to);
+    expect(a, `span start missing: ${from}`).toBeGreaterThan(-1);
+    expect(b, `span end missing/out of order: ${to}`).toBeGreaterThan(a);
+    return src.slice(a, b);
+  };
+
+  it("a11y-webext--1: dropdown rows activate on CLICK as well as mousedown — AT virtual-cursor picks work", () => {
+    // NVDA/JAWS browse-mode Enter, VoiceOver VO+Space and touch double-tap all dispatch a trusted
+    // CLICK, never a mousedown — so a mousedown-only row is announced as a listbox option that a
+    // screen-reader user then cannot pick, on the extension's core fill surface. The chip fixed
+    // this exact bug for itself (Review #4) and the rows were left out. ONE binder for both rows,
+    // so they cannot drift apart again.
+    const bind = spanOf(cu, "function bindRowActivation(", "function matchRow(");
+    expect(bind).toContain('row.addEventListener("mousedown", activate)');
+    expect(bind).toContain('row.addEventListener("click", activate)');
+    expect(bind).toContain("if (!e.isTrusted) return;"); // anti-spoof: a page-synthesized event cannot fill
+    expect(bind).toContain("e.preventDefault()"); //         focus stays on the page field, so it stays fillable
+    for (const [fn, arg] of [["matchRow", "pick"], ["actionRow", "act"]] as const) {
+      const at = cu.indexOf(`function ${fn}(`);
+      expect(at, `${fn} missing`).toBeGreaterThan(-1);
+      const body = cu.slice(at, cu.indexOf("\n}", at));
+      expect(body, `${fn} must bind activation through the shared binder`).toContain(`bindRowActivation(row, ${arg});`);
+      expect(body, `${fn} must not grow a second, drifting listener`).not.toContain("addEventListener");
+    }
+  });
+
+  it("a11y-webext--12: the chip has a keyboard activation path, and it is announced", () => {
+    // [K10] forbids a tabindex (real focus must stay in the page's card field), so a pure-keyboard
+    // user could SEE the chip and had no way to trigger the one thing it does. The document-capture
+    // handler already sees trusted keydowns while a chip is live; one low-collision chord there is
+    // the only shape available. It must stay chip-scoped and dropdown-free ([K4]).
+    const key = spanOf(cu, "a11y-webext--12: the chip's keyboard activation", "if (!dropdownEl) return; // a lone chip");
+    expect(key).toContain("chipEl && !dropdownEl && e.altKey && e.key === \"ArrowDown\"");
+    expect(key).toContain("dismissChipSurface()"); // [K9] the surface goes before the action
+    // Strip comments before the negative: the rationale is free to NAME what it forbids.
+    const keyCode = key
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+    expect(keyCode, "[K4]: the chip must never touch the dropdown's reopen suppression").not.toContain("suppressOpenUntil");
+    // Discoverability: an untabbable surface that does not say its key does not have one.
+    const chip = spanOf(cu, "function showCardChip(", "function closeCardChip(");
+    expect(chip).toContain("Press Alt plus Down Arrow to open andvari.");
+    expect(chip, "the SPOKEN form must not alter the [S6] visible sentences").toContain('"Fill card with andvari"');
+  });
+
+  it("a11y-webext--0: the banners answer Escape, carry a labelled role, and never drop focus to <body>", () => {
+    // The banner host is appended to documentElement, so its buttons sit at the very END of the
+    // page's tab order — inside a 30 s idle close. Escape was the only realistic keyboard
+    // dismissal and the keydown gate did not even consult bannerEl.
+    const keys = spanOf(cu, "document.addEventListener(\n    \"keydown\"", "const reanchor =");
+    expect(keys).toContain("!dropdownEl && !chipEl && !bannerEl");
+    expect(keys).toContain("bannerDecline?.();");
+    // …but NOT consumed, for Review #2's reason (a banner sits over the site's own modal).
+    expect(keys.indexOf("bannerDecline?.()")).toBeLessThan(keys.indexOf("if (!dropdownEl) return;"));
+    const shell = spanOf(cu, "function bannerShell(", "function closeBanner(");
+    expect(shell).toContain('bar.setAttribute("role", "group")');
+    expect(shell).toContain('bar.setAttribute("aria-label", "andvari")');
+    expect(shell).toContain("bar.tabIndex = -1;"); // script-focusable only — never a new tab stop
+    const offer = spanOf(cu, "function offerBanner(", "export function showSaveBanner(");
+    // The verdict removes the focused button; focus must land somewhere real, not on <body>.
+    expect(offer.indexOf("actions.remove()")).toBeLessThan(offer.indexOf("bar.focus()"));
+    // Escape runs the GHOST path (close + onDismiss), and only while the offer is unanswered.
+    expect(offer).toContain("bannerDecline = decline;");
+    expect(offer).toContain("bannerDecline = null; // answered");
+  });
+
+  it("quality-deadcode--2: ONE banner builder — the three offers differ only by spec", () => {
+    // They were ~95% identical, so every a11y contract had to be restated three times and
+    // a11y-webext--0 is exactly the one that was not. The shared body must keep the pinned
+    // ordering (announce the offer, then the verdict) and the isTrusted gates.
+    const offer = spanOf(cu, "function offerBanner(", "export function showSaveBanner(");
+    expect(offer.indexOf("announceLive(`andvari:")).toBeLessThan(offer.indexOf("announceLive(r.text)"));
+    expect(offer.match(/if \(!e\.isTrusted\) return;/g), "both buttons stay isTrusted-gated").toHaveLength(2);
+    // …and the three exports are thin: no second copy of the shell may reappear.
+    expect(cu.match(/bannerShell\(\)/g), "bannerShell has exactly one caller").toHaveLength(2); // decl + call
+    for (const fn of ["export function showSaveBanner(", "export function showCardSaveBanner(", "export function showLinkOffer("]) {
+      const at = cu.indexOf(fn);
+      expect(at, `${fn} missing`).toBeGreaterThan(-1);
+      const wrap = cu.slice(at, cu.indexOf("\n}", at));
+      expect(wrap, `${fn} must delegate to offerBanner`).toContain("offerBanner({");
+      expect(wrap, `${fn} must not rebuild the shell itself`).not.toContain("bannerShell()");
+    }
+  });
+
+  it("quality-secdrift--5: [K8] really IS one dismissal path — every content-ui close tells content.ts", () => {
+    // content-ui closed the chip directly from four places content.ts cannot observe: the
+    // outside-mousedown handler, the Escape branch and positionChip's two auto-closes. Each left
+    // `chipAnchor` set and `chipGen` un-bumped, so an offer still in flight could repaint the chip
+    // the user had just dismissed — reachable on any site whose widget preventDefault()s mousedown
+    // (custom menus, date pickers): no blur, no focusout, nothing told content.ts.
+    expect(cu).toContain("function dismissChipSurface(): void {");
+    const dismiss = spanOf(cu, "function dismissChipSurface(", "function ui(): ShadowRoot");
+    expect(dismiss).toContain("const onDismiss = chipDismissed;");
+    expect(dismiss).toContain("closeCardChip();");
+    expect(dismiss).toContain("onDismiss?.();");
+    // closeCardChip stays the callback-FREE primitive, or content.ts's own dismissal recurses.
+    const close = spanOf(cu, "export function closeCardChip(", "/** [K8] every close that ORIGINATES");
+    expect(close).toContain("chipDismissed = null;");
+    expect(close, "the primitive must not call back").not.toContain("onDismiss");
+    // All four origin sites route through it, and content.ts supplies the handler.
+    // The declaration + the FIVE origin sites: outside-mousedown, Escape, the a11y-webext--12
+    // chord, and positionChip's disconnected/off-screen auto-closes.
+    expect(cu.match(/dismissChipSurface\(\)/g) ?? []).toHaveLength(6);
+    expect(ct).toContain("onDismiss: dismissCardChip");
+  });
+
+  it("quality-secdrift--4: the chip's SW-wake mitigation exists CONTENT-side, per the design's [K13]", () => {
+    // What shipped was a per-tab SW-side throttle plus a per-INPUT content dedupe; neither reduces
+    // wakes, because the SW's cache is consulted only after handle()'s await ensureLoaded(). A page
+    // that focus-loops N distinct card fields therefore bought N wakes. The design asked for a
+    // per-document cache — this is it, on the SW's own window so there is one number, not two.
+    const chip = spanOf(ct, "async function maybeCardChip(", "// ---- dropdown ----");
+    expect(chip).toContain("const cached = chipOffer !== null && now - chipOffer.t < CHIP_OFFER_CACHE_MS");
+    expect(chip).toContain('const r = cached ?? (await safeSend({ type: "cardChipOffer" }));');
+    // Every [K12]/[K5] re-check must still run on the replay path — the cache skips the MESSAGE,
+    // never the gate.
+    expect(chip.indexOf("const r = cached")).toBeLessThan(chip.indexOf("if (gen !== chipGen) return;"));
+    expect(chip).toContain("if (filling) return;");
+    // Invalidated where the registry it answers about changes.
+    expect(spanOf(ct, "function reportCardForm(", "function cardTargetOf(")).toContain("chipOffer = null;");
+    expect(ct).toContain("const CHIP_OFFER_CACHE_MS = 250;");
+    expect(bg).toContain("CHIP_OFFER_MIN_GAP_MS = 250");
+  });
+
+  it("bug-ext-gating--1: the login submit capture is isTrusted-gated, and the top frame outranks a sub-frame", () => {
+    // requestSubmit() fires `submit` with isTrusted TRUE (it is a UA "fire an event"), so the gate
+    // costs the documented case nothing — while dispatchEvent(new SubmitEvent(...)) arrives FALSE
+    // and reached the handler, letting any frame forge a capture.
+    const submit = spanOf(ct, "bug-ext-gating--1: this listener WAS ungated", 'document.addEventListener(\n    "click"');
+    expect(submit).toContain("if (!e.isTrusted) return;");
+    // Slot ownership: a top-frame capture may EVICT a sub-frame's pending; every other pairing is
+    // still refused, so the squat (which silently suppressed the real Save banner) is closed.
+    const cap = spanOf(bg, "async function capturedCredential(", "const username = msg.username ||");
+    expect(cap).toContain("st.pending.frameId !== frameId && frameId !== 0");
+    // …and the sticky per-tab lastUsername is top-frame only (it steers saveTargetFor).
+    expect(cap).toContain("if (msg.username && frameId === 0)");
+  });
+
+  it("ux-parity--2: extension lists sort by name, transliterating CORE's comparator", () => {
+    // Web sorts (localeCompare) and core sorts (sortedBy name.lowercase); the extension listed in
+    // server change-feed order, so the popup's hoard reshuffled as items were edited. Sorted at the
+    // ONE projection every login surface reads through, and at the card twin.
+    expect(bg).toContain("function loginItems(): DecryptedItem[] {\n  return session ? session.items.filter((i) => i.doc.type === \"login\").sort(byName) : [];");
+    expect(bg).toContain('.filter((i) => i.doc.type === "card").sort(byName)');
+    const cmp = spanOf(bg, "const byName = (a: DecryptedItem", "function loginItems(");
+    expect(cmp).toContain("a.doc.name.toLowerCase()");
+    expect(cmp, "a locale collator would be a THIRD order, not core's").not.toContain("localeCompare");
+  });
+
+  it("bug-ext-gating--4: the designed RP host-permission probe exists, and the popup hides what cannot work", () => {
+    // A runtime-withheld host permission breaks the RP-ID claim with SecurityError, which the
+    // engine maps to bio_cancelled → "Setup was cancelled — try again when you're ready.", forever.
+    // The probe routes it to the honest bio_unsupported line (which names the PIN) instead.
+    expect(bg).toContain("async function bioRpPermissionHeld(): Promise<boolean> {");
+    expect(bg).toContain("const BIO_RP_ORIGIN_PATTERN = `${DEFAULT_SERVER_URL}/*`;");
+    const enroll = spanOf(bg, "const biometricDep: QuBiometric = {", "async evalPrf(");
+    expect(enroll).toContain("if (!(await bioRpPermissionHeld())) return { credentialId: \"\", prfEnabled: false, prfSalt };");
+    // The popup's capability probe must ask the same question — a button that can only fail is the
+    // bug, not the ceremony.
+    const probe = spanOf(pu, "async function probeBioCapable(", "const label = bioLabel();");
+    expect(probe).toContain("await bioRpPermissionHeld()");
+    expect(probe).toContain("typeof navigator.credentials?.create === \"function\"");
+    // One spelling of the RP origin, derived — connector.ts claims it, the SW probes it.
+    const cx = readFileSync(extensionSrc + "connector.ts", "utf-8");
+    expect(cx).toContain("const RP_ID = new URL(DEFAULT_SERVER_URL).hostname;");
+    expect(cx, "the reference host must not be re-spelled as a literal").not.toContain('"andvari.monahanhosting.com"');
+  });
+
+  it("ux-parity--1 (extension half): sign-out is a two-step arm-confirm, disarmed on blur", () => {
+    // Every other surface confirms; here one click on a footer button adjacent to "Lock" wiped the
+    // quick-unlock enrollment (PIN/biometric re-setup required). The popup has no dialog surface,
+    // so this is the options page's own inline idiom.
+    const so = spanOf(pu, "let signOutArmed = false;", "/* ---- footer ---- */");
+    expect(so).toContain("if (!signOutArmed) {");
+    expect(so).toContain('signOutArmed = true;');
+    expect(so.indexOf("signOutArmed = true;")).toBeLessThan(so.indexOf('ask({ type: "signOut" })'));
+    expect(so).toContain('el("sign-out").addEventListener("blur", disarmSignOut)');
   });
 });

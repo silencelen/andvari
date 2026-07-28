@@ -18,6 +18,14 @@ export function fmtDate(epochMs: number | null | undefined): string {
   return new Date(epochMs).toLocaleString();
 }
 
+/** "July 14"-style day (spec 03 §11 copy). Falls back gracefully for a missing time.
+ *  quality-deadcode--7: Vault.tsx and Sharing.tsx each carried a byte-identical private
+ *  copy while this file — the designated formatting home — had neither. One now. */
+export function fmtDay(ms?: number): string {
+  if (!ms) return "soon";
+  return new Date(ms).toLocaleDateString(undefined, { month: "long", day: "numeric" });
+}
+
 /** F26: the one-line reason shown on the Unlock card after an inactivity auto-lock. */
 export function inactivityNotice(seconds: number): string {
   if (seconds >= 60) {

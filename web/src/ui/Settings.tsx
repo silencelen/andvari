@@ -395,7 +395,15 @@ function IdentityCard({ account }: { account: Account }) {
 }
 
 /** One-shot clipboard copy with a transient "copied" flash — or the canon failure sentence
- *  (ux-error--2: writeText rejects on focus loss / permissions-policy; Vault useCopy's twin). */
+ *  (ux-error--2: writeText rejects on focus loss / permissions-policy; Vault useCopy's twin).
+ *
+ *  bug-web--5: the missing auto-clear is DELIBERATE, not an oversight — everything this button
+ *  copies (the TOTP setup link/code, the identity code) is SETUP MATERIAL, not a vault secret,
+ *  and wiping it out from under an authenticator app mid-enrollment would be user-hostile. The
+ *  two Kotlin clients encode the same split explicitly (desktop Ui.kt "plain copy (no auto-clear
+ *  — this is setup material, not a vault secret)"; Android reserves a ≤0 clear-window for exactly
+ *  this class, "mirroring web"). Item passwords/PANs/CVVs go through Vault's useCopy instead,
+ *  which DOES auto-clear on the §2.3-clamped policy window. Do not "fix" this into parity. */
 function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
   const [flash, setFlash] = useState(false);
   const [failed, setFailed] = useState(false);

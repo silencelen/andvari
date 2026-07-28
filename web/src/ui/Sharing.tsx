@@ -7,6 +7,7 @@ import type { Account } from "../vault/account";
 import type { DeletedVaultInfo, IncomingTransfer, VaultInfo, VaultStore } from "../vault/store";
 import { UNREACHABLE } from "./errors";
 import { Field } from "./Field";
+import { fmtDay } from "./format";
 import { Announcer, Msg } from "./Msg";
 import { settingsContentFor, showSettingsButton } from "./sharing-settings";
 import { ViewHeader } from "./ViewHeader";
@@ -22,12 +23,6 @@ interface Props {
   settingsVaultId: string | null;
   onOpenSettings: (vaultId: string) => void;
   onCloseSettings: () => void;
-}
-
-/** "July 14"-style day (spec 03 §11 copy). */
-function fmtDay(ms?: number): string {
-  if (!ms) return "soon";
-  return new Date(ms).toLocaleDateString(undefined, { month: "long", day: "numeric" });
 }
 
 /** Sharing view (spec 03 §10/§11 + DN-1): vaults, members, and the full lifecycle — delete,
@@ -702,7 +697,10 @@ function DeleteVaultControl({ vault, store, onDeleted, onDeletedNote, onBackup, 
   }
 
   return (
-    <div className="field" style={{ marginTop: 18, borderTop: "1px solid var(--line, #333)", paddingTop: 16 }}>
+    // a11y-webext--3 (adjacent): --line is declared nowhere, so this divider always painted
+    // the #333 fallback — a near-black hairline that vanished on the light theme's #fbf8f1
+    // panel. --edge is the palette's hairline-divider token, themed in both schemes.
+    <div className="field" style={{ marginTop: 18, borderTop: "1px solid var(--edge)", paddingTop: 16 }}>
       <label style={{ color: "var(--danger)" }}>Delete “{vault.name}”?</label>
       <p className="muted" style={{ marginTop: 0 }}>
         This removes the vault from everyone's andvari now. The server keeps its {items.length}{" "}
