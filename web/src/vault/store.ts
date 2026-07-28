@@ -1148,6 +1148,20 @@ export class VaultStore {
     }
     for (const id of await this.cache.consumedDeleteIds()) this.consumedDeleteIds.add(id);
     for (const t of await this.cache.transferSeqs()) this.lastTransferSeqSeen.set(t.vaultId, t.seq);
+    // Rebuild incoming-transfer state (spec 03 §11, core hydrate parity): a pending-offer
+    // row is NOT re-delivered while the offer merely pends (only cancel/expiry/
+    // re-designate/accept re-deliver it), so the verified consent surface must be
+    // recomputed from the cached rows or a reload mid-offer loses the offer until the
+    // owner acts. Runs AFTER the transferSeqs load so the replay floor is in force;
+    // noticeable=false never re-fires completion/anomaly notices for rows already seen
+    // before the reload. Idempotent per row (it starts by clearing the vault's entry).
+    for (const vault of this.vaultsById.values()) {
+      try {
+        await this.applyTransferState(vault, false);
+      } catch {
+        /* no key / crypto failure — the next pull retries (core runCatching parity) */
+      }
+    }
     // S4's durable queue stages denials; reload them into the F21 pre-park staging so a
     // removal arriving on the next pull can fold them into the holding record. stagedBefore=0
     // (core SyncEngine.hydrate LC-1 parity): the FIRST completed pull after this restart —

@@ -86,6 +86,20 @@ class SqliteVaultCache(private val db: SqlBox, private val accountUserId: String
             }
             db.userVersion = 2
         }
+        if (db.userVersion == 2) {
+            // v3: the 0.5.0 wave widened WireVault with the additive lifecycle fields
+            // (pendingTransfer/lastTransfer/restoreProof/deleteId, spec 03 §11) but left
+            // this table at its 5 typed columns, so every vaults() read handed back a
+            // stripped row (deltas never re-send it — the loss was permanent). Store the
+            // FULL serialized WireVault instead of four more typed columns: the exact
+            // pattern `held.json` already uses for HeldVaultRecord, and the next additive
+            // WireVault field rides along with no v4. Wire material only (metaBlob stays
+            // ciphertext), so the spec 02 §8 at-rest surface is unchanged. Pre-v3 rows
+            // keep wireJson NULL — the lifecycle fields were never stored (nothing to
+            // backfill) and each row self-heals on its next delivery.
+            db.tx { db.exec("ALTER TABLE vaults ADD COLUMN wireJson TEXT") }
+            db.userVersion = 3
+        }
     }
 
     private fun kv(key: String): String? =
@@ -141,15 +155,22 @@ class SqliteVaultCache(private val db: SqlBox, private val accountUserId: String
     }
 
     override fun upsertVault(vault: WireVault): Unit = lock.withLock {
+        // wireJson is the authoritative row (v3 — carries the spec 03 §11 lifecycle
+        // fields); the typed columns stay written so a downgraded client still reads a
+        // coherent (pre-v3-shaped) row.
         db.exec(
-            "INSERT OR REPLACE INTO vaults(vaultId,type,rev,metaBlob,createdAt) VALUES(?,?,?,?,?)",
+            "INSERT OR REPLACE INTO vaults(vaultId,type,rev,metaBlob,createdAt,wireJson) VALUES(?,?,?,?,?,?)",
             vault.vaultId, vault.type, vault.rev, vault.metaBlob, vault.createdAt,
+            json.encodeToString(WireVault.serializer(), vault),
         )
     }
 
     override fun vaults(): List<WireVault> = lock.withLock {
-        db.query("SELECT vaultId,type,rev,metaBlob,createdAt FROM vaults") { r ->
-            WireVault(r.string(0)!!, r.string(1)!!, r.long(2), r.string(3)!!, r.long(4))
+        db.query("SELECT vaultId,type,rev,metaBlob,createdAt,wireJson FROM vaults") { r ->
+            // A pre-v3 row has wireJson NULL: reconstruct from the typed columns (its
+            // lifecycle fields were never stored; it self-heals on its next delivery).
+            r.string(5)?.let { json.decodeFromString(WireVault.serializer(), it) }
+                ?: WireVault(r.string(0)!!, r.string(1)!!, r.long(2), r.string(3)!!, r.long(4))
         }
     }
 

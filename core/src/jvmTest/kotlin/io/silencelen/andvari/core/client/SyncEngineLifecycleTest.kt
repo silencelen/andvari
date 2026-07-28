@@ -27,6 +27,7 @@ import io.silencelen.andvari.core.model.PushRequest
 import io.silencelen.andvari.core.model.PushResponse
 import io.silencelen.andvari.core.model.RemovedGrantInfo
 import io.silencelen.andvari.core.model.SyncResponse
+import io.silencelen.andvari.core.model.TransferOfferRequest
 import io.silencelen.andvari.core.model.TransferRecord
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
@@ -103,6 +104,7 @@ class SyncEngineLifecycleTest {
         val restoreCalls = mutableListOf<Pair<String, ItemUpload>>() // undelete: captured restore POSTs
         var deletedList: List<DeletedVaultSummary> = emptyList()
         val calls = mutableListOf<String>()
+        val transferOffers = mutableListOf<TransferOfferRequest>() // captured offer POST bodies
 
         fun emptySync(rev: Long) = SyncResponse(rev, false, emptyList(), emptyList(), emptyList(), emptyList())
 
@@ -191,7 +193,11 @@ class SyncEngineLifecycleTest {
                     path.endsWith("/restore") -> { calls.add("restoreVault"); ok("""{"rev":${++rev}}""") }
                     path.endsWith("/leave") -> { calls.add("leaveVault"); ok("""{"rev":${++rev}}""") }
                     path.endsWith("/transfer/accept") -> { calls.add("acceptTransfer"); ok("""{"rev":${++rev}}""") }
-                    path.endsWith("/transfer") && req.method.value == "POST" -> { calls.add("offerTransfer"); ok("""{"rev":${++rev},"expiresAt":0}""") }
+                    path.endsWith("/transfer") && req.method.value == "POST" -> {
+                        calls.add("offerTransfer")
+                        transferOffers.add(json.decodeFromString(TransferOfferRequest.serializer(), req.body.toByteArray().decodeToString()))
+                        ok("""{"rev":${++rev},"expiresAt":0}""")
+                    }
                     path.endsWith("/transfer") && req.method.value == "DELETE" -> { calls.add("cancelTransfer"); ok("""{"rev":${++rev}}""") }
                     path.endsWith("/meta") -> { calls.add("updateVaultMeta"); ok("""{"rev":${++rev}}""") }
                     else -> respond("""{"error":"not_found","message":"unexpected $path"}""", HttpStatusCode.NotFound, jsonHeaders)
@@ -611,6 +617,90 @@ class SyncEngineLifecycleTest {
         val kinds = s.engine.notices().filter { it.vaultId == s.vaultId }.map { it.kind }
         assertTrue("transfer-complete" in kinds)
         assertFalse("transfer-anomaly" in kinds)
+    }
+
+    // ==== transfer actions on the DURABLE cache (v3 wireJson row) ====
+
+    @Test
+    fun acceptTransferOnSqliteCache_offerSurvivesRestartThenAcceptSucceeds() = runBlocking<Unit> {
+        // The accept/consent surfaces read pendingTransfer straight off cache.vaults(),
+        // so the durable cache must hand the full row back — and a restart mid-offer must
+        // rebuild the consent surface from it (the row is never re-delivered while the
+        // offer merely pends).
+        val tmp = java.nio.file.Files.createTempDirectory("andvari-transfer").toFile()
+        val dbPath = java.io.File(tmp, "vault.db").absolutePath
+        val owner = enroll("owner@example.com")
+        val member = enroll("member@example.com")
+        val nv = owner.buildCreateSharedVault("Family")
+        val vaultId = nv.vaultId
+        val vault = WireVault(vaultId, "shared", 2, nv.request.metaBlob, 0)
+        val grant = WireGrant(vaultId, member.userId, "writer", "", 3, owner.wrapVkForMember(member.identityPub, vaultId))
+        val server = FakeServer()
+        val key = owner.lifecycleKeyFor(vaultId)
+
+        val offerId = uuid()
+        val expiresAt = System.currentTimeMillis() + 14L * 86_400_000
+        val proof = LifecycleProof.offer(crypto, key, vaultId, offerId, member.userId, expiresAt, 1)
+        val cache1 = sqliteVaultCache(dbPath, member.userId)
+        val engine1 = SyncEngine(server.api(), member, cache1)
+        server.queue.add(
+            SyncResponse(
+                5, true, listOf(vault.copy(pendingTransfer = PendingTransfer(member.userId, offerId, proof, expiresAt, 1))),
+                listOf(grant), emptyList(), emptyList(),
+            ),
+        )
+        engine1.sync()
+        assertNotNull(engine1.pendingTransferFor(vaultId), "the owner-chip surface reads through the durable cache")
+        assertEquals(listOf(vaultId), engine1.incomingTransfers().map { it.vaultId })
+        engine1.close() // "process death" mid-offer
+
+        val cache2 = sqliteVaultCache(dbPath, member.userId)
+        val engine2 = SyncEngine(server.api(), member, cache2)
+        engine2.hydrate()
+        assertEquals(listOf(vaultId), engine2.incomingTransfers().map { it.vaultId }, "hydrate must rebuild the consent surface")
+        engine2.acceptTransfer(vaultId) // must NOT throw transfer_not_pending
+        assertTrue(server.calls.contains("acceptTransfer"))
+        assertTrue(engine2.incomingTransfers().isEmpty())
+        engine2.close()
+        tmp.deleteRecursively()
+    }
+
+    @Test
+    fun offerSeqChainsPastCompletedTransferOnSqliteCache() = runBlocking<Unit> {
+        // seq = cached lastTransfer.seq + 1. The server relays transferSeq+1 while the
+        // proof HMAC binds the CLIENT's seq — a cache that strips lastTransfer would mint
+        // seq=1 forever and every second+ offer would silently fail target verification.
+        val tmp = java.nio.file.Files.createTempDirectory("andvari-transfer-seq").toFile()
+        val dbPath = java.io.File(tmp, "vault.db").absolutePath
+        val owner = enroll("owner@example.com")
+        val member = enroll("member@example.com")
+        val nv = owner.buildCreateSharedVault("Family")
+        val vaultId = nv.vaultId
+        val vault = WireVault(vaultId, "shared", 2, nv.request.metaBlob, 0)
+        val grant = WireGrant(vaultId, member.userId, "writer", "", 3, owner.wrapVkForMember(member.identityPub, vaultId))
+        val server = FakeServer()
+        val key = owner.lifecycleKeyFor(vaultId)
+
+        // A COMPLETED transfer (seq=1, verified via the relayed wrapHash) is delivered.
+        val doneOffer = uuid()
+        val wrapHash = "00".repeat(32)
+        val acceptProof = LifecycleProof.acceptFromHash(crypto, key, vaultId, doneOffer, member.userId, 1, wrapHash)
+        val cache = sqliteVaultCache(dbPath, member.userId)
+        val engine = SyncEngine(server.api(), member, cache)
+        server.queue.add(
+            SyncResponse(
+                5, true, listOf(vault.copy(lastTransfer = TransferRecord(doneOffer, member.userId, acceptProof, 1, wrapHash))),
+                listOf(grant), emptyList(), emptyList(),
+            ),
+        )
+        engine.sync()
+
+        engine.offerTransfer(vaultId, "next-owner")
+        val sent = server.transferOffers.single()
+        val expected = LifecycleProof.offer(crypto, key, vaultId, sent.offerId, "next-owner", sent.expiresAt, 2)
+        assertTrue(LifecycleProof.verify(expected, sent.proof), "the offer proof must bind seq=2 (lastTransfer.seq+1)")
+        engine.close()
+        tmp.deleteRecursively()
     }
 
     // ==== F19 move/copy copy-leg-first sequencing (design §8) ====
