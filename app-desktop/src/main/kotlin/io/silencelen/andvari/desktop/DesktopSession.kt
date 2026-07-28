@@ -116,8 +116,24 @@ class DesktopSessionStore(
         val nsAdoptedOnce: Boolean = false,
     )
 
-    private fun prefs(): Prefs = runCatching { json.decodeFromString(Prefs.serializer(), prefsFile.readText()) }.getOrDefault(Prefs())
-    private fun writePrefs(p: Prefs) { dir.mkdirs(); prefsFile.writeText(json.encodeToString(Prefs.serializer(), p)) }
+    /**
+     * quality-perf--5: prefs.json was re-read AND fully re-decoded on EVERY getter. The 1 Hz
+     * idle-lock watcher does exactly that whenever no policy is loaded (an offline unlock, or a
+     * failed launch-time probe) via `originAutoLockSeconds`, so a degraded session paid a disk read
+     * plus a whole-tree JSON parse every second for its entire lifetime — on battery, in the very
+     * state where the laptop is least likely to be plugged in. Single process, single store
+     * instance, and every write goes through [writePrefs], so invalidate-on-write is sufficient;
+     * `@Volatile` because the getters are read from the Compose thread AND launched IO coroutines.
+     * (The store is deliberately not a shared/multi-instance object — tests construct one per
+     * directory, production one for the app.)
+     */
+    @Volatile
+    private var cachedPrefs: Prefs? = null
+
+    private fun prefs(): Prefs = cachedPrefs
+        ?: runCatching { json.decodeFromString(Prefs.serializer(), prefsFile.readText()) }.getOrDefault(Prefs()).also { cachedPrefs = it }
+
+    private fun writePrefs(p: Prefs) { dir.mkdirs(); prefsFile.writeText(json.encodeToString(Prefs.serializer(), p)); cachedPrefs = p }
 
     var baseUrl: String
         get() = prefs().baseUrl

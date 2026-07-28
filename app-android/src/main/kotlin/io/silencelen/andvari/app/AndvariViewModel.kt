@@ -1206,7 +1206,13 @@ class AndvariViewModel(
                         _ui.value = _ui.value.copy(
                             busy = false,
                             loginTotpRequired = true,
-                            error = if (totp == null) "Enter the 6-digit code from your authenticator." else "That code didn't work — try again.",
+                            // ux-copy--7: the wrong-code half re-minted its own shorter sentence
+                            // beside the canon constant that exists to unify exactly it (see
+                            // HouseholdCopy.BAD_TOTP_CODE's own KDoc — "unifying android's shorter
+                            // variant"). Reference it. The FIRST line stays surface-local: this is
+                            // the control-flow reveal of the code field, not the error slot
+                            // TOTP_CODE_NEEDED is the fallback for.
+                            error = if (totp == null) "Enter the 6-digit code from your authenticator." else HouseholdCopy.BAD_TOTP_CODE,
                         )
                         return@op
                     }

@@ -207,25 +207,44 @@ private fun compareVersions(a: String, b: String): Int {
 fun copyPlain(value: String): Boolean =
     runCatching { Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(value), null) }.isSuccess
 
+// ux-parity--5: the NEWEST copy owns the clipboard — and the only clear scheduled against it.
+// Every copy used to schedule its own uncancelled wipe, and the equal-value guard below let an
+// OLD timer fire inside a NEWER copy's window (copy the same password at t=0 and t=25 s with a
+// 30 s policy and the clipboard emptied at t=30 s — 5 s into a window the UI had just promised
+// was 30 s). Web and the extension each keep one live timer; this is that rule ported back,
+// alongside the Android twin (MainActivity's clipboardCopyGeneration).
+private val clipboardCopyGeneration = java.util.concurrent.atomic.AtomicLong(0)
+
+/** The auto-clear's two guards, together — byte-twin of Android's [shouldClearClipboard]. Clears
+ *  only when (a) no later copy has superseded this scheduled one (ux-parity--5) and (b) the
+ *  clipboard still demonstrably holds OUR secret (the pre-existing guard: never stomp something
+ *  the user copied from another app since). Pure so both rules are unit-testable without AWT. */
+internal fun shouldClearClipboard(scheduledGeneration: Long, currentGeneration: Long, clipboardNow: String?, copiedValue: String): Boolean =
+    scheduledGeneration == currentGeneration && clipboardNow == copiedValue
+
 /**
  * Copy to the system clipboard and auto-clear after [clearSeconds] (best-effort). Vault-secret
  * call sites pass `max(1, policy.clipboardClearSeconds)` — clamped exactly like web's useCopy,
  * so a policy of 0 still clears after 1 s (never "keep forever" for secrets).
  * False = the write failed (ux-error--3, [copyPlain]'s guard rationale); nothing landed on the
- * clipboard, so [lastSecretCopied] is NOT set and no clear is scheduled.
+ * clipboard, so [lastSecretCopied] is NOT set, the generation does NOT advance (a failed copy must
+ * never supersede a live timer), and no clear is scheduled.
  */
 fun copyWithAutoClear(value: String, clearSeconds: Int = 30): Boolean {
     // The systemClipboard ACCESSOR can throw too (headless JVM; some Linux setups without a
     // system clipboard) — guard the whole acquire-and-write, not just setContents.
     val clipboard = runCatching { Toolkit.getDefaultToolkit().systemClipboard }.getOrNull() ?: return false
     if (runCatching { clipboard.setContents(StringSelection(value), null) }.isFailure) return false
+    val generation = clipboardCopyGeneration.incrementAndGet()
     lastSecretCopied = value
     clipboardCleaner.schedule({
         runCatching {
             val current = clipboard.getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String
-            if (current == value) clipboard.setContents(StringSelection(""), null)
+            if (shouldClearClipboard(generation, clipboardCopyGeneration.get(), current, value)) clipboard.setContents(StringSelection(""), null)
         }
-        if (lastSecretCopied == value) lastSecretCopied = null // cleared (or superseded elsewhere)
+        // Same ownership rule for the exit-hook's memory: a superseded timer must not retire the
+        // secret a NEWER copy of the same value is still guarding.
+        if (generation == clipboardCopyGeneration.get() && lastSecretCopied == value) lastSecretCopied = null
     }, clearSeconds.toLong(), TimeUnit.SECONDS)
     return true
 }

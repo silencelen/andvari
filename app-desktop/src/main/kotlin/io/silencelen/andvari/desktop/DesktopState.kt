@@ -228,6 +228,48 @@ internal fun pendingReconcileDecision(markerOrigin: String, committedBaseUrl: St
     if (originKey(markerOrigin) == originKey(committedBaseUrl)) PendingReconcileDecision.AlreadyCommitted
     else PendingReconcileDecision.Reconcile
 
+/** (v2 #15): ceiling on the editor's pre-lock grace (see [editorGraceMs]). */
+internal const val EDITOR_LOCK_GRACE_MAX_MS = 5L * 60 * 1000
+
+/** (v2 #15): the editor's bounded pre-lock grace — one extra policy window, capped at
+ *  [EDITOR_LOCK_GRACE_MAX_MS] so a long-window org (30 min) doesn't see its lock double. */
+internal fun editorGraceMs(windowSeconds: Int): Long =
+    minOf(windowSeconds * 1000L, EDITOR_LOCK_GRACE_MAX_MS)
+
+/** What the 1 Hz watcher owes this tick. [Defer] and [Wait] both decline to lock, but only [Wait]
+ *  stands the imminent warning down — an op finishing is not the user coming back, so a warning
+ *  raised before it must survive the deferral (the pre-extraction behaviour, preserved verbatim). */
+enum class IdleLockDecision { Defer, Wait, GraceImminent, Lock }
+
+/**
+ * The auto-lock verdict for one tick, as a PURE function of the inputs [DesktopState.maybeIdleLock]
+ * reads — extracted (the `clampAutoLockSeconds` / `trustGateModel` precedent above, and the Android
+ * lane's `isFreshPure`) because the whole rule lived inside a private method on a Compose-bound
+ * holder whose launched coroutines the test harness deliberately never runs, so the security rule
+ * that decides when a vault stops being readable had NO executed coverage at all.
+ *
+ * The rule, unchanged:
+ *  - an in-flight op ([opInFlight]) defers — never yank the engine mid-write; the next tick re-checks,
+ *  - inside the window, wait (and stand down any raised imminent warning),
+ *  - past the window an OPEN EDITOR buys ONE bounded [editorGraceMs] — but a mid-reveal recovery
+ *    phrase ([recoveryRevealUp]) buys none: a shown-once secret left up on an unattended machine is
+ *    the worse trade, and the §F.9 capture gate re-issues it,
+ *  - otherwise lock.
+ */
+internal fun idleLockDecision(
+    windowSeconds: Int,
+    idleMs: Long,
+    opInFlight: Boolean,
+    editorOpen: Boolean,
+    recoveryRevealUp: Boolean,
+): IdleLockDecision {
+    if (opInFlight) return IdleLockDecision.Defer
+    val windowMs = windowSeconds * 1000L
+    if (idleMs < windowMs) return IdleLockDecision.Wait
+    if (editorOpen && !recoveryRevealUp && idleMs < windowMs + editorGraceMs(windowSeconds)) return IdleLockDecision.GraceImminent
+    return IdleLockDecision.Lock
+}
+
 /** F74: the Settings server-TOTP status fetch as an honest tri-state — Failed must STOP
  *  the spinner and offer Retry, instead of spinning forever beside its own error (the old
  *  shape used totpStatus==null for both "checking" and "check failed"). */
@@ -698,6 +740,21 @@ class DesktopState(
             it is DesktopScreen.Vault || it is DesktopScreen.Sharing || it is DesktopScreen.Settings ||
                 it is DesktopScreen.Trash || it is DesktopScreen.RecoverySetup || it is DesktopScreen.RecoveryCapture
         }
+
+    /**
+     * quality-deadcode--13: the menu bar's "Sign out…" shipped permanently DISABLED because §2's
+     * security note requires a confirm and an AWT native menu item cannot host one. It now raises
+     * this flag and [DesktopApp] renders the same "Sign out of this device?" dialog the Unlock
+     * screen already uses — the confirm exists, so the placeholder can stop being a placeholder.
+     * Gated on [menuSignedIn] the same way the item's `enabled` is: a stray dispatch from a locked
+     * app must not leave a dialog up over Welcome.
+     */
+    var confirmSignOut by mutableStateOf(false)
+        private set
+
+    fun requestSignOut() { if (menuSignedIn) confirmSignOut = true }
+
+    fun dismissSignOut() { confirmSignOut = false }
 
     /** design §2 menu bar: Import passwords… enables only on the Vault screen (open-question
      *  default: disabled outside Vault, no hidden navigation). Observable via [screen]. */
@@ -1999,41 +2056,39 @@ class DesktopState(
      *    "un-skippable" gate.
      */
     private fun maybeIdleLock() {
-        if (engine == null) return
         // §2.3 (B1-1): the window is clamped into [1, AUTO_LOCK_MAX_SECONDS] — live policy is
         // pre-clamped by applyPolicy; the per-origin persisted fallback (§4.2) is re-clamped here
         // as the belt (pre-clamp prefs, or a hand-edited file). A 0 that used to mean "auto-lock
         // disabled" now means the CEILING: no server — and no stale fallback — can disable the
-        // lock any more; that path is deliberately gone.
-        val window = clampAutoLockSeconds(policy?.autoLockSeconds ?: store.originAutoLockSeconds(originKey(baseUrl)))
-        // A-copyGate: the rescue copy holds `busy`, but any OTHER op finishing mid-copy
-        // clears it — the op guard is what actually keeps the idle lock off the engine
-        // for the whole copy (never yank the engine mid-rescue).
-        if (busy || importBusy || copyOpVaultId != null) return
-        val idleMs = System.currentTimeMillis() - lastInteractionMs
-        if (idleMs < window * 1000L) {
-            if (idleLockImminent) idleLockImminent = false // interaction reset the clock — stand down
-            return
+        // lock any more; that path is deliberately gone. Read only while a session is bound, so a
+        // locked app doesn't touch the store once a second (quality-perf--5's sibling).
+        val decision = if (engine == null) IdleLockDecision.Defer else idleLockDecision(
+            windowSeconds = clampAutoLockSeconds(policy?.autoLockSeconds ?: store.originAutoLockSeconds(originKey(baseUrl))),
+            idleMs = System.currentTimeMillis() - lastInteractionMs,
+            // A-copyGate: the rescue copy holds `busy`, but any OTHER op finishing mid-copy
+            // clears it — the op guard is what actually keeps the idle lock off the engine
+            // for the whole copy (never yank the engine mid-rescue).
+            opInFlight = busy || importBusy || copyOpVaultId != null,
+            editorOpen = editorOpen,
+            recoveryRevealUp = pendingRecoverySecret != null,
+        )
+        when (decision) {
+            IdleLockDecision.Defer -> Unit // no session, or an op holds the engine — leave every flag as it stands
+            IdleLockDecision.Wait -> if (idleLockImminent) idleLockImminent = false // interaction reset the clock — stand down
+            IdleLockDecision.GraceImminent -> idleLockImminent = true // the editor's grace is holding the lock — warn, don't lock yet
+            IdleLockDecision.Lock -> {
+                idleLockImminent = false
+                lock(when {
+                    // §F.7: the phrase (and its raw secret) die with lock() below — say so, and say the
+                    // recovery, not just "locked". The next unlock lands in the capture gate (v2 #15).
+                    pendingRecoverySecret != null ->
+                        "Locked after inactivity. Your recovery phrase was not confirmed — you'll be shown a fresh one after you unlock."
+                    editorOpen -> "Locked after inactivity — the editor's unsaved changes were discarded."
+                    else -> "Locked after inactivity."
+                })
+            }
         }
-        if (editorOpen && pendingRecoverySecret == null && idleMs < window * 1000L + editorGraceMs(window)) {
-            idleLockImminent = true // the editor's grace is holding the lock — warn, don't lock yet
-            return
-        }
-        idleLockImminent = false
-        lock(when {
-            // §F.7: the phrase (and its raw secret) die with lock() below — say so, and say the
-            // recovery, not just "locked". The next unlock lands in the capture gate (v2 #15).
-            pendingRecoverySecret != null ->
-                "Locked after inactivity. Your recovery phrase was not confirmed — you'll be shown a fresh one after you unlock."
-            editorOpen -> "Locked after inactivity — the editor's unsaved changes were discarded."
-            else -> "Locked after inactivity."
-        })
     }
-
-    /** (v2 #15): the editor's bounded pre-lock grace — one extra policy window, capped at
-     *  [EDITOR_LOCK_GRACE_MAX_MS] so a long-window org (30 min) doesn't see its lock double. */
-    private fun editorGraceMs(windowSeconds: Int): Long =
-        minOf(windowSeconds * 1000L, EDITOR_LOCK_GRACE_MAX_MS)
 
     /**
      * Quiet poll sync (spec 03 §6: focus regained + every 5 min while unlocked): refresh
@@ -2759,6 +2814,10 @@ class DesktopState(
             clearSecondary(); signInTotpRequired = false
             importRequested = false // §2: drop any pending menu import request with the session
             mustChangePassword = false // F58: sign-out drops the account; the flag re-arrives at the next sign-in
+            // ux-parity--4 (Android A9 twin, AndvariViewModel's "sign-out must LIFT the 426 block"):
+            // sign-out is the ESCAPE from a server minVersion pin, so it must clear the block — a
+            // retained flag would re-brick the app over Welcome and the escape would be no escape.
+            upgradeRequired = null
             lockReason = null // §6: user-initiated sign-out — the Welcome screen owes no explanation
             // §3 reset block (review MED, Android parity): a null-policy probe failure is
             // current, not stale — keep it so Welcome shows the failure + Retry instead of
@@ -2777,6 +2836,7 @@ class DesktopState(
         // clears it itself (B1 identity gates), and a blind reset would disarm the single-flight
         // guard under it.
         recoveryCaptureError = null; recoveryReplacedNotice = null; editorOpen = false; idleLockImminent = false; downloadingAttachmentId = null
+        confirmSignOut = false // quality-deadcode--13: an un-answered menu confirm dies with the session it would have ended
         cacheConsentPrompt = false // §5.3: an unanswered prompt dies with the session; re-asks at the next landing
         clearRecoverState() // §F.7 belt: the self-recovery stash never outlives a session teardown
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
@@ -3032,9 +3092,6 @@ class DesktopState(
          *  client (the Cut O bound, kept across the A.3 swap: a black-holed send must neither
          *  leak a fire-and-forget coroutine nor hold [busy] open-endedly). */
         const val RECOVERY_CALL_TIMEOUT_MS = 30_000L
-
-        /** (v2 #15): ceiling on the editor's pre-lock grace (see editorGraceMs). */
-        const val EDITOR_LOCK_GRACE_MAX_MS = 5L * 60 * 1000
 
         /** Piece binding (design 2026-07-13 §3): the STATIC replaced-phrase conflict copy —
          *  verbatim across all surfaces; never interpolate anything near it (§F.7). */
