@@ -154,11 +154,12 @@ fun main() = application {
                 Separator()
                 Item("Lock", shortcut = KeyShortcut(Key.L, ctrl = true), enabled = state.menuSignedIn) { state.panicLock() }
                 // §2 security note: Sign out is destructive and MUST route through a confirm dialog.
-                // The only sign-out confirm today is local `remember` state inside the (locked)
-                // Unlock screen — there is NO signed-in-reachable confirm (that's the audit's separate
-                // "un-confirmed sign-out" finding, not this wave). Per the contract: ship DISABLED
-                // rather than a bare state.signOut() (AWT native menu items can't carry a tooltip).
-                Item("Sign out…", enabled = false) {}
+                // quality-deadcode--13: it shipped DISABLED because the only confirm lived as local
+                // `remember` state inside the (locked) Unlock screen. That confirm is now hoisted to
+                // the app root (SignOutConfirmDialog, rendered by DesktopApp off state.confirmSignOut),
+                // so the item requests it instead of calling a bare state.signOut() — the contract is
+                // met and the placeholder is gone.
+                Item("Sign out…", enabled = state.menuSignedIn) { state.requestSignOut() }
                 Separator()
                 Item("Quit", shortcut = KeyShortcut(Key.Q, ctrl = true)) { exitApplication() }
             }

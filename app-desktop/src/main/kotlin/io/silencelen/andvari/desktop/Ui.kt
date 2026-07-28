@@ -29,8 +29,11 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
@@ -102,6 +105,17 @@ fun DesktopApp(state: DesktopState) {
                 )
                 TextButton(onClick = { copyPlain(downloadsUrl(state.baseUrl)) }) { Text("Copy link") }
             }
+            // ux-parity--4 (Android A9 backport): this screen was a DEAD END. Every server contact
+            // throws under a 426, so a user pinned by a minVersion — or pointed at the wrong/hostile
+            // server — had no way out but hand-deleting ~/.andvari-desktop. Sign-out does NOT depend
+            // on being past the block (the logout attempt is runCatching'd and signOut clears
+            // upgradeRequired), so it can re-point at a different server from here.
+            Spacer(Modifier.height(24.dp))
+            var confirmSignOut by remember { mutableStateOf(false) }
+            OutlinedButton(onClick = { confirmSignOut = true }) { Text("Sign out / change server") }
+            if (confirmSignOut) {
+                SignOutConfirmDialog(onDismiss = { confirmSignOut = false }, onConfirm = { confirmSignOut = false; state.signOut() })
+            }
         }
         return
     }
@@ -126,7 +140,10 @@ fun DesktopApp(state: DesktopState) {
         // root, above every screen, so no view change escapes it. Desktop can't change the
         // password yet (native screen deferred) — direct to the web app, which can.
         if (state.mustChangePassword) {
-            Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
+            // a11y-native--3: Polite, not Assertive — the banner appears once, right after a
+            // sign-in the user just performed, so it should follow the sign-in announcement
+            // rather than cut it off (Assertive is reserved for the ErrorBar).
+            Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite }) {
                 Text(
                     "Recovery sign-in — set a new master password now. This app can't change it yet: open ${state.baseUrl} in your browser and use Settings → Change master password.",
                     style = MaterialTheme.typography.bodySmall,
@@ -134,6 +151,12 @@ fun DesktopApp(state: DesktopState) {
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                 )
             }
+        }
+        // quality-deadcode--13: the app-level sign-out confirm the menu bar's "Sign out…" needs.
+        // Hoisted here (not into a screen) for the same reason the banners are: the menu is
+        // reachable from every signed-in screen, so its confirm must be too.
+        if (state.confirmSignOut) {
+            SignOutConfirmDialog(onDismiss = state::dismissSignOut, onConfirm = { state.dismissSignOut(); state.signOut() })
         }
         // N3 (design 2026-07-11): the ONE home for global break-glass attention — Android P4
         // parity. Escrow re-seal (moved off the Vault list), incoming ownership offers,
@@ -305,7 +328,11 @@ private fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
     // error-on-errorContainer ~2.56:1 dark / 4.48:1 light (fail/borderline); onErrorContainer-on-
     // errorContainer ~7.17:1 dark / 12.77:1 light — both pass WCAG AA. Same fix at :92, :828 (warn
     // branch only, per AM-8) and the UnopenableVaultWarning icon/title.
-    if (msg != null) Card(Modifier.fillMaxWidth().padding(vertical = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+    // a11y-native--3: the bar simply APPEARS — with no live region a screen reader says nothing,
+    // so on Windows (the AT-reachable desktop path: Java Access Bridge, jdk.accessibility is in
+    // the jlink module list) a failed save or sign-in was silent. Assertive, matching the Android
+    // twin (MainActivity's ErrorBar): an error must interrupt, not queue behind the page.
+    if (msg != null) Card(Modifier.fillMaxWidth().padding(vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Assertive }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = onDismiss, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onErrorContainer)) { Text("dismiss") }
@@ -315,7 +342,9 @@ private fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
 
 @Composable
 private fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
-    if (msg != null) Card(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+    // a11y-native--3: Polite (the Android NoticeBar twin) — a notice is an outcome report, so it
+    // waits its turn instead of cutting off whatever the reader is mid-sentence on.
+    if (msg != null) Card(Modifier.fillMaxWidth().padding(vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Polite }) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall)
             // a11y (Cut B review): default primary on the filled-card tone is 3.77:1 in light.
@@ -1045,15 +1074,26 @@ private fun Unlock(state: DesktopState, email: String) {
         var confirmSignOut by remember { mutableStateOf(false) }
         TextButton(onClick = { confirmSignOut = true }) { Text("Sign out / use a different account") }
         if (confirmSignOut) {
-            AlertDialog(
-                onDismissRequest = { confirmSignOut = false },
-                title = { Text("Sign out of this device?") },
-                text = { Text("This removes the vault copy and any unsynced changes from this device. You'll need your master password — and a connection to your server — to sign back in.") },
-                confirmButton = { TextButton(onClick = { confirmSignOut = false; state.signOut() }) { Text("Sign out") } },
-                dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Stay signed in") } },
-            )
+            SignOutConfirmDialog(onDismiss = { confirmSignOut = false }, onConfirm = { confirmSignOut = false; state.signOut() })
         }
     }
+}
+
+/**
+ * The ONE "Sign out of this device?" confirm (Android's SignOutConfirmDialog twin). Three sites now
+ * reach the same destructive revoke-and-wipe — the Unlock screen, the 426 blocking screen
+ * (ux-parity--4) and the menu bar (quality-deadcode--13) — and hand-writing it per site is exactly
+ * how Android's three copies drifted apart. Wording unchanged from the Unlock screen's original.
+ */
+@Composable
+private fun SignOutConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sign out of this device?") },
+        text = { Text("This removes the vault copy and any unsynced changes from this device. You'll need your master password — and a connection to your server — to sign back in.") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Sign out") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Stay signed in") } },
+    )
 }
 
 @Composable
@@ -2480,6 +2520,10 @@ private fun Editor(
     var name by remember { mutableStateOf(initial.name) }
     var username by remember { mutableStateOf(initial.login?.username ?: "") }
     var password by remember { mutableStateOf(initial.login?.password ?: "") }
+    // ux-parity--0: the Generate guard's two flags, hoisted beside the value they guard (Android's
+    // twin declares them the same way) — see the Generate button below.
+    var confirmGen by remember { mutableStateOf(false) }
+    val passwordRevealed = remember { mutableStateOf(false) }
     var website by remember { mutableStateOf(initial.login?.uris?.firstOrNull() ?: "") }
     var totp by remember { mutableStateOf(initial.login?.totp ?: "") }
     var cardholder by remember { mutableStateOf(initial.card?.cardholderName ?: "") }
@@ -2519,8 +2563,31 @@ private fun Editor(
         Field("Name", name, { name = it })
         if (isLogin) {
             Field("Username", username, { username = it }, mono = true)
-            Secret("Password", password) { password = it }
-            TextButton(onClick = { password = PasswordGenerator.generate(crypto, GeneratorOptions(length = 20)) }) { Icon(Icons.Default.Refresh, null); Text(" Generate") }
+            // F78 (web parity, ux-parity--0): Generate over a NON-EMPTY password arms an inline
+            // confirm instead of replacing in one click — a mistyped-then-generated field silently
+            // losing what the user typed was the reported footgun. Either way the result is
+            // revealed, so the user sees what will be saved. Editing the field cancels the arm
+            // (the onChange below), the same arm-then-confirm idiom this editor's "Discard
+            // changes?" cancel already uses. Android's twin landed at MainActivity.kt:2063.
+            Secret("Password", password, revealed = passwordRevealed) { password = it; confirmGen = false }
+            TextButton(
+                onClick = {
+                    if (password.isNotEmpty() && !confirmGen) {
+                        confirmGen = true
+                    } else {
+                        password = PasswordGenerator.generate(crypto, GeneratorOptions(length = 20))
+                        passwordRevealed.value = true
+                        confirmGen = false
+                    }
+                },
+            ) { Icon(Icons.Default.Refresh, null); Text(if (confirmGen) " Replace?" else " Generate") }
+            if (confirmGen) {
+                Text(
+                    "this replaces the current password — click “Replace?” to confirm, or edit the field to cancel",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
             Field("Website", website, { website = it })
             // RAW text while typing — normalizeTotp per keystroke rewrote the field to an
             // otpauth:// URI on the first character and the clamped cursor then garbled all
@@ -2677,11 +2744,23 @@ private fun AttachmentLine(ref: AttachmentRef, action: @Composable () -> Unit) {
 @Composable
 private fun TotpRow(uri: String, clearSeconds: Int) {
     val crypto = remember { createCryptoProvider() }
-    var code by remember { mutableStateOf("······") }
-    var remaining by remember { mutableStateOf(30) }
+    // ux-error--6: parse ONCE, in composition rather than inside the effect. The old shape only
+    // learned the URI was malformed after the first frame and answered by writing the literal
+    // "invalid" into the CODE slot — rendered in the monospace headline beside a "30s" that then
+    // never ticked, and still copyable, so the word "invalid" went to the clipboard with a
+    // scheduled auto-clear. Parsing up front also fixes the wrong first frame for a non-30s
+    // period: `remaining` starts from the real one instead of a hardcoded 30.
+    val cfg = remember(uri) { runCatching { Totp.parseUri(uri) }.getOrNull() }
+    if (cfg == null) {
+        Column(Modifier.padding(vertical = 8.dp)) {
+            Text("One-time code", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(TOTP_URI_UNREADABLE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        return
+    }
+    var code by remember(uri) { mutableStateOf("······") }
+    var remaining by remember(uri) { mutableStateOf(Totp.secondsRemaining(cfg, System.currentTimeMillis() / 1000)) }
     LaunchedEffect(uri) {
-        val cfg = runCatching { Totp.parseUri(uri) }.getOrNull()
-        if (cfg == null) { code = "invalid"; return@LaunchedEffect }
         while (true) {
             val now = System.currentTimeMillis() / 1000
             code = Totp.code(crypto, cfg, now); remaining = Totp.secondsRemaining(cfg, now)
@@ -2694,15 +2773,29 @@ private fun TotpRow(uri: String, clearSeconds: Int) {
         // but a refused clipboard write must not be silent.
         var copyFailed by remember { mutableStateOf(false) }
         androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { copyFailed = !copyWithAutoClear(code, clearSeconds) }) { Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary) }
-            Text("${remaining}s", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // a11y-native--5 (the Android a11yand-05 pair, which desktop's A1 list missed): the
+            // button's only content is the LIVE code, so AT named the control with the rotating
+            // secret — give it a stable name instead.
+            TextButton(
+                onClick = { copyFailed = !copyWithAutoClear(code, clearSeconds) },
+                modifier = Modifier.semantics { contentDescription = "One-time code — copy" },
+            ) { Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary) }
+            // Re-computed every second; clearAndSetSemantics stops the reader re-announcing it on every tick (a11yand-05).
+            Text("${remaining}s", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.clearAndSetSemantics {})
         }
         if (copyFailed) {
-            Text(CLIPBOARD_COPY_FAILED, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+            // a11y-native--3: the failure line replaces silent feedback for a sighted user — a
+            // reader needs it announced (Polite: the copy click is the user's own action).
+            Text(CLIPBOARD_COPY_FAILED, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             LaunchedEffect(copyFailed) { delay(3500); copyFailed = false }
         }
     }
 }
+
+/** ux-error--6: what a stored otpauth:// URI that won't parse says instead of a fake code. Names
+ *  the repair the user can actually perform — desktop-local (a stored-data problem, not one of the
+ *  canon's mapped failures). Pinned by [io.silencelen.andvari.desktop.TotpRowTest]. */
+internal const val TOTP_URI_UNREADABLE = "This one-time code isn't set up right — edit the item and add it again."
 
 // ---- settings / server TOTP ----
 
@@ -3172,8 +3265,11 @@ private fun Field(label: String, value: String, onChange: (String) -> Unit, mono
 }
 
 @Composable
-private fun Secret(label: String, value: String, onEnter: (() -> Unit)? = null, autoFocus: Boolean = false, onChange: (String) -> Unit) {
-    var show by remember { mutableStateOf(false) }
+private fun Secret(label: String, value: String, onEnter: (() -> Unit)? = null, autoFocus: Boolean = false, revealed: MutableState<Boolean>? = null, onChange: (String) -> Unit) {
+    // [revealed] hoists the reveal toggle so a call site can force it open (the editor's Generate
+    // reveals what it just wrote — ux-parity--0); null keeps the local-only behaviour everywhere else.
+    val showState = revealed ?: remember { mutableStateOf(false) }
+    val show = showState.value
     // a11ydesk-06 (AM-9): see Field — optional initial focus, runCatching-guarded, one per screen.
     val fr = remember { FocusRequester() }
     LaunchedEffect(autoFocus) { if (autoFocus) runCatching { fr.requestFocus() } }
@@ -3181,7 +3277,7 @@ private fun Secret(label: String, value: String, onEnter: (() -> Unit)? = null, 
         visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
         // a11ydesk-02: name the reveal toggle; the description doubles as the shown/hidden state.
-        trailingIcon = { IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "hide value" else "show value") } })
+        trailingIcon = { IconButton(onClick = { showState.value = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "hide value" else "show value") } })
 }
 
 /** ux-error--3 failure feedback — byte-twin of web/extension errors.ts CLIPBOARD_FAILED; kept
@@ -3214,6 +3310,10 @@ private fun CopyRow(label: String, value: String, secret: Boolean, clearSeconds:
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = if (copied == false) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                // a11y-native--3 (Android's CopiedNote twin): Copy is the app's primary action and
+                // its ONLY confirmation is this line — unannounced, a reader user cannot tell a
+                // successful copy from a refused one, nor learn the clipboard is about to be wiped.
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
             )
             LaunchedEffect(copied) { delay(3500); copied = null }
         }

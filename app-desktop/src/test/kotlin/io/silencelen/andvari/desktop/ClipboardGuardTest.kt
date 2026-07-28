@@ -3,6 +3,7 @@ package io.silencelen.andvari.desktop
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * ux-error--3 (polish audit 2026-07-27): [copyPlain]/[copyWithAutoClear] were the file's only
@@ -39,5 +40,33 @@ class ClipboardGuardTest {
     @Test
     fun failureSentenceIsTheCrossClientTwin() {
         assertEquals("Couldn't copy to the clipboard — try again.", CLIPBOARD_COPY_FAILED)
+    }
+
+    // ---- ux-parity--5: only the NEWEST copy owns the scheduled clear ----
+
+    /**
+     * The bug the generation counter fixes: copy the same password at t=0 and again at t=25 s with
+     * a 30 s window and the FIRST timer's `current == value` guard still passed at t=30 s — the
+     * clipboard emptied 5 s into a window the CopyRow had just promised was 30 s. The equal-value
+     * guard alone only ever covered the different-value case.
+     */
+    @Test
+    fun aSupersededTimerDoesNotClearTheNewerCopysWindow() {
+        assertFalse(
+            shouldClearClipboard(scheduledGeneration = 1, currentGeneration = 2, clipboardNow = "hunter2", copiedValue = "hunter2"),
+            "a re-copy of the SAME secret must retire the older timer, not truncate the new window",
+        )
+        assertTrue(
+            shouldClearClipboard(scheduledGeneration = 2, currentGeneration = 2, clipboardNow = "hunter2", copiedValue = "hunter2"),
+            "the newest copy still owns its own clear",
+        )
+    }
+
+    /** The pre-existing ownership guard is unchanged: never stomp something the user copied from
+     *  another app since, and never clear on an unreadable clipboard. */
+    @Test
+    fun theClipboardIsOnlyClearedWhileItStillHoldsOurSecret() {
+        assertFalse(shouldClearClipboard(1, 1, clipboardNow = "a url the user copied after pasting", copiedValue = "hunter2"))
+        assertFalse(shouldClearClipboard(1, 1, clipboardNow = null, copiedValue = "hunter2"), "null = can't verify ownership, NEVER 'still ours'")
     }
 }
