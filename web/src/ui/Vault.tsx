@@ -687,16 +687,22 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
       return { warn: false, body: `You left “${name}”.` };
     case "restored":
       return { warn: false, body: `“${name}” was restored.` };
-    case "replay-denied":
+    case "replay-denied": {
       // C1 (core LC-1): recovered (F21-parked) edits replayed after a restore, refused on the
       // now-live vault — the member's role likely changed across the grace. Calm, never an error.
+      // TWIN of core HouseholdCopy.replayDeniedNotice, byte-equal — web can't import Kotlin, so
+      // these two templates are pinned against the Kotlin source by vault-copy.test.ts
+      // (ux-copy--3: this sentence had drifted three ways from the natives'). Both sides move
+      // together; `count` is named to match the canon's parameter the pin substitutes.
+      const count = n.parkedCount ?? 0;
       return {
         warn: false,
         body:
-          n.parkedCount === 1
-            ? `A recovered edit to “${name}” couldn't be applied — your access may have changed while it was deleted.`
-            : `${n.parkedCount ?? 0} recovered edits to “${name}” couldn't be applied — your access may have changed while it was deleted.`,
+          count === 1
+            ? `A recovered edit to “${name}” couldn't be applied — your access may have changed while the vault was deleted.`
+            : `${count} recovered edits to “${name}” couldn't be applied — your access may have changed while the vault was deleted.`,
       };
+    }
     case "write-refused": {
       // C2/M3: offline/queued changes genuinely denied at classification. The store restores
       // each refused item to its last synced value WHEN IT CAN (revertedCount) — the copy must
