@@ -66,6 +66,11 @@ const REFRESH_FETCH_TIMEOUT_MS = 15_000;
  *  so a healthy holder always finishes or times out first) and proceed without
  *  cross-tab exclusion rather than stall every tab behind one wedged fetch. */
 const REFRESH_LOCK_WAIT_MS = 20_000;
+/** Bound on the sign-out revocation POST — the natives' 5 s logout timeout, mirrored.
+ *  Exported so ui/session.ts races the SAME clock the request is aborted on: abandoning a
+ *  race does NOT cancel a fetch, and an uncancelled revocation outlives the sign-out (see
+ *  logout()). One constant, one clock. */
+export const LOGOUT_TIMEOUT_MS = 5_000;
 
 /**
  * Why the session ended (events() → onRevoked): an explicit server `revoked` frame is
@@ -316,8 +321,27 @@ export class ApiClient {
     return s;
   }
 
-  logout() {
-    return this.raw("POST", "/api/v1/auth/logout").finally(() => this.setTokens(null));
+  /**
+   * bug-web--0: best-effort sign-out revocation. Deliberately NOT routed through raw(), and
+   * deliberately NOT clearing the token pair:
+   *  - it carries its own AbortSignal, so the caller's bound (revokeSessionBestEffort's race)
+   *    actually CANCELS the POST. Abandoning a race leaves the request running, and a slow
+   *    revocation that lands after the user signed back in on this same client would have
+   *    nulled the NEW session's tokens from a `.finally` — a sign-out with a one-request lag;
+   *  - no 401 refresh-retry (raw's): a refused access token means this device session is
+   *    already gone server-side, and rotating for it would only extend that window.
+   * Dropping the pair is each call site's own job, done synchronously right after (App's
+   * signOut, Welcome's two capture teardowns). The pair is read HERE, synchronously at call
+   * time, so a fire-and-forget `void` call from a sync path still revokes the right session.
+   */
+  logout(): Promise<Response> {
+    const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
+    if (this.tokens) headers["Authorization"] = `Bearer ${this.tokens.accessToken}`;
+    return fetch(this.baseUrl + "/api/v1/auth/logout", {
+      method: "POST",
+      headers,
+      signal: timeoutSignal(LOGOUT_TIMEOUT_MS),
+    });
   }
 
   async accountKeys() {

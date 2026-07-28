@@ -7,8 +7,9 @@ import { qrModules } from "../vendor/qrcode-generator";
 import { Account } from "../vault/account";
 import type { VaultStore } from "../vault/store";
 import { Busy } from "./Busy";
+import { writeClipboard } from "./clipboard";
 import { DevicesCard } from "./Devices";
-import { UNREACHABLE } from "./errors";
+import { CLIPBOARD_FAILED, UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
@@ -393,15 +394,23 @@ function IdentityCard({ account }: { account: Account }) {
   );
 }
 
-/** One-shot clipboard copy with a transient "copied" flash. */
+/** One-shot clipboard copy with a transient "copied" flash — or the canon failure sentence
+ *  (ux-error--2: writeText rejects on focus loss / permissions-policy; Vault useCopy's twin). */
 function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
   const [flash, setFlash] = useState(false);
+  const [failed, setFailed] = useState(false);
   const copy = async () => {
-    await navigator.clipboard.writeText(value);
-    setFlash(true);
-    window.setTimeout(() => setFlash(false), 1200);
+    const ok = await writeClipboard(value);
+    setFailed(!ok);
+    setFlash(ok);
+    if (ok) window.setTimeout(() => setFlash(false), 1200);
   };
-  return <button type="button" className="ghost" onClick={copy}>{flash ? "Copied ✓" : label}</button>;
+  return (
+    <>
+      <button type="button" className="ghost" onClick={() => void copy()}>{flash ? "Copied ✓" : label}</button>
+      {failed && <Msg kind="err">{CLIPBOARD_FAILED}</Msg>}
+    </>
+  );
 }
 
 // ---- server TOTP (spec 03 §2 — optional second factor, verified at every sign-in) ----

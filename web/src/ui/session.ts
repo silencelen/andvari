@@ -1,4 +1,4 @@
-import { ApiClient, type Tokens } from "../api/client";
+import { ApiClient, LOGOUT_TIMEOUT_MS, type Tokens } from "../api/client";
 import { idbSupported, openVaultCache, vaultDbName } from "../vault/idbcache";
 
 /**
@@ -448,4 +448,27 @@ export function makeClient(session: Session | null, baseUrl: string): ApiClient 
       return userId !== null && cur?.userId === userId ? cur.tokens : null;
     },
   );
+}
+
+/**
+ * bug-web--0: best-effort server-side revocation on USER sign-out (spec 03: POST /auth/logout
+ * revokes every session for this device). Without it "Sign out" leaves the refresh token
+ * refreshable server-side for ~30 days and this browser listed as an active device — exactly
+ * the bug the natives fixed by awaiting a bounded api.logout() before teardown. Bounded and
+ * swallowed: a dead or hung server must never block the local wipe, so this always resolves
+ * within ~LOGOUT_TIMEOUT_MS and never rejects. The bound is the client's OWN abort clock
+ * (LOGOUT_TIMEOUT_MS), so giving up here also cancels the POST — an uncancelled revocation
+ * would keep running past the sign-out and into whatever session comes next. Call it BEFORE
+ * clearSession()/setTokens(null) — logout() captures the token pair synchronously at call time,
+ * so even a fire-and-forget `void` call from a sync path revokes correctly as long as it is
+ * issued first, and clearing the pair is the CALLER's job (logout() no longer does it).
+ * Deliberately NOT used for the "expired"/"revoked" sign-out kinds (the session is already dead
+ * server-side) and NOT on lock (locking keeps the session — spec 05 T3).
+ */
+export async function revokeSessionBestEffort(client: Pick<ApiClient, "logout"> | null): Promise<void> {
+  if (!client) return;
+  await Promise.race([
+    client.logout().catch(() => {}), // refused/unreachable — revocation is best-effort
+    new Promise<void>((resolve) => setTimeout(resolve, LOGOUT_TIMEOUT_MS)),
+  ]);
 }

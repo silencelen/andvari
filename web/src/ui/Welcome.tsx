@@ -24,6 +24,7 @@ import {
   installId,
   offlineCopyStamp,
   refreshCachedAccountKeys,
+  revokeSessionBestEffort,
   saveSession,
   webCacheEnabled,
   wipeVaultCache,
@@ -573,6 +574,9 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
     // timeout escape surfaces the timeout copy on the returned sign-in form.
     const signOutOfCapture = (notice = "") => {
       const uid = capture.account.userId;
+      // bug-web--0: revoke the just-issued device session server-side (fire-and-forget — this
+      // path is sync; logout() captures the pair now, BEFORE setTokens(null) below).
+      void revokeSessionBestEffort(client);
       clearSession();
       client.setTokens(null);
       void wipeVaultCache(uid);
@@ -700,6 +704,9 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
     const uid = ready?.account.userId;
     secretRef.current?.fill(0);
     secretRef.current = null;
+    // bug-web--0: this timeout is a full SIGN-OUT (the session was already saved at register) —
+    // revoke it server-side too (fire-and-forget; issued before setTokens(null) below).
+    void revokeSessionBestEffort(client);
     clearSession();
     client.setTokens(null);
     if (uid) void wipeVaultCache(uid);
