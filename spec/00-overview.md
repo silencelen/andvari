@@ -4,9 +4,10 @@ This directory is **normative**. The Kotlin implementation (`core/`), the TypeSc
 implementation (`web/src/crypto` + sync), the extension's pure-JS implementation
 (`extension/src/crypto.ts`, @noble — the MV3 service-worker CSP forbids WASM), and the
 server (`server/`) follow these documents; when code and spec disagree, the code is
-wrong. Changes land here first, then in `tools/vector-gen` (regenerating
-`test-vectors/`), then in every implementation, and `scripts/verify.sh` must green all
-three suites off the same vectors.
+wrong. Changes land here first, then in `tools/vector-gen` (regenerating the vectors it
+owns — most of `test-vectors/`, but not all: the per-file provenance manifest is
+`test-vectors/README.md`), then in every implementation, and `scripts/verify.sh` must
+green all three suites off the same vectors.
 
 ## Documents
 
@@ -24,12 +25,16 @@ three suites off the same vectors.
 
 Zero-knowledge, hub-and-spoke, offline-first. Clients (Android, Windows desktop, web,
 MV3 browser extension) derive all encryption keys from the user's master password
-on-device and sync opaque
-ciphertext through one ktor server (CT 122 `andvari`, Tailscale-primary, break-glass
-public via Cloudflare tunnel + Access). The server orders writes (global revision
-counter), stores ciphertext + minimal metadata, authenticates users without ever
-seeing the master password, and holds escrow blobs only an **offline** recovery key
-can open. Recovery, not the server, is the answer to "forgot my master password."
+on-device and sync opaque ciphertext through **one ktor server per instance**, reached
+at whatever origin its operator fronts it with — a reverse proxy, a tunnel, the bundled
+caddy overlay, or plain http on a trusted LAN (`docs/self-hosting.md`). Clients are
+**endpoint-agnostic**: any client talks to any instance the user points it at, and an
+instance's declared `ClientPolicy` (spec 03 §1.1) may only make a client *safer*, never
+laxer — the client trusts no server with the shape of its own defences. The server
+orders writes (global revision counter), stores ciphertext + minimal metadata,
+authenticates users without ever seeing the master password, and holds escrow blobs
+only an **offline** recovery key can open. Recovery, not the server, is the answer to
+"forgot my master password."
 
 ## Conventions (normative)
 

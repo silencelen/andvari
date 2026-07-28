@@ -42,8 +42,10 @@ downloadable copies of `docker-compose.yml`, `andvari.env.template`, and `bringu
 ## Install
 
 The distribution channel is the public container image
-**`ghcr.io/silencelen/andvari`** — you **pull** it; building from source is not
-required (the source repo is private; these docs + the image are the product).
+**`ghcr.io/silencelen/andvari`** — you **pull** it; building from source is optional.
+The source is public at <https://github.com/silencelen/andvari> (AGPLv3 server, GPLv3
+clients — see `LICENSING.md`), so you can read or build every byte you run; the image
+is simply the shorter path.
 
 ```sh
 mkdir andvari && cd andvari
@@ -83,9 +85,9 @@ Enroll yourself as the first admin (have the printed sheet at hand — enrollmen
 confirms the recovery fingerprint from it), then blank `ANDVARI_BOOTSTRAP_TOKEN` in
 `andvari.env` and `docker compose up -d`.
 
-From a **source checkout** (if you have repo access): `./deploy/bringup.sh --build`
-builds the image locally (tag `:local`) instead of pulling. Everything else is
-identical; pull remains the one default path.
+From a **source checkout** (`git clone https://github.com/silencelen/andvari`):
+`./deploy/bringup.sh --build` builds the image locally (tag `:local`) instead of
+pulling. Everything else is identical; pull remains the one default path.
 
 ## The policy variables — what your instance declares
 
@@ -129,9 +131,9 @@ mv -f ./data/backup/andvari-nightly.db.tmp ./data/backup/andvari-nightly.db
 # then rsync/restic/borg the whole ./data directory off-host
 ```
 
-Cron that nightly (it is a lift of the reference instance's
-`ops/nightly-db-backup.sh`, which also shows the failure-alerting shape). Restore =
-put `andvari.db` + `blobs/` back under `./data` and `docker compose up -d`.
+Cron that nightly, and alert yourself when it fails — a backup you never notice
+breaking is not a backup. Restore = put `andvari.db` + `blobs/` back under `./data`
+and `docker compose up -d`.
 
 Also part of your backup posture, but **never digital**: the printed recovery sheets
 from the ceremony, and members' own `.andvari` export files if they make them.

@@ -296,8 +296,9 @@ replay); a tab becoming visible with a dead socket reconnects immediately, and a
 401/403 at ticket mint (dead session) stops reconnection and drops to the lock screen.
 Clients without WS poll `/sync` + refresh `/client-policy`: Android on every
 foreground transition and every 5 min while foregrounded and unlocked; desktop on
-window focus regained and every 5 min while unlocked. Server pings every 30 s; both
-proxies in front (tailscale serve, cloudflared) pass WebSocket upgrades — verified in P1.
+window focus regained and every 5 min while unlocked. Server pings every 30 s. Whatever
+front an instance runs MUST pass WebSocket upgrades through to the app; a front that
+strips them degrades every client to the poll path (correct, just slower).
 
 ## 7. Admin (isAdmin only; every call audited)
 
@@ -532,7 +533,7 @@ first armed week): purge vaults past grace (spec 02 §7) and expire transfer off
 `expiresAt`; a Grafana/Loki alert fires on any vault with `purgeAt < now-2d AND purgedAt IS
 NULL`. **Admin succession: no admin lifecycle route exists BY DESIGN** (a server route that
 reassigns owner rows *is* the F16 forgery class) — a lost/disabled owner is recovered via
-spec 04 §4 escrow recovery, then acts as owner (`ops/runbooks/vault-succession.md`).
+spec 04 §4 escrow recovery, then signs in and transfers or deletes the vault as its owner.
 
 ## 12. Per-member self-service recovery
 

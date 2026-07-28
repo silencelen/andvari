@@ -1,6 +1,9 @@
 # In-page card chip (C1) — the field-anchored card affordance
 
-**Status: DRAFT — breaker review pending.** Owner-triggered by a failed real-world checkout test
+**Status: SHIPPED — extension 0.19.0 (`59d523f`, 2026-07-26; both stores).** Breaker review is
+folded in: two passes (security/egress and correctness) plus a find→refute review, whose binding
+amendments are the `[S*]`/`[K*]` markers below — notably `[S3]`, which struck the drafted "vault
+holds ≥1 card" presence condition as a vault-state leak. Owner-triggered by a failed real-world checkout test
 (2026-07-26: "suggested card autofill not working on eBay/Amazon"). Root cause was NOT a
 regression: cards have never had an in-page prompt — `formFor` (content.ts:152) matches only
 username/password/newPassword, so `maybeOpen` never fires on a card field. The audit called this

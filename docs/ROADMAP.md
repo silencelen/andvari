@@ -1,10 +1,28 @@
 # andvari — Roadmap
 
-Where andvari is, what gates real-secret migration, and where it goes next. Living doc;
-the SSOT for *state* is the memory file `andvari-password-manager-2026-07-05.md` + the
-git history. This is the SSOT for *direction*.
+Where andvari is, what gates real-secret migration, and where it goes next. Living doc.
+**The SSOT for *state* is the git history + `CHANGELOG.md`** — when this file and a commit
+disagree, the commit wins. This is the SSOT for *direction* only.
 
-## Public-release trust & attestation campaign — 2026-07-16 (design drafted; ORCHESTRATOR PICKUP)
+> **Reading this file.** Sections are dated campaign records, kept rather than deleted so the
+> reasoning stays auditable. Done work is marked with ~~strike-through~~ + a **DONE `<date>`**
+> and a commit; anything unmarked is genuinely open. Reconciled against git 2026-07-27.
+>
+> **Two conventions in the older sections.** (1) Paths under `ops/` and `docs/{assess,pentest,recon,drills}/`
+> were never in this repository — they are the reference instance's private, out-of-tree operational
+> area; read them as "recorded elsewhere", not as broken links. (2) `CT122` and similar names are that
+> one instance's host labels, not part of the product; andvari is endpoint-agnostic and every client
+> works with any server (spec 00 "System shape", `docs/self-hosting.md`).
+
+## Public-release trust & attestation campaign — 2026-07-16 (partly landed; see status)
+
+> **Status 2026-07-27.** The flip happened — the repository is public and the owner forks were
+> taken: **F1** landed (`LICENSE` + `LICENSING.md`), **F2** landed (full history published), and
+> **W3 is largely in place** (`.github/workflows/codeql.yml`, `scorecard.yml`,
+> `gradle-wrapper-validation.yml`, `.github/dependabot.yml`, `SECURITY.md`). **Still open:**
+> W1 whitepaper, W2 wire-egress harness, W4 artifact provenance (note GitHub Actions cannot run
+> release builds on this account — releases are published by hand from a build host), W5 fuzzing,
+> W6 external audit, W7 posture-doc publication. Lane text below is the original plan, unedited.
 
 The outward-facing trust layer for the public flip: what proves to a stranger that the crypto
 does what we say and that any server operator sees exactly spec 02 §5 and nothing more. Design:
@@ -68,15 +86,18 @@ deployed to CT122 / not yet a native release** at time of writing — see the de
 - **Card creation flipped live** (Option A; 0.2.x MSI retired).
 
 **Deferred / follow-ups (documented, not dropped):** native admin-fingerprint-confirm (needs a native
-admin surface) · web forced-theme cold-load FOUC (cosmetic; a same-origin boot script) · surface the
-extension's fail-closed-quiet update state in the popup (§M-D4b) · the determinism metaV-regression
+admin surface) · web forced-theme cold-load FOUC (cosmetic; a same-origin boot script) · ~~surface the
+extension's fail-closed-quiet update state in the popup (§M-D4b)~~ **DONE 2026-07-15 (`0b9f608`) —
+`updateStatus` carries `quietReason`, rendered as one muted popup line** · the determinism metaV-regression
 warning is console-only (a user-facing banner needs a UI pass) · a cross-device `recoverySelfSetup`
 race noted earlier is superseded by the piece-binding above. **web-offline durable cache** = SHIPPED
 (S1–S6 built+verified, DEPLOYED to CT122 2026-07-15; `docs/design/2026-07-13-web-offline-cache.md`) —
 encrypted IndexedDB twin of the native cache, offline unlock + reads, durable persist-gated write
 queue; unit suite + live e2e (`scripts/e2e.sh` PHASE C: A2 ciphertext-only, offline unlock, torn-cache
-resync, queued flush) green; web-only, no wire/schema/version change; ON by default for private/
-tailnet origins, opt-in-only on the public break-glass origin.
+resync, queued flush) green; web-only, no wire/schema/version change; ~~ON by default for private/
+tailnet origins, opt-in-only on the public break-glass origin~~ — **that origin gate was replaced
+the same week by the 2026-07-15 pivot: the cache is now opt-in on EVERY origin, default OFF, with a
+one-time migration adopting standing pre-pivot caches (spec 02 §8.1, spec 05 T3).**
 
 ## Security pentest 2026-07-13 — remediation status + open H2 items
 
@@ -87,11 +108,17 @@ trust scoping, **M6** backup-cli PAN/CVV redaction, **L6** identityPub tampering
 revoked-session WS teardown. **H2** (signed updates) load-bearing OS-signing DONE — MSI Authenticode +
 deb GPG (ceremony 2026-07-14, `docs/runbooks/release-signing-keys.md`).
 
-**Open — two H2 items (both owner-adjacent):**
-1. **Extension store-signing — DO FIRST.** Self-hosted extension zips have no integrity; the real fix
-   is publishing to the **Chrome Web Store (unlisted)** + **Firefox AMO (self-distribution signing)**.
-   The 0.13.0 zips are built + ready; step-by-step + listing copy + privacy policy in
-   `docs/runbooks/extension-store-publishing.md`. This is the only platform with NO installer signing.
+**Both H2 items are now CLOSED:**
+1. ~~**Extension store-signing — DO FIRST.**~~ **DONE.** The extension publishes to the
+   **Chrome Web Store (unlisted)** +
+   **Firefox AMO (self-distribution signing)**, so store-signed auto-updates replaced the
+   integrity-free self-hosted zips. `scripts/publish-extension.sh` pushes BOTH stores in one
+   command (Chrome Publish API + `web-ext sign`) — landed `ecfc10a` 2026-07-17, with `f37f313`
+   adding the Chrome push queue for releases that outpace store review. The live CWS item id and
+   AMO addon id are recorded in the runbook. Runbook + listing copy + privacy policy:
+   `docs/runbooks/extension-store-publishing.md`. **Standing per-release step, easy to skip:**
+   any release that changes `/downloads/manifest.json` must re-sign it with a bumped `seq` —
+   see the runbook's "Then RE-SIGN the downloads manifest".
 2. ~~**Client manifest-verify wiring — secondary / defense-in-depth.**~~ **DONE 2026-07-14 (0.17.0
    campaign).** Desktop `Platform.kt` + extension `background.ts` now fetch the manifest as raw bytes +
    its detached `.sig`, verify Ed25519 against the pinned key (single-sourced to `core UpdateVerify.PINNED`)
@@ -128,25 +155,34 @@ pending a release**.
 - **Feedback & a11y** — truthful clipboard/copy disclosure (#10); the extension autofill dropdown got
   truthful fill-outcomes + full keyboard/listbox semantics (#14/#18); enroll accepts a pasted link (#13).
 
-**Remaining (all files now free; parallelizable by module):**
-- **#23** household voice + error-string sweep (all clients; Android just maps web's existing strings).
-- **#24 remainder** motion/progress layer on web+desktop (android unlock caption done) + `prefers-reduced-motion`
-  + the desktop synchronous update-check UI freeze (one-line `withContext`).
-- **#25** port the tofu-proof SVG runes to the extension + Compose (the mark renders as tofu on stock
-  macOS/iOS/Linux where anti-spoofing lives; web already solved it with SVG geometry).
-- **#26** user theme override (Auto/Light/Dark) — Linux desktop is hard-stuck in the light theme.
+**Remaining — one item. #23–#26 all shipped in the 0.17.0 campaign** (see that section above, which
+this list predated and contradicted until 2026-07-27):
+- ~~**#23** household voice + error-string sweep~~ **DONE 0.17.0** — shared core `HouseholdCopy`,
+  natives mapped off it.
+- ~~**#24 remainder** motion/progress layer + `prefers-reduced-motion` + the desktop update-check
+  UI freeze~~ **DONE 0.17.0.**
+- ~~**#25** tofu-proof SVG runes on the extension + Compose~~ **DONE 0.17.0.**
+- ~~**#26** user theme override (Auto/Light/Dark)~~ **DONE 0.17.0** — Linux desktop is no longer
+  stuck light.
 - **#27** platform-fit roadmap (L, needs design): extension quick-unlock tier, desktop menu bar + Ctrl+L,
-  CMP screen-reader verification.
+  CMP screen-reader verification. **Mostly overtaken — two of three landed:** the extension
+  quick-unlock tier shipped separately (`6d18faa` PIN-wrapped Tier B per spec 01 §8.4, then the
+  biometric WebAuthn-PRF lane in **extension** 0.17.0, `2cb7847`), and the desktop menu bar +
+  Ctrl+L panic lock shipped (`Main.kt:134-147`, citing the same platform-fit design §2). What is
+  genuinely left is the **Compose screen-reader verification** — a verification pass, not a build.
+  Design: `docs/design/2026-07-13-platform-fit.md`.
 
-**Cross-cut follow-ups (need their own passes, NOT UI cuts):**
-- **Cross-device `recoverySelfSetup` race** (server, silent-loss class, flagged by the #15 review):
-  `Service.kt recoverySelfSetup` rotates the recovery block without resetting `recoveryConfirmed` in the same
-  tx, so a 2nd device's mount-time setup after a 1st device's confirm can strand the 1st's phrase. **Needs a
-  breaker-before-build pass** (ZK recovery semantics) before touching.
-- **TOTP detail "invalid" forever** for a bare-base32 / imported secret (only the web editor normalizes) —
-  `Vault.tsx TotpView` should tolerate a raw secret or normalize at the store boundary.
-- **Native release** — cuts K/L/M(android)/O(desktop)/N(ext) are committed but not on any device: rebuild
-  APK/deb/MSI + extension zips (0.16.0 code; installers lag).
+**Cross-cut follow-ups — closed:**
+- ~~**Cross-device `recoverySelfSetup` race**~~ **DONE (0.17.0 campaign, `Service.kt:530-537`).**
+  Superseded by the recovery-confirm piece-binding: self-setup now commits/rotates the piece and
+  clears `recoveryConfirmed` to 0 in the SAME tx (marked "§F.9 round-3 fix" in the code), so a 2nd
+  device's setup can no longer leave the flag attesting the 1st device's stranded phrase.
+- ~~**TOTP detail "invalid" forever** for a bare-base32 / imported secret~~ **DONE.** There is now
+  ONE shared normalize — core `Totp.normalize` (spec 06 §9.2), byte-exact with web `normalizeTotp`
+  and "delegated to by every editor and import adapter (private copies are deleted)"; the web detail
+  view normalizes before parsing (`Vault.tsx:1456`).
+- **Native release** — this was a 0.16.0-era note and no longer describes the tree. Current fielded
+  state is tracked in `CHANGELOG.md`, not here.
 
 ## v5 refinement cycle — batches B1–B8 SHIPPED (2026-07-07)
 
@@ -175,7 +211,7 @@ autofill, lifecycle cross-slice + persona walks, all findings adversarially veri
 fixes the 0.2.x edit-corruption); enroll server-TOTP (the v6-QW1 QR makes it a
 camera-scan — do it right after the QW1 deploy).
 
-## Where we are (2026-07-06, v0.4.0)
+## Where we were at 0.4.0 (2026-07-06) — historical snapshot, kept for the feature trail
 
 v1 is feature-complete and deployed (CT 122). **0.4.0 (same day, v4 cycle)** adds: spec 07
 export/backup (`.andvari` container + CSV w/ totp round-trip + `backup-cli`), enforced
@@ -216,25 +252,25 @@ importing any real password:
 2. ~~**Enroll the first admin**~~ **DONE** (bootstrap token consumed + stripped; owner admin
    enrolled against the real key). **Still open: enroll server-TOTP** (web → Settings) —
    break-glass public login is impossible without it, and CT122 shows it not yet enrolled.
-3. **Windows MSI rebuild** on the owner box (desktop ~~0.13.0~~ **0.14.2** in-tree as of 2026-07-11; fielded MSI still
-   0.2.x — the tailnet-default URL + version bump are in the tree; only the owner can run
-   jpackage/WiX). See `ops/windows-build.md`. (Batch B4 makes the update banner + 426 path
-   honest first.)
+3. ~~**Windows MSI rebuild** on the owner box (fielded MSI still 0.2.x)~~ **DONE — the 0.2.x MSI
+   was retired at 0.17.0** (`0dd0d63`, 2026-07-14; the card-create Option-A unhide was explicitly
+   gated on that retirement and fired). MSI builds remain a manual, owner-run step (jpackage/WiX
+   on a Windows box — `scripts/build-windows.ps1`) with Authenticode signing per
+   `docs/runbooks/release-signing-keys.md`; the *current* fielded desktop version is tracked in
+   `CHANGELOG.md`, not here.
 4. **On-device smoke tests** — attachments + TOTP on the Fold + desktop; the autofill Fold-7
    checklist (design §6.4); a CSV dry-run with a synthetic export; a shared-vault invite
    round-trip web↔Fold with the printed-sheet fingerprint check.
-5. ~~**Uptime-Kuma monitor** on `/healthz`~~ **DONE 2026-07-06** — gjallarhorn can't reach
-   VLAN 2 (UDM default-deny), so it's a Kuma **push** monitor (`andvari-healthz`, id 13):
-   heimdall checks `http://192.168.2.122:8080/healthz` every 2 min and pushes up/down
-   (`andvari-kuma-push.{sh,service,timer}` on heimdall, mirrored in netplan
-   `scripts/active/monitoring/`; token in `/etc/andvari-kuma-token`). Also dead-mans if
-   heimdall itself dies (pushes stop → missed-heartbeat alert → Telegram).
-6. **Drills:** PBS restore of CT122's DB + blobDir; ~~**escrow-recovery drill** with the
-   air-gapped key (recover a throwaway account end-to-end)~~ **DONE** (0.6.0-era;
-   `docs/drills/account-recovery-drill.md` + a passed drill); **min-version-pin exercise**
-   (bump `minVersion`, confirm all three clients block writes and show the upgrade path);
-   **backup-verify drill** (export a `.andvari` → `backup-cli` verify/dump/extract —
-   `docs/drills/backup-restore-drill.md`, then quarterly).
+5. ~~**Uptime monitor** on `/healthz`~~ **DONE 2026-07-06** — the server exposes an unauthenticated
+   `/healthz`; wire whatever the instance already runs at it. (The reference instance uses a
+   *push*-style monitor because its prober cannot reach the server's VLAN directly; the useful
+   property is that it also dead-mans — if the prober itself dies, the missed heartbeat alerts.)
+6. **Drills:** a restore of the server's DB + blobDir from the instance's own backups;
+   ~~**escrow-recovery drill** with the air-gapped key (recover a throwaway account
+   end-to-end)~~ **DONE** (0.6.0-era, a passed drill; `scripts/recovery-drill.sh` automates the
+   exercise against a scratch server); **min-version-pin exercise** (bump `minVersion`, confirm
+   all three clients block writes and show the upgrade path); **backup-verify drill** (export a
+   `.andvari` → `backup-cli` verify/dump/extract, then quarterly).
 7. **30-day soak** with synthetic secrets across 3 devices (web + Fold + desktop).
 8. **Migrate**, then keep the old manager **read-only for 60 days** before deleting it.
 
@@ -269,16 +305,20 @@ Prioritized; each is additive and back-compatible.
   server+web DEPLOYED CT122), 3+5 native UI (`106096f`), 4 Android autofill (`3255c1f`),
   6 extension (`f68abcb`), release cut (APK devstore, .deb + extension zips /downloads).
   Card-create DARK on every client per Option A — flip checklist in the design doc, fires
-  when the 0.2.x MSI is retired. Owner steps: Windows MSI (`ops/windows-build.md`), Fold
-  autofill re-run, extension load-unpacked. Deferred: in-page extension card fill (frame-
-  egress contract), combined-expiry LIST dropdowns, Skipti honesty line placement on natives.
+  when the 0.2.x MSI is retired. Owner steps: Windows MSI, Fold autofill re-run, extension
+  load-unpacked. Deferred at the time: ~~in-page extension card fill (frame-egress contract)~~
+  **DONE 2026-07-15 (`0b9f608`, the S3 slice + its A1–A10 egress amendments)**;
+  ~~combined-expiry LIST dropdowns~~ **DONE 2026-07-23 (card-autofill Tier 1, `4ded308`)** —
+  `<select>` expiry month/year and card type now fill, per CHANGELOG 0.20.0; Skipti honesty line
+  placement on natives (still open, cosmetic).
   **Owner dev-note 2026-07-10 (re-request): "support storing autofill creditcard and payment
-  details."** Storage/UI/Android-autofill already shipped above but card-create is DARK
-  (Option A) — so the visible to-dos are: (1) the Option-A unhide flip once the 0.2.x MSI
-  retires (checklist in the cards design doc §build-order), (2) extension in-page card fill
-  behind a breaker-passed frame-origin egress design, (3) scope decision on non-card payment
-  types (IBAN / bank account) as a new template. Tracked in
-  `docs/PLAN-autonomous-2026-07.md` §"Owner dev-notes queued".
+  details."** Storage/UI/Android-autofill shipped above, and the rest has since landed too:
+  (1) ~~the Option-A unhide flip~~ **DONE 2026-07-14 (`0dd0d63`)** — card-create is live on every
+  client; (2) ~~extension in-page card fill behind a breaker-passed frame-origin egress design~~
+  **DONE 2026-07-15 (`0b9f608`)**, extended 2026-07-23/26 by the card-autofill campaign
+  (`4ded308`/`2abb0a3`/`c2ab855`/`3087988`) and the in-page card chip (`59d523f`); (3) scope
+  decision on non-card payment types (IBAN / bank account) as a new template — **still open, and
+  it is a product decision, not a build.**
 - **Browser extension** — *owner-requested 2026-07-07 (reaffirmed).* Reuses the `:core`/web
   `UriMatch` + `FieldClassifier` (already built + vector-tested for exactly this) and the
   same-origin API; carries the web save-flow. Chromium + Firefox. Go/no-go spike:
@@ -333,9 +373,10 @@ Prioritized; each is additive and back-compatible.
   Settings section: this browser, devstore Android (with install QR, tailnet-only labelled),
   Windows MSI via `/downloads/manifest.json` (honest "not published yet" until the owner
   publishes; no extension row until one exists). Hidden on the public break-glass origin
-  (shared `isPrivateOrigin`). The batch also shipped the Skipti purge-visibility gauges
-  (`andvari_vaults_deleted_pending` / `_purge_overdue`) — apply the ops alert per
-  `ops/grafana-purge-stall-alert.md` after deploy.
+  (shared `isPrivateOrigin` — since removed by the 2026-07-15 endpoint-agnostic pivot). The batch
+  also shipped the Skipti purge-visibility gauges (`andvari_vaults_deleted_pending` /
+  `_purge_overdue`); ~~the matching stall alert is an ops follow-up~~ **applied 2026-07-11
+  (`408b31a`)**. Both gauges are on `/metrics` for any instance to alert on.
 - **Guided per-source importers** — replace the single generic "CSV upload" with named,
   instructioned flows: "Import from Chrome / Edge / Brave / Opera" (all export the *same*
   Chromium CSV the current importer already parses — so this slice is mostly a friendlier
@@ -408,7 +449,14 @@ Prioritized; each is additive and back-compatible.
   building. Pairs naturally with the "email this invite" note above (same form; if both land, the
   result offers token + QR + optional email in one flow).
 
-- **Owner dev-note (BUG) 2026-07-12 — password-only re-auth autofill creates a DUPLICATE item.**
+- ~~**Owner dev-note (BUG) 2026-07-12 — password-only re-auth autofill creates a DUPLICATE item.**~~
+  **DONE 2026-07-12 (`2e5f34a`)** ("password-only re-login no longer creates a
+  duplicate", extension 0.12.0 + Android). Both surfaces the note asked to check were fixed:
+  the extension resolves a save target from the site's existing items and drops the offer when the
+  submitted password already matches (`background.ts:2840-2841`), and Android's
+  `SaveConfirmActivity.resolveStages` skips the login stage on an unchanged re-login — its code
+  calls it "the dup-registration suppress" (`SaveConfirmActivity.kt:185`). Original note kept below
+  for the reasoning trail.
   Symptom (owner, live): on a site whose re-login form shows ONLY a password field, the owner
   autofills the password from an andvari suggestion and submits; andvari's save-offer then asks
   to "save this login?" as if it's new, and accepting creates a SECOND item (password-only)
@@ -425,8 +473,12 @@ Prioritized; each is additive and back-compatible.
   fill. **Size S–M, P2 (data hygiene — silently clutters the vault with dupes).** Verify against
   the shipped save-flow before designing.
 
-- **Owner dev-note (enhancement) 2026-07-12 — accelerate live cross-client sync via a change
-  push.** Owner want: when a member changes an item, push an update notice to the OTHER remote
+- ~~**Owner dev-note (enhancement) 2026-07-12 — accelerate live cross-client sync via a change
+  push.**~~ **DONE 0.17.0** — MV3 live-sync shipped (design `docs/design/2026-07-13-ext-live-sync.md`):
+  the extension holds an unlock-scoped WebSocket, so a peer edit lands in ~1–2 s, with the 5-min poll
+  retained as a backstop. Exactly the use case the note described (edit in the web vault, see it in
+  the extension without a manual refresh). Original note kept below for the reasoning trail.
+  **Owner want:** when a member changes an item, push an update notice to the OTHER remote
   clients on that vault so they pick it up quickly (use case: edit in the web app because it's
   easier to navigate → want the extension to reflect it without a manual refresh). **Current
   state to verify:** the server already has a WebSocket notify path (spec 03 §WS notify) that the
@@ -482,22 +534,35 @@ each cycle. Small reviewed batches, additive wire, docs true as you go.
 - **R7** removed shared-vault member keeps decryption capability for ciphertext they held
   until VK rotation (P6). **R3** the escrow key holder can decrypt every account (it *is* the
   recovery feature). **R1** JVM/JS can't guarantee secret zeroization. **R4** server sees
-  traffic metadata + membership topology. **R5** single server (offline-first + PBS/shadow,
-  not HA). **R6** TOTP seeds co-located with passwords. Full text: `spec/05-threat-model.md`.
+  traffic metadata + membership topology. **R5** single server per instance (offline-first +
+  the operator's backups, not HA). **R6** TOTP seeds co-located with passwords. Full text:
+  `spec/05-threat-model.md`.
 
 ## Operational cadence (once real secrets are in)
 
-- **Backups:** daily PBS (02:00) covers CT122; nightly `VACUUM INTO` for a clean snapshot;
-  skybox DR shadow 2122. Quarterly PBS-restore drill.
-- **Escrow:** annual presence-verification of both printed sheets + the USB; re-ceremony +
-  full re-escrow + item re-key on any suspected compromise (manual runbook, spec 04).
-- **Monitoring:** Grafana `Andvari Alerts` (no-metrics, auth-fail burst, break-glass>24h) +
-  the Kuma `/healthz` monitor; audit → Loki.
+Written for the reference instance; a self-hoster should read it as the *shape* of the cadence
+and substitute their own tooling.
+
+- **Backups:** a daily off-box snapshot of the server's data directory, plus a nightly
+  `VACUUM INTO` for a clean, consistent DB copy. Quarterly restore drill — a backup nobody has
+  restored is a hypothesis.
+- **Escrow:** annual presence-verification of both printed sheets + the USB; annual canary
+  verify + drill (spec 04 §4); re-ceremony + full re-escrow + item re-key on any suspected
+  compromise.
+- **Monitoring:** an uptime check on `/healthz`, and alerts on the metrics the server already
+  exports — no metrics arriving at all, an auth-failure burst, a break-glass origin left armed
+  longer than expected, and the purge-stall gauges. Ship the audit log off-box: it is only
+  tamper-*evident* if a copy lives somewhere the server cannot rewrite.
 - **Security:** re-run the hardening self-audit before each major feature that touches the
-  server or crypto; rotate the tailnet auth key on schedule.
-- **Releases:** verify.sh + e2e.sh green → `ops/deploy.sh` (server+web) → `scripts/ship.sh`
-  (Android → devstore) → owner MSI (desktop). Keep the 7 crypto vector files byte-identical;
-  regenerate only the new one per feature.
+  server or crypto.
+- **Releases:** `scripts/verify.sh` + `scripts/e2e.sh` green, then, per surface:
+  **server + web** → `scripts/publish-image.sh <ver>` (multi-arch GHCR image; self-hosters pull
+  it); **extension** → `extension/package.mjs` then `scripts/publish-extension.sh` (Chrome Web
+  Store + AMO), **followed by re-signing `/downloads/manifest.json` with a bumped `seq`**;
+  **desktop** → `scripts/build-windows.ps1` on a Windows box + Authenticode, and the signed deb;
+  **Android** → the signed APK. Signing keys and the per-release ceremony:
+  `docs/runbooks/release-signing-keys.md`. Keep the crypto vector files byte-identical;
+  regenerate only the new one per feature (`spec/test-vectors/README.md`).
 
 ## Dependency upgrade lanes (Dependabot triage 2026-07-17)
 
