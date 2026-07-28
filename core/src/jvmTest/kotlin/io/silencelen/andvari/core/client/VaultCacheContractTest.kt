@@ -1,6 +1,8 @@
 package io.silencelen.andvari.core.client
 
 import io.silencelen.andvari.core.model.Mutation
+import io.silencelen.andvari.core.model.PendingTransfer
+import io.silencelen.andvari.core.model.TransferRecord
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
 import io.silencelen.andvari.core.model.WireVault
@@ -68,6 +70,20 @@ abstract class VaultCacheContractTest {
         assertEquals(2, c.grants().size)
         assertEquals("sealed", c.grants().single { it.vaultId == "v2" }.sealedVk)
         assertEquals("meta1", c.vaults().single { it.vaultId == "v1" }.metaBlob)
+    }
+
+    @Test fun vaultsRoundTripEveryLifecycleField() {
+        // The additive spec 03 §11 fields must survive the cache: pendingTransfer feeds
+        // the accept/consent surfaces and offer-seq chaining straight off vaults() reads.
+        val c = newCache()
+        val full = WireVault(
+            "v1", "shared", 9, "META", 100,
+            pendingTransfer = PendingTransfer("u2", "offer-1", "PROOF", 123L, 4L),
+            lastTransfer = TransferRecord("offer-0", "u1", "ACCEPT", 3L, "ab".repeat(32)),
+            restoreProof = "RESTORE", deleteId = "del-0",
+        )
+        c.upsertVault(full)
+        assertEquals(full, c.vaults().single())
     }
 
     @Test fun dropVaultPurgesGrantVaultAndItems() {

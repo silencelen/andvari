@@ -16,11 +16,11 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The v1→v2 cache migration + the 0.5.0 lifecycle persistence (#8): this migration first
- * executes IN PRODUCTION on fielded phones' populated v1 databases, so it is exercised
- * here against a hand-built v1 schema with real rows — plus HeldVaultRecord round-trip,
- * the staged-denied queue state, clear()-preserves-safety-state, and the account-mismatch
- * full wipe.
+ * The v1→v2 and v2→v3 cache migrations + the 0.5.0 lifecycle persistence (#8): these
+ * migrations first execute IN PRODUCTION on fielded phones' populated databases, so they
+ * are exercised here against hand-built v1/v2 schemas with real rows — plus
+ * HeldVaultRecord round-trip, the staged-denied queue state,
+ * clear()-preserves-safety-state, and the account-mismatch full wipe.
  */
 class SqliteVaultCacheLifecycleTest {
     private val tmp = Files.createTempDirectory("andvari-cache-v2").toFile()
@@ -97,7 +97,56 @@ class SqliteVaultCacheLifecycleTest {
         cache.close()
 
         val raw = openSqlBox(path)
-        assertEquals(2, raw.userVersion)
+        assertEquals(3, raw.userVersion) // migrations chain: v1→v2→v3 in one open
+        raw.close()
+    }
+
+    /** Hand-build a POPULATED v2-schema db — byte-for-byte the pre-v3 layout (5-column vaults). */
+    private fun buildV2Db(path: String, userId: String) {
+        buildV1Db(path, userId)
+        val db = openSqlBox(path)
+        db.tx {
+            db.exec("CREATE TABLE held(vaultId TEXT PRIMARY KEY, json TEXT NOT NULL, expungeAt INTEGER NOT NULL)")
+            db.exec("CREATE TABLE consumed_delete_ids(deleteId TEXT PRIMARY KEY)")
+            db.exec("CREATE TABLE transfer_seq(vaultId TEXT PRIMARY KEY, seq INTEGER NOT NULL)")
+            db.exec("ALTER TABLE queue ADD COLUMN staged INTEGER NOT NULL DEFAULT 0")
+            db.exec("INSERT INTO consumed_delete_ids(deleteId) VALUES('del-0')")
+            db.exec("INSERT INTO transfer_seq(vaultId,seq) VALUES('v1',3)")
+        }
+        db.userVersion = 2
+        db.close()
+    }
+
+    @Test
+    fun v2ToV3MigrationPreservesEveryRowAndSelfHealsLifecycleFields() {
+        val path = newPath()
+        buildV2Db(path, "u1")
+
+        val cache = sqliteVaultCache(path, "u1")
+        // Every v2 row intact; the pre-v3 vault row reads back with the lifecycle fields
+        // null (they were never stored — nothing to backfill).
+        assertEquals(42L, cache.cursor())
+        assertEquals(wireItem, cache.envelopes().single())
+        assertEquals(wireGrant, cache.grants().single())
+        assertEquals(wireVault, cache.vaults().single())
+        assertEquals(listOf(mutation("m1", "v1")), cache.pending())
+        assertTrue(cache.isConsumedDeleteId("del-0"))
+        assertEquals(3L, cache.lastVerifiedTransferSeq("v1"))
+        // Self-heal: the row's next delivery persists the FULL WireVault durably.
+        val full = wireVault.copy(
+            pendingTransfer = PendingTransfer("u2", "offer-1", "PROOF", 123L, 4L),
+            lastTransfer = TransferRecord("offer-0", "u1", "ACCEPT", 3L, "ab".repeat(32)),
+            restoreProof = "RESTORE", deleteId = "del-0",
+        )
+        cache.upsertVault(full)
+        cache.close()
+
+        val reopened = sqliteVaultCache(path, "u1") // "process restart"
+        assertEquals(full, reopened.vaults().single())
+        reopened.close()
+
+        val raw = openSqlBox(path)
+        assertEquals(3, raw.userVersion)
         raw.close()
     }
 

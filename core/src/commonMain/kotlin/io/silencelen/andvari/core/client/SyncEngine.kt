@@ -326,6 +326,17 @@ class SyncEngine(
         for (m in cache.stagedDenied()) {
             preParkedByVault.getOrPut(m.vaultId) { mutableListOf() }.add(StagedDenial(m, 0))
         }
+        // Rebuild incoming-transfer state (spec 03 §11): a pending-offer row is NOT
+        // re-delivered while the offer merely pends (only cancel/expiry/re-designate/
+        // accept re-deliver it), so the verified consent surface must be recomputed from
+        // the cached rows or a restart mid-offer loses the offer until the owner acts.
+        // noticeable=false: rebuilding must never re-fire completion/anomaly notices for
+        // rows already seen before the restart. Idempotent per row (it starts by clearing
+        // the vault's entry), and a verified-completion sighting still advances the
+        // durable seq floor — an apply-time verification skip is retried here.
+        for (v in cache.vaults()) {
+            runCatching { applyTransferState(v, noticeable = false) }
+        }
     }
 
     /** Close the underlying cache (must precede deleting its DB file — Windows file locks). */
