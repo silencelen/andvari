@@ -893,7 +893,7 @@ class Service(
     private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, deniedMetas: MutableList<String>): MutationResult {
         val item = m.item ?: throw BadRequest("put_without_item")
         validateAttachmentRefs(c, m, item.attachmentIds)
-        val vaultUsers = vaultMemberIds(c, m.vaultId).also { affected.addAll(it) }
+        affected.addAll(vaultMemberIds(c, m.vaultId))
         val t = now()
         if (existing == null) {
             val rev = repo.nextRev(c, "item", m.itemId, m.vaultId)
@@ -931,7 +931,7 @@ class Service(
 
     private fun applyDelete(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, filesToUnlink: MutableList<String>): MutationResult {
         if (existing == null || existing.deleted) return MutationResult(m.mutationId, "applied") // idempotent
-        val vaultUsers = vaultMemberIds(c, m.vaultId).also { affected.addAll(it) }
+        affected.addAll(vaultMemberIds(c, m.vaultId))
         // Edit-beats-delete: a delete against a stale rev loses to the newer edit.
         if (m.baseItemRev < existing.rev) {
             return MutationResult(m.mutationId, "conflict", existing.rev, serverItem = existing)
@@ -1484,7 +1484,6 @@ class Service(
         const val RECOVERY_TICKET_TTL_MS = 5L * 60 * 1000
         // A fixed valid argon2id string so unknown-user logins spend the same CPU (timing).
         val DUMMY_VERIFIER: String = ServerCrypto.hashVerifier("andvari-dummy-authkey")
-        private val UUID_RE = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
         internal const val DAY_MS = 24L * 3600 * 1000
     }
 }

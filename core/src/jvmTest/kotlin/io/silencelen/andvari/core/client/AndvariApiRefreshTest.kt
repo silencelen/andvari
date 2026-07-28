@@ -28,9 +28,15 @@ import kotlin.test.assertTrue
  *  - two concurrent 401s must never double-spend the same rotating refresh token — the
  *    server treats reuse as theft (refresh_reuse) and revokes the whole device;
  *  - a transient refresh failure (502/503/429) must KEEP the token pair;
- *  - only a definitive 401/403 from the refresh endpoint clears it.
+ *  - only a definitive 401/403 from the refresh endpoint clears it;
+ *  - uploadAttachment, the ONE call that hand-rolls its own 401→refresh→retry outside
+ *    [AndvariApi.request], retries exactly like every other call (quality-tests--12).
  */
 class AndvariApiRefreshTest {
+
+    private companion object {
+        const val ATTACHMENT_ID = "11111111-2222-3333-4444-555555555555"
+    }
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -76,6 +82,17 @@ class AndvariApiRefreshTest {
         }
 
         fun accessOk(authorization: String?): Boolean = synchronized(lock) { authorization == "Bearer $validAccess" }
+
+        /** Attachment PUTs seen, and how many of them were rejected 401. */
+        var uploadAttempts = 0
+            private set
+        var upload401s = 0
+            private set
+
+        fun recordUpload(ok: Boolean) = synchronized(lock) {
+            uploadAttempts++
+            if (!ok) upload401s++
+        }
     }
 
     private val emptySync = """{"rev":1,"full":false,"vaults":[],"grants":[],"items":[],"removedGrants":[]}"""
@@ -99,6 +116,19 @@ class AndvariApiRefreshTest {
                         server.recordSync401()
                         respond("""{"error":"unauthorized","message":"bad access token"}""", HttpStatusCode.Unauthorized, jsonHeaders())
                     }
+                "/api/v1/attachments/$ATTACHMENT_ID" -> {
+                    val ok = server.accessOk(request.headers[HttpHeaders.Authorization])
+                    server.recordUpload(ok)
+                    if (ok) {
+                        respond(
+                            """{"attachmentId":"$ATTACHMENT_ID","itemId":"item-1","vaultId":"vault-1","size":${request.body.toByteArray().size},"sha256":"deadbeef"}""",
+                            HttpStatusCode.OK,
+                            jsonHeaders(),
+                        )
+                    } else {
+                        respond("""{"error":"unauthorized","message":"bad access token"}""", HttpStatusCode.Unauthorized, jsonHeaders())
+                    }
+                }
                 else -> respond("""{"error":"not_found","message":"unexpected path"}""", HttpStatusCode.NotFound, jsonHeaders())
             }
         }
@@ -141,6 +171,40 @@ class AndvariApiRefreshTest {
         // Proxy recovered: the SAME kept pair refreshes and the call goes through.
         assertEquals(1L, api.sync(0).rev)
         assertFalse(server.reusedRefresh)
+        api.close()
+    }
+
+    @Test
+    fun uploadAttachmentRefreshesOnceAndRetries() = runBlocking {
+        // uploadAttachment cannot ride request() — it streams a raw octet-stream body — so it
+        // repeats the refresh/retry loop by hand. Nothing pinned that loop, which is exactly how
+        // it would rot into "401 → give up" while every request()-based call kept working: a
+        // stale access token would then fail the LAST leg of every attachment save.
+        val server = FakeAuth()
+        val api = apiAgainst(server, Tokens("stale-access", "refresh-0"))
+        val meta = api.uploadAttachment(ATTACHMENT_ID, "item-1", "vault-1", ByteArray(11) { 7 })
+        assertEquals(ATTACHMENT_ID, meta.attachmentId)
+        assertEquals(11L, meta.size, "the retry must resend the SAME body, not an empty one")
+        assertEquals(2, server.uploadAttempts, "expected exactly one retry after the 401")
+        assertEquals(1, server.upload401s)
+        assertEquals(1, server.refreshCalls)
+        assertFalse(server.reusedRefresh)
+        assertNotNull(api.currentTokens())
+        api.close()
+    }
+
+    @Test
+    fun uploadAttachmentSurfacesTheErrorWhenTheRefreshFails() = runBlocking {
+        // The other half of the contract: a refresh that cannot succeed must surface the 401
+        // rather than loop, and must not silently swallow it into a "successful" upload.
+        val server = FakeAuth().apply {
+            refreshFailuresToServe = 1
+            refreshFailureStatus = HttpStatusCode.Unauthorized
+        }
+        val api = apiAgainst(server, Tokens("stale-access", "refresh-0"))
+        val failed = assertFailsWith<ApiException> { api.uploadAttachment(ATTACHMENT_ID, "item-1", "vault-1", ByteArray(4)) }
+        assertEquals(401, failed.status)
+        assertEquals(1, server.uploadAttempts, "a failed refresh must not re-send the body")
         api.close()
     }
 

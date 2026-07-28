@@ -104,14 +104,27 @@ class AdminService(private val repo: Repo, private val config: Config) {
         if (refusal != null) throw BadRequest(refusal)
     }
 
-    /** Returns the revoked device's owner userId (null if the device row is absent) so the route can
-     *  push {revoked} + close that device's live WS socket (M8). */
-    fun revokeDevice(deviceId: String, byUserId: String): String? = repo.db.tx { c ->
-        val owner = c.queryOne("SELECT userId FROM devices WHERE deviceId=?", deviceId) { it.getString(1) }
-        c.exec("UPDATE devices SET revokedAt=? WHERE deviceId=?", now(), deviceId)
-        c.exec("UPDATE sessions SET revokedAt=? WHERE deviceId=? AND revokedAt IS NULL", now(), deviceId)
-        repo.auditOn(c, "device_revoke", byUserId, deviceId, null)
-        owner
+    /** Returns the revoked device's owner userId so the route can push {revoked} + close that
+     *  device's live WS socket (M8). An UNKNOWN deviceId is a refusal, not a no-op success: the
+     *  admin who mistyped/pasted a stale id must not be told "ok" while the compromised device
+     *  stays live, and the audit trail must not carry a device_revoke row for a device that never
+     *  existed — an incident review reads that as a completed revocation (bug-server--8). Audited
+     *  as device_revoke_denied INSIDE the tx and thrown OUTSIDE it, exactly like [disableUser]. */
+    fun revokeDevice(deviceId: String, byUserId: String): String {
+        val owner: String? = repo.db.tx { c ->
+            val found = c.queryOne("SELECT userId FROM devices WHERE deviceId=?", deviceId) { it.getString(1) }
+            if (found == null) {
+                // meta carries the reason ALONE — unlike user_disable_denied, the audit row has a
+                // deviceId column of its own, so restating the id there would just duplicate it.
+                repo.auditOn(c, "device_revoke_denied", byUserId, deviceId, null, "no_such_device")
+                return@tx null
+            }
+            c.exec("UPDATE devices SET revokedAt=? WHERE deviceId=?", now(), deviceId)
+            c.exec("UPDATE sessions SET revokedAt=? WHERE deviceId=? AND revokedAt IS NULL", now(), deviceId)
+            repo.auditOn(c, "device_revoke", byUserId, deviceId, null)
+            found
+        }
+        return owner ?: throw NotFound("no_such_device")
     }
 
     /** Upload recovery-cli output (spec 04 §4): set temp creds + force change + revoke sessions. */

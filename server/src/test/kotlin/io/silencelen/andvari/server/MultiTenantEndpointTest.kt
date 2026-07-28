@@ -578,6 +578,62 @@ class MultiTenantEndpointTest : P4TestSupport() {
         assertTrue(notes.notes.any { "deprecated" in it })
     }
 
+    /**
+     * bug-server--7: envLint and fromEnv used to disagree about what a numeric var may be. Lint
+     * accepted anything that fit a Long while fromEnv called bare toInt(), so a lint-CLEAN value
+     * could still throw NumberFormatException out of Config.fromEnv — an unhandled boot stack,
+     * including under ANDVARI_STRICT_ENV=1 where the operator was promised a clean problem list.
+     * Nothing rejected negatives either. One range table now backs both sides.
+     */
+    @Test
+    fun numericEnv_lintAndParseAgree_outOfRangeIsNamedThenDegradesToTheDefault() {
+        val secret = Bytes.toB64(ByteArray(32) { 1 })
+        fun envOf(vararg pairs: Pair<String, String>): (String) -> String? {
+            val m = mapOf("ANDVARI_ENUM_SECRET" to secret, *pairs)
+            return { name -> m[name] }
+        }
+
+        // (1) Range: too big for an Int. Lint must NAME it (it used to pass)…
+        val huge = Config.envLint(mapOf("ANDVARI_PORT" to "3000000000"))
+        assertEquals(1, huge.problems.size, huge.problems.toString())
+        assertTrue(huge.problems.single().let { "ANDVARI_PORT" in it && "outside" in it }, huge.problems.toString())
+        // …and fromEnv must survive it rather than throw out of boot.
+        assertEquals(8080, Config.fromEnv(envOf("ANDVARI_PORT" to "3000000000")).port)
+
+        // (2) Sign: a negative grace stamped every purgeAt in the PAST, so the next janitor sweep
+        // purged with the grace window silently gone. Named by lint, ignored by fromEnv.
+        val negative = Config.envLint(mapOf("ANDVARI_VAULT_GRACE_DAYS" to "-7"))
+        assertEquals(1, negative.problems.size, negative.problems.toString())
+        assertEquals(7, Config.fromEnv(envOf("ANDVARI_VAULT_GRACE_DAYS" to "-7")).vaultGraceDays)
+
+        // (3) The loud channel now covers what fromEnv already silently rejected: a 0 login rate
+        // fell back to 5 but linted clean, so nobody was ever told the setting hadn't applied.
+        assertTrue(Config.envLint(mapOf("ANDVARI_LOGIN_RATE_PER_MIN" to "0")).problems.isNotEmpty())
+
+        // (4) Every var in the table is readable end-to-end at a legal value, and the lint agrees.
+        val legal = mapOf(
+            "ANDVARI_PORT" to "9443", "ANDVARI_SMTP_PORT" to "2525",
+            "ANDVARI_MIN_KDF_MEM" to "134217728", "ANDVARI_MIN_KDF_OPS" to "4",
+            "ANDVARI_UPLOAD_MAX_CONCURRENT" to "8",
+            "ANDVARI_REQUEST_READ_TIMEOUT_S" to "300", "ANDVARI_RESPONSE_WRITE_TIMEOUT_S" to "120",
+            "ANDVARI_VAULT_GRACE_DAYS" to "30", "ANDVARI_TRANSFER_TTL_DAYS" to "21",
+            "ANDVARI_LOGIN_RATE_PER_MIN" to "9",
+        )
+        assertEquals(Config.NUM_ENV_RANGES.keys, legal.keys, "keep this table in lockstep with NUM_ENV_RANGES")
+        assertTrue(Config.envLint(legal).problems.isEmpty(), Config.envLint(legal).problems.toString())
+        val c = Config.fromEnv(envOf(*legal.toList().toTypedArray()))
+        assertEquals(9443, c.port)
+        assertEquals(2525, c.smtpPort)
+        assertEquals(134_217_728L, c.minKdfMemBytes)
+        assertEquals(4L, c.minKdfOps)
+        assertEquals(8, c.uploadMaxConcurrentPerUser)
+        assertEquals(300, c.requestReadTimeoutSeconds)
+        assertEquals(120, c.responseWriteTimeoutSeconds)
+        assertEquals(30, c.vaultGraceDays)
+        assertEquals(21, c.transferTtlDays)
+        assertEquals(9, c.loginRatePerMin)
+    }
+
     // ---- §8.1: /selfhost is a real route, registered before the SPA fallback ----
 
     @Test
@@ -601,12 +657,17 @@ class MultiTenantEndpointTest : P4TestSupport() {
         assertTrue("&lt;script&gt;" in html)
         assertFalse("<script>alert" in html)
 
-        // The three deploy artifacts download (fixture copies on the test classpath).
-        for (name in listOf("docker-compose.yml", "andvari.env.template", "bringup.sh")) {
+        // EVERY advertised deploy artifact downloads (fixture copies on the test classpath).
+        // Driven off SelfHost.ARTIFACTS rather than a hand-written list, so adding an artifact
+        // without its test fixture fails here instead of silently leaving that download
+        // exercised only through the "(not bundled in this build)" branch — which is exactly
+        // how docker-compose.caddy.yml went untested (quality-tests--12).
+        for (name in SelfHost.ARTIFACTS) {
             val r = client.get("/selfhost/$name")
             assertEquals(HttpStatusCode.OK, r.status, "$name must be downloadable")
             assertTrue("test fixture" in r.bodyAsText(), "$name serves the bundled bytes")
             assertTrue(r.headers["Content-Disposition"]!!.contains(name))
+            assertTrue("""<a href="/selfhost/$name">""" in html, "$name must be linked, not marked unbundled")
         }
         // Anything off the fixed allowlist is a 404, not a probe surface.
         assertEquals(HttpStatusCode.NotFound, client.get("/selfhost/evil.txt").status)

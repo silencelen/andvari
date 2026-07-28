@@ -27,6 +27,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * spec 02 §4 warn-and-keep-newer (SyncEngine.keepNewerMeta) + the pinned metaV parse rule:
@@ -81,12 +82,21 @@ class SyncEngineMetaVTest {
         }
     }
 
+    /** Everything the engine handed to its [CoreLog] seam, in order. */
+    private class RecordingLog : CoreLog {
+        val entries = mutableListOf<Pair<String, String>>()
+        override fun warn(event: String, detail: String) {
+            entries += event to detail
+        }
+    }
+
     private class Seed(
         val owner: Account,
         val member: Account,
         val engine: SyncEngine,
         val server: FakeServer,
         val cache: InMemoryVaultCache,
+        val log: RecordingLog,
         val vaultId: String,
         val vault: WireVault,
         val grant: WireGrant,
@@ -108,10 +118,11 @@ class SyncEngineMetaVTest {
         val item = WireItem(itemId, vaultId, 4, 0, 0, false, false, 1, emptyList(), owner.encryptItem(vaultId, itemId, doc).blob)
         val server = FakeServer()
         val cache = InMemoryVaultCache()
-        val engine = SyncEngine(server.api(), member, cache)
+        val log = RecordingLog()
+        val engine = SyncEngine(server.api(), member, cache, log)
         server.queue.add(SyncResponse(5, true, listOf(vault), listOf(grant), listOf(item), emptyList()))
         runBlocking { engine.sync() }
-        return Seed(owner, member, engine, server, cache, vaultId, vault, grant, item)
+        return Seed(owner, member, engine, server, cache, log, vaultId, vault, grant, item)
     }
 
     /** Deliver a rename to "Family v2" (metaV 0 → 1) and return the renamed metaBlob. */
@@ -147,6 +158,28 @@ class SyncEngineMetaVTest {
         assertEquals(renamed, s.row().metaBlob)
         assertEquals(7L, s.row().rev, "rev from the delivered row still applies")
         assertEquals("did-replay", s.row().deleteId, "lifecycle fields from the delivered row still apply")
+    }
+
+    @Test
+    fun replayedMetaV_reportsThroughTheCoreLogSeam_notAStdoutPrintln() = runBlocking<Unit> {
+        // ux-error--4: this detection is security-relevant (an honest server never replays), so it
+        // must reach a sink a client can surface/persist/escalate. It used to go to a bare
+        // println — nothing on Android or desktop reads that, which made the whole
+        // warn-and-keep-newer contract unobservable in practice.
+        val s = seeded()
+        s.applyRename()
+        assertEquals(0, s.log.entries.size, "an ordinary rename must be silent")
+
+        s.server.queue.add(
+            SyncResponse(7, false, listOf(s.vault.copy(rev = 7)), emptyList(), emptyList(), emptyList()),
+        )
+        s.engine.sync()
+
+        assertEquals(1, s.log.entries.size, "the metaV regression must reach the log seam exactly once")
+        val (event, detail) = s.log.entries.single()
+        assertEquals(CoreLog.EVENT_VAULT_META_REPLAY, event, "the machine code a client routes on")
+        assertTrue(s.vaultId in detail, "the detail must name the vault: $detail")
+        assertTrue("0" in detail && "1" in detail, "the detail must name both counters: $detail")
     }
 
     @Test

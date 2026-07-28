@@ -480,9 +480,6 @@ class Account private constructor(
         vaultKeys[grant.vaultId] = vk
     }
 
-    @Deprecated("shared grants exist now — use addGrant", ReplaceWith("addGrant(grant)"))
-    fun addPersonalGrant(grant: WireGrant) = addGrant(grant)
-
     fun setPersonalVault(vaultId: String) {
         if (personalVaultId.isEmpty()) personalVaultId = vaultId
     }

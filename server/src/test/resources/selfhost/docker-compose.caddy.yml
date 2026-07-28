@@ -1,0 +1,4 @@
+# selfhost test fixture — the real file is deploy/docker-compose.caddy.yml (docs/deploy lane)
+services:
+  caddy:
+    image: caddy:2-alpine

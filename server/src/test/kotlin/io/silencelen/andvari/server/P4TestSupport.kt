@@ -43,11 +43,18 @@ abstract class P4TestSupport {
     protected val bootstrapToken = "p4-bootstrap-token"
     protected val tmpDir: File = Files.createTempDirectory("andvari-p4").toFile()
 
-    protected fun config(publicHostname: String? = null, janitorDryRun: Boolean = false) = Config(
+    /** [escrowConfigured] = false reproduces a self-hoster who never set ANDVARI_RECOVERY_PUBKEY /
+     *  _FINGERPRINT — the instance has no admin backstop key at all. */
+    protected fun config(
+        publicHostname: String? = null,
+        janitorDryRun: Boolean = false,
+        escrowConfigured: Boolean = true,
+    ) = Config(
         host = "127.0.0.1", port = 0,
         dbPath = File(tmpDir, "p4-${System.nanoTime()}.db").absolutePath,
         blobDir = File(tmpDir, "blobs-${System.nanoTime()}").absolutePath, webDir = null,
-        recoveryPublicKey = recovery.publicKey, recoveryFingerprint = fingerprint,
+        recoveryPublicKey = if (escrowConfigured) recovery.publicKey else ByteArray(0),
+        recoveryFingerprint = if (escrowConfigured) fingerprint else "",
         enumSecret = ByteArray(32) { 7 }, publicHostname = publicHostname, bootstrapToken = bootstrapToken,
         janitorDryRun = janitorDryRun,
     )

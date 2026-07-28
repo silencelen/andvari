@@ -18,13 +18,10 @@ dependencies {
     implementation(libs.ktor.server.netty)
     implementation(libs.ktor.server.websockets)
     implementation(libs.ktor.server.content.negotiation)
-    implementation(libs.ktor.server.auth)
-    implementation(libs.ktor.server.rate.limit)
     implementation(libs.ktor.server.status.pages)
     // quality-perf--1: 304 revalidation + Range support for the streamed downloads/SPA files.
-    // Version-catalog'd inline (the shared toml is owned by another lane; same ktor version ref).
-    implementation("io.ktor:ktor-server-conditional-headers:${libs.versions.ktor.get()}")
-    implementation("io.ktor:ktor-server-partial-content:${libs.versions.ktor.get()}")
+    implementation(libs.ktor.server.conditional.headers)
+    implementation(libs.ktor.server.partial.content)
     implementation(libs.ktor.server.metrics.micrometer)
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.ktor.client.core)

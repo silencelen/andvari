@@ -96,9 +96,11 @@ assert) is **FAIL** — consistent with JetBrains not documenting Linux/AT-SPI s
 ### Phase 1 — attended Orca pass (Linux)
 
 Runs only if Phase 0 PASSes (else moot). GNOME + Orca, three scripted flows (unlock / vault list
-/ editor) with per-flow PASS / PARTIAL / SILENT. Note: the desktop client currently has zero
-`liveRegion`s (a separate audit item), so error *announcements* may fail even where a tree exists
-— record which layer failed. **Status: not run** (blocked on Phase 0).
+/ editor) with per-flow PASS / PARTIAL / SILENT. Note: desktop gained its first `liveRegion`s in the
+2026-07-27 polish pass (ErrorBar assertive; NoticeBar, the must-change-password banner and the
+CopyRow disclosure polite), so announcements now have a source — but whether Compose Multiplatform
+surfaces them through the platform bridge is exactly what this phase must establish. Record which
+layer failed. **Status: not run** (blocked on Phase 0).
 
 ### Phase 2 — Windows (NVDA)
 

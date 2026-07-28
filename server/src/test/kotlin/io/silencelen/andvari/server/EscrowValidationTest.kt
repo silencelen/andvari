@@ -124,4 +124,31 @@ class EscrowValidationTest : P4TestSupport() {
         }
         assertEquals(HttpStatusCode.OK, ok.status, ok.bodyAsText())
     }
+
+    /**
+     * bug-server--9: on an instance with no org recovery key, /recovery-pubkey answered a BARE
+     * STRING body with its 503. Every consumer decodes ApiError, so the named cause was lost —
+     * core's errorFrom fell back to "http_503" and the web enroll helper substituted a generic
+     * code of its own, leaving a self-hoster with an opaque failure mid-enrollment. The success
+     * body stays bare base64: only the failure joins the taxonomy.
+     */
+    @Test
+    fun recoveryPubkey_unconfiguredInstance_answersTheHouseApiError() = testApplication {
+        application { andvariModule(buildServices(config(escrowConfigured = false), Notifier())) }
+        val client = jsonClient(this)
+
+        val resp = client.get("/api/v1/recovery-pubkey")
+        assertEquals(HttpStatusCode.ServiceUnavailable, resp.status)
+        assertEquals("escrow_not_configured", errorOf(resp))
+    }
+
+    @Test
+    fun recoveryPubkey_configuredInstance_stillServesBareBase64() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+
+        val resp = client.get("/api/v1/recovery-pubkey")
+        assertEquals(HttpStatusCode.OK, resp.status)
+        assertEquals(Bytes.toB64(recovery.publicKey), resp.bodyAsText().trim())
+    }
 }

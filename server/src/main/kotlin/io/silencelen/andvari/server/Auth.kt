@@ -37,6 +37,13 @@ class Gone(val reason: String) : Exception()
 // never reads as "your prefix was malformed" (polish audit 2026-07-27 bug-server--2).
 class BadGateway(val reason: String) : Exception()
 
+// This instance is not CONFIGURED for the thing asked of it → 503: nothing the caller sent is
+// wrong and no retry helps until the operator acts (polish audit 2026-07-27 bug-server--9).
+// Exists so such a route can still answer inside the ApiError taxonomy every client decodes —
+// a bare-string 503 body degrades to the generic "http_503" in AndvariApi.errorFrom, losing the
+// one thing the caller needed: the named cause.
+class ServiceUnavailable(val reason: String) : Exception()
+
 /** X-Andvari-Client: <platform>/<semver>; used for version pins + audit. */
 data class ClientId(val platform: String, val version: String)
 

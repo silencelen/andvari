@@ -96,12 +96,10 @@ const val SERVER_VERSION = io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERS
 @Serializable
 data class InviteCreateResponse(val inviteToken: String, val email: String, val expiresAt: Long, val emailStatus: String)
 
-private val UUID_PATH_RE = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-
 /** Path/query ids that name files or rows MUST be canonical UUIDs (also kills traversal). */
 fun requireUuid(value: String?, field: String): String {
     val v = value ?: throw BadRequest("missing_$field")
-    if (!UUID_PATH_RE.matches(v)) throw BadRequest("bad_$field")
+    if (!UUID_RE.matches(v)) throw BadRequest("bad_$field")
     return v
 }
 
@@ -296,6 +294,7 @@ fun Application.andvariModule(services: Services) {
                 is RateLimited -> call.respond(HttpStatusCode.TooManyRequests, ApiError("rate_limited", "slow down"))
                 is PayloadTooLarge -> call.respond(HttpStatusCode.PayloadTooLarge, ApiError(cause.reason, "quota exceeded"))
                 is BadGateway -> call.respond(HttpStatusCode.BadGateway, ApiError(cause.reason, "upstream failed"))
+                is ServiceUnavailable -> call.respond(HttpStatusCode.ServiceUnavailable, ApiError(cause.reason, "not configured on this instance"))
                 // PT-L11 (CR-04): Ktor's own malformed-input throwables (a bad/empty JSON body on any
                 // receive route — incl. unauthenticated /auth/*) are CLIENT errors → 400, not a 500 with
                 // "unhandled" log spam. In Ktor 3.0.3 these are disjoint hierarchies
@@ -446,8 +445,11 @@ fun Application.andvariModule(services: Services) {
         // Org recovery PUBLIC key (base64url) — public; the client confirms its
         // fingerprint against the printed sheet before sealing escrow to it.
         get("/api/v1/recovery-pubkey") {
-            if (!config.escrowConfigured) call.respond(HttpStatusCode.ServiceUnavailable, "escrow_not_configured")
-            else call.respondText(Bytes.toB64(config.recoveryPublicKey))
+            // The SUCCESS body stays bare base64 (every client does fromB64 on the raw text);
+            // the failure rides the house ApiError so "this instance has no escrow key" reaches
+            // the enroll flow as a named cause instead of an opaque 503 (bug-server--9).
+            if (!config.escrowConfigured) throw ServiceUnavailable("escrow_not_configured")
+            call.respondText(Bytes.toB64(config.recoveryPublicKey))
         }
 
         // Desktop distribution + in-app update check (spec P3). The manifest and the
@@ -609,15 +611,29 @@ fun Application.andvariModule(services: Services) {
         // Restore a tombstoned item: the client re-encrypts a chosen version and POSTs it here; the
         // server un-tombstones cleanly (dedicated path, not a put — avoids the edit-over-tombstone
         // conflict that would spawn a spurious copy). Writer/owner only; only a deleted item.
+        // Item lifecycle buckets, the per-ITEM sibling of the vault_destructive/vault_recovery
+        // pair below (bug-server--10 — these two routes carried no bucket at all). Windows are an
+        // hour and the counts are generous by design: a household emptying or rebuilding its whole
+        // Trash in one sitting must never hit them, while an automated walk of every tombstone is
+        // throttled and leaves a bucket in the audit/metrics story. Recovery is the looser of the
+        // two for the same reason as vaults — a restore is never blocked by the purge spree it undoes.
         post("/api/v1/items/{id}/restore") {
             val p = requirePrincipal(call, service)
+            // Version-pinned like /sync/push: a restore re-uploads a re-encrypted item blob, so a
+            // build the min-version pin bans must not write item ciphertext through this door.
+            enforceVersion(call, service)
+            if (!limiter.allow("item_recovery:${p.userId}", 400, 3_600_000)) throw RateLimited()
             val id = requireUuid(call.parameters["id"], "item_id")
             val rev = service.restoreItem(p, id, call.receive<ItemUpload>(), call.clientIp(config))
             call.respond(ItemRestoreResponse(rev))
         }
         // "Delete forever" (F49): hard-delete a tombstoned item + its versions. Writer/owner only.
+        // The module's only irreversible per-item destruction (Repo.purgeItem leaves no tombstone),
+        // so it takes the tighter bucket. Deliberately NOT enforceVersion'd: the pin exists to keep
+        // a banned build from WRITING ciphertext, and a purge writes none.
         post("/api/v1/items/{id}/purge") {
             val p = requirePrincipal(call, service)
+            if (!limiter.allow("item_destructive:${p.userId}", 200, 3_600_000)) throw RateLimited()
             val id = requireUuid(call.parameters["id"], "item_id")
             call.respond(ItemRestoreResponse(service.purgeItem(p, id, call.clientIp(config))))
         }
@@ -881,13 +897,16 @@ fun Application.andvariModule(services: Services) {
         post("/api/v1/admin/devices/{id}/revoke") {
             val p = requireAdmin(call, service)
             val deviceId = requireUuid(call.parameters["id"], "device_id")
-            val owner = services.admin.revokeDevice(deviceId, p.userId)
-            if (owner != null) services.notifier.notifyRevokedDevice(owner, deviceId) // M8: lock + close that device's socket
+            val owner = services.admin.revokeDevice(deviceId, p.userId) // throws NotFound on an unknown id
+            services.notifier.notifyRevokedDevice(owner, deviceId) // M8: lock + close that device's socket
             call.respondText("ok")
         }
         get("/api/v1/admin/users/{id}/escrow") {
             requireAdmin(call, service)
-            val sealed = services.admin.userSealed(requireUuid(call.parameters["id"], "user_id")) ?: throw BadRequest("no_escrow")
+            // 404, not 400: the id was well-formed, the row simply isn't there — the same stance
+            // every other state-of-the-world miss takes (no_such_user, not_a_member). A 400 told
+            // the Admin UI "you sent a bad id" for a member who is merely waived (bug-server--9).
+            val sealed = services.admin.userSealed(requireUuid(call.parameters["id"], "user_id")) ?: throw NotFound("no_escrow")
             call.respondText(sealed)
         }
         post("/api/v1/admin/recovery") {

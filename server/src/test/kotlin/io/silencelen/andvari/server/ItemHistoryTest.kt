@@ -140,4 +140,74 @@ class ItemHistoryTest : LifecycleTestSupport() {
         assertEquals(HttpStatusCode.Forbidden, client.get("/api/v1/items/$itemId/versions") { authed(owner) }.status)
         assertEquals(HttpStatusCode.Forbidden, client.post("/api/v1/items/$itemId/purge") { authed(owner) }.status)
     }
+
+    /**
+     * bug-server--10: purge is the module's ONLY irreversible per-item destruction (Repo.purgeItem
+     * drops the row and every archived version, leaving no tombstone) and it was the least guarded
+     * destructive route in App.kt — no bucket at all, so a compromised or buggy client could walk a
+     * member's whole Trash at full request rate with nothing to slow it and nothing in the
+     * audit/metrics story to notice. The bucket is deliberately generous: a household emptying its
+     * Trash in one sitting must never see a 429.
+     */
+    @Test
+    fun purgeIsRateBucketed_andTheBucketIsPerUser() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val owner = VirtualClient("purge-rate@x.com", "purge rate password one")
+        client.register(owner, bootstrapToken)
+        val other = client.enrollSecond(owner, "purge-rate-2@x.com", "purge rate password two")
+
+        // Unknown ids: the limiter runs BEFORE the service, so every attempt spends the bucket
+        // and answers 403-hidden until the bucket is empty. 200/h is the cap.
+        repeat(ITEM_DESTRUCTIVE_PER_HOUR) {
+            val r = client.post("/api/v1/items/${uuid()}/purge") { authed(owner) }
+            assertEquals(HttpStatusCode.Forbidden, r.status, "attempt $it should still be inside the bucket")
+        }
+        val overflow = client.post("/api/v1/items/${uuid()}/purge") { authed(owner) }
+        assertEquals(HttpStatusCode.TooManyRequests, overflow.status)
+        assertEquals("rate_limited", errorOf(overflow))
+
+        // A second member's Trash is untouched by the first's spree (per-user key, not global).
+        assertEquals(HttpStatusCode.Forbidden, client.post("/api/v1/items/${uuid()}/purge") { authed(other) }.status)
+    }
+
+    /**
+     * bug-server--10: restore re-uploads a re-encrypted item blob exactly as /sync/push does — the
+     * route even shares push's generous body cap for that reason — yet it alone skipped
+     * enforceVersion, so a build the min-version pin bans could still write item ciphertext through
+     * it. Purge stays ungated on purpose: the pin exists to keep a banned build from WRITING.
+     */
+    @Test
+    fun restoreIsVersionPinned_purgeDeliberatelyIsNot() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val owner = VirtualClient("restore-pin@x.com", "restore pin password one")
+        client.register(owner, bootstrapToken)
+
+        val itemId = owner.newItemId()
+        val r1 = client.push(owner, putMutation(owner, itemId, "secret", 0))
+        client.push(owner, Mutation(uuid(), "delete", itemId, owner.personalVaultId, r1.results[0].newItemRev!!, null))
+
+        // VirtualClient identifies as test/1.0.0; pin above it.
+        services.service.setPolicy(services.service.policy().copy(minVersion = mapOf("test" to "2.0.0")))
+
+        val blocked = client.post("/api/v1/items/$itemId/restore") {
+            authed(owner); contentType(ContentType.Application.Json); setBody(owner.encItem(itemId, "back"))
+        }
+        assertEquals(426, blocked.status.value, blocked.bodyAsText())
+        assertEquals("upgrade_required", errorOf(blocked))
+
+        // The item is still in the Trash — the banned build wrote nothing.
+        val trash = json.decodeFromString(DeletedItemsResponse.serializer(), client.get("/api/v1/items/deleted") { authed(owner) }.bodyAsText()).items
+        assertEquals(listOf(itemId), trash.map { it.itemId })
+
+        // ...and purge still works for that same build (no ciphertext is written).
+        assertEquals(HttpStatusCode.OK, client.post("/api/v1/items/$itemId/purge") { authed(owner) }.status)
+    }
+
+    private companion object {
+        /** Mirrors the `item_destructive` bucket in App.kt. */
+        const val ITEM_DESTRUCTIVE_PER_HOUR = 200
+    }
 }
