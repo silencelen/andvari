@@ -1,6 +1,6 @@
 import java.util.Properties
 
-// Release signing (ledger/devstore pattern): keystore.properties from ~/.andvari,
+// Release signing: keystore.properties from ~/.andvari,
 // env-overridable; absent → release builds UNSIGNED (CI-safe, and P2 ships debug first).
 val keystorePropsFile = file(
     System.getenv("ANDVARI_KEYSTORE_PROPERTIES") ?: "${System.getProperty("user.home")}/.andvari/keystore.properties",

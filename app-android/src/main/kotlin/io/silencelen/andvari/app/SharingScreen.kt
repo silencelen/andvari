@@ -42,7 +42,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.LifecycleNotice
@@ -186,8 +189,13 @@ fun SharingScreen(vm: AndvariViewModel, ui: UiState) {
                     // List mode only — the settings reveal keeps DN-1's title+back contract.
                     if (settingsVault == null) {
                         // Tint when open so an explicit tap gives feedback even when the
-                        // disclosed sections are empty (the common case).
-                        IconButton(onClick = { showTrash = !showTrash }) {
+                        // disclosed sections are empty (the common case). a11yand-13: the tint was
+                        // the ONLY state signal — colour alone (P5) and mute to a screen reader, so
+                        // the shown/hidden state also rides stateDescription.
+                        IconButton(
+                            onClick = { showTrash = !showTrash },
+                            modifier = Modifier.semantics { stateDescription = if (showTrash) "shown" else "hidden" },
+                        ) {
                             Icon(
                                 Icons.Default.Delete,
                                 "recently deleted and removed vaults",
@@ -266,7 +274,7 @@ private fun VaultListRow(v: VaultInfo, onOpenSettings: (() -> Unit)?) {
         Text((v.name.firstOrNull() ?: '?').uppercase(), color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Serif)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(v.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+            Text(v.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
             Text(
                 if (v.type == "personal") "personal vault" else "shared vault · ${v.role ?: "member"}",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -431,7 +439,7 @@ private fun TransferControl(vm: AndvariViewModel, ui: UiState, v: VaultInfo) {
         Text("Make someone else the owner", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         targets.forEach { m ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("${m.displayName} (${m.email})", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                Text("${m.displayName} (${m.email})", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
                 TextButton(onClick = { confirming = m.userId }, enabled = !ui.busy) { Text("Transfer ownership…") }
             }
         }
@@ -556,7 +564,7 @@ private fun RecentlyDeletedSection(vm: AndvariViewModel, ui: UiState) {
             ui.deletedVaults.forEach { d ->
                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("“${d.name}”", style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                        Text("“${d.name}”", style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
                         Text(
                             "deleted ${fmtDay(d.deletedAt)} · erased for good ${fmtDay(d.purgeAt)}",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -602,7 +610,7 @@ private fun RecentlyRemovedSection(held: List<HeldVaultInfo>) {
             Spacer(Modifier.height(6.dp))
             held.forEach { h ->
                 Column(Modifier.padding(vertical = 4.dp)) {
-                    Text("“${h.name}”", style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                    Text("“${h.name}”", style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
                     val line = when {
                         h.reason == "deleted" && h.verified -> "deleted by its owner · kept sealed until ${fmtDay(h.purgeAt ?: h.expungeAt)}"
                         h.reason == "left" -> "you left · kept until ${fmtDay(h.expungeAt)}"

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Spacer
@@ -36,7 +37,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -320,6 +327,10 @@ private fun UnlockCard(
                 Text("Unlock andvari", style = MaterialTheme.typography.titleLarge)
                 Text(email, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(16.dp))
+                // a11yand-07: this overlay is a ONE-field password form rendered over another
+                // app — reaching the Unlock button is the whole interaction, so the IME's Done
+                // must submit it (same gate as the button), not merely close the keyboard.
+                val submit = { if (password.isNotBlank() && !busy) onUnlock(password) }
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
@@ -329,12 +340,17 @@ private fun UnlockCard(
                     visualTransformation = PasswordVisualTransformation(),
                     // Cut E (v2 #4): declare the secret to the IME — no suggestion strip, no
                     // personal-dictionary learning of the master password.
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { submit() }),
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                 )
                 if (error != null) {
                     Spacer(Modifier.height(8.dp))
-                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    // a11yand-15: the main app routes every error through ErrorBar/InlineError, both
+                    // of which announce; these overlay activities were outside that sweep, so a
+                    // TalkBack user who mistypes their master password mid-fill heard NOTHING.
+                    // Assertive, like ErrorBar — this is the service's most consequential error.
+                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Assertive })
                 }
                 Spacer(Modifier.height(16.dp))
                 Button(
@@ -342,7 +358,8 @@ private fun UnlockCard(
                     enabled = password.isNotBlank() && !busy,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    if (busy) CircularProgressIndicator(Modifier.height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                    // a11yand-08: name the busy spinner with the button's action (see PrimaryButton).
+                    if (busy) CircularProgressIndicator(Modifier.height(18.dp).semantics { contentDescription = "Unlock"; stateDescription = "working" }, strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                     else Text("Unlock")
                 }
                 TextButton(onClick = onCancel, enabled = !busy) { Text("Cancel") }

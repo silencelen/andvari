@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -42,10 +43,12 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
@@ -416,13 +419,7 @@ private fun UpgradeRequiredScreen(message: String, onSignOut: () -> Unit) {
             var confirmSignOut by remember { mutableStateOf(false) }
             OutlinedButton(onClick = { confirmSignOut = true }) { Text("Sign out / change server") }
             if (confirmSignOut) {
-                AlertDialog(
-                    onDismissRequest = { confirmSignOut = false },
-                    title = { Text("Sign out of this device?") },
-                    text = { Text("This removes the vault copy, quick unlock, and any unsynced changes from this device. You'll need your master password — and a reachable server — to sign back in.") },
-                    confirmButton = { TextButton(onClick = { confirmSignOut = false; onSignOut() }) { Text("Sign out") } },
-                    dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Stay") } },
-                )
+                SignOutConfirmDialog(onDismiss = { confirmSignOut = false }, onConfirm = { confirmSignOut = false; onSignOut() })
             }
         }
     }
@@ -656,6 +653,20 @@ private fun SignInForm(vm: AndvariViewModel, ui: UiState) {
     var email by rememberSaveable { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var totp by rememberSaveable { mutableStateOf("") } // deliberately saveable: a 30-second-lived code
+    // design 2026-07-15 §2.3/§2.6: `policy.totpRequired` is a TRUSTED UI HINT — PRE-SHOW the
+    // code field so an enrolled user isn't bounced through a failed submit. It never gates
+    // submission: on a totpRequired instance a not-yet-enrolled user signs in password-only
+    // (the §2.6 restricted-session matrix), so only the REACTIVE server error
+    // (ui.loginTotpRequired) makes the 6-digit code mandatory — the authoritative path.
+    val showTotp = ui.loginTotpRequired || ui.policy?.totpRequired == true
+    // The form's ONE submit path — the button and every field's IME Done both call it, and it
+    // re-asserts the same gate from live reads (the S2-review race class), so a held key's
+    // repeats and Done-while-busy are no-ops.
+    val submit = {
+        if (email.isNotBlank() && password.isNotBlank() && (!ui.loginTotpRequired || totp.length == 6) && !ui.busy) {
+            vm.signIn(email.trim(), password, totp.ifBlank { null })
+        }
+    }
     Column(Modifier.fillMaxWidth()) {
         // F26: session-end explanation (set by the 401-driven sign-out paths) — one quiet
         // line, cleared on a successful sign-in.
@@ -663,16 +674,10 @@ private fun SignInForm(vm: AndvariViewModel, ui: UiState) {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
         }
-        Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
-        SecretField("Master password", password) { password = it }
-        // design 2026-07-15 §2.3/§2.6: `policy.totpRequired` is a TRUSTED UI HINT — PRE-SHOW the
-        // code field so an enrolled user isn't bounced through a failed submit. It never gates
-        // submission: on a totpRequired instance a not-yet-enrolled user signs in password-only
-        // (the §2.6 restricted-session matrix), so only the REACTIVE server error
-        // (ui.loginTotpRequired) makes the 6-digit code mandatory — the authoritative path.
-        val showTotp = ui.loginTotpRequired || ui.policy?.totpRequired == true
+        Field("Email", email, { email = it }, keyboard = KeyboardType.Email, imeAction = ImeAction.Next)
+        SecretField("Master password", password, imeAction = if (showTotp) ImeAction.Next else ImeAction.Done, onDone = submit) { password = it }
         if (showTotp) {
-            Field("One-time code", totp, { totp = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number)
+            Field("One-time code", totp, { totp = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number, onDone = submit)
             if (!ui.loginTotpRequired) {
                 Text(
                     "If you use an authenticator app with this server, enter its code — otherwise leave blank.",
@@ -732,8 +737,25 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
     // A foreign-origin link blocks submit until the gate repoints (foreign becomes null once we are
     // on its origin). Otherwise the per-posture ceremony legs decide readiness.
     val ready = foreign == null && enrollReady(posture, effToken, email, password, confirm, shortFp, fpOk, waivedAck, affirmed, linkRfp, fp)
+    // The form's ONE submit path — the Create-vault button and the fields' IME Done both call it.
+    // It RE-EVALUATES the gate from the same live reads it submits: the button's enabled flag
+    // reflects the last composition, so a same-frame edit + tap (or an IME Done on a field that
+    // isn't the last leg) could otherwise submit values `ready` never approved (S2-review race
+    // class; web enforces at submit for the same reason). Busy is re-checked in the ViewModel,
+    // where the read is live.
+    val submit = {
+        val postureNow = enrollPosture(linkRfp = linkRfp, memberHasSheet = hasSheet)
+        // required-affirm feeds the SCANNED rfp as the "typed" fingerprint into the same sealing
+        // path required-typed uses; enrollOp re-asserts it against the server's advertised
+        // fingerprint (and Account.enroll refuses a mismatched served key) — the T10 defense —
+        // before sealing escrow.
+        val typedFp = if (postureNow == EnrollPosture.RequiredAffirm) (linkRfp ?: "") else shortFp
+        if (foreign == null && !ui.busy && enrollReady(postureNow, effToken, email, password, confirm, shortFp, fpOk, waivedAck, affirmed, linkRfp, fp)) {
+            vm.enroll(effToken.trim(), email.trim(), name.trim(), password, waived = postureNow == EnrollPosture.Waived, typedShortFp = typedFp)
+        }
+    }
     Column(Modifier.fillMaxWidth()) {
-        Field("Invite code or link", invite, { invite = it }, mono = true)
+        Field("Invite code or link", invite, { invite = it }, mono = true, imeAction = ImeAction.Next)
         Text(
             "Paste the link from your invite — or just the invite code.",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -750,21 +772,11 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                 Text("Review server and continue")
             }
         } else {
-            Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
-            Field("Name (optional)", name, { name = it })
-            SecretField("Master password", password) { password = it }
-            if (password.isNotEmpty()) {
-                val score = Strength.estimateStrength(password)
-                if (Strength.meetsMasterPasswordFloor(password)) {
-                    Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                }
-                if (Strength.masterPasswordHasNonAscii(password)) {
-                    Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
-                }
-            }
-            SecretField("Confirm password", confirm) { confirm = it }
+            Field("Email", email, { email = it }, keyboard = KeyboardType.Email, imeAction = ImeAction.Next)
+            Field("Name (optional)", name, { name = it }, imeAction = ImeAction.Next)
+            SecretField("Master password", password, imeAction = ImeAction.Next) { password = it }
+            MasterPasswordStrengthHints(password)
+            SecretField("Confirm password", confirm, onDone = submit) { confirm = it }
             // Routed through InlineError so its Polite liveRegion announces the mismatch (a11yand-01).
             InlineError(if (confirm.isNotEmpty() && confirm != password) "passwords don't match" else null)
             // §F.1 posture UI (web FingerprintProvenance parity): required-affirm shows the scanned
@@ -817,7 +829,7 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                     // handed over in person) — "your printed recovery sheet" sent an emailed
                     // enrollee hunting for a sheet that was never theirs.
                     Text("Recovery check — type the FIRST 16 characters of the fingerprint on the printed recovery sheet your admin gave you", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true)
+                    Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true, onDone = submit)
                     if (shortFp.isNotBlank() && !shortOk) {
                         Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                     }
@@ -867,31 +879,51 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                 }
             }
             Spacer(Modifier.height(12.dp))
-            // The onClick RE-EVALUATES the gate from the same live reads it submits: the
-            // button's enabled flag reflects the last composition, so a same-frame edit +
-            // tap could otherwise submit values `ready` never approved (S2-review race
-            // class; web enforces at submit for the same reason). Busy is re-checked in
-            // the ViewModel, where the read is live.
-            PrimaryButton("Create vault", enabled = ready && !ui.busy, busy = ui.busy) {
-                val postureNow = enrollPosture(linkRfp = linkRfp, memberHasSheet = hasSheet)
-                // required-affirm feeds the SCANNED rfp as the "typed" fingerprint into the same
-                // sealing path required-typed uses; enrollOp re-asserts it against the server's
-                // advertised fingerprint (and Account.enroll refuses a mismatched served key) — the
-                // T10 defense — before sealing escrow.
-                val typedFp = if (postureNow == EnrollPosture.RequiredAffirm) (linkRfp ?: "") else shortFp
-                if (enrollReady(postureNow, effToken, email, password, confirm, shortFp, fpOk, waivedAck, affirmed, linkRfp, fp)) {
-                    vm.enroll(effToken.trim(), email.trim(), name.trim(), password, waived = postureNow == EnrollPosture.Waived, typedShortFp = typedFp)
-                }
-            }
+            // Submit re-asserts the gate from live reads — see the `submit` docs above.
+            PrimaryButton("Create vault", enabled = ready && !ui.busy, busy = ui.busy, onClick = submit)
         }
     }
+}
+
+/** The F60 master-password floor feedback — strength label, the too-weak refusal, and the
+ *  non-ASCII caution. ONE copy for the two forms that choose a master password (EnrollForm and
+ *  [RecoverScreen]'s reset leg), which carried it verbatim-duplicated. Renders nothing while the
+ *  field is empty. */
+@Composable
+private fun MasterPasswordStrengthHints(password: String) {
+    if (password.isEmpty()) return
+    val score = Strength.estimateStrength(password)
+    if (Strength.meetsMasterPasswordFloor(password)) {
+        Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    } else {
+        Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+    }
+    if (Strength.masterPasswordHasNonAscii(password)) {
+        Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+    }
+}
+
+/**
+ * The one "Sign out of this device?" confirm — [UnlockScreen] and [UpgradeRequiredScreen] both
+ * reach the same one-tap cache / quick-unlock / unsynced-edits wipe, and each had hand-written it
+ * with drifted body copy and drifted dismiss labels. Single wording, matching desktop's.
+ */
+@Composable
+private fun SignOutConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sign out of this device?") },
+        text = { Text("This removes the vault copy, quick unlock, and any unsynced changes from this device. You'll need your master password — and a connection to your server — to sign back in.") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Sign out") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Stay signed in") } },
+    )
 }
 
 /** The enroll submit gate per §F.1 posture (design §4.4): the core ceremony legs (EnrollCeremony,
  *  jvm-tested) for required-typed; the invite/email/password legs + a one-tap affirmation for
  *  required-affirm (the scanned rfp must be present — enrollOp does the authoritative match); or
  *  those legs + the §F.4 no-backstop acknowledgment for waived. */
-private fun enrollReady(
+internal fun enrollReady(
     posture: EnrollPosture,
     invite: String,
     email: String,
@@ -1117,7 +1149,7 @@ private fun ReSealCard(vm: AndvariViewModel, ui: UiState) {
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(vertical = 6.dp),
                 )
-                Field("First 16 characters from your printed recovery sheet", entry, { entry = it }, mono = true)
+                Field("First 16 characters from your printed recovery sheet", entry, { entry = it }, mono = true, onDone = { if (ok && !ui.busy) vm.resealEscrow(entry) })
                 Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     // a11yand-04 (AM-5): the ReSealCard has no verdict Text/checkbox — the only
                     // gate is this disabled button, so the "why disabled" hint rides its
@@ -1180,7 +1212,7 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
             )
             Spacer(Modifier.height(8.dp))
         }
-        SecretField("Master password", password) { password = it }
+        SecretField("Master password", password, onDone = { if (password.isNotBlank() && !ui.busy) vm.unlock(email, password) }) { password = it }
         Spacer(Modifier.height(12.dp))
         PrimaryButton("Unlock", enabled = password.isNotBlank() && !ui.busy, busy = ui.busy) { vm.unlock(email, password) }
         // Cut M (v2 #24): the ~6 s Argon2id derivation behind Unlock read as a hang — the
@@ -1210,13 +1242,7 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
         var confirmSignOut by remember { mutableStateOf(false) }
         TextButton(onClick = { confirmSignOut = true }) { Text("Sign out / use a different account") }
         if (confirmSignOut) {
-            AlertDialog(
-                onDismissRequest = { confirmSignOut = false },
-                title = { Text("Sign out of this device?") },
-                text = { Text("This removes the vault copy, quick unlock, and any unsynced changes from this device. You'll need your master password — and a connection to your server — to sign back in.") },
-                confirmButton = { TextButton(onClick = { confirmSignOut = false; vm.signOut() }) { Text("Sign out") } },
-                dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Stay signed in") } },
-            )
+            SignOutConfirmDialog(onDismiss = { confirmSignOut = false }, onConfirm = { confirmSignOut = false; vm.signOut() })
         }
     }
 }
@@ -1250,6 +1276,12 @@ private fun RecoverScreen(vm: AndvariViewModel, ui: UiState, sessionEmail: Strin
     // Web parity (submitVerify): drop the typed phrase from state once the VM holds the
     // parsed bytes — the display string must not linger through phase 2.
     LaunchedEffect(ui.recoverVerified) { if (ui.recoverVerified) phrase = "" }
+    // One submit path per phase — button and IME Done both call it, gate re-asserted from live
+    // reads (the VM re-checks the floor + busy too).
+    val verify = { if (email.isNotBlank() && phrase.isNotBlank() && !ui.busy) vm.recoverVerify(email.trim(), phrase) }
+    val commit = {
+        if (Strength.meetsMasterPasswordFloor(password) && password == confirm && !ui.busy) vm.recoverCommit(password)
+    }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
@@ -1270,18 +1302,16 @@ private fun RecoverScreen(vm: AndvariViewModel, ui: UiState, sessionEmail: Strin
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
-            Field("Email", email, { email = it }, keyboard = KeyboardType.Email)
+            Field("Email", email, { email = it }, keyboard = KeyboardType.Email, imeAction = ImeAction.Next)
             // The RecoverySetup type-back idiom: NOT a SecretField (a recovery phrase must never
             // be masked-then-password-managed, §F.7) but Password IME + mono so nothing learns it.
-            Field("Recovery phrase", phrase, { phrase = it }, mono = true, keyboard = KeyboardType.Password)
+            Field("Recovery phrase", phrase, { phrase = it }, mono = true, keyboard = KeyboardType.Password, onDone = verify)
             Text(
                 "exactly as you saved it — spaces are ignored",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(12.dp))
-            PrimaryButton("Continue", enabled = email.isNotBlank() && phrase.isNotBlank() && !ui.busy, busy = ui.busy) {
-                vm.recoverVerify(email.trim(), phrase)
-            }
+            PrimaryButton("Continue", enabled = email.isNotBlank() && phrase.isNotBlank() && !ui.busy, busy = ui.busy, onClick = verify)
             if (ui.busy) {
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -1298,28 +1328,14 @@ private fun RecoverScreen(vm: AndvariViewModel, ui: UiState, sessionEmail: Strin
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
-            SecretField("New master password", password) { password = it }
-            if (password.isNotEmpty()) {
-                // The EnrollForm strength block (F60 floor) — same copy, same gate.
-                val score = Strength.estimateStrength(password)
-                if (Strength.meetsMasterPasswordFloor(password)) {
-                    Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                }
-                if (Strength.masterPasswordHasNonAscii(password)) {
-                    Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
-                }
-            }
-            SecretField("Confirm new master password", confirm) { confirm = it }
+            SecretField("New master password", password, imeAction = ImeAction.Next) { password = it }
+            MasterPasswordStrengthHints(password) // the EnrollForm block (F60 floor) — one copy now
+            SecretField("Confirm new master password", confirm, onDone = commit) { confirm = it }
             InlineError(if (confirm.isNotEmpty() && confirm != password) "passwords don't match" else null)
             Spacer(Modifier.height(12.dp))
             val ready = Strength.meetsMasterPasswordFloor(password) && password == confirm
-            // onClick re-asserts the gate from live reads (S2-review race class; the VM
-            // re-checks the floor + busy too).
-            PrimaryButton("Reset master password", enabled = ready && !ui.busy, busy = ui.busy) {
-                if (Strength.meetsMasterPasswordFloor(password) && password == confirm) vm.recoverCommit(password)
-            }
+            // `commit` re-asserts the gate from live reads (S2-review race class).
+            PrimaryButton("Reset master password", enabled = ready && !ui.busy, busy = ui.busy, onClick = commit)
             if (ui.busy) {
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -1463,7 +1479,10 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                 else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
                     item(key = "toolbar") {
                         Column {
-                            OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
+                            // a11yand-10 (the desktop a11ydesk-07 twin): a placeholder is NOT a
+                            // programmatic name — it disappears the moment text is entered, leaving
+                            // the search box nameless. The label names it in both states.
+                            OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), label = { Text("Search vault") }, placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
                             ErrorBar(ui.error, vm::clearError)
                             NoticeBar(ui.notice, vm::clearNotice)
                             // P4/A7: the break-glass banners that used to render here (lifecycle notices,
@@ -1714,11 +1733,16 @@ private fun VaultRow(item: VaultItem, vaultTag: String? = null, onClick: () -> U
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
-                Text((item.doc.name.firstOrNull() ?: '?').uppercase(), color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Serif)
+                // a11yand-11 (the a11yand-06 idiom): the avatar letter IS the name's first
+                // character — spoken, the merged row reads "A, Amazon, …". Pure decoration.
+                Text((item.doc.name.firstOrNull() ?: '?').uppercase(), color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Serif, modifier = Modifier.clearAndSetSemantics {})
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(item.doc.name.ifBlank { "(untitled)" }, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                // a11yand-12: maxLines=1 defaults to TextOverflow.Clip, which shears a long name
+                // mid-glyph (routinely, at large font scale) — ellipsize instead. Same everywhere
+                // this file caps a line; desktop's F81 vault badge is the pattern.
+                Text(item.doc.name.ifBlank { "(untitled)" }, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
                     when (item.doc.type) {
                         "login" -> item.doc.login?.username?.ifBlank { "login" } ?: "login"
@@ -1726,12 +1750,14 @@ private fun VaultRow(item: VaultItem, vaultTag: String? = null, onClick: () -> U
                         "card" -> CardDisplay.subtitle(item.doc)
                         else -> "secure note"
                     },
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
             // Cut K (v2 #20): the shared-vault tag (gold, like web's) — personal items stay untagged.
+            // a11yand-12: width-capped like desktop's F81 badge — an unbounded long vault name
+            // crushes the weighted item-name column beside it.
             vaultTag?.let {
-                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, maxLines = 1)
+                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 140.dp))
                 Spacer(Modifier.width(8.dp))
             }
             Text(item.doc.type, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1908,7 +1934,7 @@ private fun AttachmentRow(ref: AttachmentRef, enabled: Boolean, onClick: () -> U
             Icon(Icons.Default.AttachFile, null, tint = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(ref.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                Text(ref.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
                 Text(humanSize(ref.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Icon(Icons.Default.FileDownload, "download", tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1957,6 +1983,12 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     var totpError by remember { mutableStateOf<String?>(null) }
     var cardExpiryError by remember { mutableStateOf<String?>(null) }
     var confirmDiscard by remember { mutableStateOf(false) }
+    // F78 (web parity): Generate over a non-empty password arms an inline confirm first, and the
+    // generated value is revealed so the user sees what will be saved. Both are view state only —
+    // NOT rememberSaveable: a reveal flag restored into a recreated editor would un-mask a
+    // password the user last saw masked.
+    var confirmGen by remember { mutableStateOf(false) }
+    val passwordRevealed = remember { mutableStateOf(false) }
     val crypto = remember { createCryptoProvider() }
     val scope = rememberCoroutineScope()
 
@@ -2024,31 +2056,54 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
         ErrorBar(ui.error, vm::clearError)
         // F18: show the vault picker ONLY for a new item with a real choice (>1 writable vault).
         if (vaultChoices.size > 1) VaultPickerField(vaultChoices, targetVaultId) { targetVaultId = it }
-        Field("Name", name, { name = it })
+        Field("Name", name, { name = it }, imeAction = ImeAction.Next)
         if (isLogin) {
-            Field("Username", username, { username = it }, mono = true)
+            Field("Username", username, { username = it }, mono = true, imeAction = ImeAction.Next)
             Column {
-                SecretField("Password", password) { password = it }
-                TextButton(onClick = { password = PasswordGenerator.generate(crypto, GeneratorOptions(length = 20)) }) { Icon(Icons.Default.Refresh, null); Text(" Generate") }
+                SecretField("Password", password, imeAction = ImeAction.Next, revealed = passwordRevealed) { password = it; confirmGen = false }
+                // F78 (web parity, ux-parity--0): Generate over a NON-EMPTY password arms an
+                // inline confirm instead of replacing in one tap — a mistyped-then-generated
+                // field silently losing what the user typed was the reported footgun. Either way
+                // the result is revealed, so the user sees what will be saved. Editing the field
+                // cancels the arm (the onChange above), the same arm-then-confirm idiom Cut D's
+                // "Discard changes?" cancel already uses.
+                TextButton(
+                    onClick = {
+                        if (password.isNotEmpty() && !confirmGen) {
+                            confirmGen = true
+                        } else {
+                            password = PasswordGenerator.generate(crypto, GeneratorOptions(length = 20))
+                            passwordRevealed.value = true
+                            confirmGen = false
+                        }
+                    },
+                ) { Icon(Icons.Default.Refresh, null); Text(if (confirmGen) " Replace?" else " Generate") }
+                if (confirmGen) {
+                    Text(
+                        "this replaces the current password — tap “Replace?” to confirm, or edit the field to cancel",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
             }
-            Field("Website", website, { website = it })
+            Field("Website", website, { website = it }, imeAction = ImeAction.Next)
             // RAW text while typing — normalizeTotp per keystroke rewrote the field to an
             // otpauth:// URI on the first character, making hand-typing a secret impossible.
             // Normalization + validation happen once, on Save.
             // Cut E review: a TOTP seed is a secret too — Password type keeps it out of the
             // IME's suggestion strip and personal dictionary (usually pasted, but not always).
-            Field("TOTP (otpauth:// or base32)", totp, { totp = it; totpError = null }, mono = true, keyboard = KeyboardType.Password)
+            Field("TOTP (otpauth:// or base32)", totp, { totp = it; totpError = null }, mono = true, keyboard = KeyboardType.Password, imeAction = ImeAction.Next)
             InlineError(totpError)
         }
         if (isCard) {
-            Field("Cardholder name", cardholder, { cardholder = it })
+            Field("Cardholder name", cardholder, { cardholder = it }, imeAction = ImeAction.Next)
             // RAW text while typing (separators and all) — digits-only ONCE, on Save, exactly
             // like the TOTP field above. The label badge + warn line read the live digits; the
             // Luhn check WARNS, never blocks: an odd-but-real card must still be savable.
             val cardDigits = CardNormalize.digitsOnly(cardNumber)
             Field(
                 "Card number" + (CardDisplay.brandLabel(CardNormalize.brand(cardDigits))?.let { " · $it" } ?: ""),
-                cardNumber, { cardNumber = it }, mono = true, keyboard = KeyboardType.Number,
+                cardNumber, { cardNumber = it }, mono = true, keyboard = KeyboardType.Number, imeAction = ImeAction.Next,
             )
             if (cardDigits.length >= 12 && !CardNormalize.luhnValid(cardDigits)) {
                 Text("this number doesn’t pass the usual check — you can still save it", color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
@@ -2061,8 +2116,8 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
             // that STILL can't be read now BLOCKS the save (the old warn-but-drop silently
             // overwrote stored halves with absence). Desktop Ui.kt parity; web's selects make
             // bad input impossible.
-            Field("Expiry month (MM)", cardExpMonth, { cardExpMonth = it; cardExpiryError = null }, mono = true, keyboard = KeyboardType.Number)
-            Field("Expiry year (YYYY)", cardExpYear, { cardExpYear = it; cardExpiryError = null }, mono = true, keyboard = KeyboardType.Number)
+            Field("Expiry month (MM)", cardExpMonth, { cardExpMonth = it; cardExpiryError = null }, mono = true, keyboard = KeyboardType.Number, imeAction = ImeAction.Next)
+            Field("Expiry year (YYYY)", cardExpYear, { cardExpYear = it; cardExpiryError = null }, mono = true, keyboard = KeyboardType.Number, imeAction = ImeAction.Next)
             // [U22] the live warning must accept parse-assistable combined input — warning iff
             // the save would block, never a lie mid-typing "07/27".
             if (cardExpiryBlocked(cardExpMonth, cardExpYear)) {
@@ -2071,10 +2126,13 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
             InlineError(cardExpiryError)
             // Masked-with-reveal: a CVV is glanceable-short and worth shielding from shoulders
             // by default. Digits-only is applied once, on Save, beside the other normalizations.
-            SecretField("Security code", cardSecurityCode) { cardSecurityCode = it }
+            SecretField("Security code", cardSecurityCode, imeAction = ImeAction.Next) { cardSecurityCode = it }
             Text("Optional — stored encrypted like everything else.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
-            // G3 billing postal — verbatim (alphanumeric), trimmed once on Save.
-            Field("Billing ZIP / postal code", cardPostal, { cardPostal = it }, keyboard = KeyboardType.Number)
+            // G3 billing postal — verbatim (alphanumeric), trimmed once on Save. a11yand-14 /
+            // ux-parity--3: the keyboard type must MATCH that contract — a numeric IME offers no
+            // letter path at all on many devices, so a UK/Canadian/Dutch postcode was unenterable.
+            // Desktop's plain text Field is the correct twin.
+            Field("Billing ZIP / postal code", cardPostal, { cardPostal = it }, keyboard = KeyboardType.Text, imeAction = ImeAction.Next)
         }
         Field("Notes", notes, { notes = it }, singleLine = false)
         Spacer(Modifier.height(12.dp))
@@ -2084,7 +2142,7 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
                 Icon(Icons.Default.AttachFile, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(ref.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                    Text(ref.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
                     Text(humanSize(ref.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 TextButton(
@@ -2145,13 +2203,13 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
 /** L7 parse-assist (design §7): a COMBINED expiry in the month box splits via
  *  [CardNormalize.parseExpiry] — ONLY while the year box is blank (a separately typed year
  *  would force a guess at which year wins; that shape blocks instead). */
-private fun cardExpiryAssist(month: String, year: String): CardNormalize.Expiry? =
+internal fun cardExpiryAssist(month: String, year: String): CardNormalize.Expiry? =
     if (month.isNotBlank() && CardNormalize.padMonth(month) == null && year.isBlank()) CardNormalize.parseExpiry(month) else null
 
 /** ONE predicate for the live warning AND the save gate ([U22]: they must never disagree —
  *  a warning that shows while the save would succeed lies, and vice versa). True iff a
  *  non-blank half still can't be read after parse-assist. */
-private fun cardExpiryBlocked(month: String, year: String): Boolean {
+internal fun cardExpiryBlocked(month: String, year: String): Boolean {
     val monthBad = month.isNotBlank() && CardNormalize.padMonth(month) == null && cardExpiryAssist(month, year) == null
     val yearBad = year.isNotBlank() && CardNormalize.yearTo4(year) == null
     return monthBad || yearBad
@@ -2389,10 +2447,13 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                         }
                         setup != null -> {
                             Text("Add this secret to your authenticator app, then confirm with a code.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            SelectableCopyRow("Setup URI (otpauth)", setup.otpauthUri, ctx)
-                            SelectableCopyRow("Secret (base32)", setup.secretBase32, ctx)
+                            // ux-copy--4: web's #23 labels — "otpauth URI" / "Secret (base32)" were
+                            // developer names for the wire shapes. The values are unchanged; the
+                            // labels now say what a household member DOES with each.
+                            SelectableCopyRow("Setup link (if you can't scan)", setup.otpauthUri, ctx)
+                            SelectableCopyRow("Setup code (to type into your app)", setup.secretBase32, ctx)
                             Spacer(Modifier.height(4.dp))
-                            Field("6-digit code", code, { code = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number)
+                            Field("6-digit code", code, { code = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number, onDone = { if (code.length == 6 && !ui.busy) { vm.totpConfirm(code); code = "" } })
                             InlineError(ui.totpMessage)
                             Spacer(Modifier.height(8.dp))
                             PrimaryButton("Confirm", enabled = code.length == 6 && !ui.busy, busy = ui.busy) { vm.totpConfirm(code); code = "" }
@@ -2400,7 +2461,7 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                         status.enrolled -> {
                             Text("Enrolled — one-time codes are active for this account.", style = MaterialTheme.typography.bodyMedium)
                             Spacer(Modifier.height(8.dp))
-                            Field("6-digit code", code, { code = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number)
+                            Field("6-digit code", code, { code = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number, onDone = { if (code.length == 6 && !ui.busy) { vm.totpDisable(code); code = "" } })
                             InlineError(ui.totpMessage)
                             Spacer(Modifier.height(8.dp))
                             OutlinedButton(
@@ -2731,7 +2792,10 @@ private fun SelectableCopyRow(label: String, value: String, ctx: Context) {
             SelectionContainer(Modifier.weight(1f)) {
                 Text(value, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             }
-            TextButton(onClick = { copyToClipboard(ctx, label, value, 0) }) { Text("Copy") }
+            // a11yand-09: name each Copy for ITS field — a detail screen stacks several, and out of
+            // context (TalkBack controls navigation) they all read "Copy, button". Extension twin
+            // a11yext-3d. The visible label stays "Copy".
+            TextButton(onClick = { copyToClipboard(ctx, label, value, 0) }, modifier = Modifier.semantics { contentDescription = "Copy $label" }) { Text("Copy") }
         }
     }
 }
@@ -2880,27 +2944,52 @@ private fun QuickUnlockOfferCard(vm: AndvariViewModel) {
 
 @Composable private fun LocalContextCompat(): Context = androidx.compose.ui.platform.LocalContext.current
 
+/**
+ * a11yand-07 (the desktop F72/a11ydesk-04 twin): a single-line field with no declared IME action
+ * gets Compose's default, which merely HIDES the keyboard — the user types the last field of a
+ * form, presses the key that looks like "submit", and nothing happens. [onDone] carries the form's
+ * ONE submit path (same ready/busy gate as its button, re-asserted inside), so an IME Done while
+ * incomplete or busy is a no-op rather than a queued double submit; passing it alone implies
+ * [ImeAction.Done]. Multi-line fields DROP the action (not just ignore it) — Enter must stay a
+ * newline there. [ImeAction.Next]'s focus advance is Compose's own default, so it needs no handler.
+ */
 @Composable
-private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true, keyboard: KeyboardType = KeyboardType.Text) {
+private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true, keyboard: KeyboardType = KeyboardType.Text, imeAction: ImeAction = ImeAction.Default, onDone: (() -> Unit)? = null) {
+    val effAction = imeActionFor(singleLine, imeAction, onDone)
     OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp), label = { Text(label) }, singleLine = singleLine,
         // mono fields hold verbatim strings (invite token, typed fingerprint) — an IME
         // "correcting" a hex chunk to a dictionary word can only ever FAIL the check,
         // but the user gets a scary mismatch for keyboard noise. Kill autocorrect there.
-        keyboardOptions = KeyboardOptions(keyboardType = keyboard, autoCorrectEnabled = if (mono) false else null),
+        keyboardOptions = KeyboardOptions(keyboardType = keyboard, autoCorrectEnabled = if (mono) false else null, imeAction = effAction),
+        keyboardActions = KeyboardActions(onDone = if (effAction == ImeAction.Done && onDone != null) ({ onDone() }) else null),
         textStyle = if (mono) MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace) else MaterialTheme.typography.bodyMedium)
 }
 
+/** The IME action a field actually declares — see [Field]. Pure so the multi-line drop and the
+ *  "onDone implies Done" contract are unit-testable. */
+internal fun imeActionFor(singleLine: Boolean, imeAction: ImeAction, onDone: (() -> Unit)?): ImeAction = when {
+    !singleLine -> ImeAction.Default
+    imeAction != ImeAction.Default -> imeAction
+    onDone != null -> ImeAction.Done
+    else -> ImeAction.Default
+}
+
+/** [revealed] hoists the reveal toggle for callers that must force it open (the editor's Generate
+ *  shows what will be saved — web F78 parity); null keeps the toggle field-local as before. */
 @Composable
-private fun SecretField(label: String, value: String, onChange: (String) -> Unit) {
-    var show by remember { mutableStateOf(false) }
+private fun SecretField(label: String, value: String, imeAction: ImeAction = ImeAction.Default, onDone: (() -> Unit)? = null, revealed: MutableState<Boolean>? = null, onChange: (String) -> Unit) {
+    val showState = revealed ?: remember { mutableStateOf(false) }
+    val show = showState.value
+    val effAction = imeActionFor(singleLine = true, imeAction = imeAction, onDone = onDone)
     OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp), label = { Text(label) }, singleLine = true,
         visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
         // Cut E (v2 #4): a masking transformation alone does NOT tell the IME the field is a
         // secret — without KeyboardType.Password the keyboard's suggestion strip and personal
         // dictionary learn master passwords, item passwords, and backup passphrases.
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false, imeAction = effAction),
+        keyboardActions = KeyboardActions(onDone = if (effAction == ImeAction.Done && onDone != null) ({ onDone() }) else null),
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-        trailingIcon = { IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "Hide $label" else "Show $label") } })
+        trailingIcon = { IconButton(onClick = { showState.value = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "Hide $label" else "Show $label") } })
 }
 
 @Composable
@@ -2913,7 +3002,8 @@ private fun CopyRow(label: String, value: String, ctx: Context, clearSeconds: In
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(value, Modifier.weight(1f), fontFamily = FontFamily.Monospace)
-            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds); copied = true }) { Text(if (copied) "Copied ✓" else "Copy") }
+            // a11yand-09: name the button for ITS field (see SelectableCopyRow).
+            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds); copied = true }, modifier = Modifier.semantics { contentDescription = "Copy $label" }) { Text(if (copied) "Copied ✓" else "Copy") }
         }
         if (copied) {
             CopiedNote(clearSeconds) { copied = false }
@@ -2944,7 +3034,8 @@ private fun SecretCopyRow(label: String, value: String, ctx: Context, clearSecon
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (show) display else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
             IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "Hide $label" else "Show $label") }
-            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds); copied = true }) { Text(if (copied) "Copied ✓" else "Copy") }
+            // a11yand-09: name the button for ITS field (see SelectableCopyRow).
+            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds); copied = true }, modifier = Modifier.semantics { contentDescription = "Copy $label" }) { Text(if (copied) "Copied ✓" else "Copy") }
         }
         if (copied) {
             CopiedNote(clearSeconds) { copied = false }
@@ -2969,7 +3060,8 @@ private fun ExpiryRow(label: String, expired: Boolean, copyValue: String?, ctx: 
             }
             if (copyValue != null) {
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = { copyToClipboard(ctx, "Expiry", copyValue, clearSeconds); copied = true }) { Text(if (copied) "Copied ✓" else "Copy") }
+                // a11yand-09: name the button for ITS field (see SelectableCopyRow).
+                TextButton(onClick = { copyToClipboard(ctx, "Expiry", copyValue, clearSeconds); copied = true }, modifier = Modifier.semantics { contentDescription = "Copy Expiry" }) { Text(if (copied) "Copied ✓" else "Copy") }
             }
         }
         if (copied) {
@@ -2999,7 +3091,10 @@ private fun ServerField(baseUrl: String, onSet: (String) -> Unit) {
 @Composable
 private fun PrimaryButton(text: String, enabled: Boolean, busy: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Button(onClick = onClick, enabled = enabled, modifier = modifier.fillMaxWidth()) {
-        if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary) else Text(text)
+        // a11yand-08 (the desktop a11ydesk-08 twin): while busy the label is replaced by a bare
+        // spinner — name the spinner with the button's text (+ "working" state) so a screen reader
+        // still announces the action instead of an unlabeled button.
+        if (busy) CircularProgressIndicator(Modifier.size(18.dp).semantics { contentDescription = text; stateDescription = "working" }, strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary) else Text(text)
     }
 }
 
@@ -3039,8 +3134,24 @@ private fun displayName(ctx: Context, uri: Uri): String {
     return uri.lastPathSegment ?: "file"
 }
 
+/** ux-parity--5: every copy takes the next generation, and only the NEWEST one owns the auto-clear.
+ *  Re-copying the same secret used to leave the FIRST copy's timer live — its `cur == value` guard
+ *  still passed, so it wiped the clipboard partway through the second copy's DISCLOSED window
+ *  ("clears from the clipboard in Ns"). Web and the extension each keep one live timer; this is
+ *  that rule ported back. */
+private val clipboardCopyGeneration = java.util.concurrent.atomic.AtomicLong(0)
+
+/** The auto-clear's two guards, together. Clears only when (a) no later copy has superseded this
+ *  scheduled one (ux-parity--5) and (b) the clipboard still demonstrably holds OUR secret — a null
+ *  read means "can't verify ownership", NEVER "still ours" (see [copyToClipboard]). Pure so both
+ *  rules are unit-testable without a ClipboardManager. */
+internal fun shouldClearClipboard(scheduledGeneration: Long, currentGeneration: Long, clipboardNow: String?, copiedValue: String): Boolean =
+    scheduledGeneration == currentGeneration && clipboardNow == copiedValue
+
 private fun copyToClipboard(ctx: Context, label: String, value: String, clearSeconds: Int) {
     val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    // Newest copy owns the clipboard — and any clear scheduled for it (see the counter above).
+    val generation = clipboardCopyGeneration.incrementAndGet()
     // <=0 is reserved for NON-secret setup material (e.g. the TOTP setup URI) — no auto-clear.
     // Vault-secret call sites always pass max(1, policy.clipboardClearSeconds), mirroring web.
     if (clearSeconds <= 0) {
@@ -3062,6 +3173,6 @@ private fun copyToClipboard(ctx: Context, label: String, value: String, clearSec
     // overwritten — a platform limitation we cannot fix without clobbering user data.
     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
         val cur = runCatching { cm.primaryClip?.getItemAt(0)?.text?.toString() }.getOrNull()
-        if (cur == value) runCatching { cm.clearPrimaryClip() }
+        if (shouldClearClipboard(generation, clipboardCopyGeneration.get(), cur, value)) runCatching { cm.clearPrimaryClip() }
     }, clearSeconds * 1000L)
 }

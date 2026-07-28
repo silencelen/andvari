@@ -360,16 +360,30 @@ object QuickUnlock {
             // for zero security gain: the Keystore key is auth-per-use + BIOMETRIC_STRONG, so a
             // locked-out attacker could never have used it. (enroll()'s lockout wipe is
             // different and correct: it cleans up an ORPHAN key when no valid enrollment exists.)
-            is Auth.TempLockout -> Recover.Fallback("Too many attempts — enter your master password.")
-            is Auth.Cancelled -> Recover.Fallback(null)
-            is Auth.PermanentLockout -> Recover.Fallback("Too many attempts — enter your master password.")
-            is Auth.Error -> Recover.Fallback(null)
+            else -> Recover.Fallback(fallbackReason(outcome))
         }
     }
 
     // ---- BiometricPrompt suspend bridge ----
 
-    private sealed interface Auth {
+    /** ux-error--5: which biometric outcomes SPEAK on the way back to the password prompt. A
+     *  deliberate cancel stays silent (the user knows what they just did), but a lockout or a
+     *  sensor/hardware failure must point at the master password — [Auth.Error] used to be silent
+     *  too, so a failed sensor left the Unlock screen looking simply inert, with no pointer to the
+     *  way in. [DEVICE_FALLBACK] is the extension's twin sentence (errors.ts). Pure + internal so
+     *  the cancel-silent / failure-spoken distinction is unit-pinned. */
+    internal fun fallbackReason(outcome: Auth): String? = when (outcome) {
+        is Auth.Cancelled, is Auth.Ok -> null
+        is Auth.TempLockout, is Auth.PermanentLockout -> LOCKOUT_FALLBACK
+        is Auth.Error -> DEVICE_FALLBACK
+    }
+
+    internal const val LOCKOUT_FALLBACK = "Too many attempts — enter your master password."
+
+    /** Byte-twin of the extension's quickUnlockErrorCopy default branch (errors.ts) — edit both. */
+    internal const val DEVICE_FALLBACK = "Couldn't unlock with your device — unlock with your master password."
+
+    internal sealed interface Auth {
         class Ok(val cipher: Cipher) : Auth
         object Cancelled : Auth
         object TempLockout : Auth
