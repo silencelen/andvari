@@ -826,11 +826,17 @@ private fun RecoverySetupScreen(state: DesktopState) {
             Column(Modifier.padding(16.dp)) {
                 SelectionContainer { Text(phrase, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyLarge) }
                 Spacer(Modifier.height(8.dp))
+                // ux-error--3: a refused clipboard write (busy Windows clipboard) must not be
+                // silent — the user would walk away believing the phrase is on the clipboard.
+                var copyFailed by remember { mutableStateOf(false) }
                 // a11y (Cut B review): primary on the surfaceVariant card is 3.77:1 in light.
                 TextButton(
-                    onClick = { copyWithAutoClear(phrase, clipClear) },
+                    onClick = { copyFailed = !copyWithAutoClear(phrase, clipClear) },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
                 ) { Text("Copy phrase") }
+                if (copyFailed) {
+                    Text(CLIPBOARD_COPY_FAILED, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
             }
         }
         Spacer(Modifier.height(20.dp))
@@ -2271,7 +2277,9 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
                 // box wants) through the same auto-cleared clipboard as CopyRow; a half-missing
                 // expiry (null composeShortExpiry) keeps the row read-only.
                 val shortExpiry = CardNormalize.composeShortExpiry(card.expMonth ?: "", card.expYear ?: "")
-                var expCopied by remember { mutableStateOf(false) }
+                // null = idle, true = copied, false = the clipboard write failed (ux-error--3) —
+                // CopyRow's tri-state, mirrored.
+                var expCopied by remember { mutableStateOf<Boolean?>(null) }
                 Column(Modifier.padding(vertical = 6.dp)) {
                     Text("Expiry", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2283,16 +2291,20 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
                         }
                         if (shortExpiry != null) {
                             Spacer(Modifier.weight(1f))
-                            TextButton(onClick = { copyWithAutoClear(shortExpiry, clipClear); expCopied = true }) { Text(if (expCopied) "Copied ✓" else "Copy") }
+                            TextButton(onClick = { expCopied = copyWithAutoClear(shortExpiry, clipClear) }) { Text(if (expCopied == true) "Copied ✓" else "Copy") }
                         }
                     }
-                    if (expCopied) {
+                    if (expCopied != null) {
                         Text(
-                            if (clipClear > 0) "Copied — clears from the clipboard in ${clipClear}s" else "Copied",
+                            when {
+                                expCopied == false -> CLIPBOARD_COPY_FAILED
+                                clipClear > 0 -> "Copied — clears from the clipboard in ${clipClear}s"
+                                else -> "Copied"
+                            },
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (expCopied == false) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        LaunchedEffect(Unit) { delay(3500); expCopied = false }
+                        LaunchedEffect(expCopied) { delay(3500); expCopied = null }
                     }
                 }
             }
@@ -2678,9 +2690,16 @@ private fun TotpRow(uri: String, clearSeconds: Int) {
     }
     Column(Modifier.padding(vertical = 8.dp)) {
         Text("One-time code", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // ux-error--3: the code button has no success flash (the countdown is its own feedback),
+        // but a refused clipboard write must not be silent.
+        var copyFailed by remember { mutableStateOf(false) }
         androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { copyWithAutoClear(code, clearSeconds) }) { Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary) }
+            TextButton(onClick = { copyFailed = !copyWithAutoClear(code, clearSeconds) }) { Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary) }
             Text("${remaining}s", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (copyFailed) {
+            Text(CLIPBOARD_COPY_FAILED, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+            LaunchedEffect(copyFailed) { delay(3500); copyFailed = false }
         }
     }
 }
@@ -3165,27 +3184,38 @@ private fun Secret(label: String, value: String, onEnter: (() -> Unit)? = null, 
         trailingIcon = { IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "hide value" else "show value") } })
 }
 
+/** ux-error--3 failure feedback — byte-twin of web/extension errors.ts CLIPBOARD_FAILED; kept
+ *  desktop-local (not in core's HouseholdCopy — the canon maps errors, not clipboard outcomes).
+ *  Pinned by ClipboardGuardTest; edit all three sides together. */
+internal const val CLIPBOARD_COPY_FAILED = "Couldn't copy to the clipboard — try again."
+
 /** [display] is what a reveal shows (e.g. a grouped card number); Copy always hands over the raw [value]. */
 @Composable
 private fun CopyRow(label: String, value: String, secret: Boolean, clearSeconds: Int, display: String = value) {
     var show by remember { mutableStateOf(!secret) }
     // Cut J (v2 #10): the app's primary action gave ZERO visible feedback, and the silent
     // ~30s auto-wipe read as a random paste failure. Flash the button + disclose the window.
-    var copied by remember { mutableStateOf(false) }
+    // null = idle, true = copied, false = the clipboard write failed (ux-error--3: a busy
+    // Windows clipboard) — honest failure line instead of a false "Copied ✓".
+    var copied by remember { mutableStateOf<Boolean?>(null) }
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (show) display else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
             if (secret) IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "hide value" else "show value") } // a11ydesk-02
-            TextButton(onClick = { copyWithAutoClear(value, clearSeconds); copied = true }) { Text(if (copied) "Copied ✓" else "Copy") }
+            TextButton(onClick = { copied = copyWithAutoClear(value, clearSeconds) }) { Text(if (copied == true) "Copied ✓" else "Copy") }
         }
-        if (copied) {
+        if (copied != null) {
             Text(
-                if (clearSeconds > 0) "Copied — clears from the clipboard in ${clearSeconds}s" else "Copied",
+                when {
+                    copied == false -> CLIPBOARD_COPY_FAILED
+                    clearSeconds > 0 -> "Copied — clears from the clipboard in ${clearSeconds}s"
+                    else -> "Copied"
+                },
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (copied == false) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            LaunchedEffect(Unit) { delay(3500); copied = false }
+            LaunchedEffect(copied) { delay(3500); copied = null }
         }
     }
 }

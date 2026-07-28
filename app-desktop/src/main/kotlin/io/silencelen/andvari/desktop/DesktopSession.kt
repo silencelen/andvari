@@ -11,7 +11,7 @@ import java.nio.file.Files
  * Non-secret desktop session persisted to ~/.andvari-desktop/session.json. Tokens
  * are here (MVP); the vault KEY is NEVER stored — a relaunch re-prompts for the
  * master password (spec 01 §8). DPAPI+PIN quick-unlock is a documented Windows
- * follow-up (see ops/windows-build.md).
+ * follow-up.
  */
 @Serializable
 data class DesktopSession(

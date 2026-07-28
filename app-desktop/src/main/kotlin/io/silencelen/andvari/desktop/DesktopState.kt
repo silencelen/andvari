@@ -2338,7 +2338,7 @@ class DesktopState(
         scope.launch {
             runCatching { api!!.totpStatus() }
                 .onSuccess { totpStatus = it; totpLoad = TotpLoad.Ready }
-                .onFailure { totpError = it.message ?: "couldn't load TOTP status"; totpLoad = TotpLoad.Failed }
+                .onFailure { totpError = HouseholdCopy.forTotpError(it); totpLoad = TotpLoad.Failed } // #23: canon copy, never it.message
         }
     }
 
@@ -2393,9 +2393,9 @@ class DesktopState(
         scope.launch {
             try { block(); busy = false } catch (t: Throwable) {
                 busy = false
-                totpError = if (t is ApiException && t.code == "bad_totp_code") {
-                    "That code isn't right — check your authenticator and try again."
-                } else t.message ?: "something went wrong"
+                // #23: the canon's `bad_totp_code` row IS this flow's curated sentence
+                // ([HouseholdCopy.BAD_TOTP_CODE]); everything else takes canon copy, never t.message.
+                totpError = HouseholdCopy.forTotpError(t)
             }
         }
     }
@@ -2417,7 +2417,7 @@ class DesktopState(
             } catch (t: java.io.IOException) {
                 true // offline is fine — export the cached snapshot, visibly dated
             } catch (t: Throwable) {
-                busy = false; error = t.message ?: "sync failed"; return@launch
+                busy = false; error = HouseholdCopy.forSyncError(t); return@launch // #23: canon copy, never t.message
             }
             val acct = account
             if (acct == null) { busy = false; return@launch }
@@ -2464,7 +2464,7 @@ class DesktopState(
                 busy = false
                 backupResult = result
             } catch (t: Throwable) {
-                busy = false; error = t.message ?: "backup failed"
+                busy = false; error = exportError(t) // #23 carve-out: app-minted ISE sentences pass; wire text never
             }
         }
     }
@@ -2580,7 +2580,7 @@ class DesktopState(
             } catch (t: java.io.IOException) {
                 true
             } catch (t: Throwable) {
-                busy = false; error = t.message ?: "sync failed"; return@launch
+                busy = false; error = HouseholdCopy.forSyncError(t); return@launch // #23: canon copy, never t.message
             }
             val acct = account
             if (acct == null) { busy = false; return@launch }
@@ -2613,7 +2613,7 @@ class DesktopState(
                 busy = false
                 notice = "Exported $count logins to ${dest.absolutePath}. Delete the CSV once the other manager has imported it."
             } catch (t: Throwable) {
-                busy = false; error = t.message ?: "export failed"
+                busy = false; error = exportError(t) // #23 carve-out: app-minted ISE sentences pass; wire text never
             }
         }
     }
@@ -3052,3 +3052,11 @@ class DesktopState(
             "Updates: the server's update listing hasn't been re-signed in a while — if you're expecting an update, mention it to your admin."
     }
 }
+
+/** #23 carve-out for the spec 07 export paths (android AndvariViewModel.exportError's twin): their
+ *  [IllegalStateException]s are OUR curated, user-facing sentences minted app-side
+ *  ("backup verification failed — …", writeVerifiedAtomically's kept-temp move failure) — never
+ *  wire text — so they surface verbatim; everything else routes through the shared canon.
+ *  Top-level (the trustGateModel idiom) so ExportErrorCopyTest can pin it. */
+internal fun exportError(t: Throwable): String =
+    if (t is IllegalStateException && !t.message.isNullOrBlank()) t.message!! else HouseholdCopy.forError(t)
