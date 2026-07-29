@@ -286,6 +286,7 @@ function Get-Sha256Lower {
 function Get-MsiProductVersion {
     param([string]$Path)
     $ver = $null
+    $installer = $null; $db = $null; $view = $null; $rec = $null
     try {
         $installer = New-Object -ComObject WindowsInstaller.Installer
         $db   = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 0))
@@ -304,6 +305,20 @@ function Get-MsiProductVersion {
         [void]$view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
     }
     catch { Die "could not read ProductVersion from $Path - $($_.Exception.Message)" }
+    finally {
+        # Closing the VIEW is not enough. The database and installer COM objects keep the .msi file
+        # open for the remaining life of this process, so the very next step - signtool writing the
+        # Authenticode signature into that same file - fails with "The file is being used by another
+        # process". Release them explicitly and let the finalizers run. This also unwinds correctly
+        # when the catch above throws, so a failed read cannot leave the MSI locked either.
+        foreach ($o in @($rec, $view, $db, $installer)) {
+            if ($null -ne $o) {
+                try { [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($o) } catch { }
+            }
+        }
+        $rec = $null; $view = $null; $db = $null; $installer = $null
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+    }
     if ([string]::IsNullOrWhiteSpace($ver)) { Die "MSI at $Path carries no ProductVersion property" }
     return $ver
 }
