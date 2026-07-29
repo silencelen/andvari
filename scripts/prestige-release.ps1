@@ -291,12 +291,17 @@ function Get-MsiProductVersion {
         $db   = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 0))
         $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db,
                     @('SELECT `Value` FROM `Property` WHERE `Property` = ''ProductVersion'''))
-        $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+        # [void] on the two value-less calls is load-bearing: an unassigned InvokeMember emits $null
+        # onto the output stream, and a PowerShell function returns EVERYTHING it emitted. Without
+        # it this returns @($null, $null, '0.21.0'), which interpolates as '  0.21.0' and makes the
+        # version assertion below compare an ARRAY (where -ne filters and yields a truthy result)
+        # instead of a string - failing on a perfectly correct MSI.
+        [void]$view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
         $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
         if ($null -ne $rec) {
             $ver = [string]$rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, @(1))
         }
-        $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
+        [void]$view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
     }
     catch { Die "could not read ProductVersion from $Path - $($_.Exception.Message)" }
     if ([string]::IsNullOrWhiteSpace($ver)) { Die "MSI at $Path carries no ProductVersion property" }
