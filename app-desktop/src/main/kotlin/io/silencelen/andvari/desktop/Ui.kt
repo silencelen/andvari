@@ -1344,13 +1344,23 @@ private fun ImportDialogs(state: DesktopState) {
             AlertDialog(
                 onDismissRequest = { if (!state.importBusy) state.importDismiss() },
                 confirmButton = {
-                    if (state.importError != null) {
+                    // ux-error--1: a TERMINAL push failure (403, weakened-KDF block, …) gets no
+                    // Retry — replaying it would just collect the same refusal. Only the exit
+                    // remains, and the message beside it says what the server actually refused.
+                    if (state.importError != null && !state.importRetryable) {
+                        TextButton(onClick = { state.importDismiss() }) { Text("OK") }
+                    } else if (state.importError != null) {
                         TextButton(onClick = { state.importConfirm() }, enabled = !state.importBusy) { Text("Retry") }
                     } else {
                         TextButton(onClick = { state.importConfirm() }, enabled = !state.importBusy && report.imported > 0) { Text("Import ${report.imported}") }
                     }
                 },
-                dismissButton = { TextButton(onClick = { state.importDismiss() }, enabled = !state.importBusy) { Text("Cancel") } },
+                // A second dismiss beside the terminal "OK" would just be a slower way to press it.
+                dismissButton = {
+                    if (state.importError == null || state.importRetryable) {
+                        TextButton(onClick = { state.importDismiss() }, enabled = !state.importBusy) { Text("Cancel") }
+                    }
+                },
                 title = { Text("Import passwords?") },
                 text = {
                     Column(Modifier.verticalScroll(rememberScrollState())) {

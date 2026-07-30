@@ -204,6 +204,10 @@ data class UiState(
     val importFormat: CsvImport.ImportFormat? = null,
     val importReport: CsvImport.ImportReport? = null,
     val importError: String? = null,
+    // ux-error--1: does [importError] describe a failure a Retry can actually clear? Only the
+    // PUSH phase sets it false (a server refusal / weakened-KDF block); every pre-push refusal
+    // ends the attempt at the "Couldn't import" dialog, which has no Retry to gate.
+    val importRetryable: Boolean = true,
     val importProgress: Pair<Int, Int>? = null,
     val importBusy: Boolean = false,
     val importDone: Boolean = false,
@@ -2413,7 +2417,7 @@ class AndvariViewModel(
         if (snap.importBusy) return // state-level: the button's enabled flag lags a frame behind a re-plan
         val plan = snap.importPlan ?: return
         val dest = snap.importVaultId
-        _ui.value = _ui.value.copy(importBusy = true, importError = null, importProgress = 0 to plan.items.size)
+        _ui.value = _ui.value.copy(importBusy = true, importError = null, importRetryable = true, importProgress = 0 to plan.items.size)
         viewModelScope.launch {
             try {
                 engine!!.importAll(plan.items, onProgress = { done, total -> _ui.value = _ui.value.copy(importProgress = done to total) }, vaultId = dest)
@@ -2426,7 +2430,19 @@ class AndvariViewModel(
                 }
                 _ui.value = _ui.value.copy(importBusy = false, importDone = true, importReport = plan.report, items = engine?.items() ?: emptyList())
             } catch (t: Throwable) {
-                _ui.value = _ui.value.copy(importBusy = false, importError = "Import interrupted — press Retry to finish (no duplicates will be created).")
+                // A8: a 426 mid-import is not a per-import error — this build is too old for the
+                // server's pin, so every replay of this push is refused identically. The blocking
+                // upgrade screen owns it (op()/backgroundSync parity); the old catch-all swallowed
+                // it into a Retry prompt instead, the exact ux-error--1 defect.
+                if (t is UpgradeRequiredException) {
+                    _ui.value = _ui.value.copy(importBusy = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
+                    return@launch
+                }
+                _ui.value = _ui.value.copy(
+                    importBusy = false,
+                    importError = importPushError(t),
+                    importRetryable = importPushRetryable(t),
+                )
             }
         }
     }
@@ -2435,8 +2451,8 @@ class AndvariViewModel(
         importParsed = null
         _ui.value = _ui.value.copy(
             importPlan = null, importFormat = null, importReport = null, importError = null,
-            importProgress = null, importBusy = false, importDone = false, importVaultId = null,
-            importSourceSheet = false, importMangleNote = null,
+            importRetryable = true, importProgress = null, importBusy = false, importDone = false,
+            importVaultId = null, importSourceSheet = false, importMangleNote = null,
         )
     }
 
@@ -3019,3 +3035,36 @@ class AndvariViewModel(
         }
     }
 }
+
+/** ux-error--1: the import PUSH phase's retryable sentence — kept verbatim from the old catch-all,
+ *  because for a TRANSIENT failure its promise is true (the plan's itemIds double as push
+ *  mutationIds, so SyncEngine.importAll replays idempotently). Desktop's twin. */
+internal const val IMPORT_INTERRUPTED = "Import interrupted — press Retry to finish (no duplicates will be created)."
+
+/**
+ * ux-error--1 (polish audit 2026-07-27): is a mid-push import failure worth the Retry affordance?
+ * The old catch-all answered "always" and promised every failure would finish — so a 403, a
+ * weakened-KDF block or a version pin replayed the same doomed push forever under a sentence that
+ * said it would work. The split follows the canon's own taxonomy (HouseholdCopy's house rules):
+ * "can't reach the server" is transport and replays fine; "the server said no" is a refusal of THIS
+ * request and replays as the same refusal — except the two verdicts whose OWN canon sentences
+ * invite a retry ([HouseholdCopy.TOO_MANY_REQUESTS] "wait a bit and try again",
+ * [HouseholdCopy.SERVER_PROBLEM] "try again in a moment").
+ *
+ * [UpgradeRequiredException] never reaches here — importConfirm catches it first for the blocking
+ * upgrade screen, exactly like op()/backgroundSync (A8). Top-level (the desktop trustGateModel
+ * idiom) so PureGatesTest can pin it without a ViewModel. Desktop's twin.
+ */
+internal fun importPushRetryable(t: Throwable): Boolean = when {
+    // H1 (spec 05 T1): a security block, not a hiccup — the identical push is blocked identically.
+    t is KdfPolicyViolationException -> false
+    t is ApiException -> t.code == "rate_limited" || t.status == 429 || t.status >= 500
+    // Transport blip, a cancelled scope, an unclassified throw: the idempotent replay converges.
+    else -> true
+}
+
+/** ux-error--1: import-push copy. A terminal failure says what the server actually refused
+ *  ([HouseholdCopy.forError] — the mapper forImportError's KDoc already names for the PUSH phase)
+ *  and the UI drops the Retry button; a transient one keeps [IMPORT_INTERRUPTED]'s honest promise. */
+internal fun importPushError(t: Throwable): String =
+    if (importPushRetryable(t)) IMPORT_INTERRUPTED else HouseholdCopy.forError(t)

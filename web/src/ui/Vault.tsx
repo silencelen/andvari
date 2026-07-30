@@ -5,6 +5,7 @@ import { toB64 } from "../crypto/bytes";
 import { shortFormMatches } from "../crypto/escrow";
 import { generatePassword } from "../crypto/generator";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
+import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import { randomBytes } from "../crypto/provider";
 import { normalizeTotp, parseOtpauthUri, totpCode, totpSecondsRemaining } from "../crypto/totp";
 import type { Account } from "../vault/account";
@@ -1997,6 +1998,34 @@ function friendlyParseError(e: unknown): string {
   return "That file could not be read. Make sure it's the CSV your password manager exported.";
 }
 
+/** ux-error--1: the transient import-push sentence — its promise is true, because the plan's
+ *  itemIds double as push mutationIds and the server dedupes an already-applied put. */
+const IMPORT_INTERRUPTED =
+  "The import was interrupted before it finished. Everything that already landed is safe in your vault — press Retry to import the rest (it won’t create duplicates).";
+
+/**
+ * ux-error--1 (polish audit 2026-07-27): the import PUSH phase's outcome. The old catch-all
+ * promised EVERY failure would finish on Retry, so a refusal replayed the same doomed push forever
+ * under a sentence saying it would work. `fatal` drops the Retry affordance; the message then names
+ * what the server actually refused. Named-terminal-first, transient-last — MoveCopyControl's
+ * ladder shape, and its sentences are the same canon twins (core HouseholdCopy's status rows,
+ * pinned by vault-copy.test.ts).
+ *
+ * Deliberately NOT enumerated: 401 (the client's definitive-401 path forgets the session, which
+ * unmounts this panel) and 426 (api/client.ts fires onUpgradeRequired and App shows its sticky
+ * "reload to update" banner) — both already answer GLOBALLY, and the natives' equivalents raise
+ * their blocking upgrade screen, so a local sentence here would only compete with them.
+ * Exported for import-push-outcome.test.ts (the offlineCopyModel idiom).
+ */
+export function importPushOutcome(e: unknown): { message: string; fatal: boolean } {
+  if (e instanceof KdfPolicyError) return { message: WEAK_KDF_MESSAGE, fatal: true }; // H1 (spec 05 T1)
+  if (e instanceof ApiError && e.status === 403) return { message: "You don't have permission to do that.", fatal: true };
+  if (e instanceof ApiError && e.status === 413) {
+    return { message: "The server refused that upload — it may be too large, or storage may be full.", fatal: true };
+  }
+  return { message: IMPORT_INTERRUPTED, fatal: false };
+}
+
 function problemLabel(code: string): string {
   switch (code) {
     case "wrong_field_count":
@@ -2122,6 +2151,9 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [importErr, setImportErr] = useState("");
+  /** ux-error--1: does [importErr] describe a failure a Retry can actually clear? A terminal
+   *  refusal keeps importLocked (the plan's ids must not be re-minted) but drops the Retry. */
+  const [importFatal, setImportFatal] = useState(false);
   /** S2: a non-locking notice for a failed destination PICK (vault vanished mid-sync) —
    *  deliberately not importErr, which would flip importLocked and freeze the very picker
    *  the user needs to choose again with. */
@@ -2141,6 +2173,7 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
     setMangled(false);
     setParseErr("");
     setImportErr("");
+    setImportFatal(false);
     setFinished(false);
     setProgress(null);
   };
@@ -2204,6 +2237,7 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
     if (!planned) return;
     setBusy(true);
     setImportErr("");
+    setImportFatal(false);
     setProgress({ done: 0, total: planned.plan.items.length });
     try {
       // Reuse plan.items on every attempt: each carries its own itemId, used as the push
@@ -2211,10 +2245,10 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
       // Destination = the vault CAPTURED with the plan (S2 invariant), never the picker.
       await store.importDocs(planned.plan.items, (done, total) => setProgress({ done, total }), planned.vault.vaultId);
       setFinished(true);
-    } catch {
-      setImportErr(
-        "The import was interrupted before it finished. Everything that already landed is safe in your vault — press Retry to import the rest (it won’t create duplicates).",
-      );
+    } catch (e) {
+      const outcome = importPushOutcome(e);
+      setImportFatal(outcome.fatal);
+      setImportErr(outcome.message);
     } finally {
       setBusy(false);
     }
@@ -2343,7 +2377,11 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
           )}
 
           <div className="actions">
-            {importErr ? (
+            {importErr && importFatal ? (
+              /* ux-error--1: a terminal refusal offers the EXIT, not a Retry that replays the same
+                 "no". onDone (not onClose) so the rows that did land show up in the vault. */
+              <button type="button" className="primary" onClick={onDone}>Back to vault</button>
+            ) : importErr ? (
               <button type="button" className="primary" disabled={busy} onClick={runImport}>{busy ? "Retrying…" : "Retry"}</button>
             ) : (
               <button type="button" className="primary" disabled={busy || nothingToImport} onClick={runImport}>

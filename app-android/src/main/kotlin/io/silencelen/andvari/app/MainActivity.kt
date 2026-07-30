@@ -1589,13 +1589,23 @@ private fun ImportDialogs(vm: AndvariViewModel, ui: UiState) {
             AlertDialog(
                 onDismissRequest = { if (!ui.importBusy) vm.importDismiss() },
                 confirmButton = {
-                    if (ui.importError != null) {
+                    // ux-error--1: a TERMINAL push failure (403, weakened-KDF block, …) gets no
+                    // Retry — replaying it would just collect the same refusal. Only the exit
+                    // remains, and the message beside it says what the server actually refused.
+                    if (ui.importError != null && !ui.importRetryable) {
+                        TextButton(onClick = vm::importDismiss) { Text("OK") }
+                    } else if (ui.importError != null) {
                         TextButton(onClick = vm::importConfirm, enabled = !ui.importBusy) { Text("Retry") }
                     } else {
                         TextButton(onClick = vm::importConfirm, enabled = !ui.importBusy && report.imported > 0) { Text("Import ${report.imported}") }
                     }
                 },
-                dismissButton = { TextButton(onClick = vm::importDismiss, enabled = !ui.importBusy) { Text("Cancel") } },
+                // A second dismiss beside the terminal "OK" would just be a slower way to press it.
+                dismissButton = {
+                    if (ui.importError == null || ui.importRetryable) {
+                        TextButton(onClick = vm::importDismiss, enabled = !ui.importBusy) { Text("Cancel") }
+                    }
+                },
                 title = { Text("Import passwords?") },
                 text = {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
