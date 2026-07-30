@@ -1,6 +1,6 @@
 # Polish-release audit — full-surface review at 0.20.0 / ext 0.19.0
 
-**Status: REVIEW COMPLETE — backlog proposed, nothing built.** Scope: everything shipped, reviewed
+**Status: CLOSED — every finding shipped, refuted, or deliberately deferred. See the closure ledger below.** Scope: everything shipped, reviewed
 from every angle (correctness, security drift, UX parity, copy, accessibility, failure experience,
 performance, test quality, code structure, docs, release hygiene). The next release is a **polish
 release**: no roadmap items, no new capability — fix, unify, and clean up what already exists.
@@ -14,6 +14,229 @@ release**: no roadmap items, no new capability — fix, unify, and clean up what
   verification of the batches that died. See §8.
 - **Outcome:** 16 high · 64 medium · 72 low. Two findings were killed by the refuters and are
   recorded in §7 so they are not re-found. Ten had their severity or mechanism corrected.
+
+---
+
+## Closure ledger (added 2026-07-30)
+
+**Every finding in this document is accounted for — read this before the tables below.** This audit
+drove a four-wave campaign that shipped as release **0.21.0 / extension 0.20.0**, live on every
+surface 2026-07-29. The tables further down are the original findings as reported, *not* an open
+backlog.
+
+| Disposition | Count |
+|---|---|
+| Shipped in a build wave | 127 |
+| Shipped in the closeout pass (`1b12380`) | 6 |
+| Shipped as a side effect of an adjacent lane | 6 |
+| Refuted / not defects | 6 |
+| Severity reviewed down, left out of scope | 2 |
+| Deliberately deferred | 5 |
+| **Total** | **152** |
+
+The adversarial layers are why those first rows are trustworthy: a find→refute pass over the *new*
+work found 15 confirmed regressions in Wave 1 alone — including that the headline autofill fix was
+incomplete — and two independent reviewers returned "fix-first" on the release automation, catching
+an inverted trust model and a ceremony that signed an unverified base before either shipped.
+
+### Refuted — do not re-find these
+
+- **`hygiene-release--1`** — Emission-on-sign is the documented designed contract, and the file lands in a local gitignored dir that nothing serves. It was also **not** the cause of the 2026-07-26 unpapered publish, which was a deliberate dual-channel push that skipped the paperwork ritual.
+  <br><sub>Originally: publish-extension.sh arms the Firefox auto-update channel on every sign, ungated</sub>
+- **`quality-deadcode--12`** — The `UriMatch.normalizeHost` / `CsvImport.nameFallback` split is a deliberate, documented divergence — not duplication to unify.
+  <br><sub>Originally: Core host-extraction duplication (UriMatch.normalizeHost vs CsvImport.nameFallback) is real but deliberately divergent and vector-pinned — full unification is the wrong fix</sub>
+- **`quality-deadcode--14`** — Refuted-leads ledger: no unused CSS classes, no commented-out code blocks, all extension deps used.
+  <br><sub>Originally: Refuted leads: no unused CSS classes, no commented-out code blocks, extension deps all used</sub>
+- **`quality-tests--4`** — Both refuters overturned it: the in-page card chip IS pinned, by a dedicated `C1` describe block in `web/src/extension-pins.test.ts` that `verify.sh` runs. The reviewer grepped only `extension/src/*.test.ts` and missed the house pattern — **extension invariants are pinned from the web vitest suite**.
+  <br><sub>Originally: Extension 0.19.0 (in-page card chip) is staged and partially shipped — signed xpi built, firefox-updates.json advertising it — with ZERO automated coverage of any chip code</sub>
+- **`ux-copy--12`** — Verified **largely deliberate and documented** at `HouseholdCopy.kt:56,108` — the extension popup's shorter "contact your admin" is intentional brevity. A blunt unification would overwrite a recorded decision. The residual is a minor inconsistency inside the canon itself; not worth forking a pinned twin over.
+  <br><sub>Originally: 'contact your admin' vs 'contact your administrator' split inside the core canon itself</sub>
+- **`ux-parity--8`** — It IS the refuted-leads ledger for that lane, not a defect.
+  <br><sub>Originally: REFUTED LEADS (for the refuter's ledger): five mapper observations are not cross-platform divergences</sub>
+
+### Severity reviewed down, left out of scope
+
+- **`bug-server--4`** — Reviewed down to low by its refuter; deliberately left out of scope.
+  <br><sub>PUT /escrow/self replaces the org recovery backstop with only a session, while the sibling recovery-write route requires a password re-auth</sub>
+- **`bug-web--2`** — Reviewed down to low by its refuter.
+  <br><sub>mustChange banner navigation misses three layers — stale invisible layer eats a Back press</sub>
+
+### Still open, deliberately
+
+Decisions, not oversights. Each is either out of scope for a polish release or needs something this
+campaign could not provide.
+
+- **God-file decomposition** — `MainActivity.kt` 3067 lines, `Ui.kt` 3228, `background.ts` 3117,
+  `Vault.tsx` 2307, `Service.kt` 1426, `SyncEngine.kt` 1387. A standalone project, not polish. Leaves
+  were extracted opportunistically where a wave already had the file open.
+- **Desktop `Ui.kt` coverage** — no Compose test harness exists in the module. Wave 3 added desktop's
+  first *executing*-coroutine harness for `DesktopState` (the existing one deliberately never ran its
+  coroutines), but composables remain uncovered.
+- **`quality-tests--8`** — The E2E layer is manual-only and decaying (`e2e.sh` is an echo-suggestion inside `verify.sh`). Fixing it needs a live server and real credentials, which this campaign deliberately never had.
+- **`quality-tests--9`** — Extension surface wiring (~7.1k lines across background/content/content-ui/popup/connector/offscreen) has no behavioural coverage. Effort L, and it wants a browser harness — out of scope for polish.
+- **`ux-copy--10`** — One popup string capitalizes the brand ("Andvari can't auto-fill…"). Low; it is a pinned twin, so changing it costs more than it returns.
+- **`ux-copy--8`** — Import-result bucket phrasing diverges across the three importing surfaces. Low, and it touches copy that would want canonizing first.
+- **`ux-copy--9`** — Apostrophe style is mixed inside single files against the canon's ASCII convention. Low, cosmetic.
+- **Anything needing a real device or a live checkout** — the F20 compatibility trace, and end-to-end
+  verification against a real payment form. No amount of static review substitutes for it.
+
+### Found while fixing — NOT in this audit
+
+- **The *transient* import sentence is an un-canonized twin, and has already drifted.** The natives say
+  "Import interrupted — press Retry to finish (no duplicates will be created)."; web says something
+  different. Same class as `ux-copy--3`, which this campaign moved into the `HouseholdCopy` canon.
+  **Undecided:** whether this sentence belongs there too.
+- **Neither native refreshes `items` after a FAILED import**, so rows that did land stay invisible until
+  the next sync. Previously masked — a transient retry eventually succeeded and refreshed — but now
+  reachable via the terminal path added for `ux-error--1`.
+- **Private infrastructure names were reachable in public files**: a tailnet hostname and absolute
+  build paths in developer-facing scripts, `gradle.properties`, extension console output and the
+  store-publishing runbook. Genericized. Dated design and compliance records were deliberately left as
+  written, with a banner in `docs/ROADMAP.md` explaining the notation.
+
+### Where each shipped finding landed
+
+| Finding | Sev | Shipped in |
+|---|---|---|
+| `bug-autofill-ux--0` | H | Wave 1 + fold |
+| `bug-cache-lifecycle--0` | H | Wave 1 + fold |
+| `bug-ext-gating--0` | H | Wave 1 + fold |
+| `bug-server--0` | H | Wave 1 + fold |
+| `bug-web--0` | H | Wave 1 + fold |
+| `hygiene-docs--0` | H | Wave 2 |
+| `hygiene-docs--1` | H | Wave 2 |
+| `hygiene-docs--2` | H | Wave 2 |
+| `hygiene-docs--4` | H | Wave 2 |
+| `hygiene-docs--6` | H | Wave 2 |
+| `hygiene-release--0` | H | Wave 2 |
+| `quality-tests--0` | H | Wave 2 |
+| `quality-tests--1` | H | Wave 2 |
+| `quality-tests--2` | H | Same defect as bug-cache-lifecycle--0; fixed there (8b81306) |
+| `ux-copy--1` | H | Closeout pass (`1b12380`) |
+| `ux-error--0` | H | Wave 1 + fold |
+| `a11y-native--0` | M | Wave 2 |
+| `a11y-native--1` | M | Wave 2 |
+| `a11y-native--2` | M | Wave 2 |
+| `a11y-native--3` | M | Wave 3 |
+| `a11y-webext--0` | M | Wave 3 |
+| `a11y-webext--1` | M | Wave 3 |
+| `a11y-webext--2` | M | Wave 3 |
+| `a11y-webext--3` | M | Wave 3 |
+| `bug-autofill-ux--1` | M | Wave 1 + fold |
+| `bug-cache-lifecycle--1` | M | Wave 1 + fold |
+| `bug-cache-lifecycle--2` | M | Wave 1 + fold |
+| `bug-ext-gating--1` | M | Wave 3 |
+| `bug-ext-gating--2` | M | Wave 1 + fold |
+| `bug-ext-gating--4` | M | Wave 3 |
+| `bug-server--1` | M | Wave 1 + fold |
+| `bug-server--2` | M | Wave 1 + fold |
+| `bug-server--5` | M | Wave 1 + fold |
+| `bug-web--1` | M | Wave 1 + fold |
+| `hygiene-docs--10` | M | Wave 2 |
+| `hygiene-docs--11` | M | Wave 2 |
+| `hygiene-docs--13` | M | Wave 2 |
+| `hygiene-docs--3` | M | Wave 2 |
+| `hygiene-docs--5` | M | Wave 2 |
+| `hygiene-docs--7` | M | Wave 2 |
+| `hygiene-docs--8` | M | Closeout pass (`1b12380`) |
+| `hygiene-docs--9` | M | Wave 2 |
+| `hygiene-release--2` | M | Fixed by scripting the ceremony end to end: `release-spec.sh` + `prestige-release.ps1` (b1ebc17) and the verify-and-publish watcher (netplan 55423a5) — first run end-to-end 2026-07-29 |
+| `hygiene-release--3` | M | Wave 2 |
+| `hygiene-release--4` | M | Wave 2 |
+| `hygiene-release--5` | M | Wave 2 |
+| `quality-deadcode--0` | M | Wave 1 + fold |
+| `quality-deadcode--1` | M | Wave 2 |
+| `quality-deadcode--2` | M | Wave 3 |
+| `quality-deadcode--3` | M | Wave 3 |
+| `quality-deadcode--5` | M | Wave 3 |
+| `quality-deadcode--6` | M | Wave 3 |
+| `quality-perf--0` | M | Wave 1 + fold |
+| `quality-perf--1` | M | Wave 1 + fold |
+| `quality-secdrift--0` | M | Wave 1 + fold |
+| `quality-secdrift--1` | M | Wave 1 + fold |
+| `quality-secdrift--2` | M | Wave 1 + fold |
+| `quality-secdrift--3` | M | Wave 1 + fold |
+| `quality-tests--10` | M | Wave 3 |
+| `quality-tests--3` | M | Wave 2 |
+| `quality-tests--5` | M | Wave 3 |
+| `quality-tests--6` | M | Wave 1 + fold |
+| `quality-tests--7` | M | Fixed as a side effect — the docs lane added the vector-provenance manifest (1842c9d) |
+| `ux-copy--0` | M | Wave 1 + fold |
+| `ux-copy--2` | M | Wave 1 + fold |
+| `ux-copy--3` | M | Twin pass (1cd59b8) |
+| `ux-copy--4` | M | Wave 2 |
+| `ux-copy--5` | M | Closeout pass (`1b12380`) |
+| `ux-copy--6` | M | Fixed as a side effect — the docs lane rewrote INSTALL.txt (1842c9d) |
+| `ux-error--1` | M | Closeout pass (`1b12380`) |
+| `ux-error--2` | M | Wave 1 + fold |
+| `ux-error--3` | M | Wave 1 + fold |
+| `ux-error--4` | M | Wave 3 |
+| `ux-parity--0` | M | Wave 2 |
+| `ux-parity--1` | M | Wave 3 |
+| `ux-parity--2` | M | Wave 3 |
+| `ux-parity--3` | M | Wave 2 |
+| `ux-parity--4` | M | Wave 3 |
+| `a11y-native--10` | L | Wave 2 |
+| `a11y-native--4` | L | Wave 2 |
+| `a11y-native--5` | L | Wave 3 |
+| `a11y-native--6` | L | Wave 2 |
+| `a11y-native--7` | L | Wave 2 |
+| `a11y-native--8` | L | Wave 2 |
+| `a11y-native--9` | L | Wave 2 |
+| `a11y-webext--10` | L | Wave 3 |
+| `a11y-webext--11` | L | Wave 3 |
+| `a11y-webext--12` | L | Wave 3 |
+| `a11y-webext--4` | L | Wave 3 |
+| `a11y-webext--5` | L | Wave 3 |
+| `a11y-webext--6` | L | Wave 3 |
+| `a11y-webext--7` | L | Wave 3 |
+| `a11y-webext--8` | L | Wave 3 |
+| `a11y-webext--9` | L | Wave 3 |
+| `bug-autofill-ux--2` | L | Wave 1 + fold |
+| `bug-ext-gating--3` | L | Wave 3 |
+| `bug-server--10` | L | Wave 3 |
+| `bug-server--3` | L | Wave 1 + fold |
+| `bug-server--6` | L | Wave 3 |
+| `bug-server--7` | L | Wave 3 |
+| `bug-server--8` | L | Wave 3 |
+| `bug-server--9` | L | Wave 3 |
+| `bug-web--3` | L | Wave 3 |
+| `bug-web--4` | L | Fixed as a side effect of the Trash N+1 work (b6eba07) |
+| `bug-web--5` | L | Wave 3 |
+| `bug-web--6` | L | Wave 3 |
+| `hygiene-docs--12` | L | Wave 2 |
+| `hygiene-docs--14` | L | Closeout pass (`1b12380`) |
+| `hygiene-docs--15` | L | Fixed as a side effect — the 1.8 MB HTML twin is no longer tracked (1842c9d) |
+| `hygiene-docs--16` | L | Wave 2 |
+| `hygiene-docs--17` | L | Wave 2 |
+| `hygiene-release--6` | L | Wave 2 |
+| `hygiene-release--7` | L | Wave 2 |
+| `hygiene-release--8` | L | Wave 2 |
+| `hygiene-release--9` | L | Wave 2 |
+| `quality-deadcode--10` | L | Wave 3 |
+| `quality-deadcode--11` | L | Wave 3 |
+| `quality-deadcode--13` | L | Wave 3 |
+| `quality-deadcode--4` | L | Wave 2 |
+| `quality-deadcode--7` | L | Wave 3 |
+| `quality-deadcode--8` | L | Wave 3 |
+| `quality-deadcode--9` | L | Wave 2 |
+| `quality-perf--2` | L | Wave 3 |
+| `quality-perf--3` | L | Wave 3 |
+| `quality-perf--4` | L | Wave 3 |
+| `quality-perf--5` | L | Wave 3 |
+| `quality-perf--6` | L | Wave 1 + fold |
+| `quality-perf--7` | L | Wave 1 + fold |
+| `quality-secdrift--4` | L | Wave 3 |
+| `quality-secdrift--5` | L | Wave 3 |
+| `quality-tests--11` | L | Wave 2 |
+| `quality-tests--12` | L | Wave 2 |
+| `ux-copy--11` | L | Wave 2 |
+| `ux-copy--7` | L | Wave 3 |
+| `ux-error--5` | L | Wave 2 |
+| `ux-error--6` | L | Wave 3 |
+| `ux-parity--5` | L | Wave 2 |
+| `ux-parity--6` | L | Wave 3 |
+| `ux-parity--7` | L | Closeout pass (`1b12380`) |
 
 ---
 
