@@ -10,6 +10,13 @@ package io.silencelen.andvari.server
  * the household sheet ceremony, the inviter is NAMED (anti-phishing: "Jacob invited you" beats
  * "someone"), and the ~1-hour fuse is stated concretely from the invite's real expiresAt.
  *
+ * The link instruction presumes NO network (ux-copy--1, polish audit 2026-07-27): the 0.19.1 copy
+ * sweep fixed the clients and never touched server email copy, so both transports still told every
+ * invitee to open the link "on the same network as the app" — false since the 2026-07-15
+ * endpoint-agnostic pivot, where the invitee opens a public reference-instance link from wherever
+ * they are. The body now states the plain action and hedges only for a private household server, in
+ * the words of the UNREACHABLE canon; EmailInviteTest pins both transports so it can't come back.
+ *
  * The enrollLink is server-generated (an EnrollLink payload), never user input, so it is inserted
  * verbatim; it is a scheme+host+base64url fragment with no HTML-significant characters. The inviter
  * name IS member-typed free text — sanitized here (controls stripped, length-capped, HTML-escaped
@@ -51,8 +58,8 @@ object InviteEmailBody {
     fun text(enrollLink: String, inviterName: String?, escrowWaived: Boolean, expiresAt: Long): String = """
         You've been invited to andvari — your household's password manager.
 
-        ${inviterPhrase(inviterName)} set up this invite for you. Open this link on the
-        same network as the app to create your account:
+        ${inviterPhrase(inviterName)} set up this invite for you. Open the link below to create
+        your account. If your household's server is private, open it from a device that can reach it.
 
         $enrollLink
 
@@ -84,7 +91,7 @@ object InviteEmailBody {
                       </td></tr>
                       <tr><td style="padding:14px 32px 0;">
                         <h1 style="font-family:Georgia,'Times New Roman',serif;font-size:21px;font-weight:normal;color:#2c2517;margin:8px 0 10px;">You've been invited</h1>
-                        <p style="font-family:$sans;font-size:15px;line-height:1.6;color:#42392a;margin:0 0 18px;"><b>$inviter</b> set up an invite for you to join <b>andvari</b>, your household's password manager. Open the link below <b>on the same network as the app</b> to create your account.</p>
+                        <p style="font-family:$sans;font-size:15px;line-height:1.6;color:#42392a;margin:0 0 18px;"><b>$inviter</b> set up an invite for you to join <b>andvari</b>, your household's password manager. Open the link below to create your account. If your household's server is private, open it from a device that can reach it.</p>
                       </td></tr>
                       <tr><td align="center" style="padding:2px 32px 18px;">
                         <a href="$enrollLink" style="display:inline-block;background:#9a7420;color:#fdf9f0;text-decoration:none;font-family:$sans;font-size:15px;font-weight:600;padding:13px 30px;border-radius:10px;">Set up your account</a>

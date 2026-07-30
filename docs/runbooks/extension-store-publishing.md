@@ -11,17 +11,24 @@ collects/transmits nothing to anyone but that server.
 > - **Publishing a release, today** → skip to **§E. Automated publishing**. One command,
 >   both stores. That is the living procedure.
 > - **Sections A and B below are a point-in-time record of the FIRST submission (2026-07-14)**:
->   account setup, the store-listing copy, and the privacy answers, captured with the artifact
+>   account setup, the form-by-form field kit, and the privacy answers, captured with the artifact
 >   versions that happened to be current that day (0.13.0/0.14.0). The *steps* are still the
 >   steps if you ever re-do a listing from scratch; the **version numbers are frozen history —
 >   substitute the version you are actually shipping**, which §E reads from
->   `extension/manifest.json` for you. Note also that the listing copy below was written before
->   the 2026-07-15 endpoint-agnostic pivot and still describes the extension as Tailscale-bound;
->   check the live listing text against the current model before reusing it verbatim.
+>   `extension/manifest.json` for you.
+> - **The paste-ready listing copy in §B was rewritten** for the shipped endpoint-agnostic model
+>   (`hygiene-docs--8`, polish audit 2026-07-27): it had been written before the 2026-07-15 pivot
+>   and still sold the extension as Tailscale-bound, which is what seeds the live listings. The text
+>   below is now correct; what it can't tell you is whether the **live** listings have caught up —
+>   Google and Mozilla are still serving the pre-pivot text until someone re-submits these fields.
 
 **Artifacts uploaded for that first submission** (built and byte-verified at the time, version 0.14.0):
 - Chrome: `extension/artifacts/andvari-extension-chrome-0.14.0.zip`
 - Firefox: `extension/artifacts/andvari-extension-firefox-0.14.0.zip`
+
+Every version number in §A/§B is that day's. Nothing here is the current track: the version being
+shipped is whatever `extension/manifest.json` says, which is what `scripts/publish-extension.sh`
+(§E) reads and uploads — never a number copied out of this file.
 
 ---
 
@@ -51,9 +58,12 @@ Privacy · Distribution** (plus one-time Account items). Everything below is pas
 
 ### Package tab
 - Draft package = `andvari-extension-chrome-<version>.zip` (0.14.0 on the day). The **Summary** ("description" in
-  `manifest.json`) and the item name come from the package, not the form: *"Zero-knowledge password
-  manager — fill and save logins. Requires the andvari server on your Tailscale network."* (110
-  chars — fits the 132 limit.) Nothing to do here unless a newer version ships before submission.
+  `manifest.json`) and the item name come from the package, not the form — read the live value out of
+  `extension/manifest.json` rather than trusting this file; as of the endpoint-agnostic rewrite it is
+  *"Zero-knowledge password manager — fill and save logins. Works with any andvari server; set your
+  own in Options."* (111 chars). **The cap is 132 characters** and the store rejects the package for
+  exceeding it — a past release was bounced for exactly that, so count before you edit the manifest.
+  Nothing to do on this tab unless a newer version ships before submission.
 
 ### Store listing tab
 - **Title (from package):** andvari
@@ -64,7 +74,7 @@ Privacy · Distribution** (plus one-time Account items). Everything below is pas
 - **Detailed description** (paste verbatim):
 
 ```
-andvari is the browser companion for the andvari password manager — a self-hosted, zero-knowledge vault for one household. The extension connects ONLY to your own andvari server over your private Tailscale network. There is no account to create here and no cloud service behind it: without a running andvari server, the extension does nothing.
+andvari is the browser companion for the andvari password manager — a zero-knowledge vault for one household. The extension connects ONLY to the andvari server you point it at: the public reference instance by default, or your own self-hosted one, set in Options. There is no account to create here and no cloud service behind it: without an andvari server, the extension does nothing.
 
 WHAT IT DOES
 • Fills logins — detects username/password fields (multi-step sign-ins, iframes, and single-page apps included) and offers the matching entries from your vault.
@@ -75,11 +85,11 @@ WHAT IT DOES
 
 HOW YOUR DATA IS HANDLED
 • End-to-end encrypted: entries are encrypted and decrypted only on your devices. Your master password and keys never leave your browser.
-• Your server, your data: the extension talks exclusively to the single andvari server address built into it (a private Tailscale hostname). No third-party servers, no analytics, no telemetry.
+• Your server, your data: the extension talks exclusively to the one andvari server you have configured — nothing else. No third-party servers, no analytics, no telemetry.
 • The content script reads only form structure to detect login fields; page content is never collected or transmitted.
 
 REQUIREMENTS
-• A running andvari server reachable over your Tailscale network. This extension is distributed unlisted for household use and will not work without one — it is a companion client, not a standalone product.
+• An andvari server you have an account on: the public reference instance, or your own self-hosted one. Accounts are created by a household admin's invite — there is no signup in the extension. It is a companion client, not a standalone product, and does nothing without a server.
 
 Privacy policy: https://monahanhosting.com/andvari/privacy/
 ```
@@ -98,7 +108,7 @@ Privacy policy: https://monahanhosting.com/andvari/privacy/
 - **Single purpose** (paste):
 
 ```
-andvari is a password manager. Its single purpose is giving the user access to their own encrypted credential vault — filling and saving logins on websites, and showing/copying vault entries (passwords, two-factor codes, payment cards) from the user's own self-hosted andvari server. Every permission requested serves that one purpose.
+andvari is a password manager. Its single purpose is giving the user access to their own encrypted credential vault — filling and saving logins on websites, and showing/copying vault entries (passwords, two-factor codes, payment cards) from the andvari server the user configures (the project's reference instance, or a server they host themselves). Every permission requested serves that one purpose.
 ```
 
 - **Permission justifications** (one field per permission):
@@ -106,8 +116,13 @@ andvari is a password manager. Its single purpose is giving the user access to t
   - **activeTab** — `Lets the popup read the URL of the tab it was opened on so it can list the vault entries that match the current site, without requesting broad tabs access.`
   - **alarms** — `Schedules the vault auto-lock timeout, the clipboard auto-clear, and the periodic background sync/update check. No user data is involved.`
   - **offscreen** — `Creates a minimal offscreen document for exactly one job: clearing the system clipboard after the auto-clear timeout (an MV3 service worker cannot access the clipboard directly).`
-  - **Host permission justification** (covers `https://andvari.taila2dff2.ts.net/*` AND the content
-    scripts on `http://*/*` / `https://*/*`) — `The single host permission is the user's own self-hosted andvari server on their private Tailscale network — the only network endpoint the extension ever contacts, used to fetch and store the user's end-to-end-encrypted vault. The content scripts run on ordinary web pages because a password manager must detect login/registration forms on whatever site the user visits in order to offer autofill and save; they read form structure only, and nothing from the page is sent anywhere except to the extension itself.`
+  - **scripting** — `Registers and injects the autofill content script on the page the user is working on, so login fields can be detected and filled. It is injected only into origins the user has granted, and it reads form structure only.`
+  - **contextMenus** — `Adds a single right-click entry ("andvari") on editable fields whose only action is to open the extension's own popup, so the user can reach their vault from the field they are typing in. It reads nothing from the page and sends no traffic.`
+  - **Host permission justification** (mind the current manifest: the only *install-time* host is the
+    default server origin `https://andvari.monahanhosting.com/*`; the broad `https://*/*` for autofill
+    plus `http://localhost/*` / `http://127.0.0.1/*` for self-hosted dev servers sit in
+    `optional_host_permissions`, granted at runtime by the user's own gesture) —
+    `The install-time host permission is the default andvari server origin — the only endpoint the extension contacts without further consent — used to fetch and store the user's end-to-end-encrypted vault. Users who run their own andvari server grant that origin themselves from the options page. The broad web pattern is OPTIONAL, not granted on install: a password manager must detect login/registration forms on whatever site the user visits in order to offer autofill and save, so the user grants it when they turn autofill on, and the content script reads form structure only — nothing from the page is sent anywhere except to the extension itself.`
 - **Remote code:** **"No, I am not using remote code."** (Everything is bundled by esbuild; no
   eval, no WASM, extension-page CSP is `script-src 'self'`.)
 - **Data usage — check exactly two** (Bitwarden-precedent, accurate for us):
@@ -123,21 +138,22 @@ andvari is a password manager. Its single purpose is giving the user access to t
 
 ### Test instructions tab (fill it — credentials NO, instructions YES)
 
-Do **not** provide test credentials: the only backend the extension can reach is the private
-Tailscale hostname pinned in the manifest, so any account would fail from Google's review
-environment anyway — and the household vault is not something to hand out. Instead, paste this so
-the reviewer knows WHY sign-in can't work and what they can still verify:
+Do **not** provide test credentials: a vault is one household's real credentials, and there is no
+signup surface in the extension to hand a reviewer either — accounts exist only by a household
+admin's invite. The default server IS reachable from a review environment (the public reference
+instance), so the honest framing is "no account to give you", not "no server to reach". Paste this:
 
 ```
-andvari is the companion client to a SELF-HOSTED password manager. The only backend it can talk to is the single host in its manifest — a private Tailscale (VPN) hostname on the developer's home network. It is not reachable from the public internet, so no test account can work from your environment: sign-in will fail with a network error by design. There is no public or demo server; pinning that single host permission is the product's security model (the extension can never talk to any other endpoint).
+andvari is the companion client to the andvari password manager. It talks to exactly one server: the andvari server configured in its options, which defaults to the project's public reference instance and can be changed to a server the user hosts themselves. There is no signup in the extension — accounts on any andvari server are created by that household's admin sending an invite — so we cannot supply a test account without handing over a real household's vault. Everything below is verifiable without one.
 
-What you can verify without a server:
+What you can verify without an account:
 1. Install and open the popup — the locked screen renders (email + master password + "Test server connection").
-2. Click "Test server connection" — it reports the server unreachable (expected outside the private network) and sends no other traffic.
-3. Visit any login page (for example https://fill.dev) — the content script reads form structure only; with the vault locked it fills nothing and transmits nothing.
-4. Observe network traffic: every request goes exclusively to the single manifest host. There are no analytics and no third-party endpoints anywhere in the code.
+2. Click "Test server connection" — it reaches the configured server and reports the result. Signing in with anything else fails with an authentication error; no other traffic is sent.
+3. Open the options page — the server URL is a user setting. Point it at any host and the extension talks only to that one.
+4. Visit any login page (for example https://fill.dev) — autofill needs a broad host permission that is OPTIONAL and not granted on install, so with the vault locked and no grant the extension injects nothing, fills nothing and transmits nothing. Grant it from the extension's own prompt and the content script reads form structure only.
+5. Observe network traffic: every request goes to the configured server origin and nowhere else. There are no analytics and no third-party endpoints anywhere in the code.
 
-This extension is distributed UNLISTED and installed only by the developer's own household, whose members run the matching self-hosted server. The listing screenshots show the unlocked experience.
+The listing screenshots show the unlocked experience.
 ```
 
 ### Distribution tab
@@ -147,9 +163,9 @@ This extension is distributed UNLISTED and installed only by the developer's own
   surface entirely). All-regions would also be fine as a declared non-trader.
 
 ### Submit + expectations
-- Content scripts on all sites = **broad host permissions** → expect the in-depth review track
-  (typically 1–7 days for a first submission; the justifications above are exactly what reviewers
-  check). Unlisted items get the same review as public ones.
+- A broad web host pattern — even the **optional** one this manifest ships — still draws the in-depth
+  review track (typically 1–7 days for a first submission; the justifications above are exactly what
+  reviewers check). Unlisted items get the same review as public ones.
 - After approval, Chrome installs/auto-updates it **store-signed** — that's the H2 fix for Chrome.
   Record the **item ID + store URL here** when granted.
 - **Future releases:** bump the 3 lockstep version files → `npm run package` → Package tab →

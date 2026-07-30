@@ -28,8 +28,12 @@ CORE_VER=$(lit ANDVARI_CLIENT_VERSION "$REPO_DIR/core/src/commonMain/kotlin/io/s
 AND_VER=$(lit versionName "$REPO_DIR/app-android/build.gradle.kts" 'versionName[[:space:]]*=[[:space:]]*"[^"]+"')
 DESK_VER=$(lit packageVersion "$REPO_DIR/app-desktop/build.gradle.kts" 'packageVersion[[:space:]]*=[[:space:]]*"[^"]+"')
 WEB_VER=$(lit CLIENT_VERSION "$REPO_DIR/web/src/api/client.ts" 'CLIENT_VERSION[[:space:]]*=[[:space:]]*"[^"]+"')
-if [ "$CORE_VER" != "$AND_VER" ] || [ "$CORE_VER" != "$DESK_VER" ] || [ "$CORE_VER" != "$WEB_VER" ]; then
-  echo "    VERSION SKEW: core=$CORE_VER android=$AND_VER desktop=$DESK_VER web=$WEB_VER — bump all to match." >&2
+# web/package.json sat at a never-maintained 0.0.1 until 0.21.0 (audit hygiene-docs--14). Nothing
+# reads it — but a version literal nobody checks is exactly how the other four drifted, so now
+# that it carries a real number it joins the gate rather than becoming the next stale one.
+PKG_VER=$(lit 'package.json version' "$REPO_DIR/web/package.json" '"version"[[:space:]]*:[[:space:]]*"[^"]+"')
+if [ "$CORE_VER" != "$AND_VER" ] || [ "$CORE_VER" != "$DESK_VER" ] || [ "$CORE_VER" != "$WEB_VER" ] || [ "$CORE_VER" != "$PKG_VER" ]; then
+  echo "    VERSION SKEW: core=$CORE_VER android=$AND_VER desktop=$DESK_VER web=$WEB_VER pkg=$PKG_VER — bump all to match." >&2
   exit 1
 fi
 

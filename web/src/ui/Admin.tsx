@@ -596,7 +596,7 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
                 <button type="button" className="ghost" onClick={() => void copy(resultLink, true)}>{copiedLink ? "Copied ✓" : "Copy link"}</button>
               </div>
               <div className="muted" style={{ marginTop: 8 }}>
-                Expires {fmtDate(result.expiresAt)}. They scan this with their phone camera (or open the link) <strong>while on the same network as this page's address</strong> — for a phone that isn't on the tailnet yet, mint from the LAN address instead. <strong>Anyone who photographs this can use it until it expires — it can't be revoked</strong>, so keep the window short.
+                Expires {fmtDate(result.expiresAt)}. They scan this with their phone camera (or open the link) — it points at this page's address, so mint it from an address the invitee's device can reach. <strong>Anyone who photographs this can use it until it expires — it can't be revoked</strong>, so keep the window short.
                 {resultPolicy === "required" && (
                   <> {" "}This is an <strong>admin-backstop</strong> invite: show your <strong>printed recovery sheet</strong> to the invitee in person so they can eyeball-confirm the code.</>
                 )}

@@ -1,6 +1,11 @@
 package io.silencelen.andvari.app
 
 import androidx.compose.ui.text.input.ImeAction
+import io.silencelen.andvari.core.client.ApiException
+import io.silencelen.andvari.core.client.HouseholdCopy
+import io.silencelen.andvari.core.client.KdfPolicyViolationException
+import io.silencelen.andvari.core.client.UpgradeRequiredException
+import io.silencelen.andvari.core.crypto.KdfParams
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -316,5 +321,62 @@ class PureGatesTest {
         // N2 §3/§6: with NO policy loaded the failure is CURRENT — Welcome must keep its Retry.
         assertTrue(UiState(policy = null, policyFetchFailed = true).sessionCleared(null).policyFetchFailed)
         assertFalse(UiState(policy = null, policyFetchFailed = false).sessionCleared(null).policyFetchFailed)
+    }
+
+    // ---- ux-error--1 import-push outcome (importPushRetryable / importPushError) ----
+
+    /**
+     * Every import PUSH failure used to collapse into ONE retryable sentence, so a 403, a
+     * weakened-KDF block, or a version pin replayed the same doomed push forever under copy that
+     * promised it would finish. Desktop's ImportPushOutcomeTest pins the twin pair; the 426 escape
+     * (the catch-all ALSO swallowed UpgradeRequiredException, which drives the blocking upgrade
+     * screen everywhere else) is control flow in importConfirm, contract-asserted below.
+     */
+    @Test
+    fun transientImportFailuresKeepTheRetryPromise() {
+        for (t in listOf(
+            java.io.IOException("Connection reset by peer"),
+            ApiException(429, "rate_limited", "slow down"),
+            ApiException(500, "internal", "boom"),
+            IllegalStateException("mid-chunk"), // idempotent replay converges — "no duplicates" holds
+        )) {
+            assertTrue(importPushRetryable(t), "$t should keep Retry")
+            assertEquals(IMPORT_INTERRUPTED, importPushError(t))
+        }
+    }
+
+    @Test
+    fun terminalImportFailuresDropRetryAndNameTheRefusal() {
+        val forbidden = ApiException(403, "forbidden", "forbidden")
+        assertFalse(importPushRetryable(forbidden))
+        assertEquals("You don't have permission to do that.", importPushError(forbidden))
+
+        val weak = KdfPolicyViolationException("kdf_below_floor", KdfParams())
+        assertFalse(importPushRetryable(weak))
+        assertEquals(HouseholdCopy.WEAK_KDF_ACTION, importPushError(weak))
+
+        for (t in listOf(
+            ApiException(401, "unauthorized", "authentication failed"),
+            ApiException(404, "not_found", "no such vault"),
+            ApiException(409, "vault_state_changed", "rev mismatch"),
+            ApiException(413, "too_large", "quota"),
+        )) {
+            assertFalse(importPushRetryable(t), "${t.status} replays as the same refusal")
+            assertEquals(HouseholdCopy.forError(t), importPushError(t))
+        }
+
+        // The audited leak shape: a refusal's copy never carries the server's raw message.
+        val leaked = importPushError(ApiException(400, "bad_request", "SQLITE_CONSTRAINT: mutations.id"))
+        assertFalse(leaked.contains("SQLITE"), "raw wire text leaked: $leaked")
+    }
+
+    /** A version pin must never reach the classifier — importConfirm catches it first for the
+     *  blocking upgrade screen (op()/backgroundSync parity). Pinned as terminal anyway, so a
+     *  refactor that drops that catch cannot quietly land back on a Retry prompt. */
+    @Test
+    fun upgradeRequiredIsNeverRetryable() {
+        val t = UpgradeRequiredException("upgrade_required", "min version 0.22.0")
+        assertFalse(importPushRetryable(t))
+        assertEquals(HouseholdCopy.UPGRADE_REQUIRED, importPushError(t))
     }
 }
