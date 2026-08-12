@@ -6,6 +6,15 @@ operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
 ## 0.21.0 (2026-07-27) — polish release: correctness, accessibility, and the public record · fleet 0.21.0, extension 0.20.0
 
+*Extension patch 0.20.1 (2026-08-12) — a locked save now prompts for the unlock. Clicking Save on
+the in-page banner while the vault was locked answered "Could not save — unlock andvari and try
+again." and left you to re-raise the whole offer after unlocking. The click now summons the unlock
+screen itself (on Firefox, which refuses a script-opened popup, the line names the toolbar as the
+way there), and the Save is remembered as approval: unlocking lands it automatically — under the
+existing stricter post-unlock save-vs-update rule, so an ambiguous locked capture still becomes a
+recoverable new item rather than clobbering an existing login — and a toast confirms. No second
+Save click.*
+
 No new features. This release is the result of a full-surface audit of everything already shipped
 (`docs/design/2026-07-27-polish-release-audit.md`), and fixes what that audit found.
 

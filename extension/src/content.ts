@@ -23,7 +23,7 @@ import {
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import { bumpLabelGeneration, demoteCsc, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
-import { fillErrorCopy, saveErrorCopy } from "./errors";
+import { fillErrorCopy, saveErrorCopy, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
 import {
   send,
   type CaptureCardFields,
@@ -919,10 +919,19 @@ function offerBanner(pending: PendingSave): void {
     async () => {
       const r = await safeSend({ type: "resolvePendingSave", action: "save" });
       if (r?.ok) return { ok: true, text: "Saved to the hoard." };
+      if (r?.code === "locked") {
+        // Unlock-prompt (2026-08-12): don't just NAME the unlock — summon it. The SW kept this
+        // Save click as approval (pending.approved), so unlocking lands the save with no second
+        // click; the pendingSaveCommitted toast confirms. openPopupForSave answers the one honest
+        // signal the engines give ([K14]: Firefox rejects the gesture-less call by design), so the
+        // line either points at the now-open unlock screen or names the toolbar as the way there.
+        const o = await safeSend({ type: "openPopupForSave" });
+        return { ok: false, text: o?.opened === true ? SAVE_UNLOCK_PROMPTED : SAVE_UNLOCK_TOOLBAR };
+      }
       // E1-5: map the SW's code to human copy — NEVER render r.error (the old `?? fallback` only
       // fired on undefined, so the SW's internal "locked"/"save failed (conflict)" strings leaked
-      // straight into the red result line). saveErrorCopy: locked → unlock-and-retry, conflict →
-      // open-in-web-vault, failed/undefined → generic retry.
+      // straight into the red result line). saveErrorCopy: conflict → open-in-web-vault,
+      // failed/undefined → generic retry.
       return { ok: false, text: saveErrorCopy(r?.code) };
     },
     () => void safeSend({ type: "resolvePendingSave", action: "dismiss" }),
@@ -1203,6 +1212,10 @@ function init(): void {
         return undefined;
       }
       if (msg.type === "offerPendingSave" && isTop) offerBanner(msg.pending);
+      // Unlock-prompt (2026-08-12): the approved save the user clicked while locked just landed
+      // on unlock — confirm it. Sent to frame 0 only, and ONLY on a real write (a 2a suppress
+      // stays silent SW-side). Same sentence as the banner's own success line.
+      if (msg.type === "pendingSaveCommitted" && isTop) showToast("Saved to the hoard.");
       return undefined;
     },
   );

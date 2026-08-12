@@ -332,6 +332,15 @@ export type Req =
   /** Content/popup: resolve the tab's pending save. Resolvable ONLY by the frame that captured
    *  it (or the popup) — the card entry's frame rule, mirrored. */
   | { type: "resolvePendingSave"; action: "save" | "dismiss" }
+  /** Content (unlock-prompt, design 2026-08-12): the banner's Save click answered `locked`, so
+   *  the banner asks the SW to SUMMON the unlock screen via `chrome.action.openPopup()` instead
+   *  of only naming it. EXACTLY this literal — no members ([A2]-adjacent: the SW reads only
+   *  browser-set sender fields). The side effect is bound to a GENUINE locked offer: the SW opens
+   *  nothing unless this tab holds a live pending save, resolvable by this frame, while the vault
+   *  is locked. `opened` is the honest resolution of that ONE call ([K14]: on Firefox it is
+   *  EXPECTED to reject and the banner's toolbar sentence is the primary path there). NON-passive:
+   *  it rides the banner's isTrusted Save click, i.e. genuine user activity. */
+  | { type: "openPopupForSave" }
   /** Append https://<host> to an item's login.uris (additive; preserves the tail). */
   | { type: "linkUri"; itemId: string; host: string }
   | { type: "generate" }
@@ -506,7 +515,10 @@ export type Res<T extends Req["type"]> = T extends "status"
                                                   : /** C1 §C4: the honest resolution of the ONE openPopup attempt — nothing else. */
                                                     T extends "openPopupForCards"
                                                     ? { opened: boolean }
-                                                    : never;
+                                                    : /** Unlock-prompt (2026-08-12): the same one-call honesty as the card twin. */
+                                                      T extends "openPopupForSave"
+                                                      ? { opened: boolean }
+                                                      : never;
 
 /** SW → content (chrome.tabs.sendMessage): fill this item now (popup-granted). The
  *  content script performs its normal `reveal` round-trip with its own host — the SW
@@ -516,6 +528,12 @@ export type TabMsg =
   | { type: "fillItem"; itemId: string }
   /** SW → content: (re-)offer the tab's pending save banner (e.g. after navigation). */
   | { type: "offerPendingSave"; pending: PendingSave }
+  /** SW → content frame 0 (unlock-prompt, 2026-08-12): the approved pending save the user
+   *  clicked Save on while locked just LANDED on unlock — show the confirmation toast. Sent
+   *  ONLY when a write actually happened (a 2a-suppress commits silently: toasting "saved"
+   *  over nothing-written would be a lie). Carries nothing — the sentence lives content-side
+   *  (errors-canon rule: the SW never ships user-facing text). */
+  | { type: "pendingSaveCommitted" }
   /** SW → content (S3): fill this card into the granted frame's card form. Sent to ONE frameId
    *  only; the frame redeems via `revealCardForFill` (the value round-trip), never receiving the
    *  card values on this message. Tier 2 [U12]: `sig` is the grant's kind-signature

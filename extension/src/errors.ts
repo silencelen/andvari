@@ -110,7 +110,11 @@ export function unlockErrorCopy(code: UnlockCode | undefined): string {
 }
 
 /** Locked-save banner result line (E1-5): the SW answers a code, never a sentence — the old
- *  path leaked its internal "locked" / "save failed (conflict)" strings into the red line. */
+ *  path leaked its internal "locked" / "save failed (conflict)" strings into the red line.
+ *  Unlock-prompt (2026-08-12): the LOGIN banner no longer renders the `locked` rung — its Save
+ *  click summons the unlock screen and shows SAVE_UNLOCK_* below instead. The rung stays for the
+ *  card banner's narrow lock-mid-resolve race (a locked card capture never records a pending, so
+ *  there is nothing an unlock could finish there). */
 export function saveErrorCopy(code: SaveErrorCode | undefined): string {
   switch (code) {
     case "locked":
@@ -122,6 +126,14 @@ export function saveErrorCopy(code: SaveErrorCode | undefined): string {
       return "Could not save — try again.";
   }
 }
+
+/** Unlock-prompt result lines (2026-08-12): a Save click while locked now SUMMONS the unlock
+ *  screen — the SW keeps the click as approval and lands the save on unlock (the confirmation
+ *  toast follows), so neither sentence asks for a second Save. Two sentences for the one honest
+ *  signal openPopup gives: opened → the unlock screen is up; not opened (Firefox rejects the
+ *  gesture-less call; anything older/absent) → the toolbar is the way there. */
+export const SAVE_UNLOCK_PROMPTED = "Unlock andvari to finish saving.";
+export const SAVE_UNLOCK_TOOLBAR = "Open andvari from the toolbar and unlock to finish saving.";
 
 /** Fill-failure line (Cut M, v2 #14): shared by the in-page dropdown toast and the popup's
  *  "Fill this page" #msg strip — the fill paths used to fail SILENTLY (dropdown closed, popup
