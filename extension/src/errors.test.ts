@@ -13,6 +13,8 @@ import {
   lockNoticeCopy,
   pinUnlockErrorCopy,
   revealErrorCopy,
+  SAVE_UNLOCK_PROMPTED,
+  SAVE_UNLOCK_TOOLBAR,
   saveErrorCopy,
   UNREACHABLE,
   unlockErrorCopy,
@@ -49,10 +51,20 @@ test("unlock ladder: an absent code falls back to the terminal sentence", () => 
 });
 
 test("save banner: the three codes render copy, never SW-internal strings", () => {
+  // Unlock-prompt (2026-08-12): the LOGIN banner no longer renders the `locked` rung (its Save
+  // click summons the unlock screen and shows SAVE_UNLOCK_* instead); the rung stays pinned for
+  // the card banner's lock-mid-resolve race.
   assert.equal(saveErrorCopy("locked"), "Could not save — unlock andvari and try again.");
   assert.equal(saveErrorCopy("conflict"), "This login changed elsewhere — open it in the web vault.");
   assert.equal(saveErrorCopy("failed"), "Could not save — try again.");
   assert.equal(saveErrorCopy(undefined), "Could not save — try again."); // SW unreachable
+});
+
+test("unlock-prompt lines (2026-08-12): neither sentence asks for a second Save", () => {
+  // The SW keeps the locked Save click as approval and lands it on unlock, so the copy must
+  // promise finishing, not retrying — "try again" here would be a lie about the flow.
+  assert.equal(SAVE_UNLOCK_PROMPTED, "Unlock andvari to finish saving.");
+  assert.equal(SAVE_UNLOCK_TOOLBAR, "Open andvari from the toolbar and unlock to finish saving.");
 });
 
 test("fill outcomes (Cut M, v2 #14): every code renders canon copy, never SW/content-internal strings", () => {

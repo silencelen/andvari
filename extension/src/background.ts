@@ -133,8 +133,8 @@ const CARD_BADGE_TEXT = "•";
 // reload, exactly the pageInfo case): anything a page can drive with focus() or a load is
 // passive. `openPopupForCards` deliberately stays OUT: it rides a real isTrusted click on our
 // own chip, i.e. genuine user activity — as do `reveal` (a dropdown pick), `allItems` (search
-// typing), `capturedCredential`/`resolvePendingSave` (submits + banner clicks) and every popup
-// action, so the timer keeps its real signal.
+// typing), `capturedCredential`/`resolvePendingSave`/`openPopupForSave` (submits + banner
+// clicks) and every popup action, so the timer keeps its real signal.
 const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status", "cardFormInfo", "cardChipOffer", "matches", "pendingSave"]);
 
 /** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
@@ -234,8 +234,16 @@ interface TabState {
   lastUsername?: string;
   /** The tab's pending save. The password stays SW-side — content only ever sees PendingSave.
    *  `frameId` is the frame that captured it: a DIFFERENT frame may not overwrite a live pending,
-   *  so a hostile sub-frame can't silently redirect the top frame's Save banner to its own login. */
-  pending?: (PendingSave & { password: string; frameId: number }) | undefined;
+   *  so a hostile sub-frame can't silently redirect the top frame's Save banner to its own login.
+   *  `approvedAt` (unlock-prompt, 2026-08-12): the user clicked Save while the vault was LOCKED —
+   *  the click is remembered so the next unlock commits it with no second click, but only within
+   *  APPROVED_SAVE_TTL_MS (a shared browser's NEXT unlocker must not silently inherit a long-
+   *  abandoned click — stale approvals fall back to the ask-first E1-5 banner). Never sent to
+   *  content (publicPending constructs its shape explicitly); rides persistTabs like the rest of
+   *  the record, and a browser restart drops storage.session and the approval with it. Only ever
+   *  set on a LOCKED-capture pending — doLock's [S3-lock] allow-list drops pendings wholesale, so
+   *  an approval can never straddle a lock of a live session. */
+  pending?: (PendingSave & { password: string; frameId: number; approvedAt?: number }) | undefined;
   /** S3 per-frame card-form registry: frameId → { the frame's browser-set origin, ALL its card
    *  forms' kinds in document order (Tier 2 §2) }. METADATA ONLY (never card values). `origin` is
    *  `sender.origin` ([A2]); every card offer/redemption re-derives the tab's top origin and
@@ -1578,6 +1586,8 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     }
     case "resolvePendingSave":
       return resolvePendingSave(msg.action, sender);
+    case "openPopupForSave":
+      return openPopupForSave(sender); // unlock-prompt 2026-08-12 — rides the banner's isTrusted Save click, deliberately NOT passive
     case "linkUri":
       return linkUri(msg.itemId, msg.host);
     case "generate":
@@ -1735,16 +1745,70 @@ async function fetchPolicyInto(): Promise<void> {
   }
 }
 
+/** How long a locked Save click stays live as an auto-commit approval. Generous for the real flow
+ *  (click Save → unlock screen opens → type the master password) while bounding the walk-away tail:
+ *  on a shared browser, whoever unlocks LATER must meet the ask-first banner, not silently inherit
+ *  someone else's abandoned click into their own vault. */
+const APPROVED_SAVE_TTL_MS = 10 * 60_000;
+
 /** E1-5: re-offer any save captured while locked the moment we unlock — otherwise the pending stays
- *  invisible until a navigation. Same uninjected-tab try/catch as the tabs.onUpdated listener. */
+ *  invisible until a navigation. Same uninjected-tab try/catch as the tabs.onUpdated listener.
+ *  Unlock-prompt (2026-08-12): a pending the user ALREADY clicked Save on while locked
+ *  (`approvedAt`, fresh within APPROVED_SAVE_TTL_MS) skips the re-ask and commits now — the second
+ *  Save click was pure friction. A stale approval is dropped and falls through to the banner. */
 function reofferPendingSaves(): void {
   for (const [tabId, st] of tabs) {
     if (!st.pending) continue;
+    if (st.pending.approvedAt !== undefined) {
+      if (Date.now() - st.pending.approvedAt <= APPROVED_SAVE_TTL_MS) {
+        void commitApprovedSave(tabId, st, st.pending);
+        continue;
+      }
+      st.pending.approvedAt = undefined; // expired — back to consent-first
+      persistTabs();
+    }
     const m: TabMsg = { type: "offerPendingSave", pending: publicPending(st.pending) };
     // Frame 0 only — same rule as the onUpdated re-offer: the metadata never rides into sub-frames.
     chrome.tabs.sendMessage(tabId, m, { frameId: 0 }).catch(() => {
       /* content not injected in that tab — its own pendingSave poll covers it */
     });
+  }
+}
+
+/** Per-tab single-flight for the approved auto-commit — a doubled unlock signal must not race two
+ *  puts of the same pending (the second would 409 or, on the save-new leg, mint a duplicate).
+ *  resolvePendingSave checks it too: a banner Save click landing while the auto-commit's put is
+ *  in flight must not start a second put for the same credential. */
+const approvedCommitsInFlight = new Set<number>();
+
+/** Land ONE approved pending save post-unlock and tell frame 0 honestly what happened:
+ *  a real write → the "pendingSaveCommitted" toast; a 2a suppress → silence (nothing was written,
+ *  so there is nothing to claim); still/again locked → keep the approval for the NEXT unlock;
+ *  any other failure → drop the approval and fall back to the E1-5 banner re-offer, whose Save
+ *  click renders the honest error line (conflict → web-vault copy, etc.). Same uninjected-tab
+ *  catch as every tab send. */
+async function commitApprovedSave(
+  tabId: number,
+  st: TabState,
+  pending: PendingSave & { password: string; frameId: number; approvedAt?: number },
+): Promise<void> {
+  if (approvedCommitsInFlight.has(tabId)) return;
+  approvedCommitsInFlight.add(tabId);
+  try {
+    const { res, wrote } = await commitPendingSave(tabId, st, pending);
+    if (res.ok) {
+      if (!wrote) return; // 2a suppress — pending cleared, nothing to toast
+      const m: TabMsg = { type: "pendingSaveCommitted" };
+      chrome.tabs.sendMessage(tabId, m, { frameId: 0 }).catch(() => {});
+      return;
+    }
+    if (res.code === "locked") return; // re-locked under the await — the approval survives for the next unlock
+    pending.approvedAt = undefined; // one shot: a conflict/failed commit goes back to the ask-first banner
+    persistTabs();
+    const m: TabMsg = { type: "offerPendingSave", pending: publicPending(pending) };
+    chrome.tabs.sendMessage(tabId, m, { frameId: 0 }).catch(() => {});
+  } finally {
+    approvedCommitsInFlight.delete(tabId);
   }
 }
 
@@ -2646,6 +2710,37 @@ async function openPopupForCards(sender: chrome.runtime.MessageSender): Promise<
   }
 }
 
+/** Unlock-prompt (design 2026-08-12): the save banner's Save click answered `locked`, so the
+ *  banner asks us to SUMMON the unlock screen — ATTEMPT `chrome.action.openPopup()` and answer
+ *  honestly whether it opened, the card chip's contract verbatim ([K14]: on Firefox the
+ *  gesture-less call is EXPECTED to reject, and the banner's toolbar sentence is the primary path
+ *  there; resolution is the only signal either engine gives). The side effect is bound to a
+ *  GENUINE locked offer: nothing opens unless this tab holds a live pending save, resolvable by
+ *  this frame (the resolvePendingSave admission rule — capturer or top frame), while the vault is
+ *  LOCKED (an unlocked vault means the Save would simply have landed; opening the popup then would
+ *  be chrome-out-of-nowhere). [S9]: same focused-window/active-tab rule as the chip — never open
+ *  trusted chrome over a tab the user is no longer looking at. [A5]: mints nothing, pre-selects
+ *  nothing, enumerates nothing; FORBIDDEN: opening popup.html as a tab or window (the popup
+ *  computes its offers against the ACTIVE tab and would see itself — the [C4] pin's ban covers
+ *  this function too, its span deliberately swallows us). */
+async function openPopupForSave(sender: chrome.runtime.MessageSender): Promise<Res<"openPopupForSave">> {
+  const tabId = sender.tab?.id;
+  if (tabId === undefined || sender.tab?.active !== true) return { opened: false }; // pages only, and only the active one
+  const pending = tabs.get(tabId)?.pending;
+  if (!pending || session) return { opened: false }; // only a LOCKED live offer may summon the popup
+  if (sender.frameId !== pending.frameId && sender.frameId !== 0) return { opened: false };
+  const [current] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (current?.id === undefined || current.id !== tabId) return { opened: false };
+  const fn = (chrome.action as unknown as { openPopup?: () => Promise<unknown> }).openPopup;
+  if (typeof fn !== "function") return { opened: false }; // absent → honest false
+  try {
+    await fn.call(chrome.action);
+    return { opened: true }; // resolve ⇒ opened (the popup renders the locked unlock screen)
+  } catch {
+    return { opened: false }; // reject ⇒ not opened (the banner line names the toolbar)
+  }
+}
+
 /** Popup ONLY: is the active tab fillable, and to which origin? Fillable iff a recorded card
  *  form's origin equals the tab's current top-level origin (SW-derived). Refuses tab senders.
  *  [T5] as revised at review-fold: this ALWAYS answers immediately off the registry — an inline
@@ -2945,8 +3040,36 @@ async function resolvePendingSave(
 
   // Pending survives a locked failure so unlock → save can still land it. The surface maps the
   // CODE to copy — the SW's raw "locked" string must never reach the banner (extux-03).
-  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
+  // Unlock-prompt (2026-08-12): the click itself is REMEMBERED as approval — the banner goes on
+  // to summon the unlock screen (openPopupForSave), and the next unlock auto-commits this pending
+  // (reofferPendingSaves) instead of re-asking for a second Save click.
+  if (!session || !session.personalVaultId) {
+    pending.approvedAt = Date.now();
+    tabs.set(tabId, st);
+    persistTabs();
+    return { ok: false, code: "locked", error: "locked" };
+  }
 
+  // A Save click landing while the approved auto-commit's put is still in flight (post-unlock
+  // race) must not start a SECOND put of the same credential — answer retryable; the commit's own
+  // toast (or its banner re-offer on failure) tells the user what actually happened.
+  if (approvedCommitsInFlight.has(tabId)) return { ok: false, code: "failed", error: "auto-commit in flight" };
+
+  return (await commitPendingSave(tabId, st, pending)).res;
+}
+
+/** The unlocked commit half of resolvePendingSave, shared verbatim with the approved-save
+ *  auto-commit (unlock-prompt, 2026-08-12) — extracted, not twinned, so the 2b data-loss guard
+ *  below can never drift between the two callers. `wrote` distinguishes an actual vault write
+ *  from the 2a suppress (both answer ok:true on the seam): the auto-commit path toasts ONLY on
+ *  a real write. Re-checks the session itself — the auto-commit runs post-await, where a racing
+ *  re-lock would otherwise NPE on session.items. */
+async function commitPendingSave(
+  tabId: number,
+  st: TabState,
+  pending: PendingSave & { password: string; frameId: number; approvedAt?: number },
+): Promise<{ res: Res<"resolvePendingSave">; wrote: boolean }> {
+  if (!session || !session.personalVaultId) return { res: { ok: false, code: "locked", error: "locked" }, wrote: false };
   // Re-decide save-vs-update NOW (the capture-time decision is stale if the vault was LOCKED then —
   // matchesFor was empty ⇒ updatesItemId null). resolveSaveAction only auto-updates on UNAMBIGUOUS
   // same-account signals: it NEVER runs the ambiguous "lone host login" (2b) fallback here (a
@@ -2965,7 +3088,7 @@ async function resolvePendingSave(
     st.pending = undefined;
     tabs.set(tabId, st);
     persistTabs();
-    return { ok: true };
+    return { res: { ok: true }, wrote: false };
   }
   let result: Res<"resolvePendingSave">;
   if (decision.kind === "update") {
@@ -2982,7 +3105,7 @@ async function resolvePendingSave(
     tabs.set(tabId, st);
     persistTabs();
   }
-  return result;
+  return { res: result, wrote: result.ok };
 }
 
 // ---- G2 save-card capture → pending card save → resolve (design 2026-07-23 §G2) ----

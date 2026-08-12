@@ -866,9 +866,11 @@ describe("2026-07-27 polish-release audit pins (extension lane) — checkout gat
     const card = spanOf(bg, "async function resolvePendingCardSave(", "// ---- writes");
     expect(card).toContain("sender.tab !== undefined && sender.frameId !== rec.frameId");
     expect(card, "the card twin stays capturer-only — its banner never crosses frames").not.toContain("frameId !== 0");
-    // …and both offerPendingSave sends target frame 0: the metadata never rides into sub-frames
-    // (the render was always isTop-gated content-side; the delivery now matches it).
-    expect(bg.match(/\{ type: "offerPendingSave"[\s\S]{0,300}?sendMessage\(tabId, (?:msg|m), \{ frameId: 0 \}\)/g) ?? []).toHaveLength(2);
+    // …and all THREE offerPendingSave sends target frame 0: the metadata never rides into
+    // sub-frames (the render was always isTop-gated content-side; the delivery now matches it).
+    // Third sender since ext 0.20.1: commitApprovedSave's failure fallback (unlock-prompt design
+    // 2026-08-12) re-offers the banner when an approved auto-commit could not land.
+    expect(bg.match(/\{ type: "offerPendingSave"[\s\S]{0,300}?sendMessage\(tabId, (?:msg|m), \{ frameId: 0 \}\)/g) ?? []).toHaveLength(3);
   });
 
   it("bug-ext-gating--2 (regression half): the LOGIN resolve admits frame 0 — capture and offer live in different frames", () => {
