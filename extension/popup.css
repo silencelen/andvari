@@ -308,6 +308,9 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .detail .fill-btn:hover { color: var(--btn-ink); background: linear-gradient(180deg, var(--gold-hi), var(--gold-lo)); border-color: transparent; }
 .detail .fill-btn.did, .detail .fill-btn.did:hover { color: var(--ok); border-color: var(--ok); background: transparent; }
 .detail .totp-chip { align-self: flex-start; }
+/* TOTP-add paste row (2026-08-12): the entry form the "add" pill swaps in for the value row. */
+.totp-add { display: flex; align-items: center; gap: 6px; }
+.totp-add input { flex: 1; min-width: 0; }
 .site-link { display: block; font-family: var(--mono); font-size: 12px; color: var(--link); text-decoration: none; padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .site-link:hover { text-decoration: underline; color: var(--gold-bright); }
 .detail-fill { width: 100%; margin-top: 4px; }

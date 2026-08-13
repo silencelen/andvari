@@ -7,7 +7,7 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
 import { DEFAULT_SERVER_URL, getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
@@ -522,6 +522,11 @@ function renderDetail(it: MatchItem): void {
     lab.textContent = "One-time code";
     field.append(lab, totpChip(it.itemId)); // joins the list's 1 s ticker (queried by class)
     body.append(field);
+  } else {
+    // TOTP-add (design 2026-08-12): only a code-LESS login gets the affordance — the seam is
+    // ADD-ONLY (setTotp answers `exists` regardless of what a surface renders), so replacing or
+    // removing an existing code stays a web-vault edit and this branch never shows beside a chip.
+    body.append(totpAddField(it));
   }
 
   // Saved sites — each uri sanitized to an http(s) link (a saved uri could be javascript:/
@@ -567,6 +572,65 @@ function renderDetail(it: MatchItem): void {
   fill.title = "Type this login into the current tab";
   fill.addEventListener("click", () => void fillItem(it.itemId));
   body.append(fill);
+}
+
+/** TOTP-add paste row (design 2026-08-12). The input accepts whatever the enrollment page
+ *  offers — the full otpauth:// link or the bare "can't scan?" setup key — and the SW runs the
+ *  shared normalize + parse-accept gate on the write (this surface validates nothing; rendering
+ *  the honest code copy is its whole error story). On success the SW's session copy is already
+ *  updated (putExisting mutates in place), so re-rendering the detail immediately shows the
+ *  live code chip. */
+function totpAddField(it: MatchItem): HTMLElement {
+  const { field, value, acts } = detailField("One-time code");
+  value.classList.add("muted");
+  value.textContent = "none";
+  const add = actBtn("add", "Add a one-time code (2FA) to this login", () => {
+    const row = value.parentElement;
+    if (!row) return;
+    const form = document.createElement("div");
+    form.className = "totp-add";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "mono";
+    input.placeholder = "otpauth:// link or setup key";
+    input.setAttribute("aria-label", "One-time code secret — paste the otpauth:// link or the setup key");
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "fill-btn";
+    save.textContent = "save";
+    save.title = "Add this one-time code";
+    save.setAttribute("aria-label", save.title);
+    const submit = async (): Promise<void> => {
+      const raw = input.value.trim();
+      if (raw === "") {
+        input.focus();
+        return;
+      }
+      save.disabled = true;
+      input.disabled = true;
+      const r = await ask({ type: "setTotp", itemId: it.itemId, totp: raw });
+      if (r?.ok) {
+        input.value = ""; // never leave the secret sitting in the DOM
+        it.hasTotp = true; // the SW's session copy already carries it (putExisting mutates in place)
+        renderDetail(it); // the row becomes the live code chip
+        showMsg("info", TOTP_ADDED); // polite, not alert — the chip appearing is the real confirmation
+        return;
+      }
+      save.disabled = false;
+      input.disabled = false;
+      showMsg("err", totpAddErrorCopy(r?.code));
+      input.focus();
+    };
+    save.addEventListener("click", () => void submit());
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") void submit();
+    });
+    form.append(input, save);
+    row.replaceWith(form); // one-shot swap; Back/reopen renders the detail fresh
+    input.focus();
+  });
+  acts.append(add);
+  return field;
 }
 
 function actBtn(label: string, title: string, onClick: (btn: HTMLButtonElement) => void): HTMLButtonElement {

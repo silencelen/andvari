@@ -1095,3 +1095,64 @@ describe("2026-07-27 polish-release audit pins (extension lane) — in-page a11y
     expect(so).toContain('el("sign-out").addEventListener("blur", disarmSignOut)');
   });
 });
+
+describe("TOTP-add lane pins (design 2026-08-12) — add-only contract, sender gates, passive offer", () => {
+  const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+  const ct = readFileSync(extensionSrc + "content.ts", "utf-8");
+
+  const spanOf = (src: string, from: string, to: string): string => {
+    const a = src.indexOf(from);
+    const b = src.indexOf(to);
+    expect(a, `span start missing: ${from}`).toBeGreaterThan(-1);
+    expect(b, `span end missing/out of order: ${to}`).toBeGreaterThan(a);
+    return src.slice(a, b);
+  };
+
+  it("writeTotp is ADD-ONLY and SW-validated: the exists refusal and the parse gate both precede the put", () => {
+    const w = spanOf(bg, "async function writeTotp(", "async function setTotp(");
+    // The one contract line: an item that already carries a code refuses, whatever the surface.
+    expect(w).toContain('code: "exists"');
+    expect(w.indexOf('code: "exists"')).toBeLessThan(w.indexOf("putExisting("));
+    // The SW normalizes + parse-gates ITSELF — a surface's validation is never the gate.
+    expect(w).toContain("normalizeTotp(rawTotp)");
+    expect(w).toContain("isValidTotp(totp)");
+    expect(w.indexOf("isValidTotp(totp)")).toBeLessThan(w.indexOf("putExisting("));
+  });
+
+  it("setTotp is popup-only; the page derivation is origin-bound, exactly-one-match, code-less-only", () => {
+    const s = spanOf(bg, "async function setTotp(", "function pageTotpTarget(");
+    expect(s).toContain("if (sender.tab !== undefined) return"); // a page never reaches the pick-any-item write
+    const p = spanOf(bg, "function pageTotpTarget(", "/** Offer gate for the in-page banner");
+    // [A2] browser-set origin only (captureCard's guard shape) — no page-supplied host exists on this seam.
+    expect(p).toContain('typeof sender.origin !== "string" || sender.origin === "" || sender.origin === "null"');
+    // Ambiguity fails CLOSED to the popup path…
+    expect(p).toContain("matches.length !== 1");
+    // …and an item that already has a code is never a page target (add-only at the derivation too).
+    expect(p).toContain('(it.doc.login?.totp ?? "") !== ""');
+  });
+
+  it("both page halves run the ONE derivation, and the offer answers a NAME only", () => {
+    const o = spanOf(bg, "function totpOffer(", "/** Banner accept");
+    expect(o).toContain("pageTotpTarget(sender)");
+    expect(o, "the offer must never carry an itemId onto the page seam").not.toContain("itemId");
+    const a = spanOf(bg, "async function addTotpFromPage(", "/** [X2-A6] card-aware re-seal");
+    expect(a, "the accept must RE-DERIVE, never trust the offer round-trip").toContain("pageTotpTarget(sender)");
+    expect(a).toContain("sender.frameId !== 0");
+  });
+
+  it("totpOffer is PASSIVE ([K13]); the accept and the popup write are NOT", () => {
+    const m = /const PASSIVE_MSGS = new Set<Req\["type"\]>\(\[([^\]]*)\]\)/.exec(bg);
+    expect(m).not.toBeNull();
+    expect(m![1]).toContain('"totpOffer"');
+    expect(m![1], "a real Add click is user activity — it must re-arm the idle lock").not.toContain('"addTotpFromPage"');
+    expect(m![1]).not.toContain('"setTotp"');
+  });
+
+  it("content sends the href ONLY on the Add click — the offer ask is the bare literal", () => {
+    const c = spanOf(ct, "async function maybeOfferTotp(", "// ---- wiring ----");
+    expect(c).toContain('safeSend({ type: "totpOffer" })'); // no host, no href — [A2]
+    expect(c).toContain('safeSend({ type: "addTotpFromPage", totp: href })');
+    expect(c, "raw attribute, never the engine-normalized .href").toContain('getAttribute("href")');
+    expect(c).toContain("if (!isTop) return");
+  });
+});

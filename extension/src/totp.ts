@@ -43,10 +43,12 @@ export function base32Decode(text: string): Uint8Array {
 }
 
 // quality-deadcode--3: `base32Encode` lived here with zero callers — the extension only ever
-// DECODES a stored secret to compute a code; nothing in it mints or re-serialises one (that is the
-// web vault's editor, whose own copy is live and vector-tested). Deleted rather than kept "for
+// DECODES a stored secret to compute a code; nothing in it re-serialises one (that is the web
+// vault's editor, whose own copy is live and vector-tested). Deleted rather than kept "for
 // symmetry": this module is bundled into the service worker, and an unreferenced export is weight
-// plus a second implementation to keep honest.
+// plus a second implementation to keep honest. (The 2026-08-12 TOTP-add lane later brought the
+// shared normalizeTotp here — it WRAPS a bare secret into an otpauth URI verbatim, still never
+// re-encoding bytes, so base32Encode stays dead.)
 
 export type TotpAlgorithm = "SHA1" | "SHA256" | "SHA512";
 
@@ -174,6 +176,40 @@ export function parseOtpauthUri(uri: string): TotpConfig {
     label,
     issuer: params.get("issuer") ?? (colon >= 0 ? label.slice(0, colon) : ""),
   };
+}
+
+/**
+ * The ONE shared TOTP normalize (design 2026-07-09 A5, byte-exact; mirrors web totp.ts /
+ * core Totp.normalize): strip ALL ASCII whitespace; a full otpauth:// URI passes through
+ * unchanged; a bare base32 secret (either case, padding-tolerant — the existing decoder)
+ * wraps to an otpauth URI with the ORIGINAL case preserved (the web editor's historical
+ * behavior); anything else returns unchanged. VALIDITY is a separate question — callers
+ * gate on parseOtpauthUri ACCEPTING the result, exactly as the web editors block the save.
+ * Ported for the TOTP-add lane (2026-08-12): the extension previously only DECODED stored
+ * secrets; the SW's write path now needs the same normalize the web save path runs.
+ */
+export function normalizeTotp(raw: string): string {
+  const s = raw.replace(/[ \t\n\f\r]+/g, ""); // the exact char set core Totp.normalizeTotp strips
+  if (s.length === 0) return s;
+  if (s.toLowerCase().startsWith("otpauth://")) return s;
+  try {
+    base32Decode(s); // case-insensitive + padding-tolerant (RFC 4648)
+    return `otpauth://totp/andvari?secret=${s}`;
+  } catch {
+    return s;
+  }
+}
+
+/** True when the SHARED normalizeTotp's output is a parseable otpauth URI — the write-time
+ *  gate (web Vault.tsx isValidTotp, twinned). The SW runs this itself on every TOTP write:
+ *  a surface's own validation is a convenience, never the gate. */
+export function isValidTotp(normalized: string): boolean {
+  try {
+    parseOtpauthUri(normalized);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The stored login.totp is a normalized otpauth:// URI (the web editor wraps raw base32 on

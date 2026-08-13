@@ -25,6 +25,7 @@ type UnlockCode =
   | "network"
   | "unknown";
 type SaveErrorCode = "locked" | "conflict" | "failed";
+type TotpAddCode = "locked" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
 type RevealFailCode = "locked" | "not_allowed";
 // Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
@@ -124,6 +125,34 @@ export function saveErrorCopy(code: SaveErrorCode | undefined): string {
     default:
       // "failed" and an absent code (SW unreachable) — retryable, no jargon.
       return "Could not save — try again.";
+  }
+}
+
+/** TOTP-add success line (design 2026-08-12), shared verbatim by the popup's paste-add result
+ *  and the in-page banner — one sentence, both surfaces. */
+export const TOTP_ADDED = "One-time code added.";
+
+/** TOTP-add failure lines (setTotp / addTotpFromPage). `exists` is the ADD-ONLY contract
+ *  speaking — the extension never replaces a stored second factor, so the copy routes to the
+ *  web vault rather than hinting at a retry. `not_allowed` is the page path's ambiguity
+ *  refusal (no single eligible login) — it names the popup as the way through, because that's
+ *  where the user picks the item themselves. `conflict` reuses the save banner's sentence
+ *  deliberately (same situation, same advice). */
+export function totpAddErrorCopy(code: TotpAddCode | undefined): string {
+  switch (code) {
+    case "locked":
+      return "andvari locked before it could add the code — unlock and try again.";
+    case "invalid":
+      return "That doesn't look like a one-time-code secret — paste the otpauth:// link or the setup key.";
+    case "exists":
+      return "This login already has a one-time code — manage it in the web vault.";
+    case "not_allowed":
+      return "andvari couldn't tell which login this code belongs to — add it from the popup instead.";
+    case "conflict":
+      return "This login changed elsewhere — open it in the web vault.";
+    default:
+      // "failed" and an absent code (SW mid-restart) — retryable, no jargon.
+      return "Could not add the code — try again.";
   }
 }
 
