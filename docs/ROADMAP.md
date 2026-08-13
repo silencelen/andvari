@@ -361,7 +361,9 @@ Prioritized; each is additive and back-compatible.
   (`docs/assess/2026-07-passkeys.md`: defer-with-trigger; store-as-fv3 + Android
   CredentialProvider is the pre-agreed shape; trigger = a household site pushing
   passkey-first).
-- **TOTP add from the extension** — *owner-requested 2026-08-12 (active lane).* The popup only
+- ~~**TOTP add from the extension**~~ **DONE 2026-08-12 (`fc62367`, ext 0.21.0 shipped
+  same-day: popup paste-add + page otpauth-link offer, strictly ADD-ONLY).** Original entry:
+  *owner-requested 2026-08-12 (active lane).* The popup only
   *displays* one-time codes for items that already carry `login.totp`; adding a secret means a
   trip to the web vault — exactly wrong at the moment a site's 2FA-enrollment page is showing
   you the secret. Popup gains an add affordance (paste the `otpauth://` URI or the "can't
@@ -369,7 +371,10 @@ Prioritized; each is additive and back-compatible.
   parseOtpauthUri-accepts gate (the extension already carries the parser for display, and the
   popup-write precedent is `linkUri`). Entry points beyond paste (page otpauth-link detection;
   QR decode, which would need a new image-decoding dependency) are an owner fork.
-- **Duplicate-entry checker** — *owner-requested 2026-08-12.* Health flags **reused passwords**
+- ~~**Duplicate-entry checker**~~ **DONE 2026-08-12 (`f88fb93`, web deployed to the reference
+  instance: Health clusters + guided fail-closed merge for identical copies; diverging-password
+  clusters report-only, newest first).** Original entry: *owner-requested 2026-08-12.* Health
+  flags **reused passwords**
   across items but not duplicate *entries* themselves — the same account captured twice (same
   registrable domain + username, or byte-equal password on the same host under URI variants),
   which the locked-capture save path can legitimately mint by design (a locked 2b ambiguity
