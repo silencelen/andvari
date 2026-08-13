@@ -111,11 +111,43 @@ exportKey = HKDF-SHA-256(ikm = MKx, salt = empty, info = "andvari/v1/export", L 
 Same shape as spec 01 §2's auth/wrap split; `andvari/v1/export` collides with no
 existing info string. The passphrase is taken **as typed** (no Unicode
 normalization, spec 01 §1; warn on non-ASCII). It is user-chosen with a strength
-floor (`estimateStrength ≥ 3`, both impls' shared estimator: `bits = length × {≤1
-class:2.0, 2:3.5, 3:5.0, 4:6.0}` over lower/upper/digit/other classes, scored 0..4 at
-40/60/80/110-bit thresholds, length in UTF-16 units; vector-pinned in
+floor (`estimateStrength ≥ 3`, both impls' shared estimator: `bits = effectiveLength
+× {≤1 class:2.0, 2:3.5, 3:5.0, 4:6.0}` over lower/upper/digit/other classes, scored
+0..4 at 40/60/80/110-bit thresholds, lengths in UTF-16 units; vector-pinned in
 `spec/test-vectors/strength.json`) and a mandatory confirm
-field. UI guidance (not enforceable — the client retains neither the master password
+field.
+
+**`effectiveLength` (0.21.0, audit F31).** The length term is the raw UTF-16 length
+with repetition collapsed, because the pre-0.21.0 `bits = length × classes` scored a
+doubled password as twice the entropy — `Password1!Password1!` read "strong" (4) and
+40 characters of one letter cleared both floors. Walking left to right from index 0,
+each position is charged, first rule that applies:
+
+1. a block of `period` characters (`period ≤ 12`) repeated back to back, spanning
+   ≥ 4 characters in total, costs `period + 1` **whatever the repeat count** — the
+   choice is the block plus the decision to repeat it. The **smallest** qualifying
+   period wins, so `abababab` collapses as `ab` (cost 3), not `abab`. `period = 1`
+   is a run of one character;
+2. otherwise an ascending or descending run of ≥ 4 adjacent UTF-16 code units
+   (`abcdef`, `9876`) costs 2 — the run is fixed by its first unit and its direction;
+3. otherwise the character itself costs 1.
+
+Consumed characters are not re-charged; both implementations MUST agree on this walk
+character-for-character, which is what the vector file pins (its `score` column is
+`estimateStrength`, i.e. post-collapse).
+
+**The master-password floor deliberately does NOT use it.** Enrollment and
+change-password (spec 01 §1, spec 05 T8) score the **pre-collapse** `length × classes`
+proxy (`entropyProxyScore ≥ 3`), so the pattern penalty can only *warn*, never refuse:
+tightening a floor that gates a password *change* could otherwise lock a household
+member out of fixing a weak password. The backup floor here is the other way round on
+purpose — a backup passphrase is chosen fresh at export time, and opening an existing
+`.andvari` never consults strength at all (§3), so a stricter estimate can only steer
+that one choice and can never cost anyone a backup they already hold. The sharper
+number is still what the user is shown: the strength meter scores `estimateStrength`,
+so a repeated block reads weak on screen even where it is not refused.
+
+UI guidance (not enforceable — the client retains neither the master password
 nor MK after unlock): *"Tip: your master password is a fine choice — the backup is
 then exactly as protected as your vault (spec 05 T8). A different passphrase belongs
 on your printed recovery sheet."* After a later master-password change, old backups

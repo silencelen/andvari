@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ApiClient } from "../api/client";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import type { VaultItem, VaultStore } from "../vault/store";
 import { duplicateClusters, type DuplicateCluster } from "./duplicates";
-import { Msg } from "./Msg";
+import { Announcer, Msg } from "./Msg";
 import { EmptySigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength } from "./strength";
 import { ViewHeader } from "./ViewHeader";
@@ -58,7 +58,20 @@ export function healthRows(items: VaultItem[]): Row[] {
 /** Vault-wide password health: strength, reuse, duplicates, and (on demand) HIBP breach exposure. */
 export function Health({ items, client, userId, onOpenItem, store, onChanged }: Props) {
   const rows = useMemo<Row[]>(() => healthRows(items), [items]);
-  const dupes = useMemo<DuplicateCluster[]>(() => duplicateClusters(items), [items]);
+  // audit F03: duplicates cluster ACROSS vaults (the app mints cross-vault twins itself), so the
+  // checker needs vault identity — names for the row badges and the confirm sentence, and the
+  // role that decides whether a merge may write at all. Same source as Vault's row badge
+  // (store.vaults()), recomputed with `items` per that view's memo idiom.
+  // bug-web--1 (kept): keyed on `items` ONLY — the store's identity never changes for the mount,
+  // so listing it would be the identity-stable dependency that froze this view once already.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const vaultsInfo = useMemo(() => store.vaults(), [items]);
+  const vaultNameById = useMemo(() => new Map(vaultsInfo.map((v) => [v.vaultId, v.name])), [vaultsInfo]);
+  const roleFor = useCallback(
+    (vaultId: string) => vaultsInfo.find((v) => v.vaultId === vaultId)?.role ?? null,
+    [vaultsInfo],
+  );
+  const dupes = useMemo<DuplicateCluster[]>(() => duplicateClusters(items, roleFor), [items, roleFor]);
 
   // itemId → breach count, filled by a scan and cached ON-DEVICE (by itemId — never the plaintext
   // password, which is only the scan's lookup key) so it survives navigating away from Health.
@@ -130,7 +143,7 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged }: 
         <Tile label="Duplicates" value={String(dupes.length)} tone={dupes.length > 0 ? "bad" : "good"} />
       </div>
 
-      {dupes.length > 0 && <Duplicates clusters={dupes} store={store} onOpenItem={onOpenItem} onChanged={onChanged} />}
+      {dupes.length > 0 && <Duplicates clusters={dupes} store={store} vaultNameById={vaultNameById} onOpenItem={onOpenItem} onChanged={onChanged} />}
 
       {rows.length === 0 ? (
         <div className="empty">
@@ -232,8 +245,13 @@ export function clearBreachCache(): void {
  *  delete, so the copies land in Deleted items (30-day Trash) rather than oblivion, and the
  *  confirm line says so. The confirm is the purge idiom (two-step, per-cluster). "differs"
  *  clusters (same account, diverging passwords — one is stale) are report-only BY DESIGN: only
- *  the human knows which password the site currently accepts. */
-function Duplicates({ clusters, store, onOpenItem, onChanged }: { clusters: DuplicateCluster[]; store: VaultStore; onOpenItem: (itemId: string) => void; onChanged: () => void }) {
+ *  the human knows which password the site currently accepts.
+ *
+ *  audit F03: every member row names its VAULT (the gold tag Vault's list rows already use) and
+ *  the confirm names both the vault kept and the vault emptied — a merge moves real items out of
+ *  a real place, and this screen used to name neither. Cross-vault and view-only clusters carry
+ *  a refusal from planMerge instead of a Merge button. */
+function Duplicates({ clusters, store, vaultNameById, onOpenItem, onChanged }: { clusters: DuplicateCluster[]; store: VaultStore; vaultNameById: Map<string, string>; onOpenItem: (itemId: string) => void; onChanged: () => void }) {
   const [confirmId, setConfirmId] = useState<string | null>(null); // survivorId of the open confirm
   const [mergingId, setMergingId] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ kind: "err" | "info"; text: string } | null>(null);
@@ -266,10 +284,25 @@ function Duplicates({ clusters, store, onOpenItem, onChanged }: { clusters: Dupl
       <div className="muted" style={{ marginBottom: 10 }}>
         The same account saved more than once — usually a save that landed while the vault was locked, or an import.
         Merging keeps one copy (its saved sites combined) and moves the rest to Deleted items, where they stay restorable for 30 days.
+        {" "}Copies sitting in different vaults are listed but never merged — removing one would take it away from everyone who shares that vault.
       </div>
       {msg && <Msg kind={msg.kind}>{msg.text}</Msg>}
+      {/* BL-1 (audit F12): the merge outcome is ASYNC info — the cluster and its Merge button
+          unmount as it lands, and a `.msg info` mounting already-populated is not announced
+          (Msg.tsx). Unconditional persistent region, per that contract; failures already speak
+          for themselves through role="alert". */}
+      <Announcer text={msg && msg.kind === "info" ? msg.text : ""} />
       {clusters.map((c) => {
-        const survivorName = c.merge ? (c.members.find((m) => m.itemId === c.merge!.survivorId)?.name ?? "") : "";
+        const survivor = c.merge ? c.members.find((m) => m.itemId === c.merge!.survivorId) : undefined;
+        const survivorName = survivor?.name ?? "";
+        // The vault kept and the vault(s) emptied. planMerge refuses cross-vault clusters, so
+        // these are the same place today — naming both is what makes that visible, and keeps
+        // the sentence honest if the refusal is ever relaxed.
+        const vaultLabel = (vaultId: string) => vaultNameById.get(vaultId) ?? "shared";
+        const survivorVault = survivor ? vaultLabel(survivor.vaultId) : "";
+        const loserVaults = c.merge
+          ? [...new Set(c.merge.loserIds.map((id) => vaultLabel(c.members.find((m) => m.itemId === id)?.vaultId ?? "")))].join(" · ")
+          : "";
         return (
           <div className="dupe" key={c.members[0]!.itemId}>
             <div className="dupe-head">
@@ -285,6 +318,10 @@ function Duplicates({ clusters, store, onOpenItem, onChanged }: { clusters: Dupl
                 <button type="button" className="link" onClick={() => onOpenItem(m.itemId)}>
                   {m.name}
                 </button>
+                {/* The vault tag Vault's list rows carry (audit F03) — on EVERY row here,
+                    personal included: which vault a copy is in is the one thing that decides
+                    whether removing it touches anybody else. */}
+                <span className="tag" style={{ color: "var(--gold-text)" }}>{vaultLabel(m.vaultId)}</span>
                 <span className="muted">
                   {m.username.trim() || "(no username)"} · updated {new Date(m.updatedAt).toLocaleDateString()}
                   {m.hasTotp ? " · has a one-time code" : ""}
@@ -296,7 +333,7 @@ function Duplicates({ clusters, store, onOpenItem, onChanged }: { clusters: Dupl
                 confirmId === c.merge.survivorId ? (
                   <div className="dupe-actions">
                     <span className="muted">
-                      Keep “{survivorName}” and move {c.merge.loserIds.length === 1 ? "the other copy" : `the ${c.merge.loserIds.length} other copies`} to Deleted items (kept 30 days)?
+                      Keep “{survivorName}” in “{survivorVault}” and move {c.merge.loserIds.length === 1 ? "the other copy" : `the ${c.merge.loserIds.length} other copies`} in “{loserVaults}” to Deleted items (kept 30 days)?
                     </span>
                     <button type="button" className="ghost" onClick={() => void runMerge(c)} disabled={mergingId !== null}>
                       {mergingId === c.merge.survivorId ? "Merging…" : "Merge"}

@@ -1,7 +1,9 @@
 package io.silencelen.andvari.core.client
 
+import io.silencelen.andvari.core.crypto.Ad
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.CryptoException
+import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.createCryptoProvider
@@ -162,5 +164,29 @@ class AccountUnlockWithUvkTest {
         a.fill(0)
         val unlocked = Account.unlockWithUvk(e.reg.userId, e.account.uvkCopyForPlatformWrap(), e.keys, crypto)
         assertEquals(e.reg.userId, unlocked.userId)
+    }
+
+    /**
+     * Audit F32: [Account.addGrant]'s two branches disagreed about what a vault key is.
+     * `SharedGrant.open` has always asserted 32 bytes; the wrappedVk branch installed whatever
+     * length the envelope produced, so a wrong-length VK entered the key map and only surfaced
+     * later, at the next envelope operation, as an IllegalArgumentException from deep inside the
+     * crypto provider — a different exception CLASS for the same broken grant depending on which
+     * branch delivered it, which SyncEngine's runCatching paths then classify differently. Both
+     * branches now refuse at the door, as a [CryptoException].
+     */
+    @Test
+    fun addGrantRefusesAWrongLengthWrappedVaultKey() {
+        val e = enroll("grantlen@example.com")
+        val uvk = e.account.uvkCopyForPlatformWrap()
+        val vaultId = "66666666-6666-4666-8666-666666666666"
+        val shortVk = Envelope.sealB64(crypto, uvk, ByteArray(16), Ad.vk(vaultId, e.reg.userId))
+        assertFailsWith<CryptoException> {
+            e.account.addGrant(WireGrant(vaultId = vaultId, userId = e.reg.userId, role = "owner", wrappedVk = shortVk, rev = 2))
+        }
+        // A well-formed grant on the same branch is unaffected.
+        val goodVk = Envelope.sealB64(crypto, uvk, crypto.randomBytes(32), Ad.vk(vaultId, e.reg.userId))
+        e.account.addGrant(WireGrant(vaultId = vaultId, userId = e.reg.userId, role = "owner", wrappedVk = goodVk, rev = 3))
+        assertTrue(e.account.hasVault(vaultId))
     }
 }

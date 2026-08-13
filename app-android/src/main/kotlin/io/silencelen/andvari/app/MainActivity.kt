@@ -69,6 +69,7 @@ import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
+import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ImportHelp
@@ -223,6 +224,11 @@ fun AndvariApp(vm: AndvariViewModel) {
             // F58: sits ABOVE the screen switch so it survives every in-app navigation —
             // no screen can compose it away while the flag is true.
             MustChangePasswordBanner(ui)
+            // F31: same placement rule as the AttentionArea below — above the screen switch so
+            // the enrollment breach advisory survives navigation, but NEVER over the two recovery
+            // gates: the shown-once phrase is the one thing on screen that cannot be recovered if
+            // the reader is distracted, and this advisory keeps until dismissed.
+            if (ui.screen !is Screen.RecoverySetup && ui.screen !is Screen.RecoveryCapture) BreachAdvisoryBanner(vm, ui)
             // P4/A7 (design 2026-07-10): break-glass notices live HERE, above the screen switch,
             // so they render ONCE on every screen — no longer duplicated on both the Vault list
             // AND Sharing. Critical items stay direct; only two genuinely-FYI items collapse.
@@ -289,6 +295,49 @@ private fun MustChangePasswordBanner(ui: UiState) {
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
             }
+        }
+    }
+}
+
+/**
+ * F31: the master password chosen at enrollment is in the public breach corpus (the k-anonymity
+ * check [AndvariViewModel.breachWarning] ran once the register response gave this device a
+ * session — the relay is session-gated, so the enroll form itself cannot check). ADVISORY: the
+ * account exists and works, nothing was blocked, and Dismiss is a real exit — the owner rule for
+ * F31 is that the pattern/breach signals warn and never refuse.
+ *
+ * Tertiary, not error: an error container here would read like the F58 temporary-password banner
+ * (a live credential failure) when this is a "you can do better" nudge. Like that banner, the fix
+ * itself is in the WEB app — the natives have no change-master-password screen yet — so the copy
+ * names the place rather than implying a button that isn't there.
+ */
+@Composable
+private fun BreachAdvisoryBanner(vm: AndvariViewModel, ui: UiState) {
+    val advisory = ui.breachAdvisory ?: return
+    Card(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            // a11y (Cut B): on tertiaryContainer the readable ink is onTertiaryContainer — the
+            // same pairing rule the F58 banner and PendingSwitchNotice follow.
+            Text("Master password found in a breach", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            Text(
+                advisory,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Text(
+                "Your vault is set up and safe to use. To change this password, open andvari in your web browser.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            TextButton(
+                onClick = vm::dismissBreachAdvisory,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
+            ) { Text("Dismiss") }
         }
     }
 }
@@ -885,18 +934,30 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
     }
 }
 
-/** The F60 master-password floor feedback — strength label, the too-weak refusal, and the
- *  non-ASCII caution. ONE copy for the two forms that choose a master password (EnrollForm and
- *  [RecoverScreen]'s reset leg), which carried it verbatim-duplicated. Renders nothing while the
- *  field is empty. */
+/** The F60 master-password floor feedback — strength label, the too-weak refusal, the F31
+ *  pattern caveat, and the non-ASCII caution. ONE copy for the two forms that choose a master
+ *  password (EnrollForm and [RecoverScreen]'s reset leg), which carried it verbatim-duplicated.
+ *  Renders nothing while the field is empty. */
 @Composable
 private fun MasterPasswordStrengthHints(password: String) {
     if (password.isEmpty()) return
     val score = Strength.estimateStrength(password)
-    if (Strength.meetsMasterPasswordFloor(password)) {
-        Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    } else {
-        Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+    // F31: the pattern penalty is already inside `score`, but a bare "strength: good" beside a
+    // doubled block still reads as an endorsement of the block — the estimate and the caveat
+    // contradicted each other on screen. Where the collapse cost a score, the label says so and
+    // the shared sentence below explains WHY; the affirmative (uncaveated) line is reserved for
+    // passwords that earn it. It never gates: the floor is [Strength.meetsMasterPasswordFloor].
+    val pattern = Strength.patternWarning(password)
+    when {
+        !Strength.meetsMasterPasswordFloor(password) ->
+            Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        pattern != null ->
+            Text("strength: ${Strength.label(score)} — weaker than it looks", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+        else ->
+            Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    if (pattern != null) {
+        Text(pattern, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
     }
     if (Strength.masterPasswordHasNonAscii(password)) {
         Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
@@ -1919,7 +1980,17 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
                 AlertDialog(
                     onDismissRequest = { confirmDelete = false },
                     title = { Text("Delete \"${doc.name}\"?") },
-                    text = { Text("This removes the item from every device and every family member who can see it.") },
+                    // F04: the 30-day trash makes delete look fully reversible, and for
+                    // attachments it never was — the server nulls the blob and unlinks the files
+                    // at delete time, so a restore brings back the passwords and notes and
+                    // nothing else. Say it while the user can still choose otherwise, and ONLY
+                    // when this item actually carries files (nothing to warn about otherwise).
+                    text = {
+                        Text(
+                            "This removes the item from every device and every family member who can see it." +
+                                if (doc.attachments.isNotEmpty()) " " + HouseholdCopy.TRASH_RESTORE_NO_ATTACHMENTS else "",
+                        )
+                    },
                     confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") } },
                     dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
                 )
@@ -2303,7 +2374,15 @@ fun TrashScreen(vm: AndvariViewModel, ui: UiState) {
             NoticeBar(ui.notice, vm::clearNotice)
             var confirmPurgeId by remember { mutableStateOf<String?>(null) }
             Text(
-                "Deleted items are kept for 30 days, then removed automatically. Restore brings one back to its vault on every device; \"Delete forever\" removes it now.",
+                // F04: the attachment caveat is part of this sentence, not a footnote. It used to
+                // exist only in a KDoc (above) and in the 0.6.0 user-test guide; the screen itself
+                // said "Restore brings one back to its vault on every device" and stopped there,
+                // so a restored item missing its file read as a sync bug rather than the
+                // documented, irreversible behaviour it is. [HouseholdCopy] carries the sentence
+                // so web and desktop say it byte-for-byte.
+                "Deleted items are kept for 30 days, then removed automatically. " +
+                    HouseholdCopy.TRASH_RESTORE_NO_ATTACHMENTS +
+                    " \"Delete forever\" removes it now.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -2354,6 +2433,9 @@ fun TrashScreen(vm: AndvariViewModel, ui: UiState) {
 fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
     val ctx = LocalContextCompat()
     var code by remember { mutableStateOf("") }
+    // The org's clipboard window, clamped exactly as every other secret-copy surface clamps it
+    // (§2.3: a server value of 0 still clears — never "keep forever" for a secret).
+    val clipClear = (ui.policy?.clipboardClearSeconds ?: 30).coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS)
     BackHandler(onBack = vm::closeSettings) // back = the top-bar arrow, not "background the app"
     Scaffold(
         topBar = {
@@ -2460,8 +2542,11 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                             // ux-copy--4: web's #23 labels — "otpauth URI" / "Secret (base32)" were
                             // developer names for the wire shapes. The values are unchanged; the
                             // labels now say what a household member DOES with each.
-                            SelectableCopyRow("Setup link (if you can't scan)", setup.otpauthUri, ctx)
-                            SelectableCopyRow("Setup code (to type into your app)", setup.secretBase32, ctx)
+                            // F25: BOTH are the account's second-factor seed (the URI embeds it),
+                            // so both copy as vault-class — sensitive-flagged and auto-cleared on
+                            // the policy window, exactly like a password.
+                            SelectableCopyRow("Setup link (if you can't scan)", setup.otpauthUri, ctx, clipClear)
+                            SelectableCopyRow("Setup code (to type into your app)", setup.secretBase32, ctx, clipClear)
                             Spacer(Modifier.height(4.dp))
                             Field("6-digit code", code, { code = it.filter { c -> c.isDigit() }.take(6) }, mono = true, keyboard = KeyboardType.Number, onDone = { if (code.length == 6 && !ui.busy) { vm.totpConfirm(code); code = "" } })
                             InlineError(ui.totpMessage)
@@ -2620,8 +2705,26 @@ private fun BackupPreflightDialog(
     var confirm by remember(pre) { mutableStateOf("") }
     val plan = remember(pre, selected) { vm.attachmentPlan(selected) }
     val score = Strength.estimateStrength(passphrase)
+    // F31: the backup floor compares against the PATTERN-AWARE estimate (Strength's class KDoc),
+    // so a passphrase that passed before 0.21.0 can be refused now. Without this sentence the
+    // refusal is unexplainable — "needs at least good" beside a 20-character passphrase reads as
+    // a bug. Advisory either way: it never changes `ready`.
+    val pattern = Strength.patternWarning(passphrase)
     val ready = selected.isNotEmpty() && passphrase.isNotEmpty() && passphrase == confirm &&
         score >= Strength.BACKUP_FLOOR && !ui.busy
+    // F31 breach check, on the CANDIDATE passphrase only — when both fields agree, never per
+    // keystroke: a prefix for every prefix of what is being typed ("p", "pa", "pas"…) narrows the
+    // real passphrase far more than one prefix for the finished one does, and this way the relay
+    // sees one request per passphrase the user actually meant. Debounced so a retype doesn't
+    // queue several. Silent when the check fails or the vault is locked (vm.breachWarning).
+    var breachNote by remember(pre) { mutableStateOf<String?>(null) }
+    val candidate = if (passphrase.isNotEmpty() && passphrase == confirm) passphrase else ""
+    LaunchedEffect(candidate) {
+        breachNote = null // an edited passphrase drops the verdict about the old one immediately
+        if (candidate.isEmpty()) return@LaunchedEffect
+        delay(500)
+        breachNote = vm.breachWarning(candidate)
+    }
     AlertDialog(
         onDismissRequest = { if (!ui.busy) vm.backupDismiss() },
         confirmButton = {
@@ -2673,9 +2776,20 @@ private fun BackupPreflightDialog(
                     Text(
                         "Strength: ${Strength.label(score)}" + if (ok) "" else " — needs at least “good”",
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (ok) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+                        // F31: no affirmative (secondary) treatment while a pattern caveat stands —
+                        // "Strength: good" in the good colour, over a warning that it repeats a
+                        // block, is the self-contradiction the audit found.
+                        color = when {
+                            !ok -> MaterialTheme.colorScheme.error
+                            pattern != null -> MaterialTheme.colorScheme.tertiary
+                            else -> MaterialTheme.colorScheme.secondary
+                        },
                     )
                 }
+                // The WHY behind a refusal (or a caveated pass): the shared sentence, in the
+                // canon's words, so web and the natives explain a floor miss identically.
+                pattern?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
+                breachNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
                 if (confirm.isNotEmpty() && confirm != passphrase) {
                     Text("Passphrases don't match.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
@@ -2751,6 +2865,11 @@ private fun CsvPreflightDialog(vm: AndvariViewModel, ui: UiState, pre: CsvPrefli
                 NamedSkips("Attachments can't be represented in CSV:", pre.warnings.withAttachments)
                 NamedSkips("Only the first website is kept:", pre.warnings.extraUris)
                 NamedSkips("Written, but a reimport would skip them (no username or password):", pre.warnings.emptyUsernameAndPassword)
+                // Audit F08: the writer deliberately never mangles a leading =+-@ (mangling would
+                // corrupt real secrets), so THIS row is the compensating control — the warning was
+                // computed and then rendered nowhere. Same NamedSkips shape as its five siblings;
+                // the sentence itself is the shared canon's, byte-equal with web's.
+                NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaRisk)
                 Spacer(Modifier.height(6.dp))
                 Text(
                     "Reimporting a CSV collapses exact duplicates.",
@@ -2793,9 +2912,23 @@ private fun InlineError(msg: String?) {
     if (msg != null) Text(msg, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite })
 }
 
-/** Copy row for setup material (not vault secrets): selectable text, copy WITHOUT auto-clear. */
+/**
+ * Copy row for material the user must be able to READ and paste elsewhere (selectable text).
+ *
+ * [clearSeconds] decides the clipboard CLASS, and the caller must decide it honestly: 0 = genuine
+ * non-secret setup material (no auto-clear, no sensitive flag), anything ≥1 = a secret, which
+ * takes [copyToClipboard]'s EXTRA_IS_SENSITIVE + generation-guarded auto-clear branch.
+ *
+ * Audit F25: this row used to hardcode 0 and its KDoc asserted the contents were "not vault
+ * secrets" — while its only two callers were the account's TOTP enrollment `otpauth://` URI and
+ * its base32 seed, which ARE the account's second factor. Anyone holding either generates valid
+ * codes for this account forever, so they sat on the system clipboard past lock, sign-out and app
+ * exit (all three of which andvari scrubs for every other secret), and without EXTRA_IS_SENSITIVE
+ * Android 13+ rendered the seed in the clipboard-preview overlay and let clipboard history/sync
+ * carry it off the device. Setup material and second-factor seeds are not the same class.
+ */
 @Composable
-private fun SelectableCopyRow(label: String, value: String, ctx: Context) {
+private fun SelectableCopyRow(label: String, value: String, ctx: Context, clearSeconds: Int = 0) {
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2805,7 +2938,7 @@ private fun SelectableCopyRow(label: String, value: String, ctx: Context) {
             // a11yand-09: name each Copy for ITS field — a detail screen stacks several, and out of
             // context (TalkBack controls navigation) they all read "Copy, button". Extension twin
             // a11yext-3d. The visible label stays "Copy".
-            TextButton(onClick = { copyToClipboard(ctx, label, value, 0) }, modifier = Modifier.semantics { contentDescription = "Copy $label" }) { Text("Copy") }
+            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds) }, modifier = Modifier.semantics { contentDescription = "Copy $label" }) { Text("Copy") }
         }
     }
 }

@@ -1,7 +1,7 @@
 {
   "name": "andvari-web",
   "private": true,
-  "version": "0.21.0",
+  "version": "0.22.0",
   "type": "module",
   "description": "andvari web client — independent TypeScript implementation of spec/",
   "scripts": {
@@ -18,7 +18,6 @@
   },
   "devDependencies": {
     "@noble/ciphers": "^2.2.0",
-    "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "@types/libsodium-wrappers-sumo": "^0.7.8",
     "@types/node": "^22.20.1",
@@ -31,8 +30,9 @@
     "vite": "^6.0.3",
     "vitest": "^3.2.7"
   },
-  "overridesComment": "postcss <=8.5.17 (GHSA): path traversal via sourceMappingURL auto-loading. postcss is a TRANSITIVE dep of vite only — build-time, never shipped in the bundle — so pin it here rather than add a phantom direct dependency or take an unneeded vite major.",
+  "overridesComment": "Both entries are TRANSITIVE build-time deps of vite — never shipped in the bundle — so they are pinned here rather than added as phantom direct dependencies or forced through an unneeded vite major. postcss <=8.5.17 (GHSA): path traversal via sourceMappingURL auto-loading. nanoid <3.3.17 (GHSA-2v37-7h3g-55p8): customAlphabet/customRandom spin forever when called with size 0; it reaches us only through postcss, and nothing in this tree calls those functions — the pin exists so the repository's OpenSSF Scorecard vulnerability check stays clean, which for a public password manager is part of the product.",
   "overrides": {
-    "postcss": "^8.5.18"
+    "postcss": "^8.5.18",
+    "nanoid": "^3.3.18"
   }
 }

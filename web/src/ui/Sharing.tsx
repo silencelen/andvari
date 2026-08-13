@@ -680,57 +680,63 @@ function DeleteVaultControl({ vault, store, onDeleted, onDeletedNote, onBackup, 
     }
   };
 
-  if (!open) {
-    return (
-      <div className="actions" style={{ marginTop: 18 }}>
-        {/* Review LOW: a copy that completed while the layer was closed must be visible from
-            the collapsed state — the opener below clears the note, so this is the one place
-            the user can learn the rescue copy landed. */}
-        {copiedNote && <div className="msg info" style={{ display: "block", flexBasis: "100%" }}>{copiedNote}</div>}
-        {copying && <div className="msg info" style={{ display: "block", flexBasis: "100%" }}>Copying items to your Personal vault… {copying.done}/{copying.total}</div>}
-        <div className="spacer" />
-        <button type="button" className="ghost" style={{ color: "var(--danger)" }} onClick={() => { setOpen(true); setErr(""); setCopiedNote(""); }}>
-          Delete vault…
-        </button>
-      </div>
-    );
-  }
-
   return (
-    // a11y-webext--3 (adjacent): --line is declared nowhere, so this divider always painted
-    // the #333 fallback — a near-black hairline that vanished on the light theme's #fbf8f1
-    // panel. --edge is the palette's hairline-divider token, themed in both schemes.
-    <div className="field" style={{ marginTop: 18, borderTop: "1px solid var(--edge)", paddingTop: 16 }}>
-      <label style={{ color: "var(--danger)" }}>Delete “{vault.name}”?</label>
-      <p className="muted" style={{ marginTop: 0 }}>
-        This removes the vault from everyone's andvari now. The server keeps its {items.length}{" "}
-        {items.length === 1 ? "item" : "items"}{attachmentCount > 0 ? ` and ${attachmentCount} ${attachmentCount === 1 ? "attachment" : "attachments"}` : ""} for 7 days
-        (until {eraseDay}) in case you change your mind — then erases them for good. Want to keep some of these?
-      </p>
-      <div className="actions" style={{ marginBottom: 8 }}>
-        <button type="button" className="ghost" disabled={inFlight} onClick={copyFirst}>
-          {copying ? `Copying… ${copying.done}/${copying.total}` : "Copy items to my Personal vault first…"}
-        </button>
-        <button type="button" className="ghost" disabled={inFlight} onClick={onBackup}>Back up first…</button>
-      </div>
-      {copiedNote && <div className="msg info" style={{ display: "block" }}>{copiedNote}</div>}
+    <>
+      {/* BL-1 (audit F12): the rescue-copy confirmation lands after an awaited copyAllToPersonal
+          — the `.msg info` boxes below mount already-populated, which a polite region does not
+          announce (Msg.tsx), and this is "the one place the user can learn the rescue copy
+          landed" before a shared vault is deleted. Mounted OUTSIDE the open/collapsed branch so
+          it is one persistent node across the toggle, per that contract. */}
+      <Announcer text={copiedNote} />
+      {!open ? (
+        <div className="actions" style={{ marginTop: 18 }}>
+          {/* Review LOW: a copy that completed while the layer was closed must be visible from
+              the collapsed state — the opener below clears the note, so this is the one place
+              the user can learn the rescue copy landed. */}
+          {copiedNote && <div className="msg info" style={{ display: "block", flexBasis: "100%" }}>{copiedNote}</div>}
+          {copying && <div className="msg info" style={{ display: "block", flexBasis: "100%" }}>Copying items to your Personal vault… {copying.done}/{copying.total}</div>}
+          <div className="spacer" />
+          <button type="button" className="ghost" style={{ color: "var(--danger)" }} onClick={() => { setOpen(true); setErr(""); setCopiedNote(""); }}>
+            Delete vault…
+          </button>
+        </div>
+      ) : (
+        // a11y-webext--3 (adjacent): --line is declared nowhere, so this divider always painted
+        // the #333 fallback — a near-black hairline that vanished on the light theme's #fbf8f1
+        // panel. --edge is the palette's hairline-divider token, themed in both schemes.
+        <div className="field" style={{ marginTop: 18, borderTop: "1px solid var(--edge)", paddingTop: 16 }}>
+          <label style={{ color: "var(--danger)" }}>Delete “{vault.name}”?</label>
+          <p className="muted" style={{ marginTop: 0 }}>
+            This removes the vault from everyone's andvari now. The server keeps its {items.length}{" "}
+            {items.length === 1 ? "item" : "items"}{attachmentCount > 0 ? ` and ${attachmentCount} ${attachmentCount === 1 ? "attachment" : "attachments"}` : ""} for 7 days
+            (until {eraseDay}) in case you change your mind — then erases them for good. Want to keep some of these?
+          </p>
+          <div className="actions" style={{ marginBottom: 8 }}>
+            <button type="button" className="ghost" disabled={inFlight} onClick={copyFirst}>
+              {copying ? `Copying… ${copying.done}/${copying.total}` : "Copy items to my Personal vault first…"}
+            </button>
+            <button type="button" className="ghost" disabled={inFlight} onClick={onBackup}>Back up first…</button>
+          </div>
+          {copiedNote && <div className="msg info" style={{ display: "block" }}>{copiedNote}</div>}
 
-      <div className="msg info" style={{ display: "block" }}>
-        <strong>Deleting can't take back what people already saw:</strong> anyone who had access may have
-        kept copies of items or the vault key, and encrypted server backups age out on their own schedule
-        (about a month). If a password really matters, change it at the website too.
-      </div>
+          <div className="msg info" style={{ display: "block" }}>
+            <strong>Deleting can't take back what people already saw:</strong> anyone who had access may have
+            kept copies of items or the vault key, and encrypted server backups age out on their own schedule
+            (about a month). If a password really matters, change it at the website too.
+          </div>
 
-      {err && <Msg kind="err">{err}</Msg>}
-      <label style={{ marginTop: 10 }}>Type the vault's name to delete it:</label>
-      <input aria-label="Type the vault's name to delete it" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={vault.name} disabled={inFlight} />
-      <div className="actions" style={{ marginTop: 10 }}>
-        <button type="button" className="ghost" disabled={busy} onClick={() => { setOpen(false); setTyped(""); setErr(""); }}>Cancel</button>
-        <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={inFlight || typed !== vault.name} onClick={del}>
-          {busy ? "Deleting…" : "Delete vault"}
-        </button>
-      </div>
-    </div>
+          {err && <Msg kind="err">{err}</Msg>}
+          <label style={{ marginTop: 10 }}>Type the vault's name to delete it:</label>
+          <input aria-label="Type the vault's name to delete it" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={vault.name} disabled={inFlight} />
+          <div className="actions" style={{ marginTop: 10 }}>
+            <button type="button" className="ghost" disabled={busy} onClick={() => { setOpen(false); setTyped(""); setErr(""); }}>Cancel</button>
+            <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={inFlight || typed !== vault.name} onClick={del}>
+              {busy ? "Deleting…" : "Delete vault"}
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -966,7 +972,9 @@ function AddMember({ vaultId, account, client, onAdded }: { vaultId: string; acc
       {found && (
         <>
           <div className="field">
-            <label>{found.displayName}'s identity code</label>
+            {/* Audit F10: heads a read-only .fingerprint block — there is no control here to
+                label, so it is a heading. */}
+            <div className="field-head">{found.displayName}'s identity code</div>
             <div className="fingerprint" style={{ fontSize: 18, letterSpacing: "0.08em" }}>{found.code}</div>
             <p className="muted" style={{ marginTop: 6 }}>
               Ask {found.displayName} to read out the identity code shown in THEIR app's

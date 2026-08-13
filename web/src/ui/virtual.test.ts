@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { windowRange } from "./virtual";
 
@@ -50,5 +52,39 @@ describe("windowRange", () => {
     const r = windowRange(79200, 800, STRIDE, 3, 10);
     expect(r.start).toBe(10);
     expect(r.end).toBe(10);
+  });
+});
+
+/**
+ * Audit F16: the 72px row height was pinned for BOTH render paths, because the windowed one needs
+ * one fixed stride. Measured at 16px default fonts a row needs 68.75px of content (2px border +
+ * 26px padding + a 24px `.name` + an 18.75px `.sub`) inside a 72px border-box — 1.25px of slack.
+ * Raise the browser's default or MINIMUM font size to 18px (a standard low-vision setting in both
+ * Chrome and Firefox) and both lines become 27px: 54px of content in a 44px content box, which
+ * `overflow: hidden` clips — taking `.sub`, the row's ONLY distinguishing text (username or
+ * website), i.e. exactly the disambiguation a password-manager list exists for. Full-page zoom
+ * scales the px height and is unaffected; this is text-only scaling (WCAG 1.4.4 / 1.4.12).
+ * So the fixed stride is scoped to the path that requires it and the plain ≤500-row branch —
+ * which is most households — sizes to content.
+ */
+describe("F16 — the fixed row stride is scoped to the windowed path", () => {
+  const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
+  const css = readFileSync(here("./styles.css"), "utf8");
+  const vaultTsx = readFileSync(here("./Vault.tsx"), "utf8");
+
+  it("only the virtual list pins a height; the plain list uses min-height so text can grow", () => {
+    expect(css).toContain(".vault-list--virtual .item { height: 72px; overflow: hidden; }");
+    expect(css).toContain(".vault-list .item { min-height: 72px; }");
+    expect(css, "the unscoped fixed height is the defect").not.toContain(".vault-list .item { height: 72px");
+  });
+
+  it("VirtualList is the only renderer that puts the class on, and ROW_H still matches it", () => {
+    expect(vaultTsx).toContain('className="list vault-list vault-list--virtual"');
+    // The plain branch keeps the plain class only.
+    expect(vaultTsx).toContain('<div className="list vault-list">{filtered.map(renderRow)}</div>');
+    expect(vaultTsx).toContain("const ROW_H = 72;");
+    const rowH = Number(vaultTsx.match(/const ROW_H = (\d+);/)![1]);
+    const cssH = Number(css.match(/\.vault-list--virtual \.item \{ height: (\d+)px/)![1]);
+    expect(cssH, "the stride and the CSS height must move together (F56)").toBe(rowH);
   });
 });

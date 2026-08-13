@@ -235,6 +235,11 @@ pins must not claim otherwise.
   `sender.origin` vs `topOrigin`, never crosses to a page, and is the same class of fact as
   "this tab has a login form" — acceptable metadata for trusted chrome. Fail-quiet caveat:
   un-granted pages never inject → signal false → no explainer (acceptable).
+  > **The quoted sentence's leading capital is superseded (2026-08-13, audit F24).** The
+  > shipped string is lowercase — "andvari can't auto-fill…" — because the brand is lowercase
+  > in running copy; `web/src/extension-pins.test.ts` [U21] now pins the lowercase twin and
+  > reds on the capitalized one, so "restoring" the byte-exact sentence above breaks the gate.
+  > Nothing else about this decision changed: same capability-framed, never-vouching copy.
 - Copy parity: popup gains cardholder-name copy (`revealCardField` union += `"name"` —
   additive: popup-only guard + `doc.type==="card"` gate verified; `CardItem` += `hasName`);
   web Vault card view + desktop + Android detail gain expiry copy (composeShortExpiry — the

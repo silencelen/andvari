@@ -22,9 +22,16 @@ data class SharedGrantPayload(
 object SharedGrant {
     private val json = Json { ignoreUnknownKeys = true }
 
-    /** Canonical bytes — string template guarantees key order and no whitespace (matches web). */
-    fun canonicalPayload(vaultId: String, vk: ByteArray): ByteArray =
-        """{"v":1,"vaultId":"$vaultId","vk":"${Bytes.toB64(vk)}"}""".encodeToByteArray()
+    /**
+     * Canonical bytes — string template guarantees key order and no whitespace (matches web).
+     * [vaultId] comes from a server-supplied vault row, so it is held to [requireJsonSafe] for
+     * the reason that helper documents: a template composes the structure, and only a value that
+     * cannot escape its JSON string leaves the structure ours.
+     */
+    fun canonicalPayload(vaultId: String, vk: ByteArray): ByteArray {
+        requireJsonSafe(vaultId, "shared grant vaultId")
+        return """{"v":1,"vaultId":"$vaultId","vk":"${Bytes.toB64(vk)}"}""".encodeToByteArray()
+    }
 
     fun seal(crypto: CryptoProvider, memberIdentityPub: ByteArray, vaultId: String, vk: ByteArray): ByteArray =
         crypto.sealTo(memberIdentityPub, canonicalPayload(vaultId, vk))

@@ -1,4 +1,5 @@
 import { fromB64, fromUtf8, toB64, toHexLower, utf8 } from "./bytes";
+import { requireJsonSafe } from "./canonicaljson";
 import { sealOpen, sealTo, sha256 } from "./provider";
 import { CryptoError } from "./sodium";
 
@@ -9,8 +10,15 @@ export interface SharedGrantPayload {
   vk: string;
 }
 
-/** Canonical bytes — string template guarantees key order and no whitespace (matches Kotlin). */
+/**
+ * Canonical bytes — string template guarantees key order and no whitespace (matches Kotlin).
+ *
+ * Audit F33: [vaultId] comes from a server-supplied vault row, so it is held to
+ * {@link requireJsonSafe} for the reason that helper documents — a template composes the
+ * structure, and only a value that cannot escape its JSON string leaves the structure ours.
+ */
 export function canonicalGrantPayload(vaultId: string, vk: Uint8Array): Uint8Array {
+  requireJsonSafe(vaultId, "shared grant vaultId");
   return utf8(`{"v":1,"vaultId":"${vaultId}","vk":"${toB64(vk)}"}`);
 }
 

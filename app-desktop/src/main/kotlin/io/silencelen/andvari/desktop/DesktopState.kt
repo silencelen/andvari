@@ -439,6 +439,13 @@ class DesktopState(
     // sign-out or a fresh sign-in that returns false (i.e. after the change actually happened).
     var mustChangePassword by mutableStateOf(false)
         private set
+    // F31: the master password chosen at enrollment turned up in the public breach corpus (the
+    // k-anonymity check enrollOp fires the moment a session exists — the relay is session-gated,
+    // so the enroll form itself cannot check). Advisory ONLY: nothing was blocked, the account
+    // exists, and [dismissBreachAdvisory] is a real exit. Never persisted, and dropped with the
+    // session (clearSecondary) — a warning about one account's password must not greet another.
+    var breachAdvisory by mutableStateOf<String?>(null)
+        private set
     // F57: this account's escrow is sealed to a superseded org recovery key (re-ceremony) — the
     // vault screen offers a re-seal. escrowFingerprint is the CURRENT org fingerprint (re-seal
     // target + the value the user verifies against the new printed sheet).
@@ -669,6 +676,44 @@ class DesktopState(
 
     private fun newApi(tokens: Tokens? = null) =
         AndvariApi(baseUrl, newHttpClient(), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
+
+    /**
+     * F31 advisory (twin of android's AndvariViewModel.breachWarning): is [password] in the public
+     * breach corpus? The spec 03 §8 k-anonymity check over [AndvariApi.hibpRange] — only the
+     * 5-character hash prefix leaves this machine, and the password is never logged or persisted
+     * ([Strength.breachCount]).
+     *
+     * Returns the sentence to render, or null for "say nothing" — deliberately covering BOTH "not
+     * in any breach" and "couldn't check": the check fails open, and so must every caller. A relay
+     * that is down may never stop someone backing up their vault. No unlocked session ⇒ null
+     * without a request (the relay is session-gated).
+     */
+    suspend fun breachWarning(password: String): String? = api?.let { breachWarningVia(it, password) }
+
+    // Off the Compose thread: the callers are a LaunchedEffect (composition context) and a
+    // scope.launch, and createCryptoProvider() can pay a one-time sodium load. Same house rule
+    // as every other crypto touch here — it is never worth a frozen window.
+    private suspend fun breachWarningVia(a: AndvariApi, password: String): String? = withContext(Dispatchers.Default) {
+        val count = Strength.breachCount(createCryptoProvider(), password) { a.hibpRange(it) }
+        if (count != null && count > 0) Strength.BREACHED_PASSWORD_WARNING else null
+    }
+
+    /** The F31 enrollment advisory's ONE affordance — it warns, so dismissing it is the whole
+     *  interaction (unlike the F58 must-change banner, which is a live credential problem). */
+    fun dismissBreachAdvisory() {
+        breachAdvisory = null
+    }
+
+    /** Detached F31 check of a just-enrolled master password (enrollOp). Silent on "clean" and on
+     *  "couldn't check" alike — only a positive count paints the banner. [a] is passed in rather
+     *  than read from [api] so the check binds to the client the enroll used, even if the user
+     *  locks or signs out while the round trip is in flight (the call then fails, and failing is
+     *  silent). */
+    private fun checkEnrolledPasswordForBreach(a: AndvariApi, password: String) {
+        scope.launch {
+            breachWarningVia(a, password)?.let { breachAdvisory = it }
+        }
+    }
 
     fun start() {
         scope.launch {
@@ -1245,6 +1290,12 @@ class DesktopState(
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
             mustChangePassword = s.mustChangePassword // F58: never true for a fresh enroll; wired for truth
+            // F31: the master password that now wraps this whole vault, against the public breach
+            // corpus. It runs HERE, after register, because the relay is session-gated — the first
+            // moment on the enroll path a check can be made at all. DETACHED: the shown-once reveal
+            // below must never wait on a network round trip, and the verdict is advisory (a
+            // dismissable banner), never a gate on an enrollment that already landed.
+            checkEnrolledPasswordForBreach(a, password)
             // §F.4/§F.7: the recovery piece is MANDATORY and already committed in register(), but a
             // member who never SEES it is silently unrecoverable. Hold it transiently and route to the
             // shown-once reveal+confirm gate (RecoverySetup) instead of the vault; the gate zeroes it
@@ -1588,6 +1639,11 @@ class DesktopState(
             recoverError = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols."
             return
         }
+        // F31, deliberately absent here: the reset's pattern warning DOES render (the screen shares
+        // MasterPasswordStrengthHints with enroll), but the breach check does not — this whole leg
+        // is pre-session (both recovery endpoints are unauthenticated) and the commit revokes every
+        // session of the account, so the session-gated relay is unreachable before AND after. A
+        // call would fail open on every single reset: a warning nobody could ever see.
         busy = true; recoverError = null
         scope.launch {
             val a = newApi()
@@ -2326,25 +2382,6 @@ class DesktopState(
         else -> "That file could not be read ($code)."
     }
 
-    /**
-     * Read at most [limit] bytes from [input]; return null if the source is larger (so a
-     * multi-GB pick is rejected without ever being buffered in memory). Mirrors Android's
-     * readBounded and CsvImport's own size cap, so a file that fits here also passes parse().
-     */
-    private fun readBounded(input: java.io.InputStream, limit: Int): ByteArray? {
-        val out = java.io.ByteArrayOutputStream()
-        val buf = ByteArray(64 * 1024)
-        var total = 0L
-        while (true) {
-            val r = input.read(buf)
-            if (r < 0) break
-            total += r
-            if (total > limit) return null
-            out.write(buf, 0, r)
-        }
-        return out.toByteArray()
-    }
-
     /** A10: fires when MULTIPLE parsed values carry HTML entities — one legitimate
      *  "&amp;" in a single note shouldn't cry wolf, a file full of them should. */
     private fun looksHtmlMangled(parsed: CsvImport.Parsed): Boolean {
@@ -2853,6 +2890,7 @@ class DesktopState(
         cacheConsentPrompt = false // §5.3: an unanswered prompt dies with the session; re-asks at the next landing
         clearRecoverState() // §F.7 belt: the self-recovery stash never outlives a session teardown
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
+        breachAdvisory = null // F31: the advisory belongs to the session's own master password
         backupPreflight = null; backupResult = null; csvPreflight = null
         // F19: drop any in-flight move state + memoized gesture ids/fileKeys on lock/sign-out.
         moveError = null; moveProgress = null; moveGestures.clear()
@@ -2989,7 +3027,10 @@ class DesktopState(
         val allowed = (policy?.offlineCacheAllowed ?: store.orgCacheAllowed(key)) && store.cacheConsent(key) == true
         val newCache = if (allowed) {
             val db = store.cacheDbFile(key, acct.userId)
-            db.parentFile?.mkdirs() // ns/<originKey>/<userId>/ — first durable cache for this pair
+            // ns/<originKey>/<userId>/ — first durable cache for this pair. F35: 0700, because the
+            // SQLite driver opens the .db/-wal/-shm itself and we can never create THOSE with a
+            // mode; restricting the directory is what actually closes the window.
+            db.parentFile?.mkdirsOwnerOnly()
             sqliteVaultCache(db.absolutePath, acct.userId).also {
                 // 0600 on POSIX, best-effort on Windows — same handling as session.json.
                 for (suffix in listOf("", "-wal", "-shm")) restrictToOwner(File("${db.path}$suffix"))
@@ -3038,31 +3079,18 @@ class DesktopState(
     }
 
     /**
-     * #23: the ENROLL surface's error map. Surface-specific refusal codes keep their per-client
-     * phrasing at the surface (the HouseholdCopy contract — web `enrollError` is the twin table;
-     * wording adapted to the desktop's sheet toggle where web says "reload"); everything else
-     * delegates to the shared canon. The H1 branch pins the SIGN-IN-context sentence (an enroll
-     * is a credential ceremony — byte-equal to what this screen always showed); the old desktop
-     * `friendlyError` duplicate of the canon's ten lifecycle rows is deleted in favor of
-     * [HouseholdCopy.forError] (see [op]).
+     * #23: the ENROLL surface's error map — now one line, because the table moved (audit F26).
+     *
+     * It used to live HERE, hand-written, as one of three: web had its own `enrollError` switch,
+     * android had none at all (every refusal fell through to the generic 400 and told a family
+     * member to "update andvari"), and this copy carried a sentence about the admin backstop keyed
+     * to `recovery_required` — a DIFFERENT server condition — while `escrow_required`, the code
+     * that sentence was written for and the one the default invite path actually produces, had no
+     * row on any client. Three copies, one of them mis-keyed, is what a per-surface table costs.
+     * The rows are now [HouseholdCopy]'s, asserted complete against the server source; this seam
+     * stays so the enroll call site reads as intentional rather than defaulted.
      */
-    private fun enrollError(t: Throwable): String {
-        if (t is ApiException) when (t.code) {
-            // §F.4 register-gate refusals (posture ≠ invite; reachable now the waived toggle
-            // exists). The invitee can't fix a mismatch — the admin re-issues the invite.
-            "recovery_required" -> return "This invite needs the admin backstop set up — use your printed recovery sheet (“My admin gave me a printed recovery sheet”), or ask your admin to re-send it as a member-only invite."
-            "escrow_not_allowed_when_waived" -> return "This invite is set to “member-only” (no admin backstop) — set up without the recovery-sheet step, or ask your admin for a new invite."
-            // Invite/register refusals (web enrollError rows) — these used to fall through as the
-            // server's raw message.
-            "invalid_invite" -> return "That invite code is not valid."
-            "invite_used" -> return "That invite has already been used. Already set up this account? Switch to Sign in."
-            "invite_expired" -> return "That invite has expired."
-            "email_taken" -> return "An account with that email already exists."
-            "invite_email_mismatch" -> return "This invite was created for a different email address — ask your admin for a new invite."
-            "escrow_fingerprint_mismatch" -> return "Recovery fingerprint mismatch — do not proceed; contact your admin."
-        }
-        return if (t is KdfPolicyViolationException) HouseholdCopy.WEAK_KDF_SIGN_IN else HouseholdCopy.forError(t)
-    }
+    private fun enrollError(t: Throwable): String = HouseholdCopy.forEnrollError(t)
 
     private fun op(map: (Throwable) -> String = HouseholdCopy::forError, block: suspend () -> Unit) {
         busy = true; error = null; notice = null
@@ -3162,3 +3190,26 @@ internal fun importPushRetryable(t: Throwable): Boolean = when {
  *  and the UI drops the Retry button; a transient one keeps [IMPORT_INTERRUPTED]'s honest promise. */
 internal fun importPushError(t: Throwable): String =
     if (importPushRetryable(t)) IMPORT_INTERRUPTED else HouseholdCopy.forError(t)
+
+/**
+ * Read at most [limit] bytes from [input]; return null if the source is larger (so a multi-GB
+ * pick is rejected without ever being buffered in memory). Mirrors Android's readBounded and
+ * CsvImport's own size cap, so a file that fits here also passes parse().
+ *
+ * Module-level rather than a private member (audit F28): the attachment picker in Ui.kt needs the
+ * SAME primitive, and it had been reimplementing the bug this function exists to prevent —
+ * `readBytes()` first, cap second. One implementation, two call sites, no second copy to drift.
+ */
+internal fun readBounded(input: java.io.InputStream, limit: Int): ByteArray? {
+    val out = java.io.ByteArrayOutputStream()
+    val buf = ByteArray(64 * 1024)
+    var total = 0L
+    while (true) {
+        val r = input.read(buf)
+        if (r < 0) break
+        total += r
+        if (total > limit) return null
+        out.write(buf, 0, r)
+    }
+    return out.toByteArray()
+}

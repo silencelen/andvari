@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { ApiClient, ApiError, type SessionEndKind } from "../api/client";
 import type { AttachmentRef, ClientPolicy, ItemDoc } from "../api/types";
 import { toB64 } from "../crypto/bytes";
@@ -22,8 +22,8 @@ import {
 } from "../vault/store";
 import { ImportError, type ImportFormat, type ImportPlan, type ImportReport, type Parsed, type ParsedRow, parseCsvImport, planImport, rowOrdinalsByLine } from "../import/csv";
 import { Admin } from "./Admin";
-import { writeClipboard } from "./clipboard";
-import { CLIPBOARD_FAILED, net, NetworkError, UNREACHABLE } from "./errors";
+import { scheduleClipboardClear, writeClipboard } from "./clipboard";
+import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, CLIPBOARD_NOT_CLEARED_SHORT, net, NetworkError, UNREACHABLE } from "./errors";
 import { ExportPanel, type ExportMode } from "./ExportPanel";
 import { Field } from "./Field";
 import { fmtDay, humanSize } from "./format";
@@ -37,6 +37,20 @@ import { estimateStrength } from "./strength";
 import { windowRange, type WindowRange } from "./virtual";
 
 type View = "vault" | "sharing" | "health" | "settings" | "admin" | "trash";
+
+/** Audit F11 landmark plumbing: the skip link's target, and the name of each place — used for
+ *  the page <h1> of the two title-less branches and for the tab title, which was the static
+ *  "andvari" for every view (so neither the heading tree nor the tab said where you were).
+ *  The names match the visible ViewHeader titles / nav buttons; Vault's switch mounts one. */
+const MAIN_ID = "main-content";
+const VIEW_TITLES: Record<View, string> = {
+  vault: "Vault",
+  sharing: "Sharing",
+  health: "Vault health",
+  settings: "Settings",
+  admin: "Administration",
+  trash: "Trash",
+};
 
 /**
  * F76: make hardware/gesture Back step through the vault's open UI layers instead of leaving
@@ -161,6 +175,17 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     () => typeof window !== "undefined" && !!window.matchMedia && window.matchMedia("(pointer: fine)").matches,
     [],
   );
+
+  // Audit F11: the tab title tracks the mounted view — it was the static <title>andvari</title>
+  // for every place in the app, so a user with several tabs (and every AT that reads the title
+  // on tab switch) had nothing telling Vault from Health from Admin. Restored on unmount
+  // (lock / sign-out), which lands back on the signed-out shell.
+  useEffect(() => {
+    document.title = view === "vault" ? "andvari" : `${VIEW_TITLES[view]} · andvari`;
+    return () => {
+      document.title = "andvari";
+    };
+  }, [view]);
 
   // The break-glass export suppression is GONE (design 2026-07-15 §5.4.2 — origin.ts deleted):
   // export renders whenever the vault is unlocked. It was SHOULD-level advertising only — this
@@ -400,7 +425,14 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
 
   return (
     <div>
-      <div className="appbar">
+      {/* Audit F11: the signed-in app had NO landmarks but `nav`, so NVDA's landmark key and
+          JAWS's region list offered no "main" to jump to — the appbar (brand + nav + status +
+          Lock) and the vault view's 7-button toolbar had to be traversed on every arrival at
+          content. The skip link is the first focusable node and is visible only on focus
+          (.skip-link, styles.css, over the existing .visually-hidden utility). The extension's
+          own options page already ships this shape (options.html header/main/section). */}
+      <a className="skip-link" href={`#${MAIN_ID}`}>Skip to content</a>
+      <header className="appbar">
         <div className="row">
           <span className="brand"><span className="a-mark">and</span>vari</span>
           <nav className="nav">
@@ -430,7 +462,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           )}
           <button className="ghost" onClick={onLock}>Lock</button>
         </div>
-      </div>
+      </header>
 
       {mustChange && (
         <div className="banner">
@@ -472,7 +504,15 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         </div>
       )}
 
-      <div className="wrap">
+      {/* Audit F11: the one <main> of the signed-in app. The view switch below mounts exactly
+          one view, and each view's ViewHeader title is that view's <h1> — so the landmark and
+          the heading tree both say where the user is. */}
+      <main className="wrap" id={MAIN_ID}>
+        {/* The page heading for the two branches that render no ViewHeader — the vault
+            (list / item / editor / import-export panels) and Trash. Visually hidden because
+            both deliberately carry no visible view title; every other view's ViewHeader title
+            IS the <h1>, so exactly one is mounted either way. */}
+        {(view === "vault" || view === "trash") && <h1 className="visually-hidden">{VIEW_TITLES[view]}</h1>}
         {view === "health" ? (
           // bug-web--1: items (live state, refreshed by syncNow) — never the identity-stable
           // store, which froze Health's rows for the whole mount.
@@ -513,6 +553,8 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             account={account}
             store={store}
             policy={policy}
+            /* F31: the k-anonymity relay for the backup-passphrase breach check. */
+            client={client}
             onClose={() => { setExportMode(null); refresh(); }}
           />
         ) : importOpen ? (
@@ -602,13 +644,15 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             )}
           </>
         )}
-      </div>
+      </main>
     </div>
   );
 }
 
 // F56 vault-list windowing geometry. ROW_H/LIST_GAP mirror styles.css
-// (.vault-list .item height / .list gap) — the three must move together.
+// (.vault-list--virtual .item height / .list gap) — the three must move together. Audit F16:
+// the pinned height now lives on the --virtual class, i.e. on exactly the path this stride
+// describes; the plain branch's rows size to content and are not measured here.
 const ROW_H = 72;
 const LIST_GAP = 8;
 const STRIDE = ROW_H + LIST_GAP;
@@ -664,7 +708,10 @@ function VirtualList({ items, renderRow }: { items: VaultItem[]; renderRow: (it:
     // The spacer holds the full scroll height (last row carries no trailing gap);
     // the absolutely-placed slice sits exactly where its rows would have laid out.
     <div ref={hostRef} style={{ position: "relative", height: items.length * STRIDE - LIST_GAP }}>
-      <div className="list vault-list" style={{ position: "absolute", top: range.start * STRIDE, left: 0, right: 0 }}>
+      {/* Audit F16: `vault-list--virtual` is what pins the 72px row height — ONLY this path
+          needs one fixed stride (the plain ≤500-row branch sizes to content, so a raised
+          browser minimum font size can't clip the row's `.sub` line there). */}
+      <div className="list vault-list vault-list--virtual" style={{ position: "absolute", top: range.start * STRIDE, left: 0, right: 0 }}>
         {items.slice(range.start, range.end).map(renderRow)}
       </div>
     </div>
@@ -820,20 +867,33 @@ function ReSealBanner({ account, client, escrowFingerprint }: { account: Account
           Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect. Your master
           key never leaves this device except sealed to the recovery key you verify below.
         </span>
-        <label>Type the FIRST 16 characters of the fingerprint on your printed recovery sheet</label>
-        <input
-          value={entry}
-          onChange={(e) => setEntry(e.target.value)}
-          placeholder="from the sheet, not this screen"
-          autoComplete="off"
-          spellCheck={false}
-        />
-        {!shortOk && entry && (
-          <span style={{ color: "var(--danger)" }}>
-            doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin
-          </span>
-        )}
-        {shortOk && <span className="muted">matches — {escrowFingerprint.replace(/(.{4})/g, "$1 ").trim()}</span>}
+        {/* Audit F10: this gate's twin in the ENROLLMENT path (Welcome's required-typed check
+            block) is a `Field`, so its prompt is associated with its box; here the bare <label>
+            named nothing and a screen reader reached the one un-skippable, one-shot re-protect
+            input hearing "edit, blank". Same component, same association, same copy. */}
+        <Field
+          label="Type the FIRST 16 characters of the fingerprint on your printed recovery sheet"
+          /* The banner is a flex column with its own gap — .field's own margin would double it. */
+          style={{ marginBottom: 0 }}
+          hint={
+            <>
+              {!shortOk && entry && (
+                <span style={{ color: "var(--danger)" }}>
+                  doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin
+                </span>
+              )}
+              {shortOk && <span className="muted">matches — {escrowFingerprint.replace(/(.{4})/g, "$1 ").trim()}</span>}
+            </>
+          }
+        >
+          <input
+            value={entry}
+            onChange={(e) => setEntry(e.target.value)}
+            placeholder="from the sheet, not this screen"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </Field>
         {err && <span style={{ color: "var(--danger)" }}>{err}</span>}
         <div style={{ display: "flex", gap: "0.5rem" }}>
           <button className="primary" disabled={!shortOk || busy} onClick={reseal}>{busy ? "Re-protecting…" : "Re-protect account"}</button>
@@ -940,8 +1000,10 @@ function ExportMenu({ onBackup, onCsv }: { onBackup: () => void; onCsv: () => vo
 function useCopy(clearSeconds: number) {
   const [flash, setFlash] = useState<string | null>(null);
   const [copyErr, setCopyErr] = useState(false);
+  // Audit F05: the platform refused the auto-clear, so the value is STILL on the clipboard —
+  // the surfaces below retract the "clears in Ns" promise instead of leaving it standing.
+  const [wipeStuck, setWipeStuck] = useState(false);
   const flashTimer = useRef<number | null>(null);
-  const wipeTimer = useRef<number | null>(null);
   const copy = async (label: string, value: string) => {
     // ux-error--2: writeText rejects in real conditions ("Document is not focused",
     // permissions-policy) and every call site is fire-and-forget — surface the canon
@@ -952,28 +1014,35 @@ function useCopy(clearSeconds: number) {
       return;
     }
     setCopyErr(false);
+    setWipeStuck(false);
     setFlash(label);
     // Cut J (v2 #10, review fix): the flash-timer id was never STORED, so the dedupe guard
     // was dead code; and each copy stacked a fresh unconditional wipe — copying B after A
     // let A's stale timer blank the clipboard mid-way through B's window. One live timer each.
     if (flashTimer.current) window.clearTimeout(flashTimer.current);
     flashTimer.current = window.setTimeout(() => setFlash((f) => (f === label ? null : f)), 2600);
-    if (wipeTimer.current) window.clearTimeout(wipeTimer.current);
+    // Audit F05: the wipe slot is MODULE scope (clipboard.ts), not a per-instance ref — this
+    // hook is re-instantiated per Detail and Detail unmounts on every back-to-list, so the ref
+    // dropped the pending id while the timer kept running and A's orphan blanked B's password.
     // Clamped into [1, CLIPBOARD_CLEAR_MAX_SECONDS] (design 2026-07-15 §2.3, B1-1) at the timer
     // itself — belt to the caller-side clamp; no useCopy consumer can pin the clipboard.
-    wipeTimer.current = window.setTimeout(() => navigator.clipboard.writeText("").catch(() => {}), clampClipboardClearSeconds(clearSeconds) * 1000);
+    scheduleClipboardClear(clampClipboardClearSeconds(clearSeconds), (outcome) => setWipeStuck(outcome === "stuck"));
   };
-  return { flash, copyErr, copy };
+  return { flash, copyErr, wipeStuck, copy };
 }
 
 function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets, onEdit, onDelete, onMoved, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; moveTargets: VaultInfo[]; onEdit: () => void; onDelete: () => Promise<void>; onMoved: () => void; onBack: () => void }) {
   // §2.3 clamp (B1-1): a server-declared clipboard window is honored only inside [1, 300 s].
   const clearSecs = clampClipboardClearSeconds(policy?.clipboardClearSeconds ?? 30);
-  const { flash, copyErr, copy } = useCopy(clearSecs);
+  const { flash, copyErr, wipeStuck, copy } = useCopy(clearSecs);
   const [deleting, setDeleting] = useState(false);
   const [delBusy, setDelBusy] = useState(false);
   const [delErr, setDelErr] = useState("");
   const doc = item.doc;
+  /** The one copy-state pill for every secret row (audit F05): the auto-clear promise, retracted
+   *  in place when the platform refused the wipe — it used to assert "clears in Ns" regardless. */
+  const copyPill = (label: string) =>
+    flash === label ? <span className="copy-flash">{wipeStuck ? CLIPBOARD_NOT_CLEARED_SHORT : `copied ✓ · clears in ${clearSecs}s`}</span> : null;
 
   // Mirror the Editor's save path: await the delete, and on failure keep the confirm open
   // with a message instead of silently closing it while the item still exists everywhere.
@@ -1001,11 +1070,15 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
       {/* BL-1: copy confirmation is polite async info — the visible .copy-flash span mounts
           already-populated (silent), so announce it off this persistent region, named by
           which field was copied ("password copied", "code copied", …). */}
-      <Announcer text={copyErr ? CLIPBOARD_FAILED : flash ? `${flash} copied` : ""} />
+      <Announcer text={wipeStuck ? CLIPBOARD_NOT_CLEARED : copyErr ? CLIPBOARD_FAILED : flash ? `${flash} copied` : ""} />
       <button className="link" onClick={onBack}>← back to vault</button>
       {/* ux-error--2: the visible half of the copy-failure surface — same canon sentence the
           extension popup shows on its toClipboard catch. */}
       {copyErr && <Msg kind="err">{CLIPBOARD_FAILED}</Msg>}
+      {/* Audit F05: the copy landed but the auto-clear was refused (the pill is long gone by
+          then, so the retraction needs a surface of its own). A retry is armed for the next
+          focus — if it lands, this clears itself. */}
+      {wipeStuck && <Msg kind="err">{CLIPBOARD_NOT_CLEARED}</Msg>}
       <h2 style={{ marginTop: 12 }}>{doc.name}</h2>
       <div className="muted" style={{ marginBottom: 18 }}>
         {/* Cards identify themselves by brand + ••last4 (design contract) — the one line
@@ -1028,14 +1101,14 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           )}
           {doc.login.password && (
             <div className="field">
-              <label>Password {flash === "password" && <span className="copy-flash">copied ✓ · clears in {clearSecs}s</span>}</label>
+              <label>Password {copyPill("password")}</label>
               <div className="secret-row">
                 <PasswordField value={doc.login.password} />
                 <button className="ghost" onClick={() => copy("password", doc.login!.password!)}>Copy</button>
               </div>
             </div>
           )}
-          {doc.login.totp && <TotpView uri={doc.login.totp} flash={flash === "code"} clearSecs={clearSecs} onCopy={(code) => copy("code", code)} />}
+          {doc.login.totp && <TotpView uri={doc.login.totp} pill={copyPill("code")} onCopy={(code) => copy("code", code)} />}
           {doc.login.uris?.[0] && (
             <Field label="Website">
               <input readOnly value={doc.login.uris[0]} />
@@ -1058,7 +1131,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           )}
           {doc.card.number && (
             <div className="field">
-              <label>Card number {flash === "card number" && <span className="copy-flash">copied ✓ · clears in {clearSecs}s</span>}</label>
+              <label>Card number {copyPill("card number")}</label>
               {/* Reveal shows the grouped form; Copy hands checkout forms the bare digits. */}
               <div className="secret-row">
                 <PasswordField value={groupNumber(doc.card.number)} />
@@ -1082,7 +1155,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           )}
           {doc.card.securityCode && (
             <div className="field">
-              <label>Security code {flash === "security code" && <span className="copy-flash">copied ✓ · clears in {clearSecs}s</span>}</label>
+              <label>Security code {copyPill("security code")}</label>
               <div className="secret-row">
                 <PasswordField value={doc.card.securityCode} />
                 <button className="ghost" onClick={() => copy("security code", doc.card!.securityCode!)}>Copy</button>
@@ -1118,7 +1191,16 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           <div className="actions">
             {deleting ? (
               <>
-                <span className="muted">Delete “{doc.name}” from every device?</span>
+                {/* Audit F04: a restore drops the attachment refs (store.restoreDeleted's own
+                    invariant — the blobs are unlinked server-side at delete), so "kept for 30
+                    days" is only true of the FIELDS. The one moment that matters is here, before
+                    the delete. Twin sentence on the Trash header below and on both natives. */}
+                <span className="muted">
+                  Delete “{doc.name}” from every device?
+                  {(doc.attachments?.length ?? 0) > 0 && (
+                    <> Its {doc.attachments!.length === 1 ? "attached file" : `${doc.attachments!.length} attached files`} cannot be restored, even from Deleted items.</>
+                  )}
+                </span>
                 <div className="spacer" />
                 <button className="ghost" disabled={delBusy} onClick={confirmDelete} style={{ color: "var(--danger)" }}>{delBusy ? "Deleting…" : "Confirm delete"}</button>
                 <button className="ghost" disabled={delBusy} onClick={() => { setDeleting(false); setDelErr(""); }}>Keep</button>
@@ -1211,8 +1293,12 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
     <div className="sheet">
       <h2>Trash</h2>
       <div className="muted" style={{ marginBottom: 18 }}>
-        Deleted items you can still restore — kept for 30 days, then removed automatically. Restoring
-        brings an item back to its vault on every device; “Delete forever” removes it now.
+        {/* Audit F04: the 30-day promise covered the item's FIELDS only — restoreDeleted drops the
+            attachment refs because the blobs are unlinked server-side at delete time. Say it here
+            (and at the delete confirm above); byte-twin of the Android/desktop Trash sentence. */}
+        Deleted items you can still restore — kept for 30 days, then removed automatically.{" "}
+        Restoring brings the item back, but not its attachments — those were permanently removed when the item was deleted.{" "}
+        “Delete forever” removes it now.
       </div>
       {err && <Msg kind="err">{err}</Msg>}
       {items === null ? (
@@ -1484,7 +1570,7 @@ function SecretInput({ value, onChange, ariaLabel }: { value: string; onChange: 
   );
 }
 
-function TotpView({ uri, flash, clearSecs, onCopy }: { uri: string; flash: boolean; clearSecs: number; onCopy: (code: string) => void }) {
+function TotpView({ uri, pill, onCopy }: { uri: string; pill: ReactNode; onCopy: (code: string) => void }) {
   const [code, setCode] = useState("······");
   const [remaining, setRemaining] = useState(30);
   const [period, setPeriod] = useState(30);
@@ -1515,8 +1601,9 @@ function TotpView({ uri, flash, clearSecs, onCopy }: { uri: string; flash: boole
   return (
     <div className="field">
       {/* Same copy-flash pill as the password/card fields — TotpView owns the label, so the
-          Detail parent threads `flash` (=== "code") + clearSecs down instead of rendering it. */}
-      <label>One-time code {flash && <span className="copy-flash">copied ✓ · clears in {clearSecs}s</span>}</label>
+          Detail parent hands the rendered pill down (audit F05: one pill, one place that knows
+          whether the auto-clear actually landed) instead of re-stating the promise here. */}
+      <label>One-time code {pill}</label>
       <div className="totp-wrap">
         {/* a11y-webext--6: the extension popup's chip contract, ported verbatim (popup.ts
             totpChip). a11yweb-09 named the affordance but baked the LIVE code into the name:
@@ -1876,6 +1963,28 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { 
   );
 }
 
+/**
+ * The login editor's item-password bar. ExportPanel keeps a declared copy of this (importing it
+ * back from here would make a Vault ⇄ ExportPanel cycle) — and that copy has since grown a
+ * `caution` prop this one deliberately does NOT take. The divergence is a decision, not drift.
+ *
+ * `caution` exists to stop a bar affirming what a sentence beside it is denying: the export panel
+ * renders <PasswordCautions> in the same hint, so a green bar over "this password shows up in
+ * public breach lists" is the "strength: fair ✓" defect (passwordadvice.tsx) in another costume.
+ * This editor renders no such sentence — no floor, no pattern line, and no breach check bound to
+ * the field (an item password's breach exposure is on demand instead: HealthLine's "Check breach
+ * exposure" on the detail view, and the Health panel across the whole vault). Holding the bar out
+ * of green here would be a signal with nothing to refer to — the user is told something is wrong
+ * and given nowhere to read why.
+ *
+ * Staying uncautioned does not drop the F31 pattern penalty: `estimateStrength` collapses repeats
+ * and runs before scoring (strength.ts), so `Password1!Password1!` already paints short and gold
+ * off its own score. What is skipped is only the DEMOTION of a password whose honest, pattern-aware
+ * score still clears "good" — and the stakes differ there. A backup passphrase is the one thing
+ * protecting a file that has left the vault, chosen once at export time; an item password is
+ * generated by default, sits a click from the Generate button directly above this bar, and is
+ * re-rollable at any time.
+ */
 function StrengthBar({ password }: { password: string }) {
   const score = estimateStrength(password);
   const colors = ["var(--danger)", "var(--danger)", "var(--gold)", "var(--ok)", "var(--ok)"];

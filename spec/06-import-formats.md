@@ -25,8 +25,10 @@ timeLastUsed,timePasswordChanged` (times = unix **millis**).
 
 Mapping: name = URL host (Firefox has no name column); `url`→uris[0];
 username/password direct; `httpRealm` non-empty → append to notes ("HTTP realm:
-…"); `timePasswordChanged` → seed passwordHistory retiredAt context (informative
-only). `guid` is NOT preserved as itemId (always mint fresh UUIDs).
+…"); `timePasswordChanged` is parsed but **informative only** — never materialized into
+`passwordHistory` (§4 step 9; that field is reserved and unwritten — spec 02 §3), since no
+retired password *value* exists to put in an entry. `guid` is NOT preserved as itemId
+(always mint fresh UUIDs).
 
 ## 3. Common rules
 

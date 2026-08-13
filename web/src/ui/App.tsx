@@ -28,6 +28,7 @@ import {
   loadSession,
   makeClient,
   migrateCacheConsentOnce,
+  offlineCopyStamp,
   pendingSyncCount,
   revokeSessionBestEffort,
   SESSION_STORAGE_KEY,
@@ -179,11 +180,21 @@ export function App() {
   const signOut = useCallback(async (notice?: string, kind: "user" | "expired" | "revoked" = "user") => {
     const uid = loadSession()?.userId ?? null;
     const unsynced = uid ? await pendingSyncCount(uid) : 0;
-    if (kind === "user" && unsynced > 0) {
+    // Audit F07: the confirm used to fire ONLY on unsynced work, so a fully-synced device took
+    // the whole destructive path — session cleared, offline copy deleteDatabase'd — off one
+    // click of a control that reads like an account switcher ("Sign out / use a different
+    // account"). Offline, that leaves the member unable to open their vault at all until
+    // connectivity returns. A durable offline copy is itself a thing to lose, so it gates the
+    // confirm too; offlineCopyStamp is the same non-creating probe the Unlock card already runs.
+    // The sentence is the natives' verbatim (desktop Ui.kt / Android MainActivity) so all three
+    // clients say the same thing, with the unsynced count appended when there is one.
+    const durableCopy = uid ? (await offlineCopyStamp(uid)) !== null : false;
+    if (kind === "user" && (unsynced > 0 || durableCopy)) {
+      const question =
+        "Sign out of this device? This removes the vault copy and any unsynced changes from this device. You'll need your master password — and a connection to your server — to sign back in." +
+        (unsynced > 0 ? ` ${unsynced} unsynced ${unsynced === 1 ? "change" : "changes"} will be permanently lost.` : "");
       const ok =
-        typeof window !== "undefined" && typeof window.confirm === "function"
-          ? window.confirm(`${unsynced} unsynced ${unsynced === 1 ? "change" : "changes"} will be permanently lost if you sign out on this device. Sign out anyway?`)
-          : true;
+        typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(question) : true;
       if (!ok) return; // aborted — session, tokens, and cache are untouched
     }
     const lostCount =

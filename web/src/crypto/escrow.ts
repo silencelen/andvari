@@ -1,4 +1,5 @@
 import { ctEquals, fromB64, fromUtf8, toB64, toHexLower, utf8 } from "./bytes";
+import { requireJsonSafe } from "./canonicaljson";
 import { sealOpen, sealTo, sha256 } from "./provider";
 import { CryptoError } from "./sodium";
 
@@ -16,8 +17,18 @@ export interface EscrowPayload {
   sha256: string;
 }
 
-/** Canonical bytes — string template guarantees key order and no whitespace. */
+/**
+ * Canonical bytes — string template guarantees key order and no whitespace.
+ *
+ * Audit F33: [userId] is SERVER-SUPPLIED (it arrives on the session response), so the template is
+ * composed under the same precondition core's twin applies — see {@link requireJsonSafe} for what
+ * a value that escapes its JSON string would buy an attacker here. `keyType` is ours, but it is
+ * interpolated into the same template, so it is held to the same rule rather than trusted by
+ * position.
+ */
 export async function canonicalPayload(userId: string, keyType: string, keyBytes: Uint8Array): Promise<Uint8Array> {
+  requireJsonSafe(userId, "escrow userId");
+  requireJsonSafe(keyType, "escrow keyType");
   const keyB64 = toB64(keyBytes);
   const shaB64 = toB64(await sha256(keyBytes));
   return utf8(`{"v":1,"userId":"${userId}","keyType":"${keyType}","key":"${keyB64}","sha256":"${shaB64}"}`);

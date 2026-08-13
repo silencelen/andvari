@@ -126,6 +126,87 @@ class EscrowValidationTest : P4TestSupport() {
     }
 
     /**
+     * F19: the §F.4 escrow-polarity gate is TOTAL across BOTH ingestion points. Register already
+     * refused a blob on a `waived` invite; PUT /escrow/self read no user row at all, so the member
+     * the design guarantees has NO admin backstop could hand itself an escrow row with one blob
+     * carrying the org fingerprint — which /recovery-pubkey serves to anybody. The Admin console
+     * then reads "admin backstop" over a users.escrowPolicy still saying `waived`: a coverage lie
+     * discovered only when a real recovery ceremony meets an unopenable blob.
+     */
+    @Test
+    fun escrowSelf_waivedAccount_cannotPlantABackstop() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("adm-waive@x.com", "escrow waive admin 1")
+        client.register(admin, bootstrapToken)
+
+        val inviteResp = client.post("/api/v1/admin/users") {
+            contentType(ContentType.Application.Json)
+            authed(admin)
+            setBody(InviteRequest("waived-esc@x.com", escrowPolicy = "waived"))
+        }
+        assertEquals(HttpStatusCode.OK, inviteResp.status, inviteResp.bodyAsText())
+        val invite = json.decodeFromString(InviteResponse.serializer(), inviteResp.bodyAsText())
+
+        // Enroll under the waived invite (escrow omitted — the only shape register accepts there).
+        val waived = VirtualClient("waived-esc@x.com", "escrow waive member 1")
+        val registerResp = client.post("/api/v1/auth/register") {
+            contentType(ContentType.Application.Json)
+            header("X-Andvari-Client", "test/1.0.0")
+            setBody(waived.buildRegister(invite.inviteToken, recovery.publicKey, fingerprint, includeEscrow = false))
+        }
+        assertEquals(HttpStatusCode.OK, registerResp.status, registerResp.bodyAsText())
+        val session = json.decodeFromString(
+            io.silencelen.andvari.core.model.SessionResponse.serializer(),
+            registerResp.bodyAsText(),
+        )
+        waived.userId = session.userId; waived.accessToken = session.accessToken
+
+        // A perfectly-formed blob sealed to the REAL org key, with the REAL public fingerprint —
+        // everything the old route checked — is refused on the persisted posture alone.
+        val real = EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, waived.userId, waived.uvk)), fingerprint)
+        val refused = client.escrowSelf(waived, real)
+        assertEquals(HttpStatusCode.BadRequest, refused.status, refused.bodyAsText())
+        assertEquals("escrow_not_allowed_when_waived", errorOf(refused))
+
+        // Nothing was persisted: the admin fetch still finds no backstop for this member.
+        assertEquals(
+            HttpStatusCode.NotFound,
+            client.get("/api/v1/admin/users/${waived.userId}/escrow") { authed(admin) }.status,
+            "a waived account must have no escrow row after the refused upload",
+        )
+
+        // The gate is polarity-only: a `required` account (the admin itself) still uploads.
+        assertEquals(HttpStatusCode.OK, client.escrowSelf(admin, EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, admin.userId, admin.uvk)), fingerprint)).status)
+    }
+
+    /**
+     * F19 (second leg): with NO org recovery key, config.recoveryFingerprint is "" — so a body
+     * carrying an empty fingerprint passed the compare and the route happily stored escrow rows
+     * nothing can ever open. This was the one escrow path without an escrowConfigured guard; it now
+     * answers the same 503 escrow_not_configured the pubkey route does. Reached the way a real
+     * instance reaches it: members enroll under a configured instance, THEN the operator drops the
+     * key from the env (register itself refuses on an unconfigured instance, so this is the only
+     * way an account and an unconfigured server ever coexist).
+     */
+    @Test
+    fun escrowSelf_keyDroppedFromEnv_refusesEmptyFingerprintBlobs() {
+        val configured = config()
+        val vc = VirtualClient("esc-unconf@x.com", "escrow unconfigured pw 1")
+        testApplication {
+            application { andvariModule(buildServices(configured, Notifier())) }
+            jsonClient(this).register(vc, bootstrapToken)
+        }
+        testApplication {
+            application { andvariModule(buildServices(config(escrowConfigured = false, dbPath = configured.dbPath), Notifier())) }
+            val client = jsonClient(this)
+            val resp = client.escrowSelf(vc, EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, vc.userId, vc.uvk)), ""))
+            assertEquals(HttpStatusCode.ServiceUnavailable, resp.status, resp.bodyAsText())
+            assertEquals("escrow_not_configured", errorOf(resp))
+        }
+    }
+
+    /**
      * bug-server--9: on an instance with no org recovery key, /recovery-pubkey answered a BARE
      * STRING body with its 503. Every consumer decodes ApiError, so the named cause was lost —
      * core's errorFrom fell back to "http_503" and the web enroll helper substituted a generic

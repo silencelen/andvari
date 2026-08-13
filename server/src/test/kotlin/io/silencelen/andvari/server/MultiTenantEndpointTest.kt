@@ -21,6 +21,8 @@ import io.ktor.websocket.CloseReason
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.DeviceInfo
+import io.silencelen.andvari.core.model.InviteRequest
+import io.silencelen.andvari.core.model.InviteResponse
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.RecoveryVerifyRequest
 import io.silencelen.andvari.core.model.RefreshRequest
@@ -334,6 +336,131 @@ class MultiTenantEndpointTest : P4TestSupport() {
         val key = Bytes.toB64(ByteArray(32) { 3 })
         repeat(2) { assertEquals(HttpStatusCode.Unauthorized, client.loginRaw("g$it@gone.test", key, ip = "203.0.113.60").status) }
         assertEquals(HttpStatusCode.TooManyRequests, client.loginRaw("g9@gone.test", key, ip = "203.0.113.60").status)
+    }
+
+    /**
+     * F20: a failed login against an UNKNOWN or disabled account left no trace — no audit row, no
+     * Loki line — while the wrong-password path audited. A credential-stuffing run off a breach list
+     * is mostly unknown addresses, so the attack an internet-reachable instance actually sees was the
+     * one the log couldn't show.
+     *
+     * The UNKNOWN-address row deliberately carries NO identifier: ip + timestamp + count is what
+     * detection needs, and a row that named the submitted email would make the audit log the account
+     * oracle the fake-salt prelogin and the DUMMY_VERIFIER path exist to deny. Rows for accounts that
+     * DO exist attribute — see [loginFail_disabledAccount_attributesWithInactiveMeta].
+     */
+    @Test
+    fun loginFail_unknownAccount_auditsWithoutNamingIt() = testApplication {
+        application { andvariModule(buildServices(tenantConfig(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("audit-admin@x.com", "stuffing audit admin pw")
+        client.register(admin, bootstrapToken)
+        val wrongKey = Bytes.toB64(ByteArray(32) { 9 })
+
+        // One miss against a REAL account, one against an address that was never here.
+        assertEquals(HttpStatusCode.Unauthorized, client.loginRaw(admin.email, wrongKey, ip = "203.0.113.70").status)
+        assertEquals(HttpStatusCode.Unauthorized, client.loginRaw("never-here@gone.test", wrongKey, ip = "203.0.113.71").status)
+
+        val rows = client.auditRows(admin, "login_fail")
+        assertEquals(2, rows.size, "BOTH outcomes leave a row — an invisible branch is an invisible attack")
+        val unknown = rows.single { it.ip == "203.0.113.71" }
+        assertNull(unknown.userId, "the unknown-account row must not name an account")
+        assertNull(unknown.meta, "…and must carry no identifier at all")
+        // The known-account row is unchanged: it still attributes, which is what makes the pair a
+        // usable signal (same ip, many rows) without the log itself confirming who exists.
+        val known = rows.single { it.ip == "203.0.113.70" }
+        assertEquals(admin.userId, known.userId)
+        assertNull(known.meta, "a wrong password on a live account is the plain case — no meta")
+    }
+
+    /**
+     * The third shape of the same event (server review 2026-08-13). A DISABLED account was folded
+     * into the anonymous branch, so an operator asking "why can't they log in" saw a row identical
+     * to a stranger's stuffing attempt. It now attributes with an "inactive" meta: the audit log is
+     * admin-only and this account is already in that admin's own user list, so naming it leaks
+     * nothing to its one reader — while the meta is the whole answer to the operator's question.
+     * (Nothing about the RESPONSE changes: the caller still gets the same uniform 401.)
+     */
+    @Test
+    fun loginFail_disabledAccount_attributesWithInactiveMeta() = testApplication {
+        application { andvariModule(buildServices(tenantConfig(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("disable-admin@x.com", "disabled login admin pw")
+        client.register(admin, bootstrapToken)
+
+        val inviteResp = client.post("/api/v1/admin/users") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(InviteRequest("shut-out@x.com", isAdmin = false))
+        }
+        assertEquals(HttpStatusCode.OK, inviteResp.status, inviteResp.bodyAsText())
+        val member = VirtualClient("shut-out@x.com", "member password value")
+        client.register(member, json.decodeFromString(InviteResponse.serializer(), inviteResp.bodyAsText()).inviteToken)
+        assertEquals(
+            HttpStatusCode.OK,
+            client.post("/api/v1/admin/users/${member.userId}/disable") { authed(admin) }.status,
+        )
+
+        // The password is CORRECT — only the account's state refuses it, and the 401 is the same
+        // one an unknown address gets.
+        val refused = client.loginRaw(member.email, member.authKey, ip = "203.0.113.73")
+        assertEquals(HttpStatusCode.Unauthorized, refused.status, refused.bodyAsText())
+
+        val row = client.auditRows(admin, "login_fail").single { it.ip == "203.0.113.73" }
+        assertEquals(member.userId, row.userId, "an admin-only log may name an account that admin already lists")
+        assertEquals("inactive", row.meta, "…and must say WHY, or it reads as a wrong password")
+    }
+
+    // ---- F22: the two anonymous POSTs that had no bucket ----
+
+    /**
+     * Register buffers a 256 KiB-capped body and then holds the process's ONE SQLite writer for its
+     * whole transaction, so an unauthenticated flood turned cheap requests into latency on every
+     * authenticated sync — the same pre-auth resource consumption the pentest raised against
+     * prelogin, which was answered there with a body cap AND a bucket. 5/min per IP, like its
+     * siblings; a household enrolls devices, it does not flood.
+     */
+    @Test
+    fun registerRateLimit_fivePerIp() = testApplication {
+        application { andvariModule(buildServices(tenantConfig(), Notifier())) }
+        val client = jsonClient(this)
+        // Five invalid-invite attempts from one IP are each refused on the invite…
+        repeat(5) { n ->
+            val vc = VirtualClient("flood$n@x.com", "register flood password $n")
+            val r = client.post("/api/v1/auth/register") {
+                contentType(ContentType.Application.Json)
+                header("X-Andvari-Client", "test/1.0.0")
+                header("X-Forwarded-For", "203.0.113.80")
+                setBody(vc.buildRegister("not-a-real-invite-$n", recovery.publicKey, fingerprint))
+            }
+            assertEquals(HttpStatusCode.BadRequest, r.status, "attempt ${n + 1} is under the bucket")
+            assertEquals("invalid_invite", errorOf(r))
+        }
+        // …the 6th never reaches the invite lookup, let alone the writer lock.
+        val sixth = client.post("/api/v1/auth/register") {
+            contentType(ContentType.Application.Json)
+            header("X-Andvari-Client", "test/1.0.0")
+            header("X-Forwarded-For", "203.0.113.80")
+            setBody(VirtualClient("flood6@x.com", "register flood password 6").buildRegister("nope", recovery.publicKey, fingerprint))
+        }
+        assertEquals(HttpStatusCode.TooManyRequests, sixth.status, sixth.bodyAsText())
+        assertEquals("rate_limited", errorOf(sixth))
+    }
+
+    /** Refresh gets the same treatment with headroom (30/min): a multi-device household whose access
+     *  tokens lapse together must never be throttled, but the route still can't be looped for free. */
+    @Test
+    fun refreshRateLimit_thirtyPerIp() = testApplication {
+        application { andvariModule(buildServices(tenantConfig(), Notifier())) }
+        val client = jsonClient(this)
+        suspend fun refreshWithGarbageToken() = client.post("/api/v1/auth/refresh") {
+            contentType(ContentType.Application.Json)
+            header("X-Forwarded-For", "203.0.113.90")
+            setBody(RefreshRequest("not-a-real-refresh-token"))
+        }
+        repeat(30) { n -> assertEquals(HttpStatusCode.Unauthorized, refreshWithGarbageToken().status, "attempt ${n + 1} is under the bucket") }
+        val over = refreshWithGarbageToken()
+        assertEquals(HttpStatusCode.TooManyRequests, over.status, over.bodyAsText())
+        assertEquals("rate_limited", errorOf(over))
     }
 
     /**

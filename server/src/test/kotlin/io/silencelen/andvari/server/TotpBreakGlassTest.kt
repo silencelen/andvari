@@ -219,5 +219,131 @@ class TotpBreakGlassTest : P4TestSupport() {
         // Audit: one first-time enroll, one rotation — the rotation never hides as totp_enroll.
         assertEquals(1, client.auditRows(vc, "totp_enroll").size)
         assertEquals(1, client.auditRows(vc, "totp_rotate").size)
+
+        // F02: the two rejected setups above (the wrong code, then the replayed rotation code — a
+        // consumed step fails the window check, so both land as "setup") each left a totp_verify_fail
+        // row. Before this the only TOTP rows were successes, so a grind against the factor showed up
+        // in GET /admin/audit as nothing at all. The refused-no-code attempt writes none: it never
+        // presented a code to check.
+        assertEquals(listOf("setup", "setup"), client.auditRows(vc, "totp_verify_fail").map { it.meta })
+    }
+
+    /**
+     * F02: every TOTP route verifies a 6-digit code, and until F02 none of them carried a bucket —
+     * ~333k expected requests to guess a factor, free and unlogged, off a session an attacker already
+     * holds (the exact threat the rotation gate above was added for). Every rejected code is audited.
+     *
+     * Server review 2026-08-13: F02's first cut keyed one bucket per ROUTE, which handed the LIVE
+     * secret 10 guesses a minute — /disable and an ENROLLED /setup both check it, at 5/min each. The
+     * key is now cut by the secret a call checks, so both spend one `totp_verify:<userId>` budget and
+     * the live factor faces the 5/min the finding asked for.
+     */
+    @Test
+    fun liveSecretGuesses_shareOneBudget_acrossDisableAndRotation() = testApplication {
+        application { andvariModule(buildServices(config(publicHostname = publicHost), Notifier())) }
+        val client = jsonClient(this)
+        val vc = VirtualClient("bg4@x.com", "break glass password four")
+        client.register(vc, bootstrapToken) // bootstrap invite → admin (auditRows below)
+
+        // Enroll first. A FIRST setup verifies nothing and confirm checks the pending secret, so
+        // neither touches the live-secret budget this test then spends.
+        val setup = json.decodeFromString(
+            TotpSetupResponse.serializer(),
+            client.post("/api/v1/account/totp/setup") { authed(vc) }.bodyAsText(),
+        )
+        val confirm = client.post("/api/v1/account/totp/confirm") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(totpCode(setup.secretBase32)))
+        }
+        assertEquals(HttpStatusCode.OK, confirm.status, confirm.bodyAsText())
+
+        // Five guesses against the live factor are each refused on the code…
+        val wrong = wrongCode(setup.secretBase32)
+        suspend fun disableAttempt() = client.post("/api/v1/account/totp/disable") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(wrong))
+        }
+        repeat(5) { n ->
+            val r = disableAttempt()
+            assertEquals(HttpStatusCode.BadRequest, r.status, "guess ${n + 1} is under the bucket")
+            assertEquals("bad_totp_code", errorOf(r))
+        }
+        // …and the 6th inside the same minute never reaches the verify at all.
+        val sixth = disableAttempt()
+        assertEquals(HttpStatusCode.TooManyRequests, sixth.status, sixth.bodyAsText())
+        assertEquals("rate_limited", errorOf(sixth))
+
+        // The factor stands (a bucketed attempt changes no state) and the grind is VISIBLE: five
+        // rows, one per code actually checked — the 429 left none because it never got that far.
+        assertEquals(TotpStatus(enrolled = true, pendingSetup = false), client.totpStatus(vc))
+        val misses = client.auditRows(vc, "totp_verify_fail")
+        assertEquals(5, misses.size)
+        assertTrue(misses.all { it.userId == vc.userId && it.meta == "disable" }, "each miss names the route it hit")
+
+        // THE FIX: a rotation carrying a VALID current code is refused too, because it would check
+        // the same secret the five guesses above were spent on. With a per-route key this call
+        // succeeded — five fresh guesses, on the same factor, inside the same minute.
+        val rotate = client.post("/api/v1/account/totp/setup") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(totpCode(setup.secretBase32, stepOffset = 1))) // confirm consumed the current step
+        }
+        assertEquals(HttpStatusCode.TooManyRequests, rotate.status, rotate.bodyAsText())
+        assertEquals("rate_limited", errorOf(rotate))
+    }
+
+    /**
+     * The usability half of that split, and the reason a single shared key was not the answer: the
+     * PENDING secret is one the server just handed this caller, so confirming it is not guessing
+     * surface and keeps its own budget. A rotation already staged therefore stays finishable in a
+     * minute whose live-secret budget is gone. The arithmetic also proves the budget really is
+     * shared rather than renamed: the staging setup + four disable misses = five.
+     */
+    @Test
+    fun stagedRotation_stillConfirms_whenTheLiveSecretBudgetIsSpent() = testApplication {
+        application { andvariModule(buildServices(config(publicHostname = publicHost), Notifier())) }
+        val client = jsonClient(this)
+        val vc = VirtualClient("bg5@x.com", "break glass password five")
+        client.register(vc, bootstrapToken)
+
+        val setup1 = json.decodeFromString(
+            TotpSetupResponse.serializer(),
+            client.post("/api/v1/account/totp/setup") { authed(vc) }.bodyAsText(),
+        )
+        val confirm1 = client.post("/api/v1/account/totp/confirm") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(totpCode(setup1.secretBase32)))
+        }
+        assertEquals(HttpStatusCode.OK, confirm1.status, confirm1.bodyAsText())
+
+        // Stage the rotation: this verifies the LIVE secret, so it spends 1 of the 5.
+        val rotResp = client.post("/api/v1/account/totp/setup") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(totpCode(setup1.secretBase32, stepOffset = 1))) // confirm consumed the current step
+        }
+        assertEquals(HttpStatusCode.OK, rotResp.status, rotResp.bodyAsText())
+        val setup2 = json.decodeFromString(TotpSetupResponse.serializer(), rotResp.bodyAsText())
+
+        // Four more live-secret attempts exhaust the shared budget…
+        val wrong = wrongCode(setup1.secretBase32)
+        suspend fun disableAttempt() = client.post("/api/v1/account/totp/disable") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(wrong))
+        }
+        repeat(4) { n ->
+            val r = disableAttempt()
+            assertEquals(HttpStatusCode.BadRequest, r.status, "guess ${n + 1} shares the budget with the staging setup")
+            assertEquals("bad_totp_code", errorOf(r))
+        }
+        val spent = disableAttempt()
+        assertEquals(HttpStatusCode.TooManyRequests, spent.status, spent.bodyAsText())
+
+        // …and the staged rotation still completes: /confirm holds its own key.
+        val confirm2 = client.post("/api/v1/account/totp/confirm") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(totpCode(setup2.secretBase32)))
+        }
+        assertEquals(HttpStatusCode.OK, confirm2.status, confirm2.bodyAsText())
+        assertEquals(TotpStatus(enrolled = true, pendingSetup = false), client.totpStatus(vc))
+        assertEquals(1, client.auditRows(vc, "totp_rotate").size)
     }
 }

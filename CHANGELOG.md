@@ -4,7 +4,70 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
-## 0.21.0 (2026-07-27) — polish release: correctness, accessibility, and the public record · fleet 0.21.0, extension 0.20.0
+## 0.22.0 (2026-08-13) — full-surface audit: the locks close, and the copy stops overpromising · fleet 0.22.0, extension 0.22.0
+
+*This release comes out of a tip-to-tail audit of every surface — crypto, server, web, extension,
+Android, desktop, specs, docs and the build itself. The crypto core came through clean: no key or
+plaintext reaches the server, and the key hierarchy still matches the spec byte for byte. What the
+audit found instead was a pattern worth naming, because it shaped everything below: over and over, a
+protection had been designed and written down and then not applied at one last seam. Most of this
+release is closing those seams.*
+
+*Your vault now locks when it is supposed to. A web page could keep the browser extension unlocked
+indefinitely — a hidden form submitting itself on a timer looked exactly like you signing in, and
+each fake submit pushed the idle timer back. It never showed on screen. The extension now requires a
+real click or keypress from you before a submit can count as activity, so a page that scripts its own
+submissions gets nothing and the idle lock lands on time.*
+
+*Your second factor can no longer be guessed at leisure. The one-time-code routes accepted unlimited
+attempts and recorded none of them, so anyone holding a stolen session could sit and grind, or quietly
+swap your second factor for their own. Those routes are now rate-limited, every failure is written to
+the audit log, and attempts against your live code share a single budget so the limit cannot be
+sidestepped by alternating routes.*
+
+*Merging duplicates can no longer delete other people's logins. The duplicate finder grouped matching
+entries across vault boundaries without ever naming a vault, so merging two copies of "Netflix" could
+remove the household's shared one for everyone — and the "Copy to vault" button makes exactly those
+pairs. Duplicates that span vaults are now shown but never merged, every row says which vault it lives
+in, the confirmation names both vaults, and copies in vaults you can only read are left alone.*
+
+*andvari now tells you if your master password is known to be breached. After you enroll or change it,
+and when you set a backup passphrase, andvari checks it against public breach data and says so if it
+appears there. It never blocks you and never nags you into a different choice — it is your password
+and your call. Only a short fragment of a hash ever leaves your device, never the password, and if the
+check cannot run it stays silent rather than guessing. Passwords built from an obvious repeat now score
+honestly too, and the strength meter no longer shows a reassuring tick next to a warning that says the
+opposite.*
+
+*Several messages stopped being true, so they were rewritten. Restoring from Deleted items never
+brought attachments back, but nothing said so before or after — every client now tells you plainly.
+"Clears in 30 seconds" was printed even when the clipboard wipe had silently failed. Sign-in and
+enrollment failures that could never succeed — a browser that will not run the crypto on an insecure
+address, an invite that has already been used — advised you to try again anyway; they now name the
+real cause. Signing out of the web vault wiped the offline copy on one unconfirmed click, while both
+apps asked first; web now asks too. CSV export warns that spreadsheets can execute a cell that starts
+with an equals sign.*
+
+*The web vault is easier to use without a mouse or with a screen reader: real page landmarks and a skip
+link, labels on the recovery gates that had none, and spoken confirmation when an action in Health,
+Recovery or Sharing finishes. On Android and desktop, one-time-code secrets now leave the clipboard the
+way passwords do, exported files are created private rather than fixed up afterwards, large attachments
+no longer load entirely into memory before saving, and the emulator's plain-text networking exemption is
+gone from release builds. The vault list loads a smaller bundle: the public-suffix data that the
+autofill matcher needs is now its own cached chunk instead of being rebuilt into the main one.*
+
+*Under the hood, the safety net itself was repaired. Sixteen security tests in two modules were being
+neither compiled nor run, and the extension's test step reported success when it collected no tests at
+all — both now fail loudly. The release gate also checks the extension's version and scans the docs, so
+the kind of stale claim this release fixed is caught next time. The user guide, which still described
+andvari as requiring a private network, was rewritten to match how the product actually works.*
+
+*Known limits, stated plainly. Android still accepts a plain-`http` self-hosted address that its own
+network policy then refuses; the misleading "unreachable" message is fixed, but whether to accept such
+addresses at all is a deliberate open question pending a test on real hardware. Password history remains
+described in the spec as planned rather than shipped, because it is not built.*
+
+## 0.21.0 (2026-07-27, amended through 2026-08-12) — polish release: correctness, accessibility, and the public record · fleet 0.21.0, extension 0.21.0
 
 *Web (2026-08-12) — duplicate-entry checker in Vault health. The Health view now finds the same
 account saved more than once — same site (registrable domain, the autofill-matching authority)

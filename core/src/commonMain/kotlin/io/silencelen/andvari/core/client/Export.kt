@@ -41,10 +41,11 @@ object ExportCsv {
      * Rules: UTF-8 (callers encode without BOM), CRLF record terminator (header row
      * included), a field is quoted iff it contains `,` `"` CR or LF with `"` escaped as
      * `""`, CRLF/lone-CR inside values normalized to LF before writing, no trimming, no
-     * formula-injection mangling (leading =+-@ verbatim — warn in UI instead). Rows with
-     * empty username AND password are still WRITTEN (only a reimport skips them, spec 06
-     * §1); non-login items (notes AND cards — CSV has no card columns) are skipped
-     * (enumerate them via [warnings]).
+     * formula-injection mangling (leading =+-@ verbatim — mangling would corrupt real
+     * secrets; the compensating control is [Warnings.formulaRisk] + [FORMULA_WARNING] in the
+     * UI, which is what audit F08 found missing). Rows with empty username AND password are
+     * still WRITTEN (only a reimport skips them, spec 06 §1); non-login items (notes AND
+     * cards — CSV has no card columns) are skipped (enumerate them via [warnings]).
      */
     fun write(items: List<ItemDoc>): String {
         val sb = StringBuilder()
@@ -80,7 +81,33 @@ object ExportCsv {
         val extraUris: List<String>,
         /** Login items with empty username AND password — written, but a reimport skips them. */
         val emptyUsernameAndPassword: List<String>,
+        /** Audit F08: login items whose WRITTEN text cells (name, url, username, note) lead
+         *  with a spreadsheet formula character. The no-mangling rule above is only safe
+         *  because the UI says so — this is that warning's input. */
+        val formulaRisk: List<String>,
     )
+
+    /** F08 — the sentence the UI must render for [Warnings.formulaRisk], byte-twin of web
+     *  `CSV_FORMULA_WARNING`. Ends in a colon: the caller appends the names, exactly like the
+     *  other five categories. The advice is "not in a spreadsheet at all" rather than "beware
+     *  these cells" because the writer deliberately mangles nothing, in ANY column. */
+    const val FORMULA_WARNING =
+        "These start with a character a spreadsheet reads as a formula — open this file in a text editor, or import it straight into the other password manager, rather than in Excel or Sheets:"
+
+    /** Leading characters Excel/Sheets/LibreOffice treat as the start of a formula (OWASP's
+     *  set: a tab or CR ahead of one of them is the same vector, so both count on their own). */
+    private const val FORMULA_LEAD = "=+-@\t\r"
+
+    /** Leading characters a spreadsheet skips before deciding a cell is a formula — a value is
+     *  still dangerous behind them, so they don't clear the check. */
+    private const val FORMULA_LEAD_SKIP = " \n\uFEFF"
+
+    /** True when [value] would be parsed as a formula by a spreadsheet that opens the CSV. */
+    fun startsWithFormulaChar(value: String): Boolean {
+        var i = 0
+        while (i < value.length && value[i] in FORMULA_LEAD_SKIP) i++
+        return i < value.length && value[i] in FORMULA_LEAD
+    }
 
     fun warnings(items: List<ItemDoc>): Warnings {
         val notes = ArrayList<String>()
@@ -88,6 +115,7 @@ object ExportCsv {
         val attach = ArrayList<String>()
         val uris = ArrayList<String>()
         val empty = ArrayList<String>()
+        val formula = ArrayList<String>()
         for (doc in items) {
             // Cards interact with the other lists exactly as notes always have: still eligible
             // for [Warnings.withAttachments] (that check is type-blind), never for the login-only lists.
@@ -97,9 +125,16 @@ object ExportCsv {
             if (doc.type == "login") {
                 if ((doc.login?.uris?.size ?: 0) > 1) uris.add(doc.name)
                 if (doc.login?.username.isNullOrEmpty() && doc.login?.password.isNullOrEmpty()) empty.add(doc.name)
+                // Login-only because only login rows are WRITTEN: a note's name never reaches the
+                // file. The password and totp cells are deliberately NOT scanned — a generated
+                // password beginning `-` or `@` is ordinary, and a list that fires on most exports
+                // is a list nobody reads. The copy therefore steers away from spreadsheets
+                // entirely, which is the honest advice for every column.
+                val written = listOf(doc.name, doc.login?.uris?.firstOrNull() ?: "", doc.login?.username ?: "", doc.notes ?: "")
+                if (written.any { startsWithFormulaChar(it) }) formula.add(doc.name)
             }
         }
-        return Warnings(notes, cards, attach, uris, empty)
+        return Warnings(notes, cards, attach, uris, empty, formula)
     }
 
     private fun field(value: String): String {
@@ -236,6 +271,15 @@ object Backup {
     const val MAX_HEADER_BYTES = 64 * 1024
     const val MAX_KDF_MEM_BYTES = 256L * 1024 * 1024
     const val MAX_KDF_OPS = 16L
+
+    /** Audit F34: the §2.2 ladder capped file size, header size and KDF params but never the
+     *  SECTION COUNT, and a zero-length section advances the cursor by only its 8 length bytes —
+     *  so a file of zeroes framed tens of millions of empty sections into the heap before the
+     *  first Argon2 cost gate could apply. Mirrors web `MAX_SECTIONS`. A legitimate container is
+     *  section 0 plus one per embedded attachment, all of them under the §2.5 64 MiB total, so
+     *  4096 is far above any real backup and [buildWithPayloadBytes] refuses to exceed it rather
+     *  than writing a file [open] would reject. */
+    const val MAX_SECTIONS = 4096
     private const val MIN_KDF_MEM_BYTES = 8L * 1024 // libsodium crypto_pwhash minima,
     private const val MIN_KDF_OPS = 1L //              not a policy floor
 
@@ -318,6 +362,11 @@ object Backup {
         envelopeNonce: ByteArray? = null,
         sink: (ByteArray) -> Unit,
     ) {
+        // F34: never write a file our own [open] would refuse — section 0 plus one per
+        // attachment must fit under the same ceiling the parser enforces.
+        require(1 + attachments.size <= MAX_SECTIONS) {
+            "a backup may hold at most ${MAX_SECTIONS - 1} attachment sections (got ${attachments.size})"
+        }
         val header = BackupHeader(
             format = FORMAT,
             v = VERSION,
@@ -406,7 +455,8 @@ object Backup {
      *  3. kdfParams v/alg (`unsupported_kdf`), ceilings memBytes ≤ 256 MiB и opsLimit ≤ 16
      *     (`unsupported_kdf`); params below libsodium's own minima are also
      *     `unsupported_kdf` (argon2id cannot run them — not a policy floor)
-     *  4. section framing complete, section 0 present (`truncated`)
+     *  4. section framing complete, at most [MAX_SECTIONS] of them, section 0 present
+     *     (`truncated`)
      *
      * then derives MKx/exportKey and opens section 0; ANY AEAD failure — wrong
      * passphrase, corruption, or an AD/fileId mismatch — is the single combined
@@ -452,6 +502,10 @@ object Backup {
             // length near 2^63 and slips past the guard, after which len.toInt() truncates to garbage.
             val remaining = (file.size - off - 8).toLong()
             if (len < 0 || len > remaining) throw BackupException(ERR_TRUNCATED, "section extends past end of file")
+            // F34: bound the COUNT too, inside the loop — a zero-length section advances `off`
+            // by only 8, so without this a crafted file frames millions of them before section 0
+            // is ever opened.
+            if (sections.size >= MAX_SECTIONS) throw BackupException(ERR_TRUNCATED, "more than $MAX_SECTIONS sections")
             sections.add((off + 8) to len.toInt())
             off += 8 + len.toInt()
         }

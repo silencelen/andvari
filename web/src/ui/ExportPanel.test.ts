@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { ClientPolicy, KdfParams } from "../api/types";
 import { concat } from "../crypto/bytes";
@@ -81,5 +83,39 @@ describe("backup container carries the policy KDF params", () => {
       memBytes: FAST_POLICY_KDF.memBytes,
     });
     expect(opened.header.kdfParams.opsLimit).not.toBe(DEFAULT_KDF_PARAMS.ops); // the old hardcode is gone
+  });
+});
+
+/**
+ * Audit F08 — the CSV formula-injection warning, RENDERED.
+ *
+ * `writeCsv` deliberately writes a leading `=` `+` `-` `@` verbatim in every column, because
+ * mangling would corrupt real secrets, and the whole bargain rests on the UI naming the rows a
+ * spreadsheet would evaluate. `csvWarnings.formulaRisk` and `CSV_FORMULA_WARNING` were both
+ * computed, exported and vector-pinned — and nothing rendered either, so the compensating control
+ * did not exist for a user. It is a sixth bucket beside the five that were already drawn; pinned
+ * on the source because this panel reads window/module singletons and cannot render in node.
+ */
+describe("F08 — the formula-risk bucket reaches the CSV screen", () => {
+  const panel = readFileSync(fileURLToPath(new URL("./ExportPanel.tsx", import.meta.url)), "utf8");
+
+  it("the sentence and the names are both rendered, in the CSV branch", () => {
+    expect(panel).toContain("{warnings.formulaRisk.length > 0 && (");
+    expect(panel).toContain("{CSV_FORMULA_WARNING} {warnings.formulaRisk.join(\", \")}.");
+    expect(panel).toContain('CSV_FORMULA_WARNING,'); // …and actually imported, not just referenced
+  });
+
+  it("it is drawn like the other five buckets, so it can't be styled out of existence", () => {
+    // Every bucket is the same `msg info` block; count them to catch a sixth that was added as a
+    // comment, a console.log, or a differently-shaped element nobody notices.
+    const csvBranch = panel.slice(panel.indexOf("{/* §1 loss enumeration"), panel.indexOf("The spec 06 plaintext warning"));
+    for (const bucket of ["noteItems", "cardItems", "withAttachments", "extraUris", "emptyUsernameAndPassword", "formulaRisk"]) {
+      expect(csvBranch, `${bucket} is not enumerated on screen`).toContain(`warnings.${bucket}.join(", ")`);
+    }
+    expect(csvBranch.match(/warnings\.\w+\.length > 0 && \(/g) ?? []).toHaveLength(6);
+  });
+
+  it("the names are enumerated, never counted (spec 07 §1)", () => {
+    expect(panel).not.toContain("warnings.formulaRisk.length}");
   });
 });

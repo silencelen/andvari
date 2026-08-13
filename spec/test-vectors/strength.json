@@ -23,12 +23,12 @@
         {
             "password": "aaaaaaaaaaaaaaaaaaaa",
             "utf16Length": 20,
-            "score": 1
+            "score": 0
         },
         {
             "password": "passwordpasswordpassword",
             "utf16Length": 24,
-            "score": 1
+            "score": 0
         },
         {
             "password": "Password1",
@@ -58,7 +58,7 @@
         {
             "password": "aA1!aA1!aA1!aA1!aA1!",
             "utf16Length": 20,
-            "score": 4
+            "score": 0
         },
         {
             "password": "0123456789012345678",
@@ -68,7 +68,7 @@
         {
             "password": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm",
             "utf16Length": 39,
-            "score": 4
+            "score": 0
         },
         {
             "password": "pässwörd pässwörd",

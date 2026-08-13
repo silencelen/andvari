@@ -300,15 +300,27 @@ export type Req =
   | { type: "allItems"; query?: string }
   /** Popup: all cards for the copy-only Cards group (query filters name/subtitle). */
   | { type: "cardItems"; query?: string }
-  /** Secret for a fill. `host` = the requesting page's host. The SW hands out the secret
-   *  only when (a) the item's uris match `host`, (b) a one-shot popup grant covers it, or
-   *  (c) `explicit` is set — the user picked the item from the search-all list rendered in
-   *  OUR closed-shadow UI. Trust model: pages cannot send runtime messages to this SW (no
-   *  externally_connectable) and cannot reach into the closed shadow root; the content
-   *  script additionally requires `isTrusted` events on fill/save clicks. */
+  /** Secret for a fill. The SW hands out the secret only when (a) the caller's host matches the
+   *  item's uris, (b) a one-shot popup grant covers it, or (c) `explicit` is set — the user picked
+   *  the item from the search-all list rendered in OUR closed-shadow UI. The matched host is the
+   *  browser-set `sender.origin`'s host for TAB senders ([A2], fail-closed on a missing/opaque
+   *  origin); `host` is read only from the popup, which has no tab and reads `activeTabHost()`.
+   *  (c) is a deliberate BYPASS, not an oversight: `explicit` is checked AHEAD of the host gate, so
+   *  the fail-closed origin rule constrains (a) only. It has to be — the whole point of a search-all
+   *  pick is to fill an item this host does NOT match — and it carries its own, different gate: the
+   *  pick exists only in OUR closed-shadow UI (isTrusted-gated rows a page can neither query,
+   *  hit-test, nor synthesize a click into — [S5]) or in the popup. Two surfaces set it and no
+   *  other: `fillExplicit` (the content script's search-all pick) and the popup's own reveal/copy,
+   *  which has no tab and so was never subject to the origin gate anyway. A page has no route to
+   *  this SW at all. Trust model: pages cannot send runtime messages here (no
+   *  externally_connectable) and cannot reach into the closed shadow root; the content script
+   *  additionally requires `isTrusted` events on fill/save clicks, and a submit additionally needs a
+   *  fresh user gesture. */
   | { type: "reveal"; itemId: string; host: string; explicit?: boolean }
-  /** Popup: user explicitly picked an item to fill into the active tab → SW mints a
-   *  one-shot grant for (tabId,itemId) and forwards {type:"fillItem"} to that tab. */
+  /** Popup ONLY (the SW refuses senders with a tab, i.e. content scripts — the grant is minted for
+   *  whatever tab is ACTIVE, which need not be the sender's): user explicitly picked an item to
+   *  fill into the active tab → SW mints a one-shot grant for (tabId,itemId) and forwards
+   *  {type:"fillItem"} to that tab's top frame. */
   | { type: "fillFromPopup"; itemId: string }
   /** Popup ONLY (the SW refuses senders with a tab, i.e. content scripts): one card field
    *  for a copy — the value goes straight to the popup's clipboard write, never into a page
@@ -318,7 +330,13 @@ export type Req =
    *  name/CVV); additive, same popup-only guard + doc.type==="card" gate. */
   | { type: "revealCardField"; itemId: string; field: "number" | "expiry" | "name" | "cvv" }
   /** Content: page captured a submitted credential. SW decides save-vs-update and
-   *  stores it as the pending save for the tab (survives navigation). */
+   *  stores it as the pending save for the tab (survives navigation). PASSIVE (F01): a submit is
+   *  page-DRIVEABLE — `form.requestSubmit()` fires one with isTrusted true and no user gesture —
+   *  so it must never re-arm the idle autolock; the user's own signal is `resolvePendingSave`.
+   *  The capture itself needs a fresh gesture content-side (consumeLoginGesture): a trusted
+   *  click/Enter, or the SW's own `fillItem` delivery — a popup fill is a user click this document
+   *  cannot see, and the sites that auto-submit on fill are exactly the ones that would lose the
+   *  banner without it. */
   | { type: "capturedCredential"; url: string; username: string; password: string }
   /** Content (G2 [X2-A3]): a card form was submitted under a trusted gesture — the frame's OWN card
    *  inputs, Luhn-gated content-side, NEVER the CVV. The SW re-Luhns, discards any capture whose
@@ -347,7 +365,10 @@ export type Req =
    *  EXPECTED to reject and the banner's toolbar sentence is the primary path there). NON-passive:
    *  it rides the banner's isTrusted Save click, i.e. genuine user activity. */
   | { type: "openPopupForSave" }
-  /** Append https://<host> to an item's login.uris (additive; preserves the tail). */
+  /** Append https://<host> to an item's login.uris (additive; preserves the tail). A vault WRITE:
+   *  a TAB sender may only link ITS OWN host (`host` must equal the browser-set `sender.origin`'s
+   *  host — [A2], fail-closed on a missing/opaque origin), so a page-side caller can never make an
+   *  item match a site the user never visited. Popup senders (no tab) are unrestricted. */
   | { type: "linkUri"; itemId: string; host: string }
   | { type: "generate" }
   /** Popup: live TOTP code for an item's detail row. */

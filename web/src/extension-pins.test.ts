@@ -396,7 +396,11 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
 
   it("[U21] crossOriginFormsOnly: exact neutral copy, mutually-exclusive flags, Fill gated on fillable alone", () => {
     // Byte-exact design sentence — capability-framed, never vouching the page is a checkout.
-    expect(pp).toContain("Andvari can't auto-fill payment forms embedded from another site. Use the copy buttons instead.");
+    // F24 (2026-08-13 audit): lowercase brand. This was the ONE capitalized user-facing "andvari"
+    // in the tree — and this pin was what protected the drift. If a sentence-initial capital is
+    // ever wanted here, rephrase so the brand is not the first word.
+    expect(pp).toContain("andvari can't auto-fill payment forms embedded from another site. Use the copy buttons instead.");
+    expect(pp, "the brand is lowercase in running copy").not.toContain("Andvari can't auto-fill");
     // The SW computes the two flags mutually exclusive in ONE return — an eligible frame can
     // never also raise the explainer, so gating Fill on `fillable` alone renders no Fill button
     // in the explainer state.
@@ -557,9 +561,17 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     expect(set).toContain('"matches"');
     expect(set).toContain('"pendingSave"');
     expect(set).not.toContain("openPopupForCards");
+    // 2026-08-13 audit (F01): `capturedCredential` was pinned OUT of this set on the reasoning
+    // that "a submit is a real user activity" — and that reasoning was the defect. A submit is
+    // page-DRIVEABLE (`form.requestSubmit()` fires one with isTrusted TRUE and no user gesture),
+    // so a scripted loop in any frame re-armed the idle alarm forever, silently: a username-only
+    // capture sends password:"" and the SW answers with no `pending`, so no banner is ever drawn.
+    // Driveability is the whole test here, so it is passive; the user's save signal is the banner
+    // click (`resolvePendingSave`), which stays out.
+    expect(set, "capturedCredential is page-driveable (requestSubmit) ⇒ it must NOT re-arm the autolock").toContain('"capturedCredential"');
     // …while genuine user activity keeps re-arming: none of these may ever join the passive set
-    // (each rides an isTrusted gesture in our closed-shadow UI, the popup, or a real submit).
-    for (const active of ["reveal", "allItems", "capturedCredential", "resolvePendingSave", "generate", "linkUri"]) {
+    // (each rides an isTrusted gesture in our closed-shadow UI, the popup, or a banner click).
+    for (const active of ["reveal", "allItems", "resolvePendingSave", "generate", "linkUri"]) {
       expect(set, `${active} must re-arm the autolock (real user activity)`).not.toContain(`"${active}"`);
     }
   });
@@ -1040,18 +1052,68 @@ describe("2026-07-27 polish-release audit pins (extension lane) — in-page a11y
     expect(bg).toContain("CHIP_OFFER_MIN_GAP_MS = 250");
   });
 
-  it("bug-ext-gating--1: the login submit capture is isTrusted-gated, and the top frame outranks a sub-frame", () => {
-    // requestSubmit() fires `submit` with isTrusted TRUE (it is a UA "fire an event"), so the gate
-    // costs the documented case nothing — while dispatchEvent(new SubmitEvent(...)) arrives FALSE
-    // and reached the handler, letting any frame forge a capture.
+  it("bug-ext-gating--1 / F01: the login submit capture needs a fresh GESTURE (isTrusted alone is not one), and the top frame outranks a sub-frame", () => {
+    // requestSubmit() fires `submit` with isTrusted TRUE (it is a UA "fire an event"), so the
+    // isTrusted gate costs the documented case nothing — while dispatchEvent(new SubmitEvent(...))
+    // arrives FALSE and reached the handler, letting any frame forge a capture. It stays as the
+    // cheap first refusal…
     const submit = spanOf(ct, "bug-ext-gating--1: this listener WAS ungated", 'document.addEventListener(\n    "click"');
     expect(submit).toContain("if (!e.isTrusted) return;");
+    // …but 2026-08-13 audit F01: it is NOT the gate. The very case the comment above names —
+    // requestSubmit() — needs no user gesture at all, so a 1 px form ticking `requestSubmit()`
+    // captured on every tick (and, before capturedCredential became passive, re-armed the idle
+    // autolock forever with nothing on screen). A fresh unconsumed click/Enter is now the gate,
+    // the card lane's shape: form first, THEN consume, so a foreign submit cannot burn the
+    // gesture the real login form is about to need.
+    expect(submit).toContain("if (f && consumeLoginGesture()) captureNow(f);");
+    // The gesture is recorded by the login lane's OWN trusted listeners — any click (a JS "Sign in"
+    // element that calls requestSubmit() is an ordinary login shape) and Enter in a field.
+    expect(ct).toMatch(/"click",\s*\(e\) => \{\s*if \(!e\.isTrusted\) return;\s*recordLoginGesture\(\);/);
+    // …recorded BEFORE the dropdown's Enter check (a row pick is user activity too — the page
+    // routinely auto-submits behind it), which also anchors this to the login keydown listener.
+    expect(ct).toMatch(/e\.key !== "Enter"[\s\S]{0,600}?recordLoginGesture\(\);[\s\S]{0,600}?dropdownWillConsumeEnter\(\)/);
+    // Its slot is PRIVATE to the login lane: recording into the card lane's one-shot would hand
+    // the card capture the free 1 s window [X2-A3] forbids.
+    const gesture = spanOf(ct, "function consumeLoginGesture(", "function captureNow(");
+    expect(gesture).toContain("loginGesture.consumed = true;");
+    expect(gesture, "the login gate must not reach into the card lane's slot").not.toContain("trustedGesture");
     // Slot ownership: a top-frame capture may EVICT a sub-frame's pending; every other pairing is
     // still refused, so the squat (which silently suppressed the real Save banner) is closed.
     const cap = spanOf(bg, "async function capturedCredential(", "const username = msg.username ||");
     expect(cap).toContain("st.pending.frameId !== frameId && frameId !== 0");
     // …and the sticky per-tab lastUsername is top-frame only (it steers saveTargetFor).
     expect(cap).toContain("if (msg.username && frameId === 0)");
+  });
+
+  it("F01 follow-up: the SW's own popup fill ARMS the login gesture, so an auto-submitting site still banners", () => {
+    // The gesture gate closed a scripted-capture hole and opened a silent one: a popup fill IS a
+    // real user click, but it lands in the popup's document, so a site that submits itself the
+    // moment its fields change (fill → the page's change handler → requestSubmit()) found no
+    // gesture in THIS document, captured nothing, and the Save banner simply never appeared.
+    const branch = spanOf(ct, 'if (msg.type === "fillItem") {', 'if (msg.type === "fillCard")');
+    expect(branch).toContain("recordLoginGesture();");
+    // Armed BEFORE the fill: fillForm's input/change events can drive the page's requestSubmit()
+    // synchronously, so an arm placed after the round-trip is an arm after the submit it exists for.
+    expect(branch.indexOf("recordLoginGesture();")).toBeGreaterThan(-1);
+    expect(branch.indexOf("void fillItem(")).toBeGreaterThan(-1);
+    expect(branch.indexOf("recordLoginGesture();")).toBeLessThan(branch.indexOf("void fillItem("));
+    // …and only when there IS a form to fill: the no_form early return must not leave a window armed
+    // on a page we never touched.
+    expect(branch.indexOf('code: "no_form"')).toBeLessThan(branch.indexOf("recordLoginGesture();"));
+
+    // The recorders are an AUTHORITY LIST, not a gate — the opposite of senderHost, where a new
+    // caller is the outcome the pin wants. Every recordLoginGesture() call site widens what counts
+    // as the user's submit gesture, so exactly three, each argued in the source: the trusted click,
+    // Enter in a field, and this SW-delivered fill. A fourth SHOULD red this pin.
+    expect(ct.match(/recordLoginGesture\(\);/g) ?? [], "each recorder is a vetted user-gesture source").toHaveLength(3);
+    // The property F01 bought is unchanged: nothing else admits a submit, so a scripted
+    // requestSubmit() loop with no gesture anywhere still consumes nothing and captures nothing.
+    const gate = spanOf(ct, "function consumeLoginGesture(", "function captureNow(");
+    expect(gate).toContain("if (loginGesture && !loginGesture.consumed && Date.now() - loginGesture.t < LOGIN_GESTURE_MS)");
+    // One-shot, and wide enough for a sign-in that round-trips before it submits (the reason the
+    // login window is not the card lane's 1 s).
+    expect(gate).toContain("loginGesture.consumed = true;");
+    expect(ct).toContain("const LOGIN_GESTURE_MS = 10_000;");
   });
 
   it("ux-parity--2: extension lists sort by name, transliterating CORE's comparator", () => {
@@ -1154,5 +1216,95 @@ describe("TOTP-add lane pins (design 2026-08-12) — add-only contract, sender g
     expect(c).toContain('safeSend({ type: "addTotpFromPage", totp: href })');
     expect(c, "raw attribute, never the engine-normalized .href").toContain('getAttribute("href")');
     expect(c).toContain("if (!isTop) return");
+  });
+});
+
+describe("2026-08-13 audit pins (extension lane) — F18 caller binding on the three unbound handlers", () => {
+  const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+  const ct = readFileSync(extensionSrc + "content.ts", "utf-8");
+  const msgs = readFileSync(extensionSrc + "messages.ts", "utf-8");
+
+  const spanOf = (src: string, from: string, to: string): string => {
+    const a = src.indexOf(from);
+    const b = src.indexOf(to);
+    expect(a, `span start missing: ${from}`).toBeGreaterThan(-1);
+    expect(b, `span end missing/out of order: ${to}`).toBeGreaterThan(a);
+    return src.slice(a, b);
+  };
+
+  it("the dispatch hands `sender` to BOTH newly-bound handlers (a dropped argument is the whole defect)", () => {
+    // `fillFromPopup(msg.itemId)` and `linkUri(msg.itemId, msg.host)` were the only two effectful
+    // cases in the switch that never saw who was calling.
+    expect(bg).toContain("return fillFromPopup(msg.itemId, sender);");
+    expect(bg).toContain("return linkUri(msg, sender);");
+  });
+
+  it("fillFromPopup is POPUP ONLY, refused before anything else runs (its card twin's guard, verbatim)", () => {
+    const f = spanOf(bg, "async function fillFromPopup(", "// ---- S3 in-page card fill");
+    expect(f).toContain('if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "not allowed from a page" };');
+    // It mints a grant for whatever tab is ACTIVE — which need not be the sender's tab or origin —
+    // so the refusal must precede the tab query, not merely exist somewhere in the body. (Both
+    // indices are asserted present: a missing guard is -1, which would "pass" an ordering test.)
+    expect(f.indexOf("sender.tab !== undefined")).toBeGreaterThan(-1);
+    expect(f.indexOf("sender.tab !== undefined")).toBeLessThan(f.indexOf("chrome.tabs.query"));
+    // The sibling that already did this must not regress alongside it.
+    const c = spanOf(bg, "async function fillCardFromPopup(", "/** Content (S3 redemption)");
+    expect(c).toContain("if (sender.tab !== undefined) return");
+  });
+
+  it("linkUri binds a TAB sender to ITS OWN host — a page cannot make an item match a site it never visited", () => {
+    // linkUri closes the file, so this span runs to EOF rather than to the next section header.
+    const l = bg.slice(bg.indexOf("async function linkUri("));
+    expect(l.length, "linkUri must exist").toBeGreaterThan(0);
+    expect(l).toContain("if (sender.tab !== undefined && senderHost(sender) !== webHost) return");
+    // The refusal must sit ahead of the write: this handler persists to the server, so a late
+    // check would still have appended the uri locally. (-1 must never satisfy the ordering.)
+    expect(l.indexOf("senderHost(sender) !== webHost")).toBeGreaterThan(-1);
+    expect(l.indexOf("senderHost(sender) !== webHost")).toBeLessThan(l.indexOf("putExisting("));
+    // The popup keeps its freedom (its host comes from activeTabHost() under activeTab), which is
+    // exactly what the `sender.tab !== undefined` conjunct buys.
+    expect(l, "the guard must stay tab-scoped, not blanket").toContain("sender.tab !== undefined &&");
+  });
+
+  it("reveal's host gate reads the BROWSER-SET origin for tab senders, never the page-supplied msg.host", () => {
+    const r = spanOf(bg, "function reveal(msg: Extract<", "/** Card copy egress");
+    expect(r).toContain("const webHost = sender.tab !== undefined ? senderHost(sender) : normalizeHost(msg.host);");
+    // The old unconditional read is the defect: a sandboxed frame has an opaque `sender.origin`
+    // but a perfectly real `location.hostname`, so the two can disagree.
+    expect(r, "msg.host must never be the tab sender's identity").not.toContain("const webHost = normalizeHost(msg.host);");
+  });
+
+  it("[A2]/[A3] senderHost is the ONE spelling of caller identity, and fails closed", () => {
+    const s = spanOf(bg, "function senderHost(", "/** Contract reveal rules");
+    expect(s).toContain('typeof sender.origin !== "string" || sender.origin === "" || sender.origin === "null"');
+    expect(s).toContain("return hostOfUrl(sender.origin);");
+    // ONE spelling means every gate reads it — reveal's host and linkUri's own-host rule are each
+    // pinned to their own span above, which is what actually proves the seam is CONNECTED. This
+    // count is only the floor: an exactly-2 pin would red the gate on a THIRD handler correctly
+    // adopting the host gate, i.e. it would punish the outcome the pin exists to encourage.
+    expect(
+      (bg.match(/senderHost\(sender\)/g) ?? []).length,
+      "the F18 host gates must route through the one spelling",
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("reveal's `explicit` bypass is stated as deliberate, and stays narrow on the page side", () => {
+    // `msg.explicit === true` short-circuits AHEAD of the host gate, so senderHost's fail-closed
+    // property does not hold on that path. Deliberate — a search-all pick exists precisely to fill
+    // an item this host does NOT match — but undocumented it reads as the same class of oversight
+    // F18 fixed, so the contract now says so where the contract is stated.
+    const c = spanOf(msgs, "/** Secret for a fill.", '| { type: "fillFromPopup"');
+    expect(c).toContain("deliberate BYPASS");
+    expect(c).toContain("`explicit` is checked AHEAD of the host gate");
+    // The ordering the comment describes is the code's: no host is computed into the decision first.
+    const r = spanOf(bg, "function reveal(msg: Extract<", "/** Card copy egress");
+    expect(r).toContain("msg.explicit === true ||");
+    // And the claim it rests on must stay true: the page side sets `explicit` at exactly ONE call
+    // site, the closed-shadow search-all pick. Every other in-page fill goes through the host gate.
+    expect(
+      ct.match(/fill(?:Item|FromDropdown)\([^)]*, true\)/g) ?? [],
+      "only the search-all pick may bypass the host gate",
+    ).toHaveLength(1);
+    expect(ct).toContain("const o = await fillFromDropdown(m.itemId, f, true);");
   });
 });

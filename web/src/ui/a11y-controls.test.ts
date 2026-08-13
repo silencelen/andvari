@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -110,5 +110,141 @@ describe("a11y-webext--11 — the ~6 s Argon2id unseal is not silent", () => {
     const busies = welcomeTsx.match(/busy \? <Busy>Unsealing…<\/Busy>/g);
     expect(busies).toHaveLength(2);
     expect(welcomeTsx).not.toContain('busy ? "Unsealing…"');
+  });
+});
+
+/**
+ * Audit F10 — every text input has an accessible name. The two recovery gates (Vault's
+ * ReSealBanner, Welcome's shown-once type-back) and Admin's invite/link boxes shipped with a bare
+ * `<label>` beside an `<input>`: no `htmlFor`, no `aria-label`, no `Field` wrapper, so in forms
+ * mode a screen reader hears "edit, blank" at three one-shot, high-consequence prompts. The house
+ * already has both idioms — `Field` for a lone labelable control, an `aria-label` on the inner
+ * input of a multi-child `.secret-row` (BL-2) — so this is a scan, not a judgement call.
+ * WCAG 1.3.1 / 3.3.2 / 4.1.2.
+ */
+describe("F10 — no unnamed <input> anywhere under web/src/ui", () => {
+  const files = readdirSync(fileURLToPath(new URL(".", import.meta.url)))
+    .filter((f) => f.endsWith(".tsx"))
+    .sort();
+
+  it("scans every view file (guard: the scan itself must not silently cover nothing)", () => {
+    expect(files.length).toBeGreaterThan(10);
+    expect(files).toContain("Vault.tsx");
+    expect(files).toContain("Welcome.tsx");
+    expect(files).toContain("Admin.tsx");
+  });
+
+  for (const file of files) {
+    it(`${file} names every input (Field wrapper, wrapping <label>, or aria-label)`, () => {
+      const lines = readFileSync(here(`./${file}`), "utf8").split("\n");
+      const unnamed: string[] = [];
+      // Depth-track the two wrappers that name a control implicitly: <Field> (injects htmlFor)
+      // and a wrapping <label> (the .check checkbox rows). Neither is ever self-closing.
+      let fieldDepth = 0;
+      let labelDepth = 0;
+      lines.forEach((line, i) => {
+        fieldDepth -= (line.match(/<\/Field>/g) ?? []).length;
+        labelDepth -= (line.match(/<\/label>/g) ?? []).length;
+        const opensField = (line.match(/<Field\b/g) ?? []).length;
+        const opensLabel = (line.match(/<label\b/g) ?? []).length;
+        if (line.includes("<input")) {
+          // The whole tag, which may span lines up to its "/>".
+          let tag = "";
+          for (let j = i; j < lines.length; j++) {
+            tag += lines[j] + " ";
+            if (lines[j]!.includes("/>")) break;
+          }
+          const named = tag.includes("aria-label") || tag.includes("aria-labelledby");
+          if (!named && fieldDepth + opensField <= 0 && labelDepth + opensLabel <= 0) {
+            unnamed.push(`${file}:${i + 1} ${line.trim().slice(0, 80)}`);
+          }
+        }
+        fieldDepth += opensField;
+        labelDepth += opensLabel;
+      });
+      expect(unnamed, "an input with no accessible name — wrap it in Field or give it an aria-label").toEqual([]);
+    });
+  }
+
+  it("the two one-shot recovery gates are wrapped in Field, not a bare label", () => {
+    // Vault's re-seal banner (the household recovery key rotated) …
+    expect(vaultTsx).toContain('label="Type the FIRST 16 characters of the fingerprint on your printed recovery sheet"');
+    expect(vaultTsx).not.toContain("<label>Type the FIRST 16 characters");
+    // … and the shown-once phrase type-back, which blocks entry to the vault entirely.
+    expect(welcomeTsx).toContain('label="Type your recovery phrase back to confirm you saved it"');
+    expect(welcomeTsx).not.toContain("<label>Type your recovery phrase back");
+  });
+
+  it("a <label> heading no control at all is a heading, not a label", () => {
+    const stylesHasHead = stylesCss.includes(".field-head {");
+    expect(stylesHasHead, ".field-head must exist — it is what these headings paint with").toBe(true);
+    const adminTsx = readFileSync(here("./Admin.tsx"), "utf8");
+    const exportTsx = readFileSync(here("./ExportPanel.tsx"), "utf8");
+    const sharingTsx = readFileSync(here("./Sharing.tsx"), "utf8");
+    expect(adminTsx).toContain('<div className="field-head" style={{ marginBottom: 8 }}>Minimum client versions</div>');
+    expect(exportTsx).toContain('<div className="field-head">What gets exported</div>');
+    expect(sharingTsx).toContain('className="field-head">{found.displayName}\'s identity code</div>');
+    expect(welcomeTsx).toContain('<div className="field-head">Your recovery phrase</div>');
+  });
+});
+
+/**
+ * Audit F11 — the signed-in app had no landmarks but `nav`, no `<h1>`, and no skip link, so AT
+ * had no "main" to jump to and heading navigation started at level 2 with nothing naming the
+ * page. The extension's own options page already ships header/main/section + h1; this is the web
+ * twin of that shape. WCAG 2.4.1 / 1.3.1 / 2.4.6.
+ */
+describe("a11y F11 — landmarks, one page heading, and a skip link", () => {
+  it("the appbar is a <header> and the content container is the app's <main>", () => {
+    expect(vaultTsx).toContain('<header className="appbar">');
+    expect(vaultTsx).toContain('<main className="wrap" id={MAIN_ID}>');
+    expect(vaultTsx).not.toContain('<div className="appbar">');
+  });
+
+  it("the skip link is the first focusable node and reveals itself on focus", () => {
+    expect(vaultTsx).toContain('<a className="skip-link" href={`#${MAIN_ID}`}>Skip to content</a>');
+    expect(stylesCss).toContain(".skip-link:focus");
+  });
+
+  it("each view's title is the <h1> — ViewHeader owns it, and the two title-less branches supply their own", () => {
+    const viewHeader = readFileSync(here("./ViewHeader.tsx"), "utf8");
+    expect(viewHeader).toContain('<h1 className="view-title">{title}</h1>');
+    expect(code(viewHeader), "the title must not fall back to an <h2>").not.toContain("<h2 className=\"view-title\">");
+    expect(vaultTsx).toContain('<h1 className="visually-hidden">{VIEW_TITLES[view]}</h1>');
+  });
+
+  it("the tab title tracks the mounted view instead of being 'andvari' everywhere", () => {
+    expect(vaultTsx).toContain('document.title = view === "vault" ? "andvari" : `${VIEW_TITLES[view]} · andvari`');
+  });
+});
+
+/**
+ * Audit F12 — Msg.tsx states the rule: an info box mounting already-populated is NOT reliably
+ * announced, so async info surfaces drive a persistent <Announcer>. Every view file paired them
+ * except the three that set an info message from an awaited handler: Health's duplicate merge
+ * (shipped the day before the audit), Recover's verify→reset step change, and Sharing's
+ * rescue-copy confirmation. The class recurs with every new async surface, so pin the pairing
+ * file-wide rather than per call site. WCAG 4.1.3.
+ */
+describe("a11y F12 — every file with an info message also mounts an Announcer", () => {
+  const files = readdirSync(fileURLToPath(new URL(".", import.meta.url)))
+    .filter((f) => f.endsWith(".tsx"))
+    .sort();
+
+  for (const file of files) {
+    const src = readFileSync(here(`./${file}`), "utf8");
+    if (!/<Msg kind="info"|className="msg info"/.test(code(src))) continue;
+    it(`${file} pairs its info surface with a persistent live region`, () => {
+      expect(src, "an async info message with no <Announcer> is silent to screen readers").toContain("<Announcer");
+    });
+  }
+
+  it("the three that were missing it now have it, driven by the value that lands asynchronously", () => {
+    expect(healthTsx).toContain('<Announcer text={msg && msg.kind === "info" ? msg.text : ""} />');
+    expect(healthTsx).toContain('import { Announcer, Msg } from "./Msg"');
+    const recoverTsx = readFileSync(here("./Recover.tsx"), "utf8");
+    expect(recoverTsx).toContain('<Announcer text={step === "reset"');
+    const sharingTsx = readFileSync(here("./Sharing.tsx"), "utf8");
+    expect(sharingTsx).toContain("<Announcer text={copiedNote} />");
   });
 });

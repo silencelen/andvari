@@ -1,6 +1,7 @@
 package io.silencelen.andvari.server
 
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
@@ -11,6 +12,9 @@ import io.ktor.server.testing.testApplication
 import io.silencelen.andvari.core.model.AdminDeviceSummary
 import io.silencelen.andvari.core.model.InviteRequest
 import io.silencelen.andvari.core.model.InviteResponse
+import io.silencelen.andvari.core.model.RefreshRequest
+import io.silencelen.andvari.core.model.SessionResponse
+import io.silencelen.andvari.core.model.TokenPair
 import io.silencelen.andvari.core.model.TotpCodeRequest
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import kotlinx.serialization.builtins.ListSerializer
@@ -84,6 +88,7 @@ class AdminP4Test : P4TestSupport() {
         assertEquals(user2Session.deviceId, device.deviceId)
         assertEquals("test", device.platform)
         assertEquals("vc-use", device.name)
+        assertEquals("1.0.0", device.clientVersion, "F23: the register call's X-Andvari-Client build is stamped on the row")
         assertNull(device.revokedAt)
 
         // Revoke → the device's access token stops working immediately.
@@ -94,6 +99,100 @@ class AdminP4Test : P4TestSupport() {
             client.get("/api/v1/admin/users/${user2.userId}/devices") { authed(admin) }.bodyAsText(),
         ).single()
         assertNotNull(after.revokedAt)
+    }
+
+    /**
+     * F23: the column, the wire field and the Admin console's "Client" cell all existed — and nothing
+     * ever WROTE the value, so every device on every instance read "—" forever. That is precisely the
+     * question an operator asks before arming a minVersion pin that will silently 426 anything older.
+     */
+    @Test
+    fun deviceList_carriesTheDeclaredBuild_andFollowsAnUpgrade() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("root@x.com", "admin password value")
+        client.register(admin, bootstrapToken) // the register call declares test/1.0.0
+
+        suspend fun deviceRow() = json.decodeFromString(
+            ListSerializer(AdminDeviceSummary.serializer()),
+            client.get("/api/v1/admin/users/${admin.userId}/devices") { authed(admin) }.bodyAsText(),
+        ).single()
+
+        assertEquals("1.0.0", deviceRow().clientVersion)
+
+        // The device updates itself: its next refresh re-stamps the row, so the admin sees the new
+        // build without waiting for a re-login (refresh is the only heartbeat a device sends).
+        val refreshed = client.post("/api/v1/auth/refresh") {
+            contentType(ContentType.Application.Json)
+            header("X-Andvari-Client", "test/1.4.0")
+            setBody(RefreshRequest(admin.refreshToken))
+        }
+        assertEquals(HttpStatusCode.OK, refreshed.status, refreshed.bodyAsText())
+        assertEquals("1.4.0", deviceRow().clientVersion)
+
+        // A caller that declares NO build leaves the last known one standing — the column must never
+        // regress to a "0.0.0" that no device is actually running.
+        val next = json.decodeFromString(TokenPair.serializer(), refreshed.bodyAsText())
+        val silent = client.post("/api/v1/auth/refresh") {
+            contentType(ContentType.Application.Json)
+            setBody(RefreshRequest(next.refreshToken))
+        }
+        assertEquals(HttpStatusCode.OK, silent.status, silent.bodyAsText())
+        assertEquals("1.4.0", deviceRow().clientVersion)
+    }
+
+    /**
+     * F23 follow-up (server review 2026-08-13): the declared build is attacker-chosen text on an
+     * UNAUTHENTICATED route (register/login both stamp it) that is now PERSISTED and rendered in the
+     * Admin console, so it is validated before it reaches the column — semver alphabet, ≤32 chars.
+     * A value that fails is treated as "never said" (null → "—") rather than truncated, because the
+     * operator reads this column to decide a minVersion pin and a half-string would be a lie.
+     */
+    @Test
+    fun deviceList_dropsAnImplausibleDeclaredBuild() = testApplication {
+        application { andvariModule(buildServices(config(), Notifier())) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("root@x.com", "admin password value")
+
+        // Register declaring a build no client could be running: markup, and far past the cap.
+        val junk = "1.0.0<script>x</script>" + "9".repeat(64)
+        val resp = client.post("/api/v1/auth/register") {
+            contentType(ContentType.Application.Json)
+            header("X-Andvari-Client", "test/$junk")
+            setBody(admin.buildRegister(bootstrapToken, recovery.publicKey, fingerprint))
+        }
+        assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+        val session = json.decodeFromString(SessionResponse.serializer(), resp.bodyAsText())
+        admin.userId = session.userId; admin.accessToken = session.accessToken; admin.refreshToken = session.refreshToken
+
+        suspend fun deviceRow() = json.decodeFromString(
+            ListSerializer(AdminDeviceSummary.serializer()),
+            client.get("/api/v1/admin/users/${admin.userId}/devices") { authed(admin) }.bodyAsText(),
+        ).single()
+
+        assertNull(deviceRow().clientVersion, "junk is 'never said', never a truncation of itself")
+
+        // A long-but-real semver (pre-release + build metadata) must still be accepted — the guard
+        // bounds the value, it does not narrow what a legitimate client may call itself.
+        val real = "1.2.3-rc.4+build.9"
+        val refreshed = client.post("/api/v1/auth/refresh") {
+            contentType(ContentType.Application.Json)
+            header("X-Andvari-Client", "test/$real")
+            setBody(RefreshRequest(admin.refreshToken))
+        }
+        assertEquals(HttpStatusCode.OK, refreshed.status, refreshed.bodyAsText())
+        assertEquals(real, deviceRow().clientVersion)
+
+        // A later junk declaration leaves the last GOOD build standing (the COALESCE), so the column
+        // can't be poisoned by one request from a device that already reported honestly.
+        val next = json.decodeFromString(TokenPair.serializer(), refreshed.bodyAsText())
+        val poisoned = client.post("/api/v1/auth/refresh") {
+            contentType(ContentType.Application.Json)
+            header("X-Andvari-Client", "test/" + "0".repeat(33)) // one character over the cap
+            setBody(RefreshRequest(next.refreshToken))
+        }
+        assertEquals(HttpStatusCode.OK, poisoned.status, poisoned.bodyAsText())
+        assertEquals(real, deviceRow().clientVersion)
     }
 
     @Test

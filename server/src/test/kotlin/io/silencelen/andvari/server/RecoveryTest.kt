@@ -74,9 +74,18 @@ class RecoveryTest : P4TestSupport() {
         return json.decodeFromString(InviteResponse.serializer(), resp.bodyAsText()).inviteToken
     }
 
+    // F22 gave register a 5/min per-IP bucket, and the §F.4 truth table below deliberately walks
+    // every branch of the gate in one sitting — more enrollments than any household makes in a
+    // minute. Each attempt stamps its own forwarded IP (testApplication's peer is loopback → XFF
+    // trusted), the same way the login-matrix tests do, so the truth table tests the GATE and the
+    // bucket is pinned where it belongs (MultiTenantEndpointTest.registerRateLimit_fivePerIp).
+    private var ipCounter = 0
+    private fun nextIp() = "198.51.100.${++ipCounter}"
+
     private suspend fun HttpClient.rawRegister(req: RegisterRequest, host: String? = null): HttpResponse =
         post("/api/v1/auth/register") {
             contentType(ContentType.Application.Json); header("X-Andvari-Client", "test/1.0.0")
+            header("X-Forwarded-For", nextIp())
             if (host != null) header(HttpHeaders.Host, host)
             setBody(req)
         }

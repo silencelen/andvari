@@ -44,6 +44,9 @@ import java.security.MessageDigest
 import java.sql.Connection
 import java.sql.ResultSet
 
+/** One SELECT for both invite reads register does (its pre-flight and the authoritative in-tx one). */
+private const val INVITE_BY_HASH = "SELECT email,isAdmin,expiresAt,usedAt,escrowPolicy FROM invites WHERE tokenHash=?"
+
 /** The invite row fields the register gate reads, incl. the v6 escrowPolicy (design §F.4). */
 private class InviteRow(
     val email: String,
@@ -202,83 +205,103 @@ class Service(
     // recovery path. `memberRecovery` is MANDATORY for all; org `escrow` is mandatory iff the
     // invite is required and FORBIDDEN iff waived. Any escrowPolicy value other than the literal
     // "waived" (NULL, unknown, typo) is treated as `required` — fail-safe toward the admin backstop.
-    fun register(req: RegisterRequest, ip: String): SessionResponse = repo.db.tx { c ->
+    fun register(req: RegisterRequest, ip: String, clientVersion: String? = null): SessionResponse {
+        // F22: every rejection reachable WITHOUT the writer lock happens first — the two pure body
+        // validations, then a read-only pre-flight of the invite. An anonymous flood of invalid
+        // invites (the cheapest way to reach this unauthenticated route) then never opens a write tx
+        // on the ONE SQLite connection every authenticated sync serializes behind. The pre-flight is
+        // a snapshot and deliberately NOT the authority: [requireUsableInvite] runs AGAIN inside the
+        // tx below, where it is ordered against the `usedAt` consume — otherwise two concurrent
+        // redemptions of one invite could both pass a check taken outside the lock.
         requireKdfFloor(req.kdfParams)
         // A self-service recovery piece for EVERY new account, regardless of escrow policy (the
         // owner's core ask). Absent/structurally-invalid ⇒ recovery_required (never trust the client).
         val memberRecovery = requireMemberRecovery(req.memberRecovery)
 
         val tokenHash = ServerCrypto.hashToken(req.inviteToken)
-        val invite = c.queryOne("SELECT email,isAdmin,expiresAt,usedAt,escrowPolicy FROM invites WHERE tokenHash=?", tokenHash, map = ::inviteRowOf)
-            ?: throw BadRequest("invalid_invite")
+        requireUsableInvite(repo.db.read { c -> c.queryOne(INVITE_BY_HASH, tokenHash, map = ::inviteRowOf) }, req.email)
+
+        return repo.db.tx { c ->
+            val invite = requireUsableInvite(c.queryOne(INVITE_BY_HASH, tokenHash, map = ::inviteRowOf), req.email)
+
+            // §F.4 escrow-polarity gate (escrowPolicy read from the invite row above, never the body).
+            val waived = invite.escrowPolicy == "waived"
+            if (waived) {
+                // waived ⇒ per-member piece only, no admin backstop → an escrow blob MUST NOT be present.
+                if (req.escrow != null) throw BadRequest("escrow_not_allowed_when_waived")
+            } else {
+                // required ⇒ org escrow mandatory + fingerprint-match, exactly as before (Service.kt:87-89).
+                if (!config.escrowConfigured) throw BadRequest("escrow_not_configured")
+                val escrow = req.escrow ?: throw BadRequest("escrow_required")
+                if (escrow.fingerprint != config.recoveryFingerprint) throw BadRequest("escrow_fingerprint_mismatch")
+                requireEscrowBlob(escrow.sealed)
+            }
+            if (repo.userByEmail(req.email) != null) throw BadRequest("email_taken")
+
+            val userId = req.userId
+            if (!UUID_RE.matches(userId)) throw BadRequest("bad_user_id")
+            if (c.queryOne("SELECT userId FROM users WHERE userId=?", userId) { it.getString(1) } != null) throw BadRequest("user_id_taken")
+            val t = now()
+            c.exec(
+                """INSERT INTO users(userId,email,displayName,kdfSalt,kdfParams,verifier,wrappedUvk,identityPub,
+                   encryptedIdentitySeed,isAdmin,status,mustChangePassword,createdAt,escrowPolicy)
+                   VALUES(?,?,?,?,?,?,?,?,?,?, 'active', 0, ?, ?)""",
+                userId, req.email.lowercase(), req.displayName, req.kdfSalt, encodeParams(req.kdfParams),
+                ServerCrypto.hashVerifier(req.authKey), req.wrappedUvk, req.identityPub,
+                req.encryptedIdentitySeed, invite.isAdmin, t,
+                // §F.4 posture reconciliation (v8): persist the ENFORCED polarity of the invite's
+                // escrowPolicy — exactly what the gate above applied, never the client body — so
+                // AdminUserSummary can surface a posture flip / missing-backstop drift later.
+                if (waived) "waived" else "required",
+            )
+            // Org escrow (the admin backstop) only when the invite required it; in the required branch
+            // req.escrow is guaranteed non-null above, so this always inserts there and never when waived.
+            if (!waived) req.escrow?.let { c.exec("INSERT INTO escrow(userId,sealed,fingerprint,updatedAt) VALUES(?,?,?,?)", userId, it.sealed, it.fingerprint, t) }
+
+            val vaultRev = repo.nextRev(c, "vault", req.personalVault.vaultId, req.personalVault.vaultId)
+            c.exec(
+                "INSERT INTO vaults(vaultId,type,rev,metaBlob,createdAt) VALUES(?, 'personal', ?, ?, ?)",
+                req.personalVault.vaultId, vaultRev, req.personalVault.metaBlob, t,
+            )
+            val grantRev = repo.nextRev(c, "grant", req.personalVault.vaultId, req.personalVault.vaultId)
+            c.exec(
+                "INSERT INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES(?,?, 'owner', ?, ?)",
+                req.personalVault.vaultId, userId, req.personalVault.wrappedVk, grantRev,
+            )
+            c.exec("UPDATE invites SET usedAt=? WHERE tokenHash=?", t, tokenHash)
+
+            val session = issueSession(c, userId, req.device.platform, req.device.name, clientVersion)
+            // The self-service member-recovery row: UVK ciphertext + a one-way hash of recoveryAuthKey
+            // (never the raw key — identical to how authKey → verifier works). Inserted AFTER issueSession
+            // so it can stamp the minted session's deviceId as setupDeviceId, next to a fresh pieceId
+            // (piece-binding, design 2026-07-13 §2.3); the response carries the id so the enroll path's
+            // type-back confirm attests exactly THIS piece. recoveryConfirmed stays 0 (column default).
+            val pieceId = ServerCrypto.newToken()
+            c.exec(
+                "INSERT INTO member_recovery(userId,recoveryWrappedUvk,recoveryVerifier,updatedAt,pieceId,setupDeviceId) VALUES(?,?,?,?,?,?)",
+                userId, memberRecovery.recoveryWrappedUvk, ServerCrypto.hashVerifier(memberRecovery.recoveryAuthKey), t, pieceId, session.deviceId,
+            )
+            // Meta = invite token-hash prefix, not the email (INFO-1): joins this row to its
+            // invite_create without copying PII into the central log store.
+            repo.auditOn(c, "register", userId, session.deviceId, ip, tokenHash.take(12))
+            // §2.6: a fresh register is never TOTP-enrolled, so under instance totpRequired its session
+            // is restricted from the first request — say so in the response (authenticate() enforces the
+            // same condition regardless, so the response only mirrors what the routes will do).
+            session.toResponse(user(c, userId), invite.isAdmin, false, recoveryPieceId = pieceId, mustEnrollTotp = config.totpRequired)
+        }
+    }
+
+    /**
+     * The invite's own gate (F22). Applied TWICE per register — once on the pre-flight snapshot that
+     * keeps a bad invite off the writer lock, once inside the tx where it is the authority, ordered
+     * against the `usedAt` consume. One function so the two can never drift.
+     */
+    private fun requireUsableInvite(row: InviteRow?, email: String): InviteRow {
+        val invite = row ?: throw BadRequest("invalid_invite")
         if (invite.usedAt != null) throw BadRequest("invite_used")
         if (invite.expiresAt < now()) throw BadRequest("invite_expired")
-        if (invite.email != BOOTSTRAP_ANY_EMAIL && !invite.email.equals(req.email, ignoreCase = true)) throw BadRequest("invite_email_mismatch")
-
-        // §F.4 escrow-polarity gate (escrowPolicy read from the invite row above, never the body).
-        val waived = invite.escrowPolicy == "waived"
-        if (waived) {
-            // waived ⇒ per-member piece only, no admin backstop → an escrow blob MUST NOT be present.
-            if (req.escrow != null) throw BadRequest("escrow_not_allowed_when_waived")
-        } else {
-            // required ⇒ org escrow mandatory + fingerprint-match, exactly as before (Service.kt:87-89).
-            if (!config.escrowConfigured) throw BadRequest("escrow_not_configured")
-            val escrow = req.escrow ?: throw BadRequest("escrow_required")
-            if (escrow.fingerprint != config.recoveryFingerprint) throw BadRequest("escrow_fingerprint_mismatch")
-            requireEscrowBlob(escrow.sealed)
-        }
-        if (repo.userByEmail(req.email) != null) throw BadRequest("email_taken")
-
-        val userId = req.userId
-        if (!UUID_RE.matches(userId)) throw BadRequest("bad_user_id")
-        if (c.queryOne("SELECT userId FROM users WHERE userId=?", userId) { it.getString(1) } != null) throw BadRequest("user_id_taken")
-        val t = now()
-        c.exec(
-            """INSERT INTO users(userId,email,displayName,kdfSalt,kdfParams,verifier,wrappedUvk,identityPub,
-               encryptedIdentitySeed,isAdmin,status,mustChangePassword,createdAt,escrowPolicy)
-               VALUES(?,?,?,?,?,?,?,?,?,?, 'active', 0, ?, ?)""",
-            userId, req.email.lowercase(), req.displayName, req.kdfSalt, encodeParams(req.kdfParams),
-            ServerCrypto.hashVerifier(req.authKey), req.wrappedUvk, req.identityPub,
-            req.encryptedIdentitySeed, invite.isAdmin, t,
-            // §F.4 posture reconciliation (v8): persist the ENFORCED polarity of the invite's
-            // escrowPolicy — exactly what the gate above applied, never the client body — so
-            // AdminUserSummary can surface a posture flip / missing-backstop drift later.
-            if (waived) "waived" else "required",
-        )
-        // Org escrow (the admin backstop) only when the invite required it; in the required branch
-        // req.escrow is guaranteed non-null above, so this always inserts there and never when waived.
-        if (!waived) req.escrow?.let { c.exec("INSERT INTO escrow(userId,sealed,fingerprint,updatedAt) VALUES(?,?,?,?)", userId, it.sealed, it.fingerprint, t) }
-
-        val vaultRev = repo.nextRev(c, "vault", req.personalVault.vaultId, req.personalVault.vaultId)
-        c.exec(
-            "INSERT INTO vaults(vaultId,type,rev,metaBlob,createdAt) VALUES(?, 'personal', ?, ?, ?)",
-            req.personalVault.vaultId, vaultRev, req.personalVault.metaBlob, t,
-        )
-        val grantRev = repo.nextRev(c, "grant", req.personalVault.vaultId, req.personalVault.vaultId)
-        c.exec(
-            "INSERT INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES(?,?, 'owner', ?, ?)",
-            req.personalVault.vaultId, userId, req.personalVault.wrappedVk, grantRev,
-        )
-        c.exec("UPDATE invites SET usedAt=? WHERE tokenHash=?", t, tokenHash)
-
-        val session = issueSession(c, userId, req.device.platform, req.device.name)
-        // The self-service member-recovery row: UVK ciphertext + a one-way hash of recoveryAuthKey
-        // (never the raw key — identical to how authKey → verifier works). Inserted AFTER issueSession
-        // so it can stamp the minted session's deviceId as setupDeviceId, next to a fresh pieceId
-        // (piece-binding, design 2026-07-13 §2.3); the response carries the id so the enroll path's
-        // type-back confirm attests exactly THIS piece. recoveryConfirmed stays 0 (column default).
-        val pieceId = ServerCrypto.newToken()
-        c.exec(
-            "INSERT INTO member_recovery(userId,recoveryWrappedUvk,recoveryVerifier,updatedAt,pieceId,setupDeviceId) VALUES(?,?,?,?,?,?)",
-            userId, memberRecovery.recoveryWrappedUvk, ServerCrypto.hashVerifier(memberRecovery.recoveryAuthKey), t, pieceId, session.deviceId,
-        )
-        // Meta = invite token-hash prefix, not the email (INFO-1): joins this row to its
-        // invite_create without copying PII into the central log store.
-        repo.auditOn(c, "register", userId, session.deviceId, ip, tokenHash.take(12))
-        // §2.6: a fresh register is never TOTP-enrolled, so under instance totpRequired its session
-        // is restricted from the first request — say so in the response (authenticate() enforces the
-        // same condition regardless, so the response only mirrors what the routes will do).
-        session.toResponse(user(c, userId), invite.isAdmin, false, recoveryPieceId = pieceId, mustEnrollTotp = config.totpRequired)
+        if (invite.email != BOOTSTRAP_ANY_EMAIL && !invite.email.equals(email, ignoreCase = true)) throw BadRequest("invite_email_mismatch")
+        return invite
     }
 
     // ---- login ----
@@ -293,7 +316,7 @@ class Service(
     //   no         true          no               login OK → RESTRICTED session (mustEnrollTotp=true)
     //   no         true          yes              403 public_login_requires_totp (no restricted hatch
     //                                             on the emergency origin)
-    fun login(req: LoginRequest, ip: String, publicOrigin: Boolean = false): SessionResponse {
+    fun login(req: LoginRequest, ip: String, publicOrigin: Boolean = false, clientVersion: String? = null): SessionResponse {
         // §2.5: per-account exponential backoff keyed on the NORMALIZED submitted email — existing
         // account or not (the prelogin fake-salt anti-enumeration discipline: a throttle that only
         // guarded real accounts would itself be an account oracle). Checked before verifier work;
@@ -302,6 +325,25 @@ class Service(
         val user = repo.userByEmail(req.email)
         if (user == null || user.status != "active") {
             ServerCrypto.verify(DUMMY_VERIFIER, req.authKey) // uniform cost
+            // F20: EVERY outcome leaves a row. Credential stuffing off a breach list hits mostly
+            // addresses that don't exist here, so a branch that audited nothing made the whole run
+            // invisible — no audit row, no Loki line, nothing for a rule or an incident review.
+            //
+            // The rows are NOT one uniform shape, and shouldn't be (server review 2026-08-13 —
+            // the old comment here claimed uniformity the next branch already contradicted):
+            //   • unknown address → fully anonymous (userId null, meta null). Naming it would put
+            //     the submitted email in a log an admin reads, and the ROW ITSELF would answer
+            //     "does this account exist?" — the oracle the fake-salt prelogin and the
+            //     DUMMY_VERIFIER above exist to deny. ip + timestamp + count is what detection
+            //     needs anyway (INFO-1 no-PII).
+            //   • known but not active → attributed, meta "inactive". The audit log is admin-only
+            //     and this account is already in the admin's own user list, so attributing leaks
+            //     nothing new to its one reader — while an operator debugging "why can't they log
+            //     in" needs exactly this distinction (disabled account vs. wrong password vs.
+            //     nobody by that name), which an anonymous row destroys.
+            // Same for the wrong-password branch below: known account, attributed, no meta.
+            if (user == null) repo.audit("login_fail", null, null, ip)
+            else repo.audit("login_fail", user.userId, null, ip, "inactive")
             loginBackoff.fail(req.email)
             throw Unauthorized()
         }
@@ -352,7 +394,7 @@ class Service(
         }
         loginBackoff.success(req.email) // §2.5: reset the consecutive-failure state
         return repo.db.tx { c ->
-            val session = issueSession(c, user.userId, req.device.platform, req.device.name)
+            val session = issueSession(c, user.userId, req.device.platform, req.device.name, clientVersion)
             repo.auditOn(c, "login", user.userId, session.deviceId, ip)
             session.toResponse(user, user.isAdmin, user.mustChangePassword, mustEnrollTotp = mustEnrollTotp)
         }
@@ -364,7 +406,7 @@ class Service(
         return TotpStatus(enrolled = u.totpSecret != null, pendingSetup = u.totpPendingSecret != null)
     }
 
-    fun totpSetup(userId: String, code: String? = null): TotpSetupResponse {
+    fun totpSetup(userId: String, code: String? = null, ip: String? = null): TotpSetupResponse {
         val u = repo.userById(userId) ?: throw Unauthorized()
         // Rotation gate (polish audit 2026-07-27 bug-server--0): an ENROLLED account must prove
         // the CURRENT factor before staging a replacement — otherwise a hijacked session could
@@ -374,11 +416,11 @@ class Service(
         val enrolled = u.totpSecret
         if (enrolled != null) {
             val current = code ?: throw BadRequest("totp_code_required")
-            val step = verifyTotpCode(enrolled, current, u.totpLastStep) ?: throw BadRequest("bad_totp_code")
+            val step = verifyTotpCode(enrolled, current, u.totpLastStep) ?: throw totpVerifyFail(userId, ip, "setup")
             val consumed = repo.db.tx { c ->
                 c.exec("UPDATE users SET totpLastStep=? WHERE userId=? AND totpLastStep<?", step, userId, step)
             }
-            if (consumed != 1) throw BadRequest("bad_totp_code")
+            if (consumed != 1) throw totpVerifyFail(userId, ip, "setup_replay")
         }
         val secret = Base32.encode(crypto.randomBytes(20))
         repo.db.tx { c -> c.exec("UPDATE users SET totpPendingSecret=? WHERE userId=?", secret, userId) }
@@ -389,7 +431,7 @@ class Service(
     fun totpConfirm(userId: String, code: String, ip: String) {
         val u = repo.userById(userId) ?: throw Unauthorized()
         val pending = u.totpPendingSecret ?: throw BadRequest("no_pending_totp")
-        val step = verifyTotpCode(pending, code, 0) ?: throw BadRequest("bad_totp_code")
+        val step = verifyTotpCode(pending, code, 0) ?: throw totpVerifyFail(userId, ip, "confirm")
         // A confirm that replaces a LIVE secret is a rotation, not a first enrollment — audit it
         // under its own type so intrusion review can spot a factor swap (bug-server--0).
         val auditType = if (u.totpSecret != null) "totp_rotate" else "totp_enroll"
@@ -402,11 +444,26 @@ class Service(
     fun totpDisable(userId: String, code: String, ip: String) {
         val u = repo.userById(userId) ?: throw Unauthorized()
         val secret = u.totpSecret ?: throw BadRequest("totp_not_enrolled")
-        if (verifyTotpCode(secret, code, u.totpLastStep) == null) throw BadRequest("bad_totp_code")
+        if (verifyTotpCode(secret, code, u.totpLastStep) == null) throw totpVerifyFail(userId, ip, "disable")
         repo.db.tx { c ->
             c.exec("UPDATE users SET totpSecret=NULL, totpPendingSecret=NULL, totpEnrolledAt=NULL, totpLastStep=0 WHERE userId=?", userId)
             repo.auditOn(c, "totp_disable", userId, null, ip)
         }
+    }
+
+    /**
+     * F02: every rejected second-factor code leaves a row, then the caller throws it. Before this,
+     * TOTP audited only SUCCESS (totp_enroll / totp_rotate / totp_disable), so a session-holder
+     * grinding codes at /setup to rotate the factor onto a secret it owns was invisible in
+     * GET /admin/audit — the one place an operator would look. [where] names the route (setup /
+     * setup_replay / confirm / disable) and carries no PII, matching login_fail's "totp" meta; the
+     * 5/min buckets in App.kt are the other half of the answer — keyed by the SECRET a call checks,
+     * so "setup" and "disable" misses (both the live factor) draw on one budget while "confirm"
+     * (the pending secret) holds its own.
+     */
+    private fun totpVerifyFail(userId: String, ip: String?, where: String): BadRequest {
+        repo.audit("totp_verify_fail", userId, null, ip, where)
+        return BadRequest("bad_totp_code")
     }
 
     /** RFC 6238 check over steps now-1..now+1; a step at or before the last accepted one is a replay. */
@@ -619,7 +676,7 @@ class Service(
     }
 
     // ---- refresh (rotating; reuse of a consumed token revokes the device) ----
-    fun refresh(refreshToken: String, ip: String): TokenPair {
+    fun refresh(refreshToken: String, ip: String, clientVersion: String? = null): TokenPair {
         val hash = ServerCrypto.hashToken(refreshToken)
         val s = repo.sessionByRefreshHash(hash) ?: throw Unauthorized("invalid_refresh")
         if (s.revokedAt != null) throw Unauthorized("session_revoked")
@@ -659,7 +716,11 @@ class Service(
                 uuid(), s.deviceId, s.userId, ServerCrypto.hashToken(newAccess), now() + accessTtlMs,
                 ServerCrypto.hashToken(newRefresh), now() + refreshTtlMs, now(),
             )
-            c.exec("UPDATE devices SET lastSeenAt=? WHERE deviceId=?", now(), s.deviceId)
+            // F23: the build rides along with lastSeenAt — a device that updates itself reports its
+            // NEW version on its next refresh (roughly hourly), so the Admin device list answers
+            // "which build is that phone on?" without waiting for a fresh login. COALESCE, not a
+            // plain set: a caller that declared no version must not erase what the device last said.
+            c.exec("UPDATE devices SET lastSeenAt=?, clientVersion=COALESCE(?,clientVersion) WHERE deviceId=?", now(), clientVersion, s.deviceId)
             TokenPair(newAccess, newRefresh)
         }
     }
@@ -1447,11 +1508,17 @@ class Service(
     // ---- helpers ----
     private class IssuedSession(val deviceId: String, val access: String, val refresh: String)
 
-    private fun issueSession(c: Connection, userId: String, platform: String, name: String): IssuedSession {
+    /**
+     * [clientVersion] = the caller's declared X-Andvari-Client build (null when it declared none).
+     * F23: the devices.clientVersion column existed and was surfaced all the way to the Admin device
+     * list, but NOTHING ever wrote it — every device read back "—", which is the one question that
+     * column exists to answer before an operator arms a minVersion pin that will 426 old builds.
+     */
+    private fun issueSession(c: Connection, userId: String, platform: String, name: String, clientVersion: String? = null): IssuedSession {
         val deviceId = uuid()
         c.exec(
-            "INSERT INTO devices(deviceId,userId,platform,name,createdAt,lastSeenAt) VALUES(?,?,?,?,?,?)",
-            deviceId, userId, platform, name, now(), now(),
+            "INSERT INTO devices(deviceId,userId,platform,name,clientVersion,createdAt,lastSeenAt) VALUES(?,?,?,?,?,?,?)",
+            deviceId, userId, platform, name, clientVersion, now(), now(),
         )
         val access = ServerCrypto.newToken()
         val refresh = ServerCrypto.newToken()

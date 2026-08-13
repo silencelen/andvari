@@ -266,6 +266,16 @@ class Repo(val db: Db) {
     fun userById(id: String): UserRow? =
         db.read { it.queryOne("SELECT * FROM users WHERE userId=?", id, map = ::userRow) }
 
+    /**
+     * §F.4: true iff the account was enrolled under a `waived` invite — no admin backstop, org escrow
+     * FORBIDDEN. The single reader of the persisted polarity for the escrow gates (F19), so register
+     * and PUT /escrow/self can't drift. Reads the ENFORCED value register wrote; anything else (NULL
+     * on a pre-§F.4 row, an unknown value) is NOT waived — the same fail-safe-toward-the-backstop
+     * rule the register gate applies to the invite's escrowPolicy.
+     */
+    fun escrowWaived(userId: String): Boolean =
+        db.read { it.queryOne("SELECT escrowPolicy FROM users WHERE userId=?", userId) { rs -> rs.getString(1) } } == "waived"
+
     // member recovery (design 2026-07-12 §F) — the per-member self-service recovery row.
     fun memberRecoveryRow(userId: String): MemberRecoveryRow? =
         db.read { it.queryOne("SELECT userId,recoveryWrappedUvk,recoveryVerifier,pieceId,setupDeviceId FROM member_recovery WHERE userId=?", userId, map = ::memberRecoveryRowOf) }

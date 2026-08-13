@@ -68,3 +68,36 @@ describe("Welcome's two sign-out teardowns — the paths App.signOut cannot reac
     }
   });
 });
+
+/**
+ * Audit F07: the sign-out confirm fired ONLY when unsynced work existed, so a fully-synced device
+ * took the whole destructive §E.4 path — session cleared, offline copy deleteDatabase'd — off one
+ * click of "Sign out / use a different account", a control that reads like an account switcher.
+ * Offline (train, outage, server down) that leaves the member unable to open their vault at all,
+ * with no dialog and no warning. Both natives already confirmed unconditionally and named the
+ * cost; the web is the twin that didn't, so it now reuses their sentence verbatim.
+ */
+describe("App.signOut — a durable offline copy is itself a thing to lose", () => {
+  const signOut = closure(appTsx, "signOut", "lockChannelRef");
+
+  it("confirms on unsynced work OR a standing offline copy, not on unsynced work alone", () => {
+    expect(signOut).toContain("const durableCopy = uid ? (await offlineCopyStamp(uid)) !== null : false;");
+    expect(signOut).toContain('if (kind === "user" && (unsynced > 0 || durableCopy))');
+    expect(signOut, "the unsynced-only gate is the audited defect").not.toContain('if (kind === "user" && unsynced > 0)');
+  });
+
+  it("uses the natives' sentence, so all three clients state the same cost", () => {
+    expect(signOut).toContain(
+      "Sign out of this device? This removes the vault copy and any unsynced changes from this device. You'll need your master password — and a connection to your server — to sign back in.",
+    );
+  });
+
+  it("still names the unsynced count when there is one (breaker #9 — the queue dies with the cache)", () => {
+    expect(signOut).toContain('unsynced > 0 ? ` ${unsynced} unsynced ${unsynced === 1 ? "change" : "changes"} will be permanently lost.` : ""');
+  });
+
+  it("only a USER sign-out can be blocked — expired/revoked cannot ask (spec 02 §8)", () => {
+    expect(signOut).toContain('kind === "user" &&');
+    expect(signOut).toContain("if (!ok) return;");
+  });
+});

@@ -76,7 +76,11 @@ describe("Health rows — keyed on the live items array, not the identity-stable
     const props = healthTsx.slice(healthTsx.indexOf("interface Props {"), healthTsx.indexOf("interface Row {"));
     expect(props, "Health's Props moved — update the pin").toContain("items: VaultItem[];");
     expect(healthTsx).toContain("useMemo<Row[]>(() => healthRows(items), [items])");
-    expect(healthTsx).toContain("useMemo<DuplicateCluster[]>(() => duplicateClusters(items), [items])");
+    // Evolved 2026-08-13 (audit F03): the checker now also takes a vault-role lookup, so the
+    // clusters memo keys on [items, roleFor] — roleFor itself is a useCallback over the
+    // items-keyed vaultsInfo memo, so the whole chain still re-derives on a new items identity.
+    expect(healthTsx).toContain("useMemo<DuplicateCluster[]>(() => duplicateClusters(items, roleFor), [items, roleFor])");
+    expect(healthTsx).toContain("const vaultsInfo = useMemo(() => store.vaults(), [items])");
     for (const deps of healthTsx.matchAll(/useMemo[^;]*?\[([^\]]*)\]\s*\)/g)) {
       expect(deps[1], "a useMemo grew an identity-stable store dependency").not.toMatch(/\bstore\b/);
     }
@@ -84,5 +88,34 @@ describe("Health rows — keyed on the live items array, not the identity-stable
 
   it("Vault feeds it the state it refreshes after every applied sync", () => {
     expect(vaultTsx).toMatch(/<Health items=\{items\}/);
+  });
+});
+
+/**
+ * Audit F03 — the duplicate checker's rendering half. `DuplicateMember` always carried `vaultId`
+ * and the renderer never read it: two identically-named rows, no vault named anywhere, and a
+ * Merge button whose confirm named only the survivor — while `store.remove` on a shared-vault
+ * copy takes it off every household member's devices. The pure refusals are pinned in
+ * duplicates.test.ts; these are the three rendering obligations that go with them.
+ */
+describe("Health duplicates — every row names its vault, and so does the confirm", () => {
+  it("the vault badge is the one Vault's list rows use, on EVERY member row", () => {
+    expect(healthTsx).toContain('<span className="tag" style={{ color: "var(--gold-text)" }}>{vaultLabel(m.vaultId)}</span>');
+    // Same fallback wording as Vault.tsx's badge when a name can't be resolved.
+    expect(healthTsx).toContain('vaultNameById.get(vaultId) ?? "shared"');
+  });
+
+  it("the confirm names the vault kept AND the vault emptied", () => {
+    expect(healthTsx).toContain("Keep “{survivorName}” in “{survivorVault}” and move");
+    expect(healthTsx).toContain("in “{loserVaults}” to Deleted items (kept 30 days)?");
+  });
+
+  it("the panel's own intro says cross-vault copies are never merged", () => {
+    expect(healthTsx).toContain("Copies sitting in different vaults are listed but never merged");
+  });
+
+  it("the roles come from the same source as the names, and reach the pure module", () => {
+    expect(healthTsx).toContain("const vaultsInfo = useMemo(() => store.vaults(), [items])");
+    expect(healthTsx).toContain('vaultsInfo.find((v) => v.vaultId === vaultId)?.role ?? null');
   });
 });

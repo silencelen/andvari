@@ -65,6 +65,20 @@ internal class LazySodiumCryptoProvider(private val ls: LazySodium) : CryptoProv
     }
 
     override fun aeadDecrypt(key: ByteArray, nonce: ByteArray, ciphertext: ByteArray, ad: ByteArray): ByteArray {
+        // Audit F32: the same two lengths [aeadEncrypt] requires, guarded on the way IN to native
+        // code — JNA reads KEYBYTES/NPUBBYTES from the pointer regardless of how long the Kotlin
+        // array actually is, so a short key here was an out-of-bounds native read, and the
+        // encrypt-side-only guards left every OPEN path (unlock, escrow recovery, grants) exposed.
+        //
+        // CryptoException, NOT `require` as on the encrypt side: a decrypt failure is a RESULT
+        // callers classify (Envelope.open reports every structural refusal this way, and
+        // quick-unlock's "the key you were handed is not this account's UVK" verdict is exactly a
+        // short/garbage key reaching here — see AccountUnlockWithUvkTest.emptyAndTruncatedUvkFail).
+        // Throwing IllegalArgumentException would reclassify a bad secret as an app bug and turn
+        // "wrong master password" into "couldn't unlock". Encrypt is the opposite case: we supply
+        // both inputs ourselves, so a wrong length there IS a programming error.
+        if (key.size != AEAD.XCHACHA20POLY1305_IETF_KEYBYTES) throw CryptoException("AEAD key must be 32 bytes")
+        if (nonce.size != AEAD.XCHACHA20POLY1305_IETF_NPUBBYTES) throw CryptoException("AEAD nonce must be 24 bytes")
         if (ciphertext.size < AEAD.XCHACHA20POLY1305_IETF_ABYTES) throw CryptoException("ciphertext too short")
         val out = ByteArray(ciphertext.size - AEAD.XCHACHA20POLY1305_IETF_ABYTES)
         val outLen = LongArray(1)
@@ -84,6 +98,13 @@ internal class LazySodiumCryptoProvider(private val ls: LazySodium) : CryptoProv
     }
 
     override fun sealTo(recipientPublicKey: ByteArray, plaintext: ByteArray): ByteArray {
+        // F32: the sealed-box pair had no length guards at all, unlike every neighbour here.
+        // The recipient key is the org recovery pubkey or a member's identity pubkey — both
+        // server-fetched — and it is read as PUBLICKEYBYTES by native code either way, so a
+        // short one is an out-of-bounds read. CryptoException (not require) because the whole
+        // sealed-box family already reports its structural refusals that way, so this rides the
+        // callers' existing fail-closed paths unchanged.
+        if (recipientPublicKey.size != Box.PUBLICKEYBYTES) throw CryptoException("box public key must be ${Box.PUBLICKEYBYTES} bytes")
         val out = ByteArray(plaintext.size + Box.SEALBYTES)
         if (!ls.cryptoBoxSeal(out, plaintext, plaintext.size.toLong(), recipientPublicKey)) {
             throw CryptoException("crypto_box_seal failed")
@@ -92,6 +113,8 @@ internal class LazySodiumCryptoProvider(private val ls: LazySodium) : CryptoProv
     }
 
     override fun sealOpen(publicKey: ByteArray, privateKey: ByteArray, sealed: ByteArray): ByteArray {
+        if (publicKey.size != Box.PUBLICKEYBYTES) throw CryptoException("box public key must be ${Box.PUBLICKEYBYTES} bytes")
+        if (privateKey.size != Box.SECRETKEYBYTES) throw CryptoException("box private key must be ${Box.SECRETKEYBYTES} bytes")
         if (sealed.size < Box.SEALBYTES) throw CryptoException("sealed box too short")
         val out = ByteArray(sealed.size - Box.SEALBYTES)
         if (!ls.cryptoBoxSealOpen(out, sealed, sealed.size.toLong(), publicKey, privateKey)) {

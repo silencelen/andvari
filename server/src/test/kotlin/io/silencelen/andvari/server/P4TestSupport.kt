@@ -44,14 +44,17 @@ abstract class P4TestSupport {
     protected val tmpDir: File = Files.createTempDirectory("andvari-p4").toFile()
 
     /** [escrowConfigured] = false reproduces a self-hoster who never set ANDVARI_RECOVERY_PUBKEY /
-     *  _FINGERPRINT — the instance has no admin backstop key at all. */
+     *  _FINGERPRINT — the instance has no admin backstop key at all. [dbPath] re-points a second
+     *  Config at an existing database, which is how a test replays ONE instance under a CHANGED
+     *  operator config (an escrow key dropped from the env after members enrolled). */
     protected fun config(
         publicHostname: String? = null,
         janitorDryRun: Boolean = false,
         escrowConfigured: Boolean = true,
+        dbPath: String? = null,
     ) = Config(
         host = "127.0.0.1", port = 0,
-        dbPath = File(tmpDir, "p4-${System.nanoTime()}.db").absolutePath,
+        dbPath = dbPath ?: File(tmpDir, "p4-${System.nanoTime()}.db").absolutePath,
         blobDir = File(tmpDir, "blobs-${System.nanoTime()}").absolutePath, webDir = null,
         recoveryPublicKey = if (escrowConfigured) recovery.publicKey else ByteArray(0),
         recoveryFingerprint = if (escrowConfigured) fingerprint else "",

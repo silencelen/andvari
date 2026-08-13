@@ -55,6 +55,12 @@ fun clearVaultClipboard() {
 private data class DownloadsManifest(
     val windows: PlatformBuild? = null,
     val linux: PlatformBuild? = null,
+    // Audit F09, wave 3: the phone platform, carried here so this model is the honest mirror of
+    // the manifest web's Devices card reads (Devices.tsx names this file as its twin). [checkForUpdate]
+    // never SELECTS it — a desktop build compares itself against its own OS entry only, and there is
+    // no APK to nag a desktop about — but a key the signed manifest carries belongs in the shape of
+    // it, so a reader of either side sees the same document.
+    val android: PlatformBuild? = null,
     // H2 signed-update envelope (design 2026-07-13-signed-updates §C/§M) — parsed only AFTER
     // UpdateVerify accepted the raw fetched bytes. `seq` = the monotonic anti-rollback counter;
     // `signedAt` = the signing timestamp the §M-D4 staleness check consumes. Defaults keep the
@@ -63,9 +69,11 @@ private data class DownloadsManifest(
     val signedAt: String = "",
 )
 
-// `sha256` is retained for parse-compat but consumed by NOBODY on this path (§M-D1): the desktop
-// update flow is nag-only — the browser is opened at /downloads and the OS-level installer
-// signature (Authenticode MSI / GPG deb) is the load-bearing integrity control, never this field.
+// `version` is the only field of a build entry this path READS (compared against DESKTOP_VERSION in
+// [checkForUpdate]). `url` and `sha256` are declared for shape-parity with the signed manifest and
+// consumed by NOBODY here (§M-D1): the desktop update flow is nag-only — it opens the browser at
+// [downloadsUrl], never `url`, and the OS-level installer signature (Authenticode MSI / GPG deb) is
+// the load-bearing integrity control, never `sha256`.
 @Serializable
 private data class PlatformBuild(val version: String = "", val url: String = "", val sha256: String = "")
 
