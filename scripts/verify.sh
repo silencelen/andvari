@@ -47,21 +47,72 @@ if [ "$CHANGELOG_VER" != "$CORE_VER" ]; then
 fi
 echo "    all clients report $CORE_VER (CHANGELOG heading agrees)"
 
-# The extension rides its OWN version track (separate store review cadence), so it is reported,
-# not equated. Its three hand-edited literals are held in lockstep by extension/src/version.test.ts,
-# which the extension leg below runs — no need to re-assert that here; the gap this closes is the
-# gate never naming the extension version at all.
-# (web/package.json's "0.0.1" is deliberately inert: the package is `private: true` and never
-# published, so it carries no release meaning and is not gated.)
+# The extension rides its OWN version track (separate store review cadence), so it is never equated
+# with the fleet. Its three hand-edited literals are held in lockstep by extension/src/version.test.ts,
+# which the extension leg below runs — no need to re-assert that here.
 EXT_VER=$(lit '"version"' "$REPO_DIR/extension/manifest.json" '"version"[[:space:]]*:[[:space:]]*"[^"]+"')
-echo "    extension track at $EXT_VER (lockstep of its 3 literals asserted by extension/src/version.test.ts)"
 
-echo "==> Kotlin: :core + :server + :app-desktop + recovery-cli tests (RFC pins, vectors, full server integration)"
+# ...but merely PRINTING it is what let the paperwork rot (audit F41): the 0.21.0 heading still read
+# "extension 0.20.0" after the extension had shipped 0.20.1 and 0.21.0 into that very section, because
+# only the fleet number was ever asserted. So the top heading must NAME the shipped extension version
+# too. Read from the first `## ` line whatever its shape — a fleet cut ("· fleet 0.21.0, extension
+# 0.21.0") and an extension-only cut ("## extension 0.19.0 … · fleet unchanged at 0.20.0") both carry
+# it right there. The bounded [^0-9] run tolerates the "unchanged at" phrasing without letting the
+# match wander off into the next number on the line.
+CHANGELOG_EXT=$(grep -m1 '^## ' "$REPO_DIR/CHANGELOG.md" \
+  | grep -oE 'extension[^0-9]{0,24}[0-9]+\.[0-9]+\.[0-9]+' \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1) || true
+if [ "$CHANGELOG_EXT" != "$EXT_VER" ]; then
+  echo "    CHANGELOG SKEW: top heading names extension '${CHANGELOG_EXT:-<none>}' but extension/manifest.json is $EXT_VER." >&2
+  echo "    Name it in the heading — '· fleet $CORE_VER, extension $EXT_VER' when it shipped, or" >&2
+  echo "    '· extension unchanged at $EXT_VER' when it did not. A version nobody asserts is the one that goes stale." >&2
+  exit 1
+fi
+echo "    extension track at $EXT_VER (CHANGELOG heading agrees; its 3 literals in lockstep per extension/src/version.test.ts)"
+
+echo "==> §5.5 endpoint-agnostic docs (no reference-instance hostname in current-facing docs)"
+# Published clients bake no tailnet hostname (spec/05 §5.5). The client halves of that gate are
+# pinned — web/src/ui/Devices.test.ts, extension/src/serverurl.test.ts — but prose had no gate at
+# all, which is how a checked-in user guide came to tell strangers the product needs a private
+# Tailscale network and hardcoded two of the reference instance's tailnet hosts (audit F30). Docs
+# are the surface a stranger reads FIRST, so they are held to the same rule as the clients.
+# Scope is the current-facing doc surface. Exactly two exemptions, each for a stated reason:
+#   docs/design/**  — dated point-in-time design records. They describe the pre-pivot tailnet
+#                     topology because that is what was true on their date; "fixing" them would
+#                     make the history wrong.
+#   wave4-endpoint-promotion.md — the tailnet front IS the subject of that migration runbook.
+# The guide that triggered this gate is NOT exempt: it was rewritten instance-neutral in the same
+# change, and the point of a gate is to hold the file that already got this wrong once.
+DOC_LEAKS=$(cd "$REPO_DIR" && grep -rlE 'taila2dff2|\.ts\.net|192\.168\.2\.122' docs --include='*.md' \
+  | grep -vE '^docs/design/|^docs/runbooks/wave4-endpoint-promotion\.md$') || true
+if [ -n "$DOC_LEAKS" ]; then
+  echo "    §5.5 DOC LEAK: reference-instance hostname baked into current-facing docs:" >&2
+  printf '%s\n' "$DOC_LEAKS" | sed 's/^/      /' >&2
+  echo "    name the instance generically, or use example.com — docs outlive an endpoint." >&2
+  exit 1
+fi
+echo "    docs carry no reference-instance hostname (2 stated exemptions)"
+
+echo "==> Kotlin: :core + :server + :app-desktop + the tools/ CLIs (RFC pins, vectors, full server integration)"
 # :app-desktop:test was missing until 0.20.x — the desktop suites (endpoint-switch token isolation,
 # originKey byte-parity, trust gate) had gone 2.5 days stale behind HEAD and, worse, the module was
 # never even COMPILED by the gate: a desktop-only regression once got through and was caught by a
 # hand-run :app-desktop:classes. `test` compiles it transitively, so that hole closes with it.
-(cd "$REPO_DIR" && flock "$LOCK" ./gradlew :core:jvmTest :server:test :app-desktop:test :tools:recovery-cli:test --console=plain -q)
+#
+# :tools:backup-cli and :tools:update-signer were the same hole, found again (audit F39). Nothing
+# in the build depends on them — `grep -rn 'project(":tools' --include=*.kts` is empty — so neither
+# their main nor their test sources were compiled by any automated path, and 16 real tests sat inert
+# behind a green banner: the extractor's path-separator sanitizer (`..\..\pwn.bin` must not escape
+# outDir), the dump-redacts-secrets default, the no-network-classes-on-the-classpath assert for an
+# offline tool, and update-signer's 0600-and-refuse-to-clobber guards over the ONE copy of the H2
+# Ed25519 release-signing root. The harm had already materialized: backup-cli's TestBackups.kt was
+# edited 2026-07-16 and had never once been through a compiler in this clone.
+#
+# :tools:vector-gen ships no suite, so it joins by `classes` — it authors 16 of the 22 shared
+# vector files, and a generator that no longer compiles is a generator nobody can regenerate from.
+(cd "$REPO_DIR" && flock "$LOCK" ./gradlew :core:jvmTest :server:test :app-desktop:test \
+  :tools:recovery-cli:test :tools:backup-cli:test :tools:update-signer:test :tools:vector-gen:classes \
+  --console=plain -q)
 
 echo "==> Android: :app-android:testDebugUnitTest (originKey byte-parity pins) + assembleDebug (app/autofill compile gate)"
 (cd "$REPO_DIR" && flock "$LOCK" ./gradlew :app-android:testDebugUnitTest :app-android:assembleDebug --console=plain -q)
@@ -70,7 +121,30 @@ echo "==> TypeScript: web vitest (RFC pins + vector consumption) + typecheck"
 (cd "$REPO_DIR/web" && npx vitest run --silent && npx tsc --noEmit)
 
 echo "==> Extension: typecheck + node --test (the LIVE browser fill path runs the same shared vectors)"
-(cd "$REPO_DIR/extension" && npm run typecheck && npm test)
+# `node --test` EXITS 0 WHEN IT COLLECTED NOTHING. Probed on the node this gate runs (v22.23.1):
+# `node --test "src/**/*.nosuchtest.ts"` and `node --test "test/**/*.test.ts"` (wrong directory)
+# both print `1..0` and exit 0. vitest, one leg above, fails that same case ("No test files found"),
+# so the two JS legs of one gate disagree about what "collected nothing" means — and the one that
+# stays quiet is the one guarding the browser. Move the suites to a sibling test/ dir (the layout
+# every other module uses), rename them off *.test.ts, or land on a node whose glob semantics
+# shifted, and all 271 extension tests leave the gate with the final green banner still printing —
+# including the extension's ONLY cross-engine crypto proof (crypto.vectors.test.ts) and its entire
+# signed-update suite (updateverify.test.ts). Neither the file count nor the runner's own count is
+# something the exit code will tell you, so assert both. Floors are set well under the current
+# 23 files / 271 tests: they catch a suite that vanished, not one that was pruned.
+EXT_FILES=$(find "$REPO_DIR/extension/src" -maxdepth 1 -name '*.test.ts' 2>/dev/null | wc -l) || true
+if [ "${EXT_FILES:-0}" -lt 20 ]; then
+  echo "    EXT SUITE MISSING: ${EXT_FILES:-0} *.test.ts files under extension/src, expected 20+ — did the suites move?" >&2
+  exit 1
+fi
+EXT_OUT=$( (cd "$REPO_DIR/extension" && npm run typecheck && npm test) 2>&1 ) || { printf '%s\n' "$EXT_OUT" >&2; exit 1; }
+EXT_PASS=$(printf '%s\n' "$EXT_OUT" | grep -m1 -oE '^# pass [0-9]+' | grep -oE '[0-9]+') || true
+if [ "${EXT_PASS:-0}" -lt 200 ]; then
+  printf '%s\n' "$EXT_OUT" >&2
+  echo "    EXT SUITE NOT COLLECTED: node --test reported ${EXT_PASS:-0} passing tests over $EXT_FILES files, expected 200+ — the glob found (nearly) nothing." >&2
+  exit 1
+fi
+echo "    $EXT_PASS tests passed across $EXT_FILES files"
 
 # Tag state — ADVISORY (never fails the gate; it is offline and says nothing about the code).
 # Releases were being tagged from somewhere other than the build host and never fetched back, so

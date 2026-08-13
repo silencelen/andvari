@@ -7,6 +7,7 @@ import {
   type AttachmentSection,
   type BackupAttachmentEntry,
   type BackupPayload,
+  CSV_FORMULA_WARNING,
   MAX_KDF_MEM_BYTES,
   MAX_KDF_OPS,
   buildBackup,
@@ -26,7 +27,8 @@ import type { VaultStore } from "../vault/store";
 import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
-import { estimateStrength } from "./strength";
+import { type BreachRangeSource, PasswordCautions, passwordAdvice, useBreachedPassword } from "./passwordadvice";
+import { BACKUP_FLOOR, estimateStrength } from "./strength";
 
 export type ExportMode = "backup" | "csv";
 
@@ -35,6 +37,9 @@ interface Props {
   account: Account;
   store: VaultStore;
   policy: ClientPolicy | null;
+  /** F31: the k-anonymity relay for the backup-passphrase breach check (`ApiClient.hibpRange`).
+   *  Optional so a caller without one still gets the panel; absent simply means no warning. */
+  client?: BreachRangeSource | null;
   onClose: () => void;
 }
 
@@ -75,7 +80,7 @@ export function backupKdfParams(policy: { kdfParams: WireKdfParams } | null): Kd
  * - "csv": the plaintext migration escape hatch (§1) — by-name loss enumeration and a
  *   plaintext warning gate before the download button enables.
  */
-export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
+export function ExportPanel({ mode, account, store, policy, client, onClose }: Props) {
   // spec 07: clients MUST sync before snapshotting; offline → proceed with a visible
   // "vault as of last sync <time>" banner (store.lastSyncAt).
   const [syncDone, setSyncDone] = useState(false);
@@ -135,7 +140,13 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
   const [confirm, setConfirm] = useState("");
   const strength = estimateStrength(pw);
   const nonAscii = /[^\x20-\x7e]/.test(pw);
-  const passOk = pw.length > 0 && strength >= 3 && pw === confirm;
+  // F31: this passphrase is the ONLY thing protecting the file, so it gets the same k-anonymity
+  // check as a master password — only the 5-character hash prefix leaves the tab, and a relay
+  // that never answers means no warning rather than a blocked export. Advisory: `passOk` below
+  // is unchanged, so a breached or pattern-weak passphrase still produces a backup.
+  const breached = useBreachedPassword(pw, client ?? null);
+  const advice = passwordAdvice(pw, breached, "backup");
+  const passOk = pw.length > 0 && strength >= BACKUP_FLOOR && pw === confirm;
 
   const runBackup = async () => {
     setBusy(true);
@@ -317,7 +328,9 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
 
           {/* Moment-of-truth preflight: per-vault counts, shared vaults on by default. */}
           <div className="field">
-            <label>What gets exported</label>
+            {/* Audit F10: heads the per-vault checkbox rows below — a heading, not a label
+                for any one of them (each row carries its own). */}
+            <div className="field-head">What gets exported</div>
             {preflight.map((v) => (
               <div className="attach-row" key={v.vaultId}>
                 {v.type === "personal" ? (
@@ -356,8 +369,14 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
                 label="Backup passphrase"
                 hint={
                   <>
-                    {pw && <StrengthBar password={pw} />}
-                    {pw && strength < 3 && <span className="muted" style={{ color: "var(--danger)" }}>too weak — this passphrase is all that protects the file</span>}
+                    {/* F31: the bar is the affirmative treatment on this surface, so it drops out
+                        of green whenever there is a caution to read — a green bar over "this
+                        password shows up in public breach lists" is the contradiction the
+                        pattern/breach split introduced. Only for a passphrase that CLEARS the
+                        floor: below it the bar is already red, and gold would be a promotion. */}
+                    {pw && <StrengthBar password={pw} caution={advice.meetsFloor && !advice.affirmed} />}
+                    {pw && strength < BACKUP_FLOOR && <span className="muted" style={{ color: "var(--danger)" }}>too weak — this passphrase is all that protects the file</span>}
+                    {pw && <PasswordCautions advice={advice} />}
                     {nonAscii && (
                       <span className="muted">
                         Contains non-ASCII characters — they are taken exactly as typed, so make sure you
@@ -420,6 +439,15 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
                   andvari's) skip them: {warnings.emptyUsernameAndPassword.join(", ")}.
                 </div>
               )}
+              {/* Audit F08, the sixth bucket: the writer deliberately does NOT mangle a leading
+                  =+-@ (that would corrupt real secrets, in any column), and this sentence is the
+                  compensating control that bargain assumes exists. csvWarnings has computed the
+                  names since the writer shipped; nothing rendered them. */}
+              {warnings.formulaRisk.length > 0 && (
+                <div className="msg info" style={{ display: "block" }}>
+                  {CSV_FORMULA_WARNING} {warnings.formulaRisk.join(", ")}.
+                </div>
+              )}
               <div className="msg info" style={{ display: "block" }}>
                 Re-importing this file later collapses exact duplicates into one login.
               </div>
@@ -480,13 +508,17 @@ function downloadBlob(parts: BlobPart[], type: string, filename: string): void {
 }
 
 /** Mirror of Vault.tsx's StrengthBar (kept local — importing it back from Vault.tsx
- *  would create a Vault ⇄ ExportPanel import cycle). */
-function StrengthBar({ password }: { password: string }) {
+ *  would create a Vault ⇄ ExportPanel import cycle).
+ *
+ *  `caution` (F31) holds the fill back from the affirmative green while an advisory is showing:
+ *  the score can legitimately reach 3–4 on a passphrase the panel is simultaneously reporting as
+ *  breached, and the bar is what a user reads first. Width still tracks the honest score. */
+function StrengthBar({ password, caution = false }: { password: string; caution?: boolean }) {
   const score = estimateStrength(password);
   const colors = ["var(--danger)", "var(--danger)", "var(--gold)", "var(--ok)", "var(--ok)"];
   return (
     <div className="strength">
-      <span style={{ width: `${(score + 1) * 20}%`, background: colors[score] }} />
+      <span style={{ width: `${(score + 1) * 20}%`, background: caution ? "var(--gold)" : colors[score] }} />
     </div>
   );
 }

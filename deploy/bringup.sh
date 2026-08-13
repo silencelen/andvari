@@ -180,7 +180,14 @@ set_dotenv ANDVARI_DOMAIN "$(host_of "$ORIGIN")"
 case "$ORIGIN" in
   http://*)
     set_dotenv ANDVARI_BIND 0.0.0.0
-    warn "plain-http LAN mode: publishing the app on 0.0.0.0:8080; clients will show a plain-http caution. Never expose this to the internet." ;;
+    # The operator is choosing this at the one moment they can still change it, so say what it
+    # actually costs (audit F06/F27): a plain-http origin is a DESKTOP-APP-ONLY instance. The web
+    # vault stops at a "can't run on this address" card (browsers withhold crypto.subtle off a
+    # secure context) and Android refuses cleartext to anything but 127.0.0.1. Same clause as
+    # docs/self-hosting.md option 3 — the two must not drift.
+    warn "plain-http LAN mode: publishing the app on 0.0.0.0:8080; the desktop app will connect with a plain-http caution."
+    warn "  ...but the WEB VAULT WILL NOT RUN on a plain-http address and ANDROID REFUSES it (only 127.0.0.1) — put https in front (reverse proxy / tailscale serve / cloudflared, or re-run with --caddy) if you want those clients."
+    warn "  Never expose this to the internet." ;;
 esac
 if [ "$USE_CADDY" = 1 ]; then
   case "$ORIGIN" in

@@ -1,6 +1,7 @@
 import { ApiClient, ApiError } from "../api/client";
 import type { AccountKeys } from "../api/types";
 import { assertServerKdfParams, KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
+import { CryptoError } from "../crypto/sodium";
 import { Account, IdentityMismatchError } from "../vault/account";
 import { NullCache, openVaultCache, type VaultCache } from "../vault/idbcache";
 import { SyncIntegrityError, VaultStore } from "../vault/store";
@@ -34,6 +35,8 @@ import type { LoginMeta } from "./Welcome";
 /** Kept byte-identical to today's Welcome copy so no existing behavior text shifts. */
 const SERVER_PROBLEM = "The server had a problem answering — your password may be fine. Try again in a moment.";
 const WRONG_PASSWORD = "Wrong master password.";
+/** Audit F06: the unlock failed for a reason that is NOT the password — never blame it. */
+const DEVICE_PROBLEM = "Something went wrong on this device while unsealing your vault — your password is probably fine. Reload this page and try again.";
 
 /**
  * The default cache factory — the §F.1 dark-ship gate (session.webCacheEnabled) decides
@@ -136,7 +139,13 @@ export async function unlockExistingSession(
     } catch (e) {
       cache.close();
       if (e instanceof IdentityMismatchError) return { kind: "error", message: e.message };
-      return { kind: "error", message: WRONG_PASSWORD };
+      // Audit F06: only a CRYPTO failure means "wrong password" — Account.unlock raises
+      // CryptoError("wrong master password") when the wrappedUvk refuses to open. Anything else
+      // reaching here is a broken device, not a typo: a TypeError from an absent crypto.subtle
+      // (a non-secure origin — main.tsx now blocks that at boot), a sodium init failure, an OOM.
+      // Telling those users their password is wrong sends them to reset a password that works.
+      if (e instanceof CryptoError) return { kind: "error", message: WRONG_PASSWORD };
+      return { kind: "error", message: DEVICE_PROBLEM };
     }
 
     const store = new VaultStore(client, account, cache);

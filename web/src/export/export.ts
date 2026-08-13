@@ -39,10 +39,11 @@ export const CSV_HEADER = "name,url,username,password,note,totp";
  * Rules: UTF-8 (callers encode without BOM), CRLF record terminator (header row
  * included), a field is quoted iff it contains `,` `"` CR or LF with `"` escaped as
  * `""`, CRLF/lone-CR inside values normalized to LF before writing, no trimming, no
- * formula-injection mangling (leading =+-@ verbatim — warn in UI instead). Rows with
- * empty username AND password are still WRITTEN (only a reimport skips them, spec 06
- * §1); non-login items (notes AND cards — CSV has no card columns) are skipped
- * (enumerate them via [csvWarnings]).
+ * formula-injection mangling (leading =+-@ verbatim — mangling would corrupt real secrets;
+ * the compensating control is [CsvWarnings.formulaRisk] + [CSV_FORMULA_WARNING] in the UI,
+ * which is what audit F08 found missing). Rows with empty username AND password are still
+ * WRITTEN (only a reimport skips them, spec 06 §1); non-login items (notes AND cards — CSV
+ * has no card columns) are skipped (enumerate them via [csvWarnings]).
  */
 export function writeCsv(items: ItemDoc[]): string {
   let out = CSV_HEADER + "\r\n";
@@ -76,6 +77,32 @@ export interface CsvWarnings {
   extraUris: string[];
   /** Login items with empty username AND password — written, but a reimport skips them. */
   emptyUsernameAndPassword: string[];
+  /** Audit F08: login items whose WRITTEN text cells (name, url, username, note) lead with a
+   *  spreadsheet formula character. The no-mangling rule above is only safe because the UI
+   *  says so — this is that warning's input. */
+  formulaRisk: string[];
+}
+
+/** F08 — the sentence the UI must render for [CsvWarnings.formulaRisk], byte-twin of core
+ *  `ExportCsv.FORMULA_WARNING`. Ends in a colon: the caller appends the names, exactly like
+ *  the other five categories. The advice is "not in a spreadsheet at all" rather than "beware
+ *  these cells" because the writer deliberately mangles nothing, in ANY column. */
+export const CSV_FORMULA_WARNING =
+  "These start with a character a spreadsheet reads as a formula — open this file in a text editor, or import it straight into the other password manager, rather than in Excel or Sheets:";
+
+/** Leading characters Excel/Sheets/LibreOffice treat as the start of a formula (OWASP's set:
+ *  a tab or CR ahead of one of them is the same vector, so both count on their own). */
+const FORMULA_LEAD = "=+-@\t\r";
+
+/** Leading characters a spreadsheet skips before deciding a cell is a formula — a value is
+ *  still dangerous behind them, so they don't clear the check. */
+const FORMULA_LEAD_SKIP = " \n\uFEFF";
+
+/** True when [value] would be parsed as a formula by a spreadsheet that opens the CSV. */
+export function startsWithFormulaChar(value: string): boolean {
+  let i = 0;
+  while (i < value.length && FORMULA_LEAD_SKIP.includes(value[i]!)) i++;
+  return i < value.length && FORMULA_LEAD.includes(value[i]!);
 }
 
 export function csvWarnings(items: ItemDoc[]): CsvWarnings {
@@ -84,6 +111,7 @@ export function csvWarnings(items: ItemDoc[]): CsvWarnings {
   const withAttachments: string[] = [];
   const extraUris: string[] = [];
   const emptyUsernameAndPassword: string[] = [];
+  const formulaRisk: string[] = [];
   for (const doc of items) {
     // Cards interact with the other lists exactly as notes always have: still eligible
     // for [withAttachments] (that check is type-blind), never for the login-only lists.
@@ -93,9 +121,17 @@ export function csvWarnings(items: ItemDoc[]): CsvWarnings {
     if (doc.type === "login") {
       if ((doc.login?.uris?.length ?? 0) > 1) extraUris.push(doc.name);
       if (!doc.login?.username && !doc.login?.password) emptyUsernameAndPassword.push(doc.name);
+      // Login-only because only login rows are WRITTEN: a note's name never reaches the file.
+      // The password and totp cells are deliberately NOT scanned — a generated password
+      // beginning `-` or `@` is ordinary, and a list that fires on most exports is a list
+      // nobody reads. The copy therefore steers away from spreadsheets entirely, which is
+      // the honest advice for every column.
+      if ([doc.name, doc.login?.uris?.[0] ?? "", doc.login?.username ?? "", doc.notes ?? ""].some(startsWithFormulaChar)) {
+        formulaRisk.push(doc.name);
+      }
     }
   }
-  return { noteItems, cardItems, withAttachments, extraUris, emptyUsernameAndPassword };
+  return { noteItems, cardItems, withAttachments, extraUris, emptyUsernameAndPassword, formulaRisk };
 }
 
 function csvField(value: string): string {
@@ -131,6 +167,14 @@ export const MAX_FILE_BYTES = 256 * 1024 * 1024;
 export const MAX_HEADER_BYTES = 64 * 1024;
 export const MAX_KDF_MEM_BYTES = 256 * 1024 * 1024;
 export const MAX_KDF_OPS = 16;
+/** Audit F34: the §2.2 ladder capped file size, header size and KDF params but never the
+ *  SECTION COUNT, and a zero-length section advances the cursor by only its 8 length bytes —
+ *  so a file of zeroes framed 33.5 million empty sections into the heap before the first
+ *  Argon2 cost gate could apply. Mirrors core `Backup.MAX_SECTIONS`. A legitimate container
+ *  is section 0 plus one per embedded attachment, all of them under the §2.5 64 MiB total,
+ *  so 4096 is far above any real backup and the build path refuses to exceed it (see
+ *  buildBackupWithPayloadBytes) rather than writing a file open() would reject. */
+export const MAX_SECTIONS = 4096;
 const MIN_KDF_MEM_BYTES = 8 * 1024; // libsodium crypto_pwhash minima,
 const MIN_KDF_OPS = 1; //              not a policy floor
 
@@ -297,6 +341,11 @@ export async function buildBackupWithPayloadBytes(
   attachments: AttachmentSection[] = [],
   envelopeNonce?: Uint8Array,
 ): Promise<Uint8Array[]> {
+  // F34: never write a file our own open() would refuse — section 0 plus one per attachment
+  // must fit under the same ceiling the parser enforces.
+  if (1 + attachments.length > MAX_SECTIONS) {
+    throw new Error(`a backup may hold at most ${MAX_SECTIONS - 1} attachment sections (got ${attachments.length})`);
+  }
   // Canonical header bytes: compact JSON in the §2.2 key order — JSON.stringify emits
   // string keys in insertion order, so this in-order literal IS the pinned encoding.
   const headerBytes = utf8(
@@ -393,7 +442,8 @@ export class OpenedBackup {
  *  3. kdfParams v/alg (`unsupported_kdf`), ceilings memBytes ≤ 256 MiB & opsLimit ≤ 16
  *     (`unsupported_kdf`); params below libsodium's own minima are also
  *     `unsupported_kdf` (argon2id cannot run them — not a policy floor)
- *  4. section framing complete, section 0 present (`truncated`)
+ *  4. section framing complete, at most [MAX_SECTIONS] of them, section 0 present
+ *     (`truncated`)
  *
  * then derives MKx/exportKey and opens section 0; ANY AEAD failure — wrong passphrase,
  * corruption, or an AD/fileId mismatch — is the single combined
@@ -444,6 +494,10 @@ export async function openBackup(passphrase: string, file: Uint8Array): Promise<
     if (off + 8 > file.length) throw new BackupError(ERR_TRUNCATED, "file ends inside a section length");
     const len = dv.getBigUint64(off, true);
     if (BigInt(off) + 8n + len > BigInt(file.length)) throw new BackupError(ERR_TRUNCATED, "section extends past end of file");
+    // F34: bound the COUNT too, inside the loop — a zero-length section advances `off` by
+    // only 8, so without this a crafted file frames millions of them before section 0 is
+    // ever opened.
+    if (sections.length >= MAX_SECTIONS) throw new BackupError(ERR_TRUNCATED, `more than ${MAX_SECTIONS} sections`);
     sections.push([off + 8, Number(len)]);
     off += 8 + Number(len);
   }

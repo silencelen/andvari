@@ -891,6 +891,46 @@ let lastSent: { u: string; p: string; t: number } | null = null;
 /** A recent step-1 capture arms the password-page auto-open (multi-step logins). */
 let usernameStepAt = 0;
 
+// ---- login submit-gesture gate (F01, 2026-08-13 audit) — the login twin of the card lane's
+// trustedGesture (§G2, above). `isTrusted` is NOT a gesture: `form.requestSubmit()` is a UA "fire an
+// event", so a page-scripted submit arrives with isTrusted TRUE and no user activation at all —
+// which the bug-ext-gating--1 comment on the submit listener already knew, and stopped one step
+// short of. Any frame could therefore drive capturedCredential in a loop (silently: a
+// username-only form sends password:"" and the SW draws no banner) and, because that message
+// re-armed the SW's idle alarm, hold the vault unlocked for as long as the tab was open. The SW
+// half is closed too (capturedCredential is now PASSIVE_MSGS), so the gate here is about the
+// capture itself: a submit only captures when a real click/Enter — or the SW's own popup-fill
+// delivery, which is a user click in a document whose events this one cannot see — preceded it.
+//
+// A PRIVATE slot, not the card lane's: the card gate means "a click/Enter ON A CARD FORM" and is
+// deliberately never a free window, while a login gesture is ANY trusted click/Enter (a JS "Sign
+// in" element that calls requestSubmit() is an ordinary login shape). Recording into the shared
+// slot would hand the card capture exactly the free window [X2-A3] forbids.
+//
+// The window is wider than the card lane's 1 s because a login submit routinely TRAILS its gesture
+// by an async round-trip (validate-then-requestSubmit, a captcha token fetch, a slow "does this
+// account exist" call), and a late submit does not fail loudly — it captures nothing, so the save
+// banner never appears and nothing on screen says why. The number is therefore sized to that
+// round-trip and NOT to the platform's ~5 s transient-activation lifetime, which is the wrong
+// anchor here: we never call an activation-consuming API, and the platform's own clock would be
+// spent by whatever else the page did with it. 10 s costs close to nothing — the window's only
+// power is that ONE page-driven submit may ride ONE real user gesture (the slot is one-shot), and a
+// page that wants that can fire at t+0 whatever the window is. The property that matters does not
+// move: with NO gesture, no submit ever captures.
+const LOGIN_GESTURE_MS = 10_000;
+let loginGesture: { t: number; consumed: boolean } | null = null;
+function recordLoginGesture(): void {
+  loginGesture = { t: Date.now(), consumed: false };
+}
+/** Consume a fresh (< LOGIN_GESTURE_MS) unconsumed login gesture; true iff one was consumed. */
+function consumeLoginGesture(): boolean {
+  if (loginGesture && !loginGesture.consumed && Date.now() - loginGesture.t < LOGIN_GESTURE_MS) {
+    loginGesture.consumed = true;
+    return true;
+  }
+  return false;
+}
+
 function captureNow(f: LoginForm): void {
   // CVV-negative rule (cards design 2026-07-09): the form's lone password-typed field is a
   // checkout security code — never raise save/update for it (an "update" would overwrite the
@@ -1104,6 +1144,10 @@ function init(): void {
     (e) => {
       const t = e.composedPath()[0] ?? e.target;
       if (!e.isTrusted || e.key !== "Enter" || !(t instanceof HTMLInputElement)) return;
+      // F01: Enter in a field IS the user's submit gesture even when the page's own JS does the
+      // submitting — recorded before the dropdown check, because a row pick is user activity too
+      // (the page routinely auto-submits behind it) and the capture below is separately gated.
+      recordLoginGesture();
       // Cut N review: when the dropdown is about to consume this Enter as a row pick, it is NOT a
       // login submit — snapshotting the (possibly junk partial) field here would offer to overwrite
       // the stored password. This listener runs BEFORE the dropdown's Enter handler, so the flag is
@@ -1124,6 +1168,9 @@ function init(): void {
   // and squat the tab's single pending slot, after which the user's real login on the top frame was
   // refused as a cross-frame overwrite and the Save banner simply never appeared. Same discipline
   // the card lane already states below, where consumeTrustedGesture() is the equivalent gate.
+  // F01 (2026-08-13 audit): isTrusted was ALSO not enough — it admits the requestSubmit() case the
+  // comment above names, so a scripted loop drove a capture per tick with no user gesture anywhere.
+  // The gesture consume is now the real gate; isTrusted stays as the cheap first refusal.
   document.addEventListener(
     "submit",
     (e) => {
@@ -1131,7 +1178,9 @@ function init(): void {
       const t = e.target;
       if (!(t instanceof HTMLFormElement)) return;
       const f = scanForms().find((x) => x.form === t);
-      if (f) captureNow(f);
+      // Form first, THEN consume (the card lane's shape): a submit that is not one of our login
+      // forms must not burn the gesture the real login form is about to need.
+      if (f && consumeLoginGesture()) captureNow(f);
     },
     true,
   );
@@ -1140,6 +1189,7 @@ function init(): void {
     "click",
     (e) => {
       if (!e.isTrusted) return;
+      recordLoginGesture(); // F01: any trusted click may be the submit gesture (a JS "Sign in" element calls requestSubmit())
       const t = e.composedPath()[0];
       if (t instanceof HTMLInputElement) maybeOpen(t); // reopen after dismissal
       void maybeCardChip(t ?? null, true); // [K15] REUSES `t` — a second retarget shape here would red [U17]
@@ -1221,6 +1271,16 @@ function init(): void {
           sendResponse({ filled: "nothing", code: "no_form" });
           return undefined;
         }
+        // F01 follow-up: a popup fill IS a user gesture — it is the click on Fill in OUR popup —
+        // but it happened in a document whose events this one never sees, so before the gesture
+        // gate the auto-submitting site (fill → the page's own change handler calls
+        // requestSubmit()) captured nothing and the Save banner silently never appeared. Arming
+        // here is not a widening of the gate: this message can only be sent by our own SW (a page
+        // has no route to a content script's chrome.runtime), and the SW only sends it after
+        // fillFromPopup's popup-only guard. Recorded BEFORE the fill, because the page's submit
+        // can fire synchronously inside the input/change events fillForm dispatches — arming after
+        // the round-trip would arm it too late to be consumed.
+        recordLoginGesture();
         void fillItem(msg.itemId, f, false).then(sendResponse);
         return true; // keep the channel open for the async outcome
       }

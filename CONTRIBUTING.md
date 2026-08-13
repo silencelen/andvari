@@ -24,13 +24,20 @@ run the suites individually and skip the `:app-android` line; everything else st
 `scripts/verify.sh` is the gate every release goes through. In order, it:
 
 1. **Release-version consistency** — core, Android, desktop, and web must all report the same
-   client version. One skew fails the gate.
-2. **Kotlin** — `:core`, `:server`, `:app-desktop`, and `:tools:recovery-cli` tests: RFC pins for
-   the primitives, the shared vectors, and full server integration.
-3. **Android** — unit tests plus a compile gate over the app and its autofill service.
-4. **TypeScript (web)** — `vitest` plus `tsc --noEmit`. This suite also carries the extension's
+   client version, and the top `CHANGELOG.md` heading must name it. One skew fails the gate.
+2. **Endpoint-agnostic docs** — no reference-instance hostname in the current-facing docs, the
+   prose half of the rule the clients are pinned to (`spec/05` §5.5). Dated design records under
+   `docs/design/` are exempt: they are history, not instructions.
+3. **Kotlin** — `:core`, `:server`, `:app-desktop` and every `tools/` CLI (`recovery-cli`,
+   `backup-cli`, `update-signer`, plus a compile of `vector-gen`): RFC pins for the primitives, the
+   shared vectors, and full server integration.
+4. **Android** — unit tests plus a compile gate over the app and its autofill service.
+5. **TypeScript (web)** — `vitest` plus `tsc --noEmit`. This suite also carries the extension's
    cross-engine pins (see below).
-5. **Extension** — `tsc --noEmit` plus its `node --test` suites.
+6. **Extension** — `tsc --noEmit` plus its `node --test` suites, with a floor on both the number of
+   suite files and the number of tests the runner reports back. `node --test` exits 0 when its glob
+   matches nothing, so "the runner found the suite" has to be asserted separately from "the suite
+   passed".
 
 `scripts/e2e.sh` goes further: it starts a real server, drives it with real client code over a real
 WebSocket, and `SIGKILL`s it mid-flight to prove crash-durable idempotency.

@@ -68,13 +68,29 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
     "password": "…",
     "uris": ["https://github.com/login"],
     "totp": "otpauth://totp/…?secret=BASE32&…",   // optional, full otpauth URI
-    "passwordHistory": [ { "password": "…", "retiredAt": 1751700000000 } ]  // client-maintained, capped 10
+    "passwordHistory": [ { "password": "…", "retiredAt": 1751700000000 } ]  // RESERVED — no v1 client writes it (below)
   },
   "attachments": [                       // mirrors attachmentIds; holds the SECRET half
     { "id": "uuid", "name": "scan.pdf", "size": 12345, "fileKey": "base64url(32B)" }
   ]
 }
 ```
+
+**`login.passwordHistory` is RESERVED, not shipped — planned, non-normative.** The shape
+above is fixed (so the field can be adopted later without a formatVersion bump) and every
+client already **preserves it verbatim on rewrite**, entry-level unknown fields included
+(the preservation rules below). But **no v1 client ever appends an entry**: no editor,
+importer, save path, or conflict materializer on any client writes one, and none displays
+it. A reader MUST therefore treat an absent/empty `passwordHistory` as carrying no
+information — it does **not** mean the password was never rotated — and MUST NOT present
+it to a user as a retention guarantee. The shipped
+no-silent-loss backstop is the server-side **item_versions** archive (§7 + spec 03
+`GET /items/{id}/versions`), which is what "recover the previous password" actually rests
+on; folding this field in on top of it is backlog **F62**, deliberately unbuilt
+(`docs/design/2026-07-08-item-history-and-restore.md` §"F62 passwordHistory fold").
+Importers inherit the same rule: a source's password-changed *timestamp* is informative
+only and is never materialized into an entry, because no retired password value exists to
+put in one (spec 06 §2/§4 step 9).
 
 **formatVersion 2 — cards (0.7.0).** fv2 adds `type` value `"card"` and one optional
 top-level object `card`: `{ cardholderName?, number? (digits-only), expMonth?
@@ -308,9 +324,10 @@ sweep → up-to-date cursor no-ops, stale cursor 410s then converges via `since=
 - **item_versions**: on every overwrite (and before every delete) the server archives
   the previous `{rev, blob, formatVersion}` for the item, keeping the most recent **10**
   versions. AD stays valid (bound to itemId+formatVersion, **not** rev), so an old version
-  decrypts under the item's current VK with no crypto change. This is the no-silent-loss
-  backstop and powers client-side "password history repair" after conflicts. **Exposed
-  (item history & restore feature):** `GET /items/{id}/versions` (spec 03) serves them
+  decrypts under the item's current VK with no crypto change. This is **the**
+  no-silent-loss backstop — the reserved `login.passwordHistory` field (§3) is not a second
+  one, since no client writes it. **Exposed (item history & restore feature):**
+  `GET /items/{id}/versions` (spec 03) serves them
   grant-checked; the client decrypts each blob under the VK it holds and can restore one as
   an ordinary put. Two bounds the UI MUST state honestly: (1) at most the last **10**
   versions ("up to the last 10", never "nothing is ever lost"); (2) **history resets at VK

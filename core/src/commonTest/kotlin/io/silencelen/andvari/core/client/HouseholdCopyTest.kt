@@ -82,6 +82,56 @@ class HouseholdCopyTest {
         assertEquals("Couldn't read that file — try choosing it again.", HouseholdCopy.FILE_READ_FAILED)
         // NATIVE-PINNED: AutofillUnlockActivity's offline-no-cache sentence.
         assertEquals("Offline, and no saved keys — open andvari once while online.", HouseholdCopy.UNLOCK_OFFLINE_NO_KEYS)
+        // ANDROID-ONLY (F27): the platform's cleartext refusal, never dressed up as UNREACHABLE.
+        assertEquals("Android blocks unencrypted http:// connections to other devices — put your server behind https (a reverse proxy, or Tailscale Serve), then try again.", HouseholdCopy.CLEARTEXT_BLOCKED)
+        // TWIN (F04): web Vault.tsx Trash header + delete confirm, android TrashScreen, desktop
+        // TrashScreen. One sentence on all three; a client that reworded it drifts loudly here.
+        assertEquals("Restoring brings the item back, but not its attachments — those were permanently removed when the item was deleted.", HouseholdCopy.TRASH_RESTORE_NO_ATTACHMENTS)
+    }
+
+    // ---- enrollment / invite refusals (audit F26) ----
+
+    /**
+     * The register-gate table, promoted out of web `enrollError` + the desktop enroll sheet into
+     * the ONE code map (android had no table at all and rendered "The server couldn't accept that
+     * request — try again, and update andvari if it keeps happening." for every row below: false
+     * twice over, and the same member on web was unblocked in one tap).
+     *
+     * Verbatim literals, the file's house idiom — these are the sentences web's `enrollError`
+     * switch must now render, so a reword on either side fails here rather than splitting the
+     * fleet again. `RegisterRefusalCoverageTest` separately asserts this table is COMPLETE
+     * against the server source.
+     */
+    @Test
+    fun enrollmentRefusals_pinnedVerbatim() {
+        assertEquals("That invite code is not valid.", HouseholdCopy.forEnrollError(api(400, "invalid_invite")))
+        assertEquals("That invite has already been used. Already set up this account? Switch to Sign in.", HouseholdCopy.forEnrollError(api(400, "invite_used")))
+        assertEquals("That invite has expired.", HouseholdCopy.forEnrollError(api(400, "invite_expired")))
+        assertEquals("This invite was created for a different email address — ask your admin for a new invite.", HouseholdCopy.forEnrollError(api(400, "invite_email_mismatch")))
+        assertEquals("An account with that email already exists.", HouseholdCopy.forEnrollError(api(400, "email_taken")))
+        // The row that existed NOWHERE: web printed "Enrollment failed (escrow_required)." and
+        // desktop fell through to the generic 400, because the sentence was keyed to a different
+        // condition (`recovery_required`, below). Reachable on the DEFAULT path.
+        assertEquals("This invite needs the admin backstop — set up with the recovery-sheet step (you'll need the printed sheet your admin gave you), or ask your admin for a member-only invite.", HouseholdCopy.forEnrollError(api(400, "escrow_required")))
+        assertEquals("This invite is set to “member-only” (no admin backstop) — set up without the recovery-sheet step, or ask your admin for a new invite.", HouseholdCopy.forEnrollError(api(400, "escrow_not_allowed_when_waived")))
+        assertEquals("This server hasn't finished setting up the admin backstop — ask your admin to finish it, or to send you a member-only invite.", HouseholdCopy.forEnrollError(api(400, "escrow_not_configured")))
+        assertEquals("Recovery fingerprint mismatch — do not proceed; contact your admin.", HouseholdCopy.forEnrollError(api(400, "escrow_fingerprint_mismatch")))
+        // NOT the posture gate: the client's member-recovery block was absent/malformed. Never
+        // the admin-backstop sentence — that mis-keying is the bug this table fixes.
+        assertEquals("andvari couldn't finish setting up your recovery phrase — start the setup again, and update andvari if it keeps happening.", HouseholdCopy.forEnrollError(api(400, "recovery_required")))
+        assertFalse(HouseholdCopy.forEnrollError(api(400, "recovery_required")).contains("admin backstop"))
+    }
+
+    @Test
+    fun enrollLadder_isTheGeneralMapPlusTheSignInContextForH1() {
+        // An enroll IS a credential ceremony — H1 reads with the sign-in wording, not the neutral one.
+        assertEquals("This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your administrator.", HouseholdCopy.forEnrollError(weakKdf()))
+        assertEquals("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.", HouseholdCopy.forEnrollError(identityMismatch))
+        assertEquals("Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.", HouseholdCopy.forEnrollError(IOException("no route")))
+        assertEquals("Too many requests — please wait a bit and try again.", HouseholdCopy.forEnrollError(api(429, "rate_limited")))
+        assertEquals("This andvari server requires a newer version of the app — update andvari, then try again.", HouseholdCopy.forEnrollError(UpgradeRequiredException("upgrade_required", leak)))
+        // An unrecognized refusal still lands on honest generic copy, never the raw message.
+        assertEquals("The server couldn't accept that request — try again, and update andvari if it keeps happening.", HouseholdCopy.forEnrollError(api(400, "some_future_code")))
     }
 
     // ---- lifecycle-notice copy (spec 03 §11) ----
@@ -194,6 +244,7 @@ class HouseholdCopyTest {
             HouseholdCopy::forImportError,
             HouseholdCopy::forSyncError,
             HouseholdCopy::forTotpError,
+            HouseholdCopy::forEnrollError,
         )
         for (t in throwables) for (map in mappers) {
             val copy = map(t)

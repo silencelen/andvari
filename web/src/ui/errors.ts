@@ -44,3 +44,14 @@ export const POLICY_UNAVAILABLE = "Couldn't load the server's settings — it ma
  *  a clipboard write refused by the platform (document not focused, permissions-policy) — the
  *  canon sentence, never the raw rejection text (pinned byte-equal by clipboard.test.ts). */
 export const CLIPBOARD_FAILED = "Couldn't copy to the clipboard — try again.";
+
+/** Audit F05: the AUTO-CLEAR was refused (the same "document is not focused" condition, hit at
+ *  wipe time because copy → alt-tab → paste is the dominant flow). The secret is still on the
+ *  clipboard, so every surface that promised "clears in Ns" must retract that promise instead of
+ *  leaving it standing. A retry is armed for the next time this tab is focused (clipboard.ts). */
+export const CLIPBOARD_NOT_CLEARED =
+  "Still on your clipboard — this browser wouldn't let andvari clear it. Copy something harmless to replace it.";
+
+/** The short form of {@link CLIPBOARD_NOT_CLEARED} for the in-label copy pill, which has room
+ *  for "copied ✓ · clears in 30s" and no more. */
+export const CLIPBOARD_NOT_CLEARED_SHORT = "still on your clipboard — clear it manually";

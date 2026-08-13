@@ -16,6 +16,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** spec 07 — pure reference tests for the CSV export writer and the `.andvari` backup
@@ -123,6 +124,48 @@ class ExportTest {
         assertEquals(listOf("Note with file", "Login with file"), w.withAttachments)
         assertEquals(listOf("Two uris"), w.extraUris)
         assertEquals(listOf("Empty both"), w.emptyUsernameAndPassword)
+        assertEquals(emptyList<String>(), w.formulaRisk)
+    }
+
+    /**
+     * Audit F08: the writer deliberately does NOT mangle a leading `=+-@` (mangling would
+     * corrupt real secrets, and Chrome/Bitwarden/KeePass don't either) — that decision was
+     * signed off CONDITIONAL on a warning, and the warning was never built. This is it.
+     */
+    @Test
+    fun csv_warnings_formulaRisk_namesTheRowsASpreadsheetWouldEvaluate() {
+        val w = ExportCsv.warnings(
+            listOf(
+                login("=HYPERLINK name", "u", "p"),
+                login("Plus user", "+15551234567", "p"),
+                login("At url", "u", "p", uris = listOf("@evil.test")),
+                login("Minus note", "u", "p", notes = "-1+2"),
+                login("Leading space", " =1+1", "p"),
+                // A note is never WRITTEN to the CSV, so a formula in one cannot evaluate there.
+                ItemDoc(type = "note", name = "=NoteName", notes = "=1+1"),
+                // The password column is deliberately out of scope: a generated password that
+                // starts with `-` is ordinary, and a list that fires on most exports is ignored.
+                login("Dash password", "u", "-Xk7#mQ2"),
+                login("Fine", "u", "p", uris = listOf("https://c.test")),
+            ),
+        )
+        assertEquals(
+            listOf("=HYPERLINK name", "Plus user", "At url", "Minus note", "Leading space"),
+            w.formulaRisk,
+        )
+        // The five original categories are unmoved by the new one.
+        assertEquals(listOf("=NoteName"), w.noteItems)
+        assertEquals(emptyList<String>(), w.extraUris)
+    }
+
+    @Test
+    fun csv_startsWithFormulaChar_matchesWhatASpreadsheetParses() {
+        for (v in listOf("=1+1", "+1", "-1", "@SUM(A1)", "\tcmd", "\rcmd", " =1+1", "\uFEFF=1+1", "  \n@x")) {
+            assertTrue(ExportCsv.startsWithFormulaChar(v), "'$v' must be flagged")
+        }
+        for (v in listOf("", "https://a.test", "user@example.com", "a-b", "1+1", "Visa (=old)")) {
+            assertFalse(ExportCsv.startsWithFormulaChar(v), "'$v' must NOT be flagged")
+        }
     }
 
     @Test
@@ -381,6 +424,31 @@ class ExportTest {
         // A large POSITIVE length (Long.MAX_VALUE) must also reject: off+8+len used to overflow
         // Long to a negative sum that slipped past the guard, then len.toInt() truncated to garbage.
         assertRejects(Backup.ERR_TRUNCATED, rawContainer(headerJson(), emptyList()) + u64le(Long.MAX_VALUE) + ByteArray(10))
+    }
+
+    /**
+     * Audit F34: the §2.2 ladder bounded file size, header size and KDF cost but NOT the number
+     * of sections — and a zero-length section advances the cursor by only its 8 length bytes, so
+     * a file of zeroes framed one section per 8 bytes into the heap before Argon2 (the cost gate
+     * that is supposed to make a hostile file expensive) ever ran. The count is now bounded
+     * INSIDE the framing loop, so the rejection costs the same as any other malformed file.
+     */
+    @Test
+    fun ladder_sectionCountCeiling() {
+        val overCap = rawContainer(headerJson(), List(Backup.MAX_SECTIONS + 1) { ByteArray(0) })
+        assertRejects(Backup.ERR_TRUNCATED, overCap)
+        // The boundary is not off by one: exactly MAX_SECTIONS frames fine and dies at the AEAD,
+        // which is where an unopenable-but-well-framed file is supposed to die.
+        assertRejects(Backup.ERR_WRONG_PASSPHRASE_OR_CORRUPT, rawContainer(headerJson(), List(Backup.MAX_SECTIONS) { ByteArray(64) }))
+    }
+
+    /** …and we never WRITE a file our own [Backup.open] would refuse. */
+    @Test
+    fun build_refusesMoreSectionsThanOpenAccepts() {
+        val tooMany = List(Backup.MAX_SECTIONS) { Backup.AttachmentSection(ByteArray(32)) { ByteArray(0) } }
+        assertFailsWith<IllegalArgumentException> {
+            Backup.buildWithPayloadBytes(crypto, "over-cap passphrase", "id", ByteArray(16), fast, "{}".encodeToByteArray(), tooMany) { }
+        }
     }
 
     @Test

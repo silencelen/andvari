@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { safeHttpHref } from "./safeurl";
 
 /**
  * "Get andvari on your other devices" hub (v6-QW1). Honest surfaces only — every row
@@ -33,6 +34,11 @@ export interface ExtensionBuild {
 export interface DownloadsManifest {
   windows?: PlatformBuild | null;
   linux?: PlatformBuild | null;
+  /** Audit F09: the phone platform. Self-hosters are told (README) to serve an APK from their
+   *  instance's /downloads — with no key here there was nothing to advertise it with, and the
+   *  card silently had no Android row at all while every other platform got an honest
+   *  "isn't published yet". Wave 3 carries the same key into the desktop twin (Platform.kt). */
+  android?: PlatformBuild | null;
   browserExtension?: ExtensionBuild | null;
 }
 
@@ -68,12 +74,16 @@ export function coerceManifest(parsed: unknown): DownloadsManifest | "error" {
  */
 export function platformRowState(
   manifest: DownloadsManifest | null | "error",
-  key: "windows" | "linux",
+  key: "windows" | "linux" | "android",
 ): PlatformRow {
   if (manifest === null) return { kind: "loading" };
   const build = manifest === "error" ? null : manifest[key];
-  if (build && typeof build.url === "string" && build.url && typeof build.version === "string" && build.version) {
-    return { kind: "available", version: build.version, url: build.url };
+  // Audit F14: the url is a SERVER-DECLARED string rendered as a raw href — §2.3 R8's own rule,
+  // enforced for the landing's docs link and skipped here. A rejected scheme is treated exactly
+  // like an absent artifact, so the row falls back to its honest "isn't published yet".
+  const url = build ? safeHttpHref(build.url) : null;
+  if (url && typeof build!.version === "string" && build!.version) {
+    return { kind: "available", version: build!.version, url };
   }
   return { kind: "unpublished" };
 }
@@ -92,7 +102,9 @@ export function extensionRowState(manifest: DownloadsManifest | null | "error"):
   if (manifest === null) return { kind: "loading" };
   const ext = manifest === "error" ? null : manifest.browserExtension;
   if (ext && typeof ext.version === "string" && ext.version) {
-    const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+    // Audit F14: same untrusted-url rule as the desktop rows — an install surface that is not
+    // http(s) is no install surface, and an entry left with none of them stays "unpublished".
+    const str = (v: unknown) => (typeof v === "string" ? (safeHttpHref(v) ?? undefined) : undefined);
     const chromeStoreUrl = str(ext.chromeStoreUrl);
     const chromeUrl = str(ext.chromeUrl);
     const firefoxUrl = str(ext.firefoxUrl);
@@ -103,7 +115,7 @@ export function extensionRowState(manifest: DownloadsManifest | null | "error"):
   return { kind: "unpublished" };
 }
 
-function PlatformRowView({ state, noun }: { state: PlatformRow; noun: string }) {
+export function PlatformRowView({ state, noun }: { state: PlatformRow; noun: string }) {
   if (state.kind === "loading") return <p className="muted">Checking…</p>;
   if (state.kind === "available") {
     return (
@@ -215,11 +227,15 @@ export function DevicesCard({ origin, canonicalOrigin }: { origin?: string; cano
         </p>
       </div>
 
-      {/* TODO Wave 3 (design 2026-07-15 §5.4.4, gated on the §8 Gate-1 artifact publish): the fully
-          manifest-driven artifact list goes here — render exactly the artifacts /downloads/manifest.json
-          lists, with an Android row (URL + install QR) iff an `android` artifact exists. The old
-          tailnet-devstore Android pointer was deleted with origin.ts; until the manifest carries an
-          android entry there is nothing honest to render for phones. */}
+      {/* Audit F09: the Android row. It reads the same manifest as Windows/Linux, so a
+          self-hoster who drops an APK in ANDVARI_DOWNLOADS_DIR and lists it can advertise it,
+          and until then a phone user gets the SAME honest "isn't published yet" every other
+          platform gets — instead of no row at all, which reads as "not supported".
+          (Wave 3 keeps the manifest-driven artifact list + install QR from design §5.4.4.) */}
+      <div className="field">
+        <label>Android</label>
+        <PlatformRowView state={platformRowState(manifest, "android")} noun="Android app (.apk)" />
+      </div>
 
       <div className="field">
         <label>Windows</label>

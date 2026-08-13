@@ -6,6 +6,7 @@ import {
   DevicesCard,
   ExtensionRowView,
   extensionRowState,
+  PlatformRowView,
   platformRowState,
   windowsRowState,
 } from "./Devices";
@@ -240,13 +241,79 @@ describe("DevicesCard — endpoint-agnostic (design 2026-07-15 §5.4.4: no origi
   });
 
   it("bakes no tailnet hostname and ships no devstore QR (§5.5 tailnet-leak removal)", () => {
-    // TODO Wave 3 (§5.4.4, gated on the Gate-1 artifact publish): when the manifest-driven Android
-    // row lands, pin here that an `android` manifest entry — and ONLY that — renders it (with QR).
     const html = renderToStaticMarkup(createElement(DevicesCard, { origin: PUBLIC }));
     expect(html).not.toContain("devserv");
     expect(html).not.toContain("ts.net");
     expect(html).not.toContain("<svg");
     expect(html).not.toContain("Show QR code");
-    expect(html).not.toContain("Android"); // nothing honest to render for phones until the artifact publish
+  });
+
+  // Audit F09: the Android row exists and is manifest-driven like every other platform. The old
+  // pin here asserted the OPPOSITE ("Android" must not appear) because the only Android pointer
+  // the card ever had was the retired tailnet devstore URL — a phone user therefore got no row,
+  // no link and no statement, which reads as "not supported" rather than "not published here".
+  it("renders an Android row, and with no artifact it says so in the same words as the others", () => {
+    const html = renderToStaticMarkup(createElement(DevicesCard, { origin: PUBLIC }));
+    expect(html).toContain("Android");
+    // Static markup runs no effects → manifest null → every platform row is "Checking…".
+    expect(html).toContain("Checking…");
+  });
+});
+
+/**
+ * Audit F09 + F14: the Android column of the same pure decision, and the untrusted-url rule the
+ * card used to skip — /downloads/manifest.json is server-declared data rendered straight into
+ * hrefs, and §2.3 R8 (enforced for the landing's docs link) says such a url is only ever
+ * rendered when it is a real http(s) URL. A refused url must degrade to "unpublished", never to
+ * a live link with a hostile scheme.
+ */
+describe("platformRowState — the android column + the untrusted-url rule", () => {
+  it("no android entry = unpublished (the honest row a phone user now gets)", () => {
+    expect(platformRowState({}, "android")).toEqual({ kind: "unpublished" });
+    expect(platformRowState({ android: null }, "android")).toEqual({ kind: "unpublished" });
+    expect(platformRowState("error", "android")).toEqual({ kind: "unpublished" });
+    expect(platformRowState(null, "android")).toEqual({ kind: "loading" });
+  });
+
+  it("a complete android build = a real download link, and no other column claims it", () => {
+    const m = { android: { version: "0.21.0", url: "/downloads/andvari-0.21.0.apk" } };
+    expect(platformRowState(m, "android")).toEqual({
+      kind: "available",
+      version: "0.21.0",
+      url: "/downloads/andvari-0.21.0.apk",
+    });
+    expect(platformRowState(m, "windows")).toEqual({ kind: "unpublished" });
+  });
+
+  it("a javascript:/data: url is treated exactly like an absent artifact — no link is rendered", () => {
+    for (const url of ["javascript:alert(1)", "data:text/html,<script>x</script>", "blob:https://x/y", "vbscript:msgbox"]) {
+      expect(platformRowState({ windows: { version: "0.21.0", url } }, "windows"), url).toEqual({ kind: "unpublished" });
+      expect(platformRowState({ android: { version: "0.21.0", url } }, "android"), url).toEqual({ kind: "unpublished" });
+    }
+    const html = renderToStaticMarkup(
+      createElement(PlatformRowView, { state: platformRowState({ windows: { version: "0.21.0", url: "javascript:alert(1)" } }, "windows"), noun: "Windows installer" }),
+    );
+    expect(html).not.toContain("javascript:");
+    expect(html).toContain("isn’t published yet");
+  });
+
+  it("relative same-origin paths and absolute http(s) urls both survive verbatim", () => {
+    expect(platformRowState({ linux: { version: "1.0.0", url: "/downloads/a.deb" } }, "linux")).toEqual({
+      kind: "available", version: "1.0.0", url: "/downloads/a.deb",
+    });
+    expect(platformRowState({ linux: { version: "1.0.0", url: "https://dl.example.com/a.deb" } }, "linux")).toEqual({
+      kind: "available", version: "1.0.0", url: "https://dl.example.com/a.deb",
+    });
+  });
+
+  it("the extension row drops a hostile install surface and falls back to unpublished when none is left", () => {
+    expect(
+      extensionRowState({ browserExtension: { version: "0.21.0", chromeStoreUrl: "javascript:alert(1)" } }),
+    ).toEqual({ kind: "unpublished" });
+    expect(
+      extensionRowState({
+        browserExtension: { version: "0.21.0", chromeStoreUrl: "javascript:alert(1)", firefoxUrl: "/downloads/x.xpi" },
+      }),
+    ).toEqual({ kind: "available", version: "0.21.0", chromeStoreUrl: undefined, chromeUrl: undefined, firefoxUrl: "/downloads/x.xpi" });
   });
 });

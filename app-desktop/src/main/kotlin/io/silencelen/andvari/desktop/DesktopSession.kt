@@ -133,7 +133,7 @@ class DesktopSessionStore(
     private fun prefs(): Prefs = cachedPrefs
         ?: runCatching { json.decodeFromString(Prefs.serializer(), prefsFile.readText()) }.getOrDefault(Prefs()).also { cachedPrefs = it }
 
-    private fun writePrefs(p: Prefs) { dir.mkdirs(); prefsFile.writeText(json.encodeToString(Prefs.serializer(), p)); cachedPrefs = p }
+    private fun writePrefs(p: Prefs) { dir.mkdirsOwnerOnly(); prefsFile.writeTextOwnerOnly(json.encodeToString(Prefs.serializer(), p)); cachedPrefs = p }
 
     var baseUrl: String
         get() = prefs().baseUrl
@@ -263,9 +263,10 @@ class DesktopSessionStore(
     /** Cached accountKeys for offline unlock (spec 02 §8) — all ciphertext/public; per-origin (§4.2). */
     fun saveAccountKeys(key: String, userId: String, keys: AccountKeys) {
         val f = accountKeysFile(key, userId)
-        f.parentFile?.mkdirs()
-        f.writeText(json.encodeToString(AccountKeys.serializer(), keys))
-        runCatching { f.setReadable(false, false); f.setReadable(true, true); f.setWritable(false, false); f.setWritable(true, true) }
+        // F35: created 0600 inside a 0700 ns/ tree, not written-then-repaired — this file carries
+        // wrappedUvk + kdfSalt + kdfParams, i.e. everything an offline attack on the master
+        // password needs.
+        f.writeTextOwnerOnly(json.encodeToString(AccountKeys.serializer(), keys))
     }
 
     fun loadAccountKeys(key: String, userId: String): AccountKeys? =
@@ -281,10 +282,11 @@ class DesktopSessionStore(
         runCatching { json.decodeFromString(DesktopSession.serializer(), file.readText()) }.getOrNull()
 
     fun save(s: DesktopSession) {
-        dir.mkdirs()
-        file.writeText(json.encodeToString(DesktopSession.serializer(), s))
-        // 0600 on POSIX; best-effort on Windows.
-        runCatching { file.setReadable(false, false); file.setReadable(true, true); file.setWritable(false, false); file.setWritable(true, true) }
+        // F35: the access+refresh tokens are CREATED 0600 inside a 0700 directory. The old shape
+        // wrote at the umask and chmodded second, which leaves a window an open() can win, and the
+        // comment here asserted "0600 on POSIX" as if the two steps were atomic. Windows keeps the
+        // best-effort ACL path inside the helper.
+        file.writeTextOwnerOnly(json.encodeToString(DesktopSession.serializer(), s))
     }
 
     fun updateTokens(t: Tokens?) {
@@ -313,8 +315,7 @@ class DesktopSessionStore(
     /** Persist the in-flight invite switch BEFORE register, so a crash in the commit window
      *  reconciles at next launch instead of stranding the user on an orphaned account. */
     fun setPendingServer(p: PendingServer) {
-        dir.mkdirs()
-        pendingFile.writeText(json.encodeToString(PendingServer.serializer(), p))
+        pendingFile.writeTextOwnerOnly(json.encodeToString(PendingServer.serializer(), p))
     }
 
     fun loadPendingServer(): PendingServer? =
@@ -383,7 +384,7 @@ class DesktopSessionStore(
     }
 
     private fun moveIntoNs(src: File, dst: File) {
-        dst.parentFile?.mkdirs()
+        dst.parentFile?.mkdirsOwnerOnly()
         runCatching { Files.move(src.toPath(), dst.toPath()) }.recoverCatching {
             // Cross-store or locked-source fallback; overwrite=false — an existing ns copy wins.
             src.copyTo(dst, overwrite = false)
@@ -403,4 +404,69 @@ class DesktopSessionStore(
         /** The pre-§4.2 unscoped cache filename shape — group 1 is the userId. */
         private val LEGACY_CACHE_NAME = Regex("^vault-(.+)\\.db(-wal|-shm)?$")
     }
+}
+
+// ---- at-rest permissions (audit F35) ----
+
+/**
+ * Everything this store persists is either a bearer credential or the material an offline attack
+ * on the master password needs — the refresh token (server-side valid ~30 days) alongside
+ * `kdfSalt`, `kdfParams` and `wrappedUvk`. It was written at the process umask and chmodded
+ * AFTERWARDS, under a comment claiming "0600 on POSIX" as though the two steps were one, and the
+ * containing `~/.andvari-desktop/` and its whole `ns/` subtree were created with a bare `mkdirs()`
+ * (0777 & ~umask — typically world-executable). On a shared POSIX host — a family desktop with
+ * several local accounts, a lab machine, an SSH-reachable box — another local user could traverse
+ * the tree, and a process polling the path won the window between `writeText` returning and
+ * `setReadable` landing: an `open()` that succeeds in that window keeps a readable fd no matter
+ * what the later chmod says.
+ *
+ * These two helpers close it the only way it closes: the permissions are part of the CREATE.
+ * Where the platform has no POSIX view (Windows) they fall back to the previous best-effort path,
+ * which is what the ACL-based file system there wants anyway.
+ *
+ * Restricting the DIRECTORY is the load-bearing half: it also protects files this app does not
+ * create itself, notably the SQLite cache DB and its `-wal`/`-shm` siblings, which the driver
+ * opens on its own and which can therefore never be created with a mode by us.
+ */
+private val posixSupported: Boolean = runCatching {
+    java.nio.file.FileSystems.getDefault().supportedFileAttributeViews().contains("posix")
+}.getOrDefault(false)
+
+private fun ownerOnly(spec: String): Array<java.nio.file.attribute.FileAttribute<*>> =
+    if (posixSupported) {
+        arrayOf(java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString(spec)))
+    } else {
+        emptyArray()
+    }
+
+/** `mkdirs()` with `rwx------` on every directory this call actually creates. Existing
+ *  directories are left alone (their mode is the user's business, and re-chmodding a shared
+ *  parent would be worse than the gap). Total — never throws, exactly like [File.mkdirs]. */
+internal fun File.mkdirsOwnerOnly() {
+    if (isDirectory) return
+    parentFile?.mkdirsOwnerOnly()
+    runCatching { java.nio.file.Files.createDirectory(toPath(), *ownerOnly("rwx------")) }
+    if (!isDirectory) runCatching { mkdirs() } // lost a race, or an FS that refused the attribute
+}
+
+/**
+ * [File.writeText] where the file is CREATED `rw-------` rather than repaired to it. The chmod
+ * still runs afterwards, for one case the create-time mode cannot cover: a file that already
+ * exists from a build before this fix, whose mode `CREATE` leaves untouched.
+ */
+internal fun File.writeTextOwnerOnly(text: String) {
+    parentFile?.mkdirsOwnerOnly()
+    val opts = setOf(
+        java.nio.file.StandardOpenOption.CREATE,
+        java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+        java.nio.file.StandardOpenOption.WRITE,
+    )
+    val bytes = text.encodeToByteArray()
+    val wrote = runCatching {
+        java.nio.file.Files.newByteChannel(toPath(), opts, *ownerOnly("rw-------")).use {
+            it.write(java.nio.ByteBuffer.wrap(bytes))
+        }
+    }
+    if (wrote.isFailure) writeText(text) // never lose the write over a permissions nicety
+    runCatching { setReadable(false, false); setReadable(true, true); setWritable(false, false); setWritable(true, true) }
 }

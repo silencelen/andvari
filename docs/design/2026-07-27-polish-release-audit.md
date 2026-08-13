@@ -74,7 +74,7 @@ campaign could not provide.
   coroutines), but composables remain uncovered.
 - **`quality-tests--8`** — The E2E layer is manual-only and decaying (`e2e.sh` is an echo-suggestion inside `verify.sh`). Fixing it needs a live server and real credentials, which this campaign deliberately never had.
 - **`quality-tests--9`** — Extension surface wiring (~7.1k lines across background/content/content-ui/popup/connector/offscreen) has no behavioural coverage. Effort L, and it wants a browser harness — out of scope for polish.
-- **`ux-copy--10`** — One popup string capitalizes the brand ("Andvari can't auto-fill…"). Low; it is a pinned twin, so changing it costs more than it returns.
+- **`ux-copy--10`** — One popup string capitalizes the brand ("Andvari can't auto-fill…"). Low; it is a pinned twin, so changing it costs more than it returns. **Superseded 2026-08-13 (audit F24): fixed after all** — the popup string and its `extension-pins.test.ts` [U21] pin were lowercased in one change, and the pin now reds on the capitalized form, so the sentence quoted here (and in row 141 below, and in `2026-07-23-card-autofill-tier2.md` §6) must not be restored from these records.
 - **`ux-copy--8`** — Import-result bucket phrasing diverges across the three importing surfaces. Low, and it touches copy that would want canonizing first.
 - **`ux-copy--9`** — Apostrophe style is mixed inside single files against the canon's ASCII convention. Low, cosmetic.
 - **Anything needing a real device or a live checkout** — the F20 compatibility trace, and end-to-end

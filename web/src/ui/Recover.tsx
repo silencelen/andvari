@@ -6,9 +6,10 @@ import { deriveAuthKey as deriveRecoveryAuthKey, parseSecret } from "../crypto/m
 import { Account, IdentityMismatchError } from "../vault/account";
 import { NetworkError, UNREACHABLE, net } from "./errors";
 import { Field } from "./Field";
-import { Msg } from "./Msg";
+import { Announcer, Msg } from "./Msg";
 import { BrandSigil } from "./Sigil";
-import { STRENGTH_LABELS, estimateStrength, meetsMasterPasswordFloor } from "./strength";
+import { MasterPasswordHint } from "./passwordadvice";
+import { meetsMasterPasswordFloor } from "./strength";
 import { useAutoLock } from "./useAutoLock";
 
 /** CR-02 (compliance 2026-07-15): the reset step holds a UVK-equivalent recovery secret (TM-R9) in
@@ -140,6 +141,12 @@ export function Recover({
           <p>{step === "verify" ? "with your saved recovery phrase" : "choose a new master password"}</p>
         </div>
         {err && <Msg kind="err">{err}</Msg>}
+        {/* BL-1 (audit F12): the verify→reset step change is the whole progress of this flow, and
+            it happens after an awaited server call — the form swaps, the focused button unmounts,
+            and the "your phrase checked out" box mounts already-populated, which a polite region
+            does not announce (Msg.tsx). Persistent + unconditional, driven by `step`, so the
+            mutation is what speaks. Failures already announce through Msg's role="alert". */}
+        <Announcer text={step === "reset" ? "Your recovery phrase checked out. Choose a new master password." : ""} />
 
         {step === "verify" ? (
           <form onSubmit={submitVerify}>
@@ -174,7 +181,10 @@ export function Recover({
               Your recovery phrase checked out. Choose a <strong>new master password</strong> — it re-locks the
               same vault; nothing you stored is lost.
             </div>
-            <Field label="New master password" hint={<PwHint password={password} />}>
+            {/* F31: the third surface where a master password is chosen, and the one most likely
+                to be reached BECAUSE the old one was lost — so it gets the same breach + pattern
+                cautions as enrollment and change-password. Advisory only; the reset still commits. */}
+            <Field label="New master password" hint={<MasterPasswordHint password={password} client={client} />}>
               <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
             </Field>
             <Field
@@ -233,14 +243,7 @@ export function resetErrorMessage(e: unknown): string {
             : "Recovery failed. Please try again.";
 }
 
-/** Minimal master-password strength hint (self-contained to avoid a Welcome ↔ Recover import cycle). */
-function PwHint({ password }: { password: string }) {
-  if (!password) return null;
-  const score = estimateStrength(password);
-  const ok = meetsMasterPasswordFloor(password);
-  return (
-    <span className="muted" style={{ color: ok ? "var(--ok)" : "var(--danger)" }}>
-      strength: {STRENGTH_LABELS[score]}{ok ? " ✓" : " — needs at least “good”"}
-    </span>
-  );
-}
+// The local PwHint that used to sit here was a near-copy of Welcome's, written that way because
+// Welcome imports THIS file and the shared component could not come from there. It had already
+// drifted (no non-ASCII caution) and F31's cautions would have made that two edits instead of
+// one — so the hint moved to passwordadvice.tsx, which neither file imports back.

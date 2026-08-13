@@ -12,7 +12,9 @@ import { maybeKdfUpgrade } from "../vault/kdfupgrade";
 import { VaultStore } from "../vault/store";
 import { NullCache, openVaultCache } from "../vault/idbcache";
 import { unlockExistingSession } from "./unlock";
-import { NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
+import { scheduleClipboardClear, writeClipboard } from "./clipboard";
+import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
+import { safeHttpUrl } from "./safeurl";
 import { Busy } from "./Busy";
 import { Field } from "./Field";
 import { fmtDate } from "./format";
@@ -33,7 +35,8 @@ import {
 } from "./session";
 import { BrandSigil } from "./Sigil";
 import { clampClipboardClearSeconds } from "./policyclamp";
-import { STRENGTH_LABELS, estimateStrength, masterPasswordHasNonAscii, meetsMasterPasswordFloor } from "./strength";
+import { MasterPasswordHint, breachWarningFor } from "./passwordadvice";
+import { meetsMasterPasswordFloor } from "./strength";
 import { useAutoLock } from "./useAutoLock";
 
 type Mode = { unlock: Session } | { fresh: true };
@@ -301,19 +304,6 @@ export function freshStartAffordances(landingMode: LandingMode, s: FreshStartSta
     showNudge: !s.blocking && landingMode === "landing",
     showMismatch: s.hasPendingLink && !s.hasValidPrefill,
   };
-}
-
-/** §2.3 R8 rule: `selfHostDocsUrl` is DECORATIVE, server-declared, and untrusted — render it as a
- *  raw link ONLY when it is a real http(s) URL, so a hostile server cannot slip a `javascript:` /
- *  `data:` href into the landing. Returns the url verbatim when safe, else null (link omitted). */
-function safeHttpUrl(url: string | null | undefined): string | null {
-  if (!url) return null;
-  try {
-    const scheme = new URL(url).protocol;
-    return scheme === "https:" || scheme === "http:" ? url : null;
-  } catch {
-    return null;
-  }
 }
 
 /** §7.1 stranger landing banner (signupMode "landing"/"open"): the invite-only + self-host nudge.
@@ -694,6 +684,10 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   // One settlement per reveal (the confirm is now awaited, so the button outlives the first click).
   const settlingRef = useRef(false);
   const aliveRef = useRef(true);
+  // F31: BREACHED_PASSWORD_WARNING for the master password this enrollment just committed, or null
+  // for "clean" and "couldn't check" alike (see the fire site in `submit`). Advisory only — it is
+  // never read by canSubmit, by `submit`, or by anything that decides where this card goes next.
+  const [breachAdvisory, setBreachAdvisory] = useState<string | null>(null);
 
   // §F.7: zero the raw recovery secret on unmount as well as on confirm (mirrors Recover.tsx's
   // cleanup) — if the reveal is interrupted (navigate away / lock), the secret never lingers in memory.
@@ -765,7 +759,13 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       let recoveryPublicKey: Uint8Array | undefined;
       let recoveryFingerprint: string | undefined;
       if (posture !== "waived") {
-        const pub = await net(recoveryPubFromServer(client));
+        // Audit F15: ApiClient owns this endpoint (the escrow re-seal path already calls it).
+        // The hand-rolled fetch this replaces omitted the X-Andvari-Client header every other
+        // call carries and flattened the server's real code into a synthetic
+        // `no_recovery_pubkey` — so a 426 could never raise App's "reload to update" bar on the
+        // enrollment path, only on the re-seal one. It works unauthenticated: raw() simply omits
+        // the Authorization header when no tokens are held.
+        const pub = fromB64((await net(client.recoveryPubkey())).trim());
         const pubShortFp = await shortFingerprint(pub);
         const gate = escrowGate({ posture, linkRfp, typedSheet: shortFp, serverFullFp: fp, pubShortFp });
         if (!gate.seal) {
@@ -793,6 +793,18 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       secretRef.current = recoverySecret;
       clearPendingEnroll();
       client.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
+      // F31: the master password that now wraps this whole vault, against the public breach corpus.
+      // It runs HERE, and not from the form's own MasterPasswordHint, because the relay is
+      // session-gated (App.kt `requirePrincipal`): the hint's check 401s for an enrollee who has no
+      // account yet, fails open, and says nothing — so this is the first moment on the web enroll
+      // path a check can be made at all. Same hole, same fix, as the natives'
+      // checkEnrolledPasswordForBreach. DETACHED: the reveal gate below must never wait on a network
+      // round trip, and the verdict is advisory (a dismissible line), never a gate on an enrollment
+      // that already landed. breachWarningFor is total and resolves null for BOTH "clean" and
+      // "couldn't check", so there is no failure path to handle and nothing to say on one.
+      void breachWarningFor(client, password).then((warning) => {
+        if (warning && aliveRef.current) setBreachAdvisory(warning);
+      });
       saveSession({
         baseUrl: client.baseUrl,
         userId: s.userId,
@@ -814,10 +826,24 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
     }
   };
 
+  // F31: every screen this card can show wears the enrollment breach advisory, wrapped in ONE place
+  // rather than repeated per branch so a future branch cannot silently drop it. The three parts keep
+  // fixed positions in the fragment: React reconciles by position, so the <Announcer> is the SAME
+  // node across the form → reveal → settling transitions and is therefore already mounted (and
+  // empty) when the verdict lands — the mutation is what a polite region actually announces
+  // (Msg.tsx BL-1; a conditionally-mounted `.msg info` box on its own is not reliably spoken).
+  const withBreachAdvisory = (content: React.ReactNode) => (
+    <>
+      {content}
+      {breachAdvisory && <BreachAdvisory advisory={breachAdvisory} onDismiss={() => setBreachAdvisory(null)} />}
+      <Announcer text={breachAdvisory ?? ""} />
+    </>
+  );
+
   // design 2026-07-13: the stale-confirm notice — un-skippable acknowledgment BEFORE vault landing, so
   // the user never walks away believing the (dead) phrase they saved still works.
   if (ready && pieceStale) {
-    return (
+    return withBreachAdvisory(
       <div>
         <Msg kind="err">{RECOVERY_PIECE_STALE_NOTICE}</Msg>
         <button
@@ -831,7 +857,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
         >
           I understand — continue
         </button>
-      </div>
+      </div>,
     );
   }
 
@@ -839,10 +865,10 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   // reveal (whose secret zero() nulls mid-flight), so the screen never blanks on the slow tunnel path.
   // Ordered after the stale branch (a 409 during settle wins) and before the reveal.
   if (ready && settling) {
-    return (
+    return withBreachAdvisory(
       <div>
         <p className="muted">Saving your confirmation…</p>
-      </div>
+      </div>,
     );
   }
 
@@ -850,7 +876,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   // register, holding the secret in secretRef, and it won't hand the account to the vault until the
   // member types the phrase back (confirmMatches). No skip affordance (silent-total-loss guard).
   if (ready && secretRef.current) {
-    return (
+    return withBreachAdvisory(
       <RecoveryReveal
         secretRef={secretRef}
         clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
@@ -874,11 +900,11 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
             },
           });
         }}
-      />
+      />,
     );
   }
 
-  return (
+  return withBreachAdvisory(
     <form onSubmit={submit}>
       {err && <Msg kind="err">{err}</Msg>}
       {linkValid && (
@@ -901,7 +927,10 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="optional" />
         </Field>
       </div>
-      <Field label="Master password" hint={<MasterPasswordHint password={password} />}>
+      {/* F31: `client` is what turns the breach check on — the k-anonymised prefix goes to the
+          relay this client already talks to (never upstream direct), and an unreachable relay
+          simply means no warning. Enrollment stays completable either way. */}
+      <Field label="Master password" hint={<MasterPasswordHint password={password} client={client} />}>
         <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
       </Field>
       <Field
@@ -932,7 +961,35 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       />
 
       <button className="primary" disabled={busy || !canSubmit}>{busy ? "Forging your vault…" : "Create vault"}</button>
-    </form>
+    </form>,
+  );
+}
+
+/**
+ * F31 enrollment advisory — the master password this account was just created with is in the
+ * public breach corpus. Twin of the natives' banners (Android `BreachAdvisoryBanner`, desktop
+ * Ui.kt `state.breachAdvisory`), including the posture: the account exists and works, nothing was
+ * blocked, and Dismiss is a real exit. F31's rule is that the pattern/breach signals warn and
+ * never refuse.
+ *
+ * `info`, not `err`: an error strip here would read like a live credential failure (the temporary-
+ * password bar) when this is a "you can do better" nudge. Where the natives' copy has to send the
+ * user to a browser — neither app can change a master password yet — web names the screen it
+ * already ships, two clicks away and reachable the moment this card hands over.
+ *
+ * Placement (the one deliberate divergence from desktop, which keeps this banner OFF its two
+ * recovery gates so the shown-once phrase competes with nothing): web's enroll card has no surface
+ * AFTER the gate — confirming the phrase hands the account straight to the vault shell and unmounts
+ * this component — so the advisory rides the same card, rendered BELOW the reveal. It is read after
+ * the phrase is saved rather than instead of it, and the gate above it is untouched.
+ */
+function BreachAdvisory({ advisory, onDismiss }: { advisory: string; onDismiss: () => void }) {
+  return (
+    <div className="msg info" style={{ display: "block", marginTop: 12 }}>
+      <strong>Master password found in a breach.</strong> {advisory} Your vault is set up and safe to use —
+      change this password whenever you like, in Settings → Change master password.{" "}
+      <button type="button" className="ghost" onClick={onDismiss}>Dismiss</button>
+    </div>
   );
 }
 
@@ -1066,6 +1123,10 @@ function RecoveryReveal({
 }) {
   const [typed, setTyped] = useState("");
   const [copied, setCopied] = useState(false);
+  // Audit F05: the copy was refused / the auto-clear was refused. Both were silent before —
+  // the first swallowed by a bare catch, the second by a `.catch(() => {})` on the wipe.
+  const [copyErr, setCopyErr] = useState(false);
+  const [wipeStuck, setWipeStuck] = useState(false);
   // Cut M (v2 #7): a refused paste/drop into the type-back sets this so the refusal is
   // explained in place rather than looking like a broken input.
   const [pasteTried, setPasteTried] = useState(false);
@@ -1076,17 +1137,24 @@ function RecoveryReveal({
   const matches = confirmMatches(secret, typed);
 
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(phrase);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-      // SECRET clipboard-clear (Vault.useCopy parity): wipe after the policy window, CLAMPED into
-      // [1, CLIPBOARD_CLEAR_MAX_SECONDS] (design 2026-07-15 §2.3, B1-1) — a hostile server value
-      // can never pin a recovery phrase on the clipboard past the ceiling.
-      window.setTimeout(() => navigator.clipboard.writeText("").catch(() => {}), clampClipboardClearSeconds(clipboardClearSeconds) * 1000);
-    } catch {
-      /* clipboard denied — the phrase is on screen to copy by hand */
+    // Audit F05: the guarded write (clipboard.ts) instead of a bare writeText behind a silent
+    // catch — a refused copy on THIS screen means the phrase was never copied at all, at the one
+    // moment it is shown and unrecoverable.
+    if (!(await writeClipboard(phrase))) {
+      setCopied(false);
+      setCopyErr(true);
+      return;
     }
+    setCopyErr(false);
+    setWipeStuck(false);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+    // SECRET clipboard-clear (Vault.useCopy parity): wipe after the policy window, CLAMPED into
+    // [1, CLIPBOARD_CLEAR_MAX_SECONDS] (design 2026-07-15 §2.3, B1-1) — a hostile server value
+    // can never pin a recovery phrase on the clipboard past the ceiling. Audit F05: the SHARED
+    // single slot, so double-clicking Copy no longer stacks two wipes (the second of which fired
+    // early against a later copy), and a refused wipe says so instead of being swallowed.
+    scheduleClipboardClear(clampClipboardClearSeconds(clipboardClearSeconds), (outcome) => setWipeStuck(outcome === "stuck"));
   };
 
   return (
@@ -1096,7 +1164,9 @@ function RecoveryReveal({
         forget your master password. It is shown <strong>once</strong> — write it down or store it somewhere safe.
       </div>
       <div className="field">
-        <label>Your recovery phrase</label>
+        {/* Audit F10: the phrase renders as TEXT (never an input — §F.7), so this heads a
+            block with no control in it. */}
+        <div className="field-head">Your recovery phrase</div>
         {/* Rendered as TEXT (never type=password); never written to storage (§F.7). */}
         <div
           className="mono"
@@ -1107,8 +1177,23 @@ function RecoveryReveal({
         {/* Cut M (v2 #7): no Copy button here — it moved BELOW the type-back gate (see the
             post-confirm section) so a clipboard round-trip can't stand in for saving. */}
       </div>
-      <div className="field">
-        <label>Type your recovery phrase back to confirm you saved it</label>
+      {/* Audit F10: `Field` associates the prompt with the box (the enrollment path's
+          recovery-check twin already does). This gate is UN-SKIPPABLE and one-shot — a screen
+          reader landing on an unnamed "edit, blank" here has nothing telling it what to type,
+          and pasting is deliberately refused, so there is no way to guess around it. */}
+      <Field
+        label="Type your recovery phrase back to confirm you saved it"
+        hint={
+          <>
+            {pasteTried && !matches && (
+              <span className="muted" style={{ display: "block", color: "var(--gold-text)" }}>
+                Type it from your written note — pasting doesn't prove you saved it.
+              </span>
+            )}
+            {typed.trim() && !matches && <span className="muted" style={{ color: "var(--danger)" }}>doesn't match — check what you saved</span>}
+          </>
+        }
+      >
         <input
           className="mono"
           autoComplete="off"
@@ -1123,13 +1208,7 @@ function RecoveryReveal({
           onDrop={(e) => { e.preventDefault(); setPasteTried(true); }}
           placeholder="type it in from where you saved it"
         />
-        {pasteTried && !matches && (
-          <span className="muted" style={{ display: "block", color: "var(--gold-text)" }}>
-            Type it from your written note — pasting doesn't prove you saved it.
-          </span>
-        )}
-        {typed.trim() && !matches && <span className="muted" style={{ color: "var(--danger)" }}>doesn't match — check what you saved</span>}
-      </div>
+      </Field>
       {/* Cut M (v2 #7): the gate is open — the phrase demonstrably exists outside this screen —
           so offering the clipboard here can no longer defeat it. Same SECRET clipboard-clear
           path as before (the secret is still live; it's only zeroed by onConfirmed). */}
@@ -1139,6 +1218,12 @@ function RecoveryReveal({
           <button type="button" className="ghost" onClick={copy}>{copied ? "Copied ✓" : "Copy phrase"}</button>
         </div>
       )}
+      {/* Audit F05: both halves of the clipboard truth, on the one screen where the phrase is
+          shown once and cannot be re-shown — a refused copy, and a refused auto-clear that left
+          a 256-bit recovery secret sitting on the system clipboard. */}
+      {copyErr && <Msg kind="err">{CLIPBOARD_FAILED}</Msg>}
+      {wipeStuck && <Msg kind="err">{CLIPBOARD_NOT_CLEARED}</Msg>}
+      <Announcer text={wipeStuck ? CLIPBOARD_NOT_CLEARED : copyErr ? CLIPBOARD_FAILED : copied ? "recovery phrase copied" : ""} />
       <button type="button" className="primary" disabled={!matches} onClick={onConfirmed}>I've saved it — open my vault</button>
     </div>
   );
@@ -1292,56 +1377,48 @@ function RecoveryCaptureGate({
 
 // ---- helpers ----
 
-async function recoveryPubFromServer(client: ApiClient): Promise<Uint8Array> {
-  // The org recovery PUBLIC key (safe to serve). Its fingerprint is shown and
-  // confirmed against the printed sheet before the client seals escrow to it.
-  const resp = await fetch(client.baseUrl + "/api/v1/recovery-pubkey");
-  if (!resp.ok) throw new ApiError(resp.status, "no_recovery_pubkey", "recovery pubkey unavailable");
-  return fromB64((await resp.text()).trim());
-}
-
 function groupHex(hex: string): string {
   return hex.replace(/(.{4})/g, "$1 ").trim();
 }
 
-function enrollError(code: string): string {
+/**
+ * Every refusal `Service.register` can throw, in the wording core HouseholdCopy's `apiCopy`
+ * code map now carries — ONE table all five clients read (audit F26). Byte-equal to the Kotlin
+ * rows and pinned that way in enroll-errors.test.ts; do not reword one side.
+ *
+ * Two rows changed meaning when the table was promoted, and both mattered:
+ *  - `escrow_required` (the invite wants the admin backstop, this enrollment offered none —
+ *    the DEFAULT-path refusal when an invite is passed on as a bare token) had NO row here at
+ *    all and printed the raw wire code, because the sentence that fits it was keyed to…
+ *  - `recovery_required`, which is a different condition entirely: the server refuses because
+ *    the per-member recovery block was absent or malformed. Every client always sends one, so
+ *    that is an app fault, never something the user did.
+ */
+export function enrollError(code: string): string {
   switch (code) {
-    case "invalid_invite": return "That invite token is not valid.";
+    case "invalid_invite": return "That invite code is not valid.";
     // Benign double-use dominates (a second family device scanning the same QR) — nudge to
     // Sign in rather than alarming.
     case "invite_used": return "That invite has already been used. Already set up this account? Switch to Sign in.";
     case "invite_expired": return "That invite has expired.";
     case "email_taken": return "An account with that email already exists.";
     case "invite_email_mismatch": return "This invite was created for a different email address — ask your admin for a new invite.";
+    // A tampering signal (the sealed escrow would go to a key the printed sheet doesn't attest)
+    // — never softened into retry copy.
     case "escrow_fingerprint_mismatch": return "Recovery fingerprint mismatch — do not proceed; contact your admin.";
-    // design §F.4 register-gate refusals (posture ≠ invite): the client offered the wrong posture for
-    // this invite. The invitee can't fix it — the admin re-issues an invite matching the intended posture.
-    case "recovery_required": return "This invite needs the admin backstop set up — your admin should re-send it as an 'admin backstop' invite (or share the recovery sheet so you can confirm it).";
-    case "escrow_not_allowed_when_waived": return "This invite is set to 'member-only' (no admin backstop) — reload and enroll without the recovery-sheet step, or ask your admin for a new invite.";
+    // design §F.4 posture gate: the client offered the wrong posture for this invite. The
+    // invitee CAN fix the first two by switching the recovery-sheet step; the third is the
+    // admin's to clear.
+    case "escrow_required": return "This invite needs the admin backstop — set up with the recovery-sheet step (you'll need the printed sheet your admin gave you), or ask your admin for a member-only invite.";
+    case "escrow_not_allowed_when_waived": return "This invite is set to “member-only” (no admin backstop) — set up without the recovery-sheet step, or ask your admin for a new invite.";
+    case "escrow_not_configured": return "This server hasn't finished setting up the admin backstop — ask your admin to finish it, or to send you a member-only invite.";
+    case "recovery_required": return "andvari couldn't finish setting up your recovery phrase — start the setup again, and update andvari if it keeps happening.";
+    // Not a register refusal core curates — keep the code visible so it can be reported.
     default: return "Enrollment failed (" + code + ").";
   }
 }
 
-/**
- * F60 master-password hint (shared by enrollment + change-password): shows the live strength
- * label, whether it clears the floor, and a non-blocking non-ASCII caution (spec 01 §1). Purely
- * advisory — the actual gate lives in the forms' canSubmit + submit guards.
- */
-export function MasterPasswordHint({ password }: { password: string }) {
-  if (!password) return null;
-  const score = estimateStrength(password);
-  const ok = meetsMasterPasswordFloor(password);
-  const nonAscii = masterPasswordHasNonAscii(password);
-  return (
-    <>
-      <span className="muted" style={{ color: ok ? "var(--ok)" : "var(--danger)" }}>
-        strength: {STRENGTH_LABELS[score]}{ok ? " ✓" : " — needs at least “good”"}
-      </span>
-      {nonAscii && (
-        <span className="muted" style={{ display: "block", color: "var(--gold-text)" }}>
-          contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it
-        </span>
-      )}
-    </>
-  );
-}
+// The F60 master-password hint used to live here and Settings imported it from this file. It
+// moved to passwordadvice.tsx when F31's breach check + pattern caution had to reach Recover too:
+// Welcome imports Recover, so a hint defined HERE could never be shared with it, and Recover grew
+// a near-copy instead that then drifted. Three surfaces, one component, no import cycle.

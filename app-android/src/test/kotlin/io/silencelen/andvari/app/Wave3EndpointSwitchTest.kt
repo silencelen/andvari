@@ -1,6 +1,7 @@
 package io.silencelen.andvari.app
 
 import io.silencelen.andvari.core.client.EnrollLink
+import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.Tokens
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -190,6 +191,43 @@ class Wave3EndpointSwitchTest {
         val r = trustGateRender("https://$overlong")
         assertTrue(r.punycodeCaution, "still flagged international")
         assertFalse(r.displayOrigin.any { it.code > 0x7F }, "no raw non-ASCII glyph in the display, got ${r.displayOrigin}")
+    }
+
+    // ---- audit F27: a manual switch may not be destructive against an address we never reached ----
+
+    /**
+     * [commitManualSwitch] probes the target BEFORE [setBaseUrl] locks the vault and clears the
+     * persisted tokens. This is the pure verdict that decides whether the probe proved anything:
+     * the bar is transport-only, so a server that ANSWERED — even with a refusal, a 404 or a
+     * weakened-KDF policy — is a real endpoint and the switch proceeds (those are verdicts the
+     * user needs to see AT that origin). Only "we never reached it" keeps the old session.
+     */
+    @Test
+    fun onlyATransportFailureBlocksTheManualSwitchCommit() {
+        assertTrue(switchProbeReachable(null), "a successful probe commits")
+        assertTrue(switchProbeReachable(IllegalStateException("weird")), "an answered-but-odd probe still commits")
+        assertFalse(switchProbeReachable(java.io.IOException("connect timed out")))
+        // The F27 case itself: Android's network security config refuses a cleartext LAN host
+        // before a packet leaves, as an UnknownServiceException (an IOException).
+        assertFalse(switchProbeReachable(java.net.UnknownServiceException("CLEARTEXT communication to 192.168.1.9 not permitted")))
+    }
+
+    /**
+     * …and when it is blocked, the sentence must not be the generic transport one. "Check your
+     * connection (and your VPN, if your server is private)" is true for a timeout and false here:
+     * nothing was dialled, the OS refused, and no network fixing changes that. Everything else
+     * returns null so the surface's own mapper keeps deciding.
+     */
+    @Test
+    fun theCleartextRefusalGetsItsOwnSentence() {
+        assertEquals(
+            HouseholdCopy.CLEARTEXT_BLOCKED,
+            cleartextBlockedCopy(java.net.UnknownServiceException("CLEARTEXT communication not permitted")),
+        )
+        assertNull(cleartextBlockedCopy(java.io.IOException("connect timed out")))
+        assertNull(cleartextBlockedCopy(RuntimeException("boom")))
+        // And it is genuinely a different sentence — not a reworded UNREACHABLE.
+        assertTrue(HouseholdCopy.CLEARTEXT_BLOCKED != HouseholdCopy.UNREACHABLE)
     }
 
     // §4.3 B2-6: ONLY a launch-reconcile Finish gate's Cancel restores the reconcile prompt (store.baseUrl

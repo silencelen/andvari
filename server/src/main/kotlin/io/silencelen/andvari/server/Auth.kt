@@ -54,6 +54,36 @@ fun ApplicationCall.clientId(): ClientId {
 }
 
 /**
+ * A plausible build string: the semver alphabet (digits, letters, dot, plus, hyphen — enough for
+ * `0.21.0`, `1.2.3-rc.4+build.9`) and at most 32 chars. Anchored, so one stray character rejects
+ * the whole value rather than letting a prefix through.
+ */
+private val CLIENT_VERSION_RE = Regex("^[A-Za-z0-9.+-]{1,32}$")
+
+/**
+ * The build to stamp on the device row (F23 — `devices.clientVersion`, the Admin device list's
+ * "Client" column): the version half of X-Andvari-Client, or null when the caller declared none —
+ * or declared something that is not plausibly a build string.
+ *
+ * Deliberately NOT [ClientId.version]'s "0.0.0" fallback — that sentinel exists so
+ * [enforceMinVersion] treats an undeclared build as older than any pin, and persisting it would
+ * tell an admin "this device runs 0.0.0" when the truth is "this device never said". Null renders
+ * as "—", which is honest.
+ *
+ * VALIDATED against [CLIENT_VERSION_RE] because this is attacker-chosen text on an UNAUTHENTICATED
+ * route (register/login both stamp it) that is now PERSISTED and rendered in the Admin console
+ * (server review 2026-08-13). Unbounded, one caller could park a kilobyte of newlines or markup in
+ * the row an operator reads to decide a minVersion pin. Rejection returns null — "never said" —
+ * rather than a truncated value, so the column never shows a build no device is running; on refresh
+ * the COALESCE in issueSession's sibling UPDATE leaves the last GOOD version standing. The console
+ * escaping is unchanged and still the XSS boundary; this bounds what reaches the DB at all.
+ */
+fun ApplicationCall.declaredClientVersion(): String? {
+    if (request.header("X-Andvari-Client")?.contains('/') != true) return null
+    return clientId().version.takeIf { CLIENT_VERSION_RE.matches(it) }
+}
+
+/**
  * Client IP for rate keys + audit rows (spec 03 §8). Both front-ends (tailscale serve,
  * cloudflared) terminate TLS on loopback, so the raw peer address would collapse every
  * remote caller to 127.0.0.1. Forwarded-IP headers are trusted ONLY when the direct

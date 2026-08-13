@@ -32,9 +32,20 @@ downloadable copies of `docker-compose.yml`, `andvari.env.template`, and `bringu
      (spec 03 §8). The caddy overlay satisfies that by sharing the app container's
      network namespace; a proxy that reaches the container over the Docker bridge
      does not, and per-client IP granularity degrades accordingly.
-  3. **Plain http on a trusted LAN** (dev/home-lab only): choose an
-     `http://<private-ip>:8080` origin at bring-up; the app then binds `0.0.0.0`.
-     Clients will show a plain-http caution. Never expose this to the internet.
+  3. **Plain http on a trusted LAN — the desktop app only** (dev/home-lab): choose an
+     `http://<private-ip>:8080` origin at bring-up; the app then binds `0.0.0.0`. Know
+     what this costs before choosing it — **most clients cannot use such an instance
+     at all**: the **web vault refuses to start** at an `http://<private-ip>` address
+     (browsers expose `crypto.subtle`, which every andvari key derivation goes
+     through, only on a secure context — so it shows a terminal "andvari can't run on
+     this address" card instead of a sign-in that could only ever fail;
+     `http://localhost` on the host itself is a secure context and does work), the
+     **Android app refuses** cleartext to anything but `127.0.0.1`, and the **browser
+     extension** can only be granted host permission for `https://` origins (plus
+     `http://localhost`). The **desktop app** connects, with a plain-http caution. If
+     you want the web vault or your phone, take option 1 or 2 — any https front
+     (reverse proxy, `tailscale serve`, `cloudflared`) is enough, and it needs no
+     public exposure. Never expose plain http to the internet.
 - A **printer** (or pen and paper) for the recovery sheet the bring-up ceremony
   produces. This is not optional decoration — it is the only way back into a lost
   account.

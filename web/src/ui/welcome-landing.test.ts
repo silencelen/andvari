@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -191,6 +193,32 @@ describe("EnrollMismatchNotice — §4.4 reject-on-mismatch is TERMINAL and NON-
     const html = renderToStaticMarkup(createElement(EnrollMismatchNotice, { origin: FOREIGN })).toLowerCase();
     for (const word of ["continue", "switch", "connect to", "go to", "proceed"]) {
       expect(html).not.toContain(word);
+    }
+  });
+});
+
+/**
+ * Audit F15: the enrollment path hand-rolled `fetch(client.baseUrl + "/api/v1/recovery-pubkey")`
+ * for an endpoint ApiClient already owns (`client.recoveryPubkey()`, which the escrow re-seal path
+ * uses). The bare fetch skipped the X-Andvari-Client header every other call carries and threw
+ * away the server's real code, so a 426 from a min-version pin could never raise App's "reload to
+ * update" bar HERE — the enrollee got a generic failure with no way to self-serve, on the one
+ * path a brand-new member has to complete. One client, one call site per endpoint.
+ */
+describe("F15 — the client owns every API call", () => {
+  const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
+  const welcomeTsx = readFileSync(here("./Welcome.tsx"), "utf8");
+
+  it("enrollment fetches the recovery pubkey through ApiClient, still net()-wrapped", () => {
+    expect(welcomeTsx).toContain("await net(client.recoveryPubkey())");
+    expect(welcomeTsx).not.toContain("recoveryPubFromServer");
+    expect(welcomeTsx).not.toContain("/api/v1/recovery-pubkey");
+  });
+
+  it("no view file talks to /api directly — the header, 401 refresh and 426 handling all live in ApiClient", () => {
+    for (const file of ["Welcome.tsx", "Vault.tsx", "Admin.tsx", "Settings.tsx", "Sharing.tsx", "Health.tsx", "Recover.tsx", "ExportPanel.tsx"]) {
+      const src = readFileSync(here(`./${file}`), "utf8");
+      expect(src, `${file} must not hand-roll an /api fetch`).not.toMatch(/fetch\([^)]*\/api\//);
     }
   });
 });

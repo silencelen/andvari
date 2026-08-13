@@ -7,14 +7,15 @@ import { qrModules } from "../vendor/qrcode-generator";
 import { Account } from "../vault/account";
 import type { VaultStore } from "../vault/store";
 import { Busy } from "./Busy";
-import { writeClipboard } from "./clipboard";
+import { scheduleClipboardClear, writeClipboard } from "./clipboard";
 import { DevicesCard } from "./Devices";
-import { CLIPBOARD_FAILED, UNREACHABLE } from "./errors";
+import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
 import { QrSvg } from "./QrSvg";
-import { MasterPasswordHint } from "./Welcome";
+import { MasterPasswordHint } from "./passwordadvice";
+import { clampClipboardClearSeconds } from "./policyclamp";
 import {
   orgOfflineCacheDisallowed,
   refreshCachedAccountKeys,
@@ -394,29 +395,48 @@ function IdentityCard({ account }: { account: Account }) {
   );
 }
 
-/** One-shot clipboard copy with a transient "copied" flash — or the canon failure sentence
- *  (ux-error--2: writeText rejects on focus loss / permissions-policy; Vault useCopy's twin).
+/**
+ * One-shot clipboard copy with a transient "copied" flash — or the canon failure sentence
+ * (ux-error--2: writeText rejects on focus loss / permissions-policy; Vault useCopy's twin).
  *
- *  bug-web--5: the missing auto-clear is DELIBERATE, not an oversight — everything this button
- *  copies (the TOTP setup link/code, the identity code) is SETUP MATERIAL, not a vault secret,
- *  and wiping it out from under an authenticator app mid-enrollment would be user-hostile. The
- *  two Kotlin clients encode the same split explicitly (desktop Ui.kt "plain copy (no auto-clear
- *  — this is setup material, not a vault secret)"; Android reserves a ≤0 clear-window for exactly
- *  this class, "mirroring web"). Item passwords/PANs/CVVs go through Vault's useCopy instead,
- *  which DOES auto-clear on the §2.3-clamped policy window. Do not "fix" this into parity. */
-function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
+ * `clearSeconds` decides the clipboard CLASS, and the caller must decide it honestly (the Kotlin
+ * clients' SelectableCopyRow/CopySecretRow contract, stated the same way): 0 = genuinely
+ * non-secret material — no auto-clear; anything ≥1 = a secret, which arms the shared auto-clear
+ * slot on the §2.3-clamped policy window exactly like an item password.
+ *
+ * Audit F25: this button's KDoc used to assert that EVERYTHING it copies is "setup material, not
+ * a vault secret" and that the absent auto-clear was deliberate — while two of its three call
+ * sites were the account's TOTP `otpauth://` URI and its base32 seed, which ARE the account's
+ * second factor (the URI embeds the same seed). Anyone holding either mints valid codes for this
+ * account forever, and they sat on the system clipboard indefinitely while every item password
+ * was scrubbed. Setup material and second-factor seeds are not the same class; android and
+ * desktop reclassified their twins in the same audit. The identity code — a public fingerprint
+ * someone reads out loud to verify a share — is the one caller that really is non-secret and
+ * keeps the plain path.
+ */
+function CopyButton({ value, label = "Copy", clearSeconds = 0 }: { value: string; label?: string; clearSeconds?: number }) {
   const [flash, setFlash] = useState(false);
   const [failed, setFailed] = useState(false);
+  // Audit F05 idiom: the platform can REFUSE the wipe (an unfocused document is the common
+  // case), which leaves the seed on the clipboard — say so rather than let the copy stand as if
+  // it had been cleared. A retry is armed for the next focus (clipboard.ts).
+  const [wipeStuck, setWipeStuck] = useState(false);
   const copy = async () => {
     const ok = await writeClipboard(value);
     setFailed(!ok);
     setFlash(ok);
-    if (ok) window.setTimeout(() => setFlash(false), 1200);
+    if (!ok) return;
+    setWipeStuck(false);
+    window.setTimeout(() => setFlash(false), 1200);
+    if (clearSeconds > 0) {
+      scheduleClipboardClear(clampClipboardClearSeconds(clearSeconds), (outcome) => setWipeStuck(outcome === "stuck"));
+    }
   };
   return (
     <>
       <button type="button" className="ghost" onClick={() => void copy()}>{flash ? "Copied ✓" : label}</button>
       {failed && <Msg kind="err">{CLIPBOARD_FAILED}</Msg>}
+      {wipeStuck && <Msg kind="err">{CLIPBOARD_NOT_CLEARED}</Msg>}
     </>
   );
 }
@@ -433,6 +453,12 @@ function TotpCard({ client, policy }: Pick<Props, "client" | "policy">) {
 
   // Encode the otpauth URI once per fresh setup — NOT on every confirm-code keystroke.
   const otpModules = useMemo(() => (setup ? qrModules(setup.otpauthUri, "M") : null), [setup]);
+
+  // F25: the enrollment link and the setup code are the account's second factor, so they copy as
+  // vault-class — the §2.3-clamped policy window, same as an item password (clampClipboardClearSeconds
+  // is applied inside CopyButton too; clamped here as well so the sentence below states the real
+  // number a hostile policy value can't inflate).
+  const clipClear = clampClipboardClearSeconds(policy?.clipboardClearSeconds ?? 30);
 
   useEffect(() => {
     client.totpStatus().then(setStatus).catch(() => setErr("Couldn't check two-factor sign-in — reload to try again."));
@@ -542,16 +568,22 @@ function TotpCard({ client, policy }: Pick<Props, "client" | "policy">) {
             <label>Setup link (if you can't scan)</label>
             <div className="secret-row">
               <input readOnly className="mono" aria-label="Setup link (if you can't scan)" value={setup.otpauthUri} />
-              <CopyButton value={setup.otpauthUri} />
+              <CopyButton value={setup.otpauthUri} clearSeconds={clipClear} />
             </div>
           </div>
           <div className="field">
             <label>Setup code (to type into your app)</label>
             <div className="secret-row">
               <input readOnly className="mono" aria-label="Setup code (to type into your app)" value={setup.secretBase32} />
-              <CopyButton value={setup.secretBase32} />
+              <CopyButton value={setup.secretBase32} clearSeconds={clipClear} />
             </div>
           </div>
+          {/* F25: say it, because a cleared clipboard the user wasn't told about reads as a bug —
+              and because the value stays on screen, so the clear costs them nothing. */}
+          <p className="muted" style={{ marginTop: 0 }}>
+            Both of these are your second factor — copying one clears it from your clipboard again after {clipClear} seconds.
+            The values stay on this screen until you finish.
+          </p>
           <div className="field">
             <label>Code from your app</label>
             <div className="secret-row">
@@ -626,7 +658,10 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Pick<Props
       <Field label="Current master password">
         <input type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} />
       </Field>
-      <Field label="New master password" hint={<MasterPasswordHint password={next} />}>
+      {/* F31: same advisory pair as enrollment, on the other surface a master password is
+          CHOSEN. Warns only — a breached or pattern-weak choice never blocks the change (a
+          member locked out of changing their own password is the worse failure). */}
+      <Field label="New master password" hint={<MasterPasswordHint password={next} client={client} />}>
         <input type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} />
       </Field>
       <Field

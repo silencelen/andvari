@@ -38,12 +38,20 @@ export default defineConfig({
         // is re-downloaded (452 → 89 KiB per release; the cold-start total is unchanged).
         // Static, not dynamic import(): the crypto has to be present before the first unlock,
         // and the self-contained/CSP posture rules out anything CDN-shaped.
-        // NOT split out: pslData (~144 KiB). It is in no web bundle at all — psl.ts is its only
-        // importer and nothing in the app imports psl.ts (the eTLD+1 resolver is autofill-only,
-        // and the web client has no autofill), so naming it here only mints an empty chunk.
+        // psl: the vendored public-suffix snapshot (pslData.ts, ~144 KiB of string literal).
+        // This comment used to say the blob was in no web bundle at all, because psl.ts had no
+        // importer outside the tests. That stopped being true on 2026-08-12: the duplicate-entry
+        // checker keys clusters by registrable domain, so Vault → Health → duplicates → psl →
+        // pslData is a fully static chain into the ENTRY chunk (audit F13). It is the purest
+        // "never changes between releases" data in the tree riding the highest-churn chunk —
+        // exactly inverted from what this split is for. Measured with `npx vite build`
+        // 2026-08-13: entry 452.46 kB raw / 138.97 kB gzip before, 308.54 / 92.47 after, the
+        // snapshot now its own hash-stable 143.97 / 44.84 chunk. Cold-start bytes are unchanged;
+        // a polish release re-downloads ~92 kB gzip instead of ~139.
         manualChunks: {
           sodium: ["libsodium-wrappers-sumo"],
           react: ["react", "react-dom"],
+          psl: [fileURLToPath(new URL("./src/vault/pslData.ts", import.meta.url))],
         },
       },
     },

@@ -19,9 +19,23 @@ reference instance the shipped builds default to; it is not privileged in the pr
 | Client | Stack | Distribution |
 |---|---|---|
 | **Web** | TypeScript + React (Vite) — an independent implementation of the spec | served by every server at its own origin |
-| **Android** | Kotlin / Jetpack Compose, on `:core` | an APK you build and serve from your instance's `/downloads` (`ANDVARI_DOWNLOADS_DIR`) |
+| **Android** | Kotlin / Jetpack Compose, on `:core` | an APK you build, serve from your instance's `/downloads` (`ANDVARI_DOWNLOADS_DIR`) **and list in `/downloads/manifest.json`** |
 | **Desktop** | Compose for Desktop, on `:core` — `.msi` (Windows), `.deb` (Linux) | as above |
 | **Browser extension** | MV3, Chromium + Firefox, pure-JS `@noble` crypto (no WASM, no `eval`) | Chrome Web Store (unlisted) + a Mozilla-signed `.xpi` with a self-hosted update channel |
+
+Dropping a build into the downloads directory publishes nothing on its own: the file is
+served, but the clients' "get andvari on your other devices" hub reads
+`/downloads/manifest.json` and shows a platform as unpublished until that file names it.
+Each platform key — `android`, `windows`, `linux` — wants a `version` **and** a `url`;
+with either missing the row stays "isn't published yet". A same-origin path is fine (it
+inherits the page's scheme; only an http(s) result is ever rendered as a link). This is
+the phone-shaped half of audit F09: the `android` key did not exist at all before 0.21.0,
+so an APK served exactly as this table documented could never appear in any client.
+
+```jsonc
+{ "android": { "version": "0.21.0", "url": "/downloads/andvari-0.21.0.apk" },
+  "linux":   { "version": "0.21.0", "url": "/downloads/andvari_0.21.0_amd64.deb" } }
+```
 
 Two independent crypto implementations — Kotlin (`core/`) and TypeScript (`web/src/crypto`
 plus the extension's `extension/src/crypto.ts`) — are held in byte-lockstep by the shared

@@ -84,7 +84,7 @@ data class Tokens(val accessToken: String, val refreshToken: String)
  * (android versionName, desktop packageVersion) stay equal to it, so a release bump can't
  * skew across artifacts again (0.4.0 shipped with two modules still claiming 0.3.0).
  */
-const val ANDVARI_CLIENT_VERSION = "0.21.0"
+const val ANDVARI_CLIENT_VERSION = "0.22.0"
 
 /**
  * Kotlin API client (sibling of web/src/api/client.ts). Auto-refreshes the access
@@ -386,6 +386,23 @@ class AndvariApi(
         val resp = request("GET", "/api/v1/attachments/$attachmentId")
         if (!resp.status.isSuccess()) throw errorFrom(resp)
         return resp.body()
+    }
+
+    /**
+     * spec 03 §8 k-anonymity range relay — the ONLY way a client may reach the breach corpus
+     * (web's twin is `ApiClient.hibpRange`). [prefix] is the 5 hex characters of a locally
+     * computed SHA-1 and NOTHING else; the relay fetches upstream on the client's behalf, so the
+     * device's IP never touches the breach API. The response is the raw upstream format
+     * ("SUFFIX:COUNT" lines) for [io.silencelen.andvari.core.crypto.Hibp.countInRange] to match
+     * LOCALLY — the server is never told which suffix the caller wanted.
+     *
+     * Authenticated (the route is session-gated server-side), which is why the pre-session
+     * surfaces can't use it — see [Strength.breachCount]'s callers.
+     */
+    suspend fun hibpRange(prefix: String): String {
+        val resp = request("GET", "/api/v1/hibp/range/$prefix")
+        if (!resp.status.isSuccess()) throw errorFrom(resp)
+        return resp.bodyAsText()
     }
 
     // ---- server TOTP + password change ----

@@ -1,7 +1,7 @@
 package io.silencelen.andvari.app
 
+import io.silencelen.andvari.core.client.OriginCanon
 import java.io.File
-import java.security.MessageDigest
 
 /**
  * (origin, userId) namespacing for everything durable this app keeps per server — the vault
@@ -17,6 +17,11 @@ import java.security.MessageDigest
  * lowercase `scheme://host[:non-default port]` form — so the SAME instance reached through the
  * SAME URL always lands in the same namespace, and two fronts of one instance (tailnet vs
  * public) are DIFFERENT namespaces by design (§6.2's migration moves data between them).
+ *
+ * The canonicalization itself lives in core's [OriginCanon] (audit F37) — it used to be
+ * hand-copied here and in the desktop app under a comment declaring a "BYTE-PARITY CONTRACT",
+ * which is not a thing a comment can enforce over a key that names on-disk state. This object is
+ * now the android-local NAME for that one implementation, plus [dir], which is android's alone.
  */
 object OriginNamespace {
 
@@ -27,16 +32,7 @@ object OriginNamespace {
      * malformed persisted URL keeps mapping to one stable (garbage) namespace instead of
      * throwing on every store read.
      */
-    fun canonicalOrigin(url: String): String {
-        val trimmed = url.trim().trimEnd('/')
-        val uri = runCatching { java.net.URI(trimmed) }.getOrNull()
-        val scheme = uri?.scheme?.lowercase()
-        val host = uri?.host?.lowercase() // URI keeps IPv6 brackets ("[::1]") — fine, deterministic
-        if (scheme == null || host.isNullOrEmpty()) return trimmed.lowercase()
-        val port = uri.port // -1 when absent
-        val isDefault = (scheme == "https" && port == 443) || (scheme == "http" && port == 80)
-        return if (port == -1 || isDefault) "$scheme://$host" else "$scheme://$host:$port"
-    }
+    fun canonicalOrigin(url: String): String = OriginCanon.canonicalOrigin(url)
 
     /**
      * Strict validate + canonicalize a USER-TYPED server address for the manual switch (design §4.4;
@@ -46,24 +42,12 @@ object OriginNamespace {
      * offline-crackable authKey of the real master password (the B2-6 threat). REJECT anything that is
      * not a bare http(s) origin — any userinfo, any path beyond "/", any query/fragment — returning null
      * so the caller refuses it. On success returns the canonical `scheme://host[:port]` the gate shows
-     * AND dials. Mirrors the desktop [canonicalServerOrigin] + extension canonicalizeServerUrl.
+     * AND dials.
      */
-    fun canonicalServerOrigin(input: String): String? {
-        val trimmed = input.trim().trimEnd('/')
-        val uri = runCatching { java.net.URI(trimmed) }.getOrNull() ?: return null
-        val scheme = uri.scheme?.lowercase() ?: return null
-        if (scheme != "https" && scheme != "http") return null
-        if (uri.userInfo != null) return null // `user[:pass]@` — the phishing vector; refuse outright
-        val host = uri.host?.lowercase()
-        if (host.isNullOrEmpty()) return null
-        if (!uri.rawPath.isNullOrEmpty() && uri.rawPath != "/") return null // no path
-        if (uri.rawQuery != null || uri.rawFragment != null) return null // no query/fragment
-        val isDefault = (scheme == "https" && uri.port == 443) || (scheme == "http" && uri.port == 80)
-        return if (uri.port == -1 || isDefault) "$scheme://$host" else "$scheme://$host:${uri.port}"
-    }
+    fun canonicalServerOrigin(input: String): String? = OriginCanon.canonicalServerOrigin(input)
 
     /** `hex(sha256(canonical origin)).take(16)` — stable, path-safe, collision-negligible. */
-    fun originKey(url: String): String = sha256Hex16(canonicalOrigin(url))
+    fun originKey(url: String): String = OriginCanon.originKey(url)
 
     /**
      * The on-disk namespace directory: `<base>/ns/<originKey>/<userId>/`. Callers that WRITE
@@ -85,13 +69,5 @@ object OriginNamespace {
      * addressable by the scoped readers. Anything else (separators, dots, over-long, empty)
      * maps to a stable digest — never a traversal.
      */
-    fun pathSafe(raw: String): String =
-        if (SAFE_SEGMENT.matches(raw)) raw else sha256Hex16(raw)
-
-    private val SAFE_SEGMENT = Regex("[A-Za-z0-9_-]{1,64}")
-
-    private fun sha256Hex16(s: String): String =
-        MessageDigest.getInstance("SHA-256").digest(s.encodeToByteArray())
-            .joinToString("") { "%02x".format(it) }
-            .take(16)
+    fun pathSafe(raw: String): String = OriginCanon.pathSafe(raw)
 }

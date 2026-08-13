@@ -175,6 +175,48 @@ class OriginNamespaceTest {
         assertTrue(File(store.nsDir(b, "u1"), "account-keys.json").exists()) // §4.2: B survives
     }
 
+    /**
+     * Audit F35: token- and key-bearing files are CREATED owner-only, and their directories with
+     * them. The old shape wrote at the process umask and chmodded afterwards — a window a polling
+     * local process can win, since an `open()` that succeeds inside it keeps a readable fd
+     * regardless of the later chmod — and the containing `~/.andvari-desktop/` and its whole
+     * `ns/` subtree were plain `mkdirs()` (0755 under the usual umask), so another local user on
+     * a shared host could traverse to them at leisure.
+     *
+     * The DIRECTORY assertions are the load-bearing ones: the SQLite cache DB and its `-wal`/
+     * `-shm` siblings are opened by the driver, so their mode is never ours to set at create time.
+     */
+    @Test
+    fun tokenAndKeyFilesAreCreatedOwnerOnly() {
+        val posix = java.nio.file.FileSystems.getDefault().supportedFileAttributeViews().contains("posix")
+        if (!posix) return // Windows uses ACLs; the helper falls back to the best-effort path there
+        val home = File(root, "perms").also { it.mkdirs() }
+        val store = DesktopSessionStore(home)
+        store.baseUrl = "https://home.example"
+        store.save(DesktopSession("https://home.example", "u1", "a@b.c", "at", "rt"))
+        val key = originKey("https://home.example")
+        store.saveAccountKeys(
+            key, "u1",
+            io.silencelen.andvari.core.model.AccountKeys(
+                kdfSalt = "c2FsdA", kdfParams = io.silencelen.andvari.core.crypto.KdfParams(),
+                wrappedUvk = "d3JhcA", encryptedIdentitySeed = "c2VlZA", identityPub = "cHVi", escrowFingerprint = "ZnA",
+            ),
+        )
+        store.setPendingServer(PendingServer("https://b.example", null, 1L))
+
+        fun mode(f: File): String =
+            java.nio.file.attribute.PosixFilePermissions.toString(java.nio.file.Files.getPosixFilePermissions(f.toPath()))
+
+        for (name in listOf("session.json", "prefs.json", "pending-server.json")) {
+            assertEquals("rw-------", mode(File(home, name)), "$name must be created owner-only")
+        }
+        assertEquals("rw-------", mode(File(store.nsDir(key, "u1"), "account-keys.json")))
+        // …and every directory this store created on the way there, including the ns/ tree the
+        // cache DB will land in.
+        assertEquals("rwx------", mode(File(home, "ns")))
+        assertEquals("rwx------", mode(store.nsDir(key, "u1")))
+    }
+
     @Test
     fun perOriginPrefsAreIsolated() {
         val store = DesktopSessionStore(root)

@@ -24,8 +24,22 @@ object Escrow {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    /** Canonical bytes — built by string template to guarantee key order and no whitespace. */
+    /**
+     * Canonical bytes — built by string template to guarantee key order and no whitespace.
+     *
+     * [userId] is SERVER-SUPPLIED (it arrives on the session response), so the template is
+     * composed under the same precondition [Ad.join] applies to its own separator: a conforming
+     * id is a lowercase UUID and cannot contain `"` or `\`. Without it a hostile server could
+     * return `x","keyType":"canary` and choose the JSON STRUCTURE of the blob the enrolling
+     * client seals — no secret leaks (it is sealed to the org recovery public key the attacker
+     * does not hold), but the member's recovery blob decodes as the wrong keyType or not at all,
+     * and nobody finds out until the drill or the real recovery. Refusing to seal is the honest
+     * failure: an availability denial the server could mount anyway (spec 05 T1), surfaced now
+     * instead of at the worst possible moment.
+     */
     fun canonicalPayload(userId: String, keyType: String, keyBytes: ByteArray, crypto: CryptoProvider): ByteArray {
+        requireJsonSafe(userId, "escrow userId")
+        requireJsonSafe(keyType, "escrow keyType")
         val keyB64 = Bytes.toB64(keyBytes)
         val shaB64 = Bytes.toB64(crypto.sha256(keyBytes))
         return """{"v":1,"userId":"$userId","keyType":"$keyType","key":"$keyB64","sha256":"$shaB64"}"""
@@ -38,7 +52,18 @@ object Escrow {
     fun sealCanary(crypto: CryptoProvider, recoveryPub: ByteArray): ByteArray =
         crypto.sealTo(recoveryPub, canonicalPayload(CANARY_USER_ID, KEY_TYPE_CANARY, CANARY_KEY, crypto))
 
-    /** Open + self-validate (sha256 of key must match; spec 04 §3). */
+    /**
+     * Open + self-validate (sha256 of key must match; spec 04 §3).
+     *
+     * The sha256 self-check passes for a key of ANY length — it only proves the blob is
+     * internally consistent, not that it holds a usable key. So a `uvk` payload is additionally
+     * held to 32 bytes here: recovery-cli's `verify` already asserted it, but `recover` re-wraps
+     * whatever this returns as the victim's temporary `wrappedUvk`, and a short key would then
+     * reach libsodium through JNA at their next unlock — a native out-of-bounds read where the
+     * caller's error handling expects a [CryptoException]. The check belongs in the shared
+     * helper, not in one CLI subcommand (audit F32). The fixed-length `canary` (spec 04 §4) is
+     * covered by the same rule; anything else is a future key type and is left to its own caller.
+     */
     fun open(crypto: CryptoProvider, recoveryPub: ByteArray, recoveryPriv: ByteArray, sealed: ByteArray): EscrowPayload {
         val payload = json.decodeFromString<EscrowPayload>(
             crypto.sealOpen(recoveryPub, recoveryPriv, sealed).decodeToString(),
@@ -48,6 +73,9 @@ object Escrow {
         val expected = Bytes.toB64(crypto.sha256(keyBytes))
         if (!Bytes.ctEquals(expected.encodeToByteArray(), payload.sha256.encodeToByteArray())) {
             throw CryptoException("escrow payload self-check failed (sha256 mismatch)")
+        }
+        if (payload.keyType == KEY_TYPE_UVK || payload.keyType == KEY_TYPE_CANARY) {
+            if (keyBytes.size != 32) throw CryptoException("escrow ${payload.keyType} key is not 32 bytes")
         }
         return payload
     }

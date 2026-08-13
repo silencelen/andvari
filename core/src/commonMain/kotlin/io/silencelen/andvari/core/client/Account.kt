@@ -477,6 +477,13 @@ class Account private constructor(
         } else {
             Envelope.openB64(crypto, uvk, grant.wrappedVk, Ad.vk(grant.vaultId, userId))
         }
+        // The same 32-byte assertion [SharedGrant.open] makes on the sealed branch, on the
+        // wrapped one (audit F32). Nothing downstream re-checks: a wrong-length VK went into
+        // the key map and only surfaced at the next envelope operation, as an
+        // IllegalArgumentException from a `require` deep in the crypto provider — which
+        // SyncEngine's runCatching paths classify differently from a CryptoException, so the
+        // same broken grant produced two different verdicts depending on which branch minted it.
+        if (vk.size != 32) throw CryptoException("vault key for ${grant.vaultId} is not 32 bytes")
         vaultKeys[grant.vaultId] = vk
     }
 

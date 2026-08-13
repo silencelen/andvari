@@ -64,12 +64,16 @@ import kotlinx.io.IOException
  *    overlay, rendered inside ANOTHER app, may say "open andvari"),
  *  - [BAD_TOTP_CODE] (desktop wording, deliberately unifying android's shorter variant).
  *
- * Surface-specific copy stays at the surface: enrollment codes (`invalid_invite`,
- * `recovery_required`, `escrow_not_allowed_when_waived`, …) keep their per-client
- * phrasing (web `enrollError`, the desktop enroll sheet), and a lane may still map ITS
- * codes first and delegate the rest here (the desktop move flow's gesture exceptions do
- * this). Callers should keep catching [UpgradeRequiredException] for the blocking
- * platform-specific upgrade screen; the [UPGRADE_REQUIRED] sentence below is only the
+ * ENROLLMENT CODES ARE NO LONGER SURFACE-SPECIFIC (audit F26). They used to be — this KDoc
+ * said so — and the result was a three-way split where web and desktop each hand-wrote the
+ * table and android wrote none at all, so a family member whose invite QR was scanned twice
+ * got "try again, and update andvari if it keeps happening" on the phone (false on both
+ * counts) and a one-tap fix on the laptop. The ten [Service.register] refusal rows now live
+ * ONCE, in [apiCopy]'s code map below, and every client reads them; [forEnrollError] is the
+ * enroll surface's named seam. A lane may still map ITS OWN codes first and delegate the rest
+ * here (the desktop move flow's gesture exceptions do this) — what it may not do is re-write a
+ * row that already exists here. Callers should keep catching [UpgradeRequiredException] for the
+ * blocking platform-specific upgrade screen; the [UPGRADE_REQUIRED] sentence below is only the
  * honest inline fallback when a 426 reaches a generic error slot.
  */
 object HouseholdCopy {
@@ -167,6 +171,37 @@ object HouseholdCopy {
     /** NATIVE-PINNED: AutofillUnlockActivity's offline-with-no-cached-keys sentence. For
      *  that lane (it knows the cache state); [forUnlockError] itself maps IO → [UNREACHABLE]. */
     const val UNLOCK_OFFLINE_NO_KEYS = "Offline, and no saved keys — open andvari once while online."
+
+    /**
+     * ANDROID-ONLY (audit F27), for that lane the way [SESSION_EXPIRED_AUTOFILL] is: Android's
+     * network security config bans cleartext to everything but loopback, so OkHttp refuses a
+     * plain-`http://` LAN server with `java.net.UnknownServiceException` — an IOException, which
+     * the mappers below would otherwise read as [UNREACHABLE] ("check your connection… and your
+     * VPN"). That sent self-hosters debugging a network that was never dialled, while the SAME
+     * address works on desktop (the ktor Java engine has no such policy). The refusal is the
+     * PLATFORM's, permanent, and fixable only one way, so it says exactly that. Mapped by the
+     * android surface (AndvariViewModel's `cleartextBlockedCopy`); desktop must NOT use it —
+     * UNREACHABLE is the truth there.
+     */
+    const val CLEARTEXT_BLOCKED = "Android blocks unencrypted http:// connections to other devices — put your server behind https (a reverse proxy, or Tailscale Serve), then try again."
+
+    // ---- vault-lifecycle disclosure (not an error: a limitation the user must hear BEFORE it bites) ----
+
+    /**
+     * TWIN of web Vault.tsx's Trash header sentence. Delete is irreversible for ATTACHMENTS
+     * only, and normatively so (spec 02 §7): the server nulls the blob and unlinks the files
+     * at delete time, and both the web store and core [SyncEngine] drop the refs on restore —
+     * so a restored item comes back without its files, forever.
+     * Every client framed the 30-day trash as fully reversible and said nothing about this
+     * (audit F04); the disclosure had existed once, in the 0.6.0 user-test guide, and was lost.
+     * Both moments that matter carry it — the delete confirm, when the item still HAS
+     * attachments, and the Trash header — but only the Trash header is byte-equal on all three
+     * clients. Web's delete confirm renders a COUNT-bearing variant instead ("Its 3 attached
+     * files cannot be restored, even from Deleted items.", Vault.tsx), because there the file
+     * count is already on screen; the natives append this constant verbatim. Pin the header
+     * wording across clients, not the confirm's.
+     */
+    const val TRASH_RESTORE_NO_ATTACHMENTS = "Restoring brings the item back, but not its attachments — those were permanently removed when the item was deleted."
 
     // ---- lifecycle-notice copy (spec 03 §11) ----
 
@@ -311,6 +346,20 @@ object HouseholdCopy {
      */
     fun forTotpError(t: Throwable): String = forError(t)
 
+    /**
+     * Enrollment (invite → register). Every refusal `Service.register` can throw has a curated
+     * row in [apiCopy]'s code map below, so this mapper is thin on purpose: its ONE job is the
+     * H1 context — an enroll is a credential ceremony, so a weakened-KDF push reads with the
+     * sign-in wording ([WEAK_KDF_SIGN_IN]), not the neutral [WEAK_KDF_ACTION].
+     *
+     * The register-gate rows are asserted COMPLETE against the server source by
+     * `RegisterRefusalCoverageTest` — a new BadRequest in `register` fails that test rather
+     * than shipping as "The server couldn't accept that request", which is what android showed
+     * for every one of them before F26.
+     */
+    fun forEnrollError(t: Throwable): String =
+        if (t is KdfPolicyViolationException) WEAK_KDF_SIGN_IN else forError(t)
+
     // ---- internals ----
 
     /**
@@ -332,6 +381,40 @@ object HouseholdCopy {
         "not_a_member" -> "They have to be a member of this vault first."
         "user_inactive" -> "That account has been disabled — ask your admin to re-enable it first."
         "not_vault_owner" -> "Only the vault's owner can do that."
+        // Enrollment / invite (§F.4, every BadRequest `Service.register` throws — audit F26).
+        // Promoted byte-equal from web `enrollError` + the desktop enroll sheet wherever those two
+        // already agreed, so adopting this table is a zero-copy-diff swap on both. The two that
+        // did NOT agree are resolved here, once:
+        //  - `invalid_invite` takes desktop's "code" over web's "token" — the field a household
+        //    member types into is labelled "Invite code or link" on every client; "token" is the
+        //    wire's word for it, not theirs.
+        //  - `escrow_not_allowed_when_waived` drops web's "reload and" (a browser-only gesture:
+        //    the natives toggle the step in place) and keeps curly quotes, the canon's house style.
+        "invalid_invite" -> "That invite code is not valid."
+        // Benign double-use dominates (a second family device scanning the same QR) — nudge to
+        // Sign in rather than alarming.
+        "invite_used" -> "That invite has already been used. Already set up this account? Switch to Sign in."
+        "invite_expired" -> "That invite has expired."
+        "invite_email_mismatch" -> "This invite was created for a different email address — ask your admin for a new invite."
+        "email_taken" -> "An account with that email already exists."
+        // §F.4 posture gate. `escrow_required` = the invite wants the admin backstop but this
+        // enrollment offered none (the waived posture — where an invite is passed on as a bare
+        // token, `enrollPosture` defaults to waived, so this is the DEFAULT-path refusal, not an
+        // exotic one). It had no curated row on ANY client: web printed the raw wire code and
+        // desktop fell through to the generic 400, because the sentence that fits it was keyed to
+        // `recovery_required` — a different condition entirely (see its row below).
+        "escrow_required" -> "This invite needs the admin backstop — set up with the recovery-sheet step (you'll need the printed sheet your admin gave you), or ask your admin for a member-only invite."
+        "escrow_not_allowed_when_waived" -> "This invite is set to “member-only” (no admin backstop) — set up without the recovery-sheet step, or ask your admin for a new invite."
+        // The org has no recovery key configured at all, so no invite of this posture can be
+        // completed by anyone. Only the admin can clear it.
+        "escrow_not_configured" -> "This server hasn't finished setting up the admin backstop — ask your admin to finish it, or to send you a member-only invite."
+        // A tampering signal (the sealed escrow would go to a key the printed sheet doesn't
+        // attest) — never softened into retry copy, exactly like [IDENTITY_MISMATCH].
+        "escrow_fingerprint_mismatch" -> "Recovery fingerprint mismatch — do not proceed; contact your admin."
+        // NOT the posture gate (that is `escrow_required` above): the server refuses because the
+        // per-member recovery block was absent or malformed. Every client always sends one, so
+        // this is an app fault, never something the user did — say so without blaming them.
+        "recovery_required" -> "andvari couldn't finish setting up your recovery phrase — start the setup again, and update andvari if it keeps happening."
         // Named specifics.
         "bad_totp_code" -> BAD_TOTP_CODE
         "recovery_piece_stale" -> "Your recovery phrase was replaced from another device — set up recovery again from Settings."

@@ -10,11 +10,14 @@ import {
   type AttachmentSection,
   BackupError,
   type BackupPayload,
+  CSV_FORMULA_WARNING,
+  MAX_SECTIONS,
   buildBackup,
   buildBackupWithPayloadBytes,
   csvWarnings,
   decodeBackupPayload,
   openBackup,
+  startsWithFormulaChar,
   writeCsv,
 } from "./export";
 
@@ -188,6 +191,56 @@ describe("backup round-trip (own impl — random params + attachment sections)",
       /manifest lists 1 attachments/,
     );
   });
+
+  /**
+   * Audit F34: the §2.2 ladder bounded file size, header size and KDF cost but NOT the number
+   * of sections — and a zero-length section advances the cursor by only its 8 length bytes, so
+   * a file of zeroes framed one section per 8 bytes into the heap before Argon2 (the cost gate
+   * that is supposed to make a hostile file expensive) ever ran. Twin of core ExportTest's
+   * ladder_sectionCountCeiling / build_refusesMoreSectionsThanOpenAccepts.
+   */
+  it("bounds the SECTION COUNT before any crypto, and never writes past it", async () => {
+    const header = utf8(
+      JSON.stringify({
+        format: "andvari-backup",
+        v: 1,
+        fileId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        kdfSalt: toB64(new Uint8Array(16)),
+        kdfParams: { v: 1, alg: "argon2id13", opsLimit: 1, memBytes: 8192 },
+      }),
+    );
+    const headerLen = new Uint8Array(4);
+    new DataView(headerLen.buffer).setUint32(0, header.length, true);
+    const rawContainer = (sectionLengths: number[]) =>
+      concat(
+        utf8("ANDVBK01"),
+        headerLen,
+        header,
+        ...sectionLengths.flatMap((len) => {
+          const framed = new Uint8Array(8);
+          new DataView(framed.buffer).setBigUint64(0, BigInt(len), true);
+          return [framed, new Uint8Array(len)];
+        }),
+      );
+
+    // One over the ceiling: rejected in the framing loop, for the cost of the loop.
+    await expect(openBackup(PASS, rawContainer(new Array(MAX_SECTIONS + 1).fill(0)))).rejects.toMatchObject({
+      code: "truncated",
+    });
+    // The boundary is not off by one: exactly MAX_SECTIONS frames fine and dies at the AEAD,
+    // which is where a well-framed but unopenable file is supposed to die.
+    await expect(openBackup(PASS, rawContainer(new Array(MAX_SECTIONS).fill(64)))).rejects.toMatchObject({
+      code: "wrong_passphrase_or_corrupt",
+    });
+
+    // …and we never WRITE a file our own openBackup would refuse.
+    const tooMany: AttachmentSection[] = new Array(MAX_SECTIONS)
+      .fill(0)
+      .map(() => ({ fileKey: new Uint8Array(32), plaintext: () => new Uint8Array(0) }));
+    await expect(
+      buildBackupWithPayloadBytes(PASS, crypto.randomUUID(), randomBytes(16), KDF, utf8("{}"), tooMany),
+    ).rejects.toThrow(/at most 4095 attachment sections/);
+  });
 });
 
 describe("csvWarnings (spec 07 §1 — by NAME, independent categories)", () => {
@@ -210,6 +263,50 @@ describe("csvWarnings (spec 07 §1 — by NAME, independent categories)", () => 
     expect(w.withAttachments).toEqual(["Extra"]);
     expect(w.extraUris).toEqual(["Extra"]);
     expect(w.emptyUsernameAndPassword).toEqual(["EmptyBoth", "NoLoginBlock"]);
+    expect(w.formulaRisk).toEqual([]);
+  });
+
+  /**
+   * Audit F08: the writer deliberately does NOT mangle a leading `=+-@` (mangling would corrupt
+   * real secrets, and Chrome/Bitwarden/KeePass don't either) — that decision was signed off
+   * CONDITIONAL on a warning, and the warning was never built. This is it. Twin of core
+   * ExportTest's csv_warnings_formulaRisk_namesTheRowsASpreadsheetWouldEvaluate.
+   */
+  it("names the rows a spreadsheet would evaluate (formulaRisk)", () => {
+    const docs = [
+      { type: "login", name: "=HYPERLINK name", login: { username: "u", password: "p" } },
+      { type: "login", name: "Plus user", login: { username: "+15551234567", password: "p" } },
+      { type: "login", name: "At url", login: { username: "u", password: "p", uris: ["@evil.test"] } },
+      { type: "login", name: "Minus note", notes: "-1+2", login: { username: "u", password: "p" } },
+      { type: "login", name: "Leading space", login: { username: " =1+1", password: "p" } },
+      // A note is never WRITTEN to the CSV, so a formula in one cannot evaluate there.
+      { type: "note", name: "=NoteName", notes: "=1+1" },
+      // The password column is deliberately out of scope: a generated password that starts
+      // with `-` is ordinary, and a list that fires on most exports is ignored.
+      { type: "login", name: "Dash password", login: { username: "u", password: "-Xk7#mQ2" } },
+      { type: "login", name: "Fine", login: { username: "u", password: "p", uris: ["https://c.test"] } },
+    ] as unknown as ItemDoc[];
+    expect(csvWarnings(docs).formulaRisk).toEqual([
+      "=HYPERLINK name",
+      "Plus user",
+      "At url",
+      "Minus note",
+      "Leading space",
+    ]);
+    expect(csvWarnings(docs).noteItems).toEqual(["=NoteName"]);
+    // The copy is a byte-twin of core ExportCsv.FORMULA_WARNING, and it ends in a colon so
+    // the panel appends the names like every other category.
+    expect(CSV_FORMULA_WARNING.endsWith(":")).toBe(true);
+    expect(CSV_FORMULA_WARNING).toContain("text editor");
+  });
+
+  it("startsWithFormulaChar matches what a spreadsheet parses", () => {
+    for (const value of ["=1+1", "+1", "-1", "@SUM(A1)", "\tcmd", "\rcmd", " =1+1", "\uFEFF=1+1", "  \n@x"]) {
+      expect(startsWithFormulaChar(value), value).toBe(true);
+    }
+    for (const value of ["", "https://a.test", "user@example.com", "a-b", "1+1", "Visa (=old)"]) {
+      expect(startsWithFormulaChar(value), value).toBe(false);
+    }
   });
 
   it("cards split out of noteItems; notes keep their list; the writer stays logins-only", () => {

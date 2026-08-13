@@ -484,10 +484,16 @@ fun Application.andvariModule(services: Services) {
             call.respond(service.prelogin(req.email))
         }
         post("/api/v1/auth/register") {
+            // F22: the last anonymous POST without a bucket. It yields no credential (the invite is
+            // 256-bit and checked before any argon2 work), but it deserializes a TIGHT-capped body and
+            // opens a write tx on the ONE SQLite connection the whole process serializes on — cheap
+            // requests converted into contention on every authenticated sync. Same 5/min per-IP shape
+            // as its login/recovery siblings; a household enrolls devices, not floods.
+            if (!limiter.allow("register:${call.clientIp(config)}", 5, 60_000)) throw RateLimited()
             enforceVersion(call, service)
             if (call.isPublicOrigin(config)) throw Forbidden("register_public_disabled")
             val req = call.receive<RegisterRequest>()
-            call.respond(service.register(req, call.clientIp(config)))
+            call.respond(service.register(req, call.clientIp(config), call.declaredClientVersion()))
         }
         post("/api/v1/auth/login") {
             val publicOrigin = call.isPublicOrigin(config)
@@ -498,13 +504,17 @@ fun Application.andvariModule(services: Services) {
             if (!limiter.allow("login:${call.clientIp(config)}", config.loginRatePerMin, 60_000)) throw RateLimited()
             enforceVersion(call, service)
             val req = call.receive<LoginRequest>()
-            call.respond(service.login(req, call.clientIp(config), publicOrigin))
+            call.respond(service.login(req, call.clientIp(config), publicOrigin, call.declaredClientVersion()))
         }
         post("/api/v1/auth/refresh") {
             // spec 03 §8: no refresh via the public origin — break-glass sessions re-login (with TOTP).
             if (call.isPublicOrigin(config)) throw Forbidden("public_refresh_disabled")
+            // F22: per-IP like its siblings, but with headroom — a multi-device household waking at
+            // once (or a fleet whose access tokens expire together) legitimately bursts here, and a
+            // refresh token is a 256-bit secret, so this bounds resource use, not guessing.
+            if (!limiter.allow("refresh:${call.clientIp(config)}", 30, 60_000)) throw RateLimited()
             val req = call.receive<RefreshRequest>()
-            call.respond(service.refresh(req.refreshToken, call.clientIp(config)))
+            call.respond(service.refresh(req.refreshToken, call.clientIp(config), call.declaredClientVersion()))
         }
         post("/api/v1/auth/logout") {
             val p = requirePrincipal(call, service)
@@ -534,8 +544,34 @@ fun Application.andvariModule(services: Services) {
             val p = requirePrincipal(call, service)
             call.respond(service.totpStatus(p.userId))
         }
+        // F02: the routes below verify 6-digit codes, so each carries an anti-automation bucket —
+        // per-user, not per-IP, like password_change: the caller is already authenticated. Without
+        // them a HIJACKED session could loop /setup with guessed current codes until it rotated the
+        // second factor onto a secret it holds — durable break-glass access on a public instance.
+        // Service audits every miss (totp_verify_fail) so the attempt is visible in GET /admin/audit,
+        // not just refused.
+        //
+        // The keys are cut by WHICH SECRET a call checks, not by which route it is (server review
+        // 2026-08-13) — one key per route gave the LIVE factor 10 guesses/min across two independent
+        // 5/min buckets, twice the budget the finding asked for:
+        //   totp_verify:<userId>  — the live ENROLLED secret. /disable always checks it; /setup
+        //                           checks it too when the account is enrolled (the rotation gate).
+        //                           ONE budget across both, so the live factor really faces 5/min.
+        //   totp_setup:<userId>   — a FIRST enrollment, which verifies nothing (it only stages a
+        //                           server-generated pending secret). Separate so an exhausted
+        //                           live-secret budget can't block initial enrollment and vice versa.
+        //   totp_confirm:<userId> — the PENDING secret, which the server just handed this caller, so
+        //                           guessing it buys nothing. Its own key keeps a rotation that is
+        //                           already staged finishable even in a minute when the live-secret
+        //                           budget is spent.
+        // Login's TOTP check is deliberately outside these: it is pre-auth (no userId yet) and is
+        // covered by the per-IP login bucket plus the email-keyed backoff (design 2026-07-15 §2.5).
         post("/api/v1/account/totp/setup") {
             val p = requirePrincipal(call, service)
+            // Enrolled ⇒ this call is a rotation and will verify the LIVE secret below, so it draws
+            // on the shared verify budget; not enrolled ⇒ there is no secret to guess yet.
+            val setupKey = if (service.totpStatus(p.userId).enrolled) "totp_verify:${p.userId}" else "totp_setup:${p.userId}"
+            if (!limiter.allow(setupKey, 5, 60_000)) throw RateLimited()
             // Additive OPTIONAL body (bug-server--0): an ENROLLED account must present its current
             // code to stage a rotation (Service gates it — 400 totp_code_required when enrolled and
             // absent); a fresh enrollment sends no body, exactly the fielded wire shape. Body parse
@@ -545,15 +581,18 @@ fun Application.andvariModule(services: Services) {
             val code = if (text.isBlank()) null else runCatching {
                 json.decodeFromString(TotpCodeRequest.serializer(), text).code
             }.getOrElse { throw BadRequest("bad_request") }
-            call.respond(service.totpSetup(p.userId, code))
+            call.respond(service.totpSetup(p.userId, code, call.clientIp(config)))
         }
         post("/api/v1/account/totp/confirm") {
             val p = requirePrincipal(call, service)
+            if (!limiter.allow("totp_confirm:${p.userId}", 5, 60_000)) throw RateLimited()
             service.totpConfirm(p.userId, call.receive<TotpCodeRequest>().code, call.clientIp(config))
             call.respond(service.totpStatus(p.userId))
         }
         post("/api/v1/account/totp/disable") {
             val p = requirePrincipal(call, service)
+            // Always a live-secret check ⇒ always the shared verify budget (see the note above).
+            if (!limiter.allow("totp_verify:${p.userId}", 5, 60_000)) throw RateLimited()
             service.totpDisable(p.userId, call.receive<TotpCodeRequest>().code, call.clientIp(config))
             call.respond(service.totpStatus(p.userId))
         }
@@ -754,6 +793,14 @@ fun Application.andvariModule(services: Services) {
         put("/api/v1/escrow/self") {
             val p = requirePrincipal(call, service)
             val body = call.receive<io.silencelen.andvari.core.model.EscrowUpload>()
+            // F19: the §F.4 escrow-polarity gate is TOTAL over BOTH ingestion points, not just
+            // register. Without this the second one leaked: a member enrolled under a `waived`
+            // invite — an account the design guarantees has NO admin backstop — could PUT one blob
+            // carrying the publicly-served org fingerprint and give itself an escrow row, so the
+            // Admin console read "admin backstop" over a users.escrowPolicy still saying `waived`
+            // and an operator auditing recovery coverage saw a backstop nobody can open.
+            if (!config.escrowConfigured) throw ServiceUnavailable("escrow_not_configured")
+            if (services.repo.escrowWaived(p.userId)) throw BadRequest("escrow_not_allowed_when_waived")
             if (body.fingerprint != config.recoveryFingerprint) throw BadRequest("escrow_fingerprint_mismatch")
             requireEscrowBlob(body.sealed)
             services.repo.db.tx { c ->

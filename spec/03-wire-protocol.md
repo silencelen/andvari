@@ -379,21 +379,34 @@ strips them degrades every client to the poll path (correct, just slower).
   900 s applies uniformly, reset on success. `/client-policy` carries a per-IP bucket
   (~60/min, §1.1). Per-account keys also exist on vault-create, user-lookup and the
   §11 lifecycle buckets (`vault_destructive`/`vault_recovery`). On the **opt-in
-  break-glass twin origin** (CF-Connecting-IP present + configured
-  `ANDVARI_PUBLIC_HOSTNAME`, exact-host match) TOTP is required and register/refresh
-  are hard-disabled (`403 register_public_disabled` / `public_refresh_disabled` — no
-  policy flag enables them; break-glass sessions re-login with TOTP instead of
-  refreshing). The `/recovery/self/*` routes (§12) keep their unconditional **per-IP
-  5/min** and gain the same email-keyed backoff (capped 900 s ⇒ a targeted account's
-  recovery can be delayed, never locked out — spec 05 R9/R12); they stay
-  **hard-refused on the break-glass twin origin** (`403`) but are internet-reachable
-  on single-origin instances (posture: spec 05 R10).
-- Client IP (rate keys + audit rows): derived from `CF-Connecting-IP`, else the
-  **rightmost** `X-Forwarded-For` entry, **only when the direct TCP peer is
-  loopback** (both front-ends terminate there). Any other peer uses the socket
-  address and forwarded headers are ignored entirely (spoof-proof). The trusted
-  header list is operator-configurable (`ANDVARI_TRUSTED_IP_HEADERS`); `/metrics`
-  never trusts forwarded headers.
+  break-glass twin origin** (the request `Host` header — minus any `:port` and trailing
+  FQDN root dot — equal, case-insensitively, to the configured `ANDVARI_PUBLIC_HOSTNAME`;
+  **exact equality only, no forwarded-header condition**, and unset ⇒ never public) TOTP
+  is required and register/refresh are hard-disabled (`403 register_public_disabled` /
+  `public_refresh_disabled` — no policy flag enables them; break-glass sessions re-login
+  with TOTP instead of refreshing). The `/recovery/self/*` routes (§12) keep their unconditional **per-IP
+  5/min fixed window and NOTHING else — deliberately NO per-account/email-keyed
+  backoff** (§F.8: a per-account counter on the last-resort recovery path *is* a targeted
+  lockout of the victim; the recovery secret is 256-bit CSPRNG, so per-IP alone already
+  puts online guessing out of reach — review 2026-07-16 D1, which corrects the design
+  §2.5.3/B1-6 amendment that had copied login's backoff here). §F.5's uniform 401 across
+  unknown-email / no-row / wrong-secret is what keeps the route from being an account
+  oracle instead. They stay **hard-refused on the break-glass twin origin** (`403`) but
+  are internet-reachable on single-origin instances (posture: spec 05 R10, T11).
+- Client IP (rate keys + audit rows): the **rightmost** `X-Forwarded-For` entry — the
+  **sole default trusted header** — and **only when the direct TCP peer is loopback**
+  (a supported front-end terminates there). Any other peer uses the socket address and
+  forwarded headers are ignored entirely (spoof-proof). `CF-Connecting-IP` is
+  **deliberately NOT trusted by default**: only a genuine Cloudflare tunnel sets it,
+  whereas other front-ends (plain reverse proxies, mesh/tunnel fronts) leave it unset and
+  pass a *client-supplied* one straight through — making it forgeable on those paths, so a
+  client could rotate its own rate-limit key per request and poison audit `ip` (spec 05
+  T11). `X-Forwarded-For` has no such hole: probed 2026-07-13, the supported front-ends
+  each put the real client in the **rightmost** entry (overwriting or appending a
+  client-sent header, never trusting it), which is exactly the entry taken. An
+  all-Cloudflare deployment MAY re-add `CF-Connecting-IP` through the operator-configurable
+  `ANDVARI_TRUSTED_IP_HEADERS`; a deployment that is not all-Cloudflare MUST NOT.
+  `/metrics` never trusts forwarded headers.
 - Errors: `{ "error": "<machine_code>", "message": "<human>" }`; 401 uniform for
   auth, 403 role, 404 hidden-as-403 for cross-tenant probes, 409 never used for sync
   (conflicts are 200-with-status), 410 resync, 413 attachment/user/item quota,
@@ -544,10 +557,11 @@ exposes no enumeration oracle, and binds the reset to one replay-bound ticket. *
 routes (verify, commit, self-setup, self-confirm) are refused on the break-glass twin origin** (`403`, same guard as
 register — the twin origin is opt-in; on a single-origin instance, the default since
 the 2026-07-15 pivot, these routes are internet-reachable: spec 05 R10) and
-**per-IP fixed-window rate-limited** at ≥ public-login tightness plus the §8
-email-keyed backoff (capped 900 s → a targeted account's recovery can be delayed but
-never locked out, spec 05 R9/R12; the recovery secret's ≥128-bit entropy and the
-constant-time verify comparison are build-time-confirmed). No
+**per-IP fixed-window rate-limited** at ≥ public-login tightness — and **that is the whole
+limiter: no per-account/email-keyed backoff applies here** (§8, §F.8 — an account-keyed
+counter would let anyone lock a victim out of last-resort recovery; the recovery secret's
+≥128-bit entropy and the constant-time verify comparison are build-time-confirmed, and
+spec 05 T11/R9 records the same asymmetry against login). No
 `/recovery/prelogin` exists: the recovery secret is high-entropy and its derivation is
 HKDF-only with no server salt/params (spec 01 §2.1), so there is nothing to fetch before
 phase 1 — hence no recovery-side prelogin oracle to equalize.

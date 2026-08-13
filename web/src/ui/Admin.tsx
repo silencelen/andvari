@@ -10,7 +10,8 @@ import type {
 } from "../api/types";
 import { composeEnrollLink } from "../enroll/enrolllink";
 import { Busy } from "./Busy";
-import { UNREACHABLE } from "./errors";
+import { writeClipboard } from "./clipboard";
+import { CLIPBOARD_FAILED, UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
@@ -405,6 +406,7 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
   const [resultLink, setResultLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false); // audit F05: the guarded write said no
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [sendEmail, setSendEmail] = useState(false);
@@ -483,8 +485,17 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
     await mint();
   };
 
+  // Audit F05: this wrote raw. `writeText` REJECTS whenever the document isn't focused — the
+  // dominant flow here being copy → alt-tab → paste into a message to the new member — and the
+  // rejection took the "Copied ✓" flag with it, so the admin pasted whatever was on the clipboard
+  // BEFORE, believing they had sent the token. Guarded write + the canon failure sentence, the
+  // way Settings' CopyButton and Vault's useCopy already do it. No auto-clear: an invite token
+  // and its enrollment link are setup material being handed over, not a vault secret (the
+  // deliberate split documented at Settings' CopyButton).
   const copy = async (value: string, link: boolean) => {
-    await navigator.clipboard.writeText(value);
+    const ok = await writeClipboard(value);
+    setCopyFailed(!ok);
+    if (!ok) return;
     (link ? setCopiedLink : setCopied)(true);
     window.setTimeout(() => (link ? setCopiedLink : setCopied)(false), 1200);
   };
@@ -575,10 +586,16 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
               ? " — this member will also confirm your recovery fingerprint at signup."
               : " — this member can only be recovered with their own recovery phrase; there is no admin backstop."}
           </div>
+          {/* BL-2 / audit F10: a .secret-row is multi-child, so a <label> can't associate via
+              Field — the inner input carries the name. Without it an admin heard two unlabeled
+              read-only boxes and could not tell the one-time TOKEN from the enrollment LINK. */}
           <div className="secret-row">
-            <input readOnly className="mono token" value={result.inviteToken} onFocus={(e) => e.target.select()} />
+            <input readOnly aria-label="One-time invite token" className="mono token" value={result.inviteToken} onFocus={(e) => e.target.select()} />
             <button type="button" className="ghost" onClick={() => void copy(result.inviteToken, false)}>{copied ? "Copied ✓" : "Copy"}</button>
           </div>
+          {/* Audit F05: the visible half of the guarded write — the same canon sentence every
+              other copy surface shows. Placed under both rows so either failure is seen. */}
+          {copyFailed && <Msg kind="err">{CLIPBOARD_FAILED}</Msg>}
           {view === "compose-note" && (
             <div className="muted" style={{ marginTop: 8 }}>
               Couldn't encode a QR link for this address — hand over the token above instead.
@@ -592,7 +609,7 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
                 <div className="msg info" style={{ display: "block" }}>QR too dense to render — use the link below instead.</div>
               )}
               <div className="secret-row" style={{ marginTop: 8 }}>
-                <input readOnly className="mono token" value={resultLink} onFocus={(e) => e.target.select()} />
+                <input readOnly aria-label="Enrollment link" className="mono token" value={resultLink} onFocus={(e) => e.target.select()} />
                 <button type="button" className="ghost" onClick={() => void copy(resultLink, true)}>{copiedLink ? "Copied ✓" : "Copy link"}</button>
               </div>
               <div className="muted" style={{ marginTop: 8 }}>
@@ -754,7 +771,9 @@ function PolicyTab({ client }: { client: ApiClient }) {
       {/* BL-1: "Policy saved" is async info → persistent region. */}
       <Announcer text={msg} />
 
-      <label style={{ marginBottom: 8 }}>Minimum client versions</label>
+      {/* Audit F10: heads three Fields — it names no control of its own, so it is a heading,
+          not a <label> (same paint via .field-head). */}
+      <div className="field-head" style={{ marginBottom: 8 }}>Minimum client versions</div>
       <div className="row">
         {(["android", "windows", "web"] as const).map((p) => (
           <Field label={p} style={{ flex: 1 }} key={p}>

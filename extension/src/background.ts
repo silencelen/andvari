@@ -134,12 +134,31 @@ const CARD_BADGE_TEXT = "•";
 // reload, exactly the pageInfo case): anything a page can drive with focus() or a load is
 // passive. `openPopupForCards` deliberately stays OUT: it rides a real isTrusted click on our
 // own chip, i.e. genuine user activity — as do `reveal` (a dropdown pick), `allItems` (search
-// typing), `capturedCredential`/`resolvePendingSave`/`openPopupForSave` (submits + banner
-// clicks) and every popup action, so the timer keeps its real signal.
+// typing), `resolvePendingSave`/`openPopupForSave` (banner clicks) and every popup action, so the
+// timer keeps its real signal.
+// F01 (2026-08-13 audit): `capturedCredential` USED to sit in that sentence, on the reasoning that
+// "a submit is a user activity". That reasoning was wrong, and this is the one classification a
+// page could exploit: `form.requestSubmit()` fires a submit with isTrusted TRUE and no user
+// gesture, so a 1 px form on any frame could re-arm the alarm at will — silently, since a
+// username-only capture (password:"") draws no banner. It is page-DRIVEABLE, which is the whole
+// test here, so it is passive; the user's real save signal is `resolvePendingSave` (the banner
+// click), which still re-arms. The capture path itself is separately gesture-gated content-side
+// (content.ts consumeLoginGesture) — the SW cannot see a gesture, so it classifies by reachability.
 // `totpOffer` joins for the same reason as cardChipOffer: a page can mint otpauth links (and the
 // mutation ticks that re-ask) at will — DOM-driveable is not user activity. Its accept twin
 // `addTotpFromPage` stays OUT (a real banner click), as does the popup's `setTotp`.
-const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status", "cardFormInfo", "cardChipOffer", "matches", "pendingSave", "totpOffer"]);
+const PASSIVE_MSGS = new Set<Req["type"]>([
+  "pageInfo",
+  "totp",
+  "ping",
+  "status",
+  "cardFormInfo",
+  "cardChipOffer",
+  "matches",
+  "pendingSave",
+  "totpOffer",
+  "capturedCredential",
+]);
 
 /** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
  *  account.ts:40 parity). The unlock mapper carries it to the popup as code "identity_mismatch" —
@@ -1571,7 +1590,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     case "revealCardField":
       return revealCardField(msg, sender);
     case "fillFromPopup":
-      return fillFromPopup(msg.itemId);
+      return fillFromPopup(msg.itemId, sender);
     case "capturedCredential":
       return capturedCredential(msg, sender);
     case "captureCard":
@@ -1593,7 +1612,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     case "openPopupForSave":
       return openPopupForSave(sender); // unlock-prompt 2026-08-12 — rides the banner's isTrusted Save click, deliberately NOT passive
     case "linkUri":
-      return linkUri(msg.itemId, msg.host);
+      return linkUri(msg, sender);
     case "generate":
       return { password: generatePassword(DEFAULT_GENERATOR) } satisfies Res<"generate">;
     case "totp": {
@@ -2367,6 +2386,17 @@ function toCardItem(it: DecryptedItem): CardItem {
 
 // ---- reveal + popup fill (the ZK egress gate) ----
 
+/** [A2] the CALLING frame's own host, from the browser-set `sender.origin` only — the one spelling
+ *  of "who is asking" for handlers that would otherwise take a page-supplied `msg.host` at its
+ *  word (cardFormInfo states the same rule for the card lane). [A3] fail-closed: an undefined
+ *  origin (mid-update SW / an engine that omits it), the empty string, or the opaque "null" of a
+ *  sandboxed frame yields null — and null never matches a host. Popup senders have no tab and are
+ *  not routed through here: their host comes from `activeTabHost()` under `activeTab`. */
+function senderHost(sender: chrome.runtime.MessageSender): string | null {
+  if (typeof sender.origin !== "string" || sender.origin === "" || sender.origin === "null") return null;
+  return hostOfUrl(sender.origin);
+}
+
 /** Contract reveal rules: host-match ∨ one-shot popup grant (consumed) ∨ explicit user pick.
  *  Cut M (v2 #14): failures carry a seam `code` so the fill surfaces render canon copy — the
  *  raw `error` strings here are debug detail and must never reach a user. */
@@ -2375,7 +2405,12 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
   const it = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "login");
   if (!it) return { ok: false, code: "not_allowed", error: "unknown item" };
 
-  const webHost = normalizeHost(msg.host);
+  // F18 (2026-08-13 audit): the host gate binds to `sender.origin` for TAB senders — every other
+  // origin-sensitive handler already does, and `msg.host` (content.ts sends `location.hostname`)
+  // can answer differently from the browser's own notion of the frame's origin: a sandboxed frame
+  // without allow-same-origin has an opaque origin but a perfectly real `location.hostname`.
+  // The popup keeps `msg.host` (no tab; its host comes from `activeTabHost()` under activeTab).
+  const webHost = sender.tab !== undefined ? senderHost(sender) : normalizeHost(msg.host);
   let allowed =
     msg.explicit === true || (webHost !== null && matchLogins(it.doc.login?.uris ?? [], { webHost, packageName: "" }, pslResolve));
   const tabId = sender.tab?.id;
@@ -2452,10 +2487,15 @@ function asFillOutcome(v: unknown): FillOutcome | null {
 
 /** Explicit popup pick → mint the tab's one-shot grant, then tell the tab to run its normal
  *  reveal round-trip. Single secret-egress path: the SW never pushes a secret at a tab.
+ *  Popup ONLY — the SW refuses tab senders, exactly as its card twin `fillCardFromPopup` does
+ *  (F18, 2026-08-13 audit): this handler mints a grant for whatever tab is ACTIVE, which need not
+ *  be the sender's tab or origin, so a page-side caller could write a vault password into a
+ *  different site's top-frame login form and read it back off `input.value`.
  *  Cut M (v2 #14): `ok` used to mean sendMessage DELIVERY, so the popup closed over a fill
  *  that wrote nothing — now the content script answers its real FillOutcome and ok is true
  *  only when something actually landed in a field. */
-async function fillFromPopup(itemId: string): Promise<Res<"fillFromPopup">> {
+async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSender): Promise<Res<"fillFromPopup">> {
+  if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "not allowed from a page" };
   if (!session) return { ok: false, code: "locked", error: "locked" };
   if (!session.items.some((i) => i.itemId === itemId && i.doc.type === "login")) {
     return { ok: false, code: "not_allowed", error: "unknown item" };
@@ -3405,13 +3445,20 @@ async function putCard(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boole
 }
 
 /** One-tap URI backfill for legacy items: append https://<host>, keep the real tail, shed the
- *  unmatchable "" entries the web editor leaves on untouched items. Idempotent per host. */
-async function linkUri(itemId: string, host: string): Promise<Res<"linkUri">> {
+ *  unmatchable "" entries the web editor leaves on untouched items. Idempotent per host.
+ *  F18 (2026-08-13 audit): this is a vault WRITE that persists to the server, and it used to take
+ *  the caller's word for both the item and the host — so a page-side caller could append its own
+ *  host to every login (`allItems` is deliberately not sender-gated) and then collect each
+ *  password through a plain host-matched `reveal`, with nothing on screen and no undo. A TAB
+ *  sender may now only link ITS OWN host ([A2]: browser-set origin, fail-closed on missing/opaque);
+ *  the popup (no tab) keeps the current freedom — its host comes from `activeTabHost()`. */
+async function linkUri(msg: Extract<Req, { type: "linkUri" }>, sender: chrome.runtime.MessageSender): Promise<Res<"linkUri">> {
   if (!session) return { ok: false, error: "locked" };
-  const it = session.items.find((i) => i.itemId === itemId && i.doc.type === "login");
+  const it = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "login");
   if (!it) return { ok: false, error: "unknown item" };
-  const webHost = normalizeHost(host);
+  const webHost = normalizeHost(msg.host);
   if (!webHost) return { ok: false, error: "bad host" };
+  if (sender.tab !== undefined && senderHost(sender) !== webHost) return { ok: false, error: "not this frame's host" };
   const kept = (it.doc.login?.uris ?? []).filter((u) => u.trim() !== "");
   const already = kept.some((u) => {
     const p = parseSavedUri(u);

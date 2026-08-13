@@ -54,6 +54,7 @@ import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
 import io.silencelen.andvari.core.client.EnrollLink
+import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ImportHelp
@@ -71,7 +72,10 @@ import io.silencelen.andvari.core.crypto.PasswordGenerator
 import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.TotpSetupResponse
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
@@ -151,6 +155,32 @@ fun DesktopApp(state: DesktopState) {
                     color = MaterialTheme.colorScheme.onErrorContainer, // a11ydesk-01: AA on errorContainer (see ErrorBar)
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                 )
+            }
+        }
+        // F31: the master password chosen at enrollment is in the public breach corpus (the
+        // k-anonymity check DesktopState.enrollOp runs once register hands this app a session —
+        // the relay is session-gated, so the enroll form itself cannot check). ADVISORY: the
+        // account exists and works, nothing was blocked, and Dismiss is a real exit — F31's rule
+        // is that these signals warn and never refuse. secondaryContainer, not errorContainer:
+        // an error tone here would read like the F58 temp-password banner (a live credential
+        // failure) when this is a "you can do better" nudge. Like that banner, the fix lives in
+        // the WEB app (no native change-password screen yet), so the copy names the place.
+        // NOT painted over the two recovery gates, for the AttentionArea's reason below: the
+        // shown-once phrase must not compete with anything, and this banner keeps until dismissed.
+        state.breachAdvisory?.let { advisory ->
+            val onGate = state.screen is DesktopScreen.RecoverySetup || state.screen is DesktopScreen.RecoveryCapture
+            if (!onGate) {
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite }) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "$advisory Your vault is set up and safe to use. To change this password, open ${state.baseUrl} in your browser.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer, // a11ydesk-01 pairing rule
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = state::dismissBreachAdvisory) { Text("Dismiss") }
+                    }
+                }
             }
         }
         // quality-deadcode--13: the app-level sign-out confirm the menu bar's "Sign out…" needs.
@@ -600,17 +630,7 @@ private fun Enroll(state: DesktopState) {
         Field("Email", email, { email = it }, onEnter = submit)
         Field("Name (optional)", name, { name = it }, onEnter = submit)
         Secret("Master password", password, onEnter = submit) { password = it }
-        if (password.isNotEmpty()) {
-            val score = Strength.estimateStrength(password)
-            if (Strength.meetsMasterPasswordFloor(password)) {
-                Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else {
-                Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-            }
-            if (Strength.masterPasswordHasNonAscii(password)) {
-                Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
-            }
-        }
+        MasterPasswordStrengthHints(password)
         Secret("Confirm password", confirm, onEnter = submit) { confirm = it }
         if (confirm.isNotEmpty() && confirm != password) {
             Text("passwords don't match", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -683,6 +703,40 @@ private fun Enroll(state: DesktopState) {
         Spacer(Modifier.height(12.dp))
         Primary("Create vault", ready && !state.busy, state.busy, submit)
         } // end else (form vs Trust Gate)
+    }
+}
+
+/**
+ * The F60 master-password floor feedback — strength label, the too-weak refusal, the F31 pattern
+ * caveat, and the non-ASCII caution. ONE copy for the two forms that choose a master password
+ * ([Enroll] and [RecoverScreen]'s reset leg); android's MainActivity has the same single-sourced
+ * composable, and these two had already been carrying the block verbatim-duplicated. Renders
+ * nothing while the field is empty.
+ *
+ * The F31 pattern warning renders BESIDE the label rather than replacing it, and the affirmative
+ * (uncaveated) "strength: …" line is reserved for passwords that earn it: the estimate already
+ * has the pattern penalty in it, but a bare "strength: good" over a doubled block still told the
+ * reader the block was fine — the self-contradiction the audit found. It never gates; the floor
+ * is [Strength.meetsMasterPasswordFloor], which scores the PRE-pattern proxy on purpose.
+ */
+@Composable
+private fun MasterPasswordStrengthHints(password: String) {
+    if (password.isEmpty()) return
+    val score = Strength.estimateStrength(password)
+    val pattern = Strength.patternWarning(password)
+    when {
+        !Strength.meetsMasterPasswordFloor(password) ->
+            Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        pattern != null ->
+            Text("strength: ${Strength.label(score)} — weaker than it looks", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+        else ->
+            Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    if (pattern != null) {
+        Text(pattern, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+    }
+    if (Strength.masterPasswordHasNonAscii(password)) {
+        Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
     }
 }
 
@@ -1007,17 +1061,7 @@ private fun RecoverScreen(state: DesktopState) {
             )
             Spacer(Modifier.height(8.dp))
             Secret("New master password", password, onEnter = submit, autoFocus = true) { password = it } // a11ydesk-06
-            if (password.isNotEmpty()) {
-                val score = Strength.estimateStrength(password)
-                if (strong) {
-                    Text("strength: ${Strength.label(score)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    Text("Too weak for a master password (${Strength.label(score)}) — mix length with upper/lower case, digits, or symbols.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                }
-                if (Strength.masterPasswordHasNonAscii(password)) {
-                    Text("contains non-ASCII characters — fine here, but they can be hard to type on some devices; make sure you can reproduce it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
-                }
-            }
+            MasterPasswordStrengthHints(password)
             Secret("Confirm new master password", confirm, onEnter = submit) { confirm = it }
             if (confirm.isNotEmpty() && confirm != password) {
                 Text("passwords don't match", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -1534,7 +1578,13 @@ private fun TrashScreen(state: DesktopState) {
         TextButton(onClick = { state.closeTrash() }) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
         Text("Trash", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "Deleted items are kept for 30 days, then removed automatically. Restore brings one back to its vault on every device; \"Delete forever\" removes it now.",
+            // F04: the attachment caveat belongs in this sentence, not in the KDoc above it and
+            // the 0.6.0 test guide. The screen said "Restore brings one back to its vault on every
+            // device" and stopped, so a restored item missing its file read as a sync bug rather
+            // than documented, irreversible behaviour. Byte-shared with android and web.
+            "Deleted items are kept for 30 days, then removed automatically. " +
+                HouseholdCopy.TRASH_RESTORE_NO_ATTACHMENTS +
+                " \"Delete forever\" removes it now.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -2340,7 +2390,12 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
                         }
                         if (shortExpiry != null) {
                             Spacer(Modifier.weight(1f))
-                            TextButton(onClick = { expCopied = copyWithAutoClear(shortExpiry, clipClear) }) { Text(if (expCopied == true) "Copied ✓" else "Copy") }
+                            // a11ydesk-09: the seventh Copy on this card, and the one that isn't a
+                            // CopyRow — it needs its own name for the same reason.
+                            TextButton(
+                                onClick = { expCopied = copyWithAutoClear(shortExpiry, clipClear) },
+                                modifier = Modifier.semantics { contentDescription = "Copy Expiry" },
+                            ) { Text(if (expCopied == true) "Copied ✓" else "Copy") }
                         }
                     }
                     if (expCopied != null) {
@@ -2407,7 +2462,17 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
                 AlertDialog(
                     onDismissRequest = { confirmDelete = false },
                     title = { Text("Delete \"${doc.name}\"?") },
-                    text = { Text("This removes the item from every device and every family member who can see it.") },
+                    // F04 (android's twin): the 30-day trash makes delete look fully reversible,
+                    // and for attachments it never was — the blob is nulled and the files unlinked
+                    // at delete time, so a restore returns the passwords and notes and nothing
+                    // else. Said while the user can still choose otherwise, and only when this
+                    // item actually carries files.
+                    text = {
+                        Text(
+                            "This removes the item from every device and every family member who can see it." +
+                                if (doc.attachments.isNotEmpty()) " " + HouseholdCopy.TRASH_RESTORE_NO_ATTACHMENTS else "",
+                        )
+                    },
                     confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") } },
                     dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
                 )
@@ -2520,6 +2585,9 @@ private fun Editor(
     onSave: (ItemDoc, List<PendingUpload>, String?) -> Unit,
     onCancel: () -> Unit,
 ) {
+    // F28: the attachment pick reads off the UI thread (composition-scoped, so a pending read is
+    // cancelled if the editor closes under it).
+    val scope = rememberCoroutineScope()
     // F18: which vault a NEW item is created in. Non-null only for new items with a writable
     // shared vault (see the call site); default = the first choice, which is personal
     // (vaultInfos is personal-first). Threaded into onSave → saveItem's vaultId.
@@ -2660,15 +2728,33 @@ private fun Editor(
             dialog.isVisible = true
             val dir = dialog.directory; val picked = dialog.file
             if (dir != null && picked != null) {
-                val bytes = runCatching { File(dir, picked).readBytes() }.getOrElse { attachError = "Couldn't read $picked: ${it.message}"; return@TextButton }
-                when {
-                    bytes.isEmpty() -> attachError = "$picked is empty — nothing to attach."
-                    bytes.size > maxAttachmentBytes -> attachError = "$picked is ${humanSize(bytes.size.toLong())} — over the ${humanSize(maxAttachmentBytes)} attachment limit."
-                    else -> {
-                        val ref = newRef(picked, bytes.size.toLong())
-                        pending = pending + PendingUpload(ref, bytes)
-                        attachments = attachments + ref
-                    }
+                val file = File(dir, picked)
+                // Audit F28 — android already fixed exactly this and named it in its comment:
+                // the cap must be enforced DURING the read. `readBytes()` buffered the WHOLE file
+                // first and consulted the 25 MiB cap second, on the Compose UI thread: a mispicked
+                // disk image or video froze the window with no spinner and no cancel for the whole
+                // read, and past ~2 GiB threw OutOfMemoryError — taking this editor's
+                // remember-scoped typed draft with it. Bounded read, off the UI thread, exactly
+                // like the CSV importer. null = over the cap, reported from File.length() so the
+                // user is told the real size without it ever being resident.
+                scope.launch {
+                    val cap = maxAttachmentBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                    runCatching {
+                        withContext(Dispatchers.IO) { file.inputStream().use { readBounded(it, cap) } to file.length() }
+                    }.onSuccess { (bytes, size) ->
+                        when {
+                            bytes == null -> attachError = "$picked is ${humanSize(size)} — over the ${humanSize(maxAttachmentBytes)} attachment limit."
+                            bytes.isEmpty() -> attachError = "$picked is empty — nothing to attach."
+                            else -> {
+                                val ref = newRef(picked, bytes.size.toLong())
+                                pending = pending + PendingUpload(ref, bytes)
+                                attachments = attachments + ref
+                            }
+                        }
+                        // #23: a local read failure takes the canon file copy — never the raw
+                        // exception text, which is a full local path plus a locale-dependent OS
+                        // reason (or "File … is too big (4831838208 bytes) to fit in memory").
+                    }.onFailure { attachError = HouseholdCopy.forImportError(it) }
                 }
             }
         }) { Icon(Icons.Default.AttachFile, null); Text(" Attach file") }
@@ -3019,8 +3105,26 @@ private fun BackupPreflightDialog(
     var confirm by remember(pre) { mutableStateOf("") }
     val plan = remember(pre, selected) { state.attachmentPlan(selected) }
     val score = Strength.estimateStrength(passphrase)
+    // F31: the backup floor compares against the PATTERN-AWARE estimate (Strength's class KDoc),
+    // so a passphrase that passed before 0.21.0 can be refused now. Without this sentence the
+    // refusal is unexplainable — "needs at least good" beside a 20-character passphrase reads as
+    // a bug. Advisory either way: it never changes `ready`.
+    val pattern = Strength.patternWarning(passphrase)
     val ready = selected.isNotEmpty() && passphrase.isNotEmpty() && passphrase == confirm &&
         score >= Strength.BACKUP_FLOOR && !state.busy
+    // F31 breach check, on the CANDIDATE passphrase only — when both fields agree, never per
+    // keystroke: a prefix for every prefix of what is being typed ("p", "pa", "pas"…) narrows the
+    // real passphrase far more than one prefix for the finished one does, and this way the relay
+    // sees one request per passphrase the user actually meant. Debounced so a retype doesn't
+    // queue several. Silent when the check fails or the vault is locked (state.breachWarning).
+    var breachNote by remember(pre) { mutableStateOf<String?>(null) }
+    val candidate = if (passphrase.isNotEmpty() && passphrase == confirm) passphrase else ""
+    LaunchedEffect(candidate) {
+        breachNote = null // an edited passphrase drops the verdict about the old one immediately
+        if (candidate.isEmpty()) return@LaunchedEffect
+        delay(500)
+        breachNote = state.breachWarning(candidate)
+    }
     // F72: Enter in either passphrase field = the confirm button (the AWT save dialog it opens
     // is modal, so key autorepeat dies there); Escape = Cancel, same busy gate as the scrim.
     // `ready` is captured at composition, so re-read state.busy live like the other forms.
@@ -3071,9 +3175,20 @@ private fun BackupPreflightDialog(
                     Text(
                         "Strength: ${Strength.label(score)}" + if (ok) "" else " — needs at least “good”",
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (ok) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+                        // F31: no affirmative (secondary) treatment while a pattern caveat stands —
+                        // "Strength: good" in the good colour, over a warning that it repeats a
+                        // block, is the self-contradiction the audit found.
+                        color = when {
+                            !ok -> MaterialTheme.colorScheme.error
+                            pattern != null -> MaterialTheme.colorScheme.tertiary
+                            else -> MaterialTheme.colorScheme.secondary
+                        },
                     )
                 }
+                // The WHY behind a refusal (or a caveated pass): the shared sentence, in the
+                // canon's words, so web and the natives explain a floor miss identically.
+                pattern?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
+                breachNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
                 if (confirm.isNotEmpty() && confirm != passphrase) {
                     Text("Passphrases don't match.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
@@ -3150,6 +3265,11 @@ private fun CsvPreflightDialog(state: DesktopState, pre: CsvPreflight, onChooseD
                 NamedSkips("Attachments can't be represented in CSV:", pre.warnings.withAttachments)
                 NamedSkips("Only the first website is kept:", pre.warnings.extraUris)
                 NamedSkips("Written, but a reimport would skip them (no username or password):", pre.warnings.emptyUsernameAndPassword)
+                // Audit F08: the writer deliberately never mangles a leading =+-@ (mangling would
+                // corrupt real secrets), so THIS row is the compensating control — the warning was
+                // computed and then rendered nowhere. Same NamedSkips shape as its five siblings;
+                // the sentence itself is the shared canon's, byte-equal with web's.
+                NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaRisk)
                 Spacer(Modifier.height(6.dp))
                 Text(
                     "Reimporting a CSV collapses exact duplicates.",
@@ -3188,11 +3308,16 @@ private fun backupNudge(lastExportAt: Long): Boolean =
 private fun TotpSetupBlock(state: DesktopState, setup: TotpSetupResponse) {
     var code by remember { mutableStateOf("") }
     val submit = { if (code.isNotBlank() && !state.busy) state.confirmTotp(code) } // F72
+    val clipClear = maxOf(1, state.policy?.clipboardClearSeconds ?: 30)
     Column {
         Text("Add it to your authenticator (URI or secret), then confirm with a code.",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        CopyPlainRow("otpauth URI", setup.otpauthUri)
-        CopyPlainRow("Secret (base32)", setup.secretBase32)
+        // F25: both of these ARE the account's second factor (the URI embeds the same seed) —
+        // anyone holding either mints valid codes for this account forever. They used to copy
+        // through the plain path, which never registers `lastSecretCopied`, so lock, sign-out and
+        // JVM exit all deliberately skipped them while scrubbing every other secret. Vault-class.
+        CopySecretRow("otpauth URI", setup.otpauthUri, clipClear)
+        CopySecretRow("Secret (base32)", setup.secretBase32, clipClear)
         Field("One-time code", code, { code = it }, mono = true, onEnter = submit, autoFocus = true) // a11ydesk-06
         state.totpError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         Spacer(Modifier.height(8.dp))
@@ -3218,16 +3343,34 @@ private fun TotpEnrolledBlock(state: DesktopState) {
     }
 }
 
-/** Selectable value + plain copy (no auto-clear — this is setup material, not a vault secret). */
+/**
+ * Selectable value + SECRET copy: the value stays readable on screen (the user must be able to
+ * type it into an authenticator app by hand), but the clipboard write goes through
+ * [copyWithAutoClear], so it registers as `lastSecretCopied` and is caught by the lock /
+ * sign-out / JVM-exit scrub as well as the [clearSeconds] timer.
+ *
+ * Audit F25: this row was `CopyPlainRow` and copied through [copyPlain], under a comment
+ * asserting its contents were "setup material, not a vault secret" — while its only two callers
+ * were the account's TOTP `otpauth://` URI and its base32 seed. [copyPlain] never touches
+ * `lastSecretCopied`, and `clearVaultClipboard` early-returns on a null one, so the file's own
+ * stated invariant ("a vault secret must not outlive the session") deliberately did not apply to
+ * the account's second factor. [copyPlain] is still right for genuinely non-secret material —
+ * the /downloads link, the server address — and both keep using it.
+ */
 @Composable
-private fun CopyPlainRow(label: String, value: String) {
+private fun CopySecretRow(label: String, value: String, clearSeconds: Int) {
     Column(Modifier.padding(vertical = 6.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
             SelectionContainer(Modifier.weight(1f)) {
                 Text(value, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             }
-            TextButton(onClick = { copyPlain(value) }) { Text("Copy") }
+            // a11ydesk-09 (android a11yand-09 twin): name the button for ITS field — two rows here
+            // both read "Copy, button" out of context.
+            TextButton(
+                onClick = { copyWithAutoClear(value, clearSeconds) },
+                modifier = Modifier.semantics { contentDescription = "Copy $label" },
+            ) { Text("Copy") }
         }
     }
 }
@@ -3285,8 +3428,10 @@ private fun Secret(label: String, value: String, onEnter: (() -> Unit)? = null, 
     OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).then(if (autoFocus) Modifier.focusRequester(fr) else Modifier).submitOnEnter(onEnter), label = { Text(label) }, singleLine = true,
         visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-        // a11ydesk-02: name the reveal toggle; the description doubles as the shown/hidden state.
-        trailingIcon = { IconButton(onClick = { showState.value = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "hide value" else "show value") } })
+        // a11ydesk-02 + a11ydesk-09 (audit F38): name the reveal toggle for ITS field — the
+        // description doubles as the shown/hidden state, and the editor stacks several of these
+        // (password, security code), where a bare "show value" says nothing about which.
+        trailingIcon = { IconButton(onClick = { showState.value = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "Hide $label" else "Show $label") } })
 }
 
 /** ux-error--3 failure feedback — byte-twin of web/extension errors.ts CLIPBOARD_FAILED; kept
@@ -3307,8 +3452,23 @@ private fun CopyRow(label: String, value: String, secret: Boolean, clearSeconds:
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (show) display else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
-            if (secret) IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "hide value" else "show value") } // a11ydesk-02
-            TextButton(onClick = { copied = copyWithAutoClear(value, clearSeconds) }) { Text(if (copied == true) "Copied ✓" else "Copy") }
+            // a11ydesk-09 (audit F38, a byte-level port of android's a11yand-09): name BOTH
+            // controls for THEIR field. A saved card instantiates this row six times, so an
+            // unnamed set reads as six identically-named Copy controls and two identically-named
+            // reveals — with nothing to say which copies the card number and which the security
+            // code. The visible labels are unchanged; only the accessibility names gain the field.
+            if (secret) {
+                IconButton(onClick = { show = !show }) {
+                    Icon(
+                        if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        if (show) "Hide $label" else "Show $label",
+                    )
+                } // a11ydesk-02
+            }
+            TextButton(
+                onClick = { copied = copyWithAutoClear(value, clearSeconds) },
+                modifier = Modifier.semantics { contentDescription = "Copy $label" },
+            ) { Text(if (copied == true) "Copied ✓" else "Copy") }
         }
         if (copied != null) {
             Text(

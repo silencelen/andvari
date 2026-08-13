@@ -97,3 +97,35 @@ describe("Trash / history dates are local and in the house dialect", () => {
     expect(vaultTsx).toContain("kept for 30 days, then removed automatically");
   });
 });
+
+/**
+ * Audit F04 — the 30-day restore promise covered the item's FIELDS only. A restore MUST drop the
+ * attachment refs (store.ts's own invariant; the blobs are unlinked server-side at delete, and
+ * SyncEngine.kt does the same), so a restored item comes back without its files, permanently. No
+ * client said so at delete time, at restore time, or after — the disclosure existed once, in
+ * docs/user-test-guide-0.6.0.md, and was dropped. Two web surfaces carry it now, and the sentence
+ * is the one the Android/desktop Trash headers use verbatim, so all three clients agree.
+ */
+describe("F04 — deleting an item with attachments says the files are not coming back", () => {
+  const ATTACHMENTS_NOT_RESTORED =
+    "Restoring brings the item back, but not its attachments — those were permanently removed when the item was deleted.";
+
+  it("the Trash header states it, in the cross-client wording", () => {
+    expect(vaultTsx).toContain(ATTACHMENTS_NOT_RESTORED);
+  });
+
+  it("it replaced the sentence that framed a restore as complete", () => {
+    expect(vaultTsx).not.toContain("Restoring brings an item back to its vault on every device");
+  });
+
+  it("the delete confirm warns BEFORE the delete, and only when the item actually has files", () => {
+    const confirm = vaultTsx.slice(
+      vaultTsx.indexOf("Delete “{doc.name}” from every device?"),
+      vaultTsx.indexOf("Confirm delete"),
+    );
+    expect(confirm).toContain("(doc.attachments?.length ?? 0) > 0");
+    expect(confirm).toContain("cannot be restored, even from Deleted items.");
+    // Singular/plural, because "Its 1 attached files" is how copy stops being believed.
+    expect(confirm).toContain('doc.attachments!.length === 1 ? "attached file"');
+  });
+});

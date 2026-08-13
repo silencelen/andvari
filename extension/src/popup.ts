@@ -824,7 +824,9 @@ cardsList.hidden = true;
  *  cardRow gates Fill on `fillable` alone). */
 const cardsPspNote = document.createElement("div");
 cardsPspNote.className = "empty slim";
-cardsPspNote.textContent = "Andvari can't auto-fill payment forms embedded from another site. Use the copy buttons instead.";
+// F24: the brand is lowercase in running copy everywhere else in the product (and the popup's own
+// wordmark) — this was the single capitalized user-facing "Andvari" in the tree.
+cardsPspNote.textContent = "andvari can't auto-fill payment forms embedded from another site. Use the copy buttons instead.";
 cardsPspNote.hidden = true;
 el("all-list").after(cardsLabel, cardsPspNote, cardsList);
 
