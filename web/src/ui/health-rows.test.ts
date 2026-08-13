@@ -66,10 +66,20 @@ describe("Health rows — keyed on the live items array, not the identity-stable
     expect(healthTsx).toContain("useMemo<Row[]>(() => healthRows(items), [items])");
   });
 
-  it("Health takes no `store` prop — the never-changing dependency the bug memoized on", () => {
+  it("every derivation memo keys on `items` — never the identity-stable store", () => {
+    // Evolved 2026-08-12: the duplicate checker's guided MERGE legitimately re-introduced a
+    // `store` prop as a WRITE path, so the old "no store prop at all" formulation went stale.
+    // The bug this pins was never about the prop's existence — it was rows DERIVING from an
+    // identity-stable dependency, so the [items]-keyed memo never recomputed. Pin the memos'
+    // dependency lists directly: both derivations exist, both key on [items], and no useMemo in
+    // the file lists `store` as a dependency.
     const props = healthTsx.slice(healthTsx.indexOf("interface Props {"), healthTsx.indexOf("interface Row {"));
     expect(props, "Health's Props moved — update the pin").toContain("items: VaultItem[];");
-    expect(props).not.toMatch(/^\s*store\??:/m); // a declared prop, not the doc comment's mention
+    expect(healthTsx).toContain("useMemo<Row[]>(() => healthRows(items), [items])");
+    expect(healthTsx).toContain("useMemo<DuplicateCluster[]>(() => duplicateClusters(items), [items])");
+    for (const deps of healthTsx.matchAll(/useMemo[^;]*?\[([^\]]*)\]\s*\)/g)) {
+      expect(deps[1], "a useMemo grew an identity-stable store dependency").not.toMatch(/\bstore\b/);
+    }
   });
 
   it("Vault feeds it the state it refreshes after every applied sync", () => {

@@ -432,6 +432,18 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .tone-mid { color: var(--gold-text); }
 .tone-good { color: var(--ok); }
 
+/* ---- duplicate-entry checker (Health, 2026-08-12) ---- */
+.dupes { margin-bottom: 18px; }
+.dupes-title { font-family: var(--serif); font-size: 17px; font-weight: 600; margin: 0 0 6px; }
+.dupe {
+  background: var(--bg-raised); border: 1px solid var(--edge); border-radius: var(--radius);
+  padding: 12px 14px; margin-bottom: 10px;
+}
+.dupe-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.dupe-site { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+.dupe-member { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 2px 0; }
+.dupe-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
 /* ---- tables ---- */
 .table-scroll { overflow-x: auto; border: 1px solid var(--edge); border-radius: var(--radius); background: var(--bg-raised); }
 .table { width: 100%; border-collapse: collapse; font-size: 13.5px; }

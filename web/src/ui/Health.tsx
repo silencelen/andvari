@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { ApiClient } from "../api/client";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
-import type { VaultItem } from "../vault/store";
+import type { VaultItem, VaultStore } from "../vault/store";
+import { duplicateClusters, type DuplicateCluster } from "./duplicates";
 import { Msg } from "./Msg";
 import { EmptySigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength } from "./strength";
@@ -14,6 +15,11 @@ interface Props {
   /** CR-08: keys the in-session breach cache per-account so a shared browser never cross-contaminates. */
   userId: string;
   onOpenItem: (itemId: string) => void;
+  /** Duplicate merge (2026-08-12): the guided merge writes through the store… */
+  store: VaultStore;
+  /** …and this is Vault's refresh() — re-derives `items` after the merge lands (TrashView's
+   *  onRestored convention), which is what makes the merged cluster disappear from the list. */
+  onChanged: () => void;
 }
 
 interface Row {
@@ -49,9 +55,10 @@ export function healthRows(items: VaultItem[]): Row[] {
   });
 }
 
-/** Vault-wide password health: strength, reuse, and (on demand) HIBP breach exposure. */
-export function Health({ items, client, userId, onOpenItem }: Props) {
+/** Vault-wide password health: strength, reuse, duplicates, and (on demand) HIBP breach exposure. */
+export function Health({ items, client, userId, onOpenItem, store, onChanged }: Props) {
   const rows = useMemo<Row[]>(() => healthRows(items), [items]);
+  const dupes = useMemo<DuplicateCluster[]>(() => duplicateClusters(items), [items]);
 
   // itemId → breach count, filled by a scan and cached ON-DEVICE (by itemId — never the plaintext
   // password, which is only the scan's lookup key) so it survives navigating away from Health.
@@ -120,7 +127,10 @@ export function Health({ items, client, userId, onOpenItem }: Props) {
         <Tile label="Weak" value={String(weak)} tone={weak > 0 ? "bad" : "good"} />
         <Tile label="Reused" value={String(reused)} tone={reused > 0 ? "bad" : "good"} />
         <Tile label="Breached" value={breached === null ? "—" : String(breached)} tone={breached === null ? undefined : breached > 0 ? "bad" : "good"} hint={breached === null ? "run a scan" : undefined} />
+        <Tile label="Duplicates" value={String(dupes.length)} tone={dupes.length > 0 ? "bad" : "good"} />
       </div>
+
+      {dupes.length > 0 && <Duplicates clusters={dupes} store={store} onOpenItem={onOpenItem} onChanged={onChanged} />}
 
       {rows.length === 0 ? (
         <div className="empty">
@@ -214,6 +224,104 @@ function saveBreachCache(userId: string, byItem: Map<string, number>): void {
 export function clearBreachCache(): void {
   breachCacheByUser.clear();
   purgeLegacyBreachResidue(); // and scrub the legacy at-rest residue at the wipe choke point
+}
+
+/** The duplicate-entry checker (owner-requested 2026-08-12; clustering + the merge PLAN live in
+ *  duplicates.ts — this renders and writes, nothing more). Exact clusters may offer a guided
+ *  merge: save the composed survivor doc, then remove the losers — removal is the ordinary
+ *  delete, so the copies land in Deleted items (30-day Trash) rather than oblivion, and the
+ *  confirm line says so. The confirm is the purge idiom (two-step, per-cluster). "differs"
+ *  clusters (same account, diverging passwords — one is stale) are report-only BY DESIGN: only
+ *  the human knows which password the site currently accepts. */
+function Duplicates({ clusters, store, onOpenItem, onChanged }: { clusters: DuplicateCluster[]; store: VaultStore; onOpenItem: (itemId: string) => void; onChanged: () => void }) {
+  const [confirmId, setConfirmId] = useState<string | null>(null); // survivorId of the open confirm
+  const [mergingId, setMergingId] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ kind: "err" | "info"; text: string } | null>(null);
+
+  const runMerge = async (c: DuplicateCluster) => {
+    const plan = c.merge;
+    if (!plan || mergingId !== null) return;
+    setMergingId(plan.survivorId);
+    setMsg(null);
+    try {
+      // Survivor first: if anything fails, no copy has been deleted before the union landed.
+      await store.save(plan.survivorId, plan.doc);
+      for (const id of plan.loserIds) await store.remove(id);
+      const n = plan.loserIds.length;
+      setMsg({ kind: "info", text: `Merged — ${n === 1 ? "the duplicate copy" : `${n} duplicate copies`} moved to Deleted items (kept 30 days).` });
+    } catch {
+      // Partial outcomes are honest ones: whatever was removed is in Deleted items, and the
+      // re-derive below shows exactly what is still duplicated.
+      setMsg({ kind: "err", text: "The merge didn't finish — any removed copy is in Deleted items. Check the cluster and try again." });
+    } finally {
+      setMergingId(null);
+      setConfirmId(null);
+      onChanged();
+    }
+  };
+
+  return (
+    <div className="dupes">
+      <h3 className="dupes-title">Duplicate entries</h3>
+      <div className="muted" style={{ marginBottom: 10 }}>
+        The same account saved more than once — usually a save that landed while the vault was locked, or an import.
+        Merging keeps one copy (its saved sites combined) and moves the rest to Deleted items, where they stay restorable for 30 days.
+      </div>
+      {msg && <Msg kind={msg.kind}>{msg.text}</Msg>}
+      {clusters.map((c) => {
+        const survivorName = c.merge ? (c.members.find((m) => m.itemId === c.merge!.survivorId)?.name ?? "") : "";
+        return (
+          <div className="dupe" key={c.members[0]!.itemId}>
+            <div className="dupe-head">
+              <span className="dupe-site">{c.sites.join(" · ")}</span>
+              {c.kind === "exact" ? (
+                <span className="muted">identical copies</span>
+              ) : (
+                <span className="tone-mid">passwords differ — one is likely stale; the newest is listed first</span>
+              )}
+            </div>
+            {c.members.map((m) => (
+              <div className="dupe-member" key={m.itemId}>
+                <button type="button" className="link" onClick={() => onOpenItem(m.itemId)}>
+                  {m.name}
+                </button>
+                <span className="muted">
+                  {m.username.trim() || "(no username)"} · updated {new Date(m.updatedAt).toLocaleDateString()}
+                  {m.hasTotp ? " · has a one-time code" : ""}
+                </span>
+              </div>
+            ))}
+            {c.kind === "exact" &&
+              (c.merge ? (
+                confirmId === c.merge.survivorId ? (
+                  <div className="dupe-actions">
+                    <span className="muted">
+                      Keep “{survivorName}” and move {c.merge.loserIds.length === 1 ? "the other copy" : `the ${c.merge.loserIds.length} other copies`} to Deleted items (kept 30 days)?
+                    </span>
+                    <button type="button" className="ghost" onClick={() => void runMerge(c)} disabled={mergingId !== null}>
+                      {mergingId === c.merge.survivorId ? "Merging…" : "Merge"}
+                    </button>
+                    <button type="button" className="ghost" onClick={() => setConfirmId(null)} disabled={mergingId !== null}>
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <div className="dupe-actions">
+                    <button type="button" className="ghost" onClick={() => setConfirmId(c.merge!.survivorId)}>
+                      Merge…
+                    </button>
+                  </div>
+                )
+              ) : (
+                <div className="dupe-actions">
+                  <span className="muted">{c.mergeRefusal}</span>
+                </div>
+              ))}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function Tile({ label, value, tone, hint }: { label: string; value: string; tone?: "good" | "bad"; hint?: string }) {
