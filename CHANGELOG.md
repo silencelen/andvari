@@ -6,6 +6,16 @@ operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
 ## 0.21.0 (2026-07-27) — polish release: correctness, accessibility, and the public record · fleet 0.21.0, extension 0.20.0
 
+*Web (2026-08-12) — duplicate-entry checker in Vault health. The Health view now finds the same
+account saved more than once — same site (registrable domain, the autofill-matching authority)
+and same username — and splits the finding honestly: identical copies (the twins the
+locked-vault save path and importers mint by design) get a guided one-click merge that keeps the
+best copy (never dropping a one-time code, notes, or attachments — clusters where data diverges
+or is split across copies refuse with a reason), combines the saved sites, and moves the rest to
+Deleted items (restorable for 30 days); same-account clusters whose passwords differ are
+report-only with the newest listed first, because only you know which password the site still
+accepts. Web-only view; ships to other clients with their next builds if wanted.*
+
 *Extension 0.21.0 (2026-08-12) — add one-time codes from the extension. A login's 2FA secret can
 now be attached right where the enrollment page shows it: the popup's item detail gains an "add"
 affordance next to a code-less login (paste the otpauth:// link or the "can't scan?" setup key —

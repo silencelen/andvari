@@ -476,7 +476,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         {view === "health" ? (
           // bug-web--1: items (live state, refreshed by syncNow) — never the identity-stable
           // store, which froze Health's rows for the whole mount.
-          <Health items={items} client={client} userId={account.userId} onOpenItem={goToItem} />
+          <Health items={items} client={client} userId={account.userId} onOpenItem={goToItem} store={store} onChanged={refresh} />
         ) : view === "trash" ? (
           <TrashView store={store} onRestored={refresh} />
         ) : view === "sharing" ? (
