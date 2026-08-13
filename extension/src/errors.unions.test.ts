@@ -109,11 +109,13 @@ const seam = parseStringUnions(read("./messages.ts"), "messages.ts");
 const copy = parseStringUnions(read("./errors.ts"), "errors.ts");
 
 // The twins as of 0.19.0 — the E1 seam codes (UnlockCode/SaveErrorCode/FillFailCode), the
-// quick-unlock lane (spec 01 §8.4) and its biometric sibling (0.17.0). Adding a twin to
-// errors.ts extends this automatically; this list only guarantees none can go MISSING.
+// quick-unlock lane (spec 01 §8.4) and its biometric sibling (0.17.0), and the TOTP-add lane
+// (design 2026-08-12). Adding a twin to errors.ts extends this automatically; this list only
+// guarantees none can go MISSING.
 const SHARED = [
   "UnlockCode",
   "SaveErrorCode",
+  "TotpAddCode",
   "FillFailCode",
   "PinUnlockCode",
   "PinWeakReason",

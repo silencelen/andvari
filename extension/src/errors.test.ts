@@ -16,6 +16,8 @@ import {
   SAVE_UNLOCK_PROMPTED,
   SAVE_UNLOCK_TOOLBAR,
   saveErrorCopy,
+  TOTP_ADDED,
+  totpAddErrorCopy,
   UNREACHABLE,
   unlockErrorCopy,
 } from "./errors.ts";
@@ -58,6 +60,20 @@ test("save banner: the three codes render copy, never SW-internal strings", () =
   assert.equal(saveErrorCopy("conflict"), "This login changed elsewhere — open it in the web vault.");
   assert.equal(saveErrorCopy("failed"), "Could not save — try again.");
   assert.equal(saveErrorCopy(undefined), "Could not save — try again."); // SW unreachable
+});
+
+test("TOTP add (2026-08-12): every code renders copy; exists routes to the web vault, never a retry", () => {
+  assert.equal(TOTP_ADDED, "One-time code added.");
+  assert.equal(totpAddErrorCopy("locked"), "andvari locked before it could add the code — unlock and try again.");
+  assert.equal(totpAddErrorCopy("invalid"), "That doesn't look like a one-time-code secret — paste the otpauth:// link or the setup key.");
+  // The ADD-ONLY contract: replacing a stored second factor is a web-vault edit, so this copy
+  // must never suggest retrying from the extension.
+  assert.equal(totpAddErrorCopy("exists"), "This login already has a one-time code — manage it in the web vault.");
+  assert.equal(totpAddErrorCopy("not_allowed"), "andvari couldn't tell which login this code belongs to — add it from the popup instead.");
+  // Deliberately the save banner's conflict sentence (same situation, same advice).
+  assert.equal(totpAddErrorCopy("conflict"), "This login changed elsewhere — open it in the web vault.");
+  assert.equal(totpAddErrorCopy("failed"), "Could not add the code — try again.");
+  assert.equal(totpAddErrorCopy(undefined), "Could not add the code — try again."); // SW mid-restart
 });
 
 test("unlock-prompt lines (2026-08-12): neither sentence asks for a second Save", () => {

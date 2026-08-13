@@ -6,6 +6,17 @@ operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
 ## 0.21.0 (2026-07-27) — polish release: correctness, accessibility, and the public record · fleet 0.21.0, extension 0.20.0
 
+*Extension 0.21.0 (2026-08-12) — add one-time codes from the extension. A login's 2FA secret can
+now be attached right where the enrollment page shows it: the popup's item detail gains an "add"
+affordance next to a code-less login (paste the otpauth:// link or the "can't scan?" setup key —
+the same accept rule as the web editor), and when a page shows an otpauth:// enrollment link and
+exactly one code-less login matches the site, an in-page banner offers to attach it in one click.
+Strictly ADD-ONLY: the extension never replaces or removes an existing one-time code (that stays a
+web-vault edit), so neither surface — nor a hostile page driving the banner — can rotate a stored
+second factor. The banner path sends nothing to the page: the offer answers only the login's name,
+and the secret rides only the user's Add click, with the target re-derived server-worker-side from
+the browser-set page origin at that moment.*
+
 *Extension patch 0.20.1 (2026-08-12) — a locked save now prompts for the unlock. Clicking Save on
 the in-page banner while the vault was locked answered "Could not save — unlock andvari and try
 again." and left you to re-raise the whole offer after unlocking. The click now summons the unlock

@@ -38,10 +38,11 @@ import type {
   Req,
   Res,
   SaveErrorCode,
+  TotpAddCode,
   TabMsg,
   UnlockCode,
 } from "./messages";
-import { currentCode } from "./totp";
+import { currentCode, isValidTotp, normalizeTotp } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor } from "./savetarget";
@@ -135,7 +136,10 @@ const CARD_BADGE_TEXT = "•";
 // own chip, i.e. genuine user activity — as do `reveal` (a dropdown pick), `allItems` (search
 // typing), `capturedCredential`/`resolvePendingSave`/`openPopupForSave` (submits + banner
 // clicks) and every popup action, so the timer keeps its real signal.
-const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status", "cardFormInfo", "cardChipOffer", "matches", "pendingSave"]);
+// `totpOffer` joins for the same reason as cardChipOffer: a page can mint otpauth links (and the
+// mutation ticks that re-ask) at will — DOM-driveable is not user activity. Its accept twin
+// `addTotpFromPage` stays OUT (a real banner click), as does the popup's `setTotp`.
+const PASSIVE_MSGS = new Set<Req["type"]>(["pageInfo", "totp", "ping", "status", "cardFormInfo", "cardChipOffer", "matches", "pendingSave", "totpOffer"]);
 
 /** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
  *  account.ts:40 parity). The unlock mapper carries it to the popup as code "identity_mismatch" —
@@ -1602,6 +1606,12 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         return { ok: false } satisfies Res<"totp">; // malformed stored totp
       }
     }
+    case "setTotp":
+      return setTotp(msg, sender); // TOTP-add 2026-08-12 — popup paste-add, deliberately NOT passive
+    case "totpOffer":
+      return totpOffer(sender); // page-triggered (DOM-driveable), so it is in PASSIVE_MSGS ([K13])
+    case "addTotpFromPage":
+      return addTotpFromPage(msg, sender); // rides the banner's isTrusted Add click — NOT passive
     case "pageInfo": {
       const locked = session === null;
       const matchCount = locked ? 0 : matchesFor(msg.host).length;
@@ -3305,6 +3315,80 @@ async function putNewCard(rec: {
   session.items.push({ itemId, vaultId: session.personalVaultId, rev, formatVersion: CARD_FORMAT_VERSION, doc });
   persistSession();
   return { ok: true };
+}
+
+// ---- TOTP add (design 2026-08-12: popup paste-add + page otpauth-link offer, ADD-ONLY) ----
+
+/** The ONE add-only TOTP write, shared by the popup's paste-add and the page-link accept. Both
+ *  contract invariants live HERE, not in any surface: (1) ADD-ONLY — an item already carrying
+ *  login.totp is refused (`exists`), so neither surface (nor a hostile page driving the banner)
+ *  can ever ROTATE a stored second factor from the extension; replacing/removing stays a
+ *  web-vault edit. (2) the SW re-runs the shared normalizeTotp + parse-accept gate — the web
+ *  editors' exact save rule (A5 reject-don't-corrupt) — so an unparseable secret is refused,
+ *  never stored. Callers guarantee `target` is a LOGIN doc (putExisting is the login re-seal
+ *  path; a card doc must never grow a `login` key via this spread). */
+async function writeTotp(target: DecryptedItem, rawTotp: string): Promise<{ ok: boolean; code?: TotpAddCode; error?: string }> {
+  if ((target.doc.login?.totp ?? "") !== "") return { ok: false, code: "exists", error: "item already has a totp" };
+  const totp = normalizeTotp(rawTotp);
+  if (!isValidTotp(totp)) return { ok: false, code: "invalid", error: "not a parseable otpauth secret" };
+  const doc: ItemDoc = { ...target.doc, login: { ...target.doc.login, totp } };
+  const r = await putExisting(target, doc);
+  if (r.ok) return { ok: true };
+  return { ok: false, code: r.code === "conflict" ? "conflict" : "failed", error: r.error };
+}
+
+/** Popup paste-add. Popup-only (tab senders refused — a page must never reach the pick-any-item
+ *  write; its lane is the origin-bound addTotpFromPage below). Login docs only. */
+async function setTotp(
+  msg: Extract<Req, { type: "setTotp" }>,
+  sender: chrome.runtime.MessageSender,
+): Promise<Res<"setTotp">> {
+  if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "popup only" };
+  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
+  const target = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "login");
+  if (!target) return { ok: false, code: "failed", error: "unknown item" };
+  return writeTotp(target, msg.totp);
+}
+
+/** The ONE derivation both page-path halves run — the offer gate and the accept MUST agree, or
+ *  the accept becomes a write the offer never described. From browser-set `sender.origin` only
+ *  (captureCard's [X2-A2] guard shape): the host's matches must be EXACTLY ONE login, and it
+ *  must lack a code — two matches is ambiguity (an enrollment page can't say which account),
+ *  and fails closed to the popup path where the user picks the item themselves. */
+function pageTotpTarget(sender: chrome.runtime.MessageSender): DecryptedItem | null {
+  if (typeof sender.origin !== "string" || sender.origin === "" || sender.origin === "null") return null;
+  const host = hostOfUrl(sender.origin);
+  if (!host) return null;
+  const matches = matchesFor(host);
+  if (matches.length !== 1) return null;
+  const it = matches[0]!;
+  if ((it.doc.login?.totp ?? "") !== "") return null;
+  return it;
+}
+
+/** Offer gate for the in-page banner ([K13] PASSIVE — a page can drive this at will). Answers
+ *  the display NAME only: no itemId, no uris — nothing the matches seam doesn't already give
+ *  this page's own dropdown. */
+function totpOffer(sender: chrome.runtime.MessageSender): Res<"totpOffer"> {
+  const none: Res<"totpOffer"> = { offer: false };
+  if (sender.tab === undefined || sender.frameId !== 0) return none; // top-frame pages only
+  if (!session) return none;
+  const target = pageTotpTarget(sender);
+  return target ? { offer: true, itemName: target.doc.name } : none;
+}
+
+/** Banner accept: RE-DERIVE the target at commit time (never trust the offer round-trip — the
+ *  vault may have synced between offer and click, and an itemId never crosses the page seam),
+ *  then the shared add-only write. */
+async function addTotpFromPage(
+  msg: Extract<Req, { type: "addTotpFromPage" }>,
+  sender: chrome.runtime.MessageSender,
+): Promise<Res<"addTotpFromPage">> {
+  if (sender.tab === undefined || sender.frameId !== 0) return { ok: false, code: "not_allowed", error: "top-frame pages only" };
+  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
+  const target = pageTotpTarget(sender);
+  if (!target) return { ok: false, code: "not_allowed", error: "no single eligible match" };
+  return writeTotp(target, msg.totp);
 }
 
 /** [X2-A6] card-aware re-seal — floors at max(CARD_FORMAT_VERSION, target.formatVersion), NOT the

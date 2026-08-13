@@ -203,6 +203,12 @@ export type UnlockCode =
  *  SW error string, which used to leak "locked"/"save failed (conflict)" into the banner). */
 export type SaveErrorCode = "locked" | "conflict" | "failed";
 
+/** TOTP-add failure code (setTotp / addTotpFromPage, design 2026-08-12) — mapped to copy by the
+ *  surface. `exists` = the add-only contract refused a replace; `not_allowed` = wrong sender or
+ *  the page path's exactly-one-eligible-match derivation failed; `invalid` = the shared
+ *  normalize + parse gate rejected the secret. */
+export type TotpAddCode = "locked" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed";
+
 /** Extension quick-unlock Tier B (spec 01 §8.4). Redeem-failure code — mapped to copy by the popup.
  *  `wrong_pin` carries the remaining attempts; `expired` = past the 24 h window (blob kept, use the
  *  master password); `exhausted`/`corrupt`/`stale_uvk` = the blob was wiped (re-enroll after a full
@@ -346,6 +352,28 @@ export type Req =
   | { type: "generate" }
   /** Popup: live TOTP code for an item's detail row. */
   | { type: "totp"; itemId: string }
+  /** Popup ONLY (the SW refuses tab senders): add a one-time-code secret to a login item that
+   *  has NONE (TOTP-add lane, design 2026-08-12). ADD-ONLY BY CONTRACT — the extension never
+   *  replaces or removes an existing login.totp (that stays a web-vault edit); the SW enforces
+   *  this regardless of what any surface renders. `totp` is the user's paste, raw: the SW runs
+   *  the shared normalizeTotp + parse-accept gate itself (a surface's validation is a
+   *  convenience, never the gate). */
+  | { type: "setTotp"; itemId: string; totp: string }
+  /** Content (TOP frame, PASSIVE): the page shows an otpauth:// enrollment link — may the
+   *  banner offer to add it? EXACTLY this literal — **no host/href member** ([A2]: the SW
+   *  derives the host from browser-set `sender.origin` only; a page-controlled member would be
+   *  an offer-manufacture input). Answers yes IFF the vault is unlocked, the host has EXACTLY
+   *  ONE matching login, and that login has no code yet — ambiguity fails closed to the popup
+   *  path. Carries back only the item's display NAME (metadata the matches seam already exposes
+   *  to this page's own dropdown). [K13]: a page can mint otpauth links at will, so this stream
+   *  is DOM-driveable → PASSIVE (never defers the idle autolock). */
+  | { type: "totpOffer" }
+  /** Content (TOP frame, banner Add click): commit the page-offered otpauth secret. The SW
+   *  RE-DERIVES the single eligible login from `sender.origin` at accept time — an itemId
+   *  never crosses this seam — and re-runs the full gate: unlocked ∧ exactly-one-match ∧
+   *  target still code-less ∧ normalize + parse-accept. NON-passive: rides the banner's
+   *  isTrusted click, i.e. genuine user activity. */
+  | { type: "addTotpFromPage"; totp: string }
   /** Content (each frame load): report host so the SW can badge the tab. */
   | { type: "pageInfo"; host: string }
   /** Surface → SW: a secret was just copied — arm the SW backstop clipboard-clear alarm (E1-4).
@@ -469,6 +497,13 @@ export type Res<T extends Req["type"]> = T extends "status"
                           ? { password: string }
                           : T extends "totp"
                             ? { ok: boolean; code?: string; secondsLeft?: number }
+                            : T extends "setTotp"
+                              ? { ok: boolean; code?: TotpAddCode; error?: string }
+                              : /** The offer carries the item NAME only — never an id, never a uri list. */
+                                T extends "totpOffer"
+                                ? { offer: boolean; itemName?: string }
+                                : T extends "addTotpFromPage"
+                                  ? { ok: boolean; code?: TotpAddCode; error?: string }
                             : T extends "pageInfo"
                               ? { matchCount: number; locked: boolean }
                               : T extends "cardItems"
