@@ -11,13 +11,13 @@
     "package": "node package.mjs"
   },
   "dependencies": {
-    "@noble/ciphers": "^2.2.0",
-    "@noble/hashes": "^2.2.0",
+    "@noble/ciphers": "^2.3.0",
+    "@noble/hashes": "^2.3.0",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
-    "@types/chrome": "^0.2.2",
-    "esbuild": "^0.28.1",
+    "@types/chrome": "^0.2.5",
+    "esbuild": "^0.28.2",
     "typescript": "^5.6.3"
   }
 }
