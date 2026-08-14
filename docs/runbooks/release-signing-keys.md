@@ -86,3 +86,29 @@ gNwuByi91u4o7pgD/VoZzh/N/hSiYNzHBX9UAP9JXVBhYc5GOokigvadNSG+olfm
   verify. Each manifest change re-signs on PRESTIGE per the §1 per-release step.
 - **Extension store-signing DONE** (CWS + AMO live since 0.16.x, `extension-store-publishing.md`) —
   the load-bearing integrity for the extension; the signed manifest is the belt for zip installs.
+
+## Signing-box preflight (learned on the 0.22.0 ceremony, 2026-08-14)
+
+Four things cost time on a run that was otherwise clean. None is a script defect; all are host
+state, so they recur on a fresh box or after a long gap.
+
+1. **`signtool` is usually not on PATH.** Launch from a Developer Command Prompt / Windows SDK
+   shell, or pass `-SignToolPath "C:\Program Files (x86)\Windows Kits\10\bin\<ver>\x64\signtool.exe"`.
+   The script preflights for it and stops early rather than failing after the MSI build.
+2. **Check out the TAG, not `main`.** `main` moves on after a release; an MSI built from it would
+   carry dependencies no other artifact of that version has, so Windows would silently diverge from
+   the deb, APK and extension already in users' hands. `-Ref v<version>` pins it.
+3. **A stale clone is fine to update, but only if it postdates 2026-07-16.** Anything older predates
+   the `git-filter-repo` rewrite and the repo recreation, and will not reconcile — take a fresh
+   clone instead. A clean `git fetch --all --tags` succeeding is the signal that yours is fine.
+4. **`ANDVARI_RELEASE_DROP` is worth setting.** Unset, the bundle stays on the signing box and the
+   ~117 MB MSI needs a manual copy to the build host before it can be verified and published.
+
+### Handing the bundle back
+
+Report the MSI's sha256 and size, the manifest **verbatim plus its own sha256**, and the signature
+last. That manifest hash is what makes a pasted handover safe: the signature covers exact bytes, so
+without it a mangled newline or a BOM is indistinguishable from a bad key. State the byte facts too
+(UTF-8, no BOM, LF, exactly one trailing newline) and note that the `.sig` is **unpadded base64url**
+— a strict base64 decoder rejects it. Done that way, a 687-byte manifest reconstructs byte-exactly
+on the first attempt.

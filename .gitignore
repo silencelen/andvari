@@ -31,3 +31,12 @@ __pycache__/
 
 # Generated per-release by scripts/release-spec.sh — never committed (it names local build paths).
 release-spec.json
+
+# Signing-ceremony output. prestige-release.ps1 writes its bundle to dist/ (already ignored), but
+# the documented manual fallback assembles and signs these in the working directory, and the 0.20.0
+# ceremony left a pair at the repo root that sat there until 2026-08-14 — long enough to fail the
+# 0.22.0 run's clean-tree preflight with a stale, LOWER-seq manifest beside the checkout. A manifest
+# nobody meant to keep is worth ignoring: it is never an input, and every client fetches the signed
+# copy from /downloads.
+/manifest.json
+/manifest.json.sig
