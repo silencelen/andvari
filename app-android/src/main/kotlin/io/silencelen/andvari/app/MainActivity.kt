@@ -591,9 +591,15 @@ private fun TrustGateDialog(gate: TrustGatePrompt, vm: AndvariViewModel) {
                 }
                 if (gate.render.httpCaution) {
                     Spacer(Modifier.height(8.dp))
+                    // Constants, not literals: every other string in this dialog is pinned so the
+                    // phishing wording can't drift, and this one was the exception.
                     Text(
-                        "This is an unencrypted http:// address — anyone on the network can read traffic to it.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                        if (gate.render.cleartextBlocked) TRUST_GATE_HTTP_BLOCKED else TRUST_GATE_HTTP_LOOPBACK,
+                        style = MaterialTheme.typography.bodySmall,
+                        // Loopback http is permitted and harmless, so it reads as a note rather
+                        // than an error; a refusal Android is about to enforce keeps the error colour.
+                        color = if (gate.render.cleartextBlocked) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Spacer(Modifier.height(12.dp))

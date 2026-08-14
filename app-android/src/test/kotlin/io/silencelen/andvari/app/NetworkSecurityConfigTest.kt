@@ -67,4 +67,24 @@ class NetworkSecurityConfigTest {
         assertEquals(listOf("10.0.2.2", "127.0.0.1"), cleartextDomains(debug))
         assertEquals("false", baseCleartext(debug), "debug widens ONE host, it does not open the base config")
     }
+
+    /**
+     * Audit F27 — the trust gate tells the user, before they tap Connect, whether Android will
+     * refuse an `http://` origin. It can only be right about that if its own idea of the exempt
+     * hosts matches the policy the OS actually enforces, so the two are held in lockstep here off
+     * the SHIPPED file rather than by hand.
+     *
+     * Drift has teeth both ways: narrow the Kotlin set and the gate warns about a connection that
+     * would have worked; widen it and the gate stays quiet about one Android is about to refuse,
+     * restoring exactly the two-step dead end F27 removed.
+     */
+    @Test
+    fun trustGateExemptHostsMatchTheShippedConfig() {
+        assertEquals(
+            cleartextDomains(config("main")),
+            CLEARTEXT_EXEMPT_HOSTS.sorted(),
+            "CLEARTEXT_EXEMPT_HOSTS and network_security_config.xml disagree — the trust gate would " +
+                "mispredict what Android permits",
+        )
+    }
 }
