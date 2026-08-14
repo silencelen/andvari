@@ -128,6 +128,47 @@ class Wave3EndpointSwitchTest {
         assertEquals("http://192.168.1.9:8080", r.displayOrigin)
     }
 
+    // ---- audit F27: the gate must say Android will REFUSE, before the user taps Connect ----
+    // Verified on a real device 2026-08-14: a non-loopback http:// origin is accepted at entry,
+    // warned about only for eavesdropping, and refused with UnknownServiceException AFTER Connect.
+    // These pin the fatal fact to the pre-decision side.
+
+    @Test
+    fun trustGateFlagsNonLoopbackHttpAsBlockedBeforeConnecting() {
+        for (origin in listOf("http://192.168.1.9:8080", "http://10.42.0.99:8080", "http://vault.example.org")) {
+            val r = trustGateRender(origin)
+            assertTrue(r.httpCaution, "$origin is http")
+            assertTrue(r.cleartextBlocked, "$origin is outside the shipped cleartext exemptions ⇒ Android refuses it")
+        }
+    }
+
+    @Test
+    fun trustGateDoesNotClaimLoopbackHttpIsBlockedOrExposed() {
+        val r = trustGateRender("http://127.0.0.1:8080")
+        assertTrue(r.httpCaution, "still http, so the note is shown")
+        assertFalse(r.cleartextBlocked, "loopback is the one host the shipped config permits — it must not be called blocked")
+    }
+
+    @Test
+    fun trustGateBlockedVerdictJudgesTheResolvedHostNotTheRawString() {
+        // userinfo must not smuggle an exempt host past the check: Android will judge `evil.example`,
+        // so the gate must too, or it would stay silent about a connection that is about to fail.
+        val r = trustGateRender("http://127.0.0.1@evil.example:8080")
+        assertTrue(r.cleartextBlocked, "the real host is evil.example, which is NOT exempt")
+    }
+
+    @Test
+    fun trustGateHttpCopyIsMutuallyExclusiveAndNeitherOverstates() {
+        // The two strings answer different questions and must not be interchangeable.
+        assertTrue(TRUST_GATE_HTTP_BLOCKED.contains("refuse"), "the blocked copy must say the connection will not happen")
+        assertTrue(TRUST_GATE_HTTP_BLOCKED.contains("https"), "and must name the remedy")
+        assertFalse(
+            TRUST_GATE_HTTP_LOOPBACK.contains("anyone on the network"),
+            "loopback traffic never reaches a network — claiming otherwise is the false warning F27 removed",
+        )
+        assertTrue(TRUST_GATE_HTTP_BLOCKED != TRUST_GATE_HTTP_LOOPBACK)
+    }
+
     @Test
     fun trustGateRenderPunycodesNonAsciiHost() {
         // a non-ASCII (IDN homograph) host renders in punycode with the caution

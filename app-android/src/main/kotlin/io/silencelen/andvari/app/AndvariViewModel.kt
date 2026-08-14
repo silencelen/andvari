@@ -527,9 +527,27 @@ data class TrustGateRender(
     val punycodeCaution: Boolean,
     /** An `http://` origin — show the plain-http caution. */
     val httpCaution: Boolean,
+    /**
+     * An `http://` origin Android will REFUSE outright: any host outside [CLEARTEXT_EXEMPT_HOSTS].
+     * Distinct from [httpCaution] because on Android the two http cases are not on a spectrum —
+     * loopback is permitted and never touches the network, everything else never connects at all.
+     */
+    val cleartextBlocked: Boolean,
 )
 
 private val ORIGIN_SPLIT = Regex("^(https?)://(\\[[^\\]]*]|[^/:?#]*)(:[0-9]+)?", RegexOption.IGNORE_CASE)
+
+/**
+ * The hosts the SHIPPED network security config permits cleartext to
+ * (`src/main/res/xml/network_security_config.xml`).
+ *
+ * This is the app's own model of a policy the OS enforces, so drift has teeth in both directions:
+ * too narrow and the gate warns about a connection Android would have allowed, too wide and it
+ * stays quiet about one Android then refuses — which is the two-step dead end this list exists to
+ * remove. `NetworkSecurityConfigTest` parses the real XML and holds the two in lockstep rather
+ * than trusting this copy.
+ */
+internal val CLEARTEXT_EXEMPT_HOSTS = setOf("127.0.0.1")
 
 /** §4.3 render rules: punycode a non-ASCII host + caution; caution an already-`xn--` host (the
  *  homograph vector); caution `http://`. */
@@ -551,7 +569,16 @@ internal fun trustGateRender(origin: String): TrustGateRender {
     // homograph vector spec/05 R8 warns about, whether the attacker sent us Unicode or the encoding.
     val idn = nonAscii || safeHost.split('.').any { it.startsWith("xn--", ignoreCase = true) }
     val display = if (m != null && nonAscii) "$scheme://$safeHost$port" else trimmed
-    return TrustGateRender(displayOrigin = display, punycodeCaution = idn, httpCaution = httpCaution)
+    // Matched against the RESOLVED host (post-userinfo-strip, post-punycode), never the raw string:
+    // `http://127.0.0.1@evil.example` must be judged on `evil.example`, which is exactly the host
+    // Android will judge it on too.
+    val cleartextBlocked = httpCaution && safeHost.lowercase() !in CLEARTEXT_EXEMPT_HOSTS
+    return TrustGateRender(
+        displayOrigin = display,
+        punycodeCaution = idn,
+        httpCaution = httpCaution,
+        cleartextBlocked = cleartextBlocked,
+    )
 }
 
 // §4.3 trust-gate copy — pinned as constants so the phishing wording can't drift. Baseline is
@@ -561,6 +588,21 @@ internal const val TRUST_GATE_BASELINE =
     "This server will store your encrypted vault and see your account activity (email, sign-ins, item counts). Only continue if you trust it."
 internal const val TRUST_GATE_ENROLLMENT_EXTRA =
     "Your invite was issued by this server. Enrolling creates a NEW account there — it does not move any existing vault. Choose a master password you don't use anywhere else."
+
+// The two http cautions. Audit F27 (verified on a real device 2026-08-14): entering a non-loopback
+// http:// address used to warn only about eavesdropping, let the user tap Connect, and only THEN
+// report that Android had refused the connection outright — the fatal fact arrived one step after
+// the decision. These say it before the tap instead.
+//
+// They are mutually exclusive by construction, because on Android plain http has no middle case:
+// loopback is permitted and never leaves the device, and every other host is refused before a
+// socket is opened. The old single warning ("anyone on the network can read traffic to it") was
+// therefore wrong in BOTH directions — untrue of 127.0.0.1, whose traffic never reaches a network,
+// and beside the point for anything else, which never connects.
+internal const val TRUST_GATE_HTTP_LOOPBACK =
+    "This is an unencrypted http:// address on this device. Traffic to it never leaves the phone, so it isn't exposed to the network."
+internal const val TRUST_GATE_HTTP_BLOCKED =
+    "Android will refuse this connection — it does not allow unencrypted http:// to other devices. Put the server behind https (a reverse proxy, or Tailscale Serve) first; connecting will fail until you do."
 
 /** §4.3 body paragraphs: baseline always, plus the enrollment warning when [enrollment]. Pure so
  *  the copy selection is test-pinned. */
