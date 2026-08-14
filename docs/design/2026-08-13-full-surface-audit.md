@@ -96,9 +96,10 @@ Six findings were product calls rather than defects, and were decided explicitly
   open and silent on any error, and nothing gates submission on the verdict.
 - **F30 stale guide** — rewrite `docs/user-test-guide-0.6.0.md` to the current endpoint-agnostic
   topology, over deleting it or freezing it behind a banner.
-- **F27 Android plain-http** — verify on real hardware first. The safe half shipped (honest error copy,
-  session-drop-before-probe); the posture question of whether to accept such addresses at all is open,
-  and the test pin that currently declares them supported was deliberately left untouched.
+- **F27 Android plain-http** — verify on real hardware first. **Resolved 2026-08-14** (see §5): the
+  reproduction ran on a real device, the posture was settled as accept-with-the-whole-truth rather
+  than accept-or-refuse, and the acceptance pin stands because loopback http is a supported
+  on-device self-hosting story.
 - **F29(d) password history** — demote from the normative spec. It is unimplemented, so the spec was
   overstating the product.
 - **F43 apostrophe normalization** — declined. Rewriting hundreds of shipped user-facing strings and
@@ -106,8 +107,8 @@ Six findings were product calls rather than defects, and were decided explicitly
 
 ## 5. Closure ledger
 
-41 of 43 findings shipped in 0.22.0. One is partial by owner decision (F27), one deferred by owner
-decision (F43). Four lane findings were refuted before reaching this list and are recorded below so a
+41 of 43 findings shipped in 0.22.0. F27 was partial at publication and was **closed on 2026-08-14**
+after an on-device reproduction (see below); one is deferred by owner decision (F43). Four lane findings were refuted before reaching this list and are recorded below so a
 future review does not re-find them.
 
 | ID | Sev | Area | Modules | Finding | Disposition |
@@ -131,7 +132,7 @@ future review does not re-find them.
 | F21 | medium | performance | server | WebSocket dirty-bell fan-out is awaited on the push request path with no per-socket timeout — one member's wedged socket stalls co-members' saves for up to 60 s | fixed |
 | F25 | medium | security | app-android,app-desktop,we | Account TOTP enrollment secret is copied through the "non-secret setup material" path — no auto-clear, and on Android no EXTRA_IS_SENSITIVE | fixed |
 | F26 | medium | usability | app-android,app-desktop,we | Enrollment refusals render useless or false advice: Android maps no enroll code at all, and `escrow_required` has no curated sentence on any client | fixed |
-| F27 | medium | usability | app-android | Android accepts and trust-gates plain-http self-host addresses its own network security config structurally forbids — the switch commits, drops the session, then fails with a misleading "can't reach the server" | partial (owner-gated) |
+| F27 | medium | usability | app-android | Android accepts and trust-gates plain-http self-host addresses its own network security config structurally forbids — the switch commits, drops the session, then fails with a misleading "can't reach the server" | CLOSED 2026-08-14 (verified on device) |
 | F28 | medium | code-quality | app-desktop | Desktop attachment picker reads the whole chosen file into memory on the UI thread before the size check, and leaks the raw exception message to the user | fixed |
 | F29 | medium | docs | spec,server,core | The NORMATIVE specs contradict the tree in four places, including one that would reintroduce a rate-limit bypass if a contributor "restored parity" | fixed |
 | F30 | medium | professionalism | docs | A checked-in user guide in the public repo says andvari is Tailscale-only, hardcodes the reference instance's private hostnames, and documents version 0.6.0 | fixed |
@@ -179,10 +180,16 @@ WHAT SURVIVES (verified): `grep -rn '\.asc' --include=*.sh --include=*.ps1 --inc
 
 ### Still open, deliberately
 
-- **F27 (partial)** — Android accepts a plain-`http` self-host address its own network security config
-  then blocks. The misleading "unreachable" copy is fixed and the session is dropped before the probe.
-  Whether to accept such addresses at all awaits a reproduction on real hardware; the acceptance pin at
-  `Wave3EndpointSwitchTest.kt` is deliberately unchanged until then.
+- **F27 — CLOSED 2026-08-14, no longer open.** Reproduced on a real device (Galaxy Z Fold, Android 16,
+  shipped 0.22.0): `http://` is accepted at entry, and the post-Connect failure surfaced
+  `HouseholdCopy.CLEARTEXT_BLOCKED` — a string emitted from exactly one branch
+  (`t is java.net.UnknownServiceException`), which proves the exception type the mapping targets. The
+  error copy was therefore already right; what was wrong was its timing. The trust gate now states the
+  refusal and its remedy **before** the user taps Connect (`56c37fd`). Writing it exposed a second
+  defect: the single old warning was untrue of `127.0.0.1`, whose traffic never reaches a network, and
+  beside the point for every other host, which never connects — so the two cases now carry separate,
+  accurate copy. Acceptance was deliberately kept: loopback http is supported, and a flat rejection
+  would teach the user nothing where this names the remedy.
 - **F43 (deferred)** — apostrophe glyph normalization across all user-facing copy. Declined at §4.
 - **God-file decomposition** — carried forward from the 2026-07-27 audit. This audit looked for
   concrete harm caused by the file sizes and found none, so the deferral stands rather than being
@@ -192,10 +199,12 @@ WHAT SURVIVES (verified): `grep -rn '\.asc' --include=*.sh --include=*.ps1 --inc
 
 ### Verification debt
 
-Two fixes rest on reasoning rather than observation, and are flagged so nobody mistakes them for
-measured facts: the Android plain-`http` exception type (F27, above), and the backup-parser heap
-amplification figure in F34, which was not re-derived because the missing section-count ceiling
-justifies the fix on its own.
+One fix rests on reasoning rather than observation, and is flagged so nobody mistakes it for a
+measured fact: the backup-parser heap amplification figure in F34, which was not re-derived because
+the missing section-count ceiling justifies the fix on its own.
+
+The Android plain-`http` exception type (F27) was the other entry here and **is no longer debt** — it
+was reproduced on real hardware on 2026-08-14 and the observation is recorded above.
 
 **Correction (2026-08-13).** F16 was listed here when this report was first written, and should not
 have been. The remediation did not guess a new stride: it scoped the fixed height to the windowed
