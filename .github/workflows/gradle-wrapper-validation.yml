@@ -9,6 +9,12 @@ on:
     paths: ["gradle/wrapper/**"]
   pull_request:
     paths: ["gradle/wrapper/**"]
+  # Manual trigger. The path filters above mean this only fires when the wrapper
+  # actually changes, which is correct but left the control unexercised from its
+  # introduction until 2026-08-13 — long enough for its action pin to rot to a
+  # SHA that existed in no repository, undetected. Being able to run it on demand
+  # is what makes the pin verifiable without faking a wrapper change.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,4 +24,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: gradle/actions/wrapper-validation@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4
+      - uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
