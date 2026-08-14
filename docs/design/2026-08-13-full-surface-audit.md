@@ -192,11 +192,18 @@ WHAT SURVIVES (verified): `grep -rn '\.asc' --include=*.sh --include=*.ps1 --inc
 
 ### Verification debt
 
-Three fixes rest on reasoning rather than observation, and are flagged so nobody mistakes them for
-measured facts: the Android plain-`http` exception type (F27, above); the row-clipping geometry behind
-F16, which was re-derived rather than eyeballed in a browser at a raised minimum font size; and the
-backup-parser heap amplification figure in F34, which was not re-derived because the missing
-section-count ceiling justifies the fix on its own.
+Two fixes rest on reasoning rather than observation, and are flagged so nobody mistakes them for
+measured facts: the Android plain-`http` exception type (F27, above), and the backup-parser heap
+amplification figure in F34, which was not re-derived because the missing section-count ceiling
+justifies the fix on its own.
+
+**Correction (2026-08-13).** F16 was listed here when this report was first written, and should not
+have been. The remediation did not guess a new stride: it scoped the fixed height to the windowed
+path only (`.vault-list--virtual .item`), leaving the plain ≤500-row list on `min-height` so it grows
+with the text and cannot clip at any font size, and pinned `ROW_H` and the CSS height to agree by
+parsing both sources. The fix therefore does not depend on the disputed geometry being right at all,
+and the lane recorded a measured breakdown rather than repeating the audit's arithmetic. A closure
+ledger that misreports its own debt defeats the purpose of having one.
 
 ## 6. What this audit says about the next one
 
