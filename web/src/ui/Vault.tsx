@@ -28,6 +28,7 @@ import { ExportPanel, type ExportMode } from "./ExportPanel";
 import { Field } from "./Field";
 import { fmtDay, humanSize } from "./format";
 import { applyListView, type SortMode, type TypeFilter } from "./listview";
+import { hashToView, viewToHash } from "./routes";
 import { Announcer, Msg } from "./Msg";
 import { Health } from "./Health";
 import { clampClipboardClearSeconds } from "./policyclamp";
@@ -61,8 +62,16 @@ const VIEW_TITLES: Record<View, string> = {
  * we consume the sentinel with a self-initiated back() (flagged so the handler ignores it), so
  * no dangling entry lingers. A lock/sign-out unmounts Vault → the effect cleanup drops the
  * listener; a stray sentinel is harmless (same-URL pushState, consumed by the next Back).
+ *
+ * Route mirror (owner dev-note 2026-08-19, routes.ts): the guard also carries [routeHash] — the
+ * current view's fragment — so BOTH history entries it juggles stay stamped with the view. Its
+ * pushes pass the fragment as the entry URL, and the self-pop branch re-stamps the entry the
+ * back() reveals (that entry's URL predates the view change that shallowed us — without the
+ * re-stamp, returning to the vault list from a view left "#/health" in the address bar). This
+ * stays the ONE popstate consumer; the [view]-keyed replaceState in Vault is a mirror, never a
+ * navigation, so the two can't fight over entries.
  */
-function useBackGuard(deep: boolean, closeTop: () => void) {
+function useBackGuard(deep: boolean, closeTop: () => void, routeHash: React.MutableRefObject<string>) {
   const armed = useRef(false);
   const selfPop = useRef(false);
   const deepRef = useRef(deep);
@@ -72,15 +81,18 @@ function useBackGuard(deep: boolean, closeTop: () => void) {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    // "" (the home view) must strip the fragment — a bare "" url argument would keep it.
+    const hashUrl = () => routeHash.current || window.location.pathname + window.location.search;
     const onPop = () => {
       if (selfPop.current) {
         selfPop.current = false;
         armed.current = false;
+        window.history.replaceState(null, "", hashUrl()); // re-stamp the revealed entry (header note)
         return;
       }
       if (deepRef.current) {
         closeRef.current(); // close exactly one layer
-        window.history.pushState({ andvariBack: true }, ""); // re-arm — the browser consumed our sentinel
+        window.history.pushState({ andvariBack: true }, "", hashUrl()); // re-arm — the browser consumed our sentinel
       } else {
         armed.current = false; // nothing open — let the pop stand (navigate away)
       }
@@ -96,17 +108,22 @@ function useBackGuard(deep: boolean, closeTop: () => void) {
       // but a reload already dropped the keys, so F76's "don't waste an unlock" point is moot.)
       if (armed.current) window.history.back();
     };
+    // routeHash is a ref — stable identity, read at event time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (deep && !armed.current) {
-      window.history.pushState({ andvariBack: true }, "");
+      // The Vault-side mirror ran first (declared above this hook's call site), so the
+      // underlying entry already carries the view's fragment; the sentinel inherits it here.
+      window.history.pushState({ andvariBack: true }, "", routeHash.current || window.location.pathname + window.location.search);
       armed.current = true;
     } else if (!deep && armed.current) {
       selfPop.current = true; // a layer closed via an in-app control — reclaim our sentinel
       window.history.back();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deep]);
 }
 
@@ -136,7 +153,11 @@ interface Props {
 }
 
 export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowFingerprint, offlineRecoveryReminder, onLock, onRevoked }: Props) {
-  const [view, setView] = useState<View>("vault");
+  // Route structure (owner dev-note 2026-08-19): the mount reads the fragment back, and Vault
+  // mounts AFTER the unlock gate — so a refresh on "#/health" unlocks and returns to Health.
+  // Enroll fragments were already captured-and-stripped by module load, and "#recover" belongs
+  // to the signed-out flow; both parse to the home view here (routes.ts is total).
+  const [view, setView] = useState<View>(() => hashToView(typeof window === "undefined" ? "" : window.location.hash, isAdmin));
   const [items, setItems] = useState<VaultItem[]>(store.list());
   // Lifecycle notices (spec 03 §11) — the banner reflects the store's list after every sync.
   const [notices, setNotices] = useState<LifecycleNotice[]>(store.notices());
@@ -217,7 +238,19 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     if (view === "sharing" && sharingSettingsVaultId) return setSharingSettingsVaultId(null);
     if (view !== "vault") return setView("vault");
   }, [editing, importOpen, exportMode, selected, view, sharingSettingsVaultId]);
-  useBackGuard(deep, closeTop);
+  // The route MIRROR (routes.ts has the doctrine): replaceState only — the guard below owns
+  // every real history-entry move, and this effect is declared BEFORE its call so a navigation
+  // commit stamps the underlying entry first and the guard's sentinel push inherits it. Layers
+  // and item ids deliberately never appear in the fragment.
+  const routeHash = useRef(viewToHash(view));
+  routeHash.current = viewToHash(view);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.location.hash !== routeHash.current) {
+      window.history.replaceState(null, "", routeHash.current || window.location.pathname + window.location.search);
+    }
+  }, [view]);
+  useBackGuard(deep, closeTop, routeHash);
 
   const refresh = () => {
     setItems(store.list());

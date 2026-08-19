@@ -384,7 +384,8 @@ Prioritized; each is additive and back-compatible.
   (eTLD+1 + username; password-equality as corroboration only), cross-vault scope, and merge
   semantics.
 
-- **Web route structure (owner dev-note 2026-08-19, queued for the next release).** The web
+- ~~**Web route structure**~~ **DONE 2026-08-19 (routes.ts + the back-guard route mirror; ships
+  with the next release).** Original entry: *owner dev-note 2026-08-19.* The web
   vault is a single route: every view lives at `/`, `view`/layer state is the only navigation,
   and `useBackGuard` fakes the history entries — so a refresh, a bookmark, or ordinary browser
   navigation always lands back on the home list ("un-navigates"). Give the TOP-LEVEL views real
