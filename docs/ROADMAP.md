@@ -384,6 +384,22 @@ Prioritized; each is additive and back-compatible.
   (eTLD+1 + username; password-equality as corroboration only), cross-vault scope, and merge
   semantics.
 
+- **Web route structure (owner dev-note 2026-08-19, queued for the next release).** The web
+  vault is a single route: every view lives at `/`, `view`/layer state is the only navigation,
+  and `useBackGuard` fakes the history entries — so a refresh, a bookmark, or ordinary browser
+  navigation always lands back on the home list ("un-navigates"). Give the TOP-LEVEL views real
+  addresses so Back and refresh keep your place. Design constraints settled up front:
+  **hash-fragment routes** (`#/health`, `#/sharing`, `#/settings`, `#/trash`, `#/admin`), not
+  paths — the fragment never reaches the server, so nothing new lands in ktor/Cloudflare access
+  logs, and no SPA-fallback/cache-rule server change is needed. **Views only, never layers**: a
+  selected item id, an open editor, or a search query in the URL would persist vault metadata
+  into browser history at rest (and into cross-device history sync) — layers stay guarded by
+  the existing fake-entry mechanism. The route sync must be built INTO the one `useBackGuard`
+  (a second popstate consumer is forbidden — the double-close hazard its comment documents),
+  and the fragment must survive the unlock round-trip so a refresh on `#/health` returns there
+  AFTER the unlock gate, never before. Rough size M: Vault view-state init + guard integration,
+  App boot plumbing, layer-pin test updates.
+
 ## Onboarding & reach (owner-requested 2026-07-07 — near-term product polish, mostly UI)
 
 - ~~**TOTP enrollment QR code**~~ **SHIPPED 2026-07-08 (batch v6-QW1)** — Settings enrollment
