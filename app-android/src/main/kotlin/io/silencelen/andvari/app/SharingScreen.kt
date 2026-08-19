@@ -18,6 +18,8 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -175,6 +177,11 @@ fun SharingScreen(vm: AndvariViewModel, ui: UiState) {
     // always rendering under the list. Presentation-only disclosure (rotation-safe; no VM state
     // — closing loses nothing, these are read-and-act lists).
     var showTrash by rememberSaveable { mutableStateOf(false) }
+    // Owner dev-note 2026-08-19: a vault the caller can still RESTORE (deletedVaults) hides its
+    // sealed-copy twin from the holding area — the deleter's own device otherwise showed the
+    // same vault twice, two rows telling one story. Members who merely lost access keep theirs.
+    val heldShown = ui.heldVaults.filter { h -> ui.deletedVaults.none { it.vaultId == h.vaultId } }
+    val trashCount = ui.deletedVaults.size + heldShown.size
     Scaffold(
         topBar = {
             TopAppBar(
@@ -195,11 +202,17 @@ fun SharingScreen(vm: AndvariViewModel, ui: UiState) {
                             onClick = { showTrash = !showTrash },
                             modifier = Modifier.semantics { stateDescription = if (showTrash) "shown" else "hidden" },
                         ) {
-                            Icon(
-                                Icons.Default.Delete,
-                                "recently deleted and removed vaults",
-                                tint = if (showTrash) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Unspecified,
-                            )
+                            // Owner dev-note 2026-08-19: the post-delete notice says "the trash
+                            // icon" but a bare, unbadged glyph was findable only by already
+                            // knowing it. A count badge when there is anything to recover makes
+                            // the icon assert itself exactly when the notice points at it.
+                            BadgedBox(badge = { if (trashCount > 0) Badge { Text("$trashCount") } }) {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    "recently deleted and removed vaults",
+                                    tint = if (showTrash) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Unspecified,
+                                )
+                            }
                         }
                     }
                 },
@@ -253,7 +266,7 @@ fun SharingScreen(vm: AndvariViewModel, ui: UiState) {
 
                 if (showTrash) {
                     RecentlyDeletedSection(vm, ui)
-                    RecentlyRemovedSection(ui.heldVaults)
+                    RecentlyRemovedSection(heldShown)
                 }
             }
             Spacer(Modifier.height(24.dp))

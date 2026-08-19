@@ -2000,7 +2000,10 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { 
         )}
         <input ref={fileInput} type="file" multiple style={{ display: "none" }} onChange={(e) => addFiles(e.target.files)} />
         <button type="button" className="ghost" onClick={() => fileInput.current?.click()}>+ Attach files</button>
-        <span className="muted" style={{ marginLeft: 10 }}>encrypted on this device · up to {humanSize(maxBytes)} each</span>
+        {/* Owner dev-note 2026-08-19: "encrypted on this device" read as DEVICE-LOCAL storage.
+            It meant where the encryption happens; the sealed file syncs to every member of the
+            vault like any item. Say both halves plainly. */}
+        <span className="muted" style={{ marginLeft: 10 }}>encrypted before upload · syncs with the vault · up to {humanSize(maxBytes)} each</span>
       </div>
 
       {saveErr && <Msg kind="err">{saveErr}</Msg>}

@@ -34,6 +34,11 @@ interface Props {
  *  list-branch-only. */
 export function Sharing({ account, store, client, onSynced, onBackup, settingsVaultId, onOpenSettings, onCloseSettings }: Props) {
   const [tick, setTick] = useState(0);
+  // Owner dev-note 2026-08-19: the vault ids RecentlyDeleted currently offers to RESTORE.
+  // The deleter's own device holds a sealed copy too, so the same vault showed in BOTH lists —
+  // two rows telling one story. The Restore row is strictly more actionable, so the holding
+  // area hides its twin; members who merely lost access still see theirs (they get no Restore).
+  const [restorableIds, setRestorableIds] = useState<string[]>([]);
   // A3: every vault's DeleteVaultControl {copying, copiedNote} lives HERE, keyed by vaultId —
   // Sharing stays mounted across settings-layer cycles, so closing the layer mid-copy doesn't
   // orphan the rescue-copy progress, and a reopened panel shows honest state. (No store.ts
@@ -195,10 +200,10 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
 
           {trashOpen && (
             <>
-              <RecentlyDeleted store={store} refreshKey={tick} onChanged={refresh} />
+              <RecentlyDeleted store={store} refreshKey={tick} onChanged={refresh} onLoaded={setRestorableIds} />
               {/* IA P8: web finally has the holding-area surface Android has ("Recently
                   removed") — a read-only mirror; recovery is automatic on restore/re-add. */}
-              <RecentlyRemoved store={store} />
+              <RecentlyRemoved store={store} hide={restorableIds} />
             </>
           )}
         </>
@@ -794,8 +799,10 @@ function IncomingTransferCard({ offer, account, store, client, onChanged }: { of
 /** IA P8: the holding area — vaults this account lost access to, a sealed local copy kept for
  *  a while. Read-only (recovery is automatic on restore/re-add); mirrors Android's "Recently
  *  removed". Derived from store.heldVaults() each render — no fetch, no action. */
-function RecentlyRemoved({ store }: { store: VaultStore }) {
-  const held = store.heldVaults();
+function RecentlyRemoved({ store, hide }: { store: VaultStore; hide: string[] }) {
+  // A vault the deleter can still RESTORE (RecentlyDeleted, above) hides its sealed-copy twin
+  // here — one story, one row (owner dev-note 2026-08-19).
+  const held = store.heldVaults().filter((h) => !hide.includes(h.vaultId));
   if (held.length === 0) return null;
   const line = (h: { reason: string; verified: boolean; purgeAt?: number; expungeAt: number }): string => {
     if (h.reason === "deleted" && h.verified) return `deleted by its owner · kept sealed until ${fmtDay(h.purgeAt ?? h.expungeAt)}`;
@@ -821,7 +828,7 @@ function RecentlyRemoved({ store }: { store: VaultStore }) {
   );
 }
 
-function RecentlyDeleted({ store, refreshKey, onChanged }: { store: VaultStore; refreshKey: number; onChanged: () => void }) {
+function RecentlyDeleted({ store, refreshKey, onChanged, onLoaded }: { store: VaultStore; refreshKey: number; onChanged: () => void; onLoaded: (vaultIds: string[]) => void }) {
   const [deleted, setDeleted] = useState<DeletedVaultInfo[] | null>(null);
   const [err, setErr] = useState("");
   const [restoring, setRestoring] = useState<string | null>(null); // vaultId pending confirm
@@ -830,7 +837,10 @@ function RecentlyDeleted({ store, refreshKey, onChanged }: { store: VaultStore; 
   const load = () =>
     store
       .listDeleted()
-      .then(setDeleted)
+      .then((d) => {
+        setDeleted(d);
+        onLoaded(d.map((x) => x.vaultId)); // RecentlyRemoved hides these ids' sealed-copy twins
+      })
       .catch((e) => setErr(friendlyError(e)));
 
   useEffect(() => {
