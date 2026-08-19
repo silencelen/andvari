@@ -65,6 +65,7 @@ import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.core.client.VaultListView
 import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.GeneratorOptions
@@ -1147,8 +1148,22 @@ private fun Vault(state: DesktopState) {
     var editing by remember { mutableStateOf<Pair<String?, ItemDoc>?>(null) }
     var detailId by remember { mutableStateOf<String?>(null) }
     var importFlow by remember { mutableStateOf(false) } // the universal import screen
+    // Owner dev-note 2026-08-18: sort + facet state (the Android/web listctl twin) — plain
+    // `remember` like `query` (no config-change recreation on desktop); deliberately fresh
+    // each unlock, a filter that silently persisted across sessions would read as missing items.
+    var sortMode by remember { mutableStateOf("name") }
+    var typeFilter by remember { mutableStateOf("all") }
+    var vaultFilter by remember { mutableStateOf("all") }
+    // Owner dev-note 2026-08-18: vault choices for the facet row; a filter pointing at a vault
+    // we no longer hold (left/revoked mid-session) degrades to "all" instead of pinning the
+    // list to a silent empty set (Android's effVaultFilter twin). Like vaultBadges below, each
+    // vaultInfos() call decrypts vault metadata — recompute only when the item set changes.
+    val vaultInfos = remember(state.items) { state.vaultInfos() }
+    val effVaultFilter = if (vaultFilter != "all" && vaultInfos.none { it.vaultId == vaultFilter }) "all" else vaultFilter
     // Cut K (v2 #19): remembered — the predicate ran over EVERY item on every recomposition.
-    val filtered = remember(state.items, query) { state.items.filter {
+    // Owner dev-note 2026-08-18: core's VaultListView (facets, then sort) runs BEFORE the
+    // search predicate, Android/web parity.
+    val filtered = remember(state.items, query, sortMode, typeFilter, effVaultFilter) { VaultListView.apply(state.items, sortMode, typeFilter, effVaultFilter).filter {
         val q = query.trim().lowercase()
         // F79: name + username + EVERY uri + notes + a card's brand/••last4 (never secrets),
         // matching the web predicate — so a 2nd-website login, a note's body, and a card by
@@ -1281,6 +1296,52 @@ private fun Vault(state: DesktopState) {
                     if (CardDisplay.CREATE_ENABLED) {
                         Spacer(Modifier.width(8.dp))
                         Button(onClick = { editing = null to ItemDoc(type = "card", name = "", card = CardData()) }) { Text("Add card") }
+                    }
+                }
+                // Owner dev-note 2026-08-18: sort + facet row (the Android/web listctl twin),
+                // the VaultPicker dropdown idiom — Escape/outside-click dismissal for free.
+                // Sits under the search box: list furniture, not app chrome.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    var sortMenu by remember { mutableStateOf(false) }
+                    Box {
+                        OutlinedButton(onClick = { sortMenu = true }) {
+                            Text(if (sortMode == "recent") "Sort: recent" else "Sort: name")
+                            Icon(Icons.Default.ArrowDropDown, null)
+                        }
+                        DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
+                            DropdownMenuItem(text = { Text("Name") }, onClick = { sortMenu = false; sortMode = "name" })
+                            DropdownMenuItem(text = { Text("Recently updated") }, onClick = { sortMenu = false; sortMode = "recent" })
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    var typeMenu by remember { mutableStateOf(false) }
+                    Box {
+                        OutlinedButton(onClick = { typeMenu = true }) {
+                            Text(when (typeFilter) { "login" -> "Logins"; "note" -> "Notes"; "card" -> "Cards"; else -> "All types" })
+                            Icon(Icons.Default.ArrowDropDown, null)
+                        }
+                        DropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
+                            DropdownMenuItem(text = { Text("All types") }, onClick = { typeMenu = false; typeFilter = "all" })
+                            DropdownMenuItem(text = { Text("Logins") }, onClick = { typeMenu = false; typeFilter = "login" })
+                            DropdownMenuItem(text = { Text("Notes") }, onClick = { typeMenu = false; typeFilter = "note" })
+                            DropdownMenuItem(text = { Text("Cards") }, onClick = { typeMenu = false; typeFilter = "card" })
+                        }
+                    }
+                    if (vaultInfos.size > 1) {
+                        Spacer(Modifier.width(8.dp))
+                        var vaultMenu by remember { mutableStateOf(false) }
+                        Box {
+                            OutlinedButton(onClick = { vaultMenu = true }) {
+                                Text(if (effVaultFilter == "all") "All vaults" else vaultInfos.firstOrNull { it.vaultId == effVaultFilter }?.name ?: "All vaults")
+                                Icon(Icons.Default.ArrowDropDown, null)
+                            }
+                            DropdownMenu(expanded = vaultMenu, onDismissRequest = { vaultMenu = false }) {
+                                DropdownMenuItem(text = { Text("All vaults") }, onClick = { vaultMenu = false; vaultFilter = "all" })
+                                vaultInfos.forEach { v ->
+                                    DropdownMenuItem(text = { Text(v.name) }, onClick = { vaultMenu = false; vaultFilter = v.vaultId })
+                                }
+                            }
+                        }
                     }
                 }
                 ErrorBar(state.error, state::clearError)

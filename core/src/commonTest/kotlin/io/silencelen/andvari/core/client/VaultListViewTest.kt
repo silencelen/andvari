@@ -1,8 +1,5 @@
-package io.silencelen.andvari.app
+package io.silencelen.andvari.core.client
 
-import io.silencelen.andvari.core.client.ItemDoc
-import io.silencelen.andvari.core.client.LoginData
-import io.silencelen.andvari.core.client.VaultItem
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
@@ -11,7 +8,8 @@ import kotlin.test.assertSame
  * Owner dev-note 2026-08-18: the vault list's sort + facet transform (web's listview.test.ts
  * twin) — facets subset without re-ordering, "name" never re-sorts (the engine's alphabetical
  * order is the contract), "recent" is updatedAt desc with the incoming order as the stable
- * tiebreak. Pure top-level fn, so plain kotlin.test per the PureGatesTest idiom.
+ * tiebreak. Pure core object shared by Android and desktop, so plain kotlin.test in
+ * commonTest (the CardDisplayTest idiom).
  */
 class VaultListViewTest {
 
@@ -34,22 +32,22 @@ class VaultListViewTest {
 
     @Test
     fun defaultViewPassesTheSameListThrough() {
-        assertSame(items, applyVaultListView(items, "name", "all", "all"))
+        assertSame(items, VaultListView.apply(items, "name", "all", "all"))
     }
 
     @Test
     fun typeFacetSubsetsWithoutReordering() {
-        assertEquals(listOf("alpha", "delta"), applyVaultListView(items, "name", "login", "all").map { it.itemId })
+        assertEquals(listOf("alpha", "delta"), VaultListView.apply(items, "name", "login", "all").map { it.itemId })
     }
 
     @Test
     fun vaultFacetComposesWithTheTypeFacet() {
-        assertEquals(listOf("bravo", "delta"), applyVaultListView(items, "name", "all", "v2").map { it.itemId })
-        assertEquals(listOf("delta"), applyVaultListView(items, "name", "login", "v2").map { it.itemId })
+        assertEquals(listOf("bravo", "delta"), VaultListView.apply(items, "name", "all", "v2").map { it.itemId })
+        assertEquals(listOf("delta"), VaultListView.apply(items, "name", "login", "v2").map { it.itemId })
     }
 
     @Test
     fun recentIsUpdatedAtDescWithTheIncomingOrderAsStableTiebreak() {
-        assertEquals(listOf("alpha", "carol", "delta", "bravo"), applyVaultListView(items, "recent", "all", "all").map { it.itemId })
+        assertEquals(listOf("alpha", "carol", "delta", "bravo"), VaultListView.apply(items, "recent", "all", "all").map { it.itemId })
     }
 }
