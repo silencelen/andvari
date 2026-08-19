@@ -1418,6 +1418,19 @@ private fun RecoverScreen(vm: AndvariViewModel, ui: UiState, sessionEmail: Strin
 
 // ---- vault ----
 
+/** Owner dev-note 2026-08-18 (web listview.ts twin): facets subset, then sort. "name" preserves
+ *  the engine's alphabetical order (SyncEngine.items() already sorts by name — a re-sort here
+ *  would shadow that contract); "recent" is updatedAt desc, stable so equal stamps keep the
+ *  alphabetical order. Top-level pure (the enrollReady idiom) so VaultListViewTest pins it
+ *  without a Compose runtime. */
+internal fun applyVaultListView(items: List<VaultItem>, sort: String, type: String, vaultId: String): List<VaultItem> {
+    var out = items
+    if (type != "all") out = out.filter { it.doc.type == type }
+    if (vaultId != "all") out = out.filter { it.vaultId == vaultId }
+    if (sort == "recent") out = out.sortedByDescending { it.updatedAt }
+    return out
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
@@ -1426,6 +1439,12 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
     // manifest configChanges those events no longer even recreate; this is defense-in-depth.)
     var query by rememberSaveable { mutableStateOf("") }
     var detailId by rememberSaveable { mutableStateOf<String?>(null) }
+    // Owner dev-note 2026-08-18: sort + facet state (web's listctl twin) — saveable like query
+    // so a fold/rotation doesn't reset the view; deliberately fresh each unlock, a filter that
+    // silently persisted across sessions would read as missing items.
+    var sortMode by rememberSaveable { mutableStateOf("name") }
+    var typeFilter by rememberSaveable { mutableStateOf("all") }
+    var vaultFilter by rememberSaveable { mutableStateOf("all") }
     val ctx = LocalContextCompat()
     val scope = rememberCoroutineScope()
 
@@ -1473,11 +1492,16 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
         }
     }
 
+    // Owner dev-note 2026-08-18: vault choices for the facet row; a filter pointing at a vault
+    // we no longer hold (left/revoked mid-session) degrades to "all" instead of pinning the
+    // list to a silent empty set (web's effVaultFilter twin).
+    val vaultInfos = remember(ui.items) { vm.vaultInfos() }
+    val effVaultFilter = if (vaultFilter != "all" && vaultInfos.none { it.vaultId == vaultFilter }) "all" else vaultFilter
     // Cut K (v2 #19): remembered — this ran on EVERY recomposition (not just query/item
     // changes), and the list below is now lazy so large vaults don't compose every row.
-    val filtered = remember(ui.items, query) {
+    val filtered = remember(ui.items, query, sortMode, typeFilter, effVaultFilter) {
         val q = query.trim().lowercase()
-        ui.items.filter {
+        applyVaultListView(ui.items, sortMode, typeFilter, effVaultFilter).filter {
             // F79 parity with web/desktop: name + username + EVERY uri + notes + card brand/••last4.
             val d = it.doc
             q.isEmpty() ||
@@ -1550,6 +1574,41 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                             // programmatic name — it disappears the moment text is entered, leaving
                             // the search box nameless. The label names it in both states.
                             OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), label = { Text("Search vault") }, placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
+                            // Owner dev-note 2026-08-18: sort + facet row (web's listctl twin),
+                            // the addMenu DropdownMenu idiom. Scrolls with the search box —
+                            // list furniture, not app chrome.
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                var sortMenu by remember { mutableStateOf(false) }
+                                Box {
+                                    TextButton(onClick = { sortMenu = true }) { Text(if (sortMode == "recent") "Sort: recent" else "Sort: name") }
+                                    DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
+                                        DropdownMenuItem(text = { Text("Name") }, onClick = { sortMenu = false; sortMode = "name" })
+                                        DropdownMenuItem(text = { Text("Recently updated") }, onClick = { sortMenu = false; sortMode = "recent" })
+                                    }
+                                }
+                                var typeMenu by remember { mutableStateOf(false) }
+                                Box {
+                                    TextButton(onClick = { typeMenu = true }) { Text(when (typeFilter) { "login" -> "Logins"; "note" -> "Notes"; "card" -> "Cards"; else -> "All types" }) }
+                                    DropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
+                                        DropdownMenuItem(text = { Text("All types") }, onClick = { typeMenu = false; typeFilter = "all" })
+                                        DropdownMenuItem(text = { Text("Logins") }, onClick = { typeMenu = false; typeFilter = "login" })
+                                        DropdownMenuItem(text = { Text("Notes") }, onClick = { typeMenu = false; typeFilter = "note" })
+                                        DropdownMenuItem(text = { Text("Cards") }, onClick = { typeMenu = false; typeFilter = "card" })
+                                    }
+                                }
+                                if (vaultInfos.size > 1) {
+                                    var vaultMenu by remember { mutableStateOf(false) }
+                                    Box {
+                                        TextButton(onClick = { vaultMenu = true }) { Text(if (effVaultFilter == "all") "All vaults" else vaultInfos.firstOrNull { it.vaultId == effVaultFilter }?.name ?: "All vaults") }
+                                        DropdownMenu(expanded = vaultMenu, onDismissRequest = { vaultMenu = false }) {
+                                            DropdownMenuItem(text = { Text("All vaults") }, onClick = { vaultMenu = false; vaultFilter = "all" })
+                                            vaultInfos.forEach { v ->
+                                                DropdownMenuItem(text = { Text(v.name) }, onClick = { vaultMenu = false; vaultFilter = v.vaultId })
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             ErrorBar(ui.error, vm::clearError)
                             NoticeBar(ui.notice, vm::clearNotice)
                             // P4/A7: the break-glass banners that used to render here (lifecycle notices,
