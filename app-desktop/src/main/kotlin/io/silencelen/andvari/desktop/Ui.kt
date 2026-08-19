@@ -1954,7 +1954,10 @@ private fun SharingScreen(state: DesktopState) {
 
             if (showTrash) {
                 RecentlyDeletedSection(state)
-                RecentlyRemovedSection(state.heldVaults)
+                // Owner dev-note 2026-08-19: a vault the caller can still RESTORE (above) hides
+                // its sealed-copy twin here — the deleter's device otherwise listed the same
+                // vault twice. Members who merely lost access keep their row (no Restore).
+                RecentlyRemovedSection(state.heldVaults.filter { h -> state.deletedVaults.none { it.vaultId == h.vaultId } })
             }
         }
         Spacer(Modifier.height(24.dp))

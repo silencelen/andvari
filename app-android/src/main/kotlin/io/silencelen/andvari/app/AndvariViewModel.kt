@@ -2245,7 +2245,7 @@ class AndvariViewModel(
             val purgeAt = engine!!.deleteSharedVault(vaultId)
             refreshItems(); reloadSharing()
             _ui.value = _ui.value.copy(
-                notice = "“$vaultName” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Sharing → the trash icon).",
+                notice = "“$vaultName” is deleted. Members lost access immediately. You can restore it until ${fmtDay(purgeAt)} (Sharing → the trash icon, top right).",
             )
         }
     }
