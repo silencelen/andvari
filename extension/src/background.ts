@@ -46,6 +46,7 @@ import { currentCode, isValidTotp, normalizeTotp } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor } from "./savetarget";
+import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
 import { armGate, withRedeemInFlight } from "./locksequence";
@@ -94,6 +95,14 @@ const NKEY = "lockNotice"; // storage.session: { kind:"idle"; seconds } — F26 
 // update-channel state describes ONE origin's /downloads channel (an unscoped USEQ would let one
 // origin's seq numbering poison another's anti-rollback). Every read/write goes through nsk().
 const QKEY = "quickUnlock"; // storage.session, namespaced: QuRecord (blob + counter + locked-token stash)
+// Known-logins digest (owner decision 2026-08-18; spec 01 §8.4 amendment): truncated HMACs over
+// (site key, username) pairs — NO password material — so the LOCKED capture path can tell "a
+// re-login to something we already hold" from "a genuinely new login" (knownlogins.ts has the
+// derivation + the disclosure bound). Same compartment posture as QKEY: its own storage.session
+// key under nsk(), rebuilt from the decrypted items on every persistSession, deliberately
+// RETAINED across an idle/manual lock (that survival is its whole function), wiped at sign-out
+// and on an untrusted compartment.
+const KLKEY = "knownLogins"; // storage.session, namespaced: KnownLoginsRecord
 const DKEY = "quOfferDismissed"; // storage.local, namespaced (non-secret): the offer card was dismissed once
 const BKEY = "quBioCred"; // storage.local, namespaced (non-secret, 0.17.0 amendment 4): { credentialId, prfSalt, userId } — reuse a passkey on re-enroll (avoid TPM/SEP litter). NOT secret: the PRF *output* needs the hardware + OS user-verification; salt/id/userId are public inputs (like a KDF salt).
 const UKEY = "updateInfo"; // storage.local, namespaced (non-secret): UpdateInfo while a newer build is live
@@ -265,8 +274,16 @@ interface TabState {
    *  content (publicPending constructs its shape explicitly); rides persistTabs like the rest of
    *  the record, and a browser restart drops storage.session and the approval with it. Only ever
    *  set on a LOCKED-capture pending — doLock's [S3-lock] allow-list drops pendings wholesale, so
-   *  an approval can never straddle a lock of a live session. */
-  pending?: (PendingSave & { password: string; frameId: number; approvedAt?: number }) | undefined;
+   *  an approval can never straddle a lock of a live session.
+   *  Locked-capture posture (owner decisions 2026-08-18): `lockedAt` stamps a pending minted
+   *  WHILE locked — it holds a plaintext page password in storage.session, so it expires
+   *  unoffered after LOCKED_PENDING_TTL_MS. `quiet` marks a locked capture whose (site, user)
+   *  pair the known-logins digest recognized: no banner while locked; the unlock-time dedupe in
+   *  reofferPendingSaves drops it (unchanged) or offers Update (changed). `offeredAt` throttles
+   *  locked re-offers to one per REOFFER_MIN_GAP_MS (knownlogins.ts reofferDecision owns the
+   *  ordering). All three are cleared when the unlock re-offer hands the pending to a live
+   *  session, and none ride publicPending. */
+  pending?: (PendingSave & { password: string; frameId: number; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number }) | undefined;
   /** S3 per-frame card-form registry: frameId → { the frame's browser-set origin, ALL its card
    *  forms' kinds in document order (Tier 2 §2) }. METADATA ONLY (never card values). `origin` is
    *  `sender.origin` ([A2]); every card offer/redemption re-derives the tab's top origin and
@@ -995,7 +1012,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== "complete") return;
   void (async () => {
     await ensureLoaded();
-    const pending = tabs.get(tabId)?.pending;
+    const st = tabs.get(tabId);
+    if (!st) return;
+    // 2026-08-18: TTL / quiet / once-per-gap throttle — the every-page-load re-offer was the
+    // second amplifier of the locked over-prompting (the digest suppression being the first).
+    const pending = gateReoffer(tabId, st);
     if (!pending) return;
     const msg: TabMsg = { type: "offerPendingSave", pending: publicPending(pending) };
     try {
@@ -1155,7 +1176,72 @@ function persistSession(): Promise<void> {
     vaultKeys: Object.fromEntries([...session.vaultKeys].map(([id, vk]) => [id, toB64(vk)])),
     items: session.items,
   };
+  // The known-logins digest tracks the items it is derived from: every persist of the session
+  // is exactly "items changed or were (re)installed", so this is the one rebuild choke point.
+  void refreshKnownLogins();
   return chrome.storage.session.set({ [SKEY]: snap });
+}
+
+/** The digest HMAC key, cached across rebuilds within one SW life. null after sign-out (the
+ *  record is wiped with it) and on a cold SW — the next rebuild reuses the stored key or mints
+ *  a fresh one; a fresh key merely invalidates old digests, which the same rebuild replaces. */
+let knownLoginsKey: Uint8Array | null = null;
+
+/** Rebuild the KLKEY record from the live session's items (knownlogins.ts owns the derivation).
+ *  Best-effort by design: a failed rebuild only means a known login banners while locked — the
+ *  pre-digest behavior, never a wrong suppression. */
+async function refreshKnownLogins(): Promise<void> {
+  if (!session) return;
+  try {
+    if (!knownLoginsKey) {
+      const got = await chrome.storage.session.get(nsk(KLKEY));
+      const rec = got[nsk(KLKEY)] as KnownLoginsRecord | undefined;
+      knownLoginsKey = rec?.key ? fromB64(rec.key) : crypto.getRandomValues(new Uint8Array(16));
+    }
+    const digests = buildKnownLoginDigests(knownLoginsKey, session.items, pslResolve);
+    await chrome.storage.session.set({ [nsk(KLKEY)]: { key: toB64(knownLoginsKey), digests } satisfies KnownLoginsRecord });
+  } catch {
+    /* storage hiccup — the stale (or absent) set stands; fail toward the banner, never silence */
+  }
+}
+
+/** The locked capture path's membership test. Reads the record fresh (the SW may have been born
+ *  after the lock that this set survived). Fail-open to "unknown" — the banner is the safe
+ *  default; silence is the privilege the digest has to earn. */
+async function isKnownLoginWhileLocked(host: string, username: string): Promise<boolean> {
+  try {
+    const got = await chrome.storage.session.get(nsk(KLKEY));
+    const rec = got[nsk(KLKEY)] as KnownLoginsRecord | undefined;
+    if (!rec?.key || !Array.isArray(rec.digests)) return false;
+    const site = siteKeyOfHost(host, pslResolve);
+    if (!site) return false;
+    return rec.digests.includes(knownLoginDigest(fromB64(rec.key), site, username));
+  } catch {
+    return false;
+  }
+}
+
+/** One gate for every locked-state RE-offer surface (tabs.onUpdated + the content load poll):
+ *  applies reofferDecision (TTL-expire → drop the pending; quiet/throttled → no offer) and
+ *  stamps offeredAt on a granted locked offer. The unlock moment (reofferPendingSaves) and the
+ *  immediate capture-time banner deliberately do NOT route through this. */
+function gateReoffer(tabId: number, st: TabState): (PendingSave & { password: string; frameId: number }) | null {
+  const p = st.pending;
+  if (!p) return null;
+  const verdict = reofferDecision(p, Date.now(), session !== null);
+  if (verdict === "expired") {
+    st.pending = undefined;
+    tabs.set(tabId, st);
+    persistTabs();
+    return null;
+  }
+  if (verdict !== "offer") return null;
+  if (!session) {
+    p.offeredAt = Date.now();
+    tabs.set(tabId, st);
+    persistTabs();
+  }
+  return p;
 }
 
 function persistTabs(): void {
@@ -1239,6 +1325,14 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
 
   api.setTokens(null, null); // the api forgets the pair; while armed it lives ONLY in QKEY.lockedTokens
   await chrome.storage.session.remove([SKEY, TKEY]); // full vault snapshot always erased — locked reports locked
+  // The known-logins digest (KLKEY) deliberately SURVIVES an idle/manual lock — that survival is
+  // its whole function (the locked save-prompt check, spec 01 §8.4 amendment 2026-08-18).
+  // Sign-out is its wipe choke point, and an untrusted compartment gets the same fail-closed
+  // erase as the quick-unlock blob (the record is only worth holding where TRUSTED_CONTEXTS holds).
+  if (reason === "signout" || !quCompartmentTrusted) {
+    knownLoginsKey = null;
+    await chrome.storage.session.remove(nsk(KLKEY));
+  }
   // …then re-persist the [S3-lock] allow-listed remainder (top origin + card-form KINDS only — no
   // pending, no password, no username). The blanket remove above is what guarantees the sensitive
   // half never survives; this writes back only what the page already knows, so the chip's presence
@@ -1604,7 +1698,10 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // content-side; this closes the SW half.
       if (sender.frameId !== undefined && sender.frameId !== 0) return { pending: null } satisfies Res<"pendingSave">;
       const tabId = await contextTabId(sender);
-      const p = tabId === undefined ? undefined : tabs.get(tabId)?.pending;
+      // 2026-08-18: same TTL/quiet/throttle gate as the onUpdated re-offer — this poll fires on
+      // every top-frame load, so ungated it was the other half of the every-page-load nag.
+      const st = tabId === undefined ? undefined : tabs.get(tabId);
+      const p = st === undefined || tabId === undefined ? null : gateReoffer(tabId, st);
       return { pending: p ? publicPending(p) : null } satisfies Res<"pendingSave">;
     }
     case "resolvePendingSave":
@@ -1788,6 +1885,13 @@ const APPROVED_SAVE_TTL_MS = 10 * 60_000;
 function reofferPendingSaves(): void {
   for (const [tabId, st] of tabs) {
     if (!st.pending) continue;
+    // 2026-08-18: a locked-minted pending past its TTL is dropped even at the unlock moment —
+    // the bound on plaintext-at-rest outranks the offer (reofferDecision orders it the same way).
+    if (st.pending.lockedAt !== undefined && Date.now() - st.pending.lockedAt > LOCKED_PENDING_TTL_MS) {
+      st.pending = undefined;
+      persistTabs();
+      continue;
+    }
     if (st.pending.approvedAt !== undefined) {
       if (Date.now() - st.pending.approvedAt <= APPROVED_SAVE_TTL_MS) {
         void commitApprovedSave(tabId, st, st.pending);
@@ -1796,6 +1900,22 @@ function reofferPendingSaves(): void {
       st.pending.approvedAt = undefined; // expired — back to consent-first
       persistTabs();
     }
+    // 2026-08-18: the unlock is the first moment matchesFor can answer for a locked capture — an
+    // unchanged re-login (2a) is dropped with NO banner ever shown (this is where a quiet pending's
+    // loop closes; capture-time ran this same check against an empty vault and couldn't). A changed
+    // password falls through to the offer, which resolveSaveAction will land as an Update.
+    const target = saveTargetFor(matchesFor(st.pending.host), st.pending.username, st.pending.password);
+    if (target && (target.doc.login?.password ?? "") === st.pending.password) {
+      st.pending = undefined;
+      persistTabs();
+      continue;
+    }
+    // Handed to a live session: the locked-life stamps are spent (a later re-lock drops the
+    // pending wholesale via [S3-lock], so none of them can matter again).
+    st.pending.lockedAt = undefined;
+    st.pending.quiet = undefined;
+    st.pending.offeredAt = undefined;
+    persistTabs();
     const m: TabMsg = { type: "offerPendingSave", pending: publicPending(st.pending) };
     // Frame 0 only — same rule as the onUpdated re-offer: the metadata never rides into sub-frames.
     chrome.tabs.sendMessage(tabId, m, { frameId: 0 }).catch(() => {
@@ -3043,7 +3163,7 @@ async function capturedCredential(
     return { ok: true };
   }
 
-  const pending: PendingSave & { password: string; frameId: number } = {
+  const pending: PendingSave & { password: string; frameId: number; lockedAt?: number; quiet?: boolean; offeredAt?: number } = {
     host,
     username,
     updatesItemId: existing?.itemId ?? null,
@@ -3052,6 +3172,25 @@ async function capturedCredential(
     password: msg.password,
     frameId,
   };
+  // Locked-capture posture (owner decisions 2026-08-18). A pending minted while locked holds a
+  // plaintext page password in storage.session, so it carries a TTL stamp (LOCKED_PENDING_TTL_MS,
+  // enforced by every re-offer gate + the unlock re-offer). If the known-logins digest recognizes
+  // the (site, username) pair — a re-login to something we already hold — the pending is recorded
+  // QUIET: no banner now, no re-offers; the unlock-time dedupe drops it (unchanged) or offers
+  // Update (changed). An unknown pair keeps today's "unlock to save" banner — that nag is how a
+  // genuinely new login survives — with offeredAt stamped so the re-offer throttle counts this
+  // first showing.
+  if (!session) {
+    pending.lockedAt = Date.now();
+    if (await isKnownLoginWhileLocked(host, username)) {
+      pending.quiet = true;
+      st.pending = pending;
+      tabs.set(tabId, st);
+      persistTabs();
+      return { ok: true };
+    }
+    pending.offeredAt = Date.now();
+  }
   st.pending = pending;
   tabs.set(tabId, st);
   persistTabs();
