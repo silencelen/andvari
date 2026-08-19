@@ -55,8 +55,14 @@ export function healthRows(items: VaultItem[]): Row[] {
   });
 }
 
+/** Owner dev-note 2026-08-18: the duplicate checker grew past a screenful and buried the per-item
+ *  table below it, so the view is split in two — the tiles stay as the always-visible summary and
+ *  everything below them belongs to one switchable half (Admin's tabs idiom). */
+type HealthTab = "passwords" | "duplicates";
+
 /** Vault-wide password health: strength, reuse, duplicates, and (on demand) HIBP breach exposure. */
 export function Health({ items, client, userId, onOpenItem, store, onChanged }: Props) {
+  const [tab, setTab] = useState<HealthTab>("passwords");
   const rows = useMemo<Row[]>(() => healthRows(items), [items]);
   // audit F03: duplicates cluster ACROSS vaults (the app mints cross-vault twins itself), so the
   // checker needs vault identity — names for the row badges and the confirm sentence, and the
@@ -143,9 +149,25 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged }: 
         <Tile label="Duplicates" value={String(dupes.length)} tone={dupes.length > 0 ? "bad" : "good"} />
       </div>
 
-      {dupes.length > 0 && <Duplicates clusters={dupes} store={store} vaultNameById={vaultNameById} onOpenItem={onOpenItem} onChanged={onChanged} />}
+      <div className="tabs" role="group" aria-label="Health view">
+        <button type="button" className={tab === "passwords" ? "active" : ""} aria-pressed={tab === "passwords"} onClick={() => setTab("passwords")}>
+          Passwords
+        </button>
+        <button type="button" className={tab === "duplicates" ? "active" : ""} aria-pressed={tab === "duplicates"} onClick={() => setTab("duplicates")}>
+          Duplicates
+        </button>
+      </div>
 
-      {rows.length === 0 ? (
+      {tab === "duplicates" ? (
+        dupes.length > 0 ? (
+          <Duplicates clusters={dupes} store={store} vaultNameById={vaultNameById} onOpenItem={onOpenItem} onChanged={onChanged} />
+        ) : (
+          <div className="empty">
+            <div className="sigil"><EmptySigil /></div>
+            <p>No duplicate entries — every account is saved exactly once.</p>
+          </div>
+        )
+      ) : rows.length === 0 ? (
         <div className="empty">
           <div className="sigil"><EmptySigil /></div>
           <p>No logins with passwords yet — nothing to assess.</p>
