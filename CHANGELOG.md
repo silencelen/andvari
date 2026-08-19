@@ -4,6 +4,43 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.23.0 (2026-08-18) — the vault gets organized, and the save prompt learns to hold its tongue · fleet 0.23.0, extension 0.23.0
+
+*The extension no longer asks to save a password you already have. The vault is usually locked at
+the exact moment a login form is submitted, and a locked extension had nothing to check against —
+so every re-login to a saved site raised "unlock to save". The extension now keeps one small
+membership check that survives the lock: keyed fingerprints of which site-and-username pairs the
+vault holds — no password material in them, wiped at sign-out. A submit that matches records the
+capture quietly; if the password turns out unchanged after unlock, no prompt ever appears, and if
+it changed you get the Update offer. A genuinely new login still banners immediately, but while
+the vault stays locked it re-offers at most once every ten minutes instead of on every page load,
+and a capture left unanswered is discarded after thirty minutes — a submitted password should not
+wait around indefinitely.*
+
+*The vault list can be sorted and filtered — on the web, on Android, and on desktop. Sort by name
+(as always) or by most recently updated; narrow to logins, notes, or cards; and once a second
+vault exists, narrow to a single vault. The choices reset at each unlock on purpose: a filter
+that silently persisted could read as missing items.*
+
+*Vault health is now two views — Passwords and Duplicates — because the duplicate list had grown
+long enough to bury the per-item table beneath it. The summary tiles stay above both, and the
+Duplicates count only turns red for groups that still need attention.*
+
+*Duplicate groups the guided merge could not touch now have endings. When copies of the same
+account carry different passwords, test which one the site still accepts (each copy links to its
+site; signing in is the only honest test — andvari never tries a password against a site itself),
+then "Keep this one": the other copies move to Deleted items, and the passwords they carried are
+kept in the surviving item's password history, so even a wrong pick outlives the 30-day window.
+And a group that is correct as it stands — two services on one host sharing an account name, or a
+copy deliberately kept in two vaults — can be marked "not duplicates" and stops nagging on every
+device, resurfacing only if the group itself changes.*
+
+*Housekeeping: Health moved into the web vault's main navigation now that it is a real place;
+Settings is the gear beside Lock; Import and Export are icons beside Trash, leaving + Login /
++ Note / + Card as the toolbar's only labeled buttons. On Android, the trust gate now says
+plainly — before Connect — that http:// addresses are refused. Server logging updated (logback
+1.6.1); extension crypto dependencies updated (@noble 2.3.0).*
+
 ## 0.22.0 (2026-08-13) — full-surface audit: the locks close, and the copy stops overpromising · fleet 0.22.0, extension 0.22.0
 
 *This release comes out of a tip-to-tail audit of every surface — crypto, server, web, extension,
