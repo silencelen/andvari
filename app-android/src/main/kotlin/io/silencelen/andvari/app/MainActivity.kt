@@ -79,6 +79,7 @@ import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.core.client.VaultListView
 import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.PasswordGenerator
@@ -1418,19 +1419,6 @@ private fun RecoverScreen(vm: AndvariViewModel, ui: UiState, sessionEmail: Strin
 
 // ---- vault ----
 
-/** Owner dev-note 2026-08-18 (web listview.ts twin): facets subset, then sort. "name" preserves
- *  the engine's alphabetical order (SyncEngine.items() already sorts by name — a re-sort here
- *  would shadow that contract); "recent" is updatedAt desc, stable so equal stamps keep the
- *  alphabetical order. Top-level pure (the enrollReady idiom) so VaultListViewTest pins it
- *  without a Compose runtime. */
-internal fun applyVaultListView(items: List<VaultItem>, sort: String, type: String, vaultId: String): List<VaultItem> {
-    var out = items
-    if (type != "all") out = out.filter { it.doc.type == type }
-    if (vaultId != "all") out = out.filter { it.vaultId == vaultId }
-    if (sort == "recent") out = out.sortedByDescending { it.updatedAt }
-    return out
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
@@ -1501,7 +1489,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
     // changes), and the list below is now lazy so large vaults don't compose every row.
     val filtered = remember(ui.items, query, sortMode, typeFilter, effVaultFilter) {
         val q = query.trim().lowercase()
-        applyVaultListView(ui.items, sortMode, typeFilter, effVaultFilter).filter {
+        VaultListView.apply(ui.items, sortMode, typeFilter, effVaultFilter).filter {
             // F79 parity with web/desktop: name + username + EVERY uri + notes + card brand/••last4.
             val d = it.doc
             q.isEmpty() ||
