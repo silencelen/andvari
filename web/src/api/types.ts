@@ -567,6 +567,13 @@ export interface ItemDoc {
   name: string;
   notes?: string;
   favorite?: boolean;
+  /** Duplicate-checker acknowledgment (owner decision 2026-08-18): the cluster signature the
+   *  user marked "not duplicates — keep both". A cluster is dismissed only while EVERY member
+   *  carries the signature of the cluster as currently constituted, so any membership change
+   *  resurfaces it. Doc-level on purpose — it syncs, so one dismissal quiets every device (and
+   *  every household member: the statement is about the items, not the viewer). Old clients
+   *  preserve it as an unknown key (the postalCode convention — no formatVersion bump). */
+  dupeAck?: string;
   login?: {
     username?: string;
     password?: string;

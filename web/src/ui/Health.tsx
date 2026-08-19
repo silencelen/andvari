@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { ApiClient } from "../api/client";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import type { VaultItem, VaultStore } from "../vault/store";
-import { duplicateClusters, type DuplicateCluster } from "./duplicates";
+import { duplicateClusters, planDismiss, planKeep, type DuplicateCluster, type RoleFor } from "./duplicates";
 import { Announcer, Msg } from "./Msg";
 import { EmptySigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength } from "./strength";
@@ -146,7 +146,8 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged }: 
         <Tile label="Weak" value={String(weak)} tone={weak > 0 ? "bad" : "good"} />
         <Tile label="Reused" value={String(reused)} tone={reused > 0 ? "bad" : "good"} />
         <Tile label="Breached" value={breached === null ? "—" : String(breached)} tone={breached === null ? undefined : breached > 0 ? "bad" : "good"} hint={breached === null ? "run a scan" : undefined} />
-        <Tile label="Duplicates" value={String(dupes.length)} tone={dupes.length > 0 ? "bad" : "good"} />
+        {/* Active clusters only — an acknowledged "not duplicates" must not keep the tile red. */}
+        <Tile label="Duplicates" value={String(dupes.filter((d) => !d.dismissed).length)} tone={dupes.some((d) => !d.dismissed) ? "bad" : "good"} />
       </div>
 
       <div className="tabs" role="group" aria-label="Health view">
@@ -160,7 +161,7 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged }: 
 
       {tab === "duplicates" ? (
         dupes.length > 0 ? (
-          <Duplicates clusters={dupes} store={store} vaultNameById={vaultNameById} onOpenItem={onOpenItem} onChanged={onChanged} />
+          <Duplicates clusters={dupes} items={items} roleFor={roleFor} store={store} vaultNameById={vaultNameById} onOpenItem={onOpenItem} onChanged={onChanged} />
         ) : (
           <div className="empty">
             <div className="sigil"><EmptySigil /></div>
@@ -273,10 +274,82 @@ export function clearBreachCache(): void {
  *  the confirm names both the vault kept and the vault emptied — a merge moves real items out of
  *  a real place, and this screen used to name neither. Cross-vault and view-only clusters carry
  *  a refusal from planMerge instead of a Merge button. */
-function Duplicates({ clusters, store, vaultNameById, onOpenItem, onChanged }: { clusters: DuplicateCluster[]; store: VaultStore; vaultNameById: Map<string, string>; onOpenItem: (itemId: string) => void; onChanged: () => void }) {
+function Duplicates({ clusters, items, roleFor, store, vaultNameById, onOpenItem, onChanged }: { clusters: DuplicateCluster[]; items: VaultItem[]; roleFor: RoleFor; store: VaultStore; vaultNameById: Map<string, string>; onOpenItem: (itemId: string) => void; onChanged: () => void }) {
   const [confirmId, setConfirmId] = useState<string | null>(null); // survivorId of the open confirm
   const [mergingId, setMergingId] = useState<string | null>(null);
+  // The differs-resolution confirm: which cluster (by signature) and which member the user
+  // picked as survivor. One at a time, the merge-confirm idiom.
+  const [keepConfirm, setKeepConfirm] = useState<{ sig: string; keepId: string } | null>(null);
   const [msg, setMsg] = useState<{ kind: "err" | "info"; text: string } | null>(null);
+
+  const active = clusters.filter((c) => !c.dismissed);
+  const dismissed = clusters.filter((c) => c.dismissed);
+
+  // Refusal-preview at the first click (retiredAt 0 — the probe never writes), so a cluster
+  // that can't be cleaned up says why IMMEDIATELY instead of after a confirm.
+  const startKeep = (c: DuplicateCluster, keepId: string) => {
+    const probe = planKeep(items, c.members.map((m) => m.itemId), keepId, roleFor, 0);
+    if (!probe.keep) {
+      setMsg({ kind: "err", text: probe.keepRefusal ?? "This cluster can't be cleaned up automatically." });
+      return;
+    }
+    setMsg(null);
+    setKeepConfirm({ sig: c.signature, keepId });
+  };
+
+  const runKeep = async (c: DuplicateCluster, keepId: string) => {
+    if (mergingId !== null) return;
+    const { keep, keepRefusal } = planKeep(items, c.members.map((m) => m.itemId), keepId, roleFor, Date.now());
+    if (!keep) {
+      setMsg({ kind: "err", text: keepRefusal ?? "This cluster can't be cleaned up automatically." });
+      setKeepConfirm(null);
+      return;
+    }
+    setMergingId(keepId);
+    setMsg(null);
+    try {
+      // Survivor first (the runMerge rule): nothing is deleted before the history landed.
+      await store.save(keep.survivorId, keep.doc);
+      for (const id of keep.loserIds) await store.remove(id);
+      const n = keep.loserIds.length;
+      setMsg({
+        kind: "info",
+        text: `Kept one copy — ${n === 1 ? "the other copy" : `${n} other copies`} moved to Deleted items (kept 30 days); the passwords they carried stay in the kept item's password history.`,
+      });
+    } catch {
+      setMsg({ kind: "err", text: "The clean-up didn't finish — any removed copy is in Deleted items. Check the cluster and try again." });
+    } finally {
+      setMergingId(null);
+      setKeepConfirm(null);
+      onChanged();
+    }
+  };
+
+  // restore=false stamps the acknowledgment; restore=true clears it. Single click both ways —
+  // nothing is destroyed, and each direction is the other's undo.
+  const runDismiss = async (c: DuplicateCluster, restore: boolean) => {
+    if (mergingId !== null) return;
+    const { writes, dismissRefusal } = planDismiss(items, c.members.map((m) => m.itemId), restore ? "" : c.signature, roleFor);
+    if (!writes) {
+      setMsg({ kind: "err", text: dismissRefusal ?? "These copies can't be updated." });
+      return;
+    }
+    setMergingId(c.signature);
+    setMsg(null);
+    try {
+      for (const w of writes) await store.save(w.itemId, w.doc);
+      setMsg(
+        restore
+          ? { kind: "info", text: "Back on the list." }
+          : { kind: "info", text: "Marked as not duplicates — this group stays quiet unless its copies change." },
+      );
+    } catch {
+      setMsg({ kind: "err", text: "Couldn't update every copy — the group may reappear until a retry lands. Try again." });
+    } finally {
+      setMergingId(null);
+      onChanged();
+    }
+  };
 
   const runMerge = async (c: DuplicateCluster) => {
     const plan = c.merge;
@@ -307,6 +380,8 @@ function Duplicates({ clusters, store, vaultNameById, onOpenItem, onChanged }: {
         The same account saved more than once — usually a save that landed while the vault was locked, or an import.
         Merging keeps one copy (its saved sites combined) and moves the rest to Deleted items, where they stay restorable for 30 days.
         {" "}Copies sitting in different vaults are listed but never merged — removing one would take it away from everyone who shares that vault.
+        {" "}When passwords differ, test by signing in (“open site”), then “Keep this one” — the passwords it replaces stay in the kept item's password history.
+        {" "}And a group that's correct as it stands — two services on one host, a deliberate cross-vault twin — can be marked “not duplicates” and stops nagging.
       </div>
       {msg && <Msg kind={msg.kind}>{msg.text}</Msg>}
       {/* BL-1 (audit F12): the merge outcome is ASYNC info — the cluster and its Merge button
@@ -314,7 +389,7 @@ function Duplicates({ clusters, store, vaultNameById, onOpenItem, onChanged }: {
           (Msg.tsx). Unconditional persistent region, per that contract; failures already speak
           for themselves through role="alert". */}
       <Announcer text={msg && msg.kind === "info" ? msg.text : ""} />
-      {clusters.map((c) => {
+      {active.map((c) => {
         const survivor = c.merge ? c.members.find((m) => m.itemId === c.merge!.survivorId) : undefined;
         const survivorName = survivor?.name ?? "";
         // The vault kept and the vault(s) emptied. planMerge refuses cross-vault clusters, so
@@ -348,8 +423,35 @@ function Duplicates({ clusters, store, vaultNameById, onOpenItem, onChanged }: {
                   {m.username.trim() || "(no username)"} · updated {new Date(m.updatedAt).toLocaleDateString()}
                   {m.hasTotp ? " · has a one-time code" : ""}
                 </span>
+                {/* The honest password test (owner decision 2026-08-18): open the site and sign
+                    in — the client never probes a site with candidate credentials itself. */}
+                {c.kind === "differs" && m.firstUri && (
+                  <a className="link" href={/^https?:\/\//i.test(m.firstUri) ? m.firstUri : `https://${m.firstUri}`} target="_blank" rel="noreferrer">
+                    open site
+                  </a>
+                )}
+                {c.kind === "differs" && (
+                  <button type="button" className="ghost" onClick={() => startKeep(c, m.itemId)} disabled={mergingId !== null}>
+                    Keep this one…
+                  </button>
+                )}
               </div>
             ))}
+            {c.kind === "differs" && keepConfirm && keepConfirm.sig === c.signature && (
+              <div className="dupe-actions">
+                <span className="muted">
+                  Keep “{c.members.find((m) => m.itemId === keepConfirm.keepId)?.name ?? ""}” and move{" "}
+                  {c.members.length === 2 ? "the other copy" : `the ${c.members.length - 1} other copies`} to Deleted items (kept 30 days)?
+                  The passwords they carry stay in the kept item's password history.
+                </span>
+                <button type="button" className="ghost" onClick={() => void runKeep(c, keepConfirm.keepId)} disabled={mergingId !== null}>
+                  {mergingId === keepConfirm.keepId ? "Keeping…" : "Keep"}
+                </button>
+                <button type="button" className="ghost" onClick={() => setKeepConfirm(null)} disabled={mergingId !== null}>
+                  Cancel
+                </button>
+              </div>
+            )}
             {c.kind === "exact" &&
               (c.merge ? (
                 confirmId === c.merge.survivorId ? (
@@ -376,9 +478,30 @@ function Duplicates({ clusters, store, vaultNameById, onOpenItem, onChanged }: {
                   <span className="muted">{c.mergeRefusal}</span>
                 </div>
               ))}
+            <div className="dupe-actions">
+              <button type="button" className="ghost" onClick={() => void runDismiss(c, false)} disabled={mergingId !== null}>
+                {c.members.length === 2 ? "Not duplicates — keep both" : "Not duplicates — keep all"}
+              </button>
+            </div>
           </div>
         );
       })}
+      {dismissed.length > 0 && (
+        <>
+          <h3 className="dupes-title" style={{ marginTop: 14 }}>Marked not duplicates</h3>
+          {dismissed.map((c) => (
+            <div className="dupe dupe-dismissed" key={c.signature}>
+              <span className="dupe-site">{c.sites.join(" · ")}</span>
+              <span className="muted">
+                {c.members.length} copies · {c.members[0]!.username.trim() || "(no username)"}
+              </span>
+              <button type="button" className="ghost" onClick={() => void runDismiss(c, true)} disabled={mergingId !== null}>
+                Restore
+              </button>
+            </div>
+          ))}
+        </>
+      )}
     </div>
   );
 }
