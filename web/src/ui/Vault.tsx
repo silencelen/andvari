@@ -27,6 +27,7 @@ import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, CLIPBOARD_NOT_CLEARED_SHORT, n
 import { ExportPanel, type ExportMode } from "./ExportPanel";
 import { Field } from "./Field";
 import { fmtDay, humanSize } from "./format";
+import { applyListView, type SortMode, type TypeFilter } from "./listview";
 import { Announcer, Msg } from "./Msg";
 import { Health } from "./Health";
 import { clampClipboardClearSeconds } from "./policyclamp";
@@ -140,6 +141,12 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   // Lifecycle notices (spec 03 §11) — the banner reflects the store's list after every sync.
   const [notices, setNotices] = useState<LifecycleNotice[]>(store.notices());
   const [query, setQuery] = useState("");
+  // Owner dev-note 2026-08-18: sort + facet state for the list (pure logic in listview.ts).
+  // Session-scoped on purpose — a filter that silently persisted across unlocks would read
+  // as missing items.
+  const [sortMode, setSortMode] = useState<SortMode>("name");
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
+  const [vaultFilter, setVaultFilter] = useState<string>("all");
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<ItemDoc | null>(null);
   const [importOpen, setImportOpen] = useState(false);
@@ -297,14 +304,24 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     }
   };
 
+  // Vault metadata for badges + the new-item picker (recomputed whenever items refresh).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const vaultsInfo = useMemo(() => store.vaults(), [store, items]);
+  const vaultNameById = useMemo(() => new Map(vaultsInfo.map((v) => [v.vaultId, v.name])), [vaultsInfo]);
+
+  // A vault filter pointing at a vault we no longer hold (left/revoked mid-session) degrades
+  // to "all" instead of pinning the list to a silent empty set behind a blank select.
+  const effVaultFilter = vaultFilter !== "all" && !vaultsInfo.some((v) => v.vaultId === vaultFilter) ? "all" : vaultFilter;
   const filtered = useMemo(() => {
+    // Facets first (listview.ts), then the free-text search over what survives them.
+    const base = applyListView(items, sortMode, typeFilter, effVaultFilter);
     const q = query.trim().toLowerCase();
-    if (!q) return items;
+    if (!q) return base;
     // F79: search name + username + EVERY uri (not just the first) + notes + a card's
     // brand/••last4 identity — so a login found only by its 2nd website, a secure note found
     // by its body, and a card found by "visa" all match. Secrets (passwords/PANs/CVVs) are
     // never search keys.
-    return items.filter((it) => {
+    return base.filter((it) => {
       const d = it.doc;
       if (d.name.toLowerCase().includes(q)) return true;
       if ((d.notes ?? "").toLowerCase().includes(q)) return true;
@@ -315,12 +332,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       if (d.type === "card") return cardSubtitle(d).toLowerCase().includes(q);
       return false;
     });
-  }, [items, query]);
-
-  // Vault metadata for badges + the new-item picker (recomputed whenever items refresh).
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const vaultsInfo = useMemo(() => store.vaults(), [store, items]);
-  const vaultNameById = useMemo(() => new Map(vaultsInfo.map((v) => [v.vaultId, v.name])), [vaultsInfo]);
+  }, [items, query, sortMode, typeFilter, effVaultFilter]);
   // New items may target the personal vault or any shared vault we can write to.
   const newItemVaultChoices = useMemo(
     () => vaultsInfo.filter((v) => v.type === "personal" || v.role === "owner" || v.role === "writer"),
@@ -438,9 +450,11 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           <nav className="nav">
             {navBtn("vault", "Vault")}
             {navBtn("sharing", "Sharing")}
-            {/* IA P1/DN-2: Health and Trash left the nav — they're toolbar icons on the vault
-                view (occasional tools, not top-level places). Nav is now the 3-4 real places. */}
-            {navBtn("settings", "Settings")}
+            {/* IA P1/DN-2, revised by owner dev-note 2026-08-18: Health grew into a two-view
+                page (Passwords | Duplicates) and earned its nav place back; Trash stays a
+                toolbar icon. Settings left the nav for the gear beside Lock — the appbar's
+                right side is the session controls, and Settings is one. */}
+            {navBtn("health", "Health")}
             {isAdmin && navBtn("admin", "Admin")}
           </nav>
         </div>
@@ -460,6 +474,21 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
               {syncBusy ? "Syncing…" : "Sync now"}
             </button>
           )}
+          {/* Owner dev-note 2026-08-18: the Settings entry point — a gear beside Lock. Same
+              routing as the navBtn it replaces (editor back-guard first, then view + layers). */}
+          <button
+            type="button"
+            className={`ghost ${view === "settings" ? "active" : ""}`}
+            aria-label="Settings"
+            title="Settings"
+            aria-current={view === "settings" ? "page" : undefined}
+            onClick={() => { if (editing && editorBack.current) return editorBack.current(); setView("settings"); closeLayers(); }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px" }}>
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
           <button className="ghost" onClick={onLock}>Lock</button>
         </div>
       </header>
@@ -595,29 +624,19 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
               {/* Dark until the Option A gate clears (0.2.x MSI retired) — see CARD_CREATE_ENABLED.
                   Everything downstream (row/detail/editor for EXISTING cards) renders regardless. */}
               {CARD_CREATE_ENABLED && <button className="ghost" onClick={() => startNew("card")}>+ Card</button>}
-              <button className="ghost" onClick={() => { closeLayers(); setImportOpen(true); }}>Import</button>
+              {/* Owner dev-note 2026-08-18: Import/Export shrank to icons in the trash cluster so
+                  the + buttons are the toolbar's only labeled actions; Health moved to the nav. */}
+              <button type="button" className="ghost" aria-label="Import" title="Import" onClick={() => { closeLayers(); setImportOpen(true); }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px" }}>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+              </button>
               {/* The two export destinations live under one menu so the toolbar can't crush the
                   search box. Rendered whenever unlocked (§5.4.2 — the origin gate is gone). */}
               <ExportMenu
                 onBackup={() => { closeLayers(); setExportMode("backup"); }}
                 onCsv={() => { closeLayers(); setExportMode("csv"); }}
               />
-              {/* IA P1: Health — an occasional tool, moved off the nav to a toolbar icon.
-                  (The toolbar only shows on the vault view, so these icons only ever navigate
-                  AWAY — there's no active state to reflect.) */}
-              <button
-                type="button"
-                className="ghost"
-                aria-label="Vault health"
-                title="Vault health"
-                onClick={() => { closeLayers(); setView("health"); }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px", marginRight: 5 }}>
-                  <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-                </svg>
-                {/* Cut L (v2 #20): a visible label — the bare pulse glyph didn't read as "password health". */}
-                Health
-              </button>
               {/* DN-2: the Trash entry point — a small icon here instead of a main-nav item.
                   Mirrors navBtn's layer-clearing so it behaves like navigation, not a layer. */}
               <button
@@ -632,10 +651,37 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                 </svg>
               </button>
             </div>
+            {/* Owner dev-note 2026-08-18: sort + facet row. Hidden while the vault is empty —
+                there is nothing to arrange. The vault select only appears once a second vault
+                exists (before that it could only ever say "all"). */}
+            {items.length > 0 && (
+              <div className="listctl">
+                <select value={sortMode} aria-label="Sort" onChange={(e) => setSortMode(e.target.value as SortMode)}>
+                  <option value="name">Sort: name</option>
+                  <option value="recent">Sort: recently updated</option>
+                </select>
+                <select value={typeFilter} aria-label="Filter by type" onChange={(e) => setTypeFilter(e.target.value as TypeFilter)}>
+                  <option value="all">All types</option>
+                  <option value="login">Logins</option>
+                  <option value="note">Notes</option>
+                  {/* CARD_CREATE_ENABLED gates creation only — existing cards render regardless,
+                      so the facet stays available. */}
+                  <option value="card">Cards</option>
+                </select>
+                {vaultsInfo.length > 1 && (
+                  <select value={effVaultFilter} aria-label="Filter by vault" onChange={(e) => setVaultFilter(e.target.value)}>
+                    <option value="all">All vaults</option>
+                    {vaultsInfo.map((v) => (
+                      <option key={v.vaultId} value={v.vaultId}>{v.name}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
             {filtered.length === 0 ? (
               <div className="empty">
                 <div className="sigil"><EmptySigil /></div>
-                <p>{items.length === 0 ? "Your hoard is empty. Add your first secret." : "Nothing matches that search."}</p>
+                <p>{items.length === 0 ? "Your hoard is empty. Add your first secret." : query.trim() ? "Nothing matches that search." : "Nothing matches these filters."}</p>
               </div>
             ) : filtered.length > VIRTUAL_THRESHOLD ? (
               <VirtualList items={filtered} renderRow={renderRow} />
@@ -923,10 +969,11 @@ function NoticesBanner({ notices, onDismiss }: { notices: LifecycleNotice[]; onD
   );
 }
 
-/** Toolbar "Export ▾" disclosure — folds the two export destinations under one
- *  button (they were the widest toolbar items and crushed the search box in 0.4.0).
- *  Closes on outside-click, Escape, or scroll; supports arrow-key menu navigation;
- *  flips its horizontal anchor so it never renders off the viewport edge on a phone. */
+/** Toolbar Export disclosure — folds the two export destinations under one button (they were
+ *  the widest toolbar items and crushed the search box in 0.4.0; the trigger shrank to an icon
+ *  with the 2026-08-18 toolbar reorg). Closes on outside-click, Escape, or scroll; supports
+ *  arrow-key menu navigation; flips its horizontal anchor so it never renders off the viewport
+ *  edge on a phone. */
 function ExportMenu({ onBackup, onCsv }: { onBackup: () => void; onCsv: () => void }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -985,7 +1032,11 @@ function ExportMenu({ onBackup, onCsv }: { onBackup: () => void; onCsv: () => vo
 
   return (
     <div className="menu-wrap" ref={wrapRef}>
-      <button ref={btnRef} type="button" className="ghost" aria-haspopup="menu" aria-expanded={open} onClick={toggle}>Export ▾</button>
+      <button ref={btnRef} type="button" className="ghost" aria-label="Export" title="Export" aria-haspopup="menu" aria-expanded={open} onClick={toggle}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px" }}>
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
+        </svg>
+      </button>
       {open && (
         <div ref={menuRef} className="menu" role="menu" onKeyDown={onMenuKey}>
           <button ref={(el) => { itemRefs.current[0] = el; }} type="button" role="menuitem" onClick={() => choose(onBackup)}>Back up vault…</button>

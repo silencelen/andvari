@@ -335,6 +335,10 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 22px 0 16px; }
 .toolbar input { flex: 1 1 200px; min-width: 160px; }
 .toolbar > button, .toolbar .menu-wrap > button { white-space: nowrap; }
+/* Sort/facet row (owner dev-note 2026-08-18) — tucks under the toolbar, which owns the top
+   margin; small selects so it reads as list furniture, not another action row. */
+.listctl { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: -6px 0 16px; }
+.listctl select { width: auto; font-size: 13px; }
 
 /* ---- toolbar dropdown (Export ▾) ---- */
 .menu-wrap { position: relative; display: inline-flex; }

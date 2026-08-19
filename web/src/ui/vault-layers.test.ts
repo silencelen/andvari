@@ -71,11 +71,12 @@ describe("quality-deadcode--6 — one layer-clearing routine, not ten subsets", 
   });
 
   it("the openers close everything and then open exactly one layer", () => {
+    // 2026-08-18 toolbar reorg: Health left the toolbar for the nav (its opener is navBtn's
+    // shared routing now), so its dedicated opener pin retired with the button.
     for (const opener of [
       "closeLayers(); setImportOpen(true);",
       'closeLayers(); setExportMode("backup");',
       'closeLayers(); setExportMode("csv");',
-      'closeLayers(); setView("health");',
       'closeLayers(); setView("trash");',
     ]) {
       expect(vaultCode, `opener drifted: ${opener}`).toContain(opener);
