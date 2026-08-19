@@ -28,6 +28,13 @@ import { parseSavedUri } from "../vault/urimatch";
  * of them is stale (a password change captured as new); members are newest-first so the UI can
  * say which. Never auto-merged — only the human knows which password the site accepts.
  *
+ * 2026-08-18 (owner decisions): two endings for the clusters the merge can't touch. planKeep is
+ * the DIFFERS resolution — the human picks the surviving copy, the losers' passwords land in its
+ * passwordHistory before the losers go to the Trash. planDismiss/clusterSignature/dupeAck is the
+ * "not duplicates — keep both" acknowledgment for clusters that are correct as they stand
+ * (same-host services on different ports; the deliberate cross-vault twins), doc-level so it
+ * syncs and self-invalidating on any membership change.
+ *
  * VAULTS (audit F03). Clustering deliberately spans vaults — the app MINTS cross-vault twins by
  * design ("Copy to vault…", and copyAllToPersonal's shared-vault delete rescue), so hiding them
  * would hide the duplicates a household is most likely to have. But a merge across a sharing
@@ -45,6 +52,10 @@ export interface DuplicateMember {
   username: string;
   updatedAt: number;
   hasTotp: boolean;
+  /** the member's first saved WEB uri, verbatim — the "open site" affordance for the differs
+   *  resolution flow (owner decision 2026-08-18): the only honest password test is the human
+   *  logging in; the client must never probe a site with candidate credentials itself. */
+  firstUri?: string;
 }
 
 /** The ready-to-write consolidation for an ELIGIBLE exact cluster: save `doc` over the
@@ -65,7 +76,17 @@ export interface DuplicateCluster {
   /** exact clusters: the plan, or (exclusively) the human-readable refusal */
   merge?: MergePlan;
   mergeRefusal?: string;
+  /** identity of the cluster AS CONSTITUTED (clusterSignature) — the dismissal token */
+  signature: string;
+  /** every member carries this signature as its dupeAck: the user said "not duplicates" */
+  dismissed: boolean;
 }
+
+/** The dismissal token: the cluster's sorted member ids. Any membership change — a new copy
+ *  minted, one merged away — changes the signature, so an old acknowledgment stops matching
+ *  and the cluster resurfaces. Joined with "|": itemIds are server-assigned identifiers, so
+ *  the delimiter has no forgery surface (unlike the username NUL below). */
+export const clusterSignature = (memberIds: string[]): string => [...memberIds].sort().join("|");
 
 /** Site keys for one login item (exported for the tests). */
 export function siteKeysOf(doc: ItemDoc): Set<string> {
@@ -135,17 +156,7 @@ function planMerge(members: { it: VaultItem }[], roleFor: RoleFor): { merge?: Me
   const survivor = candidates[0];
   if (!survivor) return { mergeRefusal: "The copies each hold data the others lack — merge by hand." };
 
-  const uris = [...(survivor.it.doc.login?.uris ?? [])];
-  const seen = new Set(uris);
-  for (const { it } of sorted) {
-    if (it.itemId === survivor.it.itemId) continue;
-    for (const u of it.doc.login?.uris ?? []) {
-      if (!seen.has(u)) {
-        seen.add(u);
-        uris.push(u);
-      }
-    }
-  }
+  const uris = unionUris(survivor.it.doc, sorted.filter((m) => m.it.itemId !== survivor.it.itemId).map((m) => m.it));
   const favorite = docs.some((d) => d.favorite === true);
   const doc: ItemDoc = { ...survivor.it.doc, login: { ...survivor.it.doc.login, uris } };
   if (favorite) doc.favorite = true;
@@ -155,6 +166,116 @@ function planMerge(members: { it: VaultItem }[], roleFor: RoleFor): { merge?: Me
       loserIds: sorted.filter(({ it }) => it.itemId !== survivor.it.itemId).map(({ it }) => it.itemId),
       doc,
     },
+  };
+}
+
+/** Losers' uris onto the survivor: raw-string dedupe, the survivor's own order first, then the
+ *  others' in the order given (newest-first at both call sites) — planMerge's original rule,
+ *  shared with planKeep so the two consolidations can never drift. */
+function unionUris(survivorDoc: ItemDoc, others: VaultItem[]): string[] {
+  const uris = [...(survivorDoc.login?.uris ?? [])];
+  const seen = new Set(uris);
+  for (const it of others) {
+    for (const u of it.doc.login?.uris ?? []) {
+      if (!seen.has(u)) {
+        seen.add(u);
+        uris.push(u);
+      }
+    }
+  }
+  return uris;
+}
+
+/** "Keep this one" for a DIFFERS cluster (owner decision 2026-08-18): the human tested which
+ *  password the site currently accepts and picked the survivor; retire the rest. Same
+ *  fail-closed shape as planMerge — cross-vault and view-only clusters refuse (removing a copy
+ *  from a shared vault takes it from everyone), and data only a loser holds (a diverging
+ *  one-time code, diverging notes, any attachments) refuses rather than quietly riding into
+ *  the Trash's 30-day window. The losers' PASSWORDS are the deliberate exception — they are
+ *  what this flow exists to not lose: every distinct one is appended to the survivor's
+ *  passwordHistory at the caller's `retiredAt` clock (passed in — this module stays pure), so
+ *  even a wrong pick outlives the Trash purge. Docs are looked up FRESH from `items` by id —
+ *  a rendered cluster snapshot must never write stale docs. */
+export function planKeep(
+  items: VaultItem[],
+  memberIds: string[],
+  keepId: string,
+  roleFor: RoleFor,
+  retiredAt: number,
+): { keep?: MergePlan; keepRefusal?: string } {
+  const members = memberIds.map((id) => items.find((it) => it.itemId === id)).filter((it): it is VaultItem => it !== undefined);
+  const survivor = members.find((it) => it.itemId === keepId);
+  if (members.length !== memberIds.length || members.length < 2 || !survivor) {
+    return { keepRefusal: "A copy changed under you — the list refreshes on its own; try again." };
+  }
+  if (new Set(members.map((m) => m.vaultId)).size > 1) {
+    return { keepRefusal: "These copies are in different vaults — merge by hand." };
+  }
+  if (members.some((m) => roleFor(m.vaultId) === "reader")) {
+    return { keepRefusal: "These copies are in a vault you can only view — ask the vault's owner to merge them." };
+  }
+  const losers = members.filter((m) => m.itemId !== keepId).sort((a, b) => b.updatedAt - a.updatedAt);
+  const sTotp = survivor.doc.login?.totp ?? "";
+  if (losers.some((m) => (m.doc.login?.totp ?? "") !== "" && (m.doc.login?.totp ?? "") !== sTotp)) {
+    return { keepRefusal: "The copies carry different one-time codes — merge by hand." };
+  }
+  const sNotes = (survivor.doc.notes ?? "").trim();
+  if (
+    losers.some((m) => {
+      const n = (m.doc.notes ?? "").trim();
+      return n !== "" && n !== sNotes;
+    })
+  ) {
+    return { keepRefusal: "The copies carry different notes — merge by hand." };
+  }
+  if (losers.some((m) => (m.doc.attachments?.length ?? 0) > 0)) {
+    return { keepRefusal: "A copy being removed has attachments — merge by hand." };
+  }
+  const have = new Set([survivor.doc.login?.password ?? "", ...(survivor.doc.login?.passwordHistory ?? []).map((h) => h.password)]);
+  const retired: { password: string; retiredAt: number }[] = [];
+  for (const m of losers) {
+    const pw = m.doc.login?.password ?? "";
+    if (pw && !have.has(pw)) {
+      have.add(pw);
+      retired.push({ password: pw, retiredAt });
+    }
+  }
+  const doc: ItemDoc = {
+    ...survivor.doc,
+    login: {
+      ...survivor.doc.login,
+      uris: unionUris(survivor.doc, losers),
+      passwordHistory: [...(survivor.doc.login?.passwordHistory ?? []), ...retired],
+    },
+  };
+  if (members.some((m) => m.doc.favorite === true)) doc.favorite = true;
+  return { keep: { survivorId: keepId, loserIds: losers.map((m) => m.itemId), doc } };
+}
+
+/** "Not duplicates — keep both" (owner decision 2026-08-18): stamp every member with the
+ *  cluster's signature. A write per member — so a view-only vault refuses — but a CROSS-vault
+ *  cluster is fine: unlike a merge, nothing is removed from anywhere, which makes this the
+ *  quiet ending for the deliberate cross-vault twins planMerge refuses to touch. An empty
+ *  `signature` clears the acknowledgment (un-dismiss) by dropping the key, never writing it
+ *  blank. Fresh-doc lookup by id, as in planKeep. */
+export function planDismiss(
+  items: VaultItem[],
+  memberIds: string[],
+  signature: string,
+  roleFor: RoleFor,
+): { writes?: { itemId: string; doc: ItemDoc }[]; dismissRefusal?: string } {
+  const members = memberIds.map((id) => items.find((it) => it.itemId === id)).filter((it): it is VaultItem => it !== undefined);
+  if (members.length !== memberIds.length) return { dismissRefusal: "A copy changed under you — the list refreshes on its own; try again." };
+  if (members.some((m) => roleFor(m.vaultId) === "reader")) {
+    return { dismissRefusal: "These copies are in a vault you can only view — ask the vault's owner." };
+  }
+  return {
+    writes: members.map((m) => {
+      const doc: ItemDoc = { ...m.doc };
+      if (signature) doc.dupeAck = signature;
+      else delete doc.dupeAck;
+      return { itemId: m.itemId, doc };
+    }),
   };
 }
 
@@ -202,6 +323,7 @@ export function duplicateClusters(items: VaultItem[], roleFor: RoleFor): Duplica
     const sorted = [...members].sort((a, b) => b.it.updatedAt - a.it.updatedAt);
     const passwords = new Set(sorted.map(({ it }) => it.doc.login?.password ?? ""));
     const kind: DuplicateCluster["kind"] = passwords.size === 1 ? "exact" : "differs";
+    const signature = clusterSignature(members.map((m) => m.it.itemId));
     const cluster: DuplicateCluster = {
       sites: [...new Set(members.flatMap((m) => [...m.sites]))].sort(),
       members: sorted.map(({ it }) => ({
@@ -211,8 +333,13 @@ export function duplicateClusters(items: VaultItem[], roleFor: RoleFor): Duplica
         username: it.doc.login?.username ?? "",
         updatedAt: it.updatedAt,
         hasTotp: Boolean(it.doc.login?.totp),
+        firstUri: (it.doc.login?.uris ?? []).find((u) => parseSavedUri(u)?.kind === "web"),
       })),
       kind,
+      signature,
+      // Dismissed only while EVERY member acknowledges exactly this constitution of the
+      // cluster — one new/changed member id breaks the match and the cluster resurfaces.
+      dismissed: members.every((m) => m.it.doc.dupeAck === signature),
     };
     if (kind === "exact") Object.assign(cluster, planMerge(members, roleFor));
     clusters.push(cluster);

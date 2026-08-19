@@ -119,3 +119,24 @@ describe("Health duplicates — every row names its vault, and so does the confi
     expect(healthTsx).toContain('vaultsInfo.find((v) => v.vaultId === vaultId)?.role ?? null');
   });
 });
+
+/**
+ * The differs resolution + dismissal (owner decisions 2026-08-18) — rendering obligations that
+ * go with the planKeep/planDismiss pins in duplicates.test.ts.
+ */
+describe("Health duplicates — the differs resolution keeps its promises on screen", () => {
+  it("the keep-confirm says where the losers go AND that their passwords are retained", () => {
+    expect(healthTsx).toContain("to Deleted items (kept 30 days)?");
+    expect(healthTsx).toContain("stay in the kept item's password history");
+  });
+
+  it("the password test is the human signing in — an external link, never a client probe", () => {
+    expect(healthTsx).toContain('target="_blank" rel="noreferrer"');
+    expect(healthTsx).not.toMatch(/fetch\(|XMLHttpRequest/);
+  });
+
+  it("a dismissed group collapses to a quiet line with its Restore", () => {
+    expect(healthTsx).toContain("Marked not duplicates");
+    expect(healthTsx).toContain('onClick={() => void runDismiss(c, true)}');
+  });
+});

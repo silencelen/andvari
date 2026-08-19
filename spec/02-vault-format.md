@@ -63,6 +63,9 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
   "name": "GitHub",
   "notes": "free text",                  // optional, all types
   "favorite": false,                     // optional
+  "dupeAck": "itemId|itemId",            // optional — duplicate-checker "not duplicates" ack (2026-08-18): the
+                                         // sorted-member-id signature of the acknowledged cluster; any membership
+                                         // change stops it matching. Older clients preserve it as an unknown key.
   "login": {                             // when type=login
     "username": "jacob",
     "password": "…",
@@ -76,14 +79,18 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
 }
 ```
 
-**`login.passwordHistory` is RESERVED, not shipped — planned, non-normative.** The shape
-above is fixed (so the field can be adopted later without a formatVersion bump) and every
-client already **preserves it verbatim on rewrite**, entry-level unknown fields included
-(the preservation rules below). But **no v1 client ever appends an entry**: no editor,
-importer, save path, or conflict materializer on any client writes one, and none displays
-it. A reader MUST therefore treat an absent/empty `passwordHistory` as carrying no
-information — it does **not** mean the password was never rotated — and MUST NOT present
-it to a user as a retention guarantee. The shipped
+**`login.passwordHistory` — one writer (amendment 2026-08-18); otherwise reserved.** The
+shape above is fixed (so the field could be adopted without a formatVersion bump) and every
+client **preserves it verbatim on rewrite**, entry-level unknown fields included (the
+preservation rules below). Exactly **one path appends entries**: the web Health duplicate
+checker's differs resolution ("Keep this one", `planKeep`) — when the user retires
+duplicate copies, each distinct losing password is appended to the survivor as
+`{password, retiredAt}` so the retired secrets outlive the losers' 30-day Trash window. No
+editor, importer, ordinary save path, or conflict materializer on any client writes an
+entry, and no client displays the field. A reader MUST therefore still treat an
+absent/empty `passwordHistory` as carrying no information — it does **not** mean the
+password was never rotated — and MUST NOT present it to a user as a general retention
+guarantee (entries exist only where that one flow wrote them). The shipped
 no-silent-loss backstop is the server-side **item_versions** archive (§7 + spec 03
 `GET /items/{id}/versions`), which is what "recover the previous password" actually rests
 on; folding this field in on top of it is backlog **F62**, deliberately unbuilt

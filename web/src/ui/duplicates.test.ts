@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ItemDoc } from "../api/types";
 import type { VaultItem } from "../vault/store";
-import { type RoleFor, duplicateClusters, siteKeysOf } from "./duplicates";
+import { type RoleFor, clusterSignature, duplicateClusters, planDismiss, planKeep, siteKeysOf } from "./duplicates";
 
 /**
  * Duplicate-entry checker pins (owner-requested 2026-08-12; ROADMAP P6). The clustering, the
@@ -266,5 +266,89 @@ describe("the PSL snapshot stays out of the app chunk", () => {
   it("duplicates.ts is still the importer that put it there (the pin's premise)", () => {
     const dupes = readFileSync(fileURLToPath(new URL("./duplicates.ts", import.meta.url)), "utf8");
     expect(dupes).toContain('import { pslResolve } from "../vault/psl";');
+  });
+});
+
+describe("planKeep — the differs resolution (owner decision 2026-08-18)", () => {
+  const cluster = () => [
+    login("stale", { password: "old-pass" }, {}, 10),
+    login("current", { password: "new-pass", uris: ["https://example.com", "https://sso.example.com"] }, {}, 20),
+    login("older", { password: "ancient" }, {}, 5),
+  ];
+
+  it("keeps the CHOSEN copy (not the newest), unions uris, retires every distinct losing password", () => {
+    const items = cluster();
+    const { keep, keepRefusal } = planKeep(items, ["stale", "current", "older"], "current", noRole, 777);
+    expect(keepRefusal).toBeUndefined();
+    expect(keep!.survivorId).toBe("current");
+    expect(keep!.loserIds).toEqual(["stale", "older"]); // newest-first
+    expect(keep!.doc.login!.password).toBe("new-pass");
+    expect(keep!.doc.login!.uris).toEqual(["https://example.com", "https://sso.example.com"]);
+    expect(keep!.doc.login!.passwordHistory).toEqual([
+      { password: "old-pass", retiredAt: 777 },
+      { password: "ancient", retiredAt: 777 },
+    ]);
+  });
+
+  it("never duplicates a password already held — current, in history, or shared by two losers", () => {
+    const items = [
+      login("a", { password: "keep-me", passwordHistory: [{ password: "old-pass", retiredAt: 1 }] }, {}, 30),
+      login("b", { password: "old-pass" }, {}, 20), // already in history → not re-added
+      login("c", { password: "twin" }, {}, 10),
+      login("d", { password: "twin" }, {}, 5), //     second carrier of "twin" → once
+    ];
+    const { keep } = planKeep(items, ["a", "b", "c", "d"], "a", noRole, 9);
+    expect(keep!.doc.login!.passwordHistory).toEqual([
+      { password: "old-pass", retiredAt: 1 },
+      { password: "twin", retiredAt: 9 },
+    ]);
+  });
+
+  it("refuses cross-vault, reader vaults, diverging codes/notes, and losers with attachments", () => {
+    const base = cluster();
+    expect(planKeep([base[0]!, inVault(base[1]!, "v2"), base[2]!], ["stale", "current", "older"], "current", noRole, 0).keepRefusal).toMatch(/different vaults/);
+    expect(planKeep(base, ["stale", "current", "older"], "current", () => "reader", 0).keepRefusal).toMatch(/only view/);
+    const withTotp = [login("stale", { password: "old", totp: "otpauth://totp/x?secret=GEZDGNBV" }, {}, 10), login("current", { password: "new" }, {}, 20)];
+    expect(planKeep(withTotp, ["stale", "current"], "current", noRole, 0).keepRefusal).toMatch(/one-time codes/);
+    const withNotes = [login("stale", { password: "old" }, { notes: "loser-only note" }, 10), login("current", { password: "new" }, {}, 20)];
+    expect(planKeep(withNotes, ["stale", "current"], "current", noRole, 0).keepRefusal).toMatch(/different notes/);
+    const withAtt = [login("stale", { password: "old" }, { attachments: [{ id: "f", name: "n", size: 1, fileKey: "k" }] }, 10), login("current", { password: "new" }, {}, 20)];
+    expect(planKeep(withAtt, ["stale", "current"], "current", noRole, 0).keepRefusal).toMatch(/attachments/);
+  });
+
+  it("a member id missing from the live items refuses — a stale cluster snapshot must never write", () => {
+    expect(planKeep(cluster(), ["stale", "current", "vanished"], "current", noRole, 0).keepRefusal).toMatch(/changed under you/);
+  });
+});
+
+describe("clusterSignature / dupeAck — the not-a-duplicate acknowledgment (owner decision 2026-08-18)", () => {
+  it("a cluster is dismissed only while EVERY member carries the signature of its current constitution", () => {
+    const sig = clusterSignature(["a", "b"]);
+    const dismissedPair = [login("a", {}, { dupeAck: sig }, 10), login("b", {}, { dupeAck: sig }, 20)];
+    expect(duplicateClusters(dismissedPair, noRole)[0]!.dismissed).toBe(true);
+    // A third copy arrives: same site+user, new membership → new signature → resurfaces.
+    const withNewcomer = [...dismissedPair, login("c", {}, {}, 30)];
+    const c = duplicateClusters(withNewcomer, noRole)[0]!;
+    expect(c.dismissed).toBe(false);
+    expect(c.signature).toBe(clusterSignature(["a", "b", "c"]));
+  });
+
+  it("signature is order-insensitive", () => {
+    expect(clusterSignature(["b", "a"])).toBe(clusterSignature(["a", "b"]));
+  });
+
+  it("planDismiss stamps every member; empty signature clears the key rather than writing it blank", () => {
+    const items = [login("a"), login("b")];
+    const sig = clusterSignature(["a", "b"]);
+    const { writes } = planDismiss(items, ["a", "b"], sig, noRole);
+    expect(writes!.map((w) => w.doc.dupeAck)).toEqual([sig, sig]);
+    const cleared = planDismiss(writes!.map((w, i) => ({ ...items[i]!, doc: w.doc })), ["a", "b"], "", noRole);
+    expect(cleared.writes!.every((w) => !("dupeAck" in w.doc))).toBe(true);
+  });
+
+  it("planDismiss allows cross-vault (nothing is removed) but refuses a reader vault", () => {
+    const items = [login("a"), inVault(login("b"), "v2")];
+    expect(planDismiss(items, ["a", "b"], clusterSignature(["a", "b"]), noRole).writes).toHaveLength(2);
+    expect(planDismiss(items, ["a", "b"], clusterSignature(["a", "b"]), (v) => (v === "v2" ? "reader" : null)).dismissRefusal).toMatch(/only view/);
   });
 });

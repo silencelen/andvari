@@ -484,6 +484,8 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
    inline, exactly as on Vault's own row badge, so the two read as the same mark. */
 .dupe-member .tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; border: 1px solid var(--edge); border-radius: 5px; padding: 2px 6px; }
 .dupe-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+/* An acknowledged "not duplicates" group (2026-08-18) — one quiet line + its Restore. */
+.dupe-dismissed { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 
 /* ---- tables ---- */
 .table-scroll { overflow-x: auto; border: 1px solid var(--edge); border-radius: var(--radius); background: var(--bg-raised); }
