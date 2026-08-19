@@ -450,6 +450,34 @@ refresh token across lock — new *client-side* state, not new server exposure
 (today's `doLock` already leaves the refresh token valid server-side, merely
 forgetting it).
 
+**Known-logins digest (locked save-prompt check — amendment 2026-08-18).** A
+second record deliberately survives an idle/manual lock, under its own distinct,
+per-origin `chrome.storage.session` key: a random per-install HMAC key plus a set
+of **truncated (16-byte) HMAC-SHA256 digests over (site key, normalized username)
+pairs** — one per saved web uri of every login item, the site key being the same
+eTLD+1 authority autofill matching uses. It carries **no password material** and
+is rebuilt from the decrypted items on every session persist. Its function is the
+locked capture path: a submitted credential whose (site, username) pair is in the
+set is a re-login to something already held — recorded as a *quiet* pending (no
+banner) and resolved by the unlock-time dedupe (unchanged → dropped silently;
+changed → the Update offer). An unknown pair keeps the "unlock to save" banner.
+Honest disclosure bound, accepted by design: a reader of the locked compartment
+can test *guessed* (site, username) pairs for membership — strictly less than the
+plaintext locked-minted pendings the same compartment already holds. Wiped at
+sign-out / definitive-401 (with the quick-unlock material) and never armed where
+`TRUSTED_CONTEXTS` cannot be guaranteed; a `storage.local` copy is **forbidden**
+(the rejected durable Tier C, again).
+
+**Locked-minted pendings (amendment 2026-08-18).** "Pending saves die at lock"
+covers pendings alive AT the lock transition; a pending captured *while already
+locked* necessarily post-dates it and persists (plaintext) in `storage.session`
+for the post-unlock offer. That window is now **bounded**: a locked-minted
+pending carries its capture stamp and is dropped unoffered once
+`LOCKED_PENDING_TTL_MS` (30 min) passes — enforced at every re-offer surface and
+at the unlock re-offer itself, ahead of any offer. Re-offers of a still-live
+locked pending are additionally throttled to one per `REOFFER_MIN_GAP_MS`
+(10 min); the immediate capture-time banner is exempt.
+
 **Use** (new `unlockWithPin`, single-flight): `open(K_pin, …) → AEAD(K_nonexp)⁻¹ →
 UVK`, then a **forced `POST /auth/refresh` rotation as the FIRST server contact** (a
 revoked/rotated refresh → definitive 401 → wipe → full sign-in; this is also the
