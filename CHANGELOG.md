@@ -4,6 +4,29 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.24.0 (2026-08-20) — the web vault keeps your place · fleet 0.24.0, extension 0.24.0
+
+*Refreshing the web vault no longer sends you back to the beginning. Every page lived at one
+address, so a reload — or an ordinary browser Back — dropped you on the item list no matter where
+you were. Health, Sharing, Settings, Trash and Administration now have addresses of their own, so
+a refresh returns you to the page you were on (after the usual unlock), Back steps where you
+expect, and a page you visit often can simply be bookmarked. What is in the address is only which
+page you were on: never which item was open, never what you searched for. That is deliberate —
+browser history is kept in the clear and often synced between devices, and no part of your vault
+belongs there.*
+
+*Deleted vaults are easier to find and no longer listed twice. On the phone, the "recently deleted"
+area in Sharing lives behind a small trash icon; the message you get after deleting a vault points
+at it, but the icon itself gave no sign there was anything to recover — it now carries a count, and
+the message says where to look. On every client, a vault you deleted yourself appeared twice — once
+as restorable, once as the sealed copy your own device keeps — which read as two different
+problems. The restorable entry now stands alone; members who merely lost access still see theirs.*
+
+*Attachments say what they actually do. The note beside a file read "encrypted on this device",
+which sounded like the file stays on that one device. It never did: the encryption happens on your
+device, and the sealed file syncs to everyone who shares the vault, like any other item. It now
+says so.*
+
 ## 0.23.0 (2026-08-18) — the vault gets organized, and the save prompt learns to hold its tongue · fleet 0.23.0, extension 0.23.0
 
 *The extension no longer asks to save a password you already have. The vault is usually locked at
