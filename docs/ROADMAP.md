@@ -624,10 +624,18 @@ Full per-family analysis lives in the closed PRs' comments (#5 #7-#16 #19).
 5. **TS 7 / tsgo (web+ext):** engine replacement; pin the same 7.x in both, and equivalence-check
    the gate (run 5.9 and 7.x side-by-side, diff diagnostics) before trusting it — exit 0 proves
    compatibility, not equal strictness.
-6. **AGP 9 toolchain (atomic):** gradle-wrapper 9.6 + AGP 9.3 + shadow 9.6 + the Kotlin cluster
+6. **AGP 9 toolchain (atomic):** gradle-wrapper 9.x + AGP 9.3 + shadow 9.6 + the Kotlin cluster
    (kotlin 2.4.x, coroutines/serialization 1.11, kotlinx-datetime 0.8 — port SyncEngine off
    `kotlinx.datetime.Instant`, compose-multiplatform 1.11, ktor 3.5) as ONE commit — no
-   intermediate state builds. Then stage 3: compileSdk/targetSdk 36 (+ platform-36 on the build
+   intermediate state builds. *Lane intel from the PR #42 probe (2026-08-20): a wrapper-ONLY
+   bump to 9.7.0 actually builds green locally on the current toolchain — full verify.sh plus
+   `:server:shadowJar` and `:app-desktop:packageDeb` — so the atomicity argument is no longer
+   "nothing intermediate compiles". The binding blocker is CI: CodeQL's java-kotlin buildless
+   extraction (CLI 2.26.3) produces an EMPTY database under Gradle 9.7 ("could not process any
+   code"), which would kill the code-scanning control on every push. Re-test that failure with
+   each CodeQL CLI release; the lane cannot open before it passes. PR #42 closed on this basis;
+   the wrapper's real Dependabot name (`gradle-wrapper`) is now actually ignored — the
+   original `gradle` ignore never matched it.* Then stage 3: compileSdk/targetSdk 36 (+ platform-36 on the build
    host) → compose-bom 2026.06 → re-derive the androidx fragment/activity/biometric pin lattice
    by hand (no alphas on the unlock path). Re-run the in-container Docker build (it downloads the
    wrapper independently).

@@ -25,6 +25,7 @@ updates:
       - dependency-name: "com.android*"                    # AGP — AGP9 lane (min-Gradle entangled)
       - dependency-name: "com.gradleup.shadow"             # breaks on Gradle 9 — AGP9 lane
       - dependency-name: "gradle"                          # wrapper — AGP9 lane
+      - dependency-name: "gradle-wrapper"                  # the wrapper's ACTUAL dependabot name — "gradle" never matched it (PR #42 slipped through)
       - dependency-name: "org.jetbrains.kotlin*"           # Kotlin toolchain lane
       - dependency-name: "org.jetbrains.kotlinx*"
       - dependency-name: "io.ktor*"                        # klibs need Kotlin 2.2+ — toolchain lane
