@@ -67,6 +67,18 @@ function Get-Sha256Lower {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+# Windows PowerShell 5.1 wraps every stderr line from a NATIVE program in an ErrorRecord, and under
+# $ErrorActionPreference = 'Stop' that ErrorRecord is a TERMINATING error - even when the program
+# exited 0. git announces "HEAD is now at ..." on stderr, gradle logs its whole build there, and ssh
+# uses it for banners; all three would abort a perfectly healthy run. Native commands report failure
+# through their EXIT CODE, which every caller below checks, so relax the preference around them.
+function Invoke-Native {
+    param([scriptblock]$Body)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Body } finally { $ErrorActionPreference = $prev }
+}
+
 # ============================================================ 1. ENVIRONMENT ====================
 
 Write-Step 'Environment'
@@ -108,7 +120,7 @@ Write-Step 'Tag, working tree, leftovers'
 
 function Invoke-Git {
     param([string[]]$Arguments, [switch]$AllowFailure)
-    $out  = & git -C $Repo @Arguments 2>&1
+    $out  = Invoke-Native { & git -C $Repo @Arguments 2>&1 }
     $code = $LASTEXITCODE
     if ($code -ne 0 -and -not $AllowFailure) {
         Write-Host ($out | Out-String)
@@ -250,7 +262,7 @@ Write-Host ''
 # owns its own failure modes - including `signtool verify` exiting 1 with an UnknownError chain
 # status, which is EXPECTED here (the household cert is self-signed and deliberately not in Trusted
 # Root) and which it already classifies as a pass. We judge only its final exit code.
-& powershell.exe @ceremonyArgs
+Invoke-Native { & powershell.exe @ceremonyArgs }
 $ceremonyExit = $LASTEXITCODE
 
 Write-Host ''
@@ -330,7 +342,7 @@ function Send-One {
     $local = Join-Path $BundleDir $Name
     $bytes = (Get-Item -LiteralPath $local).Length
     Write-Info ("-> {0} ({1} bytes)" -f $Name, $bytes)
-    & scp @scpOpts -- $local "${DropHost}:${DropPath}"
+    Invoke-Native { & scp @scpOpts -- $local "${DropHost}:${DropPath}" }
     if ($LASTEXITCODE -ne 0) { Die "scp of $Name to the drop host failed (exit $LASTEXITCODE) - nothing further was sent." }
 }
 
@@ -339,7 +351,7 @@ function Confirm-Remote {
     $local  = Join-Path $BundleDir $Name
     $want   = Get-Sha256Lower -Path $local
     $remote = "$DropPath$Name"
-    $out    = & ssh @sshOpts -- $DropHost "sha256sum -- '$remote'" 2>&1
+    $out    = Invoke-Native { & ssh @sshOpts -- $DropHost "sha256sum -- '$remote'" 2>&1 }
     if ($LASTEXITCODE -ne 0) {
         Write-Host ($out | Out-String)
         Die "could not sha256sum $Name on the drop host (exit $LASTEXITCODE) - ABORTING BEFORE THE SIGNATURE."
