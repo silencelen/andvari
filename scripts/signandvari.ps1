@@ -268,12 +268,21 @@ Write-Host ''
 # "the child exited". The MSI build starts a GRADLE DAEMON, which deliberately outlives the build
 # and inherits that handle. So whenever our own output is a pipe or a file rather than a console,
 # the ceremony finishes, the daemon keeps the pipe open, and the read blocks forever - the run
-# hangs AFTER signing but BEFORE the drop. Start-Process hands the child our handles directly and
-# never reads them here, and WaitForExit() waits on the child alone, not on its descendants.
+# hangs AFTER signing but BEFORE the drop. Starting the child as a plain process hands it our
+# handles directly and reads nothing here; WaitForExit() waits on the child alone, not on its
+# descendants. (`Start-Process -PassThru` is also wrong: it does not keep the process handle open,
+# so .ExitCode reads back EMPTY once the child is gone and a good ceremony is reported as failed.)
 $quotedArgs = $ceremonyArgs | ForEach-Object {
     if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
 }
-$proc = Start-Process -FilePath 'powershell.exe' -ArgumentList ($quotedArgs -join ' ') -NoNewWindow -PassThru
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName         = 'powershell.exe'
+$psi.Arguments        = ($quotedArgs -join ' ')
+$psi.WorkingDirectory = $Repo
+# UseShellExecute = false WITH NO redirection: the child inherits our stdout/stderr, so its output
+# streams straight through and this process never reads a handle the gradle daemon is holding open.
+$psi.UseShellExecute  = $false
+$proc = [System.Diagnostics.Process]::Start($psi)
 $proc.WaitForExit()
 $ceremonyExit = $proc.ExitCode
 
