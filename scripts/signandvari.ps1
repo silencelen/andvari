@@ -262,8 +262,20 @@ Write-Host ''
 # owns its own failure modes - including `signtool verify` exiting 1 with an UnknownError chain
 # status, which is EXPECTED here (the household cert is self-signed and deliberately not in Trusted
 # Root) and which it already classifies as a pass. We judge only its final exit code.
-Invoke-Native { & powershell.exe @ceremonyArgs }
-$ceremonyExit = $LASTEXITCODE
+#
+# NOT `& powershell.exe ...`. The call operator makes THIS process read the child's stdout until
+# end-of-stream, and end-of-stream means "every holder of the write handle has closed it" - not
+# "the child exited". The MSI build starts a GRADLE DAEMON, which deliberately outlives the build
+# and inherits that handle. So whenever our own output is a pipe or a file rather than a console,
+# the ceremony finishes, the daemon keeps the pipe open, and the read blocks forever - the run
+# hangs AFTER signing but BEFORE the drop. Start-Process hands the child our handles directly and
+# never reads them here, and WaitForExit() waits on the child alone, not on its descendants.
+$quotedArgs = $ceremonyArgs | ForEach-Object {
+    if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+}
+$proc = Start-Process -FilePath 'powershell.exe' -ArgumentList ($quotedArgs -join ' ') -NoNewWindow -PassThru
+$proc.WaitForExit()
+$ceremonyExit = $proc.ExitCode
 
 Write-Host ''
 if ($ceremonyExit -ne 0) { Die "prestige-release.ps1 exited $ceremonyExit - nothing was dropped." }
