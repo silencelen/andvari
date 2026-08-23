@@ -142,6 +142,38 @@ data class AttachmentRef(
     @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
 )
 
+/**
+ * The last recorded HUMAN verdict on whether a login still works (spec 02 §3, 2026-08-22) —
+ * the Kotlin sibling of web's `ItemCheck` in `web/src/api/types.ts`.
+ *
+ * Doc-level for the same reason `dupeAck` is: the verdict is about the ITEM, not the viewer, so
+ * one household member's confirmation quiets it for everyone.
+ *
+ * **[result] is an OPEN vocabulary and must never become an enum.** `ok`/`bad`/`gone`/`blocked`
+ * are what ships today; a value this client does not recognize means "checked, verdict unknown"
+ * and must degrade to a neutral row, NEVER a failing one ([Staleness.isFailing] is the one place
+ * that decides). A future client's verdict cannot be allowed to turn this one red.
+ *
+ * **Times are client clocks: ADVISORY ONLY, never a security input** (spec 02 §1). In a shared
+ * vault an [at] can arrive from another member's skewed — or hostile — device, so readers clamp
+ * it to "now" rather than trusting it (see [Staleness.stalenessRows]).
+ */
+@OptIn(ExperimentalSerializationApi::class)
+@kotlinx.serialization.Serializable(with = ItemCheckSerializer::class)
+@KeepGeneratedSerializer
+data class ItemCheck(
+    /** When this verdict was recorded (epoch ms, client clock — advisory). */
+    val at: Long,
+    /** Open vocabulary; unknown values render as "checked" with no verdict styling. */
+    val result: String,
+    /** The most recent [at] whose result was "ok", carried forward across later non-ok verdicts
+     *  so "last worked in March, failed in August" survives without an array. */
+    val okAt: Long? = null,
+    /** Snooze horizon: do not resurface in the staleness list before this. */
+    val until: Long? = null,
+    @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
+)
+
 @OptIn(ExperimentalSerializationApi::class)
 @kotlinx.serialization.Serializable(with = ItemDocSerializer::class)
 @KeepGeneratedSerializer
@@ -153,6 +185,18 @@ data class ItemDoc(
     val login: LoginData? = null,
     val card: CardData? = null,
     val attachments: List<AttachmentRef> = emptyList(),
+    // dupeAck + check (2026-08-23): promoted from the extras overlay to typed fields so the
+    // native clients can read and write them without hand-parsing JsonElement at every call
+    // site. APPENDED LAST WITH NULL DEFAULTS — the `postalCode` precedent above — so every
+    // existing positional and copy() writer stays bit-identical. Both are additive doc-level
+    // keys within fv1/fv2: NO formatVersion bump, and a client that predates them preserves
+    // them as unknown keys exactly as it did before they were typed.
+    /** Duplicate-checker acknowledgment: the cluster signature the user marked "not duplicates
+     *  — keep both". A cluster is dismissed only while EVERY member carries the signature of
+     *  the cluster as currently constituted, so any membership change resurfaces it. */
+    val dupeAck: String? = null,
+    /** Login verification ledger — see [ItemCheck]. */
+    val check: ItemCheck? = null,
     @kotlinx.serialization.Transient val extras: Map<String, JsonElement> = emptyMap(),
 )
 
@@ -167,6 +211,9 @@ internal object CardDataSerializer : ExtrasOverlaySerializer<CardData>(CardData.
 
 @OptIn(ExperimentalSerializationApi::class)
 internal object AttachmentRefSerializer : ExtrasOverlaySerializer<AttachmentRef>(AttachmentRef.generatedSerializer(), AttachmentRef::extras, { v, e -> v.copy(extras = e) })
+
+@OptIn(ExperimentalSerializationApi::class)
+internal object ItemCheckSerializer : ExtrasOverlaySerializer<ItemCheck>(ItemCheck.generatedSerializer(), ItemCheck::extras, { v, e -> v.copy(extras = e) })
 
 @OptIn(ExperimentalSerializationApi::class)
 internal object ItemDocSerializer : ExtrasOverlaySerializer<ItemDoc>(ItemDoc.generatedSerializer(), ItemDoc::extras, { v, e -> v.copy(extras = e) })
