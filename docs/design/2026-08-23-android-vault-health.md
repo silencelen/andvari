@@ -110,6 +110,24 @@ duplicate clusters — and assert **web and core produce the identical ordering 
 plans**. Phone and laptop disagreeing about which login is worst is a bug nobody would report and
 everybody would distrust.
 
+> **DONE (`spec/test-vectors/vaulthealth.json`).** 20-item fixture vault; core
+> `VaultHealthVectorsTest` and web `vaulthealth.vectors.test.ts` both green, 7 assertions each,
+> first run on the web side. That is the port's real validation: the two suites in §10 were
+> ported from one another and could agree with each other while both being wrong about the same
+> thing — only a shared corpus catches that. **Order is asserted as a sequence, never a set**, and
+> two dedicated cases keep the fixture honest about the forward-compat properties (an unknown
+> verdict staying non-failing, a future `check.at` clamping).
+>
+> ⚠ **Found while adding it: `tools/vector-gen` can no longer reproduce the committed corpus**,
+> so following the README's "regenerate; never hand-edit" would have destroyed tests.
+> `itemdoc.json` has 11 committed cases and the generator emits 7 (the four dropped include the
+> `check`-carrying ones `99fae40` added by hand); `urimatch.json` carries `classifyCard` (65) and
+> `classifyCardFreeRegression` (28) keys the generator does not emit **at all**. Generate to a
+> scratch directory and copy across only the intended file. Recorded in
+> `spec/test-vectors/README.md`; teaching the generator those cases is its own job, not this
+> release's. (Separately benign: `seal`/`secretstream`/`sharedgrant`/`export` differ on every run
+> by construction — randomized sealing, verified in the decrypt direction.)
+
 ## 4. Layer 2 — the Android Health screen
 
 Mirrors web's information architecture (tiles as the always-visible summary, one switchable half
@@ -263,10 +281,19 @@ re-open them.
 
 ## 11. Risks, ranked
 
-1. **The `ItemDoc` promotion (§3.1).** Silent serialization drift means conflict churn across a
-   household. Mitigated by the round-trip test; if it cannot be made to pass, **keep reading
-   `check` out of `extras`** and ship the screen anyway — the typed field is ergonomics, not the
-   feature.
+1. ~~**The `ItemDoc` promotion (§3.1).**~~ **RESOLVED 2026-08-23 (`20a6e77`), and it was
+   narrower than this section feared.** `ItemDocCheckRoundTripTest` (10 tests) is green and the
+   full core suite passed unchanged. Two things the implementation established:
+   - Item docs were **never** byte-identical across clients, so cross-client byte identity was
+     never a property to preserve. Web's `JSON.stringify` omits `undefined`; kotlinx with
+     `encodeDefaults = true` emits explicit nulls. `ItemDocVectorsTest`'s own KDoc already said
+     so — "both shapes are spec-legal". The AD binds userId/vaultId/itemId, not doc bytes.
+   - 0.26.0 therefore writes `"check":null` / `"dupeAck":null` on docs that have neither, where
+     0.25.0 wrote no key at all. **Benign, and now pinned concretely rather than assumed:**
+     nothing in `SyncEngine` gates a push on doc-byte equality (so no spurious writes), web reads
+     `null` as falsy exactly like an absent key, and an older native client parks it in `extras`
+     and hands it back unchanged. If it ever became intolerable the fix is `explicitNulls = false`
+     on the shared config — a whole-doc change, never a per-field one.
 2. **Lock-on-background changes daily feel** (§7). More autofill re-prompts. Reversible, but the
    owner should see it in a build before it is in a release.
 3. **Two ports of ~560 lines of decision-dense TypeScript.** The comments in `staleness.ts` and

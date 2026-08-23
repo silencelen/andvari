@@ -45,8 +45,21 @@ object Staleness {
     /** The snooze the "couldn't complete" verdict offers (design §4). One knob, named. */
     const val SNOOZE_MS: Long = 30L * DAY_MS
 
-    /** Scanning buckets. Declared in PRIORITY ORDER — [rankOf] depends on it. */
-    enum class StaleBucket { FAILING, NEVER, OVER_YEAR, SIX_TO_TWELVE, RECENT }
+    /**
+     * Scanning buckets. Declared in PRIORITY ORDER — [rankOf] depends on it.
+     *
+     * [wire] is the cross-implementation name, identical to web's `StaleBucket` union
+     * (`web/src/ui/staleness.ts`). It exists so the shared vectors in
+     * `spec/test-vectors/vaulthealth.json` can be graded against BOTH engines from one file;
+     * it is not a display string and must never be shown to a user.
+     */
+    enum class StaleBucket(val wire: String) {
+        FAILING("failing"),
+        NEVER("never"),
+        OVER_YEAR("over-year"),
+        SIX_TO_TWELVE("six-to-twelve"),
+        RECENT("recent"),
+    }
 
     private fun rankOf(b: StaleBucket): Int = b.ordinal
 

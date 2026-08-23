@@ -1,0 +1,605 @@
+{
+    "now": 1755000000000,
+    "items": [
+        {
+            "itemId": "failing-fresh",
+            "vaultId": "v1",
+            "updatedAt": 1754740800000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"failing-fresh\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://bank.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1754827200000,\n        \"result\": \"bad\"\n    }\n}"
+        },
+        {
+            "itemId": "failing-old",
+            "vaultId": "v1",
+            "updatedAt": 1754222400000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"failing-old\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://mail.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1747224000000,\n        \"result\": \"gone\"\n    }\n}"
+        },
+        {
+            "itemId": "never-old",
+            "vaultId": "v1",
+            "updatedAt": 1677240000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"never-old\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://ancient.example\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "never-new",
+            "vaultId": "v1",
+            "updatedAt": 1754913600000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"never-new\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://recent.example\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "over-year",
+            "vaultId": "v1",
+            "updatedAt": 1711800000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"over-year\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://yearly.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1720440000000,\n        \"result\": \"ok\"\n    }\n}"
+        },
+        {
+            "itemId": "six-to-twelve",
+            "vaultId": "v1",
+            "updatedAt": 1729080000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"six-to-twelve\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://halfyear.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1737720000000,\n        \"result\": \"ok\"\n    }\n}"
+        },
+        {
+            "itemId": "recent-ok",
+            "vaultId": "v1",
+            "updatedAt": 1754568000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"recent-ok\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://fresh.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1754740800000,\n        \"result\": \"ok\",\n        \"okAt\": 1754740800000\n    }\n}"
+        },
+        {
+            "itemId": "snoozed",
+            "vaultId": "v1",
+            "updatedAt": 1751544000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"snoozed\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://snoozed.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1754568000000,\n        \"result\": \"blocked\",\n        \"until\": 1755864000000\n    }\n}"
+        },
+        {
+            "itemId": "skewed-future",
+            "vaultId": "v1",
+            "updatedAt": 1753272000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"skewed-future\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://skew.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1841313600000,\n        \"result\": \"ok\"\n    }\n}"
+        },
+        {
+            "itemId": "unknown-verdict",
+            "vaultId": "v1",
+            "updatedAt": 1752408000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"unknown-verdict\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://future.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1754913600000,\n        \"result\": \"quantum-verified\"\n    }\n}"
+        },
+        {
+            "itemId": "app-only",
+            "vaultId": "v1",
+            "updatedAt": 1754395200000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"app-only\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"androidapp://com.example.app\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "dupe-exact-old",
+            "vaultId": "v1",
+            "updatedAt": 1746360000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-exact-old\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"shared-pw\",\n        \"uris\": [\n            \"https://shop.example\",\n            \"https://old.shop.example\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "dupe-exact-new",
+            "vaultId": "v1",
+            "updatedAt": 1754136000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-exact-new\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"shared-pw\",\n        \"uris\": [\n            \"https://shop.example/login\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "dupe-differs-stale",
+            "vaultId": "v1",
+            "updatedAt": 1748088000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-differs-stale\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"stale-pw\",\n        \"uris\": [\n            \"https://news.example\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "dupe-differs-current",
+            "vaultId": "v1",
+            "updatedAt": 1754654400000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-differs-current\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"current-pw\",\n        \"uris\": [\n            \"https://news.example\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "dupe-crossvault-a",
+            "vaultId": "v1",
+            "updatedAt": 1750680000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-crossvault-a\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"twin-pw\",\n        \"uris\": [\n            \"https://social.example\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "dupe-crossvault-b",
+            "vaultId": "v2",
+            "updatedAt": 1751112000000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-crossvault-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"twin-pw\",\n        \"uris\": [\n            \"https://social.example\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "weak",
+            "vaultId": "v1",
+            "updatedAt": 1754827200000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"weak\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"aaa\",\n        \"uris\": [\n            \"https://weak.example\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "strong",
+            "vaultId": "v1",
+            "updatedAt": 1754827200000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"strong\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"correct horse battery staple\",\n        \"uris\": [\n            \"https://strong.example\"\n        ]\n    }\n}"
+        },
+        {
+            "itemId": "has-totp",
+            "vaultId": "v1",
+            "updatedAt": 1754827200000,
+            "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"has-totp\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"unique-pw-1\",\n        \"uris\": [\n            \"https://totp.example\"\n        ],\n        \"totp\": \"otpauth://totp/x?secret=GEZDGNBV\"\n    }\n}"
+        }
+    ],
+    "healthRows": [
+        {
+            "itemId": "failing-fresh",
+            "name": "failing-fresh",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "failing-old",
+            "name": "failing-old",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "never-old",
+            "name": "never-old",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "never-new",
+            "name": "never-new",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "over-year",
+            "name": "over-year",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "six-to-twelve",
+            "name": "six-to-twelve",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "recent-ok",
+            "name": "recent-ok",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "snoozed",
+            "name": "snoozed",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "skewed-future",
+            "name": "skewed-future",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "unknown-verdict",
+            "name": "unknown-verdict",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "app-only",
+            "name": "app-only",
+            "strength": 0,
+            "reused": 10,
+            "hasTotp": false
+        },
+        {
+            "itemId": "dupe-exact-old",
+            "name": "dupe-exact-old",
+            "strength": 0,
+            "reused": 1,
+            "hasTotp": false
+        },
+        {
+            "itemId": "dupe-exact-new",
+            "name": "dupe-exact-new",
+            "strength": 0,
+            "reused": 1,
+            "hasTotp": false
+        },
+        {
+            "itemId": "dupe-differs-stale",
+            "name": "dupe-differs-stale",
+            "strength": 0,
+            "reused": 0,
+            "hasTotp": false
+        },
+        {
+            "itemId": "dupe-differs-current",
+            "name": "dupe-differs-current",
+            "strength": 0,
+            "reused": 0,
+            "hasTotp": false
+        },
+        {
+            "itemId": "dupe-crossvault-a",
+            "name": "dupe-crossvault-a",
+            "strength": 0,
+            "reused": 1,
+            "hasTotp": false
+        },
+        {
+            "itemId": "dupe-crossvault-b",
+            "name": "dupe-crossvault-b",
+            "strength": 0,
+            "reused": 1,
+            "hasTotp": false
+        },
+        {
+            "itemId": "weak",
+            "name": "weak",
+            "strength": 0,
+            "reused": 0,
+            "hasTotp": false
+        },
+        {
+            "itemId": "strong",
+            "name": "strong",
+            "strength": 3,
+            "reused": 0,
+            "hasTotp": false
+        },
+        {
+            "itemId": "has-totp",
+            "name": "has-totp",
+            "strength": 1,
+            "reused": 0,
+            "hasTotp": true
+        }
+    ],
+    "healthSummary": {
+        "logins": 20,
+        "weak": 19,
+        "reused": 15
+    },
+    "staleness": {
+        "default": [
+            {
+                "itemId": "failing-fresh",
+                "bucket": "failing",
+                "checkedAt": 1754827200000,
+                "snoozed": false,
+                "firstUri": "https://bank.example"
+            },
+            {
+                "itemId": "failing-old",
+                "bucket": "failing",
+                "checkedAt": 1747224000000,
+                "snoozed": false,
+                "firstUri": "https://mail.example"
+            },
+            {
+                "itemId": "never-old",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://ancient.example"
+            },
+            {
+                "itemId": "dupe-exact-old",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://shop.example"
+            },
+            {
+                "itemId": "dupe-differs-stale",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://news.example"
+            },
+            {
+                "itemId": "dupe-crossvault-a",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://social.example"
+            },
+            {
+                "itemId": "dupe-crossvault-b",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://social.example"
+            },
+            {
+                "itemId": "dupe-exact-new",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://shop.example/login"
+            },
+            {
+                "itemId": "app-only",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": null
+            },
+            {
+                "itemId": "dupe-differs-current",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://news.example"
+            },
+            {
+                "itemId": "has-totp",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://totp.example"
+            },
+            {
+                "itemId": "strong",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://strong.example"
+            },
+            {
+                "itemId": "weak",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://weak.example"
+            },
+            {
+                "itemId": "never-new",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://recent.example"
+            },
+            {
+                "itemId": "over-year",
+                "bucket": "over-year",
+                "checkedAt": 1720440000000,
+                "snoozed": false,
+                "firstUri": "https://yearly.example"
+            },
+            {
+                "itemId": "six-to-twelve",
+                "bucket": "six-to-twelve",
+                "checkedAt": 1737720000000,
+                "snoozed": false,
+                "firstUri": "https://halfyear.example"
+            },
+            {
+                "itemId": "recent-ok",
+                "bucket": "recent",
+                "checkedAt": 1754740800000,
+                "snoozed": false,
+                "firstUri": "https://fresh.example"
+            },
+            {
+                "itemId": "unknown-verdict",
+                "bucket": "recent",
+                "checkedAt": 1754913600000,
+                "snoozed": false,
+                "firstUri": "https://future.example"
+            },
+            {
+                "itemId": "skewed-future",
+                "bucket": "recent",
+                "checkedAt": 1755000000000,
+                "snoozed": false,
+                "firstUri": "https://skew.example"
+            }
+        ],
+        "includeSnoozed": [
+            {
+                "itemId": "failing-fresh",
+                "bucket": "failing",
+                "checkedAt": 1754827200000,
+                "snoozed": false,
+                "firstUri": "https://bank.example"
+            },
+            {
+                "itemId": "snoozed",
+                "bucket": "failing",
+                "checkedAt": 1754568000000,
+                "snoozed": true,
+                "firstUri": "https://snoozed.example"
+            },
+            {
+                "itemId": "failing-old",
+                "bucket": "failing",
+                "checkedAt": 1747224000000,
+                "snoozed": false,
+                "firstUri": "https://mail.example"
+            },
+            {
+                "itemId": "never-old",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://ancient.example"
+            },
+            {
+                "itemId": "dupe-exact-old",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://shop.example"
+            },
+            {
+                "itemId": "dupe-differs-stale",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://news.example"
+            },
+            {
+                "itemId": "dupe-crossvault-a",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://social.example"
+            },
+            {
+                "itemId": "dupe-crossvault-b",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://social.example"
+            },
+            {
+                "itemId": "dupe-exact-new",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://shop.example/login"
+            },
+            {
+                "itemId": "app-only",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": null
+            },
+            {
+                "itemId": "dupe-differs-current",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://news.example"
+            },
+            {
+                "itemId": "has-totp",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://totp.example"
+            },
+            {
+                "itemId": "strong",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://strong.example"
+            },
+            {
+                "itemId": "weak",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://weak.example"
+            },
+            {
+                "itemId": "never-new",
+                "bucket": "never",
+                "checkedAt": null,
+                "snoozed": false,
+                "firstUri": "https://recent.example"
+            },
+            {
+                "itemId": "over-year",
+                "bucket": "over-year",
+                "checkedAt": 1720440000000,
+                "snoozed": false,
+                "firstUri": "https://yearly.example"
+            },
+            {
+                "itemId": "six-to-twelve",
+                "bucket": "six-to-twelve",
+                "checkedAt": 1737720000000,
+                "snoozed": false,
+                "firstUri": "https://halfyear.example"
+            },
+            {
+                "itemId": "recent-ok",
+                "bucket": "recent",
+                "checkedAt": 1754740800000,
+                "snoozed": false,
+                "firstUri": "https://fresh.example"
+            },
+            {
+                "itemId": "unknown-verdict",
+                "bucket": "recent",
+                "checkedAt": 1754913600000,
+                "snoozed": false,
+                "firstUri": "https://future.example"
+            },
+            {
+                "itemId": "skewed-future",
+                "bucket": "recent",
+                "checkedAt": 1755000000000,
+                "snoozed": false,
+                "firstUri": "https://skew.example"
+            }
+        ],
+        "summary": {
+            "unchecked": 12,
+            "failing": 2
+        }
+    },
+    "duplicates": [
+        {
+            "sites": [
+                "old.shop.example",
+                "shop.example"
+            ],
+            "kind": "exact",
+            "memberIds": [
+                "dupe-exact-new",
+                "dupe-exact-old"
+            ],
+            "signature": "dupe-exact-new|dupe-exact-old",
+            "dismissed": false,
+            "survivorId": "dupe-exact-new",
+            "loserIds": [
+                "dupe-exact-old"
+            ],
+            "mergeRefusal": null
+        },
+        {
+            "sites": [
+                "social.example"
+            ],
+            "kind": "exact",
+            "memberIds": [
+                "dupe-crossvault-b",
+                "dupe-crossvault-a"
+            ],
+            "signature": "dupe-crossvault-a|dupe-crossvault-b",
+            "dismissed": false,
+            "survivorId": null,
+            "loserIds": [],
+            "mergeRefusal": "These copies are in different vaults — merge by hand."
+        },
+        {
+            "sites": [
+                "news.example"
+            ],
+            "kind": "differs",
+            "memberIds": [
+                "dupe-differs-current",
+                "dupe-differs-stale"
+            ],
+            "signature": "dupe-differs-current|dupe-differs-stale",
+            "dismissed": false,
+            "survivorId": null,
+            "loserIds": [],
+            "mergeRefusal": null
+        }
+    ]
+}

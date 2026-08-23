@@ -20,7 +20,13 @@ import io.silencelen.andvari.core.client.ConflictCopy
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.ExportCsv
+import io.silencelen.andvari.core.client.Duplicates
 import io.silencelen.andvari.core.client.ItemDoc
+import io.silencelen.andvari.core.client.ItemCheck
+import io.silencelen.andvari.core.client.LoginData
+import io.silencelen.andvari.core.client.Staleness
+import io.silencelen.andvari.core.client.VaultHealth
+import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.TotpAlgorithm
@@ -31,6 +37,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
@@ -80,7 +87,8 @@ fun main(args: Array<String>) {
     write(outDir, "strength.json", strength())
     write(outDir, "conflictcopy.json", conflictCopy())
     write(outDir, "lifecycleproof.json", lifecycleProof())
-    println("vector-gen: wrote 16 files to ${outDir.absolutePath}")
+    write(outDir, "vaulthealth.json", vaultHealth())
+    println("vector-gen: wrote 17 files to ${outDir.absolutePath}")
 }
 
 /** Argon2id timing on this host (spec 01 §9 benchmark table). */
@@ -1012,6 +1020,158 @@ private fun strength(): JsonObject = buildJsonObject {
  * makes concurrent materializers converge on ONE copy. Divergence silently doubles
  * conflict copies across the fleet.
  */
+/**
+ * Vault-health vectors (design 2026-08-23 §3.2) — ONE fixture vault graded against all three
+ * pure health modules, so the phone and the browser can never disagree about which login is
+ * worst, which copies are duplicates, or which password is weak.
+ *
+ * This is the only vector file whose consumers are UI-facing rather than cryptographic, and it
+ * exists for a specific failure it prevents: a ranking divergence between clients is invisible
+ * (both look plausible), unreportable (nobody can say which is right), and corrosive to trust in
+ * the whole feature. Bucket names are emitted as the WIRE strings ([Staleness.StaleBucket.wire]),
+ * which are web's union members verbatim.
+ *
+ * Item names are ASCII on purpose: the final name tie-break is `localeCompare` on web and
+ * code-unit order in Kotlin, and those agree only on ASCII. The divergence is cosmetic (it can
+ * only reorder rows whose timestamps are already equal), but a vector must not encode it.
+ */
+private fun vaultHealth(): JsonObject = buildJsonObject {
+    val now = 1_755_000_000_000L
+    val day = 86_400_000L
+
+    fun item(
+        itemId: String,
+        vaultId: String = "v1",
+        updatedAt: Long = now,
+        name: String = itemId,
+        username: String = "u@example.com",
+        password: String = "hunter2",
+        uris: List<String> = listOf("https://example.com"),
+        totp: String? = null,
+        check: ItemCheck? = null,
+        dupeAck: String? = null,
+    ) = VaultItem(
+        itemId = itemId,
+        vaultId = vaultId,
+        rev = 1,
+        updatedAt = updatedAt,
+        doc = ItemDoc(
+            type = "login",
+            name = name,
+            login = LoginData(username = username, password = password, uris = uris, totp = totp),
+            check = check,
+            dupeAck = dupeAck,
+        ),
+    )
+
+    val items = listOf(
+        // --- staleness spread: one row per bucket, plus a snoozed one and a skewed clock ---
+        item("failing-fresh", updatedAt = now - 3 * day, uris = listOf("https://bank.example"), check = ItemCheck(now - 2 * day, "bad")),
+        item("failing-old", updatedAt = now - 9 * day, uris = listOf("https://mail.example"), check = ItemCheck(now - 90 * day, "gone")),
+        item("never-old", updatedAt = now - 900 * day, uris = listOf("https://ancient.example")),
+        item("never-new", updatedAt = now - day, uris = listOf("https://recent.example")),
+        item("over-year", updatedAt = now - 500 * day, uris = listOf("https://yearly.example"), check = ItemCheck(now - 400 * day, "ok")),
+        item("six-to-twelve", updatedAt = now - 300 * day, uris = listOf("https://halfyear.example"), check = ItemCheck(now - 200 * day, "ok")),
+        item("recent-ok", updatedAt = now - 5 * day, uris = listOf("https://fresh.example"), check = ItemCheck(now - 3 * day, "ok", okAt = now - 3 * day)),
+        item("snoozed", updatedAt = now - 40 * day, uris = listOf("https://snoozed.example"), check = ItemCheck(now - 5 * day, "blocked", until = now + 10 * day)),
+        // A hostile/skewed client clock: must clamp to `now`, never sort above a real entry.
+        item("skewed-future", updatedAt = now - 20 * day, uris = listOf("https://skew.example"), check = ItemCheck(now + 999 * day, "ok")),
+        // An UNKNOWN verdict from a future client: "checked, verdict unknown" — never failing.
+        item("unknown-verdict", updatedAt = now - 30 * day, uris = listOf("https://future.example"), check = ItemCheck(now - day, "quantum-verified")),
+        // No navigable web uri — firstUri must be absent, not invented.
+        item("app-only", updatedAt = now - 7 * day, uris = listOf("androidapp://com.example.app")),
+
+        // --- duplicates: an exact mergeable pair, a differs pair, a cross-vault pair ---
+        item("dupe-exact-old", updatedAt = now - 100 * day, uris = listOf("https://shop.example", "https://old.shop.example"), password = "shared-pw"),
+        item("dupe-exact-new", updatedAt = now - 10 * day, uris = listOf("https://shop.example/login"), password = "shared-pw"),
+        item("dupe-differs-stale", updatedAt = now - 80 * day, uris = listOf("https://news.example"), password = "stale-pw"),
+        item("dupe-differs-current", updatedAt = now - 4 * day, uris = listOf("https://news.example"), password = "current-pw"),
+        item("dupe-crossvault-a", updatedAt = now - 50 * day, uris = listOf("https://social.example"), password = "twin-pw"),
+        item("dupe-crossvault-b", vaultId = "v2", updatedAt = now - 45 * day, uris = listOf("https://social.example"), password = "twin-pw"),
+
+        // --- health rows: a very weak password, and a strong one ---
+        item("weak", updatedAt = now - 2 * day, uris = listOf("https://weak.example"), password = "aaa"),
+        item("strong", updatedAt = now - 2 * day, uris = listOf("https://strong.example"), password = "correct horse battery staple"),
+        item("has-totp", updatedAt = now - 2 * day, uris = listOf("https://totp.example"), password = "unique-pw-1", totp = "otpauth://totp/x?secret=GEZDGNBV"),
+    )
+
+    // Personal vaults carry no grant, so every vault here genuinely has no role.
+    val roleFor: (String) -> String? = { null }
+
+    put("now", now)
+
+    putJsonArray("items") {
+        for (i in items) {
+            addJsonObject {
+                put("itemId", i.itemId)
+                put("vaultId", i.vaultId)
+                put("updatedAt", i.updatedAt)
+                put("docJson", json.encodeToString(ItemDoc.serializer(), i.doc))
+            }
+        }
+    }
+
+    putJsonArray("healthRows") {
+        for (r in VaultHealth.healthRows(items)) {
+            addJsonObject {
+                put("itemId", r.itemId)
+                put("name", r.name)
+                put("strength", r.strength)
+                put("reused", r.reused)
+                put("hasTotp", r.hasTotp)
+            }
+        }
+    }
+    VaultHealth.summarize(VaultHealth.healthRows(items)).let { s ->
+        putJsonObject("healthSummary") {
+            put("logins", s.logins)
+            put("weak", s.weak)
+            put("reused", s.reused)
+        }
+    }
+
+    fun emitRows(rows: List<Staleness.StalenessRow>) = buildJsonArray {
+        for (r in rows) {
+            addJsonObject {
+                put("itemId", r.itemId)
+                put("bucket", r.bucket.wire)
+                put("checkedAt", r.checkedAt)
+                put("snoozed", r.snoozed)
+                put("firstUri", r.firstUri)
+            }
+        }
+    }
+
+    val defaultRows = Staleness.stalenessRows(items, Staleness.StalenessOptions(now = now))
+    val withSnoozed = Staleness.stalenessRows(items, Staleness.StalenessOptions(now = now, includeSnoozed = true))
+    putJsonObject("staleness") {
+        // ORDER IS THE ASSERTION: worst-first, the three explainable tiers.
+        put("default", emitRows(defaultRows))
+        put("includeSnoozed", emitRows(withSnoozed))
+        Staleness.stalenessSummary(defaultRows).let { s ->
+            putJsonObject("summary") {
+                put("unchecked", s.unchecked)
+                put("failing", s.failing)
+            }
+        }
+    }
+
+    putJsonArray("duplicates") {
+        for (c in Duplicates.duplicateClusters(items, roleFor)) {
+            addJsonObject {
+                putJsonArray("sites") { for (s in c.sites) add(s) }
+                put("kind", if (c.kind == Duplicates.Kind.EXACT) "exact" else "differs")
+                putJsonArray("memberIds") { for (m in c.members) add(m.itemId) }
+                put("signature", c.signature)
+                put("dismissed", c.dismissed)
+                put("survivorId", c.merge?.survivorId)
+                putJsonArray("loserIds") { for (l in c.merge?.loserIds ?: emptyList()) add(l) }
+                put("mergeRefusal", c.mergeRefusal)
+            }
+        }
+    }
+}
+
 private fun conflictCopy(): JsonObject = buildJsonObject {
     val ids = listOf(
         "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10" to 1L,
