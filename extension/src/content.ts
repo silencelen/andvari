@@ -21,6 +21,7 @@ import {
   showTotpOffer,
   type DropdownState,
 } from "./content-ui";
+import { reuseWarning, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import { bumpLabelGeneration, demoteCsc, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
@@ -861,6 +862,51 @@ async function useStrongPassword(f: LoginForm): Promise<void> {
   showToast("Strong password filled"); // Cut M (v2 #14): success is visible too, not just failure
 }
 
+// ---- signup reuse alert (owner ask 2026-08-22) ----
+
+/** The last value we asked about, per field. A tab-through, or a blur that changed nothing, must
+ *  not re-ask. WeakMap so an SPA's replaced field GCs away with its entry. */
+const reuseAsked = new WeakMap<HTMLInputElement, string>();
+
+/**
+ * Warn when the password typed at REGISTRATION is one the vault already uses somewhere else.
+ * The other half of the signup story — "Use a strong password" (content-ui) offers a fresh one;
+ * this one says when the user's own choice is a repeat.
+ *
+ * **UNLOCKED ONLY, and that is the security decision, not a limitation to fix later.** Answering
+ * while locked would need a membership set over the vault's PASSWORDS held in storage.session.
+ * knownlogins.ts built exactly that shape for (site, username) pairs, and justified it on the
+ * record as "strictly less than the plaintext pendings the same compartment already holds". The
+ * password version inverts that bound: anyone able to read the locked compartment could confirm a
+ * GUESSED password against the whole vault — an oracle strictly MORE disclosing than the pendings,
+ * and one that leaks the single thing this product exists to protect. So it is not built. While
+ * locked the user still gets "Use a strong password", which needs no vault at all.
+ *
+ * The typed value crosses to the SW on BLUR — never per keystroke — and only from a signup form's
+ * new-password field. That is the same content-script→SW channel the save capture already uses,
+ * so it is no new exposure; and only a COUNT comes back.
+ */
+async function checkPasswordReuse(input: HTMLInputElement): Promise<void> {
+  const value = typeof input.value === "string" ? input.value : "";
+  const f = formFor(input);
+  if (
+    !shouldAskReuse({
+      value,
+      lastAsked: reuseAsked.get(input),
+      filling,
+      isSignup: f?.isSignup ?? false,
+      isNewPasswordField: f?.newPasswords.includes(input) ?? false,
+    })
+  ) {
+    return;
+  }
+  reuseAsked.set(input, value);
+  const r = await safeSend({ type: "passwordReuse", password: value });
+  if (!r) return;
+  const warning = reuseWarning(r.count, r.locked);
+  if (warning) showToast(warning, true);
+}
+
 // ---- capture engine ----
 
 interface Snapshot {
@@ -1081,6 +1127,19 @@ function init(): void {
       const t = e.composedPath()[0] ?? null;
       maybeOpen(t);
       void maybeCardChip(t);
+    },
+    true,
+  );
+
+  // Signup reuse alert (2026-08-22): BLUR, not input — one question per settled password, so a
+  // typed value never streams to the SW keystroke by keystroke. checkPasswordReuse re-checks
+  // isSignup/new-password itself, so this stays a cheap unconditional hand-off.
+  document.addEventListener(
+    "focusout",
+    (e) => {
+      if (!e.isTrusted) return;
+      const t = e.composedPath()[0] as HTMLInputElement | null;
+      if (t) void checkPasswordReuse(t);
     },
     true,
   );

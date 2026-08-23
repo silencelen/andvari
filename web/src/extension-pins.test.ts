@@ -349,13 +349,16 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(bg).toContain('const sig = target.kinds.join(",")');
   });
 
-  it("[U17] composedPath()[0] retargets the shadow-blind paths: focusin, input, keydown, click-reopen (+G2 capture keydown)", () => {
+  it("[U17] composedPath()[0] retargets the shadow-blind paths: focusin, input, keydown, click-reopen, focusout (+G2 capture keydown)", () => {
     // The Tier-2 four retarget sites, PLUS one added by G2's card-submit-capture keydown-Enter
     // path (design §G2 [X2-A3]) — a shadow-blind Enter in a card field must retarget the same way.
-    // Five total; reverting any to e.target drops the count. The submit listener and the click
-    // submit-control probe stay deliberate non-members (submit does not compose; the control probe
-    // walks the WHOLE path). The `[=(]` prefix keeps the count over CODE shapes only.
-    expect(ct.match(/[=(] ?e\.composedPath\(\)\[0\]/g)).toHaveLength(5);
+    // PLUS one added 2026-08-22 by the signup reuse alert's `focusout` listener: a new-password
+    // field inside a shadow root blurs shadow-blind exactly like it focuses, so it retargets the
+    // same way or the warning silently never fires on those checkouts. SIX total; reverting any to
+    // e.target drops the count. The submit listener and the click submit-control probe stay
+    // deliberate non-members (submit does not compose; the control probe walks the WHOLE path).
+    // The `[=(]` prefix keeps the count over CODE shapes only.
+    expect(ct.match(/[=(] ?e\.composedPath\(\)\[0\]/g)).toHaveLength(6);
     // [K15] RE-SCOPED (design 2026-07-26 §Gate+pins, deliberate): the C1 chip adds a SECOND
     // consumer to the focusin listener, and the design's binding resolution is
     // `const t = e.composedPath()[0] ?? null; maybeOpen(t); void maybeCardChip(t);` — ONE retarget
@@ -369,6 +372,7 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(ct).toMatch(/"input",[\s\S]{0,120}?e\.composedPath\(\)\[0\] \?\? e\.target/);
     expect(ct).toMatch(/"keydown",[\s\S]{0,120}?e\.composedPath\(\)\[0\] \?\? e\.target/);
     expect(ct).toMatch(/"click",[\s\S]{0,200}?e\.composedPath\(\)\[0\]/);
+    expect(ct).toMatch(/"focusout",[\s\S]{0,160}?e\.composedPath\(\)\[0\]/);
   });
 
   it("[U16] the shadow sweep skips our own closed-shadow UI host (no self-observation loop)", () => {

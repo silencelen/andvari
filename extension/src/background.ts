@@ -1712,6 +1712,18 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return linkUri(msg, sender);
     case "generate":
       return { password: generatePassword(DEFAULT_GENERATOR) } satisfies Res<"generate">;
+    case "passwordReuse": {
+      // UNLOCKED-ONLY (messages.ts contract): no session ⇒ no answer, and deliberately no
+      // locked-state digest fallback — that would be a vault-wide PASSWORD oracle living in the
+      // locked compartment. The comparison happens HERE, against already-decrypted items in SW
+      // memory; the count is the only thing that leaves, so a caller learns "yes, N others" and
+      // never which item or which password.
+      if (!session) return { locked: true, count: 0 } satisfies Res<"passwordReuse">;
+      const pw = msg.password;
+      if (!pw) return { locked: false, count: 0 } satisfies Res<"passwordReuse">;
+      const count = session.items.filter((i) => i.doc.type === "login" && i.doc.login?.password === pw).length;
+      return { locked: false, count } satisfies Res<"passwordReuse">;
+    }
     case "totp": {
       const uri = session?.items.find((i) => i.itemId === msg.itemId)?.doc.login?.totp;
       if (!uri) return { ok: false } satisfies Res<"totp">;
