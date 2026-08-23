@@ -462,6 +462,19 @@ export class ApiClient {
     return this.raw("PUT", "/api/v1/escrow/self", { sealed, fingerprint });
   }
 
+  /** The usage ledger (spec 02 §8.2) — one opaque blob per user. `sealedUsage: null` means this
+   *  account has never written one, which callers must read as "no usage recorded", NEVER as
+   *  "nothing has been used". */
+  getUsage() {
+    return this.json<{ sealedUsage: string | null; updatedAt: number }>("GET", "/api/v1/usage");
+  }
+
+  /** Replace the stored ledger. Last-writer-wins by design — callers merge before calling, and
+   *  MUST batch (spec 03 §3: never one PUT per fill, or `updatedAt` becomes an activity trace). */
+  putUsage(sealedUsage: string) {
+    return this.raw("PUT", "/api/v1/usage", { sealedUsage });
+  }
+
   // F57: current org recovery PUBLIC key (base64url); the client verifies its fingerprint
   // against the user-confirmed sheet value before re-sealing escrow to it.
   recoveryPubkey() {

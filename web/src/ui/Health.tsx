@@ -4,6 +4,8 @@ import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import type { VaultItem, VaultStore } from "../vault/store";
 import { duplicateClusters, planDismiss, planKeep, type DuplicateCluster, type RoleFor } from "./duplicates";
 import { Announcer, Msg } from "./Msg";
+import { Staleness } from "./Staleness";
+import { stalenessRows, stalenessSummary } from "./staleness";
 import { EmptySigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength } from "./strength";
 import { ViewHeader } from "./ViewHeader";
@@ -20,6 +22,13 @@ interface Props {
   /** …and this is Vault's refresh() — re-derives `items` after the merge lands (TrashView's
    *  onRestored convention), which is what makes the merged cluster disappear from the list. */
   onChanged: () => void;
+  /** The server-declared clipboard window, passed to the verification run's copy buttons. The
+   *  CLAMP lives in useCopy (§2.3 B1-1), so an out-of-range policy value cannot pin a secret. */
+  clipboardClearSeconds?: number;
+  /** Usage lookup (spec 02 §8.2); absent renders "—", which is NOT "never used". */
+  lastUsedAt?: (itemId: string) => number | undefined;
+  /** Report that the user actually used a login (a copied password, a site opened to sign in). */
+  onUsed?: (itemId: string) => void;
 }
 
 interface Row {
@@ -58,10 +67,10 @@ export function healthRows(items: VaultItem[]): Row[] {
 /** Owner dev-note 2026-08-18: the duplicate checker grew past a screenful and buried the per-item
  *  table below it, so the view is split in two — the tiles stay as the always-visible summary and
  *  everything below them belongs to one switchable half (Admin's tabs idiom). */
-type HealthTab = "passwords" | "duplicates";
+type HealthTab = "passwords" | "duplicates" | "staleness";
 
 /** Vault-wide password health: strength, reuse, duplicates, and (on demand) HIBP breach exposure. */
-export function Health({ items, client, userId, onOpenItem, store, onChanged }: Props) {
+export function Health({ items, client, userId, onOpenItem, store, onChanged, clipboardClearSeconds, lastUsedAt, onUsed }: Props) {
   const [tab, setTab] = useState<HealthTab>("passwords");
   const rows = useMemo<Row[]>(() => healthRows(items), [items]);
   // audit F03: duplicates cluster ACROSS vaults (the app mints cross-vault twins itself), so the
@@ -78,6 +87,11 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged }: 
     [vaultsInfo],
   );
   const dupes = useMemo<DuplicateCluster[]>(() => duplicateClusters(items, roleFor), [items, roleFor]);
+  // Tiles derive from the SAME rows the Staleness tab shows (snoozed excluded, as there), so a
+  // tile can never disagree with the list under it.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const staleRows = useMemo(() => stalenessRows(items, { lastUsedAt }), [items, lastUsedAt]);
+  const staleSummary = stalenessSummary(staleRows);
 
   // itemId → breach count, filled by a scan and cached ON-DEVICE (by itemId — never the plaintext
   // password, which is only the scan's lookup key) so it survives navigating away from Health.
@@ -148,6 +162,8 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged }: 
         <Tile label="Breached" value={breached === null ? "—" : String(breached)} tone={breached === null ? undefined : breached > 0 ? "bad" : "good"} hint={breached === null ? "run a scan" : undefined} />
         {/* Active clusters only — an acknowledged "not duplicates" must not keep the tile red. */}
         <Tile label="Duplicates" value={String(dupes.filter((d) => !d.dismissed).length)} tone={dupes.some((d) => !d.dismissed) ? "bad" : "good"} />
+        <Tile label="Unchecked" value={String(staleSummary.unchecked)} tone={staleSummary.unchecked > 0 ? "bad" : "good"} />
+        <Tile label="Failing" value={String(staleSummary.failing)} tone={staleSummary.failing > 0 ? "bad" : "good"} />
       </div>
 
       <div className="tabs" role="group" aria-label="Health view">
@@ -157,9 +173,23 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged }: 
         <button type="button" className={tab === "duplicates" ? "active" : ""} aria-pressed={tab === "duplicates"} onClick={() => setTab("duplicates")}>
           Duplicates
         </button>
+        <button type="button" className={tab === "staleness" ? "active" : ""} aria-pressed={tab === "staleness"} onClick={() => setTab("staleness")}>
+          Staleness
+        </button>
       </div>
 
-      {tab === "duplicates" ? (
+      {tab === "staleness" ? (
+        <Staleness
+          items={items}
+          roleFor={roleFor}
+          store={store}
+          onOpenItem={onOpenItem}
+          onChanged={onChanged}
+          clearSeconds={clipboardClearSeconds ?? 30}
+          lastUsedAt={lastUsedAt}
+          onUsed={onUsed}
+        />
+      ) : tab === "duplicates" ? (
         dupes.length > 0 ? (
           <Duplicates clusters={dupes} items={items} roleFor={roleFor} store={store} vaultNameById={vaultNameById} onOpenItem={onOpenItem} onChanged={onChanged} />
         ) : (

@@ -21,5 +21,8 @@ export const adRecovery = (userId: string) => join("recovery-uvk", userId);
 export const adIdkey = (userId: string) => join("idkey", userId);
 export const adVk = (vaultId: string, userId: string) => join("vk", vaultId, userId);
 export const adVaultMeta = (vaultId: string) => join("vaultmeta", vaultId);
+/** spec 02 §8.2 (design 2026-08-22) — the per-user usage ledger envelope. Bound to the userId so
+ *  one member's ledger can never be served into another's slot on a shared endpoint. */
+export const adUsage = (userId: string) => join("usage", userId);
 /** spec 07 §2.4 — backup items envelope AD; `v` is the container header version. */
 export const adExport = (v: number, fileId: string) => join("export", String(v), fileId);

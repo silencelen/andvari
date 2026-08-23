@@ -42,3 +42,32 @@ export function safeHttpHref(url: string | null | undefined): string | null {
     return null;
   }
 }
+
+/**
+ * A SAVED VAULT URI as a navigable href — the "open site" affordance (design
+ * 2026-08-22-login-health §4). Distinct from the two helpers above: those guard a value the
+ * SERVER declared, this one guards a value a USER authored. That is not automatically safer —
+ * in a shared vault the author is ANOTHER MEMBER, which makes a `javascript:` URI a real if
+ * narrow vector — so the same http(s)-only rule applies.
+ *
+ * Saved URIs legitimately omit the scheme (spec 02 §3.1 defaults them to https), so a
+ * scheme-less value is https-prefixed and only THEN parsed. Prefixing before parsing is what
+ * makes the check safe rather than merely tidy: "javascript:alert(1)" is not http(s)-prefixed,
+ * so it becomes "https://javascript:alert(1)", whose port is unparseable and which therefore
+ * throws — it can never be navigated to. A host:port form ("localhost:8080") still resolves.
+ *
+ * Returns the href to navigate to (scheme included), or null — which every caller must treat
+ * exactly like "absent", never like "render it anyway". Replaces the inline regex that used to
+ * build this href at the duplicate checker's call site.
+ */
+export function safeSiteHref(uri: string | null | undefined): string | null {
+  const trimmed = uri?.trim();
+  if (!trimmed) return null;
+  const candidate = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const scheme = new URL(candidate).protocol;
+    return scheme === "https:" || scheme === "http:" ? candidate : null;
+  } catch {
+    return null;
+  }
+}
