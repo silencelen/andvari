@@ -14,6 +14,42 @@ Every client works with **any** andvari server: point it at yours under *Setting
 Server*, or open an invite link from it. `https://andvari.monahanhosting.com` is the
 reference instance the shipped builds default to; it is not privileged in the protocol.
 
+## What it does
+
+- **Logins, notes and payment cards**, with attachments — every field sealed on the device,
+  the server holding bytes it cannot read.
+- **Shared household vaults.** A vault is granted to a member under their own identity key, so
+  sharing never means handing anyone a password; membership changes re-key without a re-import.
+- **Autofill where you actually type**: the browser extension fills and saves logins and
+  checkout card forms on Chromium and Firefox, and the Android client is a system autofill
+  service. Both offer to save what you submit, and both know when they already have it.
+- **Built-in TOTP** — second-factor codes live beside the login they belong to, and can be added
+  from the extension.
+- **Vault health** — weak and reused passwords, a breach check against Have I Been Pwned's
+  k-anonymity range API, duplicate groups with a guided merge, and a **Staleness** view that
+  ranks logins by how long it has been since anyone confirmed one still works. Checking is
+  guided but never automated: andvari opens the site and you say what happened. **A client that
+  quietly probed sites with your credentials would be doing something you never asked for.**
+- **Last used, across every device.** Copying a password on the phone, filling one in the
+  browser, opening a site from a check — all of it feeds one sealed per-account record, so a
+  login you rely on stops looking neglected just because you last edited it a year ago. One blob
+  rather than a row per login, written occasionally rather than per use: the server learns
+  neither which login you used nor when you were awake.
+- **Quick unlock** — an optional PIN, biometric or platform passkey instead of a full Argon2id
+  sign-in at every idle relock, with the vault key double-wrapped so the stored blob alone is
+  not offline-crackable.
+- **Offline-first** — native clients cache to SQLite, the web vault to IndexedDB, both under the
+  same key-derivation floor enforced at cache read.
+- **Import and export** — browser and password-manager CSV import (spec 06), CSV export and an
+  encrypted `.andvari` backup container readable by an offline CLI (spec 07).
+- **Recovery without a server that can help you** — an offline escrow key and a printed
+  recovery sheet are the answer to "forgot my master password". The server holds sealed blobs it
+  cannot open.
+- **Deleted items and password history** — a 30-day trash on every client, and a merge that
+  loses a duplicate keeps its password in the survivor's history rather than destroying it.
+- **A signed update channel** — clients verify a detached-signed `/downloads/manifest.json`
+  against a pinned key with an anti-rollback floor, and fail closed and quiet.
+
 ## Clients
 
 | Client | Stack | Distribution |
@@ -33,8 +69,8 @@ the phone-shaped half of audit F09: the `android` key did not exist at all befor
 so an APK served exactly as this table documented could never appear in any client.
 
 ```jsonc
-{ "android": { "version": "0.21.0", "url": "/downloads/andvari-0.21.0.apk" },
-  "linux":   { "version": "0.21.0", "url": "/downloads/andvari_0.21.0_amd64.deb" } }
+{ "android": { "version": "0.25.0", "url": "/downloads/andvari-0.25.0.apk" },
+  "linux":   { "version": "0.25.0", "url": "/downloads/andvari_0.25.0_amd64.deb" } }
 ```
 
 Two independent crypto implementations — Kotlin (`core/`) and TypeScript (`web/src/crypto`
@@ -65,7 +101,7 @@ instance also serves at `<your-origin>/selfhost` alongside downloadable copies o
 | `tools/vector-gen` | Emits most of `spec/test-vectors/*.json` from the Kotlin reference implementation (six are hand-authored — see below) |
 | `tools/recovery-cli` / `tools/backup-cli` | Offline escrow ceremony/recovery + offline `.andvari` backup reader (verify/dump/extract) |
 | `tools/update-signer` | Signs the `/downloads` update manifest the extension's update channel verifies |
-| `scripts/` | `verify.sh` (the every-ship gate — see Build), `build.sh`, `e2e.sh`, `publish-image.sh`, `publish-extension.sh` |
+| `scripts/` | `verify.sh` (the every-ship gate — see Build), `build.sh`, `e2e.sh`, `publish-image.sh`, `publish-extension.sh`, and the Windows release ceremony (`build-windows.ps1`, `prestige-release.ps1`, `signandvari.ps1`) |
 
 Six vector files — `card`, `cardfill`, `cardform`, `enrolllink`, `import-foreign`,
 `urimatch-etld1` — are hand-authored fixtures rather than `vector-gen` output. Both

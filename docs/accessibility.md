@@ -5,6 +5,15 @@ Re-run the verification protocol (below) whenever `compose-multiplatform` is bum
 `gradle/libs.versions.toml` — screen-reader bridging is framework capability, so a CMP upgrade
 can change these answers.
 
+> **Currency check 2026-08-23 (through 0.25.0).** `compose-multiplatform` is **still 1.7.3**, so
+> the matrix below stands unchanged — no re-run is owed. The views added since it was measured
+> (Health split into Passwords | Duplicates, the Staleness view and its guided verification,
+> vault sort/facets, and the web vault's hash-fragment routes) all inherit their client's
+> existing posture: on the **web** they are DOM like everything else and carry the WCAG AA work;
+> on **desktop** they are as reachable — and as unreadable to Orca — as the rest of the Compose
+> tree. **Nothing here has been re-demonstrated for those views specifically**, which is the
+> point of this file: nothing is claimed that a protocol run did not show.
+
 > Scope: this is the honest, *evidence-first* support posture for assistive technology (screen
 > readers) across andvari's clients. It documents what was demonstrated, never what is hoped.
 > Source of the protocol: `docs/design/2026-07-13-platform-fit.md` §3.

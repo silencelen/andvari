@@ -1,7 +1,8 @@
 # andvari browser extension (MV3)
 
 Desktop autofill for Chromium (Chrome/Edge/Brave) + Firefox — logins and payment cards.
-**Status: shipping.** The version lives in `manifest.json` (0.19.0 as of this writing);
+**Status: shipping.** The version lives in `manifest.json` (0.25.0 as of this writing, and it
+tracks the fleet version — the extension ships in lockstep with the other clients);
 `package.mjs` refuses to package if `manifest.json`, `manifest.firefox.json`, and
 `package.json` disagree, so that one file is the answer. Per-release detail is in the repo-root
 [`CHANGELOG.md`](../CHANGELOG.md).
@@ -16,8 +17,11 @@ Design record: the go/no-go spike
 [`docs/design/2026-07-08-browser-extension-spike.md`](../docs/design/2026-07-08-browser-extension-spike.md),
 the rework plan [`docs/design/2026-07-09-extension-rework-plan.md`](../docs/design/2026-07-09-extension-rework-plan.md),
 the endpoint-agnostic model [`docs/design/2026-07-15-multi-tenant-endpoints.md`](../docs/design/2026-07-15-multi-tenant-endpoints.md),
-and the card-fill chain (`2026-07-10-extension-card-fill`, `2026-07-23-card-autofill-*`,
-`2026-07-26-in-page-card-chip`).
+the card-fill chain (`2026-07-10-extension-card-fill`, `2026-07-23-card-autofill-*`,
+`2026-07-26-in-page-card-chip`), the live-sync engine
+[`2026-07-13-ext-live-sync.md`](../docs/design/2026-07-13-ext-live-sync.md), and the login-health
+work the usage ledger and the signup reuse alert come out of
+[`2026-08-22-login-health-staleness-verification.md`](../docs/design/2026-08-22-login-health-staleness-verification.md).
 
 ## Build
 
@@ -39,7 +43,8 @@ automated:
 - **`extension/src/*.test.ts`** — `npm test`, Node's built-in runner (`node --test`, native
   type-stripping). The security-critical logic is deliberately factored into chrome-free **leaf
   modules** (`serverurl`, `locksequence`, `quickunlock`, `serverswitch`, `grantflow`, `trustgate`,
-  `updateverify`, `card`, `cardfill`, `detect`, `urimatch`, `totp`, `errors`, …) so the real
+  `updateverify`, `card`, `cardfill`, `detect`, `urimatch`, `totp`, `errors`, `knownlogins`,
+  `savetarget`, `reusealert`, `usage`, `siteurl`, `events`/`livemsg`, …) so the real
   enforcement is driven under plain node instead of a hand-rolled mirror. The `*.vectors.test.ts`
   files in that set read `spec/test-vectors/` directly — the same bytes the Kotlin and web engines
   are graded against (provenance: `spec/test-vectors/README.md`).
@@ -117,6 +122,24 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     from **tweetnacl** (box) + `@noble` blake2b (nonce), verified byte-identical to libsodium
     (`web/src/crypto/noble-extension-poc.test.ts`). Shared-vault logins fill too now.
   - **Token refresh** — a 401 rotates the single-use token pair and retries once.
+  - **Live change-push (`src/events.ts` + `src/livemsg.ts`)** — an unlock-scoped dirty-bell
+    WebSocket (spec 03 §6) so a peer's edit lands in ~1–2 s instead of waiting for the poll. The
+    socket carries no vault data: it rings, the SW resyncs through the normal path. The
+    `chrome.alarms` poll is retained underneath it as the backstop, because an MV3 worker can be
+    evicted at any moment and a dead socket must not become a silent staleness.
+  - **Save prompts that survive the lock (`src/knownlogins.ts` + `src/savetarget.ts`)** — the vault
+    is usually locked at the moment a login form is submitted, and a locked SW has nothing to
+    dedupe a captured credential against, so every re-login to an already-saved site used to
+    banner "unlock to save". A locked-readable digest set — truncated HMACs over (site key,
+    normalized username) pairs under a random per-install key, held in `storage.session` with the
+    quick-unlock posture and wiped at sign-out — gives the locked state a membership test carrying
+    **no password material**. A match captures quietly and resolves after unlock (unchanged ⇒ no
+    prompt ever; changed ⇒ the Update offer); a genuinely new login still banners immediately, but
+    re-offers at most once every ten minutes while locked, and an unanswered capture is discarded
+    after thirty. The disclosure bound is named, not hidden: whoever can read that compartment can
+    test *guessed* (site, username) pairs for membership — strictly less than the plaintext
+    pendings the same compartment already holds, which is why it is a spec 01 §8.4 amendment
+    rather than a quiet cache.
   - **Cards** — the popup lists `type:"card"` items in a "Cards" group beneath the logins as a
     masked identity line only ("Visa ••4242"; the full number/CVV never enter the popup DOM), with
     copy buttons for number / expiry / security code behind the same explicit-reveal path as
@@ -134,6 +157,28 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     `cvv`/`cvc`/`csc` suppresses the save/update banner, so a checkout security code can't be
     offered as an overwrite of a stored login password (the id is consulted only when the name is
     empty).
+  - **Signup reuse alert (`src/reusealert.ts`)** — when you type your own password into a
+    registration form instead of taking the generated one, the extension says so if that password
+    is already on another login in the vault. It fires on **blur**, never on input, so a typed
+    value never streams to the SW keystroke by keystroke, and only for a signup form's
+    new-password field — a sign-in re-typing its saved password is not reuse, and warning there
+    would fire on every login the user ever performs. Never while *we* are filling (a generated
+    password is unique by construction), never twice for the same settled value, and never below
+    four characters. **Locked, it stays quiet rather than implying uniqueness:** answering the
+    question with the vault locked would mean retaining something that could test guesses against
+    every password in the vault, which is not a trade worth making for a convenience. The offer of
+    a strong password needs no vault at all and is unaffected.
+  - **Usage ledger (`src/usage.ts`)** — a fill records that the login was used, feeding the "last
+    used" column the web vault's Staleness view ranks on. Twin of `web/src/vault/usage.ts`; the
+    merge rules must stay identical across the two or the clients would clobber each other instead
+    of converging (both fields take the **max**, so `useCount` is a floor rather than a true total
+    — summing would re-count on every round trip and inflate without bound). One opaque blob per
+    account, not a row per login, so the server cannot learn *which* login was used; uses are
+    debounced ~15 s rather than flushed per fill (spec 03 §3), so the record's timing is not a log
+    of the user's day. The blob is sealed under a key derived from the **personal vault key, not
+    the UVK** — the extension's UVK is memory-only (spec 01 breaker B1) and an evicted MV3 worker
+    restores a session holding `vaultKeys` but no UVK, so a UVK-bound ledger would have been
+    unwritable from the client that does most of the filling.
   - **Any server, safely (`src/options.ts`, `serverurl`, `serverswitch`, `trustgate`)** — the
     options page repoints the extension at any andvari origin behind an anti-phishing Trust Gate
     that shows the **raw origin only**, never a server-supplied display name. A switch is

@@ -6,13 +6,57 @@ disagree, the commit wins. This is the SSOT for *direction* only.
 
 > **Reading this file.** Sections are dated campaign records, kept rather than deleted so the
 > reasoning stays auditable. Done work is marked with ~~strike-through~~ + a **DONE `<date>`**
-> and a commit; anything unmarked is genuinely open. Reconciled against git 2026-07-27.
+> and a commit; anything unmarked is genuinely open. Reconciled against git **2026-08-23**
+> (through `v0.25.0`); the release record for 0.22.0–0.25.0 is the section immediately below.
 >
 > **Two conventions in the older sections.** (1) Paths under `ops/` and `docs/{assess,pentest,recon,drills}/`
 > were never in this repository — they are the reference instance's private, out-of-tree operational
 > area; read them as "recorded elsewhere", not as broken links. (2) `CT122` and similar names are that
 > one instance's host labels, not part of the product; andvari is endpoint-agnostic and every client
 > works with any server (spec 00 "System shape", `docs/self-hosting.md`).
+
+## Releases 0.22.0 → 0.25.0 — 2026-08-13 to 2026-08-23
+
+Four releases landed after the 2026-07-27 reconcile. Per-release prose is `CHANGELOG.md`; this is
+the direction-level record of what they closed.
+
+> **Publication state, checked 2026-08-23.** 0.22.0–0.24.0 are complete on every channel.
+> **0.25.0 is published everywhere except the two PRESTIGE-only steps:** the Windows `.msi` is
+> not on `/downloads`, and `/downloads/manifest.json` is still the 0.24.0 manifest at **seq 7**.
+> Until it is re-signed at seq 8, armed clients correctly report 0.24.0 as the latest — the
+> channel is not lying, it is simply not yet updated. The deb (+`.asc`), both extension packages,
+> `firefox-updates.json` and the web bundle are all live at 0.25.0. Closing it is one command on
+> the signing box (`signandvari 0.25.0`); see `docs/runbooks/release-signing-keys.md`.
+
+- **0.22.0 (2026-08-13) — full-surface audit remediation.** A tip-to-tail audit of every surface
+  (crypto, server, web, extension, Android, desktop, specs, docs, build) produced 43 findings,
+  **0 critical / 3 high**; **42 shipped, 1 declined**. The crypto core came through clean — no key
+  or plaintext reaches the server and the hierarchy still matches spec 01 byte for byte. The
+  pattern the audit actually found is the one worth carrying forward: *a protection designed,
+  written down, and then not applied at one last seam.* Report + disposition ledger:
+  **`docs/design/2026-08-13-full-surface-audit.md`**.
+- **0.23.0 (2026-08-18) — organization, and a save prompt that holds its tongue.** Vault sort +
+  type/vault facets on all three clients; Health split into Passwords | Duplicates; endings for
+  duplicate groups the guided merge could not touch (`planKeep` → losers' passwords into the
+  survivor's history, `planDismiss`/`dupeAck` for groups that are correct as they stand); and the
+  **known-logins digest** (spec 01 §8.4 amendment) so a locked capture of an already-saved
+  (site, username) pair stays quiet instead of bannering "unlock to save".
+- **0.24.0 (2026-08-20) — the web vault keeps your place.** Hash-fragment routes for the
+  top-level views (the "Web route structure" entry below), findable trash, one row per deleted
+  vault, honest attachment copy.
+- **0.25.0 (2026-08-23) — knowing which logins have gone stale.** The **Staleness view** ranks
+  logins worst-first (failed check → never checked → longest since anyone confirmed), with guided
+  verification: andvari opens the site, the person signs in, and records the verdict. **andvari
+  never tries a password against a site itself** — the only honest test is a person using it, and
+  a client that quietly probed would be doing something nobody asked for. Alongside it the
+  **usage ledger** (schema v9, `GET`/`PUT /usage`, spec 02 §8.2 + spec 03) gives every client a
+  "last used" contribution — one sealed blob per account rather than a row per login, so the
+  server cannot learn *which* login was used, and debounced rather than per-use, so the record's
+  timing is not a log of the user's day; it is keyed off the **personal VK, not the UVK**, because
+  an evicted MV3 worker holds `vaultKeys` but no UVK and the extension does most of the filling.
+  Plus the **signup reuse alert** (unlocked-only, by design) and an Android autofill save fix for
+  sign-in screens whose username box is left empty. Design:
+  **`docs/design/2026-08-22-login-health-staleness-verification.md`**.
 
 ## Public-release trust & attestation campaign — 2026-07-16 (partly landed; see status)
 
@@ -123,10 +167,12 @@ deb GPG (ceremony 2026-07-14, `docs/runbooks/release-signing-keys.md`).
    campaign).** Desktop `Platform.kt` + extension `background.ts` now fetch the manifest as raw bytes +
    its detached `.sig`, verify Ed25519 against the pinned key (single-sourced to `core UpdateVerify.PINNED`)
    BEFORE parse, enforce `seq`-ratchet + a `signedAt` staleness window, and **fail closed quiet** (never
-   a fabricated nag). Design `docs/design/2026-07-13-signed-updates.md` §M. **Remaining ops (owner):** a
-   per-release `update-signer sign` on the workstation to produce `/downloads/manifest.json.sig` +
-   `seq`/`signedAt` fields — until then the clients correctly fail-closed-quiet (no nag). Small follow-on:
-   surface that quiet/unverified state in the extension popup (§M-D4b).
+   a fabricated nag). Design `docs/design/2026-07-13-signed-updates.md` §M. **The per-release ops
+   step is no longer "remaining" — it runs every release** and has since 0.19.1 (seq 1): the
+   workstation signs `/downloads/manifest.json` with a bumped `seq`, and as of 2026-08-20 the
+   whole ceremony is one command (`scripts/signandvari.ps1`, see
+   `docs/runbooks/release-signing-keys.md`). Small follow-on, still open: surface the
+   quiet/unverified state in the extension popup (§M-D4b).
 
 ## Frontend/UI design audit 2026-07-12/13 — remediation campaign (~22 of 27 SHIPPED)
 

@@ -171,6 +171,15 @@ docker compose pull && docker compose up -d
 That is the whole update story. Watch the image's release tags; `:latest` follows the
 newest release. (`bringup.sh --build` users: `git pull` and re-run with `--build`.)
 
+**Schema migrations run themselves, forward only.** The server stamps a
+`meta.schemaVersion` in its SQLite DB and applies any missing steps at boot — you never
+run a migration tool. As of 0.25.0 the current version is **9** (the usage ledger, spec 02
+§8.2). There are no down-migrations: an older image pointed at a newer DB is not a
+supported state, so **take the backup below before you pull**, and roll back by restoring
+`./data`, not by downgrading in place. Migrations only ever touch the server's own tables
+and metadata — vault contents are ciphertext the server cannot read, so no upgrade can
+rewrite them.
+
 **Explicit non-promise — the in-client update check is disabled by design** (design
 2026-07-15 §9): the apps/extension do **not** phone anywhere to check for updates,
 and they will not verify or nag about anything your `/downloads` page serves. Client
