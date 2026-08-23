@@ -4,6 +4,42 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.25.0 (2026-08-23) — knowing which logins have gone stale · fleet 0.25.0, extension 0.25.0
+
+*Vault health can now tell you which logins have gone stale, and walk you through checking them.
+A new Staleness view ranks your logins worst first: the ones whose last check failed, then the
+ones never checked at all, then whichever has gone longest since anyone confirmed it still works.
+"Check" opens the site and then gets out of the way — you sign in yourself and say what happened:
+it worked, the password was refused, the account is gone, or you could not get through. andvari
+never tries a password for you. The only honest test of a password is a person using it, and a
+client that quietly probed sites with your credentials would be doing something you never asked
+for. What you record syncs, so confirming a login on one device quiets it on all of them — and in
+a shared vault, for everyone who has it.*
+
+*andvari now remembers when you last used a login, and every device contributes. Copying a
+password on your phone, filling one in the browser, opening a site from a check — all of it feeds
+the "last used" column, so a login you genuinely rely on stops looking neglected just because you
+last edited it a year ago. That record is one sealed blob per account: the server holds bytes it
+cannot read, and because it is a single blob rather than a row for each login, it cannot learn
+which login you used — only that your record changed at all. Nothing is sent as you go, either;
+uses are gathered and written occasionally, so the record's own timing is not a log of your day.
+A login with nothing recorded shows a dash rather than "never used", because those are different
+statements and only one of them is true.*
+
+*Choosing a password you already use elsewhere is now called out while you are signing up. When
+andvari offers you a strong password on a registration form, typing your own instead will say so
+if that password is already on another login in your vault. It only speaks while your vault is
+unlocked: answering the question with the vault locked would mean keeping something behind that
+could be used to test guesses against every password you own, which is not a trade worth making
+for a convenience. Locked, it stays quiet rather than implying the password is unique — and the
+offer of a strong one needs no vault at all.*
+
+*On Android, saving now works on sign-in screens whose username box you leave empty. A device
+access code, a PIN-style sign-in, an app that shows a username field it does not really need —
+andvari would offer to fill on those screens but never offer to save, which made the feature look
+half-finished. It now offers to save the password on its own. Screens that have no username field
+at all, or that fill one in for you, behaved correctly before and still do.*
+
 ## 0.24.0 (2026-08-20) — the web vault keeps your place · fleet 0.24.0, extension 0.24.0
 
 *Refreshing the web vault no longer sends you back to the beginning. Every page lived at one
