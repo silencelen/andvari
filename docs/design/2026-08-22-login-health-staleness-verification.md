@@ -377,6 +377,21 @@ channel the save capture already uses, so it adds no new flow — only a narrowe
 > case is NOT fixed by this change (every password field stays required) and remains the
 > documented residual platform limit.
 
+> **FIX VERIFIED ON-DEVICE 2026-08-22.** A release-signed build of this branch was installed in
+> place on the owner's phone (same key, same versionCode 20011308 — so the round trip stayed a
+> same-version reinstall in BOTH directions; a higher code would have made `adb install` refuse
+> the rollback and forced an uninstall, losing the local login and cache). Same drill, same
+> device, same inputs, only the build changed:
+>
+> | case | 0.24.0 (before) | this branch (after) |
+> |---|---|---|
+> | username field present but left **BLANK** + password typed | **no prompt** | **"Save username and password to andvari?"** |
+> | username field absent (control) | prompt | prompt |
+> | username prefilled (control) | prompt | prompt |
+>
+> The failing case now prompts and neither control regressed. Phone was rolled back to the
+> released 0.24.0 afterwards, and nothing was written to the vault (every prompt dismissed).
+
 **Root cause located** — `DatasetBuilder.saveInfoFor`, one line:
 
 ```kotlin
