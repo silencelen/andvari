@@ -251,8 +251,20 @@ never checked · over a year · 6–12 months · under 6 months.
 >
 > **Shipped state of the usage ledger:** server (schema v9 + `/usage`), web (record on password
 > and TOTP copy, and on open-site in the run) and extension (record on fill) all participate.
-> Android and desktop hold the personal VK too, so nothing blocks them — they simply have no
-> recording call sites yet.
+> The **shared native foundation is in** — `core UsageLedger` (merge/record/prune/parse/serialize,
+> pinned by `UsageLedgerTest` including the exact JS wire shape), `Account.sealUsage/openUsage`,
+> and `AndvariApi.usage()/putUsage()`. What remains for Android and desktop is only per-client
+> wiring: a session-scoped recorder (Android's belongs on `VaultSession`, which already holds
+> `api`/`account`/`engine` and is shared with the autofill service) plus the copy-secret call
+> sites, which need the itemId threaded into the detail-screen rows.
+>
+> **One platform limit found while scoping it, worth knowing before anyone estimates the work:**
+> an Android autofill FILL is not directly observable — the service builds datasets and the
+> system fills them without calling back, so unlike the extension there is no `reveal()`-style
+> choke point. In-app copies are recordable today; the lead for fills is the service's
+> **`FillEventHistory` / `TYPE_DATASET_SELECTED`**, read on a subsequent request, which is its own
+> pass and is NOT assumed to work here. Until then the phone's contribution would be partial, and
+> the UI's "no recorded use renders —, never 'never used'" rule is what keeps that honest.
 
 ## 8a. Browser verification — 18/18 green (2026-08-22)
 

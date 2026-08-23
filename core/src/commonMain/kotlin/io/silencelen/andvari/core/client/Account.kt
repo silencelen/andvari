@@ -8,6 +8,7 @@ import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
+import io.silencelen.andvari.core.crypto.UsageKey
 import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.createCryptoProvider
@@ -608,6 +609,24 @@ class Account private constructor(
 
     private fun vk(vaultId: String): ByteArray =
         vaultKeys[vaultId] ?: throw CryptoException("no key for vault $vaultId")
+
+    /**
+     * Seal the usage ledger (spec 02 §8.2). Keyed by HKDF from the PERSONAL VAULT KEY, not the
+     * UVK — see [UsageKey]: the browser extension's UVK is memory-only (breaker B1) and an
+     * evicted MV3 worker restores a session with vault keys but no UVK, so a UVK-bound ledger
+     * would be unwritable from the client that does most of the filling. Every unlocked client
+     * holds the personal VK. The AD still binds the blob to this userId, so a hostile endpoint
+     * cannot serve one member's ledger into another's slot.
+     *
+     * Throws when there is no personal vault key — callers treat that exactly like "no ledger".
+     */
+    fun sealUsage(plaintext: ByteArray): String =
+        Envelope.sealB64(crypto, UsageKey.usageKey(crypto, vk(personalVaultId)), plaintext, Ad.usage(userId))
+
+    /** Open a ledger sealed by [sealUsage] — on this device or any other client. Throws on a
+     *  wrong key or a substituted blob, which callers treat as "no ledger", never an empty one. */
+    fun openUsage(sealedUsage: String): ByteArray =
+        Envelope.openB64(crypto, UsageKey.usageKey(crypto, vk(personalVaultId)), sealedUsage, Ad.usage(userId))
 
     /** itemId → highest formatVersion this session decrypted or sealed it at. Reseals take
      *  maxOf(docFloor, this): the server enforces per-item monotonic fv, so an edit must
