@@ -357,6 +357,33 @@
                     "valueJson": "\"https://legacy.test\""
                 }
             ]
+        },
+        {
+            "name": "check-ledger-preserved-by-old-clients",
+            "docJson": "{\"type\":\"login\",\"name\":\"Netflix\",\"favorite\":false,\"login\":{\"username\":\"jacob\",\"password\":\"hunter2\",\"uris\":[\"https://netflix.com/login\"]},\"check\":{\"at\":1755800000000,\"result\":\"bad\",\"okAt\":1750000000000,\"until\":1758400000000,\"x-future-verdict\":{\"note\":\"deep\"}}}",
+            "edit": {
+                "setName": "Netflix (household)"
+            },
+            "expectUnknownPaths": [
+                {
+                    "path": "/check",
+                    "valueJson": "{\"at\":1755800000000,\"result\":\"bad\",\"okAt\":1750000000000,\"until\":1758400000000,\"x-future-verdict\":{\"note\":\"deep\"}}"
+                }
+            ],
+            "expectTyped": [
+                {
+                    "path": "/name",
+                    "valueJson": "\"Netflix (household)\""
+                },
+                {
+                    "path": "/type",
+                    "valueJson": "\"login\""
+                },
+                {
+                    "path": "/login/username",
+                    "valueJson": "\"jacob\""
+                }
+            ]
         }
     ]
 }
