@@ -118,6 +118,13 @@ const val ESCROW_SEAL_OVERHEAD = 48
 const val ESCROW_SEALED_MIN = ESCROW_SEAL_OVERHEAD + 150
 const val ESCROW_SEALED_MAX = ESCROW_SEAL_OVERHEAD + 1024
 
+/** Ceiling on the §8.2 usage-ledger blob, in base64 characters. An entry is roughly 70 bytes of
+ *  plaintext (itemId + two numbers), so this clears a vault of tens of thousands of items with
+ *  room to spare — generous on purpose, since refusing a legitimate write would silently freeze a
+ *  user's staleness column, while still stopping an authenticated client from treating its own
+ *  row as free storage. */
+const val USAGE_SEALED_MAX = 512 * 1024
+
 fun requireEscrowBlob(sealedB64: String) {
     val bytes = try {
         Bytes.fromB64(sealedB64)
@@ -811,6 +818,37 @@ fun Application.andvariModule(services: Services) {
                 // Escrow is the sole recovery path (spec 04); replacing it is security-relevant.
                 services.repo.auditOn(c, "escrow_self_upload", p.userId, p.deviceId, call.clientIp(config), body.fingerprint)
             }
+            call.respondText("ok")
+        }
+
+        // ---- usage ledger (spec 02 §8.2, design 2026-08-22-login-health) ----
+        // One opaque AEAD blob per user, sealed under the UVK. The server stores and returns bytes
+        // and can decrypt none of it — the shape `escrow` and `member_recovery` already use.
+        //
+        // Deliberately NOT per-item rows: that would hand the server the per-item behavioral timing
+        // (which login, how often, when) that this whole design exists to withhold. What leaks here
+        // is that a user's ledger changed and roughly how big it is — nothing about which login.
+        get("/api/v1/usage") {
+            val p = requirePrincipal(call, service)
+            call.respond(services.repo.usageLedger(p.userId))
+        }
+        put("/api/v1/usage") {
+            val p = requirePrincipal(call, service)
+            val body = call.receive<io.silencelen.andvari.core.model.UsageUpload>()
+            // Bounded like every other client-supplied blob: the ledger is ~50 bytes of ciphertext
+            // per item, so this ceiling clears a very large vault by a wide margin while keeping an
+            // authenticated client from using its own row as free storage.
+            if (body.sealedUsage.isEmpty() || body.sealedUsage.length > USAGE_SEALED_MAX) throw BadRequest("bad_usage_blob")
+            services.repo.db.tx { c ->
+                c.exec(
+                    "INSERT INTO usage_ledger(userId,sealedUsage,updatedAt) VALUES(?,?,?) ON CONFLICT(userId) DO UPDATE SET sealedUsage=excluded.sealedUsage, updatedAt=excluded.updatedAt",
+                    p.userId, body.sealedUsage, now(),
+                )
+            }
+            // Deliberately NOT audited: this endpoint is written on a routine cadence by every
+            // client, and an audit row per flush would rebuild — in the audit log — exactly the
+            // per-user activity trace the batching rule exists to avoid. It is not
+            // security-relevant: it grants nothing, and losing it costs a health column.
             call.respondText("ok")
         }
 
