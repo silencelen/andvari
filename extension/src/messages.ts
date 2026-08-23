@@ -298,6 +298,12 @@ export type Req =
   | { type: "matches"; host: string }
   /** Popup/content: all logins, optionally filtered by a query (name/username/uri contains). */
   | { type: "allItems"; query?: string }
+  /** Content, SIGNUP FORMS ONLY: is this just-typed password already used by another login?
+   *  Answers a COUNT — no password, and no item identity, ever comes back. UNLOCKED-ONLY by
+   *  design: answering it while locked would require a membership oracle over the vault's
+   *  PASSWORDS, which is strictly more disclosure than the locked compartment already carries
+   *  (see content.ts checkPasswordReuse for the full argument). Locked ⇒ {locked:true,count:0}. */
+  | { type: "passwordReuse"; password: string }
   /** Popup: all cards for the copy-only Cards group (query filters name/subtitle). */
   | { type: "cardItems"; query?: string }
   /** Secret for a fill. The SW hands out the secret only when (a) the caller's host matches the
@@ -489,6 +495,8 @@ export type Res<T extends Req["type"]> = T extends "status"
         ? { ok: boolean; serverTime?: number; error?: string }
         : T extends "matches"
           ? { locked: boolean; matches: MatchItem[] }
+          : T extends "passwordReuse"
+            ? { locked: boolean; count: number }
           : T extends "allItems"
             ? { locked: boolean; items: MatchItem[] }
             : T extends "reveal"
