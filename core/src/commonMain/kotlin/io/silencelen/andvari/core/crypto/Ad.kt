@@ -28,6 +28,10 @@ object Ad {
 
     fun vaultMeta(vaultId: String): ByteArray = join("vaultmeta", vaultId)
 
+    /** spec 02 §8.2 (design 2026-08-22) — the per-user usage ledger envelope. Bound to the userId
+     *  so one member's ledger can never be served into another's slot on a shared endpoint. */
+    fun usage(userId: String): ByteArray = join("usage", userId)
+
     /** spec 07 §2.4 — backup items envelope. Binds the plaintext header's `v` and the
      *  per-file `fileId`, so a future v2 file can never be downgrade-opened under v1 rules
      *  and a section 0 can never be transplanted between backup files. */
