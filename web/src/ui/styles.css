@@ -602,9 +602,11 @@ input.token { font-size: 15px; color: var(--gold-bright); }
 .run-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
 .run-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 /* The four verdicts are the SAME verb, so they carry the same weight — no primary button
-   nudging the user toward one answer over another; the honest one is whichever is true. */
+   nudging the user toward one answer over another; the honest one is whichever is true.
+   They also must not be SMALLER than the Skip/Stop beside them: the first browser shots showed
+   the four ways to ANSWER rendering tighter than the two ways to answer NOTHING, which is the
+   nudge inverted. All six carry .ghost so the row reads as one set of equals. */
 .run-verdicts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-.run-verdicts button { font-size: 13px; }
 .confirm-row {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   background: var(--bg-raised); border: 1px solid var(--edge-strong); border-radius: var(--radius);

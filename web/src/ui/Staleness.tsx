@@ -259,6 +259,7 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
               <button
                 key={v.result}
                 type="button"
+                className="ghost"
                 disabled={busy}
                 title={v.hint}
                 onClick={() => void record(current.itemId, v.result, v.result === "blocked" ? SNOOZE_MS : undefined)}
