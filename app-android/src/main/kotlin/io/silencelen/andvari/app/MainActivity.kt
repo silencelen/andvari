@@ -1987,8 +1987,15 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
         val clipClear = (ui.policy?.clipboardClearSeconds ?: 30).coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS)
         doc.login?.let { login ->
             login.username?.takeIf { it.isNotBlank() }?.let { CopyRow("Username", it, ctx, clipClear) }
-            login.password?.takeIf { it.isNotBlank() }?.let { SecretCopyRow("Password", it, ctx, clipClear) }
-            login.totp?.takeIf { it.isNotBlank() }?.let { TotpRow(it, ctx, clipClear) }
+            // Spec 02 §8.2: a copied password or one-time code is a real use of this login, and
+            // it is the signal the web client's staleness ranking reads. Recorded in memory and
+            // flushed on a debounce — never a PUT per copy (spec 03 §3).
+            login.password?.takeIf { it.isNotBlank() }?.let {
+                SecretCopyRow("Password", it, ctx, clipClear, onUsed = { UsageRecorder.record(item.itemId) })
+            }
+            login.totp?.takeIf { it.isNotBlank() }?.let {
+                TotpRow(it, ctx, clipClear, onUsed = { UsageRecorder.record(item.itemId) })
+            }
             login.uris.firstOrNull()?.takeIf { it.isNotBlank() }?.let { ReadOnlyRow("Website", it) }
         }
         if (doc.type == "card") doc.card?.let { card ->
@@ -2373,7 +2380,7 @@ private fun VaultPickerField(choices: List<VaultInfo>, selectedId: String?, onSe
 
 // ---- TOTP live row ----
 @Composable
-private fun TotpRow(uri: String, ctx: Context, clearSeconds: Int) {
+private fun TotpRow(uri: String, ctx: Context, clearSeconds: Int, onUsed: () -> Unit = {}) {
     val crypto = remember { createCryptoProvider() }
     var code by remember { mutableStateOf("······") }
     var remaining by remember { mutableStateOf(30) }
@@ -2391,7 +2398,7 @@ private fun TotpRow(uri: String, ctx: Context, clearSeconds: Int) {
         Text("One-time code", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(
-                onClick = { copyToClipboard(ctx, "code", code, clearSeconds) },
+                onClick = { onUsed(); copyToClipboard(ctx, "code", code, clearSeconds) },
                 modifier = Modifier.semantics { contentDescription = "One-time code, double-tap to copy" },
             ) {
                 Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary)
@@ -3222,7 +3229,16 @@ private fun CopiedNote(clearSeconds: Int, onExpire: () -> Unit) {
 /** [display] lets the reveal show a formatted view (e.g. a grouped card number) while Copy
  *  still carries the bare stored [value]. */
 @Composable
-private fun SecretCopyRow(label: String, value: String, ctx: Context, clearSeconds: Int, display: String = value) {
+private fun SecretCopyRow(
+    label: String,
+    value: String,
+    ctx: Context,
+    clearSeconds: Int,
+    display: String = value,
+    /** Spec 02 §8.2: copying a login's password IS a use. Defaulted to a no-op so the card rows,
+     *  which are not logins, stay exactly as they were. */
+    onUsed: () -> Unit = {},
+) {
     var show by remember { mutableStateOf(false) }
     var copied by remember { mutableStateOf(false) }
     Column(Modifier.padding(vertical = 6.dp)) {
@@ -3231,7 +3247,7 @@ private fun SecretCopyRow(label: String, value: String, ctx: Context, clearSecon
             Text(if (show) display else "••••••••••", Modifier.weight(1f), fontFamily = FontFamily.Monospace)
             IconButton(onClick = { show = !show }) { Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (show) "Hide $label" else "Show $label") }
             // a11yand-09: name the button for ITS field (see SelectableCopyRow).
-            TextButton(onClick = { copyToClipboard(ctx, label, value, clearSeconds); copied = true }, modifier = Modifier.semantics { contentDescription = "Copy $label" }) { Text(if (copied) "Copied ✓" else "Copy") }
+            TextButton(onClick = { onUsed(); copyToClipboard(ctx, label, value, clearSeconds); copied = true }, modifier = Modifier.semantics { contentDescription = "Copy $label" }) { Text(if (copied) "Copied ✓" else "Copy") }
         }
         if (copied) {
             CopiedNote(clearSeconds) { copied = false }

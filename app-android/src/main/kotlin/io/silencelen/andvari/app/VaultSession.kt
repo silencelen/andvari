@@ -174,7 +174,12 @@ object VaultSession {
     @Synchronized
     fun lock() {
         val prev = state
+        // Best-effort store of what this session recorded, BEFORE the keys go: flush() reads
+        // api/account off the session, so it must be given the live one. Fire-and-forget — a
+        // ranking hint may never delay a lock.
+        prev?.let { live -> UsageRecorder.flushForSession(live) }
         state = null
+        UsageRecorder.clear() // behavioural records must not outlive the session that made them
         prev?.let {
             runCatching { it.engine.close() }
             runCatching { it.api.close() }

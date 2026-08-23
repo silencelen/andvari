@@ -2427,7 +2427,11 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
         Spacer(Modifier.height(16.dp))
         doc.login?.let { login ->
             login.username?.takeIf { it.isNotBlank() }?.let { CopyRow("Username", it, secret = false, clearSeconds = clipClear) }
-            login.password?.takeIf { it.isNotBlank() }?.let { CopyRow("Password", it, secret = true, clearSeconds = clipClear) }
+            // Spec 02 §8.2: a copied password is a real use of this login, and it is the signal
+            // the web client's staleness ranking reads. Buffered and flushed on a debounce.
+            login.password?.takeIf { it.isNotBlank() }?.let {
+                CopyRow("Password", it, secret = true, clearSeconds = clipClear, onUsed = { state.recordUse(item.itemId) })
+            }
             login.totp?.takeIf { it.isNotBlank() }?.let { TotpRow(it, clearSeconds = clipClear) }
             login.uris.firstOrNull()?.takeIf { it.isNotBlank() }?.let { ReadOnly("Website", it) }
         }
@@ -3505,7 +3509,16 @@ internal const val CLIPBOARD_COPY_FAILED = "Couldn't copy to the clipboard — t
 
 /** [display] is what a reveal shows (e.g. a grouped card number); Copy always hands over the raw [value]. */
 @Composable
-private fun CopyRow(label: String, value: String, secret: Boolean, clearSeconds: Int, display: String = value) {
+private fun CopyRow(
+    label: String,
+    value: String,
+    secret: Boolean,
+    clearSeconds: Int,
+    display: String = value,
+    /** Spec 02 §8.2: copying a login's password IS a use. No-op by default so the card rows,
+     *  which are not logins, stay exactly as they were. */
+    onUsed: () -> Unit = {},
+) {
     var show by remember { mutableStateOf(!secret) }
     // Cut J (v2 #10): the app's primary action gave ZERO visible feedback, and the silent
     // ~30s auto-wipe read as a random paste failure. Flash the button + disclose the window.
@@ -3530,7 +3543,7 @@ private fun CopyRow(label: String, value: String, secret: Boolean, clearSeconds:
                 } // a11ydesk-02
             }
             TextButton(
-                onClick = { copied = copyWithAutoClear(value, clearSeconds) },
+                onClick = { onUsed(); copied = copyWithAutoClear(value, clearSeconds) },
                 modifier = Modifier.semantics { contentDescription = "Copy $label" },
             ) { Text(if (copied == true) "Copied ✓" else "Copy") }
         }

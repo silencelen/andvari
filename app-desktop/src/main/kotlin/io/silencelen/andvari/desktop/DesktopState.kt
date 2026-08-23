@@ -64,8 +64,10 @@ import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import io.silencelen.andvari.core.model.VaultMemberSummary
+import io.silencelen.andvari.core.client.UsageLedger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -648,6 +650,88 @@ class DesktopState(
 
     private var api: AndvariApi? = null
     private var account: Account? = null
+
+    // ---- usage ledger (spec 02 §8.2) ----
+    // Matches the web client's window; a desktop process is long-lived, so it need not be as
+    // short as the phone's or the service worker's.
+    // "When did I last use this login" — the signal behind the web client's staleness ranking.
+    // Buffered in memory and flushed on a debounce, NEVER a PUT per copy: spec 03 §3, because a
+    // write per use would turn the blob's own updatedAt into a keystroke-grade activity trace.
+    // Every failure here is silent — a ranking hint may not surface an error or block a copy.
+    private var pendingUsage: Map<String, UsageLedger.Entry> = emptyMap()
+    private var usageFlush: Job? = null
+
+    /** Matches the web client's window — a desktop process is long-lived, so it need not be as
+     *  short as the phone's or the service worker's. A plain val, NOT a second companion object:
+     *  this class already has one, and adding another made every existing constant in it
+     *  unresolvable. */
+    private val usageFlushDebounceMs = 30_000L
+
+    /** Record a use (a copied password or one-time code). Cheap and fire-and-forget. */
+    fun recordUse(itemId: String) {
+        if (api == null || account == null) return
+        pendingUsage = UsageLedger.record(pendingUsage, itemId, System.currentTimeMillis())
+        if (usageFlush?.isActive == true) return
+        usageFlush = scope.launch {
+            delay(usageFlushDebounceMs)
+            flushUsage()
+        }
+    }
+
+    /**
+     * Merge against the server's copy, then store. The re-read is what keeps last-writer-wins
+     * from meaning last-writer-DESTROYS — the phone's and the browser's entries survive this
+     * flush even though the endpoint has no merge semantics of its own.
+     */
+    suspend fun flushUsage() {
+        val a = api ?: return
+        val acct = account ?: return
+        val mine = pendingUsage
+        if (mine.isEmpty()) return
+        pendingUsage = emptyMap()
+        storeUsage(a, acct, mine)
+    }
+
+    /**
+     * Store what is buffered using an EXPLICITLY captured api/account, then return immediately.
+     * The lock and sign-out paths need this: they null `api`/`account` synchronously, so a plain
+     * [flushUsage] launched there would find them already gone and silently discard the session's
+     * last uses. Fire-and-forget — a ranking hint may never delay a lock.
+     */
+    private fun flushUsageDetached() {
+        val a = api ?: return
+        val acct = account ?: return
+        val mine = pendingUsage
+        if (mine.isEmpty()) return
+        pendingUsage = emptyMap()
+        scope.launch { storeUsage(a, acct, mine) }
+    }
+
+    private suspend fun storeUsage(a: AndvariApi, acct: Account, mine: Map<String, UsageLedger.Entry>) {
+        try {
+            var merged = mine
+            // Could not read the remote copy — store ours rather than lose this session's uses.
+            runCatching {
+                a.usage().sealedUsage?.let { sealed ->
+                    merged = UsageLedger.merge(UsageLedger.parse(acct.openUsage(sealed).decodeToString()), mine)
+                }
+            }
+            a.putUsage(acct.sealUsage(UsageLedger.serialize(merged).encodeToByteArray()))
+        } catch (_: Throwable) {
+            // Re-arm rather than drop — but only while a session still stands. This resumes after
+            // suspension points, so on the lock path it can run AFTER the keys were dropped;
+            // re-arming unconditionally would resurrect behavioural records into a locked app.
+            if (api != null) pendingUsage = UsageLedger.merge(mine, pendingUsage)
+        }
+    }
+
+    /** Drop the buffer wherever vault material is dropped — behavioural records about a user's
+     *  items must not outlive the session that produced them. */
+    private fun clearUsage() {
+        usageFlush?.cancel()
+        usageFlush = null
+        pendingUsage = emptyMap()
+    }
     // F82: raw-row reads (vault rows / envelopes — the spec 07 export enumerates from
     // them) go through the engine's read surface; no carried cache reference here.
     private var engine: SyncEngine? = null
@@ -892,7 +976,7 @@ class DesktopState(
      * session/unlock-derived state so nothing bleeds into the new origin.
      */
     private fun clearSessionForSwitch() {
-        engine?.close(); api?.close(); api = null; account = null; engine = null
+        flushUsageDetached(); clearUsage(); engine?.close(); api?.close(); api = null; account = null; engine = null
         store.clearSession() // persisted tokens only — no namespace touched (B2-7)
         clearVaultClipboard()
         pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
@@ -2792,7 +2876,7 @@ class DesktopState(
 
     fun lock(reason: String = "Locked.") {
         // Retain the ciphertext cache on lock (spec 05 T3); close its handle.
-        engine?.close(); api?.close(); api = null; account = null; engine = null
+        flushUsageDetached(); clearUsage(); engine?.close(); api?.close(); api = null; account = null; engine = null
         clearVaultClipboard() // a copied secret must not outlive the unlocked session
         pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
         pendingPieceId = null // piece binding: cleared WITH the secret it names (B1 teardown)
@@ -2851,7 +2935,7 @@ class DesktopState(
                 temp.close()
             }
             // Close the engine (releases the DB handle — Windows won't delete an open file) first.
-            engine?.close(); a?.close(); api = null; account = null; engine = null
+            flushUsageDetached(); clearUsage(); engine?.close(); a?.close(); api = null; account = null; engine = null
             clearVaultClipboard()
             pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
             pendingPieceId = null // piece binding: see lock()
