@@ -1,4 +1,5 @@
 import { adIdkey, adItem, adUsage, adUvk, adVaultMeta, adVk } from "../crypto/ad";
+import { usageKey } from "../crypto/usagekey";
 import { ctEquals, fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
 import { open, seal } from "../crypto/envelope";
 import { fingerprint as recoveryFingerprint, sealUvk } from "../crypto/escrow";
@@ -282,19 +283,23 @@ export class Account {
   }
 
   /**
-   * Seal the usage ledger (spec 02 §8.2) under the UVK. Lives here because the UVK never leaves
-   * this class — the ledger is the only client-derived (rather than server-delivered) payload
-   * that rides it, and the AD binds it to this userId so a hostile endpoint cannot serve one
-   * member's ledger into another's slot.
+   * Seal the usage ledger (spec 02 §8.2). Keyed by HKDF from the PERSONAL VAULT KEY, not the
+   * UVK — see usagekey.ts: the extension's UVK is memory-only (breaker B1) and an evicted MV3
+   * worker restores a session with vault keys but no UVK, so a UVK-bound ledger would be
+   * unwritable from the client that does most of the filling. The AD still binds the blob to
+   * this userId, so a hostile endpoint cannot serve one member's ledger into another's slot.
+   *
+   * Throws when there is no personal vault (a recovery-shaped Account holds none) — callers
+   * treat that exactly like "no ledger", which is the honest degradation.
    */
-  sealUsage(plaintext: Uint8Array): string {
-    return toB64(seal(this.uvk, plaintext, adUsage(this.userId)));
+  async sealUsage(plaintext: Uint8Array): Promise<string> {
+    return toB64(seal(await usageKey(this.vk(this.personalVaultId)), plaintext, adUsage(this.userId)));
   }
 
-  /** Open a usage ledger sealed by [sealUsage] — on this device or any other. Throws on a wrong
-   *  key or a substituted blob, which callers treat as "no ledger", never as an empty one. */
-  openUsage(sealedUsage: string): Uint8Array {
-    return open(this.uvk, fromB64(sealedUsage), adUsage(this.userId));
+  /** Open a usage ledger sealed by [sealUsage] — on this device or any other client. Throws on a
+   *  wrong key or a substituted blob, which callers treat as "no ledger", never as an empty one. */
+  async openUsage(sealedUsage: string): Promise<Uint8Array> {
+    return open(await usageKey(this.vk(this.personalVaultId)), fromB64(sealedUsage), adUsage(this.userId));
   }
 
   /** Role from the latest grant for this vault, or null if none seen. */

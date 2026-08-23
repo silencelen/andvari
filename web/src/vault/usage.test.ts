@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { beforeAll, describe, expect, it } from "vitest";
 import { adUsage } from "../crypto/ad";
-import { fromUtf8 } from "../crypto/bytes";
+import { fromB64, fromUtf8, toB64 } from "../crypto/bytes";
+import { initSodium } from "../crypto/sodium";
+import { usageKey } from "../crypto/usagekey";
 import { type UsageMap, mergeUsage, parseUsage, pruneUsage, recordUse, serializeUsage } from "./usage";
 
 /**
@@ -105,15 +109,32 @@ describe("parseUsage", () => {
 });
 
 /**
- * The AD twin (spec 02 §2). `adUsage` here and `Ad.usage` in :core are hand-mirrored one-liners
- * with no shared vector between them, and a silent divergence would be nasty in a specific way:
- * each client would still seal and open its OWN ledger perfectly while being unable to open the
- * other's — the failure would look like "the phone just never records anything". Both sides
- * therefore pin the exact byte string, so a drift breaks a test rather than a user's column.
+ * The crypto twins (spec 02 §2/§8.2). `usageKey`/`adUsage` here and `UsageKey`/`Ad.usage` in
+ * :core are hand-mirrored, and a silent divergence would fail in a specific and misleading way:
+ * each client would seal and open its OWN ledger perfectly while being unable to open the
+ * other's, so the symptom would read as "the phone just never records anything" rather than as a
+ * crypto fault.
+ *
+ * Both sides are therefore checked against spec/test-vectors/usagekey.json, whose expected value
+ * was computed by an INDEPENDENT third implementation — so this pins "web is correct", not merely
+ * "web and core agree", which two mirrored-but-equally-wrong impls would also satisfy.
  */
-describe("adUsage (spec 02 §2 — twin of core Ad.usage)", () => {
-  it("is exactly andvari/v1|usage|<userId>", () => {
-    expect(fromUtf8(adUsage("u1"))).toBe("andvari/v1|usage|u1");
+describe("usage crypto (spec 02 §2/§8.2 — twins of core UsageKey/Ad.usage)", () => {
+  // fromB64/toB64 go through libsodium, which the crypto vector tests init the same way.
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  const v = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../../../spec/test-vectors/usagekey.json", import.meta.url)), "utf8"),
+  ) as { vkB64: string; usageKeyB64: string; adUtf8: string; adUserId: string };
+
+  it("derives the vector's usageKey from the vector's VK", async () => {
+    expect(toB64(await usageKey(fromB64(v.vkB64)))).toBe(v.usageKeyB64);
+  });
+
+  it("builds the vector's AD", () => {
+    expect(fromUtf8(adUsage(v.adUserId))).toBe(v.adUtf8);
   });
 
   it("refuses a userId carrying the separator, so components cannot be forged across fields", () => {
