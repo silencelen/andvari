@@ -26,6 +26,20 @@ data class DeviceInfo(val platform: String, val name: String)
 @Serializable
 data class EscrowUpload(val sealed: String, val fingerprint: String)
 
+/**
+ * The usage ledger (spec 02 §8.2) — one AEAD blob per user, sealed under the UVK with AD
+ * `andvari/v1|usage|{userId}`. Carries the client-side "when did I last use this login" map that
+ * feeds the vault-health staleness ranking. Opaque to the server by construction.
+ */
+@Serializable
+data class UsageUpload(val sealedUsage: String)
+
+/** The stored ledger, or `sealedUsage = null` when this account has never written one. The
+ *  `updatedAt` is the SERVER clock at the last write — clients use it only to decide whether the
+ *  copy they hold is stale, never as a usage timestamp (those live inside the ciphertext). */
+@Serializable
+data class UsageResponse(val sealedUsage: String? = null, val updatedAt: Long = 0)
+
 @Serializable
 data class PersonalVaultUpload(val vaultId: String, val wrappedVk: String, val metaBlob: String)
 
