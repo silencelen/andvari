@@ -1,4 +1,4 @@
-import { adIdkey, adItem, adUvk, adVaultMeta, adVk } from "../crypto/ad";
+import { adIdkey, adItem, adUsage, adUvk, adVaultMeta, adVk } from "../crypto/ad";
 import { ctEquals, fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
 import { open, seal } from "../crypto/envelope";
 import { fingerprint as recoveryFingerprint, sealUvk } from "../crypto/escrow";
@@ -279,6 +279,22 @@ export class Account {
       ? openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk))
       : open(this.uvk, fromB64(grant.wrappedVk), adVk(grant.vaultId, this.userId));
     this.vaultKeys.set(grant.vaultId, vk);
+  }
+
+  /**
+   * Seal the usage ledger (spec 02 §8.2) under the UVK. Lives here because the UVK never leaves
+   * this class — the ledger is the only client-derived (rather than server-delivered) payload
+   * that rides it, and the AD binds it to this userId so a hostile endpoint cannot serve one
+   * member's ledger into another's slot.
+   */
+  sealUsage(plaintext: Uint8Array): string {
+    return toB64(seal(this.uvk, plaintext, adUsage(this.userId)));
+  }
+
+  /** Open a usage ledger sealed by [sealUsage] — on this device or any other. Throws on a wrong
+   *  key or a substituted blob, which callers treat as "no ledger", never as an empty one. */
+  openUsage(sealedUsage: string): Uint8Array {
+    return open(this.uvk, fromB64(sealedUsage), adUsage(this.userId));
   }
 
   /** Role from the latest grant for this vault, or null if none seen. */

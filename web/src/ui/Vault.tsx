@@ -23,6 +23,8 @@ import {
 import { ImportError, type ImportFormat, type ImportPlan, type ImportReport, type Parsed, type ParsedRow, parseCsvImport, planImport, rowOrdinalsByLine } from "../import/csv";
 import { Admin } from "./Admin";
 import { scheduleClipboardClear, writeClipboard } from "./clipboard";
+import { useCopy } from "./usecopy";
+import { UsageTracker } from "../vault/usage";
 import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, CLIPBOARD_NOT_CLEARED_SHORT, net, NetworkError, UNREACHABLE } from "./errors";
 import { ExportPanel, type ExportMode } from "./ExportPanel";
 import { Field } from "./Field";
@@ -153,6 +155,26 @@ interface Props {
 }
 
 export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowFingerprint, offlineRecoveryReminder, onLock, onRevoked }: Props) {
+  // Usage ledger (spec 02 §8.2) — one per unlocked session. Recording is in-memory and the flush
+  // is debounced, because spec 03 §3 forbids a PUT per fill: that would turn the blob's own
+  // updatedAt into a keystroke-grade activity trace, which is the leak the single-blob design
+  // exists to avoid. A failure anywhere in here costs one health column and nothing else.
+  const usageRef = useRef<UsageTracker | null>(null);
+  if (!usageRef.current) usageRef.current = new UsageTracker(client, account);
+  const usage = usageRef.current;
+  useEffect(() => {
+    void usage.load();
+    // pagehide, not unload: it is the one that fires reliably on mobile tab eviction, which is
+    // exactly where a session's uses would otherwise be dropped.
+    const onHide = () => void usage.flush();
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      // Flush BEFORE dispose (dispose clears the map), and never block teardown on it — the
+      // Account in this closure outlives React's unmount, so the seal still has its key.
+      void usage.flush().finally(() => usage.dispose());
+    };
+  }, [usage]);
   // Route structure (owner dev-note 2026-08-19): the mount reads the fragment back, and Vault
   // mounts AFTER the unlock gate — so a refresh on "#/health" unlocks and returns to Health.
   // Enroll fragments were already captured-and-stripped by module load, and "#recover" belongs
@@ -578,7 +600,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         {view === "health" ? (
           // bug-web--1: items (live state, refreshed by syncNow) — never the identity-stable
           // store, which froze Health's rows for the whole mount.
-          <Health items={items} client={client} userId={account.userId} onOpenItem={goToItem} store={store} onChanged={refresh} />
+          <Health items={items} client={client} userId={account.userId} onOpenItem={goToItem} store={store} onChanged={refresh} clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30} lastUsedAt={usage.lookup} onUsed={(id) => usage.record(id)} />
         ) : view === "trash" ? (
           <TrashView store={store} onRestored={refresh} />
         ) : view === "sharing" ? (
@@ -643,6 +665,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             readOnly={account.roleFor(current.vaultId) === "reader"}
             vaultName={current.vaultId !== account.personalVaultId ? vaultNameById.get(current.vaultId) : undefined}
             moveTargets={newItemVaultChoices.filter((v) => v.vaultId !== current.vaultId)}
+            onUsed={() => usage.record(current.itemId)}
             onEdit={() => setEditing(current.doc)}
             onDelete={() => remove(current.itemId)}
             onMoved={() => { refresh(); setSelected(null); }}
@@ -1081,41 +1104,7 @@ function ExportMenu({ onBackup, onCsv }: { onBackup: () => void; onCsv: () => vo
 }
 
 // ---- copy with auto-clear ----
-function useCopy(clearSeconds: number) {
-  const [flash, setFlash] = useState<string | null>(null);
-  const [copyErr, setCopyErr] = useState(false);
-  // Audit F05: the platform refused the auto-clear, so the value is STILL on the clipboard —
-  // the surfaces below retract the "clears in Ns" promise instead of leaving it standing.
-  const [wipeStuck, setWipeStuck] = useState(false);
-  const flashTimer = useRef<number | null>(null);
-  const copy = async (label: string, value: string) => {
-    // ux-error--2: writeText rejects in real conditions ("Document is not focused",
-    // permissions-policy) and every call site is fire-and-forget — surface the canon
-    // sentence instead of an unhandled rejection over a clipboard that got nothing.
-    if (!(await writeClipboard(value))) {
-      setFlash(null);
-      setCopyErr(true);
-      return;
-    }
-    setCopyErr(false);
-    setWipeStuck(false);
-    setFlash(label);
-    // Cut J (v2 #10, review fix): the flash-timer id was never STORED, so the dedupe guard
-    // was dead code; and each copy stacked a fresh unconditional wipe — copying B after A
-    // let A's stale timer blank the clipboard mid-way through B's window. One live timer each.
-    if (flashTimer.current) window.clearTimeout(flashTimer.current);
-    flashTimer.current = window.setTimeout(() => setFlash((f) => (f === label ? null : f)), 2600);
-    // Audit F05: the wipe slot is MODULE scope (clipboard.ts), not a per-instance ref — this
-    // hook is re-instantiated per Detail and Detail unmounts on every back-to-list, so the ref
-    // dropped the pending id while the timer kept running and A's orphan blanked B's password.
-    // Clamped into [1, CLIPBOARD_CLEAR_MAX_SECONDS] (design 2026-07-15 §2.3, B1-1) at the timer
-    // itself — belt to the caller-side clamp; no useCopy consumer can pin the clipboard.
-    scheduleClipboardClear(clampClipboardClearSeconds(clearSeconds), (outcome) => setWipeStuck(outcome === "stuck"));
-  };
-  return { flash, copyErr, wipeStuck, copy };
-}
-
-function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets, onEdit, onDelete, onMoved, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; moveTargets: VaultInfo[]; onEdit: () => void; onDelete: () => Promise<void>; onMoved: () => void; onBack: () => void }) {
+function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets, onUsed, onEdit, onDelete, onMoved, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; moveTargets: VaultInfo[]; onUsed: () => void; onEdit: () => void; onDelete: () => Promise<void>; onMoved: () => void; onBack: () => void }) {
   // §2.3 clamp (B1-1): a server-declared clipboard window is honored only inside [1, 300 s].
   const clearSecs = clampClipboardClearSeconds(policy?.clipboardClearSeconds ?? 30);
   const { flash, copyErr, wipeStuck, copy } = useCopy(clearSecs);
@@ -1188,11 +1177,11 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
               <label>Password {copyPill("password")}</label>
               <div className="secret-row">
                 <PasswordField value={doc.login.password} />
-                <button className="ghost" onClick={() => copy("password", doc.login!.password!)}>Copy</button>
+                <button className="ghost" onClick={() => { onUsed(); copy("password", doc.login!.password!); }}>Copy</button>
               </div>
             </div>
           )}
-          {doc.login.totp && <TotpView uri={doc.login.totp} pill={copyPill("code")} onCopy={(code) => copy("code", code)} />}
+          {doc.login.totp && <TotpView uri={doc.login.totp} pill={copyPill("code")} onCopy={(code) => { onUsed(); copy("code", code); }} />}
           {doc.login.uris?.[0] && (
             <Field label="Website">
               <input readOnly value={doc.login.uris[0]} />

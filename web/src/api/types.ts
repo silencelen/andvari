@@ -561,6 +561,23 @@ export interface CardData {
   postalCode?: string;
 }
 
+/** A recorded verification verdict (spec 02 §3 `check`). The `result` vocabulary is OPEN — a
+ *  value this client does not know means "checked, verdict unknown" and MUST be preserved
+ *  verbatim, never coerced to a known one. */
+export type CheckResult = "ok" | "bad" | "gone" | "blocked";
+
+export interface ItemCheck {
+  /** When this verdict was recorded (epoch ms, client clock — advisory). */
+  at: number;
+  /** Open vocabulary; unknown values render as "checked" with no verdict styling. */
+  result: CheckResult | (string & {});
+  /** The most recent `at` whose result was "ok" — carried forward across later non-ok verdicts
+   *  so "last worked in March, failed in August" survives without an array. */
+  okAt?: number;
+  /** Snooze horizon: do not resurface in the staleness list before this. */
+  until?: number;
+}
+
 /** The plaintext item document (spec 02 §3). `type` is chosen at creation, never changes. */
 export interface ItemDoc {
   type: "login" | "note" | "card";
@@ -574,6 +591,13 @@ export interface ItemDoc {
    *  every household member: the statement is about the items, not the viewer). Old clients
    *  preserve it as an unknown key (the postalCode convention — no formatVersion bump). */
   dupeAck?: string;
+  /** Login verification ledger (spec 02 §3, 2026-08-22) — the last recorded HUMAN verdict on
+   *  whether this login still works, written by the guided verification run. Doc-level for the
+   *  same reason dupeAck is: the verdict is about the ITEM, not the viewer, so one member's
+   *  confirmation quiets it everywhere. Web is the only writer in this cut; every other client
+   *  preserves it as an unknown key (the dupeAck/postalCode convention — no formatVersion bump).
+   *  Times are client clocks: ADVISORY ONLY, never a security input (spec 02 §1). */
+  check?: ItemCheck;
   login?: {
     username?: string;
     password?: string;
