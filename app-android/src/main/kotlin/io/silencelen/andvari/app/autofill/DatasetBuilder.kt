@@ -100,9 +100,40 @@ object DatasetBuilder {
         return b.build()
     }
 
+    /** The ids that trigger the save UI, and the ids that merely ride along with it. */
+    data class SaveTrigger<T>(val required: List<T>, val optional: List<T>)
+
     /**
-     * SaveInfo for "Save to andvari?" — the login rule is unchanged: watch the form's username +
-     * password fields, REQUIRE a password (SAVE_DATA_TYPE_PASSWORD [+USERNAME]). 0.7.0 cards: any
+     * Which fields must CHANGE before Android offers "Save to andvari?", and which are only
+     * carried to onSaveRequest. Factored pure (and generic over the id type) because
+     * `SaveInfo` cannot be constructed in a JVM unit test — the loginDatasetCap idiom, and the
+     * only red-when-reverted coverage this rule gets.
+     *
+     * **The password field(s) are the SOLE login trigger; the username is OPTIONAL.** The
+     * platform shows the save UI only once EVERY required view has changed, so listing the
+     * username as required silently suppressed the prompt forever on any form where the user
+     * never typed into it — a prefilled username, a field StructureParser classified
+     * optimistically, or an app/context-scoped password that genuinely has no username. Fill
+     * kept working, save never fired: a half-working feature (owner report 2026-08-22).
+     *
+     * This is the same correction the card path below already carries for the same reason
+     * ("requiring every PAN-ish field would silently suppress the prompt whenever one stays
+     * empty"). Demoting the username costs nothing: `setOptionalIds` still delivers its value
+     * to onSaveRequest when the user did type one, and SaveConfirmActivity already handles a
+     * null/empty username end to end (its planFor has an explicit no-username branch).
+     */
+    fun <T> saveTrigger(passwords: List<T>, usernames: List<T>, ccAnchor: T?, ccAll: List<T>): SaveTrigger<T> {
+        val required = if (passwords.isNotEmpty()) passwords else listOfNotNull(ccAnchor)
+        // Usernames ride along only on a login form; a card-only form has no login half to carry.
+        val ride = if (passwords.isNotEmpty()) ccAll + usernames else ccAll
+        return SaveTrigger(required, ride.filterNot { it in required }.distinct())
+    }
+
+    /**
+     * SaveInfo for "Save to andvari?" — the login rule: watch the form's username + password
+     * fields and REQUIRE a password (SAVE_DATA_TYPE_PASSWORD [+USERNAME]). Which of those ids
+     * actually TRIGGERS the prompt is decided by [saveTrigger] — password-only since
+     * 2026-08-22, read its KDoc before widening it back. 0.7.0 cards: any
      * classified cc field ids are added as OPTIONAL ids so the platform hands their values to
      * onSaveRequest alongside the login trigger; a form with NO password field but WITH a
      * CC_NUMBER instead uses the number field(s) as the required trigger with
@@ -129,8 +160,14 @@ object DatasetBuilder {
         // membership input doesn't), tree order on ties. Residual platform limit (no OR
         // semantics): a user who fills only a DIFFERENT PAN field gets no prompt — accepted.
         val requiredCc = ccNumber.maxByOrNull { anchor -> form.ccFields.count { it.webDomain == anchor.webDomain } }
-        val required = (if (pw.isNotEmpty()) user + pw else listOfNotNull(requiredCc)).map { it.id }
-        val optional = form.ccFields.map { it.id }.filterNot { it in required }
+        val trigger = saveTrigger(
+            passwords = pw.map { it.id },
+            usernames = user.map { it.id },
+            ccAnchor = requiredCc?.id,
+            ccAll = form.ccFields.map { it.id },
+        )
+        val required = trigger.required
+        val optional = trigger.optional
         return runCatching {
             val b = SaveInfo.Builder(type, required.toTypedArray())
             if (optional.isNotEmpty()) b.setOptionalIds(optional.toTypedArray())
