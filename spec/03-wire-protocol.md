@@ -150,6 +150,21 @@ cache OFF.
   sealed UVK; server validates fingerprint equals the pinned org fingerprint.
 - Per-member recovery setup/rotation (`PUT /recovery/self-setup`) and the two-phase
   self-service reset (`POST /recovery/self/verify` + `/commit`) live in §12.
+- `GET /usage` → `{ sealedUsage: string | null, updatedAt }` and
+  `PUT /usage { sealedUsage }` → `ok` — the usage ledger (spec 02 §8.2): ONE opaque AEAD blob
+  per user, sealed under the UVK with AD `andvari/v1|usage|{userId}`, carrying the client-side
+  "when did I last use this login" map behind the vault-health staleness ranking. The server
+  stores and returns bytes and decrypts none of it.
+  **`sealedUsage: null` means the account has never written a ledger — never "nothing is used".**
+  Deliberately one aggregate blob and NOT per-item rows: per-item rows would expose the
+  per-item behavioral timing (which login, how often, when) the design exists to withhold. The
+  blob is capped server-side (`bad_usage_blob` on empty or oversized).
+  Clients MUST batch — accumulate in memory and flush on a debounce and at lock / sign-out /
+  page-hide, never one PUT per fill — so `updatedAt` cannot be read as an activity trace.
+  Last-writer-wins: there is no conflict machinery, and a client SHOULD merge per item by
+  `max(lastUsedAt)` against the copy it holds rather than blindly overwriting. This endpoint is
+  deliberately NOT audited (an audit row per flush would rebuild the very activity trace batching
+  avoids, and the write grants nothing).
 
 ## 4. Sync — pull
 

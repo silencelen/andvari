@@ -48,6 +48,7 @@ blobs between items, vaults, or purposes (`|`-joined UTF-8, spec 00 conventions)
 | Identity seed | UVK | `andvari/v1|idkey|{userId}` |
 | Personal-vault VK wrap | UVK | `andvari/v1|vk|{vaultId}|{userId}` |
 | Vault metadata (§4) | VK(vaultId) | `andvari/v1|vaultmeta|{vaultId}` |
+| Usage ledger (§8.2) | UVK | `andvari/v1|usage|{userId}` |
 
 `rev` is deliberately NOT in AD (the server assigns it after encryption). Sealed
 boxes (escrow, shared-vault grants) have no AD; their payloads are self-describing
@@ -66,6 +67,12 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
   "dupeAck": "itemId|itemId",            // optional — duplicate-checker "not duplicates" ack (2026-08-18): the
                                          // sorted-member-id signature of the acknowledged cluster; any membership
                                          // change stops it matching. Older clients preserve it as an unknown key.
+  "check": {                             // optional — login verification ledger (2026-08-22, design
+    "at": 1755800000000,                 //   2026-08-22-login-health): when this verdict was recorded,
+    "result": "ok",                      //   ok|bad|gone|blocked, the most recent `at` that was ok, and an
+    "okAt": 1755800000000,               //   optional snooze horizon. Client clocks — advisory, never a
+    "until": 1758400000000               //   security input. Older clients preserve it as an unknown key.
+  },
   "login": {                             // when type=login
     "username": "jacob",
     "password": "…",
@@ -99,6 +106,32 @@ Importers inherit the same rule: a source's password-changed *timestamp* is info
 only and is never materialized into an entry, because no retired password value exists to
 put in one (spec 06 §2/§4 step 9).
 
+**`check` — the login verification ledger (2026-08-22).** A record of the last time a human
+confirmed the login still works, written by the guided verification run (design
+`docs/design/2026-08-22-login-health-staleness-verification.md`). Doc-level on purpose, for the
+same reason `dupeAck` is: the verdict is a statement about the ITEM, not about the viewer, so
+one member's confirmation quiets it on every device and for every member of a shared vault.
+Shape: `{ at int, result string, okAt? int, until? int }`, all epoch millis (well inside the
+2^53 preservation bound below, so they stay JSON numbers). Normative rules:
+
+- **`result` vocabulary is OPEN.** `ok` (signed in), `bad` (credentials refused), `gone`
+  (account or site no longer exists), `blocked` (could not complete — MFA, lockout, captcha).
+  A reader encountering an unrecognized value MUST treat it as "checked, verdict unknown" and
+  preserve it verbatim — never fail closed, and never rewrite it to a known value.
+- **`okAt` carries forward.** On an `ok` verdict `okAt == at`; on any other verdict `okAt` is
+  copied from the prior `check` unchanged, so "last worked in March, failed in August" survives
+  without an array.
+- **Absence carries no information.** A missing `check` means never verified — NOT verified long
+  ago, and NOT healthy. Clients MUST NOT present an unchecked item as confirmed-good, the same
+  discipline this section states for `passwordHistory`.
+- **Client clocks are untrusted (§1).** `at`/`okAt`/`until` are advisory UX only; no security
+  decision may read them. A reader MUST tolerate a future `at` (clock skew, or a hostile
+  co-member in a shared vault) without letting it dominate an ordering.
+- **One write per recorded verdict**, and a skipped item writes nothing. This bound matters:
+  every write is an item overwrite, and §7 caps `item_versions` at the newest 10 per item, so a
+  chatty writer here would evict real edit history. For the same reason the design deliberately
+  does NOT put a per-use timestamp in this document — usage tracking is client-local (§8.2).
+
 **formatVersion 2 — cards (0.7.0).** fv2 adds `type` value `"card"` and one optional
 top-level object `card`: `{ cardholderName?, number? (digits-only), expMonth?
 ("01".."12"), expYear? (4-digit), securityCode? (3–4 digits; storing it is a per-card
@@ -115,8 +148,9 @@ ciphertext loss. Readers accept a `card` field at ANY fv they can open (e.g. an 
 doc whose `card` rode the unknown-field overlay through a legacy backup restore): the
 floor binds writers, not readers, and such an item re-floors to ≥ 2 on its next
 0.7.0 edit. The top-level key space doubles as the doc-level extension registry —
-`card` is CLAIMED (fv2); future top-level fields MUST pick unclaimed keys and stay
-additive within fv2 unless they change the meaning of existing fields.
+`card` is CLAIMED (fv2), as are `dupeAck` (2026-08-18) and `check` (2026-08-22) — both
+additive within fv1-2 with no version bump; future top-level fields MUST pick unclaimed keys
+and stay additive within fv2 unless they change the meaning of existing fields.
 
 Unknown fields MUST be preserved on rewrite (forward compatibility within a
 formatVersion), at every level of the document: the top-level object, `login`, each
@@ -241,6 +275,7 @@ spec violation.
 | mutations | (deviceId, mutationId) → resultJson, createdAt — idempotency replay cache; resultJson holds per-mutation status/rev, no vault content |
 | attachments | attachmentId, itemId, vaultId, ciphertext size, sha256(ciphertext), header, createdAt (filenames + file keys are inside item ciphertext) |
 | escrow | userId, sealed blob, fingerprint (of the recovery key), updatedAt |
+| usage_ledger | userId, **sealedUsage** (the per-user "last used" map sealed under the UVK — ciphertext, opaque; AD `andvari/v1\|usage\|{userId}`, §2), updatedAt — the staleness-ranking input (§8.2). ONE aggregate blob by design, never per-item rows: the server sees THAT a user's ledger changed and its size, never WHICH login |
 | member_recovery | userId, **recoveryWrappedUvk** (the UVK sealed under the member's recovery-secret-derived wrap key — ciphertext, opaque; AD `andvari/v1\|recovery-uvk\|{userId}`, §2), **recoveryVerifier** (one-way `crypto_pwhash_str(recoveryAuthKey)` — a DB leak is not a replayable recovery, exactly as the login verifier), **pieceId** (opaque random id of the current piece — rotation/confirm binding, spec 03 §12; not a secret), **setupDeviceId** (which device committed it — legacy-confirm scoping), updatedAt — the per-member self-service recovery row (spec 04 §per-member / design §F); ZK-clean, the symmetric counterpart to `escrow` |
 | audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, emails of existing users, or any decrypted content) |
 | policies | org policy JSON (min versions, KDF policy, lock timeouts…) |
@@ -248,12 +283,12 @@ spec violation.
 | meta | key/value operational markers (schemaVersion, lastPublicRequestAt…) |
 
 Traffic analysis (who syncs when, item counts, sizes) is visible to the server by
-nature and accepted (spec 05). This table describes **schema v8 exactly** — adding any
+nature and accepted (spec 05). This table describes **schema v9 exactly** — adding any
 table or plaintext column requires updating it in the same change. (v6 = design 2026-07-12
 §F: the `member_recovery` table + the `invites.escrowPolicy` column. v7 = design 2026-07-12
 §F.9: the `users.recoveryConfirmed` capture-confirmation flag. v8 = design 2026-07-13:
 `users.escrowPolicy` (admin posture reconciliation) + `member_recovery.pieceId`/`setupDeviceId`
-(confirm piece-binding).)
+(confirm piece-binding). v9 = design 2026-08-22: the `usage_ledger` table.)
 
 ## 6. Attachments
 
@@ -434,3 +469,59 @@ freshness posture above apply to the web cache **verbatim**. Web-specific deltas
   policy and consent are ANDed, and either one saying no forbids and wipes.
 - **No quick unlock** (spec 01 §8.3 unchanged): the cache stores ciphertext + wire
   metadata only and never changes what a reload demands — the full master password.
+
+### 8.2 Usage ledger (2026-08-22 amendment)
+
+The vault-health staleness ranking (design
+`docs/design/2026-08-22-login-health-staleness-verification.md`) wants "when was this login last
+used". It is stored as **one sealed per-user blob**, never as a field in the item document, and
+never as per-item rows. Both exclusions are load-bearing:
+
+- **Not in the item document.** A `usedAt` there would make each use an item overwrite, and §7
+  caps `item_versions` at the newest 10 per item — so roughly ten uses would evict an item's
+  entire real edit history, destroying the only shipped no-silent-loss backstop (F63) in exchange
+  for a convenience column. It would also turn the server-visible `changes` feed (§5) from a
+  record of *edits* into a per-item *behavioral* log.
+- **Not per-item rows.** One row per item would leak the same behavioral timing through row
+  metadata instead of through `changes` — the same disclosure by another route.
+
+One aggregate blob has neither problem: the server learns THAT a user's ledger changed and its
+approximate size, never WHICH login moved.
+
+**The §8 subset invariant is PRESERVED, not narrowed.** The ledger exists server-side as
+ciphertext (§5 `usage_ledger`), so a client caching it is still storing a subset of the
+server-visible table — the property §8 states holds unchanged.
+
+- **Sealed under the UVK**, AD `andvari/v1|usage|{userId}` (§2). The UVK is never persisted
+  (§8 MUST NOT list, unchanged), so the ledger is readable only in memory after an unlock; the
+  server, and a stolen locked device, both hold opaque bytes. Spec 05 T3 is unchanged.
+- **Contents.** `itemId -> { lastUsedAt, useCount }`, nothing more. No password material, no
+  document content, no URIs.
+- **Every client that holds the UVK may write it**, which is the point: a fill on the phone
+  counts on the laptop. A device-local ledger could not do this — the browser extension is a
+  separate client with its own storage, and there is deliberately no cross-client channel
+  (injecting into the vault origin is fail-closed forbidden).
+  > **OPEN (2026-08-22): the browser extension cannot satisfy this clause as written.** Its UVK
+  > is memory-only and never persisted (spec 01 breaker B1), and an MV3 service worker is evicted
+  > routinely — a snapshot-restored session holds `vaultKeys` and items but **no UVK**. So the
+  > extension can seal or open a UVK-bound ledger only in a session that did a live full unlock
+  > and has not been evicted since, which is a minority of fills. Web, desktop and Android are
+  > unaffected (they hold the UVK for the unlocked lifetime). Resolving this is an owner decision:
+  > either the extension defers its uses to the next UVK-bearing session, or the ledger key moves
+  > to an HKDF of the personal vault's VK (the established `andvari/v1|lifecycle` derivation
+  > pattern), which every unlocked client holds in every session. **Until it is resolved the
+  > extension records nothing** — and a client that cannot write MUST leave the ledger untouched
+  > rather than write a partial one over another client's.
+- **Writes are batched, never per-use.** A client accumulates in memory and flushes on a debounce
+  (and on lock / sign-out / page-hide), so the blob's own `updatedAt` cannot be read as a
+  keystroke-level activity trace. Clients MUST NOT flush synchronously on every fill.
+- **Last-writer-wins, and that is acceptable.** Two clients flushing concurrently may lose one
+  side's recent entries. The data is advisory ranking input — never a security input, never
+  user-authored content — so it gets no conflict machinery; a lost entry costs at most a stale
+  cell in one health column. Clients SHOULD merge per-item by `max(lastUsedAt)` against the
+  server copy they hold rather than blindly overwriting.
+- **Absence carries no information.** A missing entry means no client has recorded a use — NOT
+  that the login is unused. Clients MUST render it as "—", never as "never used".
+- **Disclosure bound (spec 05).** On a stolen *unlocked* device, or to anyone who compels the
+  master password, the ledger reveals which items the owner touches most. It carries no secret,
+  but it is behavioral data, and it is named here rather than shipped quietly.
