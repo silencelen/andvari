@@ -354,6 +354,29 @@ channel the save capture already uses, so it adds no new flow — only a narrowe
 > the app or context, are prompted in the keyboard integration for autofill but dont prompt for
 > save, causing it to be a half working feature."*
 
+> **VERIFIED ON-DEVICE 2026-08-22, and the root cause below needed correcting.** Five form
+> shapes were driven on a real phone against the shipped 0.24.0 (drill
+> `andvari-internal/drills/autofill-formlab`, browser + native app). Measured:
+>
+> | username field | its value at commit | save prompt |
+> |---|---|---|
+> | typed | a value | ✅ |
+> | **absent entirely** | — | ✅ (never required) |
+> | **prefilled, untouched** | a value | ✅ |
+> | **present but left BLANK** | empty | ❌ **the reported bug** |
+>
+> So the suppressing condition is a required field that is **EMPTY at commit** — *not* one that
+> is merely "unchanged", which is how the framework contract reads and how this document first
+> stated it. An absent username was never required; a prefilled one satisfies the requirement.
+> The broken case is a form that HAS a username field the user leaves blank — a password- or
+> PIN-only sign-in that still carries one. Demoting the username to optional makes the password
+> the sole required id, which fixes exactly that case.
+>
+> A second measurement pins the mechanism itself: a change-password form (3 password fields)
+> with only 2 filled produced **no prompt at all** — one empty required field is enough. That
+> case is NOT fixed by this change (every password field stays required) and remains the
+> documented residual platform limit.
+
 **Root cause located** — `DatasetBuilder.saveInfoFor`, one line:
 
 ```kotlin
@@ -389,3 +412,9 @@ its own because a genuinely username-less form hits the bug too):
 
 **Owner check when this ships:** the apps that were half-working should now prompt to save. If any
 still does not, the residual above is the next place to look — say which app and it can be traced.
+
+**Reproducing it again** takes about a minute: `andvari-internal/drills/autofill-formlab/nativeapp`
+builds an 12 KB APK with the five shapes as real native EditTexts. Shape A with the username left
+blank is the failing case; shapes B and C are the controls that must keep prompting. The browser
+half of the same drill cannot reproduce it — Chromium reports a prefilled username's value at
+commit, so only a native form exercises the real path.
