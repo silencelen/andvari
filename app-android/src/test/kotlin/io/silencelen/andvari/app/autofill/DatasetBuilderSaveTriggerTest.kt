@@ -11,10 +11,15 @@ import kotlin.test.assertTrue
  * factored pure and pinned here (the DatasetBuilderCapTest idiom); this is its only
  * red-when-reverted coverage.
  *
- * The regression these exist for (owner report 2026-08-22): app- and context-scoped password
- * fields with no real username were offered for FILL but never prompted for SAVE. The platform
- * shows the save UI only once every REQUIRED view has changed, so a username in the required
- * set suppressed the prompt forever whenever the user never typed into it.
+ * The regression these exist for (owner report 2026-08-22): password fields not tied to a
+ * username were offered for FILL but never prompted for SAVE.
+ *
+ * The exact trigger was measured on a real device (drill autofill-formlab), and it is narrower
+ * than the framework contract's wording suggests: the save UI is suppressed when a REQUIRED
+ * field is **EMPTY at commit**, not merely unchanged. An ABSENT username is fine (never
+ * required) and a PREFILLED one is fine (it has a value); the broken case is a username field
+ * that EXISTS and is left BLANK — which is exactly a password-only sign-in that still carries
+ * one. Making the password the sole required id is what fixes it.
  */
 class DatasetBuilderSaveTriggerTest {
 
@@ -25,11 +30,12 @@ class DatasetBuilderSaveTriggerTest {
         assertEquals(listOf("user"), t.optional, "the username still reaches onSaveRequest")
     }
 
-    /** THE BUG: a prefilled/untouched username must not be able to suppress the prompt. */
+    /** THE BUG, as measured: a username field left EMPTY at commit must not suppress the prompt.
+     *  Verified on-device that an ABSENT or PREFILLED username never did — only a blank one. */
     @Test
-    fun aUsernameTheUserNeverTypesCannotSuppressThePrompt() {
-        val t = DatasetBuilder.saveTrigger(passwords = listOf("pw"), usernames = listOf("prefilled"), ccAnchor = null, ccAll = emptyList())
-        assertFalse("prefilled" in t.required, "a username in the required set is exactly the reported half-working feature")
+    fun aUsernameLeftBlankCannotSuppressThePrompt() {
+        val t = DatasetBuilder.saveTrigger(passwords = listOf("pw"), usernames = listOf("blank"), ccAnchor = null, ccAll = emptyList())
+        assertFalse("blank" in t.required, "a username in the required set is exactly the reported half-working feature")
     }
 
     /** The genuinely username-less case: an app/context-scoped password. Save must still fire. */

@@ -109,12 +109,22 @@ object DatasetBuilder {
      * `SaveInfo` cannot be constructed in a JVM unit test — the loginDatasetCap idiom, and the
      * only red-when-reverted coverage this rule gets.
      *
-     * **The password field(s) are the SOLE login trigger; the username is OPTIONAL.** The
-     * platform shows the save UI only once EVERY required view has changed, so listing the
-     * username as required silently suppressed the prompt forever on any form where the user
-     * never typed into it — a prefilled username, a field StructureParser classified
-     * optimistically, or an app/context-scoped password that genuinely has no username. Fill
-     * kept working, save never fired: a half-working feature (owner report 2026-08-22).
+     * **The password field(s) are the SOLE login trigger; the username is OPTIONAL.**
+     *
+     * The precise condition, established on-device 2026-08-22 (drill
+     * `andvari-internal/drills/autofill-formlab`, five form shapes on a real phone), because the
+     * obvious reading of the framework contract is WRONG in a way that matters: the save UI is
+     * suppressed when a REQUIRED field is **EMPTY at commit** — not merely "unchanged". Measured:
+     *
+     *  - username present and TYPED           → prompt (fine)
+     *  - username field ABSENT entirely       → prompt (fine — it was never required)
+     *  - username present but PREFILLED       → prompt (fine — a prefilled value satisfies it)
+     *  - **username present but left EMPTY**  → **NO PROMPT** ← the reported bug
+     *
+     * So the half-working case is a form that HAS a username field the user leaves blank — a
+     * password- or PIN-only sign-in that still carries one, or a field StructureParser classified
+     * optimistically. Fill kept working, save never fired (owner report 2026-08-22). Demoting the
+     * username to optional makes the password the only required id, which is exactly this case.
      *
      * This is the same correction the card path below already carries for the same reason
      * ("requiring every PAN-ish field would silently suppress the prompt whenever one stays
