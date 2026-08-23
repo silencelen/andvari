@@ -28,6 +28,8 @@ import io.silencelen.andvari.core.model.EscrowUpload
 import io.silencelen.andvari.core.model.ItemRestoreResponse
 import io.silencelen.andvari.core.model.ItemUpload
 import io.silencelen.andvari.core.model.ItemVersion
+import io.silencelen.andvari.core.model.UsageResponse
+import io.silencelen.andvari.core.model.UsageUpload
 import io.silencelen.andvari.core.model.ItemVersionsResponse
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.TransferAcceptRequest
@@ -217,6 +219,24 @@ class AndvariApi(
      */
     suspend fun escrowSelf(upload: EscrowUpload) {
         val resp = request("PUT", "/api/v1/escrow/self", body = upload)
+        if (!resp.status.isSuccess()) throw errorFrom(resp)
+    }
+
+    /**
+     * The usage ledger (spec 02 §8.2) — one opaque blob per user, sealed under a key derived from
+     * the personal VK. `sealedUsage == null` means this account has never written one, which
+     * callers MUST read as "no usage recorded", never as "nothing has been used".
+     */
+    suspend fun usage(): UsageResponse = call("GET", "/api/v1/usage")
+
+    /**
+     * Replace the stored ledger. Last-writer-wins by design, so callers merge against the copy
+     * they hold FIRST; and callers MUST batch (spec 03 §3) — a PUT per fill would turn the blob's
+     * own `updatedAt` into a keystroke-grade activity trace, which is the leak the single-blob
+     * shape exists to avoid.
+     */
+    suspend fun putUsage(sealedUsage: String) {
+        val resp = request("PUT", "/api/v1/usage", body = UsageUpload(sealedUsage))
         if (!resp.status.isSuccess()) throw errorFrom(resp)
     }
 
