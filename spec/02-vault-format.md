@@ -48,7 +48,7 @@ blobs between items, vaults, or purposes (`|`-joined UTF-8, spec 00 conventions)
 | Identity seed | UVK | `andvari/v1|idkey|{userId}` |
 | Personal-vault VK wrap | UVK | `andvari/v1|vk|{vaultId}|{userId}` |
 | Vault metadata (§4) | VK(vaultId) | `andvari/v1|vaultmeta|{vaultId}` |
-| Usage ledger (§8.2) | UVK | `andvari/v1|usage|{userId}` |
+| Usage ledger (§8.2) | usageKey = HKDF-SHA-256(VK(personal), `andvari/v1\|usage`) | `andvari/v1|usage|{userId}` |
 
 `rev` is deliberately NOT in AD (the server assigns it after encryption). Sealed
 boxes (escrow, shared-vault grants) have no AD; their payloads are self-describing
@@ -492,26 +492,30 @@ approximate size, never WHICH login moved.
 ciphertext (§5 `usage_ledger`), so a client caching it is still storing a subset of the
 server-visible table — the property §8 states holds unchanged.
 
-- **Sealed under the UVK**, AD `andvari/v1|usage|{userId}` (§2). The UVK is never persisted
-  (§8 MUST NOT list, unchanged), so the ledger is readable only in memory after an unlock; the
-  server, and a stolen locked device, both hold opaque bytes. Spec 05 T3 is unchanged.
+- **Sealed under `usageKey = HKDF-SHA-256(VK(personalVault), "andvari/v1|usage")`**, AD
+  `andvari/v1|usage|{userId}` (§2) — domain-separated from that VK's own AEAD use exactly as the
+  lifecycle key is (spec 03 §11), and the AD still binds the blob to the user's slot so a hostile
+  endpoint cannot serve one member's ledger into another's.
+  **Keyed from the personal VK rather than the UVK for a CLIENT reason, recorded so it is not
+  "simplified" back:** the browser extension's UVK is memory-only and never persisted (spec 01
+  breaker B1), and an evicted MV3 service worker restores a session holding `vaultKeys` but no
+  UVK — so a UVK-bound ledger was unwritable from the client that does most of the filling.
+  Every unlocked client holds the personal VK in every session. No vault key is persisted either
+  (§8 MUST NOT list, unchanged), so the ledger is still readable only in memory after an unlock,
+  and the server and a stolen locked device both hold opaque bytes. Spec 05 T3 is unchanged.
+  An account with no personal vault simply has no ledger — clients MUST degrade to "—", not error.
 - **Contents.** `itemId -> { lastUsedAt, useCount }`, nothing more. No password material, no
   document content, no URIs.
-- **Every client that holds the UVK may write it**, which is the point: a fill on the phone
+- **Every unlocked client may write it**, which is the point: a fill on the phone
   counts on the laptop. A device-local ledger could not do this — the browser extension is a
   separate client with its own storage, and there is deliberately no cross-client channel
   (injecting into the vault origin is fail-closed forbidden).
-  > **OPEN (2026-08-22): the browser extension cannot satisfy this clause as written.** Its UVK
-  > is memory-only and never persisted (spec 01 breaker B1), and an MV3 service worker is evicted
-  > routinely — a snapshot-restored session holds `vaultKeys` and items but **no UVK**. So the
-  > extension can seal or open a UVK-bound ledger only in a session that did a live full unlock
-  > and has not been evicted since, which is a minority of fills. Web, desktop and Android are
-  > unaffected (they hold the UVK for the unlocked lifetime). Resolving this is an owner decision:
-  > either the extension defers its uses to the next UVK-bearing session, or the ledger key moves
-  > to an HKDF of the personal vault's VK (the established `andvari/v1|lifecycle` derivation
-  > pattern), which every unlocked client holds in every session. **Until it is resolved the
-  > extension records nothing** — and a client that cannot write MUST leave the ledger untouched
-  > rather than write a partial one over another client's.
+  > **RESOLVED 2026-08-22 by the key binding above.** The first draft sealed under the UVK, which
+  > the browser extension cannot hold across a service-worker eviction (breaker B1) — it would
+  > have excluded the client that does most of the filling. Re-binding to the personal VK removed
+  > the exclusion rather than working around it. The standing rule, which outlives that particular
+  > problem: **a client that cannot open the ledger MUST leave it untouched** rather than write a
+  > partial one over another client's.
 - **Writes are batched, never per-use.** A client accumulates in memory and flushes on a debounce
   (and on lock / sign-out / page-hide), so the blob's own `updatedAt` cannot be read as a
   keystroke-level activity trace. Clients MUST NOT flush synchronously on every fill.

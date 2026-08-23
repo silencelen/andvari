@@ -124,7 +124,7 @@ export class UsageTracker {
     try {
       const res = await this.client.getUsage();
       if (!res.sealedUsage) return;
-      this.map = mergeUsage(this.map, parseUsage(fromUtf8(this.account.openUsage(res.sealedUsage))));
+      this.map = mergeUsage(this.map, parseUsage(fromUtf8(await this.account.openUsage(res.sealedUsage))));
     } catch {
       /* no ledger this session — the column reads "—", which is the honest rendering */
     }
@@ -160,13 +160,13 @@ export class UsageTracker {
       let merged = this.map;
       try {
         const res = await this.client.getUsage();
-        if (res.sealedUsage) merged = mergeUsage(parseUsage(fromUtf8(this.account.openUsage(res.sealedUsage))), this.map);
+        if (res.sealedUsage) merged = mergeUsage(parseUsage(fromUtf8(await this.account.openUsage(res.sealedUsage))), this.map);
       } catch {
         /* could not read the remote copy — store ours rather than lose the session's uses */
       }
       if (liveItemIds) merged = pruneUsage(merged, liveItemIds);
       this.map = merged;
-      await this.client.putUsage(this.account.sealUsage(utf8(serializeUsage(merged))));
+      await this.client.putUsage(await this.account.sealUsage(utf8(serializeUsage(merged))));
     } catch {
       // Re-arm: a failed flush must not silently drop the session's recorded uses.
       this.dirty = true;

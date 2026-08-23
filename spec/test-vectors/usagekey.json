@@ -1,0 +1,8 @@
+{
+    "note": "usageKey = HKDF-SHA-256(ikm=VK(personalVault), salt='', info='andvari/v1|usage', 32) - spec 02 section 8.2. Computed by an INDEPENDENT third implementation (python hmac/hashlib), so web and core are each checked against an outside answer rather than against each other.",
+    "vkB64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+    "info": "andvari/v1|usage",
+    "usageKeyB64": "5vVzzEOlXQem-mXdGzxlsKHVNqw6b2v9MZfAFmO4mgU",
+    "adUserId": "u1",
+    "adUtf8": "andvari/v1|usage|u1"
+}
