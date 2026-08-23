@@ -20,13 +20,12 @@ disagree, the commit wins. This is the SSOT for *direction* only.
 Four releases landed after the 2026-07-27 reconcile. Per-release prose is `CHANGELOG.md`; this is
 the direction-level record of what they closed.
 
-> **Publication state, checked 2026-08-23.** 0.22.0–0.24.0 are complete on every channel.
-> **0.25.0 is published everywhere except the two PRESTIGE-only steps:** the Windows `.msi` is
-> not on `/downloads`, and `/downloads/manifest.json` is still the 0.24.0 manifest at **seq 7**.
-> Until it is re-signed at seq 8, armed clients correctly report 0.24.0 as the latest — the
-> channel is not lying, it is simply not yet updated. The deb (+`.asc`), both extension packages,
-> `firefox-updates.json` and the web bundle are all live at 0.25.0. Closing it is one command on
-> the signing box (`signandvari 0.25.0`); see `docs/runbooks/release-signing-keys.md`.
+> **Publication state, re-checked against the live channel 2026-08-23 (supersedes the note this
+> replaces).** 0.22.0–0.25.0 are **complete on every channel.** The two PRESTIGE-only steps that
+> were outstanding when this section was first written have both closed: `/downloads/manifest.json`
+> now serves **seq 8** (`signedAt 2026-08-23T09:42:19Z`, linux/windows/browserExtension all
+> 0.25.0) and the Windows `.msi` returns 206 from `/downloads`. Verified by fetching the served
+> manifest and ranging the artifact, not from a release note.
 
 - **0.22.0 (2026-08-13) — full-surface audit remediation.** A tip-to-tail audit of every surface
   (crypto, server, web, extension, Android, desktop, specs, docs, build) produced 43 findings,
@@ -57,6 +56,49 @@ the direction-level record of what they closed.
   Plus the **signup reuse alert** (unlocked-only, by design) and an Android autofill save fix for
   sign-in screens whose username box is left empty. Design:
   **`docs/design/2026-08-22-login-health-staleness-verification.md`**.
+
+## 0.26.0 — Android vault health (design ratified 2026-08-23)
+
+Design: `docs/design/2026-08-23-android-vault-health.md`. Closes the gap left open by
+`2026-08-22-login-health-staleness-verification.md` §7, which scoped health to "web + extension
+assist" and promised the natives a read-only follow-up. **The owner ratified full parity instead:
+all three tabs on Android, writes included.**
+
+The fact that decided the shape: **the phone writes a usage ledger it has never been able to
+read.** `UsageRecorder.kt` seals and PUTs on every in-app copy — the device pays the whole cost of
+the feature and receives none of its benefit.
+
+Five ratified decisions:
+
+1. **Full parity on Android, writes included** — Passwords / Duplicates / Staleness, plus merges,
+   dismissals and check verdicts, plus a health line on `ItemDetail`.
+2. **Core port first.** `healthRows`, `duplicates.ts` and `staleness.ts` become Kotlin twins in
+   `:core` (the `VaultListView.apply` ↔ `listview.ts` idiom), with cross-language vectors so
+   phone and web can never disagree about which login is worst. `Strength.kt` is **already** a
+   complete twin of `strength.ts` — that half needs call sites, not a port.
+3. **Verification run via Custom Tab + resume.** Adds `androidx.browser`. The phone is the one
+   client where the tester and the thing tested live in the same place: tap Check → site opens →
+   andvari's own autofill fills it → back → record the verdict.
+4. **Lock-on-background lands first, then the lock button goes.** As the tree stands nothing locks
+   on `onStop`/`onPause` — only the toolbar button and a 900 s inactivity ceiling — so closing the
+   app does *not* currently lock the vault. Removing the button before adding the background lock
+   would leave no on-demand lock at all. Refresh icon also goes, replaced by pull-to-refresh.
+   **Stated cost: the autofill service will re-prompt for unlock materially more often.**
+5. **Desktop: core port now, UI next cut.** ⬇ tracked below — deliberately, because §8's own
+   "machinery with no production call sites" warning applies to us otherwise.
+
+> **TRACKED, NOT AN INTENTION — desktop vault health (post-0.26.0).** `app-desktop` has its own
+> Compose Desktop source set with no UI sharing with Android, so the desktop Health screen is a
+> genuine second build rather than a recompile. The 0.26.0 core port serves it completely; what
+> remains is `Ui.kt` rendering plus a desktop browser-launch story for the verification run.
+> **Until this ships, desktop is the client that writes a usage ledger it cannot read** — the
+> exact condition this release exists to end on Android.
+
+Highest-risk item, called out so it is not discovered late: promoting `check`/`dupeAck` from the
+`extras` overlay to typed fields on core's `ItemDoc` must be a **byte-identical round trip** in
+both directions. Silent drift there means conflict churn across a household. If the round-trip
+test cannot be made to pass, keep reading `check` out of `extras` and ship the screen anyway —
+the typed field is ergonomics, not the feature.
 
 ## Public-release trust & attestation campaign — 2026-07-16 (partly landed; see status)
 
