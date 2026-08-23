@@ -254,6 +254,33 @@ never checked · over a year · 6–12 months · under 6 months.
 > Android and desktop hold the personal VK too, so nothing blocks them — they simply have no
 > recording call sites yet.
 
+## 8a. Browser verification — 18/18 green (2026-08-22)
+
+Driven in a real Chrome against a real server (schema v9), drill kept at
+`andvari-internal/drills/login-health/`. What the node suites could not reach:
+
+- the columns, tiles and rows render as designed; a fresh vault reads Unchecked 3 / Failing 0
+- every row starts never-checked, and last-used renders **`—`**, never "never used"
+- the wizard offers all four verdicts plus Skip and Stop, and states that the human signs in
+- a verdict lands on the row and **survives a full navigate-away and back** — a server round
+  trip, not React state
+- "Couldn't complete" removes the row; Show snoozed brings it back marked `snoozed`; **Unsnooze
+  clears the mark but keeps the verdict**, and the Failing tile then counts it
+- the usage ledger round-trips: copying the password records a use, the debounce flushes on
+  `pagehide`, and a `usage_ledger` row appears
+- **the stored blob is opaque** — envelope version 1 / alg 1, 124 bytes, not valid UTF-8, with
+  none of `lastUsedAt` / `useCount` / `itemId` / `{` present in it
+- **the audit table holds only `login` / `register` / `recovery_self_confirm`** — no usage event,
+  which is the "deliberately not audited" decision (spec 03 §3) holding in practice
+
+**Two things only a browser could have caught**, both fixed here:
+
+1. **The verdict buttons rendered subordinate to Skip and Stop.** The four ways to *answer* were
+   tighter than the two ways to answer *nothing* — the nudge inverted. All six now carry `.ghost`
+   and read as one set of equals. Nothing in the unit suite can see visual weight.
+2. **"no saved site to open"** is what an item with no web URI actually shows — the `safeSiteHref`
+   refusal rendering correctly rather than an empty or broken link.
+
 ## 8. Tests that must pin this
 
 - `staleness.test.ts` — bucket and ordering derivation, exported pure like `healthRows`
