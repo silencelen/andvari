@@ -8,6 +8,7 @@ import io.silencelen.andvari.core.model.ItemVersion
 import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.RemovedGrantInfo
 import io.silencelen.andvari.core.model.TransferRecord
+import io.silencelen.andvari.core.model.UsageResponse
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
 import io.silencelen.andvari.core.model.WireVault
@@ -275,6 +276,16 @@ class Repo(val db: Db) {
      */
     fun escrowWaived(userId: String): Boolean =
         db.read { it.queryOne("SELECT escrowPolicy FROM users WHERE userId=?", userId) { rs -> rs.getString(1) } } == "waived"
+
+    /** The §8.2 usage ledger for [userId] — an opaque blob the server can only store and return.
+     *  A user who has never written one reads back `sealedUsage = null`, which every client must
+     *  treat as "no usage recorded yet", never as "nothing has been used". */
+    fun usageLedger(userId: String): UsageResponse =
+        db.read {
+            it.queryOne("SELECT sealedUsage,updatedAt FROM usage_ledger WHERE userId=?", userId) { rs ->
+                UsageResponse(rs.getString(1), rs.getLong(2))
+            }
+        } ?: UsageResponse()
 
     // member recovery (design 2026-07-12 §F) — the per-member self-service recovery row.
     fun memberRecoveryRow(userId: String): MemberRecoveryRow? =

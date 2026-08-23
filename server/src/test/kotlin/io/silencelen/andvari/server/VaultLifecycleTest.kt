@@ -1018,7 +1018,7 @@ class VaultLifecycleTest : LifecycleTestSupport() {
 
         Db(dbFile.absolutePath).use { db ->
             db.read { c ->
-                assertEquals("8", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
+                assertEquals("9", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
                 // Pre-v4 rows read back NULL lifecycle state, transferSeq=0.
                 val v = c.queryOne("SELECT deletedAt, purgeAt, purgedAt, deleteId, transferSeq, pendingOfferId FROM vaults WHERE vaultId='v'") { rs ->
                     listOf(rs.getObject(1), rs.getObject(2), rs.getObject(3), rs.getObject(4), rs.getLong(5), rs.getObject(6))
@@ -1033,13 +1033,18 @@ class VaultLifecycleTest : LifecycleTestSupport() {
                 assertEquals("required", c.queryOne("SELECT escrowPolicy FROM invites WHERE tokenHash='th'") { it.getString(1) })
                 // v7 §F.9 migration landed: users.recoveryConfirmed, pre-existing user reads back 0 (nudged).
                 assertEquals(0, c.queryOne("SELECT recoveryConfirmed FROM users WHERE userId='u'") { it.getInt(1) })
+                // v9 migration landed: the spec 02 §8.2 usage ledger. ONE row per user and NO
+                // per-item rows — that shape IS the design (per-item rows would hand the server the
+                // per-item behavioral timing the single blob exists to withhold), so pin the table
+                // itself here rather than only the version number.
+                assertNotNull(c.queryOne("SELECT name FROM sqlite_master WHERE type='table' AND name='usage_ledger'") { it.getString(1) })
                 // 410 machinery untouched.
                 assertEquals("0", c.queryOne("SELECT value FROM meta WHERE key='oldestRetainedRev'") { it.getString(1) })
             }
         }
         // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("8", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("9", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

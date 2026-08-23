@@ -403,5 +403,37 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 9) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // The usage ledger (spec 02 §8.2, design 2026-08-22-login-health): the client-side
+                    // "when did I last use this login" map that powers the vault-health staleness
+                    // ranking. ZK-clean and shaped exactly like `escrow` / `member_recovery` — the
+                    // server holds one opaque AEAD blob per user (sealed under the UVK, AD
+                    // `andvari/v1|usage|{userId}`) and a timestamp, and can decrypt neither.
+                    //
+                    // ONE AGGREGATE ROW, deliberately — this is the whole point of the design and must
+                    // not be "normalized" into per-item rows later. A row per item would hand the server
+                    // exactly the per-item behavioral timing the blob exists to withhold (which login,
+                    // how often, at what hour) — the same leak spec 02 §8.2 rejects for putting `usedAt`
+                    // in the item document, arriving by another route. The server learns THAT a user's
+                    // ledger changed and roughly how big it is; never WHICH login moved.
+                    //
+                    // Not in `users` as a column: it is rewritten on a completely different cadence
+                    // from the identity row, and a per-user blob of unbounded-ish size does not belong
+                    // beside kdfSalt/verifier.
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE usage_ledger(
+                          userId TEXT PRIMARY KEY REFERENCES users(userId),
+                          sealedUsage TEXT NOT NULL,
+                          updatedAt INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate("UPDATE meta SET value='9' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }
