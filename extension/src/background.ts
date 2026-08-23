@@ -4,6 +4,7 @@ import { brand, cardSubtitle, composeShortExpiry, digitsOnly, luhnValid, padMont
 import {
   adIdkey,
   adItem,
+  adUsage,
   adUvk,
   adVk,
   authKey,
@@ -16,6 +17,7 @@ import {
   seal,
   sealOpen,
   toB64,
+  usageKey,
   wrapKey,
   type KdfParams,
 } from "./crypto";
@@ -50,6 +52,7 @@ import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reoffe
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
 import { armGate, withRedeemInFlight } from "./locksequence";
+import { FLUSH_DEBOUNCE_MS, mergeUsage, parseUsage, recordUse, serializeUsage, type UsageMap } from "./usage";
 import { applyServerSwitch, purgeServerDataFor } from "./serverswitch";
 
 /**
@@ -1278,7 +1281,9 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   events?.close(); // live socket + all its timers die FIRST — locked means no bell traffic at all
   events = null;
   const secondsAtLock = autoLockSeconds; // capture before the reset below (web App.tsx:209 parity)
+  void flushUsage(); // best-effort: store what this session recorded before the keys go
   session = null; // in-memory vault material — INCLUDING the memory-only uvk (breaker B1) — is dropped
+  clearPendingUsage(); // behavioral records must not outlive the session that produced them
   clearPendingTotp(); // and any in-flight TOTP challenge (covers sign-out; a normal lock has none)
   autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
   clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
@@ -2532,6 +2537,76 @@ function senderHost(sender: chrome.runtime.MessageSender): string | null {
 /** Contract reveal rules: host-match ∨ one-shot popup grant (consumed) ∨ explicit user pick.
  *  Cut M (v2 #14): failures carry a seam `code` so the fill surfaces render canon copy — the
  *  raw `error` strings here are debug detail and must never reach a user. */
+// ---- usage ledger (spec 02 §8.2, design 2026-08-22-login-health) ----
+//
+// A fill IS the use, so the SW is where the extension's half of the staleness signal comes from.
+// Records accumulate in memory and flush on a debounce: spec 03 §3 forbids a PUT per fill, which
+// would turn the blob's own updatedAt into a keystroke-grade activity trace.
+//
+// ACCEPTED LOSS, stated rather than engineered around: an MV3 worker can be evicted mid-debounce,
+// and the pending records die with it. The alternative — persisting them to storage.session —
+// would add a plaintext BEHAVIORAL buffer to the locked compartment, a new disclosure class
+// needing its own justification, to protect advisory ranking data whose worst-case loss is a
+// stale cell in one health column. Not worth it. The window is kept short for the same reason.
+let pendingUsage: UsageMap = {};
+let usageTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Drop pending records — called wherever vault material is dropped. Behavioral data about the
+ *  user's items must not outlive the session that produced it. */
+function clearPendingUsage(): void {
+  if (usageTimer !== null) clearTimeout(usageTimer);
+  usageTimer = null;
+  pendingUsage = {};
+}
+
+function recordUsage(itemId: string): void {
+  if (!session) return;
+  pendingUsage = recordUse(pendingUsage, itemId, Date.now());
+  if (usageTimer !== null) return;
+  usageTimer = setTimeout(() => {
+    usageTimer = null;
+    void flushUsage();
+  }, FLUSH_DEBOUNCE_MS);
+}
+
+/**
+ * Merge against the server copy, then store. The re-read is what stops last-writer-wins from
+ * meaning last-writer-DESTROYS — the phone's and the laptop's entries survive our flush even
+ * though the endpoint has no merge semantics of its own.
+ *
+ * Every failure path is silent: this is a ranking hint and must never surface an error, break a
+ * fill, or retry hard enough to be noticed.
+ */
+async function flushUsage(): Promise<void> {
+  if (!session || Object.keys(pendingUsage).length === 0) return;
+  // Keyed from the PERSONAL VK, which a snapshot-restored session still holds — the whole reason
+  // this client can participate at all (the UVK would be absent here; breaker B1).
+  const vk = session.vaultKeys.get(session.personalVaultId);
+  if (!vk) return; // no personal vault ⇒ no ledger (spec 02 §8.2), not an error
+  const mine = pendingUsage;
+  pendingUsage = {};
+  try {
+    const key = usageKey(vk);
+    const adu = adUsage(session.userId);
+    let merged = mine;
+    try {
+      const res = await api.getUsage();
+      if (res.sealedUsage) {
+        merged = mergeUsage(parseUsage(new TextDecoder().decode(open(key, fromB64(res.sealedUsage), adu))), mine);
+      }
+    } catch {
+      /* could not read the remote copy — store ours rather than lose this session's uses */
+    }
+    await api.putUsage(toB64(seal(key, new TextEncoder().encode(serializeUsage(merged)), adu)));
+  } catch {
+    // Re-arm rather than drop — but ONLY while the session still stands. This catch runs after an
+    // await, so on the lock path it can resume AFTER clearPendingUsage() has run; re-arming
+    // unconditionally there would resurrect behavioral records into a locked SW, which is exactly
+    // what that clear exists to prevent.
+    if (session) pendingUsage = mergeUsage(mine, pendingUsage);
+  }
+}
+
 function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.MessageSender): Res<"reveal"> {
   if (!session) return { ok: false, code: "locked", error: "locked" };
   const it = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "login");
@@ -2568,6 +2643,9 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
       /* malformed stored totp — the credential fill still proceeds */
     }
   }
+  // The credential is being handed out for a fill — that is the use (spec 02 §8.2). Recorded at
+  // the single success choke point, AFTER every gate, so a refused reveal never counts as one.
+  recordUsage(msg.itemId);
   return {
     ok: true,
     secret: { username: it.doc.login?.username ?? null, password: it.doc.login?.password ?? null, totpCode },

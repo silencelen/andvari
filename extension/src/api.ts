@@ -362,6 +362,18 @@ export class AndvariApi {
     return this.json("POST", "/api/v1/sync/push", { mutations });
   }
 
+  /** The usage ledger (spec 02 §8.2) — one opaque blob per user. `sealedUsage: null` means no
+   *  ledger has ever been written, which is NOT "nothing has been used". */
+  getUsage(): Promise<{ sealedUsage: string | null; updatedAt: number }> {
+    return this.json("GET", "/api/v1/usage");
+  }
+
+  /** Replace the stored ledger. Last-writer-wins, so callers merge against the server copy first;
+   *  and callers MUST batch (spec 03 §3) — a PUT per fill would make updatedAt an activity trace. */
+  putUsage(sealedUsage: string): Promise<unknown> {
+    return this.json("PUT", "/api/v1/usage", { sealedUsage });
+  }
+
   /** Mint a single-use ~30 s ticket for the /events dirty-bell WebSocket (spec 03 §6). Minted
    *  fresh per connect attempt and NEVER persisted — the access token never rides a URL. Rides
    *  json(), so the Bearer header, the single-flight 401→refresh→retry, and ApiError parsing
