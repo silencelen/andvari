@@ -69,6 +69,9 @@ function ad(...parts: string[]): Uint8Array {
 export const adUvk = (userId: string): Uint8Array => ad("uvk", userId);
 export const adVk = (vaultId: string, userId: string): Uint8Array => ad("vk", vaultId, userId);
 export const adIdkey = (userId: string): Uint8Array => ad("idkey", userId);
+/** Usage ledger (spec 02 §8.2) AAD: "andvari/v1|usage|<userId>" — binds the blob to the user's
+ *  slot so a hostile endpoint cannot serve one member's ledger into another's. */
+export const adUsage = (userId: string): Uint8Array => ad("usage", userId);
 /** Extension quick-unlock (Tier B, spec 01 §8.4) AAD: "andvari/v1|ext-quick-unlock|<userId>".
  *  Binds a PIN-wrapped UVK blob to its account (a blob copied to another userId cannot open, and
  *  a tampered blob fails the tag). Distinct token from Android's `quick-unlock` (§8.1) — the two
@@ -143,6 +146,17 @@ const INFO_WRAP = utf8("andvari/v1/wrap");
 const EMPTY = new Uint8Array(0);
 export const authKey = (mk: Uint8Array): Uint8Array => hkdfSha256(mk, EMPTY, INFO_AUTH, KEY_BYTES);
 export const wrapKey = (mk: Uint8Array): Uint8Array => hkdfSha256(mk, EMPTY, INFO_WRAP, KEY_BYTES);
+
+/**
+ * usageKey = HKDF-SHA-256(ikm = VK(personalVault), salt = "", info = "andvari/v1|usage", 32)
+ * — spec 02 §8.2; twin of web usagekey.ts and core UsageKey.kt, pinned against
+ * spec/test-vectors/usagekey.json.
+ *
+ * Keyed from the personal VK and NOT the UVK precisely so THIS client can take part: the
+ * extension's UVK is memory-only (breaker B1) and an evicted MV3 worker restores a session with
+ * `vaultKeys` but no UVK, so a UVK-bound ledger would have been unwritable here for most fills.
+ */
+export const usageKey = (vk: Uint8Array): Uint8Array => hkdfSha256(vk, EMPTY, utf8("andvari/v1|usage"), KEY_BYTES);
 
 /** Seal: version‖alg‖nonce(24)‖ct+tag (mirrors core Envelope / web envelope.ts). */
 export function seal(key: Uint8Array, plaintext: Uint8Array, ad: Uint8Array): Uint8Array {

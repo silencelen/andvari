@@ -170,36 +170,45 @@ a worklist, resumable within the session:
 from another device, materializing a conflict copy. Rare by construction (§3's one-write-per-
 verdict), and it degrades into the existing, understood conflict path rather than anything new.
 
-## 4a. The extension cannot hold the UVK — an open key-binding question (found 2026-08-22)
+## 4a. Why the ledger key is the personal VK, not the UVK (found and resolved 2026-08-22)
 
 The synced blob was chosen **because** the extension could then contribute (§2). Building it
-surfaced the constraint that makes that clause unbuildable as specified:
+surfaced the constraint that made the first key binding wrong:
 
 - `session.uvk` in the extension is **memory-only and never persisted** — spec 01 **breaker B1**,
   a deliberate custody rule, not an oversight.
 - An **MV3 service worker is evicted routinely**, and the snapshot that restores the session
   carries `vaultKeys` and `items` but, by that same breaker, **no UVK**.
-- Therefore the extension can seal or open a UVK-bound ledger only during a session that did a
-  live full password unlock and has not been evicted since — a minority of real fills.
+- A UVK-sealed ledger was therefore writable from the extension only during a session that did a
+  live full password unlock and had not been evicted since — a minority of real fills, from the
+  client that does most of the filling. The design would have shipped excluding the very client
+  it was chosen for.
 
-Web, desktop and Android are unaffected: they hold the UVK for the whole unlocked lifetime, and
-the shipped implementation works for them today.
+**Resolved by re-binding, not by working around it.** The ledger key is now
 
-**Two ways out, owner's call:**
-1. **Defer** — the extension buffers `(itemId, when)` in `storage.session` and flushes at the next
-   UVK-bearing session. No spec change; writes arrive late and some are lost to browser exit. The
-   buffer is plaintext behavioral data in a compartment that already holds plaintext pendings, so
-   it is not a new disclosure class, but it is a new one to justify.
-2. **Re-bind the key** *(recommended)* — derive the ledger key as
-   `HKDF-SHA-256(VK(personalVault), "andvari/v1|usage")`, the same derivation shape already used
-   for the per-vault lifecycle key. **Every unlocked client holds the personal VK in every
-   session, evicted or not**, so all four clients participate with no buffering and no new at-rest
-   class. Costs a spec 02 §2/§8.2 amendment and a re-seal of any ledger already written (trivial
-   today — the feature is unreleased). Degrades cleanly: no personal vault ⇒ no ledger.
+```
+usageKey = HKDF-SHA-256(ikm = VK(personalVault), salt = "", info = "andvari/v1|usage", 32)
+```
 
-**Until this is resolved the extension records nothing**, and the rule is explicit in spec 02
-§8.2: a client that cannot write must leave the ledger alone rather than write a partial one over
-another client's.
+the same construction and domain-separation shape already used for the per-vault lifecycle key
+(spec 03 §11). **Every unlocked client holds the personal VK in every session, evicted or not**,
+so all four participate with no buffering and no new at-rest class. The AEAD associated data is
+unchanged — `andvari/v1|usage|{userId}` — so the blob stays bound to the user's slot and a
+hostile endpoint still cannot serve one member's ledger into another's. No vault key is persisted
+either, so the at-rest story is exactly as before: the server and a stolen locked device both
+hold opaque bytes.
+
+Rejected alternative: have the extension buffer `(itemId, when)` in `storage.session` and flush
+at the next UVK-bearing session. It needed no spec change, but writes would arrive late, some
+would be lost to browser exit, and it would add a plaintext behavioural buffer whose disclosure
+bound would have needed its own justification — all to preserve a key choice that had no
+independent merit.
+
+Degradation is clean: an account with no personal vault has no ledger, and the column reads "—".
+
+**The rule that outlives this particular problem, now normative in spec 02 §8.2:** a client that
+cannot open the ledger MUST leave it untouched rather than write a partial one over another
+client's.
 
 ## 5. The Staleness view
 
@@ -234,10 +243,16 @@ never checked · over a year · 6–12 months · under 6 months.
 
 > **OWNER DECISION (2026-08-22): web + extension assist.**
 > Web owns the Staleness tab, the `check` ledger and the wizard. The extension adds "Open & fill"
-> (opens the tab and fills, never submits) and records local usage on fill. Android and desktop
-> **preserve `check` losslessly from day one for free** via the extras overlay, and get a
+> (which needed no plumbing — an installed extension offers its ordinary autofill on arrival) and
+> **records usage on every fill**, at the single post-gate success point in `reveal()`. Android and
+> desktop **preserve `check` losslessly from day one for free** via the extras overlay, and get a
 > read-only "Last checked" on item detail in a later cut. This mirrors the `dupeAck` precedent
 > exactly: one writer, universal preservation.
+>
+> **Shipped state of the usage ledger:** server (schema v9 + `/usage`), web (record on password
+> and TOTP copy, and on open-site in the run) and extension (record on fill) all participate.
+> Android and desktop hold the personal VK too, so nothing blocks them — they simply have no
+> recording call sites yet.
 
 ## 8. Tests that must pin this
 
