@@ -1,0 +1,23 @@
+# A security bug must never arrive as a public issue: the whole product is a promise
+# about confidentiality, and a public report is a disclosure before there is a fix.
+# GitHub shows these links above the template list on the "New issue" screen, which is
+# the one moment a reporter is deciding where to put it — SECURITY.md alone is a file
+# nobody is looking at yet.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/silencelen/andvari/security/advisories/new
+    about: >-
+      Please do NOT open a public issue for a security bug. This opens a private
+      advisory visible only to you and the maintainers. Scope, disclosure and safe
+      harbour are in SECURITY.md.
+  - name: Verify the crypto yourself
+    url: https://github.com/silencelen/andvari/blob/main/CONTRIBUTING.md
+    about: >-
+      Two independent implementations graded against the same frozen test vectors.
+      CONTRIBUTING.md walks the clone -> verify.sh path and says what each suite proves.
+  - name: Self-hosting help
+    url: https://github.com/silencelen/andvari/blob/main/docs/self-hosting.md
+    about: >-
+      TLS options, the escrow ceremony, policy variables, backup and updates. Every
+      running instance also serves this at <your-origin>/selfhost.
