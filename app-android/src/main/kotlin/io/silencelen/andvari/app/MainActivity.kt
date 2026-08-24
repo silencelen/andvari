@@ -258,7 +258,7 @@ fun AndvariApp(vm: AndvariViewModel) {
             // the gate lands the vault.
             if (ui.screen !is Screen.RecoverySetup && ui.screen !is Screen.RecoveryCapture) AttentionArea(vm, ui)
             // One-time quick-unlock enrollment offer, only over the vault list (design §3/§8).
-            if (ui.quickUnlockOffer && ui.screen is Screen.Vault) QuickUnlockOfferCard(vm)
+            if (ui.quickUnlockOffer && ui.screen is Screen.Vault) QuickUnlockOfferCard(vm, ui.quickUnlockReoffered)
             // Cut L (v2 #20): autofill — the product's core daily value — was never offered;
             // it hid behind a diagnostics-framed Settings card. One-time offer over the vault.
             if (ui.screen is Screen.Vault) AutofillOfferCard(vm)
@@ -3161,14 +3161,23 @@ private fun AutofillOfferCard(vm: AndvariViewModel) {
 }
 
 @Composable
-private fun QuickUnlockOfferCard(vm: AndvariViewModel) {
+private fun QuickUnlockOfferCard(vm: AndvariViewModel, reoffered: Boolean) {
     val activity = LocalContext.current as? FragmentActivity ?: return
     Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Column(Modifier.padding(16.dp)) {
             Text("Unlock with fingerprint next time?", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(4.dp))
             Text(
-                "Skip typing your master password on this device. You'll still enter it at least every 30 days.",
+                // §7.1: a card the user already dismissed reappearing without explanation reads as
+                // a bug or a nag. Say what changed, in the terms they have just been feeling —
+                // andvari asks for the password when it fills, and that is now more often.
+                if (reoffered) {
+                    "andvari locks when you leave the app, so it asks for your master password more " +
+                        "often — including when it fills a password for you. A fingerprint answers " +
+                        "those instantly. You'll still type the password at least every 30 days."
+                } else {
+                    "Skip typing your master password on this device. You'll still enter it at least every 30 days."
+                },
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(12.dp))
