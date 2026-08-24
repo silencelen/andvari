@@ -75,10 +75,12 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.process)
     implementation(libs.androidx.autofill)
     // Quick unlock (design 2026-07-10 §2): BiometricPrompt + BiometricManager. Pulls in
     // androidx.fragment transitively, so the unlock/autofill activities host it via FragmentActivity.
     implementation(libs.androidx.biometric)
+    implementation(libs.androidx.browser)
     // Force fragment 1.8.5 over the 1.2.5 that biometric drags in: 1.2.5's FragmentActivity enforces
     // the legacy 16-bit requestCode check and CRASHES every Activity-Result launch (the import
     // "Choose file" picker, MainActivity.kt) under activity 1.9.3's registry. See libs.versions.toml.

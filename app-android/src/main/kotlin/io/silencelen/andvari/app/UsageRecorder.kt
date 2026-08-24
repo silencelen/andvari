@@ -71,6 +71,17 @@ object UsageRecorder {
         scope.launch { storeWith(session, mine) }
     }
 
+    /**
+     * The un-flushed buffer, for DISPLAY only (design 2026-08-23). The flush is debounced 15 s by
+     * design — one PUT per copy would turn the blob's own `updatedAt` into a keystroke-grade
+     * activity trace (spec 03 §3) — so a user who copies a password and immediately opens Health
+     * would otherwise be told that login is unused. Callers merge this over the server's copy.
+     *
+     * Returns a snapshot, never the live reference, and does NOT drain (unlike [take]): reading
+     * the screen must not cost the buffer its next real flush.
+     */
+    fun peek(): Map<String, UsageLedger.Entry> = synchronized(lock) { pending }
+
     private fun take(): Map<String, UsageLedger.Entry> = synchronized(lock) {
         val m = pending
         pending = emptyMap()
