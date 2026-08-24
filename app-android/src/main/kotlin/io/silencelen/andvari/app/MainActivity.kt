@@ -30,6 +30,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+// The wildcard above does NOT reach the pulltorefresh subpackage.
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -76,6 +79,7 @@ import io.silencelen.andvari.core.client.ImportHelp
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.PendingUpload
+import io.silencelen.andvari.core.client.Staleness
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.VaultItem
@@ -229,6 +233,21 @@ fun AndvariApp(vm: AndvariViewModel) {
             // the enrollment breach advisory survives navigation, but NEVER over the two recovery
             // gates: the shown-once phrase is the one thing on screen that cannot be recovered if
             // the reader is distracted, and this advisory keeps until dismissed.
+            // Lock-on-background (design 2026-08-23 §7). PROCESS-level, not Activity-level:
+            // an in-app excursion (rotation, a fold posture change, a dialog) must not read as
+            // leaving the app. ExternalExcursion exempts the flows that leave on purpose.
+            val processOwner = androidx.lifecycle.ProcessLifecycleOwner.get()
+            DisposableEffect(processOwner) {
+                val observer = LifecycleEventObserver { _, event ->
+                    when (event) {
+                        Lifecycle.Event.ON_STOP -> vm.lockFromBackground()
+                        Lifecycle.Event.ON_START -> ExternalExcursion.clear()
+                        else -> {}
+                    }
+                }
+                processOwner.lifecycle.addObserver(observer)
+                onDispose { processOwner.lifecycle.removeObserver(observer) }
+            }
             if (ui.screen !is Screen.RecoverySetup && ui.screen !is Screen.RecoveryCapture) BreachAdvisoryBanner(vm, ui)
             // P4/A7 (design 2026-07-10): break-glass notices live HERE, above the screen switch,
             // so they render ONCE on every screen — no longer duplicated on both the Vault list
@@ -258,6 +277,7 @@ fun AndvariApp(vm: AndvariViewModel) {
                     is Screen.Sharing -> SharingScreen(vm, ui)
                     is Screen.Settings -> SettingsScreen(vm, ui)
                     is Screen.Trash -> TrashScreen(vm, ui)
+                    is Screen.Health -> HealthScreen(vm, ui)
                     is Screen.AutofillStatus -> AutofillStatusScreen(vm, ui)
                     is Screen.RecoverySetup -> RecoverySetupScreen(vm, ui)
                     is Screen.RecoveryCapture -> RecoveryCaptureScreen(vm, ui)
@@ -1427,6 +1447,14 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
     // manifest configChanges those events no longer even recreate; this is defense-in-depth.)
     var query by rememberSaveable { mutableStateOf("") }
     var detailId by rememberSaveable { mutableStateOf<String?>(null) }
+    // Health's "open this item" hop: consumed once, then cleared so a back-navigation does not
+    // re-open the same detail forever.
+    LaunchedEffect(ui.pendingDetailId) {
+        ui.pendingDetailId?.let {
+            detailId = it
+            vm.detailShown()
+        }
+    }
     // Owner dev-note 2026-08-18: sort + facet state (web's listctl twin) — saveable like query
     // so a fold/rotation doesn't reset the view; deliberately fresh each unlock, a filter that
     // silently persisted across sessions would read as missing items.
@@ -1513,11 +1541,15 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                     actions = {
                         // Universal importer (design 2026-07-11): the one import sheet first, THEN the file picker.
                         IconButton(onClick = { vm.importBegin() }) { Icon(Icons.Default.FileUpload, "import CSV") }
-                        IconButton(onClick = { vm.refresh() }) { Icon(Icons.Default.Refresh, "sync") }
+                        // Owner decision 2026-08-23: the refresh icon is GONE — pull down on the
+                        // list instead (below). The lock icon is gone too, and the thing that
+                        // makes that safe is lock-on-background in AndvariApplication: until
+                        // that landed, NOTHING locked on onStop and the button was the only
+                        // on-demand lock the app had.
+                        IconButton(onClick = { vm.openHealth() }) { Icon(Icons.Default.Favorite, "vault health") }
                         IconButton(onClick = { vm.openSharing() }) { Icon(Icons.Default.Group, "sharing") }
                         IconButton(onClick = { vm.openTrash() }) { Icon(Icons.Default.Delete, "trash") }
                         IconButton(onClick = { vm.openSettings() }) { Icon(Icons.Default.Settings, "settings") }
-                        IconButton(onClick = { vm.lock() }) { Icon(Icons.Default.Lock, "lock") }
                     },
                 )
                 // #24: honest motion for the multi-second syncs — ui.syncing (the quiet 5-min /
@@ -1555,7 +1587,11 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                 current != null -> ItemDetail(vm, ui, current, onEdit = { vm.openEditor(current.itemId) }, onDelete = { vm.deleteItem(current.itemId); detailId = null }, onBack = { detailId = null })
                 // Cut K (v2 #19): LazyColumn — the eager Column composed EVERY row on every
                 // keystroke (the 10k-scale freeze class the import dialogs cap against).
-                else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+                // Owner decision 2026-08-23: pull-to-refresh replaces the top-bar sync icon.
+                // `ui.busy` is the same signal the old icon's op() set, so the spinner reflects
+                // the real refresh rather than a second notion of "syncing".
+                else -> PullToRefreshBox(isRefreshing = ui.busy, onRefresh = { vm.refresh() }) {
+                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
                     item(key = "toolbar") {
                         Column {
                             // a11yand-10 (the desktop a11ydesk-07 twin): a placeholder is NOT a
@@ -1618,8 +1654,9 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                         }
                     }
                 }
+                }
             }
-            ImportSheet(vm, ui) { importPicker.launch(arrayOf("*/*")) }
+            ImportSheet(vm, ui) { ExternalExcursion.begin(); importPicker.launch(arrayOf("*/*")) }
             ImportDialogs(vm, ui)
         }
     }
@@ -1978,6 +2015,7 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
             } + (if (readOnly) " · view only" else ""),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (doc.type == "login") ItemHealthLine(vm, ui, item)
         Spacer(Modifier.height(16.dp))
         // Vault-secret copies clear after the org policy window, clamped into
         // [1, CLIPBOARD_CLEAR_MAX_SECONDS] (design 2026-07-15 §2.3/B1-1): a policy of 0 still
@@ -2296,7 +2334,7 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
             }
         }
         attachError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp)) }
-        TextButton(onClick = { picker.launch(arrayOf("*/*")) }) { Icon(Icons.Default.AttachFile, null); Text(" Attach file") }
+        TextButton(onClick = { ExternalExcursion.begin(); picker.launch(arrayOf("*/*")) }) { Icon(Icons.Default.AttachFile, null); Text(" Attach file") }
         Spacer(Modifier.height(16.dp))
         // copy()-based edit, never a field-by-field rebuild: carries favorite, passwordHistory,
         // extra URIs beyond the first, and unknown-field extras (spec 02 §3) through the save.
@@ -3255,6 +3293,77 @@ private fun SecretCopyRow(
     }
 }
 
+/**
+ * The per-item health line (design 2026-08-23 §6) — the cheapest high-value slice of vault
+ * health, and the place the usage ledger finally becomes VISIBLE on this device. The phone has
+ * written that ledger on every password copy since 0.25.0 and had no surface that read it back.
+ *
+ * Every value here is derived by core, not recomputed: strength from [Strength] (already the twin
+ * of web's `strength.ts`), reuse and staleness from the same pure modules the Health screen and
+ * the browser use.
+ *
+ * "last used: —" means NO RECORD, not "never used". Those are different statements and only one
+ * of them is true: an Android autofill FILL is still not observable (the framework gives the
+ * service no callback when the system fills a dataset), so this device's contribution is
+ * copy-driven and partial by construction.
+ */
+@Composable
+private fun ItemHealthLine(vm: AndvariViewModel, ui: UiState, item: VaultItem) {
+    val password = item.doc.login?.password
+    if (password.isNullOrEmpty()) return
+    val row = remember(ui.items, item.itemId) { vm.healthRows().firstOrNull { it.itemId == item.itemId } }
+    val stale = remember(ui.items, ui.usage, item.itemId) {
+        Staleness.stalenessRows(
+            ui.items,
+            Staleness.StalenessOptions(
+                now = System.currentTimeMillis(),
+                includeSnoozed = true, // the detail view describes the item, never filters it
+                lastUsedAt = { id -> ui.usage[id]?.lastUsedAt },
+            ),
+        ).firstOrNull { it.itemId == item.itemId }
+    }
+    if (row == null) return
+    val weak = row.strength <= 1
+    Spacer(Modifier.height(8.dp))
+    Column {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "strength: ${Strength.label(row.strength)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (weak) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (row.reused > 0) {
+                Text(
+                    "reused in ${row.reused} other${if (row.reused > 1) "s" else ""}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+        stale?.let { st ->
+            Text(
+                "last used: " + (st.lastUsedAt?.let { relativeDaysLabel(it) } ?: "—") +
+                    " · last checked: " + (st.checkedAt?.let { relativeDaysLabel(it) } ?: "never"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** Coarse by design — an exact timestamp on a behavioural record is more precision than the
+ *  ranking needs and more than the user asked to have displayed. HealthScreen's twin. */
+internal fun relativeDaysLabel(at: Long): String {
+    val days = ((System.currentTimeMillis() - at) / Staleness.DAY_MS).coerceAtLeast(0)
+    return when {
+        days == 0L -> "today"
+        days == 1L -> "yesterday"
+        days < 60L -> "$days days ago"
+        days < 730L -> "${days / 30} months ago"
+        else -> "${days / 365} years ago"
+    }
+}
+
 /** Expiry line with the "expired" marker — flagged strictly AFTER the last moment of the
  *  printed month (a card is good THROUGH it); absent/garbled halves never flag. L6: gains
  *  the Copy affordance ([CopyRow]'s idiom) when [copyValue] (composed MM/YY) exists — an
@@ -3360,7 +3469,7 @@ private val clipboardCopyGeneration = java.util.concurrent.atomic.AtomicLong(0)
 internal fun shouldClearClipboard(scheduledGeneration: Long, currentGeneration: Long, clipboardNow: String?, copiedValue: String): Boolean =
     scheduledGeneration == currentGeneration && clipboardNow == copiedValue
 
-private fun copyToClipboard(ctx: Context, label: String, value: String, clearSeconds: Int) {
+internal fun copyToClipboard(ctx: Context, label: String, value: String, clearSeconds: Int) {
     val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     // Newest copy owns the clipboard — and any clear scheduled for it (see the counter above).
     val generation = clipboardCopyGeneration.incrementAndGet()

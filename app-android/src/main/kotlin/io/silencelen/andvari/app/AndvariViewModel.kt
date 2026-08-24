@@ -24,7 +24,9 @@ import io.silencelen.andvari.core.client.BackupResult
 import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupVault
 import io.silencelen.andvari.core.client.CopyDeniedException
+import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CsvPreflight
+import io.silencelen.andvari.core.client.Duplicates
 import io.silencelen.andvari.core.client.ExportPlanner
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
@@ -43,10 +45,13 @@ import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LifecycleNotice
 import io.silencelen.andvari.core.client.MoveGesture
 import io.silencelen.andvari.core.client.PendingUpload
+import io.silencelen.andvari.core.client.Staleness
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.UpgradeRequiredException
+import io.silencelen.andvari.core.client.UsageLedger
+import io.silencelen.andvari.core.client.VaultHealth
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.client.sqliteVaultCache
@@ -59,6 +64,7 @@ import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.MemberRecovery
+import io.silencelen.andvari.core.crypto.Hibp
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ClientPolicy
@@ -88,6 +94,10 @@ private const val UPGRADE_REQUIRED_MSG =
 // variant exists here; do not invent one.
 private const val REASON_LOCKED = "Locked."
 private const val REASON_IDLE = "Locked after inactivity."
+// Lock-on-background (design 2026-08-23 §7). Named rather than reusing the bare "Locked."
+// so the first time it happens the user can tell it from an idle timeout and knows the
+// rule — this is the behaviour change they will feel most often.
+private const val REASON_BACKGROUND = "Locked when you left the app."
 private const val REASON_SESSION_ENDED = "Your session ended — sign in again."
 
 // §F.7/§F.9 (desktop v2 #15 parity): the idle-reason variant for a lock that lands mid-reveal —
@@ -115,6 +125,10 @@ sealed interface Screen {
     data object Sharing : Screen
     data object Settings : Screen
     data object Trash : Screen
+    // Vault health (design 2026-08-23): the phone's half of the health surface web has
+    // owned since 0.25.0 — strength/reuse/breach rows, duplicate clusters, and the
+    // staleness ranking with its guided verification run.
+    data object Health : Screen
     data object AutofillStatus : Screen
     // Shown-once recovery-phrase gate (design 2026-07-12 §F.4/§F.7): the per-member self-service
     // piece is MANDATORY, so a member who never SEES it is silently unrecoverable. This screen
@@ -143,6 +157,49 @@ sealed interface Screen {
 data class UiState(
     val screen: Screen = Screen.Loading,
     val items: List<VaultItem> = emptyList(),
+    // ---- vault health (design 2026-08-23) ----
+    /** Which half of the Health screen is showing: "passwords" | "duplicates" | "staleness". */
+    val healthTab: String = "passwords",
+    /**
+     * The usage ledger, decrypted FOR DISPLAY (spec 02 §8.2). Behavioural data about the user's
+     * own items, so it is cleared by [sessionCleared] like every other decrypted artifact — a
+     * lock must not leave "which logins you use" readable in a locked process.
+     *
+     * An itemId ABSENT here renders "—", never "never used": those are different statements and
+     * only one of them is true (an Android autofill FILL is still not recordable, so the phone's
+     * contribution is copy-driven and partial).
+     */
+    val usage: Map<String, UsageLedger.Entry> = emptyMap(),
+    /**
+     * itemId → breach count from the last scan. **In memory only, never persisted** — CR-08 /
+     * WC-13 §E.4 ripped out web's `localStorage` version because a map derived from decrypted
+     * passwords (a >10M count fingerprints a top-100 password) outlived sign-out. The Android
+     * temptations are `SharedPreferences` and the SQLite cache; neither is used, and this rides
+     * [sessionCleared] so it dies with the session.
+     *
+     * DELIBERATE DIVERGENCE FROM WEB: web retains this across a LOCK and drops it on sign-out.
+     * Android drops it on both, following this file's own precedent for `deletedItems` /
+     * `itemVersions` — decrypted material does not outlive an Android lock, and `checkIdleLock`
+     * locks far more readily than a browser tab does.
+     *
+     * null = never scanned this session (the column renders "—" and the button reads "Scan").
+     */
+    val breachByItem: Map<String, Long>? = null,
+    val breachScanning: Boolean = false,
+    /** done / total prefix ranges, for the scan button's progress text. */
+    val breachProgress: Pair<Int, Int> = 0 to 0,
+    /** A refusal or failure from a health action, rendered verbatim (the plan* refusal idiom). */
+    val healthMessage: String? = null,
+    /** The verification run: the ordered itemIds still to visit, and where we are in them. */
+    val verifyQueue: List<String> = emptyList(),
+    val verifyIndex: Int = 0,
+    val verifyRunning: Boolean = false,
+    /** Show snoozed rows in the staleness list (the "show snoozed" toggle). */
+    val showSnoozed: Boolean = false,
+    /** Cross-screen "open this item": Health hands an itemId back to the vault list, whose
+     *  `detailId` is composition state and therefore unreachable from another screen.
+     *  VaultScreen consumes it once and calls [AndvariViewModel.detailShown] to clear it. */
+    val pendingDetailId: String? = null,
     // Held envelopes newer than this build can decrypt (fail-closed) — the vault list
     // shows them as a one-line "N items need an app update" banner instead of nothing.
     val needsUpdateCount: Int = 0,
@@ -361,6 +418,14 @@ internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     // F31: the enrollment breach advisory is about the password of the session that just ended —
     // it must not greet the next account (or hang over the lock screen) as if it were theirs.
     breachAdvisory = null,
+    // Vault health (design 2026-08-23 §8.1): the breach map is derived from decrypted passwords
+    // and the usage ledger is a behavioural record of the user's own items. CR-08 / WC-13 §E.4
+    // made "gone at the wipe choke point" the rule for the first; this file's deletedItems /
+    // itemVersions precedent makes an Android LOCK a wipe point for both. A fresh unlock
+    // re-reads the ledger and the next scan re-derives the map — neither is persisted anywhere.
+    usage = emptyMap(), breachByItem = null, breachScanning = false, breachProgress = 0 to 0,
+    healthMessage = null, verifyQueue = emptyList(), verifyIndex = 0, verifyRunning = false,
+    healthTab = "passwords", showSnoozed = false, pendingDetailId = null,
     // N2 §3/§6 (review MED): clear the probe-failure flag only when a policy is LOADED — then
     // it's stale noise. With policy == null the failure is CURRENT (nothing re-probes on the
     // way to Welcome), and clearing it would strand the enroll tab in the probe-in-flight
@@ -3123,6 +3188,270 @@ class AndvariViewModel(
     }
 
     // ---- autofill status (diagnostic surface; reached from Settings) ----
+
+    // ---------------------------------------------------------------------------------
+    // Vault health (design 2026-08-23). Every RULE lives in core — [VaultHealth], [Duplicates]
+    // and [Staleness] are the same pure modules the web client decides with, graded against it
+    // by spec/test-vectors/vaulthealth.json. This block only renders their decisions and
+    // performs their planned writes; nothing here re-derives a ranking or invents a refusal.
+    // ---------------------------------------------------------------------------------
+
+    /**
+     * Lock because the app went to the background (design 2026-08-23 §7).
+     *
+     * Until this shipped, `MainActivity` overrode only `onCreate` — nothing locked on `onStop` or
+     * `onPause`, so closing the app did NOT lock the vault and neither did locking the phone.
+     * Both merely stopped refreshing `lastInteractionElapsedMs`, leaving the vault unlocked in
+     * memory for up to [ClientPolicyClamps.AUTO_LOCK_MAX_SECONDS]. The toolbar lock button was
+     * the only on-demand lock the app had, which is why it could not be removed before this.
+     *
+     * Silent: [REASON_LOCKED]'s banner explains a lock the user did not ask for, and this one is
+     * a direct consequence of an action they took (leaving), so it needs no explanation on return.
+     *
+     * **Stated cost:** [VaultSession] is shared with the autofill service, so the service will
+     * re-prompt for unlock materially more often than before. That is the correct trade for a
+     * password manager, but it is a daily-feel change and it is deliberate, not a regression.
+     */
+    fun lockFromBackground() {
+        if (VaultSession.get() == null) return // already locked, or never unlocked — nothing to do
+        if (ExternalExcursion.consume()) return // the user asked to leave and means to come back
+        lock(reason = REASON_BACKGROUND)
+    }
+
+    fun openHealth() {
+        _ui.value = _ui.value.copy(screen = Screen.Health, healthMessage = null)
+        loadUsage()
+    }
+
+    fun closeHealth() {
+        _ui.value = _ui.value.copy(
+            screen = Screen.Vault,
+            healthMessage = null,
+            verifyRunning = false,
+            verifyQueue = emptyList(),
+            verifyIndex = 0,
+        )
+    }
+
+    fun setHealthTab(tab: String) { _ui.value = _ui.value.copy(healthTab = tab, healthMessage = null) }
+
+    fun setShowSnoozed(show: Boolean) { _ui.value = _ui.value.copy(showSnoozed = show) }
+
+    fun dismissHealthMessage() { _ui.value = _ui.value.copy(healthMessage = null) }
+
+    /** Surface a refusal the SCREEN obtained from a plan* probe (the keep-refusal preview),
+     *  so every refusal reaches the user through one path. */
+    fun showHealthMessage(message: String) { _ui.value = _ui.value.copy(healthMessage = message) }
+
+    /** Health's row tap: back to the vault list, with that item's detail opening. */
+    fun openItemFromHealth(itemId: String) {
+        _ui.value = _ui.value.copy(screen = Screen.Vault, pendingDetailId = itemId, healthMessage = null)
+    }
+
+    fun detailShown() { _ui.value = _ui.value.copy(pendingDetailId = null) }
+
+    /** The server-declared clipboard window, clamped — the copy buttons on the health screens
+     *  take the same window every other copy site does. */
+    fun healthClipboardSeconds(): Int =
+        (_ui.value.policy?.clipboardClearSeconds ?: 30).coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS)
+
+    fun healthRows(): List<VaultHealth.HealthRow> = VaultHealth.healthRows(_ui.value.items)
+
+    fun duplicateClusters(): List<Duplicates.DuplicateCluster> =
+        Duplicates.duplicateClusters(_ui.value.items, ::roleFor)
+
+    fun stalenessRows(): List<Staleness.StalenessRow> = Staleness.stalenessRows(
+        _ui.value.items,
+        Staleness.StalenessOptions(
+            now = System.currentTimeMillis(),
+            includeSnoozed = _ui.value.showSnoozed,
+            // Injected, never read inside core: the ranking is identical on an install with no
+            // ledger, which is what keeps the "—" rule honest.
+            lastUsedAt = { id -> _ui.value.usage[id]?.lastUsedAt },
+        ),
+    )
+
+    /**
+     * Read the usage ledger for display. The phone has WRITTEN this blob since 0.25.0 and never
+     * once read it back — this is the call that closes that.
+     *
+     * Merged with [UsageRecorder]'s un-flushed buffer so a copy made seconds ago is already
+     * reflected: the flush is debounced 15 s by design (spec 03 §3 — one PUT per copy would turn
+     * the blob's own updatedAt into a keystroke-grade trace), and a user who copies a password
+     * then opens Health must not be told the login is unused.
+     *
+     * Silent on failure. This is a ranking hint; it must never surface an error over a vault.
+     */
+    fun loadUsage() {
+        val session = VaultSession.get() ?: return
+        viewModelScope.launch {
+            val loaded = runCatching {
+                session.api.usage().sealedUsage?.let { sealed ->
+                    UsageLedger.parse(session.account.openUsage(sealed).decodeToString())
+                } ?: emptyMap()
+            }.getOrNull() ?: return@launch
+            // Still the same session? A lock between launch and here must not repopulate.
+            if (VaultSession.get() == null) return@launch
+            _ui.value = _ui.value.copy(usage = UsageLedger.merge(loaded, UsageRecorder.peek()))
+        }
+    }
+
+    /**
+     * Vault-wide breach scan (spec 03 §8). k-anonymity: hash every UNIQUE password, fetch each
+     * 5-hex prefix range once, map the suffix counts back — sequential, gentle on the relay, and
+     * only the prefix ever leaves the device.
+     *
+     * The result is keyed by itemId, never by the plaintext password that was merely the lookup
+     * key, and it lives only in [UiState.breachByItem] — see that field for why nothing is
+     * written at rest.
+     */
+    fun scanBreaches() {
+        val a = api ?: return
+        val rows = healthRows()
+        if (rows.isEmpty() || _ui.value.breachScanning) return
+        val crypto = createCryptoProvider()
+        _ui.value = _ui.value.copy(breachScanning = true, healthMessage = null, breachProgress = 0 to 0)
+        viewModelScope.launch {
+            try {
+                // Hash every UNIQUE password, then group by 5-hex prefix so each RANGE is fetched
+                // exactly once — web's rule. Two passwords sharing a prefix must not cost two
+                // requests; the relay is a courtesy and this is the whole vault at once.
+                val unique = rows.map { it.password }.distinct()
+                val hashes = withContext(Dispatchers.Default) {
+                    unique.associateWith { Hibp.sha1UpperHex(crypto, it) }
+                }
+                val byPrefix = hashes.entries.groupBy({ Hibp.prefix(it.value) }, { it.key })
+                val byPassword = HashMap<String, Long>()
+                var done = 0
+                for ((prefix, passwords) in byPrefix) {
+                    // FAIL OPEN, per range: "couldn't check" is not "clean", so a failed range
+                    // leaves its passwords OUT of the map (rendering "—") rather than scoring
+                    // them 0 (rendering "none"). Those are different statements.
+                    runCatching { a.hibpRange(prefix) }.getOrNull()?.let { body ->
+                        for (pw in passwords) byPassword[pw] = Hibp.countInRange(body, hashes.getValue(pw))
+                    }
+                    done++
+                    _ui.value = _ui.value.copy(breachProgress = done to byPrefix.size)
+                }
+                if (VaultSession.get() == null) return@launch // locked mid-scan: drop the results
+                // Keyed by itemId — NEVER by the plaintext password, which was only the lookup key.
+                val byItem = rows.mapNotNull { r -> byPassword[r.password]?.let { r.itemId to it } }.toMap()
+                _ui.value = _ui.value.copy(breachByItem = byItem, breachScanning = false)
+            } catch (_: Throwable) {
+                _ui.value = _ui.value.copy(
+                    breachScanning = false,
+                    healthMessage = "Breach scan failed — the service is unavailable. Partial results were discarded.",
+                )
+            }
+        }
+    }
+
+    // ---- the check ledger ----
+
+    /** Record one verdict. [snoozeMs] is non-null only for "couldn't complete". */
+    fun recordCheck(itemId: String, result: String, snoozeMs: Long? = null, onDone: () -> Unit = {}) {
+        val plan = Staleness.planCheck(
+            _ui.value.items, itemId, result, System.currentTimeMillis(), ::roleFor, snoozeMs,
+        )
+        val write = plan.write ?: run {
+            _ui.value = _ui.value.copy(healthMessage = plan.refusal)
+            onDone()
+            return
+        }
+        saveItem(write.itemId, write.doc) { onDone() }
+    }
+
+    fun unsnooze(itemId: String) {
+        val plan = Staleness.planUnsnooze(_ui.value.items, itemId, ::roleFor)
+        val write = plan.write ?: run {
+            plan.refusal?.let { _ui.value = _ui.value.copy(healthMessage = it) }
+            return
+        }
+        saveItem(write.itemId, write.doc)
+    }
+
+    // ---- the verification run ----
+
+    /** Start a run over the CURRENT ranking, worst first. The queue is itemIds, not rows: the
+     *  list re-derives itself on every applied sync, and a run must follow the item rather than
+     *  a stale snapshot's index. */
+    fun startVerifyRun() {
+        val queue = stalenessRows().map { it.itemId }
+        if (queue.isEmpty()) return
+        _ui.value = _ui.value.copy(verifyQueue = queue, verifyIndex = 0, verifyRunning = true, healthMessage = null)
+    }
+
+    fun stopVerifyRun() {
+        _ui.value = _ui.value.copy(verifyRunning = false, verifyQueue = emptyList(), verifyIndex = 0)
+    }
+
+    /** Skip writes NOTHING, by design — "I did not check this" is not a verdict. */
+    fun verifyAdvance() {
+        val next = _ui.value.verifyIndex + 1
+        if (next >= _ui.value.verifyQueue.size) stopVerifyRun()
+        else _ui.value = _ui.value.copy(verifyIndex = next, healthMessage = null)
+    }
+
+    /** The item the run is currently on, looked up FRESH (never a snapshot row). */
+    fun verifyCurrent(): Staleness.StalenessRow? {
+        val u = _ui.value
+        if (!u.verifyRunning) return null
+        val id = u.verifyQueue.getOrNull(u.verifyIndex) ?: return null
+        // Include snoozed: a verdict recorded DURING the run (e.g. "couldn't complete") snoozes
+        // the row, and the run must still be able to show the item it is standing on.
+        return Staleness.stalenessRows(
+            u.items,
+            Staleness.StalenessOptions(
+                now = System.currentTimeMillis(),
+                includeSnoozed = true,
+                lastUsedAt = { i -> u.usage[i]?.lastUsedAt },
+            ),
+        ).firstOrNull { it.itemId == id }
+    }
+
+    /** Record a use — the run's "open site" leg, matching web. */
+    fun recordUse(itemId: String) = UsageRecorder.record(itemId)
+
+    // ---- duplicates ----
+
+    /** The guided merge for an EXACT cluster: save the composed survivor, then remove the losers.
+     *  Removal is the ordinary delete, so the copies land in Deleted items (30-day Trash) rather
+     *  than oblivion — which is what the confirm sentence promises. */
+    fun mergeDuplicates(plan: Duplicates.MergePlan) = op(mapError = HouseholdCopy::forSaveError) {
+        engine!!.saveWithUploads(plan.survivorId, plan.doc, emptyList(), null)
+        for (id in plan.loserIds) engine!!.remove(id)
+        refreshItems()
+    }
+
+    /** "Keep this one" for a DIFFERS cluster. The losers' passwords ride into the survivor's
+     *  passwordHistory (planKeep is that field's first and only writer) BEFORE the losers go to
+     *  the Trash, so even a wrong pick outlives the 30-day purge. */
+    fun keepDuplicate(memberIds: List<String>, keepId: String) {
+        val plan = Duplicates.planKeep(_ui.value.items, memberIds, keepId, ::roleFor, System.currentTimeMillis())
+        val keep = plan.keep ?: run {
+            _ui.value = _ui.value.copy(healthMessage = plan.keepRefusal)
+            return
+        }
+        mergeDuplicates(keep)
+    }
+
+    /** Refusal PREVIEW at first tap (retiredAt 0 — the probe never writes), so a cluster that
+     *  cannot be cleaned up says why immediately instead of after a confirm. Web's idiom. */
+    fun keepRefusalFor(memberIds: List<String>, keepId: String): String? =
+        Duplicates.planKeep(_ui.value.items, memberIds, keepId, ::roleFor, 0).keepRefusal
+
+    /** "Not duplicates — keep both" (and its undo: an empty signature clears the key). */
+    fun dismissDuplicates(memberIds: List<String>, signature: String) {
+        val plan = Duplicates.planDismiss(_ui.value.items, memberIds, signature, ::roleFor)
+        val writes = plan.writes ?: run {
+            _ui.value = _ui.value.copy(healthMessage = plan.dismissRefusal)
+            return
+        }
+        op(mapError = HouseholdCopy::forSaveError) {
+            for (w in writes) engine!!.saveWithUploads(w.itemId, w.doc, emptyList(), null)
+            refreshItems()
+        }
+    }
 
     fun openAutofillStatus() {
         _ui.value = _ui.value.copy(screen = Screen.AutofillStatus)
