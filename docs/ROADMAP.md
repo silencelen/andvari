@@ -57,7 +57,22 @@ the direction-level record of what they closed.
   sign-in screens whose username box is left empty. Design:
   **`docs/design/2026-08-22-login-health-staleness-verification.md`**.
 
-## 0.26.0 — Android vault health (**BUILT 2026-08-23**, awaiting the signing ceremony)
+## 0.26.0 + 0.26.1 — Android vault health (**COMPLETE ON EVERY CHANNEL 2026-08-24**)
+
+> **Publication state, verified independently of the watcher's own report.** Fleet **0.26.1**,
+> extension unchanged at 0.25.0. Signed manifest at **seq 9** (`signedAt 2026-08-24T06:17:03Z`),
+> served pair re-verified against the pinned key `e_2TpyoQ…` with the update-signer CLI; linux
+> 0.26.1 / windows 0.26.1 / browserExtension 0.25.0; the served MSI's sha256 matches the signed
+> manifest byte-for-byte over a full download through CF. Every named artifact returns 206.
+> devstore on vc 20325888. CT122 healthz 200, bundle `index.BdRIgAwl.js`.
+>
+> **0.26.0 was published (tag, GitHub release, devstore, CT122) but never SIGNED** — the manifest
+> never left seq 8. 0.26.1 superseded it before the ceremony ran, so exactly one signing happened.
+> 0.26.1 added the biometric-unlock steering that was the owner's stated condition for accepting
+> lock-on-background; shipping the behaviour change without it would have delivered half of an
+> agreement.
+
+## 0.26.0 — Android vault health (design ratified + built 2026-08-23)
 
 Design: `docs/design/2026-08-23-android-vault-health.md`.
 
