@@ -382,6 +382,10 @@ data class UiState(
     val quickUnlockEnrolled: Boolean = false,
     val quickUnlockFresh: Boolean = false,
     val quickUnlockOffer: Boolean = false,
+    /** This offer is a RE-offer, earned by repeated password unlocks (design §7.1) — the card
+     *  says so, because a card the user already dismissed reappearing without explanation reads
+     *  as a bug or a nag. */
+    val quickUnlockReoffered: Boolean = false,
     val quickUnlockMessage: String? = null,
 )
 
@@ -805,6 +809,24 @@ class AndvariViewModel(
      * after any unlock, on the Unlock screen (start), and when Settings opens. All reads are
      * scoped to the CURRENT origin's namespace (§4.2).
      */
+    /**
+     * Record that the user just typed their master password on a device where a fingerprint would
+     * have done, and re-open the enrollment offer once that has happened enough times
+     * (design §7.1 / [SessionStore.notePasswordUnlockCouldHaveBeenBiometric]).
+     *
+     * Called from the ONE place a full-password unlock completes with a session bound, so it
+     * cannot double-count a single unlock. Quick unlocks never reach here — they are the outcome
+     * this is trying to produce.
+     */
+    private fun notePasswordUnlockForQuickUnlockOffer() {
+        val userId = store.load()?.userId ?: return
+        if (!QuickUnlock.isEligible(appContext, store)) return // no biometric to offer
+        if (QuickUnlock.isEnrolled(cacheDir, store.currentOriginKey(), userId)) return // already on
+        if (store.notePasswordUnlockCouldHaveBeenBiometric()) {
+            _ui.value = _ui.value.copy(quickUnlockReoffered = true)
+        }
+    }
+
     private fun refreshQuickUnlockState() {
         val userId = store.load()?.userId
         val eligible = QuickUnlock.isEligible(appContext, store)
@@ -858,6 +880,11 @@ class AndvariViewModel(
             when (val r = QuickUnlock.enroll(activity, cacheDir, store.currentOriginKey(), userId, acct)) {
                 is QuickUnlock.Enroll.Ok -> {
                     store.quickUnlockOfferDismissed = true // the toggle is now the control surface
+                    // The offer succeeded, so the evidence that earned it is spent. Without this a
+                    // later `disableQuickUnlock()` would inherit a nearly-full counter and re-offer
+                    // almost immediately — nagging someone who just made a deliberate choice.
+                    store.quickUnlockPasswordUnlocks = 0
+                    _ui.value = _ui.value.copy(quickUnlockReoffered = false)
                     refreshQuickUnlockState()
                     _ui.value = _ui.value.copy(notice = "Quick unlock is on for this device.")
                 }
@@ -877,7 +904,7 @@ class AndvariViewModel(
     /** Dismiss the one-time post-unlock enrollment offer card (Settings toggle still available). */
     fun dismissQuickUnlockOffer() {
         store.quickUnlockOfferDismissed = true
-        _ui.value = _ui.value.copy(quickUnlockOffer = false)
+        _ui.value = _ui.value.copy(quickUnlockOffer = false, quickUnlockReoffered = false)
     }
 
     /**
@@ -3502,6 +3529,10 @@ class AndvariViewModel(
         val newEngine = SyncEngine(a, acct, cache).also { it.hydrate() }
         // VaultSession closes any previously-bound engine/api (defensive: never two conns).
         VaultSession.bind(a, acct, newEngine, provenance)
+        // §7.1: the ONE place a full-password unlock completes with a session bound, so the
+        // evidence count cannot double-fire for a single unlock. QUICK unlocks are excluded by
+        // provenance — they are the outcome the offer exists to produce, not a cost to record.
+        if (provenance == VaultSession.UnlockProvenance.PASSWORD) notePasswordUnlockForQuickUnlockOffer()
     }
 
     /** Sync + record the wall-clock time of the last SUCCESS — the timestamp the spec 07

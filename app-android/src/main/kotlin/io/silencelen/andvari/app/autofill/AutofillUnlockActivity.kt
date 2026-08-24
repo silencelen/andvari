@@ -43,6 +43,7 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -132,12 +133,18 @@ class AutofillUnlockActivity : FragmentActivity() {
         // Android 15 edge-to-edge) — insets must be dispatched and consumed in Compose instead,
         // or the IME simply covers the centered card and Unlock stays unreachable.
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        // §7.1: computed ONCE, before the composition, off the same gates the auto-prompt below
+        // uses — so the hint appears exactly when a fingerprint was possible and simply is not
+        // set up, and never when the org forbids it or the hardware cannot do it.
+        val couldUseBiometrics = QuickUnlock.isEligible(applicationContext, store) &&
+            !QuickUnlock.isEnrolled(applicationContext.noBackupFilesDir, store.currentOriginKey(), session.userId)
         setContent {
             AndvariTheme {
                 UnlockCard(
                     email = session.email,
                     busy = busy,
                     error = errorText,
+                    offerBiometricHint = couldUseBiometrics,
                     onUnlock = { pw -> unlockAndFinish(store, session, pw, structure, inlineRequest) },
                     onCancel = { finish() },
                 )
@@ -308,6 +315,16 @@ private fun UnlockCard(
     email: String,
     busy: Boolean,
     error: String?,
+    /**
+     * This device COULD use a fingerprint here but has not enrolled (design §7.1). The overlay
+     * cannot enroll — enrollment needs the UVK and the vault is locked at this exact moment — so
+     * the line NAMES where the switch is rather than pretending to be a button.
+     *
+     * It matters most right here: since lock-on-background, this overlay is where the user feels
+     * the cost of not having biometrics, and it was the one screen that never mentioned they were
+     * a possibility.
+     */
+    offerBiometricHint: Boolean,
     onUnlock: (String) -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -363,6 +380,15 @@ private fun UnlockCard(
                     else Text("Unlock")
                 }
                 TextButton(onClick = onCancel, enabled = !busy) { Text("Cancel") }
+                if (offerBiometricHint) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Tip: turn on fingerprint unlock in andvari's settings and this becomes a touch.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
         }
     }

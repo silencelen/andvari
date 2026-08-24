@@ -297,6 +297,51 @@ class SessionStore(context: Context) {
         set(v) = prefs.edit().putBoolean(ns(currentOriginKey(), "quickUnlockOfferDismissed"), v).apply()
 
     /**
+     * Full-password unlocks a biometric COULD have served, since the offer was last dismissed
+     * (design 2026-08-23 §7.1).
+     *
+     * The offer used to be one-and-done: "Not now" silenced it forever and Settings became the
+     * only way back. That was the right call while backgrounding did not lock — the user was
+     * typing their master password rarely. Lock-on-background changed the trade AFTER some users
+     * had already dismissed it, and a decision made under the old cost should not bind them to
+     * the new one.
+     *
+     * So the re-offer is EVIDENCE-BASED rather than time-based: it returns only once the user has
+     * demonstrably paid the price [QU_REOFFER_AFTER] times. Counting the cost is honest; a timer
+     * would just be the nag loop the original design refused, wearing a delay.
+     */
+    var quickUnlockPasswordUnlocks: Int
+        get() = prefs.getInt(ns(currentOriginKey(), "quickUnlockPasswordUnlocks"), 0)
+        set(v) = prefs.edit().putInt(ns(currentOriginKey(), "quickUnlockPasswordUnlocks"), v).apply()
+
+    /** How many times the offer has been re-opened by [quickUnlockPasswordUnlocks]. Hard-capped at
+     *  [QU_REOFFER_MAX] so a user who keeps declining is eventually left alone for good — the
+     *  no-nag-loop property of the original design, preserved rather than traded away. */
+    var quickUnlockReoffers: Int
+        get() = prefs.getInt(ns(currentOriginKey(), "quickUnlockReoffers"), 0)
+        set(v) = prefs.edit().putInt(ns(currentOriginKey(), "quickUnlockReoffers"), v).apply()
+
+    /**
+     * Record one full-password unlock that a biometric could have served, and report whether that
+     * evidence has now earned a re-offer. Pure bookkeeping — the caller owns the decision to show
+     * anything. Returns true exactly once per re-offer (it clears the dismissal itself), so a
+     * caller cannot accidentally re-trigger by asking twice.
+     */
+    fun notePasswordUnlockCouldHaveBeenBiometric(): Boolean {
+        val next = reofferDecision(
+            ReofferInputs(
+                dismissed = quickUnlockOfferDismissed,
+                unlocks = quickUnlockPasswordUnlocks,
+                reoffers = quickUnlockReoffers,
+            ),
+        )
+        quickUnlockPasswordUnlocks = next.unlocks
+        if (next.reoffers != quickUnlockReoffers) quickUnlockReoffers = next.reoffers
+        if (next.reoffer) quickUnlockOfferDismissed = false
+        return next.reoffer
+    }
+
+    /**
      * When the last spec 07 backup was produced (unix ms; 0 = never). Recorded LOCALLY
      * only — the server is never told an export happened (spec 07 §2.6). Drives the
      * "Last backup: N days ago" line + the >90-day nudge in Settings. Global: it describes
@@ -382,7 +427,10 @@ class SessionStore(context: Context) {
     fun clear() {
         val ok = currentOriginKey()
         prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken")
-            .remove(ns(ok, "accountKeys")).remove("mustChangePassword").remove(ns(ok, "quickUnlockOfferDismissed")).apply()
+            .remove(ns(ok, "accountKeys")).remove("mustChangePassword").remove(ns(ok, "quickUnlockOfferDismissed"))
+            // A fresh account starts with a full offer budget — it never inherits the previous
+            // account's dismissals or its evidence count.
+            .remove(ns(ok, "quickUnlockPasswordUnlocks")).remove(ns(ok, "quickUnlockReoffers")).apply()
     }
 
     /**
@@ -533,6 +581,41 @@ class SessionStore(context: Context) {
     }
 
     companion object {
+        /** Password unlocks a biometric could have served before the offer returns (design §7.1).
+         *  Three, not one: the point is that the user has PAID the cost repeatedly, not merely
+         *  that time has passed. */
+        const val QU_REOFFER_AFTER = 3
+
+        /** Hard cap on re-offers. Two, so the lifetime worst case is three cards total — the
+         *  original one plus two — and a user who declines all three is never asked again. */
+        const val QU_REOFFER_MAX = 2
+
+        /** Inputs to [reofferDecision] — the persisted triple, nothing else. */
+        data class ReofferInputs(val dismissed: Boolean, val unlocks: Int, val reoffers: Int)
+
+        /** What to persist, and whether the offer re-opens. */
+        data class ReofferOutcome(val unlocks: Int, val reoffers: Int, val reoffer: Boolean)
+
+        /**
+         * Whether repeated password unlocks have earned the enrollment offer another showing —
+         * pure, so [ReofferInputsTest] pins every boundary without SharedPreferences (the
+         * [QuickUnlock.isFreshPure] idiom).
+         *
+         * The three properties that matter, none of which is obvious from the call site:
+         *  - a VISIBLE offer never counts (nothing to re-open, and counting would let a single
+         *    ignored card burn the whole budget);
+         *  - the counter RESETS on each re-offer, so the cost must be paid again to earn the next;
+         *  - past [QU_REOFFER_MAX] it is inert forever — the no-nag-loop property the original
+         *    one-and-done design was protecting, kept rather than traded away.
+         */
+        fun reofferDecision(i: ReofferInputs): ReofferOutcome {
+            if (!i.dismissed) return ReofferOutcome(i.unlocks, i.reoffers, false)
+            if (i.reoffers >= QU_REOFFER_MAX) return ReofferOutcome(i.unlocks, i.reoffers, false)
+            val n = i.unlocks + 1
+            return if (n < QU_REOFFER_AFTER) ReofferOutcome(n, i.reoffers, false)
+            else ReofferOutcome(0, i.reoffers + 1, true)
+        }
+
         // Wave-4 public default (design §5.5/§6): the reference instance, reachable from ANY network.
         // RELEASE-GATED — a build carrying this must not ship until the reference origin is promoted to
         // full service (§6.3 live /client-policy probe) + the §7.4 env flip; otherwise a migrated install
@@ -547,6 +630,7 @@ class SessionStore(context: Context) {
         private val ADOPT_FIXED_KEYS = setOf(
             "cacheAllowed", "autoLockSeconds", "policyFetchedAt", "qu_serverFloor",
             "accountKeys", "quickUnlockOfferDismissed",
+            "quickUnlockPasswordUnlocks", "quickUnlockReoffers",
         )
         private val ADOPT_PER_USER_PREFIXES = listOf("qu_stampWall_", "qu_stampElapsed_", "qu_stampBoot_")
 
