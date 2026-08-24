@@ -4,6 +4,43 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.26.0 (2026-08-23) — vault health on your phone · fleet 0.26.0, extension unchanged at 0.25.0
+
+*Vault health has been a browser-only feature since it shipped. Now it is on the phone too, in
+full: which passwords are weak, which you have used in more than one place, which turned up in a
+public breach, which accounts you have saved twice, and which logins nobody has confirmed still
+work. Everything the web app can do here, the phone can now do — including merging duplicate
+entries, resolving two copies with different passwords, and recording that a login still works.*
+
+*The phone had been keeping a record it could never show you. Since the last release andvari has
+remembered when you last used each login — every password you copy on your phone feeds it — but
+there was no screen on the phone that read it back. Now "last used" appears on each login and in
+the ranking of what needs attention. A login with nothing recorded shows a dash rather than "never
+used", because those are different statements and only one of them is true.*
+
+*Checking a login is better on a phone than anywhere else. Tap Check and the site opens, andvari
+fills it for you, and coming back you say what happened: it worked, the password was refused, the
+account is gone, or you could not get through. andvari never tries a password for you — the only
+honest test of a password is a person using it, and a client that quietly signed into sites with
+your stored credentials would be doing something you never asked for.*
+
+*Your vault now locks when you leave the app. This one is worth reading twice, because it changes
+what andvari does rather than what it shows: until now, closing andvari did not lock it and neither
+did locking your phone — the vault stayed open in memory for up to fifteen minutes, and the only
+way to lock on demand was the padlock button. Now leaving the app locks it, so the padlock button
+is gone. Opening a site to check a login, or picking a file to import, deliberately does not count
+as leaving. The trade is that andvari will ask for your master password more often when it fills
+something for you.*
+
+*The refresh button is gone as well — pull down on your list of logins to sync instead.*
+
+**Under the hood.** The health rules — the ranking, the duplicate grouping, the survivor choice,
+every refusal — moved into the shared code the phone, the desktop app and the browser all run, and
+a shared set of test fixtures now grades the phone's answers against the browser's. Two clients
+that quietly disagreed about which login is most neglected would be the kind of bug nobody reports
+and everybody stops trusting the screen over. The desktop app gets the same shared foundation; its
+own health screen follows in a later release.
+
 ## 0.25.0 (2026-08-23) — knowing which logins have gone stale · fleet 0.25.0, extension 0.25.0
 
 *Vault health can now tell you which logins have gone stale, and walk you through checking them.

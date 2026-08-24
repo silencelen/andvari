@@ -57,9 +57,20 @@ the direction-level record of what they closed.
   sign-in screens whose username box is left empty. Design:
   **`docs/design/2026-08-22-login-health-staleness-verification.md`**.
 
-## 0.26.0 — Android vault health (design ratified 2026-08-23)
+## 0.26.0 — Android vault health (**BUILT 2026-08-23**, awaiting the signing ceremony)
 
-Design: `docs/design/2026-08-23-android-vault-health.md`. Closes the gap left open by
+Design: `docs/design/2026-08-23-android-vault-health.md`.
+
+> **State:** all three layers + §7 on `main`; `scripts/verify.sh` green at fleet 0.26.0 (extension
+> unchanged at 0.25.0). Gates: core 453 · web 1076 · extension 302 · android 88 + assembleDebug ·
+> desktop 76 · server 216, all 0 failures. **Not tagged and not published** — the release needs
+> the owner's Windows box (`signandvari`, see the `andvari-release-sign` skill).
+>
+> Two things the build changed about the plan, both recorded in the design doc: the `ItemDoc`
+> promotion risk turned out narrower than feared (item docs were never byte-identical across
+> clients, and nothing gates a push on doc bytes), and adding the shared vector file surfaced that
+> **`tools/vector-gen` can no longer reproduce the committed corpus** — see §3.2 and
+> `spec/test-vectors/README.md`. Closes the gap left open by
 `2026-08-22-login-health-staleness-verification.md` §7, which scoped health to "web + extension
 assist" and promised the natives a read-only follow-up. **The owner ratified full parity instead:
 all three tabs on Android, writes included.**

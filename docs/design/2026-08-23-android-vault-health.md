@@ -1,6 +1,11 @@
 # Android vault health — the phone finally reads what it writes
 
-**Status:** DESIGN, owner-ratified 2026-08-23 (five forks answered inline below).
+**Status:** **BUILT 2026-08-23** — all three layers plus §7 are on `main` and the full
+`scripts/verify.sh` gate is green at 0.26.0. Commits: `20a6e77` (ItemDoc promotion + staleness
+twin), `c2a31ef` (duplicates + health-rows twins), `b03fcd1` (cross-engine vectors), `9fa6a61`
+(the Android surface, the health line, and lock-on-background). Remaining before publish: the
+PRESTIGE-only signing ceremony (`andvari-release-sign` skill). Desktop UI is the tracked follow-on.
+Originally: DESIGN, owner-ratified 2026-08-23 (five forks answered inline below).
 **Target:** 0.26.0.
 **Ask it answers (owner, 2026-08-23):** "we have no way to view or utilize our health features in
 the mobile release."
