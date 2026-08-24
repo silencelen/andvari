@@ -44,7 +44,7 @@ import type {
 } from "./types";
 import { assertServerKdfParams } from "../crypto/keys";
 
-export const CLIENT_VERSION = "0.26.0";
+export const CLIENT_VERSION = "0.26.1";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
 
 export class ApiError extends Error {

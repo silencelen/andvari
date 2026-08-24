@@ -4,6 +4,24 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.26.1 (2026-08-23) — a nudge toward fingerprint unlock · fleet 0.26.1, extension unchanged at 0.25.0
+
+*0.26.0 made andvari lock when you leave the app, which means it asks for your master password
+more often — including when it fills a password for you. That is the right trade, but only if the
+faster way in is easy to find, and it wasn't. This release fixes the finding.*
+
+*If your phone can unlock andvari with a fingerprint and you haven't set that up, the screen that
+asks for your master password while filling now tells you so. And the "unlock with fingerprint?"
+offer, which used to disappear for good the first time you said "not now", comes back — but only
+after you have actually typed your master password a few more times, and at most twice ever. It
+returns because the cost changed after you first declined, and it says so rather than reappearing
+without explanation. Say no three times and andvari stops asking, permanently; the switch stays in
+Settings either way.*
+
+*Nothing else changed. Vault health, the verification run and everything else in 0.26.0 are the
+same — if you already installed it, this is only about how often you type your password and how
+easily you can stop.*
+
 ## 0.26.0 (2026-08-23) — vault health on your phone · fleet 0.26.0, extension unchanged at 0.25.0
 
 *Vault health has been a browser-only feature since it shipped. Now it is on the phone too, in
