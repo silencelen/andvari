@@ -876,6 +876,10 @@ class Service(
                 fvDenied = true
                 return@tx
             }
+            // Same rule as applyPut: every referenced attachment must exist, be bound to this
+            // item+vault, and fit the quota. Shipped clients always restore with [] (the delete
+            // dropped the rows), but the payload is client-supplied — never persist it unchecked.
+            validateAttachmentRefs(c, itemId, existing.vaultId, upload.attachmentIds)
             affected = vaultMemberIds(c, existing.vaultId)
             val newRev = repo.nextRev(c, "item", itemId, existing.vaultId)
             c.exec(
@@ -953,7 +957,7 @@ class Service(
 
     private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, deniedMetas: MutableList<String>): MutationResult {
         val item = m.item ?: throw BadRequest("put_without_item")
-        validateAttachmentRefs(c, m, item.attachmentIds)
+        validateAttachmentRefs(c, m.itemId, m.vaultId, item.attachmentIds)
         affected.addAll(vaultMemberIds(c, m.vaultId))
         val t = now()
         if (existing == null) {
@@ -1006,12 +1010,12 @@ class Service(
     }
 
     /** Every referenced attachment must exist, be bound to this item+vault, and fit the per-item quota. */
-    private fun validateAttachmentRefs(c: Connection, m: Mutation, ids: List<String>) {
+    private fun validateAttachmentRefs(c: Connection, itemId: String, vaultId: String, ids: List<String>) {
         if (ids.isEmpty()) return
         var total = 0L
         for (aid in ids.distinct()) {
             val row = attachments.rowById(c, aid) ?: throw BadRequest("unknown_attachment")
-            if (row.itemId != m.itemId || row.vaultId != m.vaultId) throw BadRequest("attachment_mismatch")
+            if (row.itemId != itemId || row.vaultId != vaultId) throw BadRequest("attachment_mismatch")
             total += row.size
         }
         if (total > attachments.maxCipherBytes(policy().itemAttachmentsMaxBytes)) throw PayloadTooLarge("item_attachment_quota")

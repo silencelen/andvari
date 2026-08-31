@@ -151,8 +151,11 @@ object HouseholdCopy {
      *  match — try again." (the authenticator hint is the actionable half). */
     const val BAD_TOTP_CODE = "That code isn't right — check your authenticator and try again."
 
-    /** NATIVE-PINNED: SaveConfirmActivity's IOException sentence (autofill save offline). */
-    const val SAVE_OFFLINE = "Offline — try saving again when you're connected."
+    /** NATIVE-PINNED: SaveConfirmActivity's IOException sentence (autofill save offline).
+     *  G23: the push queue is durable — an IO failure leaves the save QUEUED, and it applies
+     *  on the next sync. So this must not claim failure or invite a re-save: a followed
+     *  retry of a new-item save mints a fresh itemId and the item lands twice. */
+    const val SAVE_OFFLINE = "Offline — your save is queued and will finish when you're connected."
 
     /** TWIN of extension saveErrorCopy("failed") — retryable, no jargon. */
     const val SAVE_FAILED = "Could not save — try again."

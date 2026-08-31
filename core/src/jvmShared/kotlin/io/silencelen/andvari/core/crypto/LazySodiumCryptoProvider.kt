@@ -142,6 +142,12 @@ internal class LazySodiumCryptoProvider(private val ls: LazySodium) : CryptoProv
     }
 
     override fun secretstreamDecrypt(key: ByteArray, header: ByteArray, chunks: List<ByteArray>): List<ByteArray> {
+        // F32 residue: init_pull reads KEYBYTES/HEADERBYTES through JNA regardless of the
+        // Kotlin array lengths, and both inputs can arrive attacker-authored (a backup
+        // manifest's fileKey, a co-member item doc's attachment ref). CryptoException, not
+        // require — same decrypt-side classification as [aeadDecrypt] above.
+        if (key.size != SecretStream.KEYBYTES) throw CryptoException("secretstream key must be ${SecretStream.KEYBYTES} bytes")
+        if (header.size != SecretStream.HEADERBYTES) throw CryptoException("secretstream header must be ${SecretStream.HEADERBYTES} bytes")
         val state = SecretStream.State()
         if (!ls.cryptoSecretStreamInitPull(state, header, key)) {
             throw CryptoException("secretstream init_pull failed (bad header)")

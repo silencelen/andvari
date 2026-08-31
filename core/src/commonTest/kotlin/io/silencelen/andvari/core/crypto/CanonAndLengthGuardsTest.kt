@@ -91,6 +91,23 @@ class CanonAndLengthGuardsTest {
         assertFailsWith<CryptoException> { crypto.aeadDecrypt(key, ByteArray(23), ct, ByteArray(0)) }
     }
 
+    /** G52 (the F32 residue): the secretstream key/header arrive attacker-authored — a backup
+     *  manifest's `fileKey` (Export.readAttachment) or a co-member item doc's attachment ref
+     *  (SyncEngine) — and init_pull reads fixed lengths through JNA like every neighbour. */
+    @Test
+    fun secretstreamDecryptGuardsKeyAndHeaderLikeEncryptAlreadyDid() {
+        val key = crypto.randomBytes(32)
+        val enc = crypto.secretstreamEncrypt(key, listOf("hello".encodeToByteArray()))
+        // The happy path is unchanged.
+        assertContentEquals(
+            "hello".encodeToByteArray(),
+            crypto.secretstreamDecrypt(key, enc.header, enc.chunks).single(),
+        )
+        assertFailsWith<CryptoException> { crypto.secretstreamDecrypt(ByteArray(31), enc.header, enc.chunks) }
+        assertFailsWith<CryptoException> { crypto.secretstreamDecrypt(ByteArray(33), enc.header, enc.chunks) }
+        assertFailsWith<CryptoException> { crypto.secretstreamDecrypt(key, ByteArray(23), enc.chunks) }
+    }
+
     @Test
     fun sealedBoxGuardsItsKeysAsCryptoExceptions() {
         val kp = crypto.boxKeypairFromSeed(crypto.randomBytes(32))

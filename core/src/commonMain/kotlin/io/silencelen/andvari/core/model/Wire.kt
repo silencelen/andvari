@@ -27,9 +27,10 @@ data class DeviceInfo(val platform: String, val name: String)
 data class EscrowUpload(val sealed: String, val fingerprint: String)
 
 /**
- * The usage ledger (spec 02 §8.2) — one AEAD blob per user, sealed under the UVK with AD
- * `andvari/v1|usage|{userId}`. Carries the client-side "when did I last use this login" map that
- * feeds the vault-health staleness ranking. Opaque to the server by construction.
+ * The usage ledger (spec 02 §8.2) — one AEAD blob per user, sealed under the personal-VK-derived
+ * usageKey (spec 02 §8.2, the 0.25.0 re-bind — NOT the UVK) with AD `andvari/v1|usage|{userId}`.
+ * Carries the client-side "when did I last use this login" map that feeds the vault-health
+ * staleness ranking. Opaque to the server by construction.
  */
 @Serializable
 data class UsageUpload(val sealedUsage: String)

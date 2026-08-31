@@ -409,8 +409,9 @@ class Db(path: String) : AutoCloseable {
                     // The usage ledger (spec 02 §8.2, design 2026-08-22-login-health): the client-side
                     // "when did I last use this login" map that powers the vault-health staleness
                     // ranking. ZK-clean and shaped exactly like `escrow` / `member_recovery` — the
-                    // server holds one opaque AEAD blob per user (sealed under the UVK, AD
-                    // `andvari/v1|usage|{userId}`) and a timestamp, and can decrypt neither.
+                    // server holds one opaque AEAD blob per user (sealed under the personal-VK-derived
+                    // usageKey, spec 02 §8.2; AD `andvari/v1|usage|{userId}`) and a timestamp, and can
+                    // decrypt neither.
                     //
                     // ONE AGGREGATE ROW, deliberately — this is the whole point of the design and must
                     // not be "normalized" into per-item rows later. A row per item would hand the server
