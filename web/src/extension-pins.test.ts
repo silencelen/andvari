@@ -1312,3 +1312,84 @@ describe("2026-08-13 audit pins (extension lane) — F18 caller binding on the t
     expect(ct).toContain("const o = await fillFromDropdown(m.itemId, f, true);");
   });
 });
+
+/**
+ * 2026-08-30 audit pins (G19) — the 0.23.0–0.25.0 invariants whose WIRING lives in the
+ * chrome-bound modules this repo's extension suite structurally cannot import
+ * (locksequence.test.ts states the constraint). The leaves are tested where they live
+ * (knownlogins.test.ts, reusealert.test.ts) but the leaves never touch storage or the send —
+ * moving KLKEY to storage.local, dropping its sign-out wipe, bypassing reofferDecision, or
+ * reordering the reuse-alert egress ahead of its gate would pass every leaf test. Same charter
+ * as every block above: editing a pinned line must break this file first, deliberately.
+ */
+describe("2026-08-30 audit pins (extension lane) — KLKEY residency/wipe, pending-TTL routing, reuse-alert egress gate", () => {
+  const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+  const ct = readFileSync(extensionSrc + "content.ts", "utf-8");
+
+  const spanOf = (src: string, from: string, to: string): string => {
+    const a = src.indexOf(from);
+    const b = src.indexOf(to, a);
+    expect(a, `span start missing: ${from}`).toBeGreaterThan(-1);
+    expect(b, `span end missing/out of order: ${to}`).toBeGreaterThan(a);
+    return src.slice(a, b);
+  };
+
+  it("the known-logins digest record (KLKEY) lives in storage.session ONLY — every storage touch names the session area", () => {
+    // storage.local would survive a browser exit with the (site, username) digests AND the HMAC
+    // key beside them. Sweep every storage call that names KLKEY rather than pinning one line —
+    // a NEW non-session touch must fail here too.
+    const touches = [...bg.matchAll(/chrome\.storage\.(\w+)\.(?:get|set|remove)\([^)]*KLKEY/g)];
+    expect(touches.length, "the KLKEY read/rebuild/wipe sites must exist").toBeGreaterThanOrEqual(4);
+    for (const t of touches) expect(t[1], "KLKEY must never touch a non-session storage area").toBe("session");
+    // The rebuild writes the whole record (key + digests) under the namespaced key, typed.
+    expect(bg).toContain("await chrome.storage.session.set({ [nsk(KLKEY)]: { key: toB64(knownLoginsKey), digests } satisfies KnownLoginsRecord });");
+  });
+
+  it("the KLKEY wipe pair: sign-out AND an untrusted compartment erase the record and null the cached key", () => {
+    // The record deliberately SURVIVES an idle/manual lock (that survival is its whole function),
+    // which makes this conditional the ONE wipe choke point — dropping it leaves the digest set
+    // and its key standing after sign-out, for the next account on this profile.
+    const wipe = spanOf(bg, 'if (reason === "signout" || !quCompartmentTrusted) {', "if (tabs.size > 0) persistTabs();");
+    expect(wipe).toContain("knownLoginsKey = null;");
+    expect(wipe).toContain("await chrome.storage.session.remove(nsk(KLKEY));");
+  });
+
+  it("every locked re-offer routes through reofferDecision, and an expired pending is DROPPED, not offered", () => {
+    const gate = spanOf(bg, "function gateReoffer(", "function persistTabs(");
+    expect(gate).toContain("const verdict = reofferDecision(p, Date.now(), session !== null);");
+    expect(gate).toContain('if (verdict === "expired") {');
+    expect(gate).toContain("st.pending = undefined;");
+  });
+
+  it("the unlock moment enforces LOCKED_PENDING_TTL_MS BEFORE honoring a pre-approved save — plaintext never outlives its bound", () => {
+    const r = spanOf(bg, "function reofferPendingSaves(", "async function commitApprovedSave(");
+    expect(r).toContain("if (st.pending.lockedAt !== undefined && Date.now() - st.pending.lockedAt > LOCKED_PENDING_TTL_MS) {");
+    // The TTL drop must sit AHEAD of the approved-save fast path: the bound on plaintext-at-rest
+    // outranks the offer. (Both indices asserted present — a missing line is -1, which would
+    // "pass" a bare ordering test.)
+    expect(r.indexOf("LOCKED_PENDING_TTL_MS")).toBeGreaterThan(-1);
+    expect(r.indexOf("approvedAt")).toBeGreaterThan(-1);
+    expect(r.indexOf("LOCKED_PENDING_TTL_MS")).toBeLessThan(r.indexOf("approvedAt"));
+  });
+
+  it("checkPasswordReuse gates BEFORE the send, and the password egresses at exactly one call site", () => {
+    const fn = spanOf(ct, "async function checkPasswordReuse(", "// ---- capture engine ----");
+    expect(fn).toContain("!shouldAskReuse({");
+    expect(fn).toContain('const r = await safeSend({ type: "passwordReuse", password: value });');
+    // Gate ahead of egress — reordering the send above shouldAskReuse trips this, not just review.
+    expect(fn.indexOf("!shouldAskReuse({")).toBeGreaterThan(-1);
+    expect(fn.indexOf("!shouldAskReuse({")).toBeLessThan(fn.indexOf('safeSend({ type: "passwordReuse"'));
+    expect(fn).toContain("reuseAsked.set(input, value);");
+    // ONE egress: no second path may ship a typed password to the SW under this message type.
+    expect(ct.match(/type: "passwordReuse"/g), "exactly one passwordReuse egress").toHaveLength(1);
+  });
+
+  it("the reuse check fires from the blur (focusout) listener only — never per keystroke", () => {
+    const listener = spanOf(ct, "// Signup reuse alert (2026-08-22)", "// [K3] the Escape sentinel");
+    expect(listener).toContain('"focusout",');
+    expect(listener).toContain("if (!e.isTrusted) return;");
+    expect(listener).toContain("if (t) void checkPasswordReuse(t);");
+    // Definition + that one call site and nothing else — a keystroke-path caller would add a third.
+    expect(ct.match(/checkPasswordReuse\(/g), "one definition + one (blur-only) call site").toHaveLength(2);
+  });
+});

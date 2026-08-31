@@ -23,11 +23,27 @@ async function mac(key: Uint8Array, domain: string): Promise<string> {
   return toB64(await hmacSha256(key, utf8(domain)));
 }
 
-export const deleteProof = (key: Uint8Array, vaultId: string, deleteId: string): Promise<string> =>
-  mac(key, `andvari/v1|lifecycle|delete|${vaultId}|${deleteId}`);
+/** Ad.join parity (F33: a check, not a comment) — mirror of core requireDomainSafe: several of
+ *  these components arrive on server rows, and a `|` inside one would shift the tuple boundaries
+ *  so two different tuples MAC identically. Conforming values (UUIDs, hex, base64url) can never
+ *  contain `|`, so honest input — and the lifecycleproof.json vectors — never trips this. On the
+ *  verify side every recompute site is try/catch-wrapped (store.verifyRemoval, the transfer
+ *  verifies), so a throw degrades to "unverified" → retain-and-warn, exactly like a bad proof. */
+function requireDomainSafe(...parts: string[]): void {
+  for (const p of parts) {
+    if (p.includes("|")) throw new Error("lifecycle proof component must not contain '|'");
+  }
+}
 
-export const restoreProof = (key: Uint8Array, vaultId: string, deleteId: string): Promise<string> =>
-  mac(key, `andvari/v1|lifecycle|restore|${vaultId}|${deleteId}`);
+export const deleteProof = (key: Uint8Array, vaultId: string, deleteId: string): Promise<string> => {
+  requireDomainSafe(vaultId, deleteId);
+  return mac(key, `andvari/v1|lifecycle|delete|${vaultId}|${deleteId}`);
+};
+
+export const restoreProof = (key: Uint8Array, vaultId: string, deleteId: string): Promise<string> => {
+  requireDomainSafe(vaultId, deleteId);
+  return mac(key, `andvari/v1|lifecycle|restore|${vaultId}|${deleteId}`);
+};
 
 export const offerProof = (
   key: Uint8Array,
@@ -36,7 +52,10 @@ export const offerProof = (
   toUserId: string,
   expiresAt: number,
   seq: number,
-): Promise<string> => mac(key, `andvari/v1|lifecycle|transfer|${vaultId}|${offerId}|${toUserId}|${expiresAt}|${seq}`);
+): Promise<string> => {
+  requireDomainSafe(vaultId, offerId, toUserId);
+  return mac(key, `andvari/v1|lifecycle|transfer|${vaultId}|${offerId}|${toUserId}|${expiresAt}|${seq}`);
+};
 
 export async function acceptProof(
   key: Uint8Array,
@@ -62,11 +81,15 @@ export const acceptProofFromHash = (
   newOwnerUserId: string,
   seq: number,
   wrapHash: string,
-): Promise<string> =>
-  mac(key, `andvari/v1|lifecycle|transfer-accept|${vaultId}|${offerId}|${newOwnerUserId}|${seq}|${wrapHash}`);
+): Promise<string> => {
+  requireDomainSafe(vaultId, offerId, newOwnerUserId, wrapHash);
+  return mac(key, `andvari/v1|lifecycle|transfer-accept|${vaultId}|${offerId}|${newOwnerUserId}|${seq}|${wrapHash}`);
+};
 
-export const removeProof = (key: Uint8Array, vaultId: string, targetUserId: string, nonce: string): Promise<string> =>
-  mac(key, `andvari/v1|lifecycle|remove|${vaultId}|${targetUserId}|${nonce}`);
+export const removeProof = (key: Uint8Array, vaultId: string, targetUserId: string, nonce: string): Promise<string> => {
+  requireDomainSafe(vaultId, targetUserId, nonce);
+  return mac(key, `andvari/v1|lifecycle|remove|${vaultId}|${targetUserId}|${nonce}`);
+};
 
 /** Constant-time compare of a presented base64url proof against the expected value. */
 export function verifyProof(expected: string, presented: string): boolean {

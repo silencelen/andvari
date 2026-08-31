@@ -175,7 +175,11 @@ export async function unlockExistingSession(
           if (e instanceof ApiError && e.status === 401) return { kind: "expired" };
           if (e instanceof NetworkError) return { kind: "error", message: UNREACHABLE };
           if (e instanceof ApiError) return { kind: "error", message: SERVER_PROBLEM };
-          return { kind: "error", message: WRONG_PASSWORD };
+          // G65 (the F06 rule again): Account.unlock already SUCCEEDED above — the password is
+          // cryptographically proven right, so an unclassifiable sync failure is a broken
+          // device/environment, never a typo. WRONG_PASSWORD here sent users to reset a
+          // password that works.
+          return { kind: "error", message: DEVICE_PROBLEM };
         }
       }
     }

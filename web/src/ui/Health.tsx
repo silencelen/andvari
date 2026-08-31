@@ -4,6 +4,8 @@ import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import type { VaultItem, VaultStore } from "../vault/store";
 import { duplicateClusters, planDismiss, planKeep, type DuplicateCluster, type RoleFor } from "./duplicates";
 import { Announcer, Msg } from "./Msg";
+import { clampClipboardClearSeconds } from "./policyclamp";
+import { safeSiteHref } from "./safeurl";
 import { Staleness } from "./Staleness";
 import { stalenessRows, stalenessSummary } from "./staleness";
 import { EmptySigil } from "./Sigil";
@@ -23,7 +25,9 @@ interface Props {
    *  onRestored convention), which is what makes the merged cluster disappear from the list. */
   onChanged: () => void;
   /** The server-declared clipboard window, passed to the verification run's copy buttons. The
-   *  CLAMP lives in useCopy (§2.3 B1-1), so an out-of-range policy value cannot pin a secret. */
+   *  CLAMP lives in useCopy (§2.3 B1-1), so an out-of-range policy value cannot pin a secret —
+   *  and it is applied again at the pass-through below, so the flash's displayed "clears in Ns"
+   *  can never promise a window the timer will not honor. */
   clipboardClearSeconds?: number;
   /** Usage lookup (spec 02 §8.2); absent renders "—", which is NOT "never used". */
   lastUsedAt?: (itemId: string) => number | undefined;
@@ -100,10 +104,12 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [scanErr, setScanErr] = useState("");
+  const [scanMsg, setScanMsg] = useState("");
 
   const scan = async () => {
     setScanning(true);
     setScanErr("");
+    setScanMsg("");
     try {
       // k-anonymity (spec 03 §8): hash every UNIQUE password, fetch each 5-hex
       // prefix range once, then map suffix counts back — sequential, gentle on the relay.
@@ -127,6 +133,8 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
       const byItem = new Map(rows.map((r) => [r.itemId, result.get(r.password) ?? 0]));
       setBreachByItem(byItem);
       saveBreachCache(userId, byItem);
+      const found = [...byItem.values()].filter((n) => n > 0).length;
+      setScanMsg(`Breach scan finished — ${found} login${found === 1 ? "" : "s"} found in known breaches.`);
     } catch {
       setScanErr("Breach scan failed — the HIBP relay is unavailable. Partial results were discarded.");
     } finally {
@@ -154,6 +162,10 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
         }
       />
       {scanErr && <Msg kind="err">{scanErr}</Msg>}
+      {/* BL-1 (audit F12 class): scan completion is ASYNC info — the button label flip and the
+          Breached tile are silent to AT. Unconditional persistent region, the merge-outcome
+          contract below; failures already speak through role="alert" above. */}
+      <Announcer text={scanMsg} />
 
       <div className="tiles">
         <Tile label="Logins" value={String(rows.length)} />
@@ -185,7 +197,7 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
           store={store}
           onOpenItem={onOpenItem}
           onChanged={onChanged}
-          clearSeconds={clipboardClearSeconds ?? 30}
+          clearSeconds={clampClipboardClearSeconds(clipboardClearSeconds ?? 30)}
           lastUsedAt={lastUsedAt}
           onUsed={onUsed}
         />
@@ -236,9 +248,12 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
                     <td>{r.reused > 0 ? <span className="tone-bad">{r.reused} other{r.reused > 1 ? "s" : ""}</span> : <span className="muted">no</span>}</td>
                     <td>{r.hasTotp ? "yes" : <span className="muted">no</span>}</td>
                     <td>
-                      {breachByItem === null ? (
+                      {breachByItem === null || count === undefined ? (
+                        // Absent from the map after a scan (added/restored since, or the range
+                        // failed) means UNSCANNED, not clean — "—" either way, never a false
+                        // "none" (the Android twin's rule).
                         <span className="muted">—</span>
-                      ) : count && count > 0 ? (
+                      ) : count > 0 ? (
                         <span className="tone-bad">{count.toLocaleString()}</span>
                       ) : (
                         <span className="tone-good">none</span>
@@ -454,12 +469,18 @@ function Duplicates({ clusters, items, roleFor, store, vaultNameById, onOpenItem
                   {m.hasTotp ? " · has a one-time code" : ""}
                 </span>
                 {/* The honest password test (owner decision 2026-08-18): open the site and sign
-                    in — the client never probes a site with candidate credentials itself. */}
-                {c.kind === "differs" && m.firstUri && (
-                  <a className="link" href={/^https?:\/\//i.test(m.firstUri) ? m.firstUri : `https://${m.firstUri}`} target="_blank" rel="noreferrer">
-                    open site
-                  </a>
-                )}
+                    in — the client never probes a site with candidate credentials itself.
+                    safeSiteHref, not an inline regex: in a SHARED vault this uri was authored by
+                    another member, which is what makes a javascript: value a real vector. */}
+                {c.kind === "differs" &&
+                  (() => {
+                    const href = safeSiteHref(m.firstUri);
+                    return href ? (
+                      <a className="link" href={href} target="_blank" rel="noreferrer">
+                        open site
+                      </a>
+                    ) : null;
+                  })()}
                 {c.kind === "differs" && (
                   <button type="button" className="ghost" onClick={() => startKeep(c, m.itemId)} disabled={mergingId !== null}>
                     Keep this one…

@@ -1,8 +1,9 @@
 # andvari browser extension (MV3)
 
 Desktop autofill for Chromium (Chrome/Edge/Brave) + Firefox — logins and payment cards.
-**Status: shipping.** The version lives in `manifest.json` (0.25.0 as of this writing, and it
-tracks the fleet version — the extension ships in lockstep with the other clients);
+**Status: shipping.** The version lives in `manifest.json` (0.25.0 as of this writing; the
+extension rides its **own** version track — separate store-review cadence, so it does not move
+with every fleet release — and the top `CHANGELOG.md` heading names both versions);
 `package.mjs` refuses to package if `manifest.json`, `manifest.firefox.json`, and
 `package.json` disagree, so that one file is the answer. Per-release detail is in the repo-root
 [`CHANGELOG.md`](../CHANGELOG.md).

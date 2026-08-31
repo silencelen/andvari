@@ -197,12 +197,18 @@ describe("F10 — no unnamed <input> anywhere under web/src/ui", () => {
 describe("a11y F11 — landmarks, one page heading, and a skip link", () => {
   it("the appbar is a <header> and the content container is the app's <main>", () => {
     expect(vaultTsx).toContain('<header className="appbar">');
-    expect(vaultTsx).toContain('<main className="wrap" id={MAIN_ID}>');
+    // G28: tabIndex={-1} is what lets the intercepted skip link focus() the landmark directly.
+    expect(vaultTsx).toContain('<main className="wrap" id={MAIN_ID} tabIndex={-1}>');
     expect(vaultTsx).not.toContain('<div className="appbar">');
   });
 
   it("the skip link is the first focusable node and reveals itself on focus", () => {
-    expect(vaultTsx).toContain('<a className="skip-link" href={`#${MAIN_ID}`}>Skip to content</a>');
+    // G28: the activation is INTERCEPTED — a default #main-content jump would clobber the route
+    // fragment (routes.ts reads any non-#/ hash as the vault list, so refresh loses your place)
+    // and mint a history entry outside useBackGuard's sentinel accounting.
+    expect(vaultTsx).toContain(
+      '<a className="skip-link" href={`#${MAIN_ID}`} onClick={(e) => { e.preventDefault(); document.getElementById(MAIN_ID)?.focus(); }}>Skip to content</a>',
+    );
     expect(stylesCss).toContain(".skip-link:focus");
   });
 

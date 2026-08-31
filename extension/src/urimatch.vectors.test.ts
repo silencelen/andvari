@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { pslResolve, PSL_SNAPSHOT_HASH } from "./psl.ts";
 import { PSL_RULES_JOINED } from "./pslData.ts";
-import { matches, parseSavedUri, RESOLVE_UNKNOWN } from "./urimatch.ts";
+import { classify, matches, parseSavedUri, RESOLVE_UNKNOWN, type FieldKind } from "./urimatch.ts";
 
 const vectorsDir = fileURLToPath(new URL("../../spec/test-vectors/", import.meta.url));
 const v = JSON.parse(readFileSync(vectorsDir + "urimatch.json", "utf-8"));
@@ -22,6 +22,22 @@ test("urimatch.json byte-frozen outcomes hold — real resolver AND RESOLVE_UNKN
       const actual = saved !== null && matches(saved, { webHost: c.webHost ?? null, packageName: c.packageName }, resolve);
       assert.equal(actual, c.expected, `${c.savedUri} @ ${c.webHost}/${c.packageName}`);
     }
+  }
+});
+
+// G20 (2026-08-30 audit): the extension's classify() is the F11 password-into-OTP-field safety
+// rule on the LIVE browser fill path, and it had no vector run of its own — dropping a
+// NEGATIVE_HINTS entry regressed green. Same loop as web/src/vault/urimatch.test.ts.
+test("urimatch.json classify vectors — field classification per priority (F11 negatives included)", () => {
+  for (const c of v.classify) {
+    const actual: FieldKind = classify({
+      hints: c.hints,
+      inputTypeClass: c.inputTypeClass,
+      inputTypeVariation: c.inputTypeVariation,
+      htmlType: c.htmlType ?? null,
+      htmlNameOrId: c.htmlNameOrId ?? null,
+    });
+    assert.equal(actual, c.expected, JSON.stringify(c));
   }
 });
 

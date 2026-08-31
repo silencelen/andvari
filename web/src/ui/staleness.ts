@@ -21,9 +21,10 @@ import { parseSavedUri } from "../vault/urimatch";
  *    only — a future `at` is clamped, never trusted, because in a shared vault it can come
  *    from another member's skewed (or hostile) device.
  *
- * Usage is INJECTED, not read here (`lastUsedAt` on the input row). Usage lives in a per-client
- * local ledger (spec 02 §8.2) that this module deliberately knows nothing about, so the ranking
- * is identical whether or not a ledger is present on this install.
+ * Usage is INJECTED, not read here (`lastUsedAt` on the input row). Usage lives in the
+ * server-synced sealed usage ledger (spec 02 §8.2 — every unlocked client writes it, so a copy
+ * on the phone counts here) that this module deliberately knows nothing about, so the ranking
+ * is identical whether or not a ledger is readable on this install.
  */
 
 /** Verdicts that mean "this login needs attention NOW" — the actionable half of the vocabulary.

@@ -284,7 +284,10 @@ export class VaultStore {
   private consumedDeleteIds = new Set<string>();
   /** Notices awaiting the UI banner. */
   private noticeList: LifecycleNotice[] = [];
-  /** Vaults this device just deleted/left — drop them cleanly on the reconcile pull (no banner). */
+  /** Vaults this device just deleted/left — drop them cleanly on the reconcile pull (no
+   *  banner). One-shot AND scoped to the action's own reconcile (removed in a finally
+   *  there), so a failed reconcile can never leave a stale entry that would misread a
+   *  LATER genuine removal as self-initiated and bypass the holding area. */
   private suppressDrop = new Set<string>();
   /** Denied edits awaiting their park-vs-genuine verdict, keyed by vault (F21 / breaker #3).
    *  In-memory INDEX only — the DURABLE truth is the queue row's staged-denied flag
@@ -1485,6 +1488,11 @@ export class VaultStore {
     since: number,
     resyncing: boolean,
   ): Promise<void> {
+    // One-shot self-initiation marker (#4): consumed on the FIRST removedGrant processed
+    // for this vault, no matter which branch runs below — a stale entry must never
+    // linger to misread a LATER genuine removal as self-initiated and bypass holding.
+    const selfInitiated = this.suppressDrop.delete(vaultId);
+
     // A stale/replayed tombstone of an already-restored vault: keep it live, do not re-warn.
     if (info?.reason === "deleted" && info.deleteId && this.consumedDeleteIds.has(info.deleteId)) return;
 
@@ -1496,7 +1504,7 @@ export class VaultStore {
     }
 
     // This device initiated the delete/leave — drop cleanly, no banner (§4 / §13).
-    if (this.suppressDrop.delete(vaultId)) {
+    if (selfInitiated) {
       this.hardDropLocal(vaultId);
       return;
     }
@@ -2336,9 +2344,13 @@ export class VaultStore {
     const resp = await this.api.deleteVault(vaultId, { deleteId, proof });
     this.suppressDrop.add(vaultId);
     try {
-      await this.sync();
-    } catch {
-      this.hardDropLocal(vaultId);
+      try {
+        await this.sync();
+      } catch {
+        this.hardDropLocal(vaultId);
+      }
+    } finally {
+      this.suppressDrop.delete(vaultId); // #4: never outlives the action's own reconcile
     }
     return { purgeAt: resp.purgeAt };
   }
@@ -2379,9 +2391,13 @@ export class VaultStore {
     await this.api.leaveVault(vaultId);
     this.suppressDrop.add(vaultId);
     try {
-      await this.sync();
-    } catch {
-      this.hardDropLocal(vaultId);
+      try {
+        await this.sync();
+      } catch {
+        this.hardDropLocal(vaultId);
+      }
+    } finally {
+      this.suppressDrop.delete(vaultId); // #4: never outlives the action's own reconcile
     }
   }
 
