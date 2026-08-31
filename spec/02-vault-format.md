@@ -78,7 +78,7 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
     "password": "…",
     "uris": ["https://github.com/login"],
     "totp": "otpauth://totp/…?secret=BASE32&…",   // optional, full otpauth URI
-    "passwordHistory": [ { "password": "…", "retiredAt": 1751700000000 } ]  // RESERVED — no v1 client writes it (below)
+    "passwordHistory": [ { "password": "…", "retiredAt": 1751700000000 } ]  // ONE writer: the Health differs resolution (below)
   },
   "attachments": [                       // mirrors attachmentIds; holds the SECRET half
     { "id": "uuid", "name": "scan.pdf", "size": 12345, "fileKey": "base64url(32B)" }
@@ -89,8 +89,9 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
 **`login.passwordHistory` — one writer (amendment 2026-08-18); otherwise reserved.** The
 shape above is fixed (so the field could be adopted without a formatVersion bump) and every
 client **preserves it verbatim on rewrite**, entry-level unknown fields included (the
-preservation rules below). Exactly **one path appends entries**: the web Health duplicate
-checker's differs resolution ("Keep this one", `planKeep`) — when the user retires
+preservation rules below). Exactly **one path appends entries**: the Health duplicate
+checker's differs resolution ("Keep this one", `planKeep` — on web and Android since 0.26.0,
+via the core/web twins) — when the user retires
 duplicate copies, each distinct losing password is appended to the survivor as
 `{password, retiredAt}` so the retired secrets outlive the losers' 30-day Trash window. No
 editor, importer, ordinary save path, or conflict materializer on any client writes an
@@ -130,7 +131,8 @@ Shape: `{ at int, result string, okAt? int, until? int }`, all epoch millis (wel
 - **One write per recorded verdict**, and a skipped item writes nothing. This bound matters:
   every write is an item overwrite, and §7 caps `item_versions` at the newest 10 per item, so a
   chatty writer here would evict real edit history. For the same reason the design deliberately
-  does NOT put a per-use timestamp in this document — usage tracking is client-local (§8.2).
+  does NOT put a per-use timestamp in this document — usage tracking lives outside the item
+  document (§8.2).
 
 **formatVersion 2 — cards (0.7.0).** fv2 adds `type` value `"card"` and one optional
 top-level object `card`: `{ cardholderName?, number? (digits-only), expMonth?
@@ -275,7 +277,7 @@ spec violation.
 | mutations | (deviceId, mutationId) → resultJson, createdAt — idempotency replay cache; resultJson holds per-mutation status/rev, no vault content |
 | attachments | attachmentId, itemId, vaultId, ciphertext size, sha256(ciphertext), header, createdAt (filenames + file keys are inside item ciphertext) |
 | escrow | userId, sealed blob, fingerprint (of the recovery key), updatedAt |
-| usage_ledger | userId, **sealedUsage** (the per-user "last used" map sealed under the UVK — ciphertext, opaque; AD `andvari/v1\|usage\|{userId}`, §2), updatedAt — the staleness-ranking input (§8.2). ONE aggregate blob by design, never per-item rows: the server sees THAT a user's ledger changed and its size, never WHICH login |
+| usage_ledger | userId, **sealedUsage** (the per-user "last used" map sealed under the VK(personal)-derived usageKey (§2/§8.2) — ciphertext, opaque; AD `andvari/v1\|usage\|{userId}`, §2), updatedAt — the staleness-ranking input (§8.2). ONE aggregate blob by design, never per-item rows: the server sees THAT a user's ledger changed and its size, never WHICH login |
 | member_recovery | userId, **recoveryWrappedUvk** (the UVK sealed under the member's recovery-secret-derived wrap key — ciphertext, opaque; AD `andvari/v1\|recovery-uvk\|{userId}`, §2), **recoveryVerifier** (one-way `crypto_pwhash_str(recoveryAuthKey)` — a DB leak is not a replayable recovery, exactly as the login verifier), **pieceId** (opaque random id of the current piece — rotation/confirm binding, spec 03 §12; not a secret), **setupDeviceId** (which device committed it — legacy-confirm scoping), updatedAt — the per-member self-service recovery row (spec 04 §per-member / design §F); ZK-clean, the symmetric counterpart to `escrow` |
 | audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, emails of existing users, or any decrypted content) |
 | policies | org policy JSON (min versions, KDF policy, lock timeouts…) |

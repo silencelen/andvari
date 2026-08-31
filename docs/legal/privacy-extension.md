@@ -1,6 +1,6 @@
 # andvari browser extension — Privacy Policy
 
-_Last updated: 2026-07-27_
+_Last updated: 2026-08-31_
 
 The andvari browser extension is the companion client to the andvari password manager — an
 end-to-end-encrypted vault you or someone you trust runs. The extension talks to **one** andvari
@@ -28,6 +28,10 @@ Everything below goes to the single server you configured, over HTTPS, and nowhe
 - a **derived authentication value** — never your master password, never your keys — plus your
   one-time code if you have two-factor enabled;
 - **encrypted vault data** in both directions (sync), plus session tokens;
+- an **encrypted usage record** — a single end-to-end-encrypted blob noting when you last used
+  each login, which powers the vault-health "stale logins" view. It is sealed with your keys
+  before it leaves your device; the server stores it without being able to read it, and it goes
+  nowhere else;
 - a header naming the client and its version, so the server can refuse an incompatible build.
 
 One exception, and it is narrow: when — and only when — the configured server is the shipped
@@ -36,7 +40,10 @@ you point the extension at any other origin, it makes no such request at all.
 
 ## What the extension does NOT do
 
-- It does **not** collect analytics, telemetry, or usage data.
+- It does **not** collect analytics or telemetry, and nothing about how you use it is ever
+  readable by the extension's authors or by your server. The one usage record it keeps — the
+  end-to-end-encrypted last-used record described above — can be read only by you, on your own
+  devices.
 - It does **not** send anything to the extension's authors, to any third party, or to any server
   other than the one you configured.
 - Your server never receives your master password, your keys, or any plaintext. It stores

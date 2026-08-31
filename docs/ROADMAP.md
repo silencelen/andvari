@@ -131,7 +131,10 @@ the typed field is ergonomics, not the feature.
 > **Status 2026-07-27.** The flip happened — the repository is public and the owner forks were
 > taken: **F1** landed (`LICENSE` + `LICENSING.md`), **F2** landed (full history published), and
 > **W3 is largely in place** (`.github/workflows/codeql.yml`, `scorecard.yml`,
-> `gradle-wrapper-validation.yml`, `.github/dependabot.yml`, `SECURITY.md`). **Still open:**
+> `gradle-wrapper-validation.yml`, `.github/dependabot.yml`, `SECURITY.md` — though CodeQL
+> analyzes js only in practice: the java-kotlin leg's buildless extraction has never produced a
+> non-empty database, so **Kotlin has no static analysis today**; open owner decision, see the
+> AGP-9 lane note). **Still open:**
 > W1 whitepaper, W2 wire-egress harness, W4 artifact provenance (note GitHub Actions cannot run
 > release builds on this account — releases are published by hand from a build host), W5 fuzzing,
 > W6 external audit, W7 posture-doc publication. Lane text below is the original plan, unedited.
@@ -744,10 +747,16 @@ Full per-family analysis lives in the closed PRs' comments (#5 #7-#16 #19).
    intermediate state builds. *Lane intel from the PR #42 probe (2026-08-20): a wrapper-ONLY
    bump to 9.7.0 actually builds green locally on the current toolchain — full verify.sh plus
    `:server:shadowJar` and `:app-desktop:packageDeb` — so the atomicity argument is no longer
-   "nothing intermediate compiles". The binding blocker is CI: CodeQL's java-kotlin buildless
-   extraction (CLI 2.26.3) produces an EMPTY database under Gradle 9.7 ("could not process any
-   code"), which would kill the code-scanning control on every push. Re-test that failure with
-   each CodeQL CLI release; the lane cannot open before it passes. PR #42 closed on this basis;
+   "nothing intermediate compiles". The CI consideration, restated honestly (audit 2026-08-30
+   G18): CodeQL's java-kotlin buildless extraction (CLI 2.26.3) produces an EMPTY database under
+   Gradle 9.7 ("could not process any code") — but it produces an empty database at the pinned
+   Gradle 8.10.2 too (`build-mode: none` cannot extract Kotlin; the weekly-green run analyzes
+   zero first-party Kotlin lines and always has). **Kotlin currently has NO static analysis** —
+   the "code-scanning control" a wrapper bump would kill is the js leg's only; the Gradle-9
+   difference is merely that init hard-fails instead of staying silently green. Making the leg
+   real (autobuild/manual on a runner that can build — this probe records a full local build
+   passing) versus retiring it and recording the gap is an OPEN OWNER DECISION, and the lane
+   remains gated behind it. PR #42 closed on this basis;
    the wrapper's real Dependabot name (`gradle-wrapper`) is now actually ignored — the
    original `gradle` ignore never matched it.* Then stage 3: compileSdk/targetSdk 36 (+ platform-36 on the build
    host) → compose-bom 2026.06 → re-derive the androidx fragment/activity/biometric pin lattice

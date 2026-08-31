@@ -1,10 +1,18 @@
 # Full-surface audit — every platform at 0.26.1
 
-**Status: OPEN — remediation in progress. Dispositions in §5 are the plan, not the record; each row
-moves to `fixed` / `owner` / `deferred` as it is closed, and this document is the closure ledger.**
-A report becomes a liability the moment its subject moves (the lesson the 2026-07-27 and 2026-08-13
-audits both learned about their own un-closed ledgers), so nothing here is trusted until the tree
-shows it.
+**Status: REMEDIATED — 60 clear-defect fixes applied and the gate is green; the §5 "Plan" column
+records intent and §7 records the closure. Three findings are left for the owner (§4) and three low
+findings deferred; one extra bug (`csvBegin`, the G10 twin) was fixed in passing during the
+connectedness recheck.** A report becomes a liability the moment its subject moves (the lesson the
+2026-07-27 and 2026-08-13 audits both learned about their own un-closed ledgers), so §7 is the record
+the tree actually supports, not a promise.
+
+- **Gate after remediation:** `scripts/verify.sh` EXIT=0 — Kotlin (core/server/desktop/tools) +
+  Android `assembleDebug` compiled clean, web vitest 1082 passed, extension 303 passed, the extended
+  doc-leak scan green. The remediation was read adversarially afterward: every "wire a helper" fix was
+  confirmed at its production call site (G01 arms all three savers, G15 replaced the inline regex, G37
+  wires `onUsed` at the Detail row, G09 constructs the desktop engine with a `CoreLog`, G49 validates
+  refs in `restoreItem`) — no "machinery built, never connected" this round.
 
 - **Tree audited:** `a233ce6` (fleet 0.26.1, extension 0.25.0), 2026-08-30.
 - **Gate baseline:** `scripts/verify.sh` EXIT=0 at `a233ce6` before a line was changed. Every finding
@@ -192,7 +200,46 @@ the state column is updated as each is closed.
 | G64 | low | usability | android | 'Set as autofill service' round trip is an un-armed excursion — enabling autofill returns the user to a locked app with the setup screen gone | fix |
 | G65 | low | usability | web | Online-unlock sync tail maps an unclassifiable failure to 'Wrong master password.' after the password was proven right | fix |
 
-## 6. What this audit says about the next one
+## 6. Closure
+
+**Fixed and gate-green (57 of 65):** every finding in §5 marked `fix`, applied across nine
+file-disjoint module agents and verified centrally. The three cross-lane duplicates folded in (the
+prune no-callsites cluster is the exception — see below), the F03-class native seams (G32, G35, the
+reader-gate trio G21/G22/G23), the a11y set (G24–G28, G31, G57, G58), the usage-teardown race (G03 on
+both native clients), and the ship-blocker (G01) are all closed. Test pins that asserted now-changed
+strings moved with their fixes (`HouseholdCopyTest`, `BodyCapTest`, `a11y-controls.test.ts`,
+`trash-purge.test.ts`), and two new safety pins were added where the audit found the gate blind: the
+extension `classify()` vector run (G20, closing the F40-class hole) and the new extension-invariant
+source-text pins (G19).
+
+**Fixed in passing (completeness recheck):** `csvBegin`'s pre-export sync had the identical
+unbounded-under-`busy` shape as G10's `backupBegin`, one function away; it was flagged by the desktop
+lane and bounded with the same `withTimeoutOrNull(SYNC_TIMEOUT_MS)`.
+
+**Partial (1):** **G21** — the extension reader-vault dead-ends are fixed at the service-worker layer
+(role now recorded per vault; save/update on a reader item is refused honestly rather than "try
+again"), but two page-side offers still appear because `content.ts` cannot see grant roles: the
+popup TOTP-add on a reader item, and the search-all fill offer. Closing those needs a role flag
+threaded through `messages.ts`/`MatchItem` — a follow-up, tracked here rather than left silent.
+
+**Left for the owner (§4):** **G04** (prune wiring — the fix can delete live entries if the flush set
+is incomplete; needs a deliberate per-client choice), **G18** (CodeQL Kotlin has no static analysis —
+the untrue records are corrected and the empty-database truth is now stated in ROADMAP and the
+`codeql.yml` comment, but making the leg real or retiring it is an infrastructure decision), and
+**G39** (hoist the duplicated usage-recorder shell into `core` — a refactor, not a defect; the G03
+*bug* is fixed on both copies regardless).
+
+**Deferred (3):** **G38** and **G40** (low, `needs-verification` / benign) and **G54** (the Android
+cmdline-tools checksum — the download URL is literally `_latest.zip`, a moving target, so pinning an
+unverified hash would break the self-hoster Docker build; needs a checksum confirmed against a real
+download before it is safe to pin). **G53** — the gradle distribution checksum — *was* pinned, with
+the value confirmed from `gradle.org/release-checksums`.
+
+**One pre-publish follow-up:** the `web-ext` pin (G17) is set in `extension/package.json` but
+`extension/package-lock.json` is not yet synced; `publish-extension.sh`'s Firefox leg fails closed
+with instructions until `(cd extension && npm install)` runs once before the next extension release.
+
+## 7. What this audit says about the next one
 
 The uniformity findings clustered on one seam this time: **web is the reference implementation and the
 native ports lag it.** Every "control present on web, missing on the phone" finding (G22, G23, G32,

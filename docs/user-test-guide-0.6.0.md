@@ -52,9 +52,9 @@ page again for newer versions.
 publishes them. Installing over an existing copy upgrades in place.
 
 **Android**
-There is **no download row for Android yet** — the app is built from source and distributed by
-whoever runs your instance, so ask them for it. (Nothing in the web vault will offer you an
-APK until that instance publishes one.)
+*Settings → Your devices → Android* lists the app (`.apk`) when your instance publishes one.
+If the row says it isn't published yet, that instance builds and hands out the app itself —
+ask whoever runs it.
 
 The first unlock on a freshly installed client takes a few seconds on purpose: your keys are
 derived from your master password on the device, and that work is deliberately slow.
@@ -82,13 +82,14 @@ check we state honestly: deleted items are kept **30 days** and then removed aut
 **file attachments on a deleted item are not recovered** — the login, password, and notes come
 back, but not attached files.
 
-**Vault health** (web vault). Open **Vault health** and look at what it says about weak and
-reused passwords, then run the breach scan — it is on demand, and only a truncated hash
-prefix of each password ever leaves the device. The duplicate-entry finding is worth pushing
-on hardest: identical copies offer a guided merge (the extras go to Deleted items,
-restorable for 30 days), while clusters whose passwords differ are report-only, because only
-you know which password the site still accepts. Does it find your real duplicates? Does it
-ever claim two genuinely different accounts are the same one?
+**Vault health** (web vault and the Android app). Open **Vault health** and look at what it
+says about weak and reused passwords, then run the breach scan — it is on demand, and only a
+truncated hash prefix of each password ever leaves the device. The duplicate-entry finding is
+worth pushing on hardest: identical copies offer a guided merge (the extras go to Deleted
+items, restorable for 30 days), while clusters whose passwords differ ask *you* to pick the
+copy to keep (**Keep this one**) — only you know which password the site still accepts — and
+retire the others the same recoverable way. Does it find your real duplicates? Does it ever
+claim two genuinely different accounts are the same one?
 
 **Autofill in a computer browser (the extension).** Click into a username or password field —
 a small andvari dropdown should list your matching logins. Submit a login andvari doesn't know

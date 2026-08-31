@@ -1,7 +1,8 @@
 # Android vault health — the phone finally reads what it writes
 
 **Status:** **BUILT 2026-08-23** — all three layers plus §7 are on `main` and the full
-`scripts/verify.sh` gate is green at 0.26.0. Commits: `20a6e77` (ItemDoc promotion + staleness
+`scripts/verify.sh` gate is green at 0.26.0 (one §6 sub-promise did not ship — the per-item
+breach affordance; see the correction note there). Commits: `20a6e77` (ItemDoc promotion + staleness
 twin), `c2a31ef` (duplicates + health-rows twins), `b03fcd1` (cross-engine vectors), `9fa6a61`
 (the Android surface, the health line, and lock-on-background). Remaining before publish: the
 PRESTIGE-only signing ceremony (`andvari-release-sign` skill). Desktop UI is the tracked follow-on.
@@ -181,6 +182,12 @@ carries the exemption list; it is not an afterthought.
 Cheapest high-value slice, and the place the usage ledger finally becomes visible: **strength ·
 reused in N others · last used · last checked**, on the item already open. `HealthLine`'s
 on-demand "check breach exposure" (`Vault.tsx:1701`) comes with it.
+
+> **Shipped-state correction (audit 2026-08-30, G47):** the health line shipped as promised, but
+> the per-item on-demand breach affordance did **not** — `ItemHealthLine` renders
+> strength/reused/last-used/last-checked only, and no Android detail surface checks a single
+> item's breach exposure. The Health tab's vault-wide scan covers the capability; the per-item
+> affordance is unbuilt follow-on, not shipped work.
 
 **Last used renders "—" when nothing is recorded — never "never used".** Those are different
 statements and only one of them is true. See §8.

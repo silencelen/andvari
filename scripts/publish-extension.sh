@@ -42,8 +42,12 @@ done
   echo "  one-time setup: docs/runbooks/extension-store-publishing.md § Automated publishing" >&2
   exit 1
 }
+# Sourced WITHOUT `set -a`: the credentials stay shell-local instead of being exported into the
+# environment of every child this script spawns. Each leg hands its own secrets over explicitly
+# (curl -d args for CWS, web-ext --api-key/--api-secret for AMO), so no child process — in
+# particular the npm-installed web-ext tree — inherits the OTHER store's credential set.
 # shellcheck source=/dev/null
-set -a; . "$ENV_FILE"; set +a
+. "$ENV_FILE"
 
 # version: prefer flag, else the single source of truth (manifest.json)
 VERSION="${VERSION:-$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$REPO_DIR/extension/manifest.json" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')}"
@@ -106,6 +110,12 @@ publish_firefox() {
   : "${AMO_JWT_ISSUER:?set in $ENV_FILE}" "${AMO_JWT_SECRET:?set in $ENV_FILE}"
   [ -f "$FIREFOX_ZIP" ] || { echo "ERROR: missing $FIREFOX_ZIP — run: (cd extension && node package.mjs)" >&2; return 1; }
   command -v npx >/dev/null || { echo "[firefox] ERROR: npx (Node) required for web-ext" >&2; return 1; }
+  # web-ext is PINNED as an exact devDependency of extension/ — this leg used to run
+  # `npx --yes web-ext@latest`, the ONE unpinned execution in the release surface, resolving and
+  # running a fresh npm tree (install scripts included) at every publish. --no-install below
+  # refuses to fetch anything at sign time; a missing install fails loudly here instead.
+  [ -x "$REPO_DIR/extension/node_modules/.bin/web-ext" ] || {
+    echo "[firefox] ERROR: web-ext not installed — run: (cd extension && npm install)" >&2; return 1; }
 
   local tmp out addon; tmp="$(mktemp -d)"; out="$REPO_DIR/extension/artifacts"
   unzip -oq "$FIREFOX_ZIP" -d "$tmp"
@@ -114,10 +124,10 @@ publish_firefox() {
 
   if [ "$DRY" = 1 ]; then echo "[firefox] DRY-RUN: would 'web-ext sign --channel=unlisted' the $VERSION firefox build"; rm -rf "$tmp"; return; fi
 
-  npx --yes web-ext@latest sign \
+  (cd "$REPO_DIR/extension" && npx --no-install web-ext sign \
       --channel=unlisted \
       --api-key="$AMO_JWT_ISSUER" --api-secret="$AMO_JWT_SECRET" \
-      --source-dir="$tmp" --artifacts-dir="$out" \
+      --source-dir="$tmp" --artifacts-dir="$out") \
     || { echo "[firefox] ERROR: web-ext sign failed" >&2; rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
 

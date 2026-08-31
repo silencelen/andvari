@@ -71,19 +71,27 @@ fi
 echo "    extension track at $EXT_VER (CHANGELOG heading agrees; its 3 literals in lockstep per extension/src/version.test.ts)"
 
 echo "==> §5.5 endpoint-agnostic docs (no reference-instance hostname in current-facing docs)"
-# Published clients bake no tailnet hostname (spec/05 §5.5). The client halves of that gate are
+# Published clients bake no tailnet hostname (§5.5 of docs/design/2026-07-15-multi-tenant-endpoints.md,
+# "Baked-default swap + tailnet-leak removal"). The client halves of that gate are
 # pinned — web/src/ui/Devices.test.ts, extension/src/serverurl.test.ts — but prose had no gate at
 # all, which is how a checked-in user guide came to tell strangers the product needs a private
 # Tailscale network and hardcoded two of the reference instance's tailnet hosts (audit F30). Docs
 # are the surface a stranger reads FIRST, so they are held to the same rule as the clients.
-# Scope is the current-facing doc surface. Exactly two exemptions, each for a stated reason:
+# Scope is the current-facing prose surface: docs/** PLUS the root-level and module prose a
+# stranger actually reads first (README, SECURITY, CONTRIBUTING, LICENSING, extension/README) —
+# a gate whose rationale names that surface has to scan it, not assume it. Exactly three
+# exemptions, each for a stated reason:
 #   docs/design/**  — dated point-in-time design records. They describe the pre-pivot tailnet
 #                     topology because that is what was true on their date; "fixing" them would
 #                     make the history wrong.
 #   wave4-endpoint-promotion.md — the tailnet front IS the subject of that migration runbook.
+#   CHANGELOG.md    — dated historical entries; a 0.3.x entry legitimately names the pre-pivot
+#                     tailnet because that is what shipped then. Exempting the file beats
+#                     teaching the gate to date-parse it.
 # The guide that triggered this gate is NOT exempt: it was rewritten instance-neutral in the same
 # change, and the point of a gate is to hold the file that already got this wrong once.
-DOC_LEAKS=$(cd "$REPO_DIR" && grep -rlE 'taila2dff2|\.ts\.net|192\.168\.2\.122' docs --include='*.md' \
+DOC_LEAKS=$(cd "$REPO_DIR" && grep -rlE 'taila2dff2|\.ts\.net|192\.168\.2\.122' \
+    docs README.md SECURITY.md CONTRIBUTING.md LICENSING.md extension/README.md --include='*.md' \
   | grep -vE '^docs/design/|^docs/runbooks/wave4-endpoint-promotion\.md$') || true
 if [ -n "$DOC_LEAKS" ]; then
   echo "    §5.5 DOC LEAK: reference-instance hostname baked into current-facing docs:" >&2
@@ -91,7 +99,7 @@ if [ -n "$DOC_LEAKS" ]; then
   echo "    name the instance generically, or use example.com — docs outlive an endpoint." >&2
   exit 1
 fi
-echo "    docs carry no reference-instance hostname (2 stated exemptions)"
+echo "    docs + root/module prose carry no reference-instance hostname (3 stated exemptions)"
 
 echo "==> Kotlin: :core + :server + :app-desktop + the tools/ CLIs (RFC pins, vectors, full server integration)"
 # :app-desktop:test was missing until 0.20.x — the desktop suites (endpoint-switch token isolation,

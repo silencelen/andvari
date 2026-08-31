@@ -112,19 +112,24 @@ gNwuByi91u4o7pgD/VoZzh/N/hSiYNzHBX9UAP9JXVBhYc5GOokigvadNSG+olfm
 -----END PGP PUBLIC KEY BLOCK-----
 ```
 
-## Status (2026-08-23)
+## Status (2026-08-31)
 - **Load-bearing OS-signing DONE for desktop:** MSI Authenticode + deb GPG, live on the reference
   instance. That closes the H2 §M-D1 "trojaned installer → RCE" path for the `.msi`/`.deb` the
   user runs — the bytes are OS-verifiable, independent of the server. Both have run every release
   since 0.20.0.
-- **Secondary manifest-sig: ARMED 2026-07-18, and signing every release since** — ceremony pubkey
+- **Secondary manifest-sig: ARMED 2026-07-18**, and every manifest change since has been signed —
+  though 0.26.0 shipped without ever reaching the manifest (see the channel-state note) — ceremony pubkey
   pinned in core + extension, reference-instance-scoped (see §1); first signed manifest = seq 1
   (0.19.1). Fielded ≤0.17.0-ext / ≤0.19.0-desktop builds pin the sentinel and stay quiet; builds
   from the arming commit onward verify.
-- **Open at 0.25.0:** the reference instance's channel is at **seq 7 (0.24.0)** and the 0.25.0 MSI
-  is not yet on `/downloads`. Both are the same PRESTIGE step — `signandvari 0.25.0` (§0). The deb,
-  both extension packages and the web bundle are already live at 0.25.0, so this is a channel that
-  is behind, not one that is wrong: armed clients correctly report 0.24.0 as latest.
+- **Channel state:** signed manifest at **seq 9** — linux + windows **0.26.1**, browserExtension
+  0.25.0 — complete on every channel (`docs/ROADMAP.md`, verified 2026-08-24). The 0.25.0 lag this
+  section previously recorded cleared with its ceremony, but the channel-behind-fleet condition
+  recurred immediately: **0.26.0 was published on every channel and never signed** — 0.26.1
+  superseded it before the ceremony ran, so the manifest went seq 8 → 9 with exactly one signing.
+  Twice now the only detection was hand-written prose; nothing in the release path asserts the
+  published manifest names the tag just signed (a `signandvari` post-ceremony probe comparing the
+  manifest's `linux.version` to the signed tag would have flagged both).
 - **Extension store-signing DONE** (CWS + AMO live since 0.16.x, `extension-store-publishing.md`) —
   the load-bearing integrity for the extension; the signed manifest is the belt for zip installs.
 

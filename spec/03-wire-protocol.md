@@ -152,7 +152,8 @@ cache OFF.
   self-service reset (`POST /recovery/self/verify` + `/commit`) live in §12.
 - `GET /usage` → `{ sealedUsage: string | null, updatedAt }` and
   `PUT /usage { sealedUsage }` → `ok` — the usage ledger (spec 02 §8.2): ONE opaque AEAD blob
-  per user, sealed under the UVK with AD `andvari/v1|usage|{userId}`, carrying the client-side
+  per user, sealed under the VK(personal)-derived usageKey (spec 02 §2/§8.2) with AD
+  `andvari/v1|usage|{userId}`, carrying the client-side
   "when did I last use this login" map behind the vault-health staleness ranking. The server
   stores and returns bytes and decrypts none of it.
   **`sealedUsage: null` means the account has never written a ledger — never "nothing is used".**
