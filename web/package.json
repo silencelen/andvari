@@ -1,7 +1,7 @@
 {
   "name": "andvari-web",
   "private": true,
-  "version": "0.26.1",
+  "version": "0.26.2",
   "type": "module",
   "description": "andvari web client — independent TypeScript implementation of spec/",
   "scripts": {
