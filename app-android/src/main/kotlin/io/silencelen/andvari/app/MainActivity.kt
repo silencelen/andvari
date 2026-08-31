@@ -38,10 +38,12 @@ import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -211,6 +213,24 @@ class MainActivity : FragmentActivity() {
 @Composable
 fun AndvariApp(vm: AndvariViewModel) {
     val ui by vm.ui.collectAsStateWithLifecycle()
+    // Lock-on-background (design 2026-08-23 §7). PROCESS-level, not Activity-level:
+    // an in-app excursion (rotation, a fold posture change, a dialog) must not read as
+    // leaving the app. ExternalExcursion exempts the flows that leave on purpose.
+    // Registered ABOVE the 426 early-return: upgradeRequired can land mid-session with the
+    // vault still unlocked behind it, and the early return would otherwise dispose the
+    // observer and uninstall lock-on-background exactly then.
+    val processOwner = androidx.lifecycle.ProcessLifecycleOwner.get()
+    DisposableEffect(processOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> vm.lockFromBackground()
+                Lifecycle.Event.ON_START -> ExternalExcursion.clear()
+                else -> {}
+            }
+        }
+        processOwner.lifecycle.addObserver(observer)
+        onDispose { processOwner.lifecycle.removeObserver(observer) }
+    }
     // P5/A9 (design 2026-07-10): a 426 (server minVersion pin) blocks EVERYTHING — this build is
     // too old, so every server contact throws. Mirror desktop's blocking screen (Ui.kt:57-66),
     // but WITH an escape (A9): unlike desktop's dead-end, the user can sign out and re-point at a
@@ -233,21 +253,6 @@ fun AndvariApp(vm: AndvariViewModel) {
             // the enrollment breach advisory survives navigation, but NEVER over the two recovery
             // gates: the shown-once phrase is the one thing on screen that cannot be recovered if
             // the reader is distracted, and this advisory keeps until dismissed.
-            // Lock-on-background (design 2026-08-23 §7). PROCESS-level, not Activity-level:
-            // an in-app excursion (rotation, a fold posture change, a dialog) must not read as
-            // leaving the app. ExternalExcursion exempts the flows that leave on purpose.
-            val processOwner = androidx.lifecycle.ProcessLifecycleOwner.get()
-            DisposableEffect(processOwner) {
-                val observer = LifecycleEventObserver { _, event ->
-                    when (event) {
-                        Lifecycle.Event.ON_STOP -> vm.lockFromBackground()
-                        Lifecycle.Event.ON_START -> ExternalExcursion.clear()
-                        else -> {}
-                    }
-                }
-                processOwner.lifecycle.addObserver(observer)
-                onDispose { processOwner.lifecycle.removeObserver(observer) }
-            }
             if (ui.screen !is Screen.RecoverySetup && ui.screen !is Screen.RecoveryCapture) BreachAdvisoryBanner(vm, ui)
             // P4/A7 (design 2026-07-10): break-glass notices live HERE, above the screen switch,
             // so they render ONCE on every screen — no longer duplicated on both the Vault list
@@ -1292,10 +1297,14 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
         }
-        // Stale-window notice (design §3): enrolled but past 30 days → password re-stamps it.
+        // Stale-window notice (design §3): enrolled but not fresh → password re-stamps it.
+        // NOT only the 30-day expiry: isFresh also fails closed cross-boot with no server
+        // anchor (QuickUnlock.isFreshPure — "no anchor → duration unknowable → password"),
+        // so the first unlock after a reboot while offline lands here too. The copy names
+        // both causes rather than asserting an elapsed time it cannot know.
         if (ui.quickUnlockEnrolled && !ui.quickUnlockFresh) {
             Text(
-                "It's been 30 days — enter your master password to keep quick unlock active.",
+                "Enter your master password to keep quick unlock active — needed at least every 30 days, and after a restart while offline.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
@@ -1591,7 +1600,10 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                 // `ui.busy` is the same signal the old icon's op() set, so the spinner reflects
                 // the real refresh rather than a second notion of "syncing".
                 else -> PullToRefreshBox(isRefreshing = ui.busy, onRefresh = { vm.refresh() }) {
-                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+                // The drag gesture exposes no semantic action of its own — surface "Refresh" as
+                // a custom accessibility action so TalkBack/switch-access users can sync on
+                // demand (additive; the icon-removal decision stands).
+                LazyColumn(Modifier.fillMaxSize().semantics { customActions = listOf(CustomAccessibilityAction("Refresh") { vm.refresh(); true }) }, contentPadding = PaddingValues(16.dp)) {
                     item(key = "toolbar") {
                         Column {
                             // a11yand-10 (the desktop a11ydesk-07 twin): a placeholder is NOT a
@@ -2060,7 +2072,7 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
             Text("Attachments", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(4.dp))
             doc.attachments.forEach { ref ->
-                AttachmentRow(ref, enabled = !ui.busy) { pendingDownload = ref; saver.launch(ref.name) }
+                AttachmentRow(ref, enabled = !ui.busy) { pendingDownload = ref; ExternalExcursion.begin(); saver.launch(ref.name) }
                 Spacer(Modifier.height(8.dp))
             }
         }
@@ -2499,6 +2511,11 @@ fun TrashScreen(vm: AndvariViewModel, ui: UiState) {
                 deleted == null -> Text(if (ui.busy) "Loading…" else "", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 deleted.isEmpty() -> Text("Nothing here — deleted items you can recover will show up in this list.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 else -> deleted.forEach { d ->
+                    // Reader-role members see a shared vault's tombstones (the list route is
+                    // role-agnostic) but the server refuses their restore/purge — gate the
+                    // actions here like every sibling surface (ItemDetail/ItemHistory) instead
+                    // of offering a guaranteed 403.
+                    val readOnly = vm.roleFor(d.vaultId) == "reader"
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                         Column(Modifier.weight(1f)) {
                             Text(
@@ -2507,17 +2524,19 @@ fun TrashScreen(vm: AndvariViewModel, ui: UiState) {
                                 color = if (d.doc != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Text(
-                                "deleted ${java.time.Instant.ofEpochMilli(d.deletedAt).toString().take(10)}",
+                                "deleted ${java.time.Instant.ofEpochMilli(d.deletedAt).toString().take(10)}" + (if (readOnly) " · view only" else ""),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                         val docToRestore = d.doc
-                        if (docToRestore != null) {
-                            TextButton(enabled = !ui.busy, onClick = { vm.restoreDeleted(d.itemId, d.vaultId, docToRestore) }) { Text("Restore") }
-                        }
-                        TextButton(enabled = !ui.busy, onClick = { confirmPurgeId = d.itemId }) {
-                            Text("Delete forever", color = MaterialTheme.colorScheme.error)
+                        if (!readOnly) {
+                            if (docToRestore != null) {
+                                TextButton(enabled = !ui.busy, onClick = { vm.restoreDeleted(d.itemId, d.vaultId, docToRestore) }) { Text("Restore") }
+                            }
+                            TextButton(enabled = !ui.busy, onClick = { confirmPurgeId = d.itemId }) {
+                                Text("Delete forever", color = MaterialTheme.colorScheme.error)
+                            }
                         }
                     }
                 }
@@ -2723,6 +2742,10 @@ internal fun ExportDialogs(vm: AndvariViewModel, ui: UiState) {
     ui.backupPreflight?.let { pre ->
         BackupPreflightDialog(vm, ui, pre) { selected, includeAttachments, passphrase ->
             vm.backupRequestStash(BackupRequest(selected, includeAttachments, passphrase))
+            // The SAF save-as dialog is another app's full-screen activity — arm the
+            // lock-on-background exemption exactly like the OpenDocument pickers, or the
+            // vault locks mid-dialog and the export aborts.
+            ExternalExcursion.begin()
             backupSaver.launch("andvari-backup-${exportDateSuffix()}.andvari")
         }
     }
@@ -2739,7 +2762,7 @@ internal fun ExportDialogs(vm: AndvariViewModel, ui: UiState) {
         }
     }
     ui.csvPreflight?.let { pre ->
-        CsvPreflightDialog(vm, ui, pre) { csvSaver.launch("andvari-export-${exportDateSuffix()}.csv") }
+        CsvPreflightDialog(vm, ui, pre) { ExternalExcursion.begin(); csvSaver.launch("andvari-export-${exportDateSuffix()}.csv") }
     }
 }
 
@@ -3261,11 +3284,16 @@ private fun CopyRow(label: String, value: String, ctx: Context, clearSeconds: In
     }
 }
 
-/** Cut J: the shared "Copied — clears in Ns" disclosure line (polite live region, ~3.5 s). */
+/** Cut J: the shared copy-disclosure line (polite live region, ~3.5 s). The wording is honest
+ *  about the wipe's real scope: [copyToClipboard] clears only when it can re-read its own clip,
+ *  and on API 29+ a backgrounded read returns null — so switching apps to paste (the dominant
+ *  flow) skips the wipe. What holds there instead is the OS: Android 10+ hides the clipboard
+ *  from non-focused apps (and 13+ auto-expires sensitive clips). Never promise an
+ *  unconditional "clears in Ns". */
 @Composable
 private fun CopiedNote(clearSeconds: Int, onExpire: () -> Unit) {
     Text(
-        if (clearSeconds > 0) "Copied — clears from the clipboard in ${clearSeconds}s" else "Copied",
+        if (clearSeconds > 0) "Copied — andvari clears it in ${clearSeconds}s while open; your device hides it from other apps" else "Copied",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },

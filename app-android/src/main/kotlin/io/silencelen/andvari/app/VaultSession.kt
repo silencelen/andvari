@@ -175,14 +175,17 @@ object VaultSession {
     fun lock() {
         val prev = state
         // Best-effort store of what this session recorded, BEFORE the keys go: flush() reads
-        // api/account off the session, so it must be given the live one. Fire-and-forget — a
-        // ranking hint may never delay a lock.
-        prev?.let { live -> UsageRecorder.flushForSession(live) }
+        // api/account off the session, so it must be given the live one. The api teardown rides
+        // the flush's completion (bounded — the signOut logout precedent below in spirit): the
+        // old fire-and-forget flush raced a synchronous api.close() here, which cancelled its
+        // GET+PUT nearly every time and silently dropped the very records it exists to save.
+        // The LOCK itself is not delayed — state and keys drop right here, the engine closes
+        // right here; only this one transport's close waits, at most ~2 s.
+        prev?.let { live -> UsageRecorder.flushForSession(live) { runCatching { live.api.close() } } }
         state = null
         UsageRecorder.clear() // behavioural records must not outlive the session that made them
         prev?.let {
             runCatching { it.engine.close() }
-            runCatching { it.api.close() }
         }
     }
 }

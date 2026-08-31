@@ -66,10 +66,15 @@ import io.silencelen.andvari.core.client.VaultHealth
 @Composable
 fun HealthScreen(vm: AndvariViewModel, ui: UiState) {
     BackHandler(onBack = vm::closeHealth)
-    val rows = vm.healthRows()
-    val dupes = vm.duplicateClusters()
-    val stale = vm.stalenessRows()
-    val staleSummary = Staleness.stalenessSummary(stale)
+    // Cut K idiom (MainActivity's own comment names this defect): remembered — these three
+    // full-vault derivations ran on EVERY recomposition, and a breach scan emits one UiState
+    // per prefix range, multiplying them into O(items × prefixes) main-thread work.
+    val rows = remember(ui.items) { vm.healthRows() }
+    val dupes = remember(ui.items) { vm.duplicateClusters() }
+    val stale = remember(ui.items, ui.showSnoozed, ui.usage) { vm.stalenessRows() }
+    // The TILES pin to snoozed-EXCLUDED rows (web Health.tsx's twin): the Show-snoozed toggle
+    // changes the list below, never the Failing/Unchecked counts.
+    val staleSummary = remember(ui.items, ui.usage) { Staleness.stalenessSummary(vm.stalenessRows(includeSnoozed = false)) }
     val summary = VaultHealth.summarize(rows)
 
     Scaffold(
@@ -98,7 +103,7 @@ fun HealthScreen(vm: AndvariViewModel, ui: UiState) {
             // paraphrasing one on the way to the screen is how a refusal becomes a mystery.
             ui.healthMessage?.let { NoticeBar(it, vm::dismissHealthMessage) }
 
-            HealthTiles(summary, dupes, staleSummary, ui.breachByItem, rows)
+            HealthTiles(summary, dupes, staleSummary, ui.breachByItem, ui.breachScanIncomplete, rows)
 
             TabRow(selectedTabIndex = TABS.indexOfFirst { it.first == ui.healthTab }.coerceAtLeast(0)) {
                 for ((key, label) in TABS) {
@@ -122,7 +127,9 @@ private val TABS = listOf("passwords" to "Passwords", "duplicates" to "Duplicate
 /**
  * The always-visible summary. Seven tiles do not fit a phone row, so they wrap — and they are
  * derived from the SAME collections the tabs below render, so a tile can never disagree with the
- * list under it.
+ * list under it. One deliberate exception: the staleness pair is pinned to snoozed-EXCLUDED rows
+ * (web's rule), so with "Show snoozed" on the list may show a snoozed failing row the Failing
+ * tile refuses to count — the toggle reveals rows, it never changes the verdict counts.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -131,6 +138,7 @@ private fun HealthTiles(
     dupes: List<Duplicates.DuplicateCluster>,
     stale: Staleness.StalenessSummary,
     breachByItem: Map<String, Long>?,
+    breachIncomplete: Boolean,
     rows: List<VaultHealth.HealthRow>,
 ) {
     // null = never scanned. "—" is NOT zero: an unscanned vault has no breach finding, which is
@@ -145,7 +153,9 @@ private fun HealthTiles(
         Tile("Logins", summary.logins.toString(), null)
         Tile("Weak", summary.weak.toString(), summary.weak > 0)
         Tile("Reused", summary.reused.toString(), summary.reused > 0)
-        Tile("Breached", breached?.toString() ?: "—", breached?.let { it > 0 })
+        // An INCOMPLETE scan's findings are real (red), but its zero is "no verdict" (neutral),
+        // the same statement the skipped rows' "—" makes — never a good-tone clean bill.
+        Tile("Breached", breached?.toString() ?: "—", breached?.let { if (it > 0) true else if (breachIncomplete) null else false })
         Tile("Duplicates", activeDupes.toString(), activeDupes > 0)
         Tile("Unchecked", stale.unchecked.toString(), stale.unchecked > 0)
         Tile("Failing", stale.failing.toString(), stale.failing > 0)
@@ -325,13 +335,19 @@ private fun DuplicatesTab(vm: AndvariViewModel, ui: UiState, clusters: List<Dupl
 
     confirmMerge?.let { plan ->
         val survivorName = vm.item(plan.survivorId)?.doc?.name ?: "this copy"
+        // audit F03: the confirm names the vault KEPT and the vault(s) EMPTIED, like the member
+        // rows above (web Health.tsx's twin sentence). planMerge refuses cross-vault clusters,
+        // so these are the same place today — naming both is what makes that visible, and keeps
+        // the sentence honest if the refusal is ever relaxed.
+        val survivorVault = vaultLabel(vm, vm.item(plan.survivorId)?.vaultId)
+        val loserVaults = plan.loserIds.map { vaultLabel(vm, vm.item(it)?.vaultId) }.distinct().joinToString(" · ")
         AlertDialog(
             onDismissRequest = { confirmMerge = null },
             title = { Text("Merge ${plan.loserIds.size + 1} copies?") },
             text = {
                 Text(
-                    "Keep “$survivorName” and move the other ${plan.loserIds.size} to Deleted items " +
-                        "(kept 30 days). Saved sites from every copy are carried over.",
+                    "Keep “$survivorName” in “$survivorVault” and move the other ${plan.loserIds.size} in “$loserVaults” " +
+                        "to Deleted items (kept 30 days). Saved sites from every copy are carried over.",
                 )
             },
             confirmButton = { TextButton(onClick = { vm.mergeDuplicates(plan); confirmMerge = null }) { Text("Merge") } },
@@ -340,13 +356,17 @@ private fun DuplicatesTab(vm: AndvariViewModel, ui: UiState, clusters: List<Dupl
     }
     confirmKeep?.let { (c, keepId) ->
         val keepName = c.members.firstOrNull { it.itemId == keepId }?.name ?: "this copy"
+        // audit F03, as above: name the vault the kept copy stays in and the vault(s) the
+        // losers leave — planKeep refuses cross-vault clusters, so one place today.
+        val keepVault = vaultLabel(vm, c.members.firstOrNull { it.itemId == keepId }?.vaultId)
+        val loserVaults = c.members.filter { it.itemId != keepId }.map { vaultLabel(vm, it.vaultId) }.distinct().joinToString(" · ")
         AlertDialog(
             onDismissRequest = { confirmKeep = null },
             title = { Text("Keep “$keepName”?") },
             text = {
                 Text(
-                    "The other ${c.members.size - 1} go to Deleted items (kept 30 days), and their " +
-                        "passwords stay in the kept item's password history.",
+                    "It stays in “$keepVault”. The other ${c.members.size - 1} in “$loserVaults” go to Deleted items " +
+                        "(kept 30 days), and their passwords stay in the kept item's password history.",
                 )
             },
             confirmButton = {
@@ -357,6 +377,11 @@ private fun DuplicatesTab(vm: AndvariViewModel, ui: UiState, clusters: List<Dupl
     }
 }
 
+/** audit F03: which vault a copy is in is the one thing that decides whether removing it
+ *  touches anybody else — the member rows' lookup, shared by both confirm sentences. */
+private fun vaultLabel(vm: AndvariViewModel, vaultId: String?): String =
+    vm.vaultInfos().firstOrNull { it.vaultId == vaultId }?.name ?: "shared"
+
 // ---------------------------------------------------------------------------------------------
 // Staleness
 // ---------------------------------------------------------------------------------------------
@@ -364,7 +389,25 @@ private fun DuplicatesTab(vm: AndvariViewModel, ui: UiState, clusters: List<Dupl
 @Composable
 private fun StalenessTab(vm: AndvariViewModel, ui: UiState, rows: List<Staleness.StalenessRow>) {
     if (rows.isEmpty() && !ui.showSnoozed) {
-        Empty("Nothing to check — every login has been confirmed recently.")
+        // An empty ranking has exactly two causes, and one sentence per cause is true: no
+        // staleness-eligible logins at all, or every login snoozed (the "Couldn't finish"
+        // verdict — the OPPOSITE of the "confirmed recently" this state used to claim). The
+        // all-snoozed case keeps the toggle mounted: Unsnooze lives on rows, so unmounting the
+        // only way to show them would strand snoozed logins for up to 30 days.
+        val allSnoozed = remember(ui.items) { vm.stalenessRows(includeSnoozed = true).isNotEmpty() }
+        if (allSnoozed) {
+            Column {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { vm.setShowSnoozed(!ui.showSnoozed) }) {
+                        Text(if (ui.showSnoozed) "Hide snoozed" else "Show snoozed")
+                    }
+                }
+                Empty("Every login is snoozed right now — Show snoozed to see them or bring one back early.")
+            }
+        } else {
+            Empty("No logins to rank yet — staleness needs saved logins.")
+        }
         return
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
@@ -407,9 +450,15 @@ private fun StalenessTab(vm: AndvariViewModel, ui: UiState, rows: List<Staleness
 }
 
 private fun bucketLabel(r: Staleness.StalenessRow): String = when (r.bucket) {
-    // The verdict itself, not a paraphrase: an unrecognized result from a future client reads as
-    // "checked" with no verdict styling, which is the open-vocabulary contract (spec 02 §3).
-    Staleness.StaleBucket.FAILING -> "last check failed (${r.check?.result})"
+    // The three KNOWN verdicts get web's curated labels (Staleness.tsx VERDICTS); an
+    // unrecognized result from a future client keeps its raw token — the open-vocabulary
+    // contract (spec 02 §3) styles it as failed without pretending to understand it.
+    Staleness.StaleBucket.FAILING -> when (r.check?.result) {
+        "bad" -> "last check failed — wrong password"
+        "gone" -> "last check failed — account is gone"
+        "blocked" -> "last check failed — couldn't complete"
+        else -> "last check failed (${r.check?.result})"
+    }
     Staleness.StaleBucket.NEVER -> "never checked"
     Staleness.StaleBucket.OVER_YEAR -> "not checked in over a year"
     Staleness.StaleBucket.SIX_TO_TWELVE -> "not checked in 6-12 months"
@@ -454,6 +503,13 @@ private fun VerifyRunDialog(vm: AndvariViewModel, ui: UiState) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // A refusal must be visible HERE: the NoticeBar renders BEHIND this modal
+                // dialog, and a run that says nothing while staying put looks stuck rather
+                // than refused. Verbatim, per the health-message rule.
+                ui.healthMessage?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
                 Spacer(Modifier.height(8.dp))
                 Text("Open the site and sign in yourself, then say what happened.", style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(8.dp))
@@ -470,22 +526,23 @@ private fun VerifyRunDialog(vm: AndvariViewModel, ui: UiState) {
                     ) { Text(if (row.firstUri != null) "Open site" else "no saved site to open") }
                 }
                 Spacer(Modifier.height(4.dp))
-                // Four ways to answer…
+                // Four ways to answer… — all disabled while a verdict is saving (web's
+                // disabled={busy} twin): a double-tap wrote TWO verdicts and skipped an item.
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = { vm.recordCheck(row.itemId, "ok") { vm.verifyAdvance() } }) { Text("It worked") }
-                    TextButton(onClick = { vm.recordCheck(row.itemId, "bad") { vm.verifyAdvance() } }) { Text("Refused") }
+                    TextButton(onClick = { vm.recordCheck(row.itemId, "ok") { vm.verifyAdvance() } }, enabled = !ui.busy) { Text("It worked") }
+                    TextButton(onClick = { vm.recordCheck(row.itemId, "bad") { vm.verifyAdvance() } }, enabled = !ui.busy) { Text("Refused") }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = { vm.recordCheck(row.itemId, "gone") { vm.verifyAdvance() } }) { Text("Account gone") }
+                    TextButton(onClick = { vm.recordCheck(row.itemId, "gone") { vm.verifyAdvance() } }, enabled = !ui.busy) { Text("Account gone") }
                     TextButton(onClick = {
                         vm.recordCheck(row.itemId, "blocked", Staleness.SNOOZE_MS) { vm.verifyAdvance() }
-                    }) { Text("Couldn't finish") }
+                    }, enabled = !ui.busy) { Text("Couldn't finish") }
                 }
             }
         },
         // …and two ways to answer nothing, carrying exactly the same weight. Skip writes NOTHING.
-        confirmButton = { TextButton(onClick = vm::verifyAdvance) { Text("Skip") } },
-        dismissButton = { TextButton(onClick = vm::stopVerifyRun) { Text("Stop") } },
+        confirmButton = { TextButton(onClick = vm::verifyAdvance, enabled = !ui.busy) { Text("Skip") } },
+        dismissButton = { TextButton(onClick = vm::stopVerifyRun, enabled = !ui.busy) { Text("Stop") } },
     )
 }
 
