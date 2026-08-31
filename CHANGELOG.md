@@ -4,6 +4,58 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.26.2 (2026-08-31) — the audit release · fleet 0.26.2, extension 0.26.0
+
+*A full audit of every platform found one serious bug and a long tail of smaller ones, almost all
+of the same kind: something the web app did correctly that the phone or desktop did not. The
+headline fix is that backing up, exporting, and saving attachments work again on the phone — since
+0.26.0 the app locked itself the instant the save dialog opened, so those three never completed.
+Everything else is andvari telling you the truth: the breach column no longer says "none" for a
+password it never checked, a vault you can only read no longer offers you buttons that can't work,
+and the "last used" ranking stops dropping the copy you just made before leaving the app.*
+
+**The serious one**
+- The phone's backup, CSV export, and "save attachment" all failed every time since 0.26.0:
+  opening the system save dialog counted as leaving the app, so the vault locked mid-save. Fixed —
+  those flows now stay unlocked through the dialog, exactly like opening a file already did.
+
+**Health, breaches, and honest copy**
+- The breach column no longer shows a reassuring "none" for an item added or changed after the last
+  scan; an unchecked item reads "—" on every client. The breach tile stops claiming "0 breached"
+  after a scan that couldn't reach the breach service at all.
+- A duplicate-merge confirmation on the phone now names the vault the copies leave, matching the
+  web app — so a merge inside a shared household vault can't happen without you seeing it.
+- A refused check verdict (on a vault you can only read) now shows why instead of silently skipping.
+- The "last used" ranking stopped losing the copy you made just before switching apps, and stops
+  showing a login you use daily as stale; the underlying record no longer grows without bound.
+- Screen-reader users now hear breach-scan and verification-run results, the "remove this?" prompt,
+  and per-item breach verdicts that were previously silent.
+
+**Sharing and reader vaults**
+- A household member with read-only access is no longer offered Restore, Delete-forever, Update, or
+  merge on shared items — actions the server always refused with a misleading "try again". They are
+  now shown honestly as view-only, on every client and in the browser extension.
+- An offline save no longer claims it failed (and no longer risks a duplicate item if you retry) —
+  it is queued and finishes when you reconnect.
+
+**Security and hardening (from the audit)**
+- Browser extension: the live 2FA-code handler is now bound to the popup like its siblings; the
+  reader-vault write offers are suppressed at the source; a field-classification safety rule
+  (never offer a password into a one-time-code box) is now covered by the test gate.
+- A crafted backup or shared item can no longer reach native code with a wrong-length key; the
+  restore path validates attachment references like every other write; MAC-domain construction
+  rejects a separator injected into a server-supplied id.
+- Desktop: a stalled or hostile server can no longer hold the vault unlocked through a hung sync or
+  attachment download; a detected vault-tamper signal is now surfaced instead of silently dropped;
+  export temp files are created owner-only and an export error no longer names a file that gets
+  deleted on exit.
+
+**Under the hood**
+- The privacy policy, specs, user guide, and release runbook were reconciled with the shipped code.
+- CodeQL's Kotlin leg (which had been analysing nothing) is retired with a tripwire; the gradle
+  distribution and the release path are pinned; the doc-leak scan covers the whole public tree.
+- Full report: `docs/design/2026-08-30-full-surface-audit.md`.
+
 ## 0.26.1 (2026-08-23) — a nudge toward fingerprint unlock · fleet 0.26.1, extension unchanged at 0.25.0
 
 *0.26.0 made andvari lock when you leave the app, which means it asks for your master password

@@ -216,18 +216,23 @@ source-text pins (G19).
 unbounded-under-`busy` shape as G10's `backupBegin`, one function away; it was flagged by the desktop
 lane and bounded with the same `withTimeoutOrNull(SYNC_TIMEOUT_MS)`.
 
-**Partial (1):** **G21** — the extension reader-vault dead-ends are fixed at the service-worker layer
-(role now recorded per vault; save/update on a reader item is refused honestly rather than "try
-again"), but two page-side offers still appear because `content.ts` cannot see grant roles: the
-popup TOTP-add on a reader item, and the search-all fill offer. Closing those needs a role flag
-threaded through `messages.ts`/`MatchItem` — a follow-up, tracked here rather than left silent.
-
-**Left for the owner (§4):** **G04** (prune wiring — the fix can delete live entries if the flush set
-is incomplete; needs a deliberate per-client choice), **G18** (CodeQL Kotlin has no static analysis —
-the untrue records are corrected and the empty-database truth is now stated in ROADMAP and the
-`codeql.yml` comment, but making the leg real or retiring it is an infrastructure decision), and
-**G39** (hoist the duplicated usage-recorder shell into `core` — a refactor, not a defect; the G03
-*bug* is fixed on both copies regardless).
+**Closed after the report, folded into the 0.26.2 release (owner-directed 2026-08-31):**
+- **G21** — now fully fixed: a SW-computed `readOnly` flag rides `MatchItem`, so `content.ts` and
+  `popup.ts` suppress the two page-side reader offers (search-all fill, TOTP-add) at the source, with
+  the honest SW refusal as backstop. No page-side dead-ends remain.
+- **G04** — prune is now wired, but only at the one point the live set is provably complete: right
+  after a successful full sync (`syncNow` on the natives, `onSynced` on web, `resync` on the
+  extension). Teardown/lock/pagehide/debounce flushes never prune; the keep-set is the live ids plus
+  the just-buffered uses, and prune only fires when the server copy was actually read — so it
+  under-prunes on a stale snapshot (retried next sync) and can never drop a live entry. Guard tests
+  on every client.
+- **G39** — the usage-recorder shell is hoisted into `core` as `UsageRecorderCore<S>` (jvmShared);
+  Android and desktop are thin adapters, with the G03 bounded-flush-before-close preserved.
+- **G18** — the CodeQL `java-kotlin` leg is retired (it analysed nothing), with a live emptiness
+  tripwire (`scripts/ci/codeql-kotlin-tripwire.sh`, the analyze job's first step) that fails CI if an
+  empty Kotlin leg is ever re-introduced. **Still owner-tracked:** making the leg *real* (autobuild on
+  a runner that can compile Kotlin) so the server and crypto core actually get SAST — the tripwire
+  keeps the retired state honest until then.
 
 **Deferred (3):** **G38** and **G40** (low, `needs-verification` / benign) and **G54** (the Android
 cmdline-tools checksum — the download URL is literally `_latest.zip`, a moving target, so pinning an
