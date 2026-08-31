@@ -181,11 +181,33 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
 
   const unchecked = rows.filter((r) => r.bucket === "never").map((r) => r.itemId);
 
+  // G27: by the time the offer renders, the run card has already advanced to the NEXT login, so
+  // the sentence must NAME the item — a bare "it" points at whatever is now on screen. The same
+  // sentence feeds the persistent Announcer below (a conditionally-mounted row is silent to AT).
+  const offerName = offerDelete ? items.find((it) => it.itemId === offerDelete)?.doc.name || "(untitled)" : null;
+  const offerSentence = offerName ? `“${offerName}” is marked as gone. Remove it from the vault?` : "";
+
   if (rows.length === 0 && !showSnoozed) {
+    // Two states land here and need different sentences: zero saved logins, or every login
+    // snoozed — which only happens via the failing "Couldn't complete" verdict, the opposite of
+    // "nothing to worry about". The Show-snoozed toggle stays mounted in the all-snoozed state:
+    // Unsnooze lives on rows, so unmounting the toggle here left snoozed logins unreachable for
+    // up to 30 days.
+    const snoozedCount = stalenessRows(items, { lastUsedAt, includeSnoozed: true, now }).length;
     return (
       <div className="empty">
         <div className="sigil"><EmptySigil /></div>
-        <p>No logins to rank yet — staleness needs saved logins.</p>
+        {snoozedCount > 0 ? (
+          <>
+            <p>Every login here is snoozed — show them to unsnooze one early.</p>
+            <label className="inline-check">
+              <input type="checkbox" checked={showSnoozed} onChange={(e) => setShowSnoozed(e.target.checked)} />
+              Show snoozed
+            </label>
+          </>
+        ) : (
+          <p>No logins to rank yet — staleness needs saved logins.</p>
+        )}
       </div>
     );
   }
@@ -197,22 +219,23 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
         Ranked worst first: logins whose last check FAILED, then ones never checked at all (oldest change first),
         then whichever has gone longest since a human confirmed it.
         {" "}“Last changed” is exactly that — any edit bumps it, so it is not the age of the password.
-        {" "}“Last used here” comes from this app on this device only; a fill on your phone will not show up.
+        {" "}“Last used” syncs across your devices — a password copied on the phone or filled by the browser extension counts here too. The one gap: a fill by the phone's autofill service can't be recorded.
         {" "}Checking is deliberately manual: andvari opens the site and you sign in — it never tries the password for you.
       </div>
 
       {msg && <Msg kind={msg.kind}>{msg.text}</Msg>}
       {copyErr && <Msg kind="err">{CLIPBOARD_FAILED}</Msg>}
       {wipeStuck && <Msg kind="err">{CLIPBOARD_NOT_CLEARED}</Msg>}
-      {/* BL-1: copy confirmation and run outcomes are polite async info — one persistent live
-          region, matching Detail's contract (a .msg mounting already-populated is not announced). */}
+      {/* BL-1: copy confirmation, run outcomes and the delete offer are polite async info — one
+          persistent live region, matching Detail's contract (a .msg mounting already-populated is
+          not announced). */}
       <Announcer
-        text={wipeStuck ? CLIPBOARD_NOT_CLEARED : copyErr ? CLIPBOARD_FAILED : flash ? `${flash} copied` : msg && msg.kind === "info" ? msg.text : ""}
+        text={wipeStuck ? CLIPBOARD_NOT_CLEARED : copyErr ? CLIPBOARD_FAILED : flash ? `${flash} copied` : offerSentence ? offerSentence : msg && msg.kind === "info" ? msg.text : ""}
       />
 
       {offerDelete && (
         <div className="confirm-row">
-          <span>Marked as gone. Remove it from the vault?</span>
+          <span>{offerSentence}</span>
           <button type="button" className="danger" disabled={busy} onClick={() => void removeGone(offerDelete)}>
             Move to Deleted items
           </button>
@@ -295,10 +318,11 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
           <thead>
             <tr>
               <th>Item</th>
-              <th>Last used here</th>
+              <th>Last used</th>
               <th>Last changed</th>
               <th>Last checked</th>
-              <th></th>
+              {/* G57: named for AT — the sibling Health table names every column. */}
+              <th><span className="visually-hidden">Actions</span></th>
             </tr>
           </thead>
           <tbody>

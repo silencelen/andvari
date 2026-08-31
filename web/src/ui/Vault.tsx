@@ -497,8 +497,13 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           Lock) and the vault view's 7-button toolbar had to be traversed on every arrival at
           content. The skip link is the first focusable node and is visible only on focus
           (.skip-link, styles.css, over the existing .visually-hidden utility). The extension's
-          own options page already ships this shape (options.html header/main/section). */}
-      <a className="skip-link" href={`#${MAIN_ID}`}>Skip to content</a>
+          own options page already ships this shape (options.html header/main/section).
+          G28: the activation is INTERCEPTED — the default jump would replace the whole fragment
+          with #main-content (not a route, so routes.ts reads it as the vault list and refresh
+          loses your place) AND push a history entry on top of useBackGuard's armed sentinel
+          (whose self-pop would then consume this entry and orphan a sentinel that eats a later
+          Back press). Focus moves to the <main> directly; fragment and history stay untouched. */}
+      <a className="skip-link" href={`#${MAIN_ID}`} onClick={(e) => { e.preventDefault(); document.getElementById(MAIN_ID)?.focus(); }}>Skip to content</a>
       <header className="appbar">
         <div className="row">
           <span className="brand"><span className="a-mark">and</span>vari</span>
@@ -591,7 +596,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       {/* Audit F11: the one <main> of the signed-in app. The view switch below mounts exactly
           one view, and each view's ViewHeader title is that view's <h1> — so the landmark and
           the heading tree both say where the user is. */}
-      <main className="wrap" id={MAIN_ID}>
+      <main className="wrap" id={MAIN_ID} tabIndex={-1}>
         {/* The page heading for the two branches that render no ViewHeader — the vault
             (list / item / editor / import-export panels) and Trash. Visually hidden because
             both deliberately carry no visible view title; every other view's ViewHeader title
@@ -602,7 +607,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           // store, which froze Health's rows for the whole mount.
           <Health items={items} client={client} userId={account.userId} onOpenItem={goToItem} store={store} onChanged={refresh} clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30} lastUsedAt={usage.lookup} onUsed={(id) => usage.record(id)} />
         ) : view === "trash" ? (
-          <TrashView store={store} onRestored={refresh} />
+          <TrashView store={store} roleFor={(vaultId) => account.roleFor(vaultId)} onRestored={refresh} />
         ) : view === "sharing" ? (
           <Sharing
             account={account}
@@ -1304,7 +1309,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
  * changes-fence horizon by construction), which is what the copy, desktop and Android all say.
  * So this list is bounded to 30 days of deletions, not everything ever deleted.
  */
-function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () => void }) {
+function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor: (vaultId: string) => string | null; onRestored: () => void }) {
   const [items, setItems] = useState<{ itemId: string; vaultId: string; deletedAt: number; doc: ItemDoc | null }[] | null>(null);
   const [err, setErr] = useState("");
   const [restoringId, setRestoringId] = useState<string | null>(null);
@@ -1335,8 +1340,14 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
       // round trip per REMAINING tombstone, so every "Delete forever" used to re-spin
       // the whole list. Nothing else changed server-side; there is nothing to re-fetch.
       setItems((prev) => (prev ? prev.filter((d) => d.itemId !== itemId) : prev));
-    } catch {
-      setErr("Couldn't delete it permanently — try again.");
+    } catch (e) {
+      // G22: a 403 is the server's reader-role refusal (no_grant) — a permission fact, not a
+      // transient; "try again" would loop the user straight back into the same 403.
+      setErr(
+        e instanceof ApiError && e.status === 403
+          ? "You don't have permission to delete items from this vault — your access may have been changed to view-only. Nothing was removed."
+          : "Couldn't delete it permanently — try again.",
+      );
       await load(true); // re-list on failure only: a lost-response success reconciles (the row drops out)
     } finally {
       setPurgingId(null);
@@ -1351,8 +1362,13 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
     try {
       await store.restoreDeleted(d.itemId, d.vaultId, d.doc);
       onRestored(); // re-sync so the item reappears in the vault
-    } catch {
-      setErr("Restore failed — try again.");
+    } catch (e) {
+      // G22: same 403 mapping as the purge arm — the honest permission sentence, never a retry.
+      setErr(
+        e instanceof ApiError && e.status === 403
+          ? "You don't have permission to restore items into this vault — your access may have been changed to view-only. Nothing was changed."
+          : "Restore failed — try again.",
+      );
     } finally {
       setRestoringId(null);
       // Always re-list: the restored item drops out (and a lost-response success reconciles).
@@ -1379,36 +1395,44 @@ function TrashView({ store, onRestored }: { store: VaultStore; onRestored: () =>
       ) : items.length === 0 ? (
         <div className="muted">Nothing here — deleted items you can recover will show up in this list.</div>
       ) : (
-        items.map((d) => (
-          <div key={d.itemId} className="secret-row" style={{ alignItems: "center", marginTop: 8 }}>
-            <span style={{ flex: 1 }}>
-              {d.doc ? d.doc.name : <span className="muted">(unrecoverable — no readable version)</span>}
-              {/* bug-web--6 / ux-parity--6: was toISOString().slice(0,10) — a UTC substring, so
-                  an 11 PM local delete rendered tomorrow's date, in an ISO dialect no other
-                  surface speaks. fmtDay is the house "July 14" form, in the reader's timezone,
-                  and Sharing's own recently-deleted list already uses it. */}
-              <span className="muted mono" style={{ marginLeft: 8 }}>deleted {fmtDay(d.deletedAt)}</span>
-            </span>
-            {confirmPurgeId === d.itemId ? (
-              <>
-                <span className="muted">Delete forever?</span>
-                <button className="ghost" style={{ color: "var(--danger)" }} disabled={purgingId !== null} onClick={() => purge(d.itemId)}>
-                  {purgingId === d.itemId ? "Deleting…" : "Confirm"}
-                </button>
-                <button className="ghost" disabled={purgingId !== null} onClick={() => setConfirmPurgeId(null)}>Keep</button>
-              </>
-            ) : (
-              <>
-                <button className="ghost" disabled={!d.doc || restoringId !== null || purgingId !== null} onClick={() => restore(d)}>
-                  {restoringId === d.itemId ? "Restoring…" : "Restore"}
-                </button>
-                <button className="ghost" style={{ color: "var(--danger)" }} disabled={restoringId !== null || purgingId !== null} onClick={() => setConfirmPurgeId(d.itemId)}>
-                  Delete forever
-                </button>
-              </>
-            )}
-          </div>
-        ))
+        items.map((d) => {
+          // G22: the deleted-items route is role-agnostic, so a reader's Trash lists shared-vault
+          // tombstones — but the server refuses a reader's restore/purge (no_grant). Gate the
+          // actions here like every sibling surface (Detail/ItemHistory) instead of offering a
+          // guaranteed 403; same shape as the Android Trash row.
+          const readOnly = roleFor(d.vaultId) === "reader";
+          return (
+            <div key={d.itemId} className="secret-row" style={{ alignItems: "center", marginTop: 8 }}>
+              <span style={{ flex: 1 }}>
+                {d.doc ? d.doc.name : <span className="muted">(unrecoverable — no readable version)</span>}
+                {/* bug-web--6 / ux-parity--6: was toISOString().slice(0,10) — a UTC substring, so
+                    an 11 PM local delete rendered tomorrow's date, in an ISO dialect no other
+                    surface speaks. fmtDay is the house "July 14" form, in the reader's timezone,
+                    and Sharing's own recently-deleted list already uses it. */}
+                <span className="muted mono" style={{ marginLeft: 8 }}>deleted {fmtDay(d.deletedAt)}{readOnly && " · view only"}</span>
+              </span>
+              {!readOnly &&
+                (confirmPurgeId === d.itemId ? (
+                  <>
+                    <span className="muted">Delete forever?</span>
+                    <button className="ghost" style={{ color: "var(--danger)" }} disabled={purgingId !== null} onClick={() => purge(d.itemId)}>
+                      {purgingId === d.itemId ? "Deleting…" : "Confirm"}
+                    </button>
+                    <button className="ghost" disabled={purgingId !== null} onClick={() => setConfirmPurgeId(null)}>Keep</button>
+                  </>
+                ) : (
+                  <>
+                    <button className="ghost" disabled={!d.doc || restoringId !== null || purgingId !== null} onClick={() => restore(d)}>
+                      {restoringId === d.itemId ? "Restoring…" : "Restore"}
+                    </button>
+                    <button className="ghost" style={{ color: "var(--danger)" }} disabled={restoringId !== null || purgingId !== null} onClick={() => setConfirmPurgeId(d.itemId)}>
+                      Delete forever
+                    </button>
+                  </>
+                ))}
+            </div>
+          );
+        })
       )}
     </div>
   );
@@ -1713,6 +1737,10 @@ function HealthLine({ password, client }: { password: string; client: ApiClient 
   };
   return (
     <div style={{ marginTop: 4 }}>
+      {/* BL-1 (G25): the verdict is ASYNC info landing in a bare span — silent to AT. One
+          persistent live region mounted from the start, the Detail/Staleness contract (a
+          conditionally-mounted role=status is not announced). */}
+      <Announcer text={status} />
       <button className="link" onClick={check}>Check breach exposure</button>
       {status && <span className="muted" style={{ marginLeft: 10, color: status.startsWith("⚠") ? "var(--danger)" : "var(--ink-dim)" }}>{status}</span>}
     </div>

@@ -227,6 +227,11 @@ interface Session {
   email: string;
   items: DecryptedItem[];
   vaultKeys: Map<string, Uint8Array>;
+  /** Grant role per opened vault (G21, 2026-08-30 audit — web Account.vaultRoles twin): "reader"
+   *  marks a view-only grant, so the save/link/TOTP-add paths never offer a write the server
+   *  would deny. Recorded alongside each key in buildVaultKeys; same staleness as vaultKeys
+   *  (refreshed at the next real unlock, by design — see resync). */
+  vaultRoles: Map<string, string>;
   personalVaultId: string;
   /** Rescue-issued temporary password in effect (E1-6) — surfaced in `status` for the popup nudge. */
   mustChangePassword: boolean;
@@ -261,6 +266,9 @@ interface SessionSnapshot {
   provenance: "PASSWORD" | "QUICK";
   lastFullUnlockAt: number;
   vaultKeys: Record<string, string>;
+  /** Optional: joined the snapshot with G21 (2026-08-30) — a pre-G21 snapshot lacks it, and the
+   *  empty default merely restores the pre-fix behavior (every vault treated writable). */
+  vaultRoles?: Record<string, string>;
   items: DecryptedItem[];
 }
 
@@ -1127,6 +1135,9 @@ function ensureLoaded(): Promise<void> {
         provenance: snap.provenance ?? "PASSWORD",
         lastFullUnlockAt: typeof snap.lastFullUnlockAt === "number" ? snap.lastFullUnlockAt : 0,
         vaultKeys: new Map(Object.entries(snap.vaultKeys).map(([id, b]) => [id, fromB64(b)])),
+        // vaultRoles joined the snapshot with G21 (2026-08-30) — a pre-G21 snapshot lacks it;
+        // empty = every vault treated writable, exactly the pre-fix behavior (the server still refuses).
+        vaultRoles: new Map(Object.entries(snap.vaultRoles ?? {})),
         // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
         items: snap.items.map((i) => ({ ...i, formatVersion: i.formatVersion ?? 1 })),
@@ -1177,6 +1188,7 @@ function persistSession(): Promise<void> {
     provenance: session.provenance,
     lastFullUnlockAt: session.lastFullUnlockAt,
     vaultKeys: Object.fromEntries([...session.vaultKeys].map(([id, vk]) => [id, toB64(vk)])),
+    vaultRoles: Object.fromEntries(session.vaultRoles),
     items: session.items,
   };
   // The known-logins digest tracks the items it is derived from: every persist of the session
@@ -1730,6 +1742,11 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return { locked: false, count } satisfies Res<"passwordReuse">;
     }
     case "totp": {
+      // G14 (2026-08-30 audit): POPUP ONLY — enforce the messages.ts "Popup: live TOTP code"
+      // contract the way every sibling secret handler does (revealCardField / fillFromPopup /
+      // setTotp). Without this, any page frame could pull the live 2FA code for an arbitrary
+      // itemId while unlocked; the popup has no tab, so this is behavior-preserving for it.
+      if (sender.tab !== undefined) return { ok: false } satisfies Res<"totp">;
       const uri = session?.items.find((i) => i.itemId === msg.itemId)?.doc.login?.totp;
       if (!uri) return { ok: false } satisfies Res<"totp">;
       try {
@@ -1846,8 +1863,14 @@ function verifyServerIdentity(localPub: Uint8Array, identityPubB64: string): voi
 /** Open every grant we hold a key for (owner via UVK, member via the identity-sealed box). Shared by
  *  the full unlock and the quick-unlock redeem — the redeem holding the UVK + identity again is what
  *  lets a brand-new shared-vault grant open on a quick unlock (design §1). */
-function buildVaultKeys(sync: SyncResponse, uvk: Uint8Array, identity: { publicKey: Uint8Array; privateKey: Uint8Array }, userId: string): Map<string, Uint8Array> {
+function buildVaultKeys(
+  sync: SyncResponse,
+  uvk: Uint8Array,
+  identity: { publicKey: Uint8Array; privateKey: Uint8Array },
+  userId: string,
+): { vaultKeys: Map<string, Uint8Array>; vaultRoles: Map<string, string> } {
   const vaultKeys = new Map<string, Uint8Array>();
+  const vaultRoles = new Map<string, string>();
   for (const g of sync.grants) {
     try {
       let vk: Uint8Array;
@@ -1864,11 +1887,14 @@ function buildVaultKeys(sync: SyncResponse, uvk: Uint8Array, identity: { publicK
         continue;
       }
       vaultKeys.set(g.vaultId, vk);
+      // G21: record the grant's role beside the key — "reader" means the server denies every push
+      // to this vault, so the write paths must never target its items.
+      vaultRoles.set(g.vaultId, g.role);
     } catch {
       /* wrong key / not ours — skip */
     }
   }
-  return vaultKeys;
+  return { vaultKeys, vaultRoles };
 }
 
 /** Policy fetch — a failed fetch must never mean "no idle lock at all" (web resolveAutoLockSeconds
@@ -2024,7 +2050,7 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
       api.setTokens(null, null); // a switch/lock landed during sync — drop the tokens, install nothing
       return { ok: false, code: "aborted" };
     }
-    const vaultKeys = buildVaultKeys(sync, uvk, identity, s.userId);
+    const { vaultKeys, vaultRoles } = buildVaultKeys(sync, uvk, identity, s.userId);
     const items = decryptItems(sync, vaultKeys);
     // The personal vault (save target) = the type="personal" vault we hold a key for (web store.ts parity).
     const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
@@ -2035,6 +2061,7 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
       email,
       items,
       vaultKeys,
+      vaultRoles,
       personalVaultId,
       mustChangePassword: s.mustChangePassword ?? false,
       uvk,
@@ -2269,7 +2296,7 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
           const sync = await api.sync(0);
           await fetchPolicyInto(); // breaker B6: re-fetch autoLockSeconds — done BEFORE the final owns-check so
           if (gen !== redeemGen) return { ok: false, code: "aborted" }; // no network await follows the session build
-          const vaultKeys = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
+          const { vaultKeys, vaultRoles } = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
           const items = decryptItems(sync, vaultKeys);
           const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
           // Provenance QUICK + the COPIED stamp (breaker A4). mustChangePassword is false by construction —
@@ -2279,6 +2306,7 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
             email: begin.email,
             items,
             vaultKeys,
+            vaultRoles,
             personalVaultId,
             mustChangePassword: false,
             uvk: begin.uvk, // UVK retained in memory (breaker B1) so a re-enroll from this QUICK session works
@@ -3253,12 +3281,16 @@ async function capturedCredential(
     return { ok: true };
   }
 
+  // G21: a reader-vault match still drives the 2a suppress above (a re-login of a shared login is
+  // nothing to save), but it can never be the UPDATE target — the server denies a reader's push —
+  // so the banner offers Save-new (a fresh personal item) instead of a doomed Update.
+  const updatable = existing !== undefined && writableItem(existing) ? existing : undefined;
   const pending: PendingSave & { password: string; frameId: number; lockedAt?: number; quiet?: boolean; offeredAt?: number } = {
     host,
     username,
-    updatesItemId: existing?.itemId ?? null,
-    updatesItemName: existing?.doc.name ?? null,
-    updatesItemUsername: existing?.doc.login?.username ?? null,
+    updatesItemId: updatable?.itemId ?? null,
+    updatesItemName: updatable?.doc.name ?? null,
+    updatesItemUsername: updatable?.doc.login?.username ?? null,
     password: msg.password,
     frameId,
   };
@@ -3355,12 +3387,16 @@ async function commitPendingSave(
   // locked-at-capture password-only submit for a DIFFERENT account would otherwise clobber the
   // host's single login — data loss), and it suppresses ONLY a password-only re-login (never drops
   // a username-present new account that reuses a password).
-  const decision = resolveSaveAction(
+  let decision = resolveSaveAction(
     pending.updatesItemId ? session.items.find((i) => i.itemId === pending.updatesItemId) : undefined,
     matchesFor(pending.host),
     pending.username,
     pending.password,
   );
+  // G21: a reader-vault target (a frozen pre-fix pending, or the host∧username match) can't take
+  // the put — the server denies a reader's push — so land the save as a NEW personal item instead.
+  // resolveSaveAction's suppress rule is untouched: a re-login of a shared reader login stays nothing-to-save.
+  if (decision.kind === "update" && !writableItem(decision.target)) decision = { kind: "create" };
   if (decision.kind === "suppress") {
     // 2a re-login of a known item (reachable via the locked-at-capture path, where the :967
     // unchanged-password suppress couldn't run) — nothing to save; don't mint a duplicate.
@@ -3488,6 +3524,15 @@ async function resolvePendingCardSave(
 }
 
 // ---- writes (seal → push → confirm) ----
+
+/** G21 (2026-08-30 audit): can this item take a put? A "reader" grant is view-only — the server
+ *  denies its push (Service.kt: role=="reader" ⇒ Forbidden) — so the save/link/TOTP-add paths must
+ *  never OFFER a write against a reader-vault item (the denial used to render as the lying
+ *  "Could not save — try again."). A missing role (pre-G21 snapshot) fails OPEN to the pre-fix
+ *  behavior: the server still refuses, nothing new is exposed. Web twin: store.ts roleFor()==="reader". */
+function writableItem(it: DecryptedItem): boolean {
+  return session?.vaultRoles.get(it.vaultId) !== "reader";
+}
 
 /** Seal + push one put over the existing envelope path; answers the per-mutation result.
  *  `formatVersion` is computed ONCE by the caller and used for BOTH the AD binding and the
@@ -3632,6 +3677,9 @@ function pageTotpTarget(sender: chrome.runtime.MessageSender): DecryptedItem | n
   if (matches.length !== 1) return null;
   const it = matches[0]!;
   if ((it.doc.login?.totp ?? "") !== "") return null;
+  // G21: a reader-vault login can't take the add (the server denies a reader's push) — never
+  // OFFER a write that is guaranteed to die in the banner's "Could not add the code" dead end.
+  if (!writableItem(it)) return null;
   return it;
 }
 
@@ -3694,6 +3742,9 @@ async function linkUri(msg: Extract<Req, { type: "linkUri" }>, sender: chrome.ru
     return p?.kind === "web" && p.host === webHost;
   });
   if (already) return { ok: true }; // nothing to push
+  // G21: a reader grant can't take the append — refuse here instead of pushing a write the server
+  // will deny (the offer banner renders its honest "Could not link." line).
+  if (!writableItem(it)) return { ok: false, error: "read-only vault" };
   const doc: ItemDoc = { ...it.doc, login: { ...it.doc.login, uris: [...kept, `https://${webHost}`] } };
   return putExisting(it, doc);
 }

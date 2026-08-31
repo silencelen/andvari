@@ -37,7 +37,7 @@ export interface WireGrant {
   userId: string;
   role: string;
   wrappedVk: string;
-  sealedVk?: string | null; // member grants (crypto_box_seal to identityPub) — TODO(extension)
+  sealedVk?: string | null; // member grants (crypto_box_seal to identityPub)
 }
 export interface WireItem {
   itemId: string;

@@ -39,7 +39,8 @@ describe("TrashView purge — no full re-list on success", () => {
   it("load() survives only on the failure arm (lost-response reconcile), never in finally", () => {
     const src = purgeSource();
     const finallyBlock = src.slice(src.indexOf("} finally {"));
-    expect(src.slice(src.indexOf("} catch {"), src.indexOf("} finally {"))).toContain("load(");
+    // G22: the catch now binds `e` to map the reader-role 403 to the permission sentence.
+    expect(src.slice(src.indexOf("} catch (e) {"), src.indexOf("} finally {"))).toContain("load(");
     expect(finallyBlock).not.toContain("load(");
   });
 });
@@ -58,7 +59,7 @@ describe("TrashView — a failed purge/restore keeps saying so after the reconci
 
   it("the purge failure arm reconciles WITHOUT wiping \"Couldn't delete it permanently\"", () => {
     const src = purgeSource();
-    expect(src.slice(src.indexOf("} catch {"), src.indexOf("} finally {"))).toContain("load(true)");
+    expect(src.slice(src.indexOf("} catch (e) {"), src.indexOf("} finally {"))).toContain("load(true)");
   });
 
   it("the restore re-list preserves \"Restore failed\" the same way", () => {
