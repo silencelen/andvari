@@ -27,16 +27,33 @@ object LifecycleProof {
     private fun mac(crypto: CryptoProvider, key: ByteArray, domain: String): String =
         Bytes.toB64(crypto.hmacSha256(key, domain.encodeToByteArray()))
 
-    fun delete(crypto: CryptoProvider, key: ByteArray, vaultId: String, deleteId: String): String =
-        mac(crypto, key, "andvari/v1|lifecycle|delete|$vaultId|$deleteId")
+    /** [Ad.join] parity (F33: a check, not a comment): several of these components arrive on
+     *  server rows, and a `|` inside one would shift the tuple boundaries so two different
+     *  tuples MAC identically. Conforming values (UUIDs, hex, base64url) can never contain
+     *  `|`, so honest input — and the lifecycleproof.json vectors — never trips this. On the
+     *  verify side every recompute site is runCatching-wrapped, so a throw degrades to
+     *  "unverified" → retain-and-warn, exactly like a bad proof. */
+    private fun requireDomainSafe(vararg parts: String) {
+        for (p in parts) require('|' !in p) { "lifecycle proof component must not contain '|'" }
+    }
 
-    fun restore(crypto: CryptoProvider, key: ByteArray, vaultId: String, deleteId: String): String =
-        mac(crypto, key, "andvari/v1|lifecycle|restore|$vaultId|$deleteId")
+    fun delete(crypto: CryptoProvider, key: ByteArray, vaultId: String, deleteId: String): String {
+        requireDomainSafe(vaultId, deleteId)
+        return mac(crypto, key, "andvari/v1|lifecycle|delete|$vaultId|$deleteId")
+    }
+
+    fun restore(crypto: CryptoProvider, key: ByteArray, vaultId: String, deleteId: String): String {
+        requireDomainSafe(vaultId, deleteId)
+        return mac(crypto, key, "andvari/v1|lifecycle|restore|$vaultId|$deleteId")
+    }
 
     fun offer(
         crypto: CryptoProvider, key: ByteArray,
         vaultId: String, offerId: String, toUserId: String, expiresAt: Long, seq: Long,
-    ): String = mac(crypto, key, "andvari/v1|lifecycle|transfer|$vaultId|$offerId|$toUserId|$expiresAt|$seq")
+    ): String {
+        requireDomainSafe(vaultId, offerId, toUserId)
+        return mac(crypto, key, "andvari/v1|lifecycle|transfer|$vaultId|$offerId|$toUserId|$expiresAt|$seq")
+    }
 
     fun accept(
         crypto: CryptoProvider, key: ByteArray,
@@ -56,10 +73,15 @@ object LifecycleProof {
     fun acceptFromHash(
         crypto: CryptoProvider, key: ByteArray,
         vaultId: String, offerId: String, newOwnerUserId: String, seq: Long, wrapHash: String,
-    ): String = mac(crypto, key, "andvari/v1|lifecycle|transfer-accept|$vaultId|$offerId|$newOwnerUserId|$seq|$wrapHash")
+    ): String {
+        requireDomainSafe(vaultId, offerId, newOwnerUserId, wrapHash)
+        return mac(crypto, key, "andvari/v1|lifecycle|transfer-accept|$vaultId|$offerId|$newOwnerUserId|$seq|$wrapHash")
+    }
 
-    fun remove(crypto: CryptoProvider, key: ByteArray, vaultId: String, targetUserId: String, nonce: String): String =
-        mac(crypto, key, "andvari/v1|lifecycle|remove|$vaultId|$targetUserId|$nonce")
+    fun remove(crypto: CryptoProvider, key: ByteArray, vaultId: String, targetUserId: String, nonce: String): String {
+        requireDomainSafe(vaultId, targetUserId, nonce)
+        return mac(crypto, key, "andvari/v1|lifecycle|remove|$vaultId|$targetUserId|$nonce")
+    }
 
     /** Constant-time compare of a [presented] base64url proof against the [expected] value
      *  (recompute expected with the mint helper above). Any decode failure ⇒ false. */

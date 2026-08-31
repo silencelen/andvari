@@ -72,8 +72,9 @@ class HouseholdCopyTest {
         assertEquals("This account needs a one-time code — enter the code from your authenticator app.", HouseholdCopy.TOTP_CODE_NEEDED)
         // NATIVE-PINNED: desktop totpOp wording (deliberately unifies android's variant).
         assertEquals("That code isn't right — check your authenticator and try again.", HouseholdCopy.BAD_TOTP_CODE)
-        // NATIVE-PINNED: SaveConfirmActivity's IOException sentence.
-        assertEquals("Offline — try saving again when you're connected.", HouseholdCopy.SAVE_OFFLINE)
+        // NATIVE-PINNED: SaveConfirmActivity's IOException sentence. G23: the save is durably
+        // queued — the copy must not claim failure or invite a duplicating re-save.
+        assertEquals("Offline — your save is queued and will finish when you're connected.", HouseholdCopy.SAVE_OFFLINE)
         // TWIN: extension saveErrorCopy("failed").
         assertEquals("Could not save — try again.", HouseholdCopy.SAVE_FAILED)
         // NATIVE-PINNED: desktop manual-refresh offline notice.
@@ -301,7 +302,7 @@ class HouseholdCopyTest {
 
     @Test
     fun saveLadder() {
-        assertEquals("Offline — try saving again when you're connected.", HouseholdCopy.forSaveError(IOException("socket closed")))
+        assertEquals("Offline — your save is queued and will finish when you're connected.", HouseholdCopy.forSaveError(IOException("socket closed")))
         assertEquals("Wrong master password.", HouseholdCopy.forSaveError(CryptoException("aead open failed")))
         assertEquals("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.", HouseholdCopy.forSaveError(identityMismatch))
         // Server refusals route through the shared map — 401, conflict, lifecycle rows.

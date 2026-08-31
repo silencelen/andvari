@@ -154,6 +154,11 @@ fun requireEscrowBlob(sealedB64: String) {
 internal const val BODY_CAP_TIGHT_BYTES = 256L * 1024
 internal const val BODY_CAP_PUSH_BYTES = 8L * 1024 * 1024
 
+/** /api/v1/usage gets its OWN cap — [USAGE_SEALED_MAX] plus JSON-framing headroom — so an
+ *  oversized ledger reaches the handler's `bad_usage_blob` check (spec 03 §8.2) instead of the
+ *  generic 413: under TIGHT the documented 512 KiB ceiling was unreachable dead code. */
+internal const val BODY_CAP_USAGE_BYTES = USAGE_SEALED_MAX + 4L * 1024
+
 /** The request-body cap for [path], or null when exempt (the streamed attachment upload; the
  *  /events WebSocket upgrade, whose live channel must not be drained by the receive interceptor). */
 internal fun bodyCapBytes(path: String): Long? = when {
@@ -164,6 +169,8 @@ internal fun bodyCapBytes(path: String): Long? = when {
     // exactly like a push mutation — so it gets the GENEROUS ceiling, not TIGHT. Otherwise a big
     // item the server accepted at creation (via push) would 413 on restore = un-restorable Trash.
     path.startsWith("/api/v1/items/") && path.endsWith("/restore") -> BODY_CAP_PUSH_BYTES
+    // The usage-ledger PUT must clear USAGE_SEALED_MAX so `bad_usage_blob` is the real authority.
+    path == "/api/v1/usage" -> BODY_CAP_USAGE_BYTES
     else -> BODY_CAP_TIGHT_BYTES
 }
 
@@ -822,8 +829,9 @@ fun Application.andvariModule(services: Services) {
         }
 
         // ---- usage ledger (spec 02 §8.2, design 2026-08-22-login-health) ----
-        // One opaque AEAD blob per user, sealed under the UVK. The server stores and returns bytes
-        // and can decrypt none of it — the shape `escrow` and `member_recovery` already use.
+        // One opaque AEAD blob per user, sealed under the personal-VK-derived usageKey (HKDF,
+        // spec 02 §8.2 — NOT the UVK). The server stores and returns bytes and can decrypt none
+        // of it — the shape `escrow` and `member_recovery` already use.
         //
         // Deliberately NOT per-item rows: that would hand the server the per-item behavioral timing
         // (which login, how often, when) that this whole design exists to withhold. What leaks here
