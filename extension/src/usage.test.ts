@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { adUsage, fromB64, toB64, usageKey } from "./crypto.ts";
-import { mergeUsage, parseUsage, recordUse, serializeUsage, type UsageMap } from "./usage.ts";
+import { mergeUsage, parseUsage, pruneUsage, recordUse, serializeUsage, type UsageMap } from "./usage.ts";
 
 /**
  * Usage ledger (spec 02 §8.2) — the extension's twin of web/src/vault/usage.test.ts.
@@ -71,6 +71,22 @@ describe("recordUse", () => {
 
   it("never moves a stamp backwards", () => {
     assert.equal(recordUse({ x: { lastUsedAt: T, useCount: 1 } }, "x", T - 99_999).x!.lastUsedAt, T);
+  });
+});
+
+// G04 (2026-08-30 audit): twin of web's pruneUsage pins. The SW flushes the prune ONLY at resync's
+// post-full-snapshot point (background.ts), where the live set is provably complete; the debounce
+// and lock-path flushes pass nothing, so a partial view can never drop an item's usage. These pin
+// the pure half — that a complete set drops the gone item, and that an empty set drops EVERYTHING,
+// which is exactly why a caller must never hand this a partial (mid-sync) set.
+describe("pruneUsage (must stay identical to the web twin)", () => {
+  it("drops entries whose item is gone so the blob cannot grow forever", () => {
+    const m: UsageMap = { alive: { lastUsedAt: T, useCount: 1 }, deleted: { lastUsedAt: T, useCount: 1 } };
+    assert.deepEqual(Object.keys(pruneUsage(m, new Set(["alive"]))), ["alive"]);
+  });
+
+  it("drops everything when handed an empty set — which is why callers must pass the FULL set", () => {
+    assert.deepEqual(pruneUsage({ a: { lastUsedAt: T, useCount: 1 } }, new Set()), {});
   });
 });
 

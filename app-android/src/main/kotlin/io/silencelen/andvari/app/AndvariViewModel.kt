@@ -3604,6 +3604,14 @@ class AndvariViewModel(
     private suspend fun syncNow(e: SyncEngine) {
         e.sync()
         store.lastSyncAt = System.currentTimeMillis()
+        // G04: a completed sync is the ONLY moment `e.items()` is provably the complete live
+        // set, so it is the only safe place to prune the ever-growing usage blob (pruning a
+        // pre-sync view would drop other devices' entries). Guard on the session still owning
+        // THIS engine — a mid-sync lock/rebind must not prune one account's ids against
+        // another's blob. Flush stays batched; the prune only writes when it drops something.
+        VaultSession.get()?.let { s ->
+            if (s.engine === e) UsageRecorder.flushWithPrune(s, e.items().mapTo(HashSet()) { it.itemId })
+        }
     }
 
     private fun refreshItems() {

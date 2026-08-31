@@ -293,6 +293,13 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     try {
       await store.sync();
       setSyncOk(true);
+      // G04: a landed full sync is the ONE moment the store's item set is provably COMPLETE, so
+      // this is the only place the usage ledger may be pruned (usage.ts pruneUsage). The
+      // pagehide/unmount/debounce flushes stay bare flush() — a partial/in-flight view there
+      // would drop usage for items merely not loaded yet, which is data loss. The live set folds
+      // in undecryptable/missing-VK ids too, so an item this device just can't read (newer fv,
+      // unarrived grant) keeps its cross-device usage instead of being pruned away.
+      void usage.flush(new Set([...store.list().map((it) => it.itemId), ...store.undecryptable().map((it) => it.itemId)]));
     } catch {
       setSyncOk(false);
     } finally {
@@ -303,7 +310,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       setItems(store.list());
       setNotices(store.notices());
     }
-  }, [store]);
+  }, [store, usage]);
 
   // WS dirty-bell → pull. The bell auto-reconnects (client.ts: backoff + fresh ticket per
   // attempt) and onOpen fires on EVERY (re)open, so the sync there catches both the mint

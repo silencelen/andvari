@@ -1,13 +1,10 @@
 package io.silencelen.andvari.app
 
 import io.silencelen.andvari.core.client.UsageLedger
+import io.silencelen.andvari.core.client.UsageRecorderCore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The usage ledger's Android half (spec 02 §8.2) — "when did I last use this login", the signal
@@ -15,14 +12,14 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * Process-wide beside [VaultSession] rather than owned by a ViewModel, because the two things
  * that record a use live in different processes' worth of lifecycle: the UI's copy buttons and
- * (later) the autofill service. Every rule about the data lives in core [UsageLedger]; this owns
- * only the buffer, the debounce and the network.
+ * (later) the autofill service. Every moving part — the buffer, the debounce, the take → merge →
+ * store round trip, the session-gated re-arm, the G03 bounded teardown flush, and the G04
+ * post-sync prune — lives in core [UsageRecorderCore] (audit G39), the F37 twin of the desktop's;
+ * this object is only the phone's adapter: its window/timeout constants, its own IO scope, and
+ * the [VaultSession]-derived session accessor + transport.
  *
  * **Batched, never per-use** — spec 03 §3: one PUT per copy would turn the blob's own `updatedAt`
  * into a keystroke-grade activity trace, which is the leak the single-blob shape exists to avoid.
- *
- * **Every failure is silent.** This is a ranking hint. It must never surface an error, block a
- * copy, or retry hard enough to be noticed.
  *
  * Known gap, deliberately not faked: an autofill FILL is not recorded, because the framework
  * gives the service no callback when the system fills a dataset (unlike the extension, which has
@@ -41,98 +38,40 @@ object UsageRecorder {
      *  never be held open noticeably. */
     const val LOCK_FLUSH_TIMEOUT_MS = 2_000L
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val lock = Any()
-    private var pending: Map<String, UsageLedger.Entry> = emptyMap()
-    private var flushJob: Job? = null
+    private val core = UsageRecorderCore<VaultSession.Unlocked>(
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        debounceMs = FLUSH_DEBOUNCE_MS,
+        boundedFlushTimeoutMs = LOCK_FLUSH_TIMEOUT_MS,
+        session = { VaultSession.get() },
+        transportFor = { s ->
+            object : UsageRecorderCore.Transport {
+                override suspend fun fetchSealed(): String? = s.api.usage().sealedUsage
+                override fun open(sealed: String): ByteArray = s.account.openUsage(sealed)
+                override fun seal(plain: ByteArray): String = s.account.sealUsage(plain)
+                override suspend fun put(sealed: String) = s.api.putUsage(sealed)
+            }
+        },
+    )
 
     /** Record a use. In memory only; the flush is debounced. Safe from any thread. */
-    fun record(itemId: String, now: Long = System.currentTimeMillis()) {
-        if (VaultSession.get() == null) return
-        synchronized(lock) {
-            pending = UsageLedger.record(pending, itemId, now)
-            if (flushJob?.isActive == true) return
-            flushJob = scope.launch {
-                delay(FLUSH_DEBOUNCE_MS)
-                flush()
-            }
-        }
-    }
+    fun record(itemId: String, now: Long = System.currentTimeMillis()) = core.record(itemId, now)
 
     /** Debounced flush against the live session. */
-    suspend fun flush() {
-        val session = VaultSession.get() ?: return
-        storeWith(session, take())
-    }
+    suspend fun flush() = core.flush()
 
-    /**
-     * Flush against an EXPLICITLY passed session, then run [then]. The lock path needs the
-     * explicit session: it calls in before dropping `state`, so [flush]'s own
-     * `VaultSession.get()` would already read null and the session's last uses would be
-     * silently discarded. The flush is BOUNDED ([LOCK_FLUSH_TIMEOUT_MS]) and [then] runs
-     * whether or not it landed — the lock path hands `api.close()` in as [then], so the
-     * GET+PUT round trip is no longer cancelled by its own teardown (the signOut logout
-     * precedent), yet a ranking hint still can never delay the lock itself or hold the
-     * transport open past the bound.
-     */
-    fun flushForSession(session: VaultSession.Unlocked, then: () -> Unit = {}) {
-        val mine = take()
-        scope.launch {
-            if (mine.isNotEmpty()) withTimeoutOrNull(LOCK_FLUSH_TIMEOUT_MS) { storeWith(session, mine) }
-            then()
-        }
-    }
+    /** Flush against an EXPLICITLY passed session, then run [then] (the G03 lock-path shape —
+     *  [VaultSession.lock] hands `api.close()` in as [then]). See [UsageRecorderCore]. */
+    fun flushForSession(session: VaultSession.Unlocked, then: () -> Unit = {}) = core.flushForSession(session, then)
 
-    /**
-     * The un-flushed buffer, for DISPLAY only (design 2026-08-23). The flush is debounced 15 s by
-     * design — one PUT per copy would turn the blob's own `updatedAt` into a keystroke-grade
-     * activity trace (spec 03 §3) — so a user who copies a password and immediately opens Health
-     * would otherwise be told that login is unused. Callers merge this over the server's copy.
-     *
-     * Returns a snapshot, never the live reference, and does NOT drain (unlike [take]): reading
-     * the screen must not cost the buffer its next real flush.
-     */
-    fun peek(): Map<String, UsageLedger.Entry> = synchronized(lock) { pending }
+    /** Flush AND prune against a COMPLETE live item set (audit G04) — the only caller is a
+     *  successful full sync, where `engine.items()` is authoritative. Never the teardown path. */
+    fun flushWithPrune(session: VaultSession.Unlocked, liveItemIds: Set<String>) =
+        core.flushWithPrune(session, liveItemIds)
 
-    private fun take(): Map<String, UsageLedger.Entry> = synchronized(lock) {
-        val m = pending
-        pending = emptyMap()
-        m
-    }
-
-    /**
-     * Merge against the server's current copy, then store. The re-read is what keeps
-     * last-writer-wins from meaning last-writer-DESTROYS: the laptop's and the browser's entries
-     * survive this flush even though the endpoint has no merge semantics of its own.
-     */
-    private suspend fun storeWith(session: VaultSession.Unlocked, mine: Map<String, UsageLedger.Entry>) {
-        if (mine.isEmpty()) return
-        try {
-            var merged = mine
-            // Could not read the remote copy — store ours rather than lose this session's uses.
-            runCatching {
-                session.api.usage().sealedUsage?.let { sealed ->
-                    merged = UsageLedger.merge(UsageLedger.parse(session.account.openUsage(sealed).decodeToString()), mine)
-                }
-            }
-            session.api.putUsage(session.account.sealUsage(UsageLedger.serialize(merged).encodeToByteArray()))
-        } catch (_: Throwable) {
-            // Re-arm rather than drop — but ONLY while a session still stands. This resumes after
-            // suspension points, so on the lock path it can run AFTER clear(); re-arming
-            // unconditionally there would resurrect behavioural records into a locked process.
-            synchronized(lock) {
-                if (VaultSession.get() != null) pending = UsageLedger.merge(mine, pending)
-            }
-        }
-    }
+    /** The un-flushed buffer, for DISPLAY only — callers merge it over the server's copy. */
+    fun peek(): Map<String, UsageLedger.Entry> = core.peek()
 
     /** Drop the buffer. Called wherever vault material is dropped — behavioural records about a
      *  user's items must not outlive the session that produced them. */
-    fun clear() {
-        synchronized(lock) {
-            flushJob?.cancel()
-            flushJob = null
-            pending = emptyMap()
-        }
-    }
+    fun clear() = core.clear()
 }

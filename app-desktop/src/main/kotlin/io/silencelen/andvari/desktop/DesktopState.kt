@@ -65,10 +65,9 @@ import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import io.silencelen.andvari.core.model.VaultMemberSummary
-import io.silencelen.andvari.core.client.UsageLedger
+import io.silencelen.andvari.core.client.UsageRecorderCore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -653,96 +652,62 @@ class DesktopState(
     private var account: Account? = null
 
     // ---- usage ledger (spec 02 §8.2) ----
-    // Matches the web client's window; a desktop process is long-lived, so it need not be as
-    // short as the phone's or the service worker's.
     // "When did I last use this login" — the signal behind the web client's staleness ranking.
-    // Buffered in memory and flushed on a debounce, NEVER a PUT per copy: spec 03 §3, because a
-    // write per use would turn the blob's own updatedAt into a keystroke-grade activity trace.
-    // Every failure here is silent — a ranking hint may not surface an error or block a copy.
-    private var pendingUsage: Map<String, UsageLedger.Entry> = emptyMap()
-    private var usageFlush: Job? = null
+    // The whole shell (buffer, debounce, take→merge→store, session-gated re-arm, the G03 bounded
+    // teardown flush, the G04 post-sync prune) is core [UsageRecorderCore] (audit G39, the F37
+    // twin of the phone's UsageRecorder). This region is the desktop's adapter: its window
+    // matches the web client's (a desktop process is long-lived, so it need not be as short as
+    // the phone's or the service worker's), and it hands the core its Compose [scope] — so the
+    // flush stays Main-confined exactly as before — plus an api+account session accessor and
+    // transport. Buffered, NEVER a PUT per copy (spec 03 §3); every failure is silent.
 
-    /** Matches the web client's window — a desktop process is long-lived, so it need not be as
-     *  short as the phone's or the service worker's. A plain val, NOT a second companion object:
-     *  this class already has one, and adding another made every existing constant in it
-     *  unresolvable. */
-    private val usageFlushDebounceMs = 30_000L
+    /** The core's unlocked-session type on this client: the api+account captured together, so a
+     *  flush launched at teardown cannot read a half-nulled pair. */
+    private class UsageSession(val api: AndvariApi, val account: Account)
+
+    private val usage = UsageRecorderCore<UsageSession>(
+        scope = scope,
+        debounceMs = 30_000L,
+        boundedFlushTimeoutMs = USAGE_FLUSH_TIMEOUT_MS,
+        session = { val a = api; val acct = account; if (a != null && acct != null) UsageSession(a, acct) else null },
+        transportFor = { s ->
+            object : UsageRecorderCore.Transport {
+                override suspend fun fetchSealed(): String? = s.api.usage().sealedUsage
+                override fun open(sealed: String): ByteArray = s.account.openUsage(sealed)
+                override fun seal(plain: ByteArray): String = s.account.sealUsage(plain)
+                override suspend fun put(sealed: String) = s.api.putUsage(sealed)
+            }
+        },
+    )
 
     /** Record a use (a copied password or one-time code). Cheap and fire-and-forget. */
-    fun recordUse(itemId: String) {
-        if (api == null || account == null) return
-        pendingUsage = UsageLedger.record(pendingUsage, itemId, System.currentTimeMillis())
-        if (usageFlush?.isActive == true) return
-        usageFlush = scope.launch {
-            delay(usageFlushDebounceMs)
-            flushUsage()
-        }
-    }
+    fun recordUse(itemId: String) = usage.record(itemId, System.currentTimeMillis())
+
+    /** Awaited (bounded by the caller) flush — [signOut] calls this BEFORE revoking the tokens
+     *  the flush rides on (audit G03). */
+    suspend fun flushUsage() = usage.flush()
 
     /**
-     * Merge against the server's copy, then store. The re-read is what keeps last-writer-wins
-     * from meaning last-writer-DESTROYS — the phone's and the browser's entries survive this
-     * flush even though the endpoint has no merge semantics of its own.
-     */
-    suspend fun flushUsage() {
-        val a = api ?: return
-        val acct = account ?: return
-        val mine = pendingUsage
-        if (mine.isEmpty()) return
-        pendingUsage = emptyMap()
-        storeUsage(a, acct, mine)
-    }
-
-    /**
-     * Audit G03: store what is buffered using an EXPLICITLY captured api/account, and hand the
-     * flush coroutine ownership of CLOSING the client. The lock and switch paths need this: they
-     * null `api`/`account` synchronously, and closing the client in the same statement list
-     * cancelled the just-launched flush every time (this scope is Main-confined, so the launched
-     * coroutine cannot start before the statements after it have run) — the session's last uses
-     * were silently dropped, exactly the race the awaited-logout precedent in [signOut] names.
-     * Keys and state still drop synchronously — a ranking hint may never delay a lock; only the
-     * transport outlives them, bounded by [USAGE_FLUSH_TIMEOUT_MS], then closes either way.
+     * Audit G03: the lock/switch teardown flush. The flush coroutine owns CLOSING the client, so
+     * the bounded GET+PUT is no longer cancelled by the synchronous `api = null` + close that
+     * used to race it (this scope is Main-confined, so the launched coroutine could not start
+     * before the statements after it had run — the session's last uses were dropped every time).
+     * Captures the transport BEFORE the caller nulls `api`; keys/state still drop synchronously.
      */
     private fun flushUsageThenClose() {
         val a = api ?: return
-        val acct = account
-        val mine = pendingUsage
-        pendingUsage = emptyMap()
-        if (acct == null || mine.isEmpty()) { a.close(); return }
-        scope.launch {
-            try {
-                withTimeoutOrNull(USAGE_FLUSH_TIMEOUT_MS) { storeUsage(a, acct, mine) }
-            } finally {
-                a.close()
-            }
-        }
+        val acct = account ?: run { a.close(); return }
+        usage.flushForSession(UsageSession(a, acct)) { a.close() }
     }
 
-    private suspend fun storeUsage(a: AndvariApi, acct: Account, mine: Map<String, UsageLedger.Entry>) {
-        try {
-            var merged = mine
-            // Could not read the remote copy — store ours rather than lose this session's uses.
-            runCatching {
-                a.usage().sealedUsage?.let { sealed ->
-                    merged = UsageLedger.merge(UsageLedger.parse(acct.openUsage(sealed).decodeToString()), mine)
-                }
-            }
-            a.putUsage(acct.sealUsage(UsageLedger.serialize(merged).encodeToByteArray()))
-        } catch (_: Throwable) {
-            // Re-arm rather than drop — but only while a session still stands. This resumes after
-            // suspension points, so on the lock path it can run AFTER the keys were dropped;
-            // re-arming unconditionally would resurrect behavioural records into a locked app.
-            if (api != null) pendingUsage = UsageLedger.merge(mine, pendingUsage)
-        }
-    }
+    /** Flush AND prune against a COMPLETE live item set (audit G04) — the only caller is
+     *  [syncNow]'s successful-sync completion, where `engine.items()` is authoritative; never a
+     *  teardown view, which can be pre-sync. */
+    private fun flushUsageWithPrune(s: UsageSession, liveItemIds: Set<String>) = usage.flushWithPrune(s, liveItemIds)
 
     /** Drop the buffer wherever vault material is dropped — behavioural records about a user's
      *  items must not outlive the session that produced them. */
-    private fun clearUsage() {
-        usageFlush?.cancel()
-        usageFlush = null
-        pendingUsage = emptyMap()
-    }
+    private fun clearUsage() = usage.clear()
     // F82: raw-row reads (vault rows / envelopes — the spec 07 export enumerates from
     // them) go through the engine's read surface; no carried cache reference here.
     private var engine: SyncEngine? = null
@@ -3192,6 +3157,15 @@ class DesktopState(
     private suspend fun syncNow(e: SyncEngine) {
         e.sync()
         store.lastSyncAt = System.currentTimeMillis()
+        // G04: a completed sync is the ONLY moment `e.items()` is provably the complete live set,
+        // so it is the only safe place to prune the ever-growing usage blob (pruning a pre-sync
+        // view would drop other devices' entries). Guard on the session still owning THIS engine
+        // — a mid-sync lock/rebind must not prune one account's ids against another's blob. The
+        // flush stays batched; the prune only writes when it drops something.
+        val a = api; val acct = account
+        if (engine === e && a != null && acct != null) {
+            flushUsageWithPrune(UsageSession(a, acct), e.items().mapTo(HashSet()) { it.itemId })
+        }
     }
 
     private fun restrictToOwner(f: File) {

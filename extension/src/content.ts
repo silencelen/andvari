@@ -825,7 +825,10 @@ async function fillFromDropdown(itemId: string, f: LoginForm, explicit: boolean)
 async function fillExplicit(m: MatchItem, f: LoginForm): Promise<void> {
   const o = await fillFromDropdown(m.itemId, f, true);
   if (o.filled === "nothing") return;
-  if (!m.siteMatch) {
+  // G21: the fill itself is a READ (fine for a reader), but the URI-backfill it offers is a WRITE
+  // the server denies on a reader-role vault (SW linkUri refuses it too). Don't offer a one-tap
+  // "link this site" that can only dead-end in a refusal — suppress it for read-only items.
+  if (!m.siteMatch && !m.readOnly) {
     showLinkOffer(
       m.name,
       location.hostname,
