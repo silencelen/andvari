@@ -126,7 +126,7 @@ FIREFOX_SHA="$(hash_of "$FIREFOX_LOCAL")"
 EXT_SUMS="$EXT_DIR/SHA256SUMS-${EXT_VERSION}.txt"
 crosscheck_sums "$CHROME_LOCAL"  "$(basename "$CHROME_LOCAL")"  "$CHROME_SHA"  "$EXT_SUMS"
 crosscheck_sums "$FIREFOX_LOCAL" "$(basename "$FIREFOX_LOCAL")" "$FIREFOX_SHA" "$EXT_SUMS"
-echo "release-spec: NOTE: no cross-check for the deb — packaging writes no SHA256SUMS for it; its sha256 comes from hashing the file directly" >&2
+echo "release-spec: NOTE: no local cross-check for the deb — packaging writes no SHA256SUMS for it; its sha256 comes from hashing the file directly (the SERVED copy is verified against this hash by prestige-release.ps1 preflight)" >&2
 
 # Published names differ from build-output names: the compose plugin emits Debian's
 # andvari_<ver>-<rev>_amd64.deb, /downloads serves andvari-<ver>.deb.

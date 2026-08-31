@@ -1,6 +1,6 @@
 # Test vectors — provenance manifest
 
-These 23 files are the shared corpus every implementation is graded against: the Kotlin
+These 24 files are the shared corpus every implementation is graded against: the Kotlin
 reference (`core/`, jvmTest), the web TypeScript engine (`web/`, vitest), and the
 extension's @noble engine (`extension/`, `node --test`). `scripts/verify.sh` greens all
 three suites off *these* bytes, so a divergence in any engine reds that engine rather
@@ -8,7 +8,7 @@ than quietly forking the fleet.
 
 **The corpus has two provenances**, and an auditor should be able to tell them apart.
 `tools/vector-gen` emits 17 of the files from the Kotlin reference implementation — those
-are *derived* artifacts and are regenerated when the spec changes. The other 6 are
+are *derived* artifacts and are regenerated when the spec changes. The other 7 are
 **hand-authored**: they encode classification/parsing decisions and corpus-derived
 fixtures that no generator produces, so they are edited deliberately, by hand, as part of
 the change that needs them. Neither kind may be edited casually — a vector edit is a
@@ -42,8 +42,8 @@ reference implementation named in each row.
 
 | file | covers | consuming suites |
 |---|---|---|
-| `kdf.json` | Argon2id derivation + the H1 policy floor (spec 01 §1) | core `VectorsTest`, web `crypto.vectors.test.ts` / `vectors.test.ts`, ext `noble-extension-poc.test.ts` |
-| `wrap.json` | purpose-split key derivation + UVK/VK wrapping (spec 01 §2/§4/§6) | core `VectorsTest` / `MemberRecoveryVectorTest`, web `crypto.vectors.test.ts` / `vectors.test.ts`, ext `member-recovery.test.ts` |
+| `kdf.json` | Argon2id derivation + the H1 policy floor (spec 01 §1) | core `VectorsTest`, web `crypto.vectors.test.ts` / `vectors.test.ts`, ext `crypto.vectors.test.ts` |
+| `wrap.json` | purpose-split key derivation + UVK/VK wrapping (spec 01 §2/§4/§6) | core `VectorsTest` / `MemberRecoveryVectorTest`, web `crypto.vectors.test.ts` / `vectors.test.ts`, ext `crypto.vectors.test.ts` |
 | `envelope.json` | the AEAD item envelope + AD binding (spec 02 §2) | core `VectorsTest` / `MemberRecoveryVectorTest`, web + ext vector suites |
 | `seal.json` | `crypto_box_seal` escrow/grant sealing (spec 04 §3) | core `VectorsTest`, web `crypto.vectors.test.ts` / `vectors.test.ts` |
 | `secretstream.json` | attachment secretstream chunking (spec 02 §6) | core `VectorsTest`, web `vectors.test.ts` |
@@ -60,7 +60,7 @@ reference implementation named in each row.
 | `urimatch.json` | URI matching + autofill field classification (spec 02 §3) | core `UriMatchVectorTest` / `CardClassifyVectorTest`, web + ext `urimatch` suites |
 | `vaulthealth.json` | vault-health rankings: strength/reuse rows, staleness buckets + ORDER, duplicate clusters + refusals (design 2026-08-23) | core `VaultHealthVectorsTest`, web `vaulthealth.vectors.test.ts` |
 
-## Hand-authored (6)
+## Hand-authored (7)
 
 No generator writes these. Each is edited by hand, in the same change that moves the
 behaviour it pins, and reviewed as a fleet-wide behaviour change.
@@ -73,6 +73,7 @@ behaviour it pins, and reviewed as a fleet-wide behaviour change.
 | `card.json` | card number normalize + brand derivation | table-shaped expectations (digit stripping, brand ranges) authored against the card-brand specs | core `CardNormalizeVectorTest` / `CardFillTest`, ext `card.test.ts`, web `extension-pins.test.ts` |
 | `cardform.json` | card-form detection + field-kind refinement | synthetic form fixtures drawn from a real checkout corpus, including the negative cases (a login form that must stay a login form) | core `CardFormVectorTest` / `CardFillTest`, ext `detect.cards.test.ts` |
 | `cardfill.json` | card fill fidelity: expiry adaptation, select matching, brand synonyms | its `tables` block is the **normative** copy of the brand-synonym / contains-word / month tables that both engines deep-equal their compiled-in tables against — the vector is the source, not a derivative | core `CardFillVectorTest` / `CardFillTest`, ext `cardfill.test.ts` |
+| `usagekey.json` | the usage-ledger key derivation `usageKey = HKDF(VK(personal))` + its AD (spec 02 §8.2) | the expected value was computed by an **independent third implementation**, so it pins "correct", not merely "the engines agree" — two mirrored-but-equally-wrong impls would still match each other | core `UsageKeyVectorTest`, web `usage.test.ts`, ext `usage.test.ts` |
 
 ## Rules
 

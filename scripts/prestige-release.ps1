@@ -536,6 +536,28 @@ if ($specHasStore) {
     Write-Ok 'chromeStoreUrl agrees between the release spec and the live manifest'
 }
 
+# --- served deb: fetch what /downloads actually serves and prove it matches the spec -------------
+# The deb is the ONE artifact renamed between build and serve (compose emits Debian's
+# andvari_<ver>-<rev>_amd64.deb; /downloads serves andvari-<ver>.deb) and the one with no
+# SHA256SUMS cross-check on the build host: the spec's sha256 was hashed from the LOCAL build
+# output and the served URL is constructed by convention. So the agreement is PROVEN here, not
+# assumed: GET the served deb and require it to hash to .linux.sha256 — before the multi-minute
+# MSI build, and long before a signed manifest can point every Linux client at bytes that do not
+# match their pinned digest. (The deb is already published when this ceremony runs; the spec is
+# emitted alongside the uploaded artifacts.)
+$preLinux  = Get-RequiredMember -Node $spec.Json -Name 'linux' -Where 'release spec'
+$preDebUrl = [string](Get-RequiredMember -Node $preLinux -Name 'url'    -Where 'release spec .linux')
+$preDebSha = ([string](Get-RequiredMember -Node $preLinux -Name 'sha256' -Where 'release spec .linux')).ToLowerInvariant()
+if ($preDebUrl -notmatch '^/downloads/[A-Za-z0-9._-]+$') { Die "release spec linux.url '$preDebUrl' is not a /downloads/<file> path" }
+if ($preDebSha -notmatch '^[0-9a-f]{64}$') { Die 'release spec .linux.sha256 is not a 64-char hex digest' }
+$servedDebPath = Get-FileFromUrl -Url "$BaseUrl$preDebUrl" -What 'served linux deb'
+$servedDebSha  = Get-Sha256Lower -Path $servedDebPath
+Remove-Item -LiteralPath $servedDebPath -Force -ErrorAction SilentlyContinue
+if ($servedDebSha -ne $preDebSha) {
+    Die "the deb served at $BaseUrl$preDebUrl hashes to $servedDebSha but the release spec says $preDebSha - the rename/upload step published different bytes than the spec hashed. Re-upload the deb (or regenerate + republish the spec on the build host), then re-run."
+}
+Write-Ok "served deb $preDebUrl hashes to the spec's sha256 - rename/upload agreement proven"
+
 # --- update-signer jar (built here so a missing jar fails before the MSI build, not after) -------
 $SignerJar = Join-Path $RepoRoot 'tools\update-signer\build\libs\andvari-update-signer.jar'
 if (-not (Test-Path -LiteralPath $SignerJar -PathType Leaf)) {

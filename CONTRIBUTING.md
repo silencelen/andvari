@@ -26,7 +26,8 @@ run the suites individually and skip the `:app-android` line; everything else st
 1. **Release-version consistency** — core, Android, desktop, and web must all report the same
    client version, and the top `CHANGELOG.md` heading must name it. One skew fails the gate.
 2. **Endpoint-agnostic docs** — no reference-instance hostname in the current-facing docs, the
-   prose half of the rule the clients are pinned to (`spec/05` §5.5). Dated design records under
+   prose half of the rule the clients are pinned to
+   (`docs/design/2026-07-15-multi-tenant-endpoints.md` §5.5). Dated design records under
    `docs/design/` are exempt: they are history, not instructions.
 3. **Kotlin** — `:core`, `:server`, `:app-desktop` and every `tools/` CLI (`recovery-cli`,
    `backup-cli`, `update-signer`, plus a compile of `vector-gen`): RFC pins for the primitives, the
