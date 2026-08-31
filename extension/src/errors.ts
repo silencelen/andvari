@@ -25,7 +25,7 @@ type UnlockCode =
   | "network"
   | "unknown";
 type SaveErrorCode = "locked" | "conflict" | "failed";
-type TotpAddCode = "locked" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed";
+type TotpAddCode = "locked" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
 type RevealFailCode = "locked" | "not_allowed";
 // Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
@@ -150,6 +150,10 @@ export function totpAddErrorCopy(code: TotpAddCode | undefined): string {
       return "andvari couldn't tell which login this code belongs to — add it from the popup instead.";
     case "conflict":
       return "This login changed elsewhere — open it in the web vault.";
+    case "read_only":
+      // G21: a reader-role shared vault — the owner has to add the code, or move the login to a
+      // vault you can edit. Honest, not the lying retry the server refusal used to render.
+      return "This login is in a shared vault you can only view — ask its owner to add a one-time code.";
     default:
       // "failed" and an absent code (SW mid-restart) — retryable, no jargon.
       return "Could not add the code — try again.";

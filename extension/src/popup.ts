@@ -522,10 +522,12 @@ function renderDetail(it: MatchItem): void {
     lab.textContent = "One-time code";
     field.append(lab, totpChip(it.itemId)); // joins the list's 1 s ticker (queried by class)
     body.append(field);
-  } else {
+  } else if (!it.readOnly) {
     // TOTP-add (design 2026-08-12): only a code-LESS login gets the affordance — the seam is
     // ADD-ONLY (setTotp answers `exists` regardless of what a surface renders), so replacing or
     // removing an existing code stays a web-vault edit and this branch never shows beside a chip.
+    // G21: and only for a login this user can WRITE — a reader-role shared vault refuses the push
+    // (SW setTotp is the honest backstop), so don't offer a paste-add that can only dead-end.
     body.append(totpAddField(it));
   }
 

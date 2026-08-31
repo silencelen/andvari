@@ -56,6 +56,13 @@ export interface MatchItem {
   /** true when the item's uris matched the requesting host (vs a search-all row). */
   siteMatch: boolean;
   hasTotp: boolean;
+  /** G21 (2026-08-30 audit): the item lives in a READER-role vault — the server denies every push
+   *  against it (Service.kt role=="reader" ⇒ Forbidden). The page-side surfaces (popup, content)
+   *  can't see vault roles, so this flag is the ONE signal they read to suppress WRITE offers a
+   *  reader can never complete — the popup TOTP paste-add and the search-all URI-link offer —
+   *  instead of surfacing an action that dead-ends in a refusal. SW-side writableItem() stays the
+   *  honest backstop. SW-computed (toMatchItem), never page-supplied. */
+  readOnly: boolean;
 }
 
 /** A listable card — masked identity ONLY (SW-computed); `has*` flags let the popup render
@@ -206,8 +213,9 @@ export type SaveErrorCode = "locked" | "conflict" | "failed";
 /** TOTP-add failure code (setTotp / addTotpFromPage, design 2026-08-12) — mapped to copy by the
  *  surface. `exists` = the add-only contract refused a replace; `not_allowed` = wrong sender or
  *  the page path's exactly-one-eligible-match derivation failed; `invalid` = the shared
- *  normalize + parse gate rejected the secret. */
-export type TotpAddCode = "locked" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed";
+ *  normalize + parse gate rejected the secret; `read_only` (G21) = a reader-role vault the server
+ *  would refuse the push against — the honest SW backstop for the suppressed page-side offer. */
+export type TotpAddCode = "locked" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 
 /** Extension quick-unlock Tier B (spec 01 §8.4). Redeem-failure code — mapped to copy by the popup.
  *  `wrong_pin` carries the remaining attempts; `expired` = past the 24 h window (blob kept, use the

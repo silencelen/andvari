@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import type { ApiClient } from "../api/client";
 import { adUsage } from "../crypto/ad";
-import { fromB64, fromUtf8, toB64 } from "../crypto/bytes";
+import { fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
 import { initSodium } from "../crypto/sodium";
 import { usageKey } from "../crypto/usagekey";
-import { type UsageMap, mergeUsage, parseUsage, pruneUsage, recordUse, serializeUsage } from "./usage";
+import type { Account } from "./account";
+import { UsageTracker, type UsageMap, mergeUsage, parseUsage, pruneUsage, recordUse, serializeUsage } from "./usage";
 
 /**
  * Usage ledger pins (spec 02 §8.2, design 2026-08-22-login-health). The network half is a thin
@@ -74,6 +76,47 @@ describe("pruneUsage", () => {
   // for items that are merely not loaded yet. Pinned so nobody wires it to a mid-sync snapshot.
   it("drops everything when handed an empty set — which is why callers must pass the FULL set", () => {
     expect(pruneUsage({ a: { lastUsedAt: T, useCount: 1 } }, new Set())).toEqual({});
+  });
+});
+
+// G04 (2026-08-30 audit): the flush prunes ONLY when it is handed a live set, and the only caller
+// that passes one is the successful-full-sync completion point (Vault.tsx syncNow) — where the
+// store's item list is provably complete. The pagehide/unmount/debounce flushes call bare flush()
+// so a partial view can never silently drop an item's usage. These pin BOTH halves of that wiring.
+describe("UsageTracker.flush pruning", () => {
+  // Minimal duck-typed doubles: the tracker touches only these four methods, and the seal is made
+  // an identity round-trip (openUsage(sealUsage(x)) === x) so the test reads back what was stored.
+  function makeTracker() {
+    let stored: string | null = null;
+    const client = {
+      getUsage: async () => ({ sealedUsage: stored, updatedAt: 0 }),
+      putUsage: async (sealedUsage: string) => {
+        stored = sealedUsage;
+      },
+    } as unknown as ApiClient;
+    const account = {
+      sealUsage: async (b: Uint8Array) => fromUtf8(b),
+      openUsage: async (s: string) => utf8(s),
+    } as unknown as Account;
+    return { tracker: new UsageTracker(client, account), stored: () => (stored === null ? null : parseUsage(stored)) };
+  }
+
+  it("prunes a deleted item when flush is handed the complete live set (the post-sync point)", async () => {
+    const { tracker, stored } = makeTracker();
+    tracker.record("alive", T);
+    tracker.record("deleted", T);
+    await tracker.flush(new Set(["alive"]));
+    expect(Object.keys(stored()!)).toEqual(["alive"]);
+    tracker.dispose();
+  });
+
+  it("never prunes on a bare flush() — pagehide/unmount/debounce must keep every entry", async () => {
+    const { tracker, stored } = makeTracker();
+    tracker.record("alive", T);
+    tracker.record("deleted", T);
+    await tracker.flush();
+    expect(Object.keys(stored()!).sort()).toEqual(["alive", "deleted"]);
+    tracker.dispose();
   });
 });
 

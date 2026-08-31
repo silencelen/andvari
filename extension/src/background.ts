@@ -52,7 +52,7 @@ import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reoffe
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
 import { armGate, withRedeemInFlight } from "./locksequence";
-import { FLUSH_DEBOUNCE_MS, mergeUsage, parseUsage, recordUse, serializeUsage, type UsageMap } from "./usage";
+import { FLUSH_DEBOUNCE_MS, mergeUsage, parseUsage, pruneUsage, recordUse, serializeUsage, type UsageMap } from "./usage";
 import { applyServerSwitch, purgeServerDataFor } from "./serverswitch";
 
 /**
@@ -1406,6 +1406,11 @@ async function resync(): Promise<void> {
     if (writesInFlight > 0 || !session) return; // a write started mid-sync — its result would be clobbered
     session.items = decryptItems(sync, session.vaultKeys);
     persistSession();
+    // G04: a landed full snapshot (cursor 0) is the one moment we hold the COMPLETE live item set,
+    // so this is the only flush allowed to prune the usage ledger — never the debounce/lock flushes.
+    // Built from the RAW sync feed (not session.items), so an item this SW can't decrypt (newer fv,
+    // unheld VK) keeps its cross-device usage instead of being pruned away as "gone".
+    void flushUsage(new Set(sync.items.filter((it) => !it.deleted).map((it) => it.itemId)));
   } catch {
     /* tolerated */
   }
@@ -2526,6 +2531,9 @@ function toMatchItem(it: DecryptedItem, siteMatch: boolean): MatchItem {
     uris: it.doc.login?.uris ?? [],
     siteMatch,
     hasTotp: Boolean(it.doc.login?.totp),
+    // G21: let the page-side surfaces suppress write offers a reader can never complete (popup
+    // TOTP paste-add, search-all URI-link) — writableItem() stays the honest SW backstop.
+    readOnly: !writableItem(it),
   };
 }
 
@@ -2605,7 +2613,7 @@ function recordUsage(itemId: string): void {
  * Every failure path is silent: this is a ranking hint and must never surface an error, break a
  * fill, or retry hard enough to be noticed.
  */
-async function flushUsage(): Promise<void> {
+async function flushUsage(liveItemIds?: ReadonlySet<string>): Promise<void> {
   if (!session || Object.keys(pendingUsage).length === 0) return;
   // Keyed from the PERSONAL VK, which a snapshot-restored session still holds — the whole reason
   // this client can participate at all (the UVK would be absent here; breaker B1).
@@ -2625,6 +2633,10 @@ async function flushUsage(): Promise<void> {
     } catch {
       /* could not read the remote copy — store ours rather than lose this session's uses */
     }
+    // G04: prune ONLY when handed a provably-complete live set (resync's post-full-snapshot point).
+    // The debounce and lock-path flushes pass nothing — pruning against a partial view would drop
+    // entries for items this session just hasn't learned yet (undecryptable / unarrived grant).
+    if (liveItemIds) merged = pruneUsage(merged, liveItemIds);
     await api.putUsage(toB64(seal(key, new TextEncoder().encode(serializeUsage(merged)), adu)));
   } catch {
     // Re-arm rather than drop — but ONLY while the session still stands. This catch runs after an
@@ -3661,6 +3673,11 @@ async function setTotp(
   if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
   const target = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "login");
   if (!target) return { ok: false, code: "failed", error: "unknown item" };
+  // G21: the honest SW backstop for the suppressed popup offer (MatchItem.readOnly). A reader's
+  // push is refused server-side (role=="reader" ⇒ Forbidden) and used to map to the lying
+  // "Could not add the code — try again." — refuse here with the honest code instead of a doomed
+  // round-trip. Mirrors linkUri / pageTotpTarget's writableItem() guards.
+  if (!writableItem(target)) return { ok: false, code: "read_only", error: "read-only vault" };
   return writeTotp(target, msg.totp);
 }
 

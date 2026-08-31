@@ -26,21 +26,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - language: java-kotlin
-            build-mode: none
           - language: javascript-typescript
             build-mode: none
-    # NOTE (build-mode): for javascript-typescript, `none` extracts from source and the analysis
-    # is real. For java-kotlin it is NOT: CodeQL cannot extract Kotlin without a build, so `none`
-    # yields an EMPTY database here — this repo's first-party code is all Kotlin (zero committed
-    # .java), so the java-kotlin leg currently analyzes NOTHING and its green check proves only
-    # that an empty analysis ran. `none` stands because the full Gradle build needs ~8-12 GB and
-    # won't fit a GitHub-hosted runner; making the leg real means `build-mode: autobuild` (or
-    # `manual` with `./gradlew … assemble`) on a self-hosted / larger runner — or retiring the
-    # leg and recording that Kotlin has no static analysis. That call is the owner's.
+    # NOTE (build-mode): for javascript-typescript, `none` extracts from source and the analysis is
+    # real — leave it as-is.
+    #
+    # KOTLIN HAS NO CodeQL SAST. This repo's first-party code is all Kotlin (zero committed .java),
+    # and CodeQL cannot extract Kotlin without a build: `build-mode: none` yields an EMPTY database,
+    # so the old java-kotlin leg analyzed NOTHING while still painting a green check — a false-green
+    # over an empty DB (audit G18, docs/design/2026-08-30-full-surface-audit.md). The owner RETIRED
+    # that leg (removed from the matrix above) rather than pay for a real one: making it real needs
+    # `build-mode: autobuild` (or `manual` with `./gradlew … assemble`) on a self-hosted / larger
+    # runner, because the full Gradle build needs ~8-12 GB and won't fit a GitHub-hosted runner. Net
+    # effect today: the server and crypto core have NO static analysis; only the JS/TS surface
+    # (web + extension) is scanned.
+    #
+    # EMPTINESS TRIPWIRE: so this can never silently recur, the first step below runs
+    # scripts/ci/codeql-kotlin-tripwire.sh, which FAILS the run if this workflow ever re-introduces a
+    # java-kotlin leg with `build-mode: none` (or none specified). Re-enable Kotlin only with a real
+    # build-mode — never the empty one.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # EMPTINESS TRIPWIRE (G18): fail fast if an empty java-kotlin leg is ever re-introduced. See
+      # the script header and the NOTE above; Kotlin currently has no CodeQL SAST by design.
+      - name: Kotlin-emptiness tripwire
+        run: bash scripts/ci/codeql-kotlin-tripwire.sh
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4

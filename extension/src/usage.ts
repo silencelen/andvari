@@ -47,6 +47,22 @@ export function mergeUsage(a: UsageMap, b: UsageMap): UsageMap {
   return out;
 }
 
+/**
+ * Drop entries whose item no longer exists, so a long-lived ledger cannot grow forever. Twin of
+ * web/src/vault/usage.ts pruneUsage — keep the two identical.
+ *
+ * The caller MUST pass the COMPLETE live item set. Passing a partial one (a sync still in flight, a
+ * vault whose key has not arrived) would silently discard usage for items merely not loaded YET —
+ * which is why this is an explicit, separately-tested function rather than something the flush does
+ * implicitly on whatever it happens to hold. In the SW only resync()'s post-full-snapshot point
+ * passes a set; the debounce and lock-path flushes pass nothing.
+ */
+export function pruneUsage(map: UsageMap, liveItemIds: ReadonlySet<string>): UsageMap {
+  const out: UsageMap = {};
+  for (const [itemId, entry] of Object.entries(map)) if (liveItemIds.has(itemId)) out[itemId] = entry;
+  return out;
+}
+
 /** Stamp one use. Clamps backwards so a skewed-backward clock cannot walk a stamp down. */
 export function recordUse(map: UsageMap, itemId: string, now: number): UsageMap {
   const held = map[itemId];
