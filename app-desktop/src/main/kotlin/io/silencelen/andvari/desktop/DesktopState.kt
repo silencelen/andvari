@@ -19,6 +19,7 @@ import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.UpgradeRequiredException
 import io.silencelen.andvari.core.client.AttachmentPlan
 import io.silencelen.andvari.core.client.AttachmentRef
+import io.silencelen.andvari.core.client.CoreLog
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
@@ -693,18 +694,28 @@ class DesktopState(
     }
 
     /**
-     * Store what is buffered using an EXPLICITLY captured api/account, then return immediately.
-     * The lock and sign-out paths need this: they null `api`/`account` synchronously, so a plain
-     * [flushUsage] launched there would find them already gone and silently discard the session's
-     * last uses. Fire-and-forget — a ranking hint may never delay a lock.
+     * Audit G03: store what is buffered using an EXPLICITLY captured api/account, and hand the
+     * flush coroutine ownership of CLOSING the client. The lock and switch paths need this: they
+     * null `api`/`account` synchronously, and closing the client in the same statement list
+     * cancelled the just-launched flush every time (this scope is Main-confined, so the launched
+     * coroutine cannot start before the statements after it have run) — the session's last uses
+     * were silently dropped, exactly the race the awaited-logout precedent in [signOut] names.
+     * Keys and state still drop synchronously — a ranking hint may never delay a lock; only the
+     * transport outlives them, bounded by [USAGE_FLUSH_TIMEOUT_MS], then closes either way.
      */
-    private fun flushUsageDetached() {
+    private fun flushUsageThenClose() {
         val a = api ?: return
-        val acct = account ?: return
+        val acct = account
         val mine = pendingUsage
-        if (mine.isEmpty()) return
         pendingUsage = emptyMap()
-        scope.launch { storeUsage(a, acct, mine) }
+        if (acct == null || mine.isEmpty()) { a.close(); return }
+        scope.launch {
+            try {
+                withTimeoutOrNull(USAGE_FLUSH_TIMEOUT_MS) { storeUsage(a, acct, mine) }
+            } finally {
+                a.close()
+            }
+        }
     }
 
     private suspend fun storeUsage(a: AndvariApi, acct: Account, mine: Map<String, UsageLedger.Entry>) {
@@ -976,7 +987,8 @@ class DesktopState(
      * session/unlock-derived state so nothing bleeds into the new origin.
      */
     private fun clearSessionForSwitch() {
-        flushUsageDetached(); clearUsage(); engine?.close(); api?.close(); api = null; account = null; engine = null
+        // G03: the flush coroutine owns closing the api client — see flushUsageThenClose.
+        flushUsageThenClose(); clearUsage(); engine?.close(); api = null; account = null; engine = null
         store.clearSession() // persisted tokens only — no namespace touched (B2-7)
         clearVaultClipboard()
         pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
@@ -2496,11 +2508,18 @@ class DesktopState(
      *  duration ([downloadingAttachmentId]) so the Detail row can show a spinner ON the
      *  file being fetched — a many-second download over a household link used to look
      *  frozen (nothing but the global grey-out moved). */
-    fun saveAttachmentTo(ref: AttachmentRef, dest: File) = op {
+    // Audit G63: the same #23 carve-out as the backup/CSV callers of writeVerifiedAtomically —
+    // its app-minted ISE sentences ("verification failed…", the kept-temp move failure that names
+    // the surviving file) must reach the user verbatim, never flatten to SOMETHING_WENT_WRONG.
+    fun saveAttachmentTo(ref: AttachmentRef, dest: File) = op(map = ::exportError) {
         downloadingAttachmentId = ref.id
         try {
             withContext(Dispatchers.IO) {
-                val bytes = engine!!.downloadAttachment(ref)
+                // Audit G10: bounded like every other busy-holding network leg — a black-holed
+                // server must not hold [busy] (and with it the idle-lock deferral) open-endedly.
+                // Size-scaled (attachmentTimeoutMs) so a large file over a slow link still fits.
+                val bytes = withTimeoutOrNull(attachmentTimeoutMs(ref.size)) { engine!!.downloadAttachment(ref) }
+                    ?: throw java.io.InterruptedIOException("attachment download timed out")
                 try { writeVerifiedAtomically(dest, bytes) } finally { bytes.fill(0) } // attachment plaintext — wipe our copy
             }
         } finally {
@@ -2602,7 +2621,13 @@ class DesktopState(
         busy = true; error = null; notice = null
         scope.launch {
             val offline = try {
-                syncNow(e); false
+                // Audit G10: runSync's bound, here too — this pre-backup sync runs under [busy]
+                // (which defers the idle lock), so a black-holed server must not hold it
+                // open-endedly. Timed out = reachable-but-unresponsive — same posture as offline
+                // (InterruptedIOException IS an IOException, so the branch below catches it).
+                withTimeoutOrNull(SYNC_TIMEOUT_MS) { syncNow(e) }
+                    ?: throw java.io.InterruptedIOException("sync timed out")
+                false
             } catch (t: java.io.IOException) {
                 true // offline is fine — export the cached snapshot, visibly dated
             } catch (t: Throwable) {
@@ -2765,7 +2790,11 @@ class DesktopState(
         busy = true; error = null; notice = null
         scope.launch {
             val offline = try {
-                syncNow(e); false
+                // Audit G10: same bound as backupBegin — this pre-export sync runs under [busy]
+                // (which defers the idle lock), so a black-holed server must not hold it open-endedly.
+                withTimeoutOrNull(SYNC_TIMEOUT_MS) { syncNow(e) }
+                    ?: throw java.io.InterruptedIOException("sync timed out")
+                false
             } catch (t: java.io.IOException) {
                 true
             } catch (t: Throwable) {
@@ -2819,17 +2848,25 @@ class DesktopState(
      * Failure handling, two distinct phases:
      * - write/verify failure → delete ONLY the temp (dest untouched);
      * - move failure (rare; e.g. dest locked on Windows after the non-atomic fallback
-     *   started) → deliberately KEEP the temp: on that fallback dest may already be
-     *   gone, so the temp can be the only surviving verified copy. The surfaced error
-     *   names it. A hard crash mid-export can likewise leave a `.tmp` behind
+     *   started) → deliberately KEEP the verified bytes: on that fallback dest may already
+     *   be gone, so they can be the only surviving verified copy. The temp is renamed to a
+     *   survivor name first (G36 — its create-time deleteOnExit cannot be cancelled and
+     *   would erase the kept temp at the next normal JVM exit), and the surfaced error
+     *   names the kept file. A hard crash mid-export can likewise leave a `.tmp` behind
      *   (deleteOnExit covers normal JVM shutdown); a stray temp never masquerades as a
      *   backup and beats a destroyed one.
      */
     private fun writeVerifiedAtomically(dest: File, bytes: ByteArray) {
         val dir = dest.absoluteFile.parentFile ?: File(System.getProperty("user.dir") ?: ".")
-        val tmp = File.createTempFile("andvari-", ".tmp", dir)
+        // Audit G50 (F35's rule: "the permissions are part of the CREATE"): this temp later holds
+        // the full plaintext CSV or a decrypted attachment, so it is created rw------- rather than
+        // created-at-umask-then-chmodded — an open() winning the create→chmod window keeps its
+        // readable fd regardless of any later repair. Windows / a refusing FS falls back to the
+        // plain create, where restrictToOwner below stays the best-effort repair.
+        val tmp = runCatching { Files.createTempFile(dir.toPath(), "andvari-", ".tmp", *ownerOnly("rw-------")).toFile() }
+            .getOrElse { File.createTempFile("andvari-", ".tmp", dir) }
         tmp.deleteOnExit() // no-op after a successful move (the path no longer exists)
-        restrictToOwner(tmp) // exports can hold plaintext (CSV) — same 0600 posture as the cache
+        restrictToOwner(tmp) // belt for the fallback path — the create-time mode above is the braces
         try {
             tmp.writeBytes(bytes)
             val onDisk = tmp.readBytes()
@@ -2847,7 +2884,15 @@ class DesktopState(
                 Files.move(tmp.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
         } catch (t: Throwable) {
-            throw IllegalStateException("could not replace ${dest.name}: ${t.message} — the verified export was left at ${tmp.name} in the same folder", t)
+            // Audit G36: the temp carries deleteOnExit (crash-stray hygiene above), which
+            // java.io.File cannot cancel — so the deliberately-kept temp would vanish at the
+            // next NORMAL app exit, possibly as the only surviving verified copy (the
+            // non-atomic fallback can have already replaced dest). Rename it to a survivor
+            // name that was never registered; only if even that rename fails does the error
+            // name the doomed temp itself.
+            val survivor = File(dir, "${dest.name}.recovered-${System.currentTimeMillis()}")
+            val kept = runCatching { Files.move(tmp.toPath(), survivor.toPath()); survivor }.getOrDefault(tmp)
+            throw IllegalStateException("could not replace ${dest.name}: ${t.message} — the verified export was left at ${kept.name} in the same folder", t)
         }
     }
 
@@ -2876,7 +2921,8 @@ class DesktopState(
 
     fun lock(reason: String = "Locked.") {
         // Retain the ciphertext cache on lock (spec 05 T3); close its handle.
-        flushUsageDetached(); clearUsage(); engine?.close(); api?.close(); api = null; account = null; engine = null
+        // G03: the flush coroutine owns closing the api client — see flushUsageThenClose.
+        flushUsageThenClose(); clearUsage(); engine?.close(); api = null; account = null; engine = null
         clearVaultClipboard() // a copied secret must not outlive the unlocked session
         pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
         pendingPieceId = null // piece binding: cleared WITH the secret it names (B1 teardown)
@@ -2920,6 +2966,13 @@ class DesktopState(
         val a = api
         busy = true; error = null
         scope.launch {
+            // Audit G03: the usage flush gets the awaited-logout treatment too — AWAIT it
+            // (bounded) BEFORE the revocation and close below. The old fire-and-forget
+            // flushUsageDetached could never start before this same statement list closed the
+            // client (the scope is Main-confined), so the session's last uses were cancelled
+            // and dropped every time. It runs BEFORE logout, which revokes the tokens the
+            // flush rides on.
+            runCatching { withTimeoutOrNull(USAGE_FLUSH_TIMEOUT_MS) { flushUsage() } }
             // AWAIT the server-side revocation (bounded) BEFORE close(): the old
             // fire-and-forget launch raced the teardown below, which cancelled the
             // in-flight logout and left the refresh token valid for ~30 days.
@@ -2935,7 +2988,7 @@ class DesktopState(
                 temp.close()
             }
             // Close the engine (releases the DB handle — Windows won't delete an open file) first.
-            flushUsageDetached(); clearUsage(); engine?.close(); a?.close(); api = null; account = null; engine = null
+            clearUsage(); engine?.close(); a?.close(); api = null; account = null; engine = null
             clearVaultClipboard()
             pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
             pendingPieceId = null // piece binding: see lock()
@@ -3124,7 +3177,14 @@ class DesktopState(
             // consent) session runs in memory and leaves no stale DB behind for this pair.
             store.deleteCacheDb(key, acct.userId); InMemoryVaultCache()
         }
-        engine = SyncEngine(a, acct, newCache).also { it.hydrate() }
+        // Audit G09 (ux-error--4): the engine's anti-replay diagnostic must not die in the
+        // CoreLog.Silent default — web's twin both console.warns AND shows the user a calm
+        // `meta-regression` notice; surface the same keep-newer here as a notice line. Static
+        // curated copy only — never the event's own detail (the [notice] surface stays
+        // interpolation-free, the §F.7 discipline).
+        engine = SyncEngine(a, acct, newCache, log = CoreLog { event, _ ->
+            if (event == CoreLog.EVENT_VAULT_META_REPLAY) notice = META_REPLAY_NOTICE
+        }).also { it.hydrate() }
     }
 
     /** Sync + record the wall-clock time of the last SUCCESS — the timestamp the spec 07
@@ -3217,6 +3277,20 @@ class DesktopState(
          *  client (the Cut O bound, kept across the A.3 swap: a black-holed send must neither
          *  leak a fire-and-forget coroutine nor hold [busy] open-endedly). */
         const val RECOVERY_CALL_TIMEOUT_MS = 30_000L
+        /** Audit G10: floor transfer rate for the size-scaled attachment cap — anything slower
+         *  than this is indistinguishable from a stalled/black-holed server. */
+        const val ATTACHMENT_MIN_BYTES_PER_SEC = 16_384L
+        /** Audit G10: whole-op cap for ONE attachment download — [SYNC_TIMEOUT_MS] as the floor
+         *  plus time for the bytes at [ATTACHMENT_MIN_BYTES_PER_SEC], so a legitimately large
+         *  file over a slow household link is never severed while a black-holed server cannot
+         *  hold [busy] — and with it the idle-lock deferral — open-endedly (the shared client's
+         *  connect-only posture, [newHttpClient], is deliberate and unchanged). */
+        fun attachmentTimeoutMs(sizeBytes: Long): Long =
+            SYNC_TIMEOUT_MS + sizeBytes.coerceAtLeast(0) * 1000L / ATTACHMENT_MIN_BYTES_PER_SEC
+        /** Audit G03: bound on the teardown usage flush ([flushUsageThenClose] / signOut) — a
+         *  ranking hint may briefly outlive the keys' drop (the transport is handed to it), but
+         *  it must never hold a transport — or a sign-out — open-endedly. */
+        const val USAGE_FLUSH_TIMEOUT_MS = 2_000L
 
         /** Piece binding (design 2026-07-13 §3): the STATIC replaced-phrase conflict copy —
          *  verbatim across all surfaces; never interpolate anything near it (§F.7). */
@@ -3232,6 +3306,13 @@ class DesktopState(
             "Updates: the server's update listing couldn't be verified, so no update will be offered from it. Your vault and sync are unaffected."
         const val UPDATE_STALE_NOTICE =
             "Updates: the server's update listing hasn't been re-signed in a while — if you're expecting an update, mention it to your admin."
+
+        /** Audit G09 (spec 02 §4 warn-and-keep-newer): the desktop line for web's calm
+         *  `meta-regression` notice — a delivered vault change looked older than the held one
+         *  and the newer local copy was kept. Informational tone, never an error; the wording
+         *  mirrors web's, minus the vault name (the CoreLog seam carries no decrypted name). */
+        const val META_REPLAY_NOTICE =
+            "A saved change to one of your vaults looked older than expected and was kept as-is — if a recent change is missing, re-save it."
     }
 }
 

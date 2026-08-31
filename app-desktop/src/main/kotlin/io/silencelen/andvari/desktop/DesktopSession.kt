@@ -432,7 +432,9 @@ private val posixSupported: Boolean = runCatching {
     java.nio.file.FileSystems.getDefault().supportedFileAttributeViews().contains("posix")
 }.getOrDefault(false)
 
-private fun ownerOnly(spec: String): Array<java.nio.file.attribute.FileAttribute<*>> =
+// `internal` (was private): DesktopState.writeVerifiedAtomically creates its export/attachment
+// temp with the same create-time mode (audit G50) — one implementation, no second copy to drift.
+internal fun ownerOnly(spec: String): Array<java.nio.file.attribute.FileAttribute<*>> =
     if (posixSupported) {
         arrayOf(java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString(spec)))
     } else {

@@ -1657,6 +1657,10 @@ private fun TrashScreen(state: DesktopState) {
             deleted == null -> Text(if (state.busy) "Loading…" else "", color = MaterialTheme.colorScheme.onSurfaceVariant)
             deleted.isEmpty() -> Text("Nothing here — deleted items you can recover will show up in this list.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             else -> deleted.forEach { d ->
+                // Audit G22: reader-gate — a reader's restore/purge is refused server-side, so
+                // refuse it in the client, with the reason (the same rule as Detail's view-only
+                // gate and ItemHistory's "Readers can view but not restore").
+                val reader = state.roleFor(d.vaultId) == "reader"
                 androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                     Column(Modifier.weight(1f)) {
                         Text(
@@ -1668,12 +1672,19 @@ private fun TrashScreen(state: DesktopState) {
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (reader) {
+                            Text(
+                                "view only — readers can’t restore or delete shared items",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                     val docToRestore = d.doc
                     if (docToRestore != null) {
-                        TextButton(enabled = !state.busy, onClick = { state.restoreDeleted(d.itemId, d.vaultId, docToRestore) }) { Text("Restore") }
+                        TextButton(enabled = !state.busy && !reader, onClick = { state.restoreDeleted(d.itemId, d.vaultId, docToRestore) }) { Text("Restore") }
                     }
-                    TextButton(enabled = !state.busy, onClick = { confirmPurgeId = d.itemId }) {
+                    TextButton(enabled = !state.busy && !reader, onClick = { confirmPurgeId = d.itemId }) {
                         Text("Delete forever", color = MaterialTheme.colorScheme.error)
                     }
                 }
@@ -2432,7 +2443,9 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
             login.password?.takeIf { it.isNotBlank() }?.let {
                 CopyRow("Password", it, secret = true, clearSeconds = clipClear, onUsed = { state.recordUse(item.itemId) })
             }
-            login.totp?.takeIf { it.isNotBlank() }?.let { TotpRow(it, clearSeconds = clipClear) }
+            // Audit G37: a copied one-time code is a use too (spec 02 §8.2 — recordUse's own
+            // KDoc claims both halves); Android and web both record it, desktop now matches.
+            login.totp?.takeIf { it.isNotBlank() }?.let { TotpRow(it, clearSeconds = clipClear, onUsed = { state.recordUse(item.itemId) }) }
             login.uris.firstOrNull()?.takeIf { it.isNotBlank() }?.let { ReadOnly("Website", it) }
         }
         if (doc.type == "card") doc.card?.let { card ->
@@ -2905,7 +2918,13 @@ private fun AttachmentLine(ref: AttachmentRef, action: @Composable () -> Unit) {
 }
 
 @Composable
-private fun TotpRow(uri: String, clearSeconds: Int) {
+private fun TotpRow(
+    uri: String,
+    clearSeconds: Int,
+    /** Spec 02 §8.2 (audit G37): copying a one-time code IS a use — Android's TotpRow twin.
+     *  No-op by default so previews/tests without a session stay as they were. */
+    onUsed: () -> Unit = {},
+) {
     val crypto = remember { createCryptoProvider() }
     // ux-error--6: parse ONCE, in composition rather than inside the effect. The old shape only
     // learned the URI was malformed after the first frame and answered by writing the literal
@@ -2940,7 +2959,7 @@ private fun TotpRow(uri: String, clearSeconds: Int) {
             // button's only content is the LIVE code, so AT named the control with the rotating
             // secret — give it a stable name instead.
             TextButton(
-                onClick = { copyFailed = !copyWithAutoClear(code, clearSeconds) },
+                onClick = { onUsed(); copyFailed = !copyWithAutoClear(code, clearSeconds) },
                 modifier = Modifier.semantics { contentDescription = "One-time code — copy" },
             ) { Text(code.chunked(3).joinToString(" "), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.secondary) }
             // Re-computed every second; clearAndSetSemantics stops the reader re-announcing it on every tick (a11yand-05).
