@@ -132,7 +132,14 @@ class SaveConfirmActivity : ComponentActivity() {
 
         val structure = intent.assistStructure()
         if (structure == null) { finish(); return }
-        val creds = SaveExtractor.extract(structure)
+        // webDomain is ATTACKER-CONTROLLED (any app populates its own AssistStructure). The Update
+        // path already gates MATCHING on the cert-pin check (loginPlanFor), but the New path stores
+        // uri()/title() straight off the claim — an untrusted app claiming webDomain="github.com"
+        // would mint an item whose URI matches the real github.com thereafter. Launder ONCE here:
+        // an untrusted caller's capture carries androidapp://<pkg> and an app-derived title, so the
+        // stored identity, the confirm sheet's "Site" and the unlock subject all agree.
+        val raw = SaveExtractor.extract(structure)
+        val creds = if (TrustedBrowsers.isTrusted(this, raw.appPackage)) raw else raw.copy(webDomain = null)
         if (!creds.savable && creds.card == null) { finish(); return } // nothing savable captured
 
         VaultSession.setAutoLockSeconds(SessionStore(applicationContext).autoLockSeconds)

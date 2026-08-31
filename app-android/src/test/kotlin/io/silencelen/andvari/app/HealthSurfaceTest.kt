@@ -98,9 +98,9 @@ class HealthSurfaceTest {
     fun everyDeliberateExcursionIsExemptFromTheBackgroundLock() {
         assertTrue(health.contains("ExternalExcursion.begin()"), "the Custom Tab run must be exempt")
         assertEquals(
-            2,
+            5,
             Regex("ExternalExcursion\\.begin\\(\\)").findAll(main).count(),
-            "both file pickers (CSV import, attachments) must be exempt",
+            "both file pickers (CSV import, attachments) and all three save-as dialogs (backup, CSV export, attachment save) must be exempt",
         )
     }
 

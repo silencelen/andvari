@@ -188,6 +188,9 @@ data class UiState(
     val breachScanning: Boolean = false,
     /** done / total prefix ranges, for the scan button's progress text. */
     val breachProgress: Pair<Int, Int> = 0 to 0,
+    /** The last scan skipped ≥1 failed range: those logins render "—", and the Breached tile
+     *  must render an incomplete verdict (neutral zero), never a clean good-tone one. */
+    val breachScanIncomplete: Boolean = false,
     /** A refusal or failure from a health action, rendered verbatim (the plan* refusal idiom). */
     val healthMessage: String? = null,
     /** The verification run: the ordered itemIds still to visit, and where we are in them. */
@@ -428,6 +431,7 @@ internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     // itemVersions precedent makes an Android LOCK a wipe point for both. A fresh unlock
     // re-reads the ledger and the next scan re-derives the map — neither is persisted anywhere.
     usage = emptyMap(), breachByItem = null, breachScanning = false, breachProgress = 0 to 0,
+    breachScanIncomplete = false,
     healthMessage = null, verifyQueue = emptyList(), verifyIndex = 0, verifyRunning = false,
     healthTab = "passwords", showSnoozed = false, pendingDetailId = null,
     // N2 §3/§6 (review MED): clear the probe-failure flag only when a policy is LOADED — then
@@ -1010,8 +1014,16 @@ class AndvariViewModel(
     var editorNewType by mutableStateOf("login")
         private set
 
+    /** F71 (desktop's draftItemId twin): the NEW-item draft id, stable across save retries
+     *  within one editor session. A transport-failed first attempt leaves its row durably
+     *  QUEUED (core enqueues before sending), so a retry that minted a fresh id would apply
+     *  as a SECOND item — and attachments committed by the failed attempt are bound to the
+     *  first id. Cleared on success and with the editor session, never by a failed save. */
+    private var draftItemId: String? = null
+
     fun openEditor(itemId: String?, newType: String = "login") {
         editorPendingUploads.clear() // a fresh editor session never inherits stale picks
+        draftItemId = null // …nor a previous session's draft id (reusing one would OVERWRITE that item)
         editorItemId = itemId
         editorNewType = newType
         editorOpen = true
@@ -1021,6 +1033,7 @@ class AndvariViewModel(
         editorOpen = false
         editorItemId = null
         editorPendingUploads.clear()
+        draftItemId = null // cancel or success: the next editor session starts a fresh draft
     }
 
     /** The item under edit vanished (deleted on another device, tombstone synced): close
@@ -2186,7 +2199,13 @@ class AndvariViewModel(
         // when itemId == null; for an existing item it re-targets the item's OWN vault (its blob
         // AD binds that vault; the server enforces vault_mismatch), so a stray picker value can
         // never re-home an edited item. The editor also passes null when editing (belt + braces).
-        engine!!.saveWithUploads(itemId, doc, uploads, vaultId)
+        // F71: a NEW-item save mints its draft id ONCE per editor session — a retry after a
+        // transport failure reuses it, so the durably queued first attempt and the retry apply
+        // as the SAME item instead of a duplicate (desktop's draftItemId pattern).
+        if (itemId == null && draftItemId == null) draftItemId = account?.newItemId()
+        // Named: a trailing lambda binds to the LAST parameter (the runGesture rule).
+        engine!!.saveWithUploads(itemId, doc, uploads, vaultId, newItemId = if (itemId == null) draftItemId else null)
+        draftItemId = null
         refreshItems()
         onSaved()
     }
@@ -3242,6 +3261,12 @@ class AndvariViewModel(
     fun lockFromBackground() {
         if (VaultSession.get() == null) return // already locked, or never unlocked — nothing to do
         if (ExternalExcursion.consume()) return // the user asked to leave and means to come back
+        // The VaultSession.kt invariant: an expiry-driven lock must NEVER close the engine/api
+        // while a mutation/import/copy coroutine is running — REGARDLESS of which entry point
+        // observes it. Same deferral as [checkIdleLock]; the deferred lock lands via
+        // getIfFresh/the next checkIdleLock tick once the op completes.
+        val s = _ui.value
+        if (s.busy || s.importBusy || s.copyOpVaultId != null) return
         lock(reason = REASON_BACKGROUND)
     }
 
@@ -3287,11 +3312,14 @@ class AndvariViewModel(
     fun duplicateClusters(): List<Duplicates.DuplicateCluster> =
         Duplicates.duplicateClusters(_ui.value.items, ::roleFor)
 
-    fun stalenessRows(): List<Staleness.StalenessRow> = Staleness.stalenessRows(
+    /** [includeSnoozed] defaults to the Show-snoozed toggle (the LIST's semantics); the tiles
+     *  pass false explicitly — they pin to snoozed-excluded rows (web Health.tsx's twin), so
+     *  the toggle can never change the Failing/Unchecked counts. */
+    fun stalenessRows(includeSnoozed: Boolean = _ui.value.showSnoozed): List<Staleness.StalenessRow> = Staleness.stalenessRows(
         _ui.value.items,
         Staleness.StalenessOptions(
             now = System.currentTimeMillis(),
-            includeSnoozed = _ui.value.showSnoozed,
+            includeSnoozed = includeSnoozed,
             // Injected, never read inside core: the ranking is identical on an install with no
             // ledger, which is what keeps the "—" rule honest.
             lastUsedAt = { id -> _ui.value.usage[id]?.lastUsedAt },
@@ -3350,20 +3378,45 @@ class AndvariViewModel(
                 val byPrefix = hashes.entries.groupBy({ Hibp.prefix(it.value) }, { it.key })
                 val byPassword = HashMap<String, Long>()
                 var done = 0
+                var failedRanges = 0
                 for ((prefix, passwords) in byPrefix) {
                     // FAIL OPEN, per range: "couldn't check" is not "clean", so a failed range
                     // leaves its passwords OUT of the map (rendering "—") rather than scoring
                     // them 0 (rendering "none"). Those are different statements.
-                    runCatching { a.hibpRange(prefix) }.getOrNull()?.let { body ->
-                        for (pw in passwords) byPassword[pw] = Hibp.countInRange(body, hashes.getValue(pw))
-                    }
+                    val body = runCatching { a.hibpRange(prefix) }.getOrNull()
+                    if (body == null) failedRanges++
+                    else for (pw in passwords) byPassword[pw] = Hibp.countInRange(body, hashes.getValue(pw))
                     done++
                     _ui.value = _ui.value.copy(breachProgress = done to byPrefix.size)
                 }
                 if (VaultSession.get() == null) return@launch // locked mid-scan: drop the results
+                if (failedRanges == byPrefix.size) {
+                    // EVERY range failed — that is no scan at all, not an empty result. Keep
+                    // breachByItem exactly as it was (publishing an empty non-null map flipped
+                    // the tile to a good-tone "Breached 0" fully offline) and say so.
+                    _ui.value = _ui.value.copy(
+                        breachScanning = false,
+                        healthMessage = "Breach scan failed — the service is unavailable. Partial results were discarded.",
+                    )
+                    return@launch
+                }
                 // Keyed by itemId — NEVER by the plaintext password, which was only the lookup key.
                 val byItem = rows.mapNotNull { r -> byPassword[r.password]?.let { r.itemId to it } }.toMap()
-                _ui.value = _ui.value.copy(breachByItem = byItem, breachScanning = false)
+                val breachedLogins = rows.count { (byItem[it.itemId] ?: 0L) > 0L }
+                _ui.value = _ui.value.copy(
+                    breachByItem = byItem,
+                    breachScanning = false,
+                    // Some ranges failed: their logins render "—" and the Breached tile must
+                    // not claim a clean verdict it doesn't have.
+                    breachScanIncomplete = failedRanges > 0,
+                    // A long, user-initiated, progress-counted operation states its verdict
+                    // (web's twin sentence rides the NoticeBar's polite liveRegion).
+                    healthMessage = if (failedRanges > 0) {
+                        "Breach scan incomplete — some passwords couldn't be checked and show “—”. Rescan to cover them."
+                    } else {
+                        "Breach scan finished — $breachedLogins login${if (breachedLogins == 1) "" else "s"} found in known breaches."
+                    },
+                )
             } catch (_: Throwable) {
                 _ui.value = _ui.value.copy(
                     breachScanning = false,
@@ -3381,10 +3434,13 @@ class AndvariViewModel(
             _ui.value.items, itemId, result, System.currentTimeMillis(), ::roleFor, snoozeMs,
         )
         val write = plan.write ?: run {
+            // A refusal does NOT advance the run (web Staleness.tsx twin): calling onDone()
+            // here moved the run to the next item, so a reader-role login looked recorded
+            // when nothing was written — and verifyAdvance wiped the refusal it just stored.
             _ui.value = _ui.value.copy(healthMessage = plan.refusal)
-            onDone()
             return
         }
+        _ui.value = _ui.value.copy(healthMessage = null) // a new verdict clears the last refusal (web's setMsg(null))
         saveItem(write.itemId, write.doc) { onDone() }
     }
 
@@ -3412,11 +3468,19 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(verifyRunning = false, verifyQueue = emptyList(), verifyIndex = 0)
     }
 
-    /** Skip writes NOTHING, by design — "I did not check this" is not a verdict. */
+    /** Skip writes NOTHING, by design — "I did not check this" is not a verdict.
+     *  Deliberately does NOT clear [UiState.healthMessage]: a refusal recordCheck just stored
+     *  must survive until the next verdict clears it (web's twin never clears on advance). */
     fun verifyAdvance() {
         val next = _ui.value.verifyIndex + 1
-        if (next >= _ui.value.verifyQueue.size) stopVerifyRun()
-        else _ui.value = _ui.value.copy(verifyIndex = next, healthMessage = null)
+        if (next >= _ui.value.verifyQueue.size) {
+            stopVerifyRun()
+            // The run's completion is stated, not implied by a closing dialog (web's twin
+            // sentence) — TalkBack otherwise gets a window change with no verdict at all.
+            _ui.value = _ui.value.copy(healthMessage = "Run finished — every login in the list has been looked at.")
+        } else {
+            _ui.value = _ui.value.copy(verifyIndex = next)
+        }
     }
 
     /** The item the run is currently on, looked up FRESH (never a snapshot row). */

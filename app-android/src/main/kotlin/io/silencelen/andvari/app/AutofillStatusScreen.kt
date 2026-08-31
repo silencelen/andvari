@@ -113,12 +113,20 @@ fun AutofillStatusScreen(vm: AndvariViewModel, ui: UiState) {
                                 // Just fire it; if the device truly has no handler the
                                 // ActivityNotFoundException lands in runCatching and the
                                 // manual-path hint below is shown.
+                                // On some OEMs the picker is a full activity, so ON_STOP
+                                // fires — arm the lock-on-background exemption or enabling
+                                // autofill returns the user to a locked app with this flow
+                                // gone (the openSite idiom, HealthScreen).
+                                ExternalExcursion.begin()
                                 val ok = runCatching {
                                     ctx.startActivity(
                                         Intent(Settings.ACTION_REQUEST_SET_AUTOFILL_SERVICE)
                                             .setData(Uri.parse("package:${ctx.packageName}")),
                                     )
                                 }.isSuccess
+                                // Launch refused: drop the unused arm so it cannot exempt a
+                                // later, unrelated backgrounding.
+                                if (!ok) ExternalExcursion.clear()
                                 noPicker = !ok
                             },
                             modifier = Modifier.fillMaxWidth(),

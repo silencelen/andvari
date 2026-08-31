@@ -7,6 +7,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The usage ledger's Android half (spec 02 §8.2) — "when did I last use this login", the signal
@@ -35,6 +36,11 @@ object UsageRecorder {
      *  unflushed buffer dies with it. */
     const val FLUSH_DEBOUNCE_MS = 15_000L
 
+    /** Bound on the lock-path flush ([flushForSession]) — the signOut logout precedent's shape:
+     *  long enough for a GET+PUT round trip, short enough that a dead session's transport can
+     *  never be held open noticeably. */
+    const val LOCK_FLUSH_TIMEOUT_MS = 2_000L
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Any()
     private var pending: Map<String, UsageLedger.Entry> = emptyMap()
@@ -60,15 +66,21 @@ object UsageRecorder {
     }
 
     /**
-     * Flush against an EXPLICITLY passed session. The lock path needs this: it calls in before
-     * dropping `state`, so [flush]'s own `VaultSession.get()` would already read null and the
-     * session's last uses would be silently discarded. Fire-and-forget — a ranking hint may never
-     * delay a lock.
+     * Flush against an EXPLICITLY passed session, then run [then]. The lock path needs the
+     * explicit session: it calls in before dropping `state`, so [flush]'s own
+     * `VaultSession.get()` would already read null and the session's last uses would be
+     * silently discarded. The flush is BOUNDED ([LOCK_FLUSH_TIMEOUT_MS]) and [then] runs
+     * whether or not it landed — the lock path hands `api.close()` in as [then], so the
+     * GET+PUT round trip is no longer cancelled by its own teardown (the signOut logout
+     * precedent), yet a ranking hint still can never delay the lock itself or hold the
+     * transport open past the bound.
      */
-    fun flushForSession(session: VaultSession.Unlocked) {
+    fun flushForSession(session: VaultSession.Unlocked, then: () -> Unit = {}) {
         val mine = take()
-        if (mine.isEmpty()) return
-        scope.launch { storeWith(session, mine) }
+        scope.launch {
+            if (mine.isNotEmpty()) withTimeoutOrNull(LOCK_FLUSH_TIMEOUT_MS) { storeWith(session, mine) }
+            then()
+        }
     }
 
     /**
