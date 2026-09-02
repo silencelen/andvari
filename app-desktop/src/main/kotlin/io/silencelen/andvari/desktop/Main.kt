@@ -23,6 +23,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
@@ -120,14 +121,24 @@ fun AndvariDesktopTheme(themeMode: ThemeMode = ThemeMode.Auto, content: @Composa
     )
 }
 
-fun main() = application {
-    // The state holder must exist before Window's key-event callback references it, so
-    // hoist scope+state to the application scope (the window IS the app lifetime here).
-    val scope = rememberCoroutineScope()
+fun main() {
+    // Field diagnostics BEFORE any UI: confirm the native libsodium layer loads on this machine
+    // (the one thing that differs between a fresh install and the dev/CI boxes where it always
+    // works) and record the environment. Writes to ~/.andvari-desktop/diagnostic.log; never
+    // throws. The sign-in canon flattens a native-crypto failure to the same calm line as every
+    // other cause, so without this a field failure has no readable trail.
+    DesktopDiagnostics.runStartupSelfCheck()
+    application {
+        // The state holder must exist before Window's key-event callback references it, so
+        // hoist scope+state to the application scope (the window IS the app lifetime here).
+        val scope = rememberCoroutineScope()
     val state = remember { DesktopState(scope).also { it.start() } }
     Window(
         onCloseRequest = ::exitApplication,
         title = "andvari",
+        // The running window / taskbar icon (jpackage's iconFile only covers the launcher +
+        // Start-menu entry). Same brand mark, loaded from resources so it rides every build.
+        icon = painterResource("andvari.png"),
         state = rememberWindowState(width = 480.dp, height = 720.dp),
         // Every hardware key press counts as user activity for the inactivity auto-lock
         // (spec 01 §8). Window-level preview sees keys regardless of what has focus; never
@@ -198,5 +209,6 @@ fun main() = application {
                 ) { DesktopApp(state) }
             }
         }
+    }
     }
 }

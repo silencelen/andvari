@@ -41,12 +41,20 @@ compose.desktop {
             // broken at the packaging layer even after the user runs `jabswitch /enable`. Shipping a
             // runtime that can't load the bridge is strictly wrong; see docs/accessibility.md.
             modules("java.instrument", "java.management", "java.net.http", "java.sql", "jdk.unsupported", "jdk.accessibility")
+            // The dark-background brand mark (gold ᛅ on #14120E), one source (icons/andvari.svg)
+            // rendered per platform: .ico carries every taskbar/Start size, the Linux .png feeds
+            // the .desktop entry. Without these jpackage ships a blank generic icon (the app had
+            // none before). Matches the web favicon + Android adaptive icon.
             windows {
+                iconFile.set(project.file("icons/andvari.ico"))
                 // STABLE across releases → re-running a newer installer upgrades in
                 // place instead of installing a second copy. NEVER change this.
                 upgradeUuid = "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60"
                 menuGroup = "andvari"
                 shortcut = true
+            }
+            linux {
+                iconFile.set(project.file("icons/andvari.png"))
             }
         }
     }
