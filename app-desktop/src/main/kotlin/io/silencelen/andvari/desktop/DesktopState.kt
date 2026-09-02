@@ -3226,6 +3226,9 @@ class DesktopState(
                 // the `t.message` fallback is gone for good (the canon NEVER returns raw wire
                 // text). Auth-shaped flows pass their context mapper ([HouseholdCopy.forSignInError]
                 // / forUnlockError / [enrollError]); everything else takes the general map.
+                // The canon's calm line is right for the USER; the underlying throwable still goes
+                // to the field diagnostic log (never the UI) so an opaque failure is inspectable.
+                DesktopDiagnostics.logThrowable("op() caught", t)
                 busy = false; error = map(t)
             }
         }
