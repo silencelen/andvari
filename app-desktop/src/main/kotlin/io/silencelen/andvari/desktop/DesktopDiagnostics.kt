@@ -57,6 +57,27 @@ object DesktopDiagnostics {
             }
             log("runtime/bin CRT dlls: ${if (crt.isEmpty()) "NONE FOUND" else crt.joinToString(",")}")
         }
+        // Install-location diagnosis (Program Files fails, a writable build folder works): the
+        // native libs (libsodium via lazysodium/resource-loader, JNA's jnidispatch, sqlite-jdbc)
+        // are extracted at first use — if they land somewhere read-only under Program Files the
+        // load throws before login. Record every path they might use and whether it is writable,
+        // plus the props that redirect them.
+        runCatching {
+            val appDir = File(System.getProperty("java.home")).parentFile // <install>, parent of runtime
+            for ((label, path) in listOf(
+                "java.io.tmpdir" to System.getProperty("java.io.tmpdir"),
+                "user.dir(cwd)" to System.getProperty("user.dir"),
+                "user.home" to System.getProperty("user.home"),
+                "app.install.dir" to appDir?.absolutePath,
+                "app.jars.dir" to appDir?.let { File(it, "app").absolutePath },
+            )) {
+                log("path $label = $path  writable=${path?.let { dirWritable(File(it)) }}")
+            }
+            for (p in listOf("jna.tmpdir", "jna.boot.library.path", "jna.nounpack", "jna.nosys",
+                             "org.sqlite.tmpdir", "java.library.path")) {
+                System.getProperty(p)?.let { log("sysprop $p = $it") }
+            }
+        }
         try {
             val provider = createCryptoProvider()
             val probe = provider.randomBytes(1)
@@ -65,4 +86,12 @@ object DesktopDiagnostics {
             logThrowable("crypto self-check FAILED (native libsodium did not load)", t)
         }
     }
+
+    /** True iff a file can be created (and is deleted again) in [dir] — the real test, since a
+     *  read-only Program Files dir reports exists()/canWrite() inconsistently across Windows. */
+    private fun dirWritable(dir: File): Boolean = runCatching {
+        if (!dir.isDirectory) return false
+        val probe = File(dir, "andvari-wtest-${System.nanoTime()}.tmp")
+        probe.writeText("x"); val ok = probe.exists(); probe.delete(); ok
+    }.getOrDefault(false)
 }
