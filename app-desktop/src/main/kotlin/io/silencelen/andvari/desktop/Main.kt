@@ -122,6 +122,10 @@ fun AndvariDesktopTheme(themeMode: ThemeMode = ThemeMode.Auto, content: @Composa
 }
 
 fun main() {
+    // Extract libsodium to a writable temp file and hand core its path BEFORE any crypto touch,
+    // sidestepping lazysodium's resource-loader (which dies on a jpackage install under a spaced
+    // path like "Program Files"). Must run before the self-check below — the first crypto call.
+    NativeSodium.prepare()
     // Field diagnostics BEFORE any UI: confirm the native libsodium layer loads on this machine
     // (the one thing that differs between a fresh install and the dev/CI boxes where it always
     // works) and record the environment. Writes to ~/.andvari-desktop/diagnostic.log; never

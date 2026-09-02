@@ -78,6 +78,7 @@ object DesktopDiagnostics {
                 System.getProperty(p)?.let { log("sysprop $p = $it") }
             }
         }
+        log("andvari.native.sodium.path = ${System.getProperty("andvari.native.sodium.path") ?: "(unset — using lazysodium's own loader)"}")
         try {
             val provider = createCryptoProvider()
             val probe = provider.randomBytes(1)
