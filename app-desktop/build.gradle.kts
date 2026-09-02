@@ -40,7 +40,14 @@ compose.desktop {
             // runtime image CANNOT load the Java Access Bridge, so Windows screen-reader support is
             // broken at the packaging layer even after the user runs `jabswitch /enable`. Shipping a
             // runtime that can't load the bridge is strictly wrong; see docs/accessibility.md.
-            modules("java.instrument", "java.management", "java.net.http", "java.sql", "jdk.unsupported", "jdk.accessibility")
+            // jdk.zipfs (the jar/zip NIO FileSystemProvider): lazysodium's resource-loader reads the
+            // bundled libsodium out of its jar via a `jar:` URI (Paths.get -> ResourceLoader
+            // .getFileFromFileSystem). Without this module the provider is absent and the load dies
+            // with `FileSystemNotFoundException: Provider "jar" not installed` — but ONLY on Windows
+            // AND only when the install path contains a space (Program Files): the no-space path and
+            // Linux take a stream-based branch that never needs it, which is exactly why it passed
+            // every dev/build-folder run and the .deb, and failed for every real MSI install.
+            modules("java.instrument", "java.management", "java.net.http", "java.sql", "jdk.unsupported", "jdk.accessibility", "jdk.zipfs")
             // The dark-background brand mark (gold ᛅ on #14120E), one source (icons/andvari.svg)
             // rendered per platform: .ico carries every taskbar/Start size, the Linux .png feeds
             // the .desktop entry. Without these jpackage ships a blank generic icon (the app had
