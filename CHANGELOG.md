@@ -4,6 +4,26 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.26.3 (2026-09-03) — Windows desktop sign-in fix · fleet 0.26.3, extension 0.26.0
+
+*The Windows desktop app could not sign in when installed the normal way (under `Program Files`):
+every attempt failed with "Sign-in failed. Please try again." even with the right password. The
+cause was in how the packaged app loaded its encryption library, not in andvari itself — the same
+release worked fine on Linux and when run from a folder without a space in its path. This release
+fixes it, and gives the desktop app its icon. Nothing changed for the web, phone, or browser
+extension; if you are on those, there is nothing to do.*
+
+- **Windows sign-in fixed.** The bundled installer's minimized Java runtime was missing the
+  jar-filesystem module (`jdk.zipfs`), and the crypto library's own loader mis-handles a jar when
+  the install path contains a space. The app now unpacks its encryption library itself, the reliable
+  way, before signing in — so it works wherever it is installed. (Under the hood: `jdk.zipfs` added
+  to the runtime, and libsodium is extracted via the classloader and loaded by absolute path,
+  bypassing lazysodium's resource-loader; a startup self-check now logs the crypto load for
+  diagnosis. The server is untouched.)
+- **Desktop app icon.** The desktop app (and installer, taskbar, and window) now carry the andvari
+  brand mark, matching the web and phone. The browser-extension icons were refreshed to the same
+  dark-background mark.
+
 ## 0.26.2 (2026-08-31) — the audit release · fleet 0.26.2, extension 0.26.0
 
 *A full audit of every platform found one serious bug and a long tail of smaller ones, almost all
