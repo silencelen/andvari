@@ -1,5 +1,6 @@
 package io.silencelen.andvari.core.client
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -98,10 +99,13 @@ class UsageRecorderCore<S : Any>(
      * Never prunes: a teardown view can be pre-sync (locked before the first pull completed),
      * and pruning against a non-authoritative item set would drop other devices' entries
      * (audit G04). Pruning belongs to [flushWithPrune] alone.
+     *
+     * Returns the launched [Job] so a test can await the ORDER this exists for — [then] after the
+     * bounded store — instead of polling the transport (audit H88); production callers ignore it.
      */
-    fun flushForSession(explicit: S, then: () -> Unit = {}) {
+    fun flushForSession(explicit: S, then: () -> Unit = {}): Job {
         val mine = take()
-        scope.launch {
+        return scope.launch {
             if (mine.isNotEmpty()) withTimeoutOrNull(boundedFlushTimeoutMs) { store(explicit, mine, liveItemIds = null) }
             then()
         }
@@ -110,18 +114,23 @@ class UsageRecorderCore<S : Any>(
     /**
      * Flush AND prune, against the [liveItemIds] the caller knows to be COMPLETE (audit G04).
      * The ONLY safe caller is immediately after a successful full sync, where the client has
-     * pulled every item and `engine.items()` is authoritative — never a lock/pagehide/teardown
-     * view, which can be pre-sync. Pruning against a partial set would silently discard usage
-     * for items merely not synced yet (see [UsageLedger.prune]'s contract).
+     * pulled every envelope and `engine.liveItemIds()` is authoritative — never a
+     * lock/pagehide/teardown view, which can be pre-sync. Pruning against a partial set would
+     * silently discard usage for items merely not synced yet (see [UsageLedger.prune]'s
+     * contract). The set must be the LIVE ENVELOPE ids, not the decrypted working set (audit
+     * H36 — see [UsageLedger.liveItemIds] for why).
      *
      * Fire-and-forget on [scope] like the debounced flush — it runs after the sync coroutine, so
      * it never extends a sync. The write stays batched: [store] only PUTs when there were
      * buffered uses OR the prune actually dropped an entry, so a quiet 5-min poll that finds
      * nothing deleted costs one GET and no write (no spurious `updatedAt` bump).
+     *
+     * Returns the launched [Job] for the same reason as [flushForSession] (audit H88: the
+     * "no write" pin must observe the flush's END, not a moment during it).
      */
-    fun flushWithPrune(explicit: S, liveItemIds: Set<String>) {
+    fun flushWithPrune(explicit: S, liveItemIds: Set<String>): Job {
         val mine = take()
-        scope.launch { store(explicit, mine, liveItemIds) }
+        return scope.launch { store(explicit, mine, liveItemIds) }
     }
 
     /**
@@ -140,51 +149,62 @@ class UsageRecorderCore<S : Any>(
     }
 
     /**
-     * Merge against the server's current copy, optionally prune, then store. The re-read is what
-     * keeps last-writer-wins from meaning last-writer-DESTROYS: the other devices' entries
+     * Read the server's current copy, decide with [UsageLedger.planFlush], then store. The re-read
+     * is what keeps last-writer-wins from meaning last-writer-DESTROYS: the other devices' entries
      * survive this flush even though the endpoint has no merge semantics of its own.
+     *
+     * The three server outcomes are kept DISTINCT (audit H05). They used to collapse into "empty
+     * server view, store ours rather than lose this session's uses" — which meant a transient GET
+     * failure (5xx, timeout, rate-limit, a lock racing the token) followed by a successful PUT
+     * seconds later replaced the household's whole ledger with this device's handful of buffered
+     * uses, fleet-wide and unrecoverably (there is no server-side history for `usage_ledger`).
+     * Spec 02 §8.2 is normative here: a client that cannot fetch or open the ledger MUST leave it
+     * untouched. So on [UsageLedger.ServerCopy.Unreadable] there is no PUT; the buffer is re-armed
+     * (session-gated, exactly as a failed PUT already was) and the next flush retries.
      */
     private suspend fun store(s: S, mine: Map<String, UsageLedger.Entry>, liveItemIds: Set<String>?) {
         // Nothing buffered and no prune requested → nothing to do.
         if (mine.isEmpty() && liveItemIds == null) return
         val t = transportFor(s)
         try {
-            var serverCopy: Map<String, UsageLedger.Entry> = emptyMap()
-            var haveServer = false
-            // Could not read the remote copy — fall through with an empty server view and store
-            // ours rather than lose this session's uses (the existing normal-path posture).
-            runCatching {
-                t.fetchSealed()?.let { sealed ->
-                    serverCopy = UsageLedger.parse(t.open(sealed).decodeToString())
-                    haveServer = true
-                }
+            val server: UsageLedger.ServerCopy = try {
+                val sealed = t.fetchSealed()
+                if (sealed == null) UsageLedger.ServerCopy.Absent
+                else UsageLedger.ServerCopy.Present(UsageLedger.parse(t.open(sealed).decodeToString()))
+            } catch (e: CancellationException) {
+                // The bounded teardown flush timing out mid-GET is a cancellation, not an
+                // unreadable server: let it propagate to the outer catch, which re-arms while a
+                // session stands. Swallowing it here would let the coroutine carry on into a
+                // PUT on a cancelled scope.
+                throw e
+            } catch (_: Throwable) {
+                // Offline / HTTP failure on the GET, or a present blob that would not open under
+                // our key (wrong key, AD mismatch, a future encoding) — the two cases the spec's
+                // MUST is about. NOT "no ledger yet": that is the null branch above.
+                UsageLedger.ServerCopy.Unreadable
             }
-            var merged = UsageLedger.merge(serverCopy, mine)
-            // Prune (the one SHRINKING op) applies ONLY against a server copy we actually read.
-            // If the remote was unreadable, pruning would drop other devices' entries we simply
-            // could not see this round — so on a fetch/parse miss the prune path degrades to a
-            // plain flush (store ours, drop nothing) and retries the prune on the next sync.
-            // The keep-set is the live set PLUS the just-buffered uses: an item copied in the
-            // sub-instant between the caller's snapshot and this flush is inherently live (you
-            // can't copy a deleted item's secret), so it must not be pruned by a snapshot that
-            // predates it — a stale snapshot may under-prune (retried next sync), never drop a
-            // live entry.
-            if (liveItemIds != null && haveServer) merged = UsageLedger.prune(merged, liveItemIds + mine.keys)
-            // Skip a pointless PUT (and the `updatedAt` bump it costs) when nothing changed: no
-            // buffered uses, and either no prune or a prune that dropped nothing. On the normal
-            // flush path `mine` is always non-empty (empty is filtered above), so this is only
-            // ever a no-op decision for the prune path.
-            val changed = mine.isNotEmpty() ||
-                (haveServer && merged.size != serverCopy.size) ||
-                (!haveServer && merged.isNotEmpty())
-            if (changed) t.put(t.seal(UsageLedger.serialize(merged).encodeToByteArray()))
+            val put = UsageLedger.planFlush(server, mine, liveItemIds)
+            if (put != null) {
+                t.put(t.seal(UsageLedger.serialize(put).encodeToByteArray()))
+            } else if (server is UsageLedger.ServerCopy.Unreadable) {
+                // Skipped the write on purpose — keep the uses for the next round. A null plan
+                // on a READABLE copy means there was simply nothing to write (quiet prune).
+                rearm(mine)
+            }
         } catch (_: Throwable) {
-            // Re-arm rather than drop — but ONLY while a session still stands. This resumes after
-            // suspension points, so on the teardown path it can run AFTER clear(); re-arming
-            // unconditionally there would resurrect behavioural records into a locked process.
-            synchronized(lock) {
-                if (session() != null) pending = UsageLedger.merge(mine, pending)
-            }
+            rearm(mine)
+        }
+    }
+
+    /**
+     * Re-arm rather than drop — but ONLY while a session still stands. [store] resumes after
+     * suspension points, so on the teardown path this can run AFTER [clear]; re-arming
+     * unconditionally there would resurrect behavioural records into a locked process.
+     */
+    private fun rearm(mine: Map<String, UsageLedger.Entry>) {
+        if (mine.isEmpty()) return
+        synchronized(lock) {
+            if (session() != null) pending = UsageLedger.merge(mine, pending)
         }
     }
 

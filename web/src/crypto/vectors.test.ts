@@ -63,6 +63,10 @@ describe("kdf.json", () => {
       expect(toB64(await authKey(mk))).toBe(c.authKeyB64);
       expect(toB64(await wrapKey(mk))).toBe(c.wrapKeyB64);
     }
+    // spec 01 §1 (H16): a memBytes that is not a KiB multiple floors to KiB in every engine —
+    // libsodium does it inside crypto_pwhash (memlimit / 1024U), the extension's @noble twin
+    // does it by hand. The corpus must keep carrying that case or the loop grades nobody on it.
+    expect(v.chain.some((c: { kdfParams: KdfParams }) => c.kdfParams.memBytes % 1024 !== 0), "a non-KiB-multiple chain case").toBe(true);
   });
 });
 
@@ -147,6 +151,12 @@ describe("sharedgrant.json", () => {
     expect(() =>
       openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVaultMismatch.expectedVaultId, fromB64(v.rejectVaultMismatch.sealedB64)),
     ).toThrow();
+    // A seal whose payload carries a non-32-byte "vk" under the RIGHT vaultId must be refused
+    // (H93 — the guard all three twins now share; the extension had shipped without it).
+    expect(v.rejectVkLength.vkLen).not.toBe(32);
+    expect(() =>
+      openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVkLength.expectedVaultId, fromB64(v.rejectVkLength.sealedB64)),
+    ).toThrow(/32 bytes/);
     // Round-trip this impl's own (nondeterministic) seal.
     const own = sealSharedGrant(kp.publicKey, v.vaultId, fromB64(v.vkB64));
     expect(toB64(openSharedGrant(kp.publicKey, kp.privateKey, v.vaultId, own))).toBe(v.vkB64);

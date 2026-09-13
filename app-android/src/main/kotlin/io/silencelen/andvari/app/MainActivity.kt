@@ -1707,7 +1707,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                         }
                     } else {
                         items(filtered, key = { it.itemId }) { item ->
-                            VaultRow(item, vaultTags[item.vaultId], onRefresh = { vm.refresh() }) { detailId = item.itemId }
+                            VaultRow(item, vaultTags[item.vaultId], onRefresh = { vm.refresh() }, pendingSync = item.itemId in ui.pendingSyncIds) { detailId = item.itemId }
                             Spacer(Modifier.height(8.dp))
                         }
                     }
@@ -1948,7 +1948,7 @@ private fun readBounded(input: java.io.InputStream, limit: Int): ByteArray? {
 }
 
 @Composable
-private fun VaultRow(item: VaultItem, vaultTag: String? = null, onRefresh: (() -> Unit)? = null, onClick: () -> Unit) {
+private fun VaultRow(item: VaultItem, vaultTag: String? = null, onRefresh: (() -> Unit)? = null, pendingSync: Boolean = false, onClick: () -> Unit) {
     // H32 (audit 2026-09-13, G24 residue): the "Refresh" custom action lived only on the
     // LazyColumn container, a non-speaking node TalkBack steps over in linear navigation, so
     // pull-to-refresh stayed gesture-only for screen-reader and switch-access users. Every row
@@ -1981,6 +1981,13 @@ private fun VaultRow(item: VaultItem, vaultTag: String? = null, onRefresh: (() -
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
+            // H18 (web Vault.tsx "pending sync" tag twin): the row is a QUEUED offline save the
+            // engine projects from its durable queue — visible, so the user neither re-creates
+            // nor re-saves it; the mark clears when the row flushes.
+            if (pendingSync) {
+                Text("pending sync", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary, maxLines = 1)
+                Spacer(Modifier.width(8.dp))
+            }
             // Cut K (v2 #20): the shared-vault tag (gold, like web's) — personal items stay untagged.
             // a11yand-12: width-capped like desktop's F81 badge — an unbounded long vault name
             // crushes the weighted item-name column beside it.
@@ -2009,7 +2016,7 @@ private fun ItemHistorySection(vm: AndvariViewModel, ui: UiState, item: VaultIte
             onDismissRequest = { confirmRestore = null },
             title = { Text("Restore this version?") },
             text = { Text("The item's current version will be replaced by the one from ${java.time.Instant.ofEpochMilli(v.archivedAt).toString().take(10)}. The replaced version stays in history.") },
-            confirmButton = { TextButton(onClick = { confirmRestore = null; vm.saveItem(item.itemId, v.doc) { onRestored() } }) { Text("Restore") } },
+            confirmButton = { TextButton(onClick = { confirmRestore = null; vm.restoreVersion(item.itemId, v.doc) { onRestored() } }) { Text("Restore") } },
             dismissButton = { TextButton(onClick = { confirmRestore = null }) { Text("Cancel") } },
         )
     }

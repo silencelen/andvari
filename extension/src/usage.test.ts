@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { adUsage, fromB64, toB64, usageKey } from "./crypto.ts";
-import { mergeUsage, parseUsage, pruneUsage, recordUse, serializeUsage, type UsageMap } from "./usage.ts";
+import { TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, pruneUsage, recordUse, serializeUsage, type UsageMap } from "./usage.ts";
 
 /**
  * Usage ledger (spec 02 §8.2) — the extension's twin of web/src/vault/usage.test.ts.
@@ -105,5 +105,58 @@ describe("parseUsage", () => {
     const parsed = parseUsage(JSON.stringify({ good: { lastUsedAt: T }, bad: { useCount: 4 }, nul: null }));
     assert.deepEqual(Object.keys(parsed), ["good"]);
     assert.deepEqual(parsed.good, { lastUsedAt: T, useCount: 1 });
+  });
+});
+
+// planFlush (spec 02 §8.2 — audits H05 / H35). The SAME cases are pinned in web/src/vault/usage.test.ts
+// and core's UsageLedgerTest, so the three flush engines cannot drift in WHEN they write.
+describe("planFlush (must stay identical to the web and core twins)", () => {
+  const mine: UsageMap = { local: { lastUsedAt: T + 1000, useCount: 1 } };
+
+  // THE H05 rule: a server copy this client could not fetch or open is never overwritten, buffered
+  // fills or not. A PUT here would replace the household's ledger with one SW's handful of entries.
+  it("never writes over an UNREADABLE server copy", () => {
+    assert.equal(planFlush({ kind: "unreadable" }, mine), null);
+    assert.equal(planFlush({ kind: "unreadable" }, mine, new Set(["local"])), null);
+    assert.equal(planFlush({ kind: "unreadable" }, {}, new Set(["x"])), null);
+  });
+
+  // `sealedUsage: null` is the ONE case a merge-less write is a first write, not an overwrite.
+  it("writes the buffer as a FIRST ledger when the server has none", () => {
+    assert.deepEqual(planFlush({ kind: "absent" }, mine), mine);
+    assert.deepEqual(planFlush({ kind: "absent" }, mine, new Set(["other"])), mine);
+    assert.equal(planFlush({ kind: "absent" }, {}), null);
+    assert.equal(planFlush({ kind: "absent" }, {}, new Set(["x"])), null);
+  });
+
+  it("merges the buffer over a readable server copy", () => {
+    const put = planFlush({ kind: "present", map: { "other-device-item": { lastUsedAt: T, useCount: 2 } } }, mine);
+    assert.deepEqual(Object.keys(put!).sort(), ["local", "other-device-item"]);
+  });
+
+  // H35: a prune request with an EMPTY buffer must still drop a deleted item's entry — the
+  // post-sync prune is the growth bound, and a resync almost never lands inside the debounce window.
+  it("prunes with an EMPTY buffer", () => {
+    const server: UsageMap = { alive: { lastUsedAt: T, useCount: 3 }, deleted: { lastUsedAt: T, useCount: 9 } };
+    assert.deepEqual(planFlush({ kind: "present", map: server }, {}, new Set(["alive"])), { alive: { lastUsedAt: T, useCount: 3 } });
+  });
+
+  // Batched, never spurious (spec 03 §3): a quiet prune that drops nothing and has nothing buffered
+  // must not write — no `updatedAt` bump on every resync.
+  it("does not write when a prune changes nothing", () => {
+    const server: UsageMap = { alive: { lastUsedAt: T, useCount: 1 } };
+    assert.equal(planFlush({ kind: "present", map: server }, {}, new Set(["alive"])), null);
+    assert.equal(planFlush({ kind: "present", map: server }, {}), null);
+  });
+
+  it("keeps a buffered use the live-set snapshot does not know — under-prune, never drop a live entry", () => {
+    const put = planFlush({ kind: "present", map: { alive: { lastUsedAt: T, useCount: 1 } } }, { fresh: { lastUsedAt: T + 1000, useCount: 1 } }, new Set(["alive"]));
+    assert.deepEqual(Object.keys(put!).sort(), ["alive", "fresh"]);
+  });
+
+  // H33: the teardown bound is the natives' 2 s (UsageRecorder.LOCK_FLUSH_TIMEOUT_MS / desktop
+  // USAGE_FLUSH_TIMEOUT_MS) — one number across the four clients.
+  it("the lock/sign-out flush bound matches the natives", () => {
+    assert.equal(TEARDOWN_FLUSH_TIMEOUT_MS, 2_000);
   });
 });

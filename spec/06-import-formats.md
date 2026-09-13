@@ -140,7 +140,10 @@ Per file row, in checked order, **kind-scoped**:
 
 - **Url equality** = the spec 02 §3.1 saved-uri normalizer's equivalence classes
   (`parseSavedUri`/`normalizeHost`): scheme/case/`www.`/port/path/userinfo-insensitive
-  host classes, `androidapp://` ids their own class. The row's url is compared against
+  host classes — and, since the 2026-09-13 A-label amendment (audit H22), a Unicode host and
+  its punycode form (`bücher.de` ≡ `xn--bcher-kva.de`) share one class, so a row exported by
+  a manager that writes the U-label dedupes against an item the browser saved as the A-label
+  — `androidapp://` ids their own class. The row's url is compared against
   EVERY saved uri of an existing item, not just `uris[0]`. EMPTY uris on the vault side
   are dropped; an item with no non-empty uris occupies a no-uri sentinel class which an
   EMPTY row url also maps to. A NON-EMPTY uri that fails spec 02 §3.1 parsing keys its

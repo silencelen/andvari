@@ -477,9 +477,16 @@ export class ApiClient {
   }
 
   /** Replace the stored ledger. Last-writer-wins by design — callers merge before calling, and
-   *  MUST batch (spec 03 §3: never one PUT per fill, or `updatedAt` becomes an activity trace). */
-  putUsage(sealedUsage: string) {
-    return this.raw("PUT", "/api/v1/usage", { sealedUsage });
+   *  MUST batch (spec 03 §3: never one PUT per fill, or `updatedAt` becomes an activity trace).
+   *
+   *  Rides text(), NOT raw() (audit H34): raw() resolves with the error Response on a non-2xx, so
+   *  a refused write — 400 `bad_usage_blob`, 413, 5xx, a 401 the refresh could not cure — used to
+   *  look exactly like a landed one. UsageTracker.flush() re-arms its buffer only when this
+   *  REJECTS, so with raw() its "a failed flush must not silently drop the session's uses" catch
+   *  was unreachable for every server refusal and the window's uses were dropped. The extension
+   *  (api.ts json()) and core (AndvariApi `if (!resp.status.isSuccess()) throw`) already threw. */
+  putUsage(sealedUsage: string): Promise<string> {
+    return this.text("PUT", "/api/v1/usage", { sealedUsage });
   }
 
   // F57: current org recovery PUBLIC key (base64url); the client verifies its fingerprint

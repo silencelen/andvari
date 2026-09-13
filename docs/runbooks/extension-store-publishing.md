@@ -94,7 +94,12 @@ REQUIREMENTS
 Privacy policy: https://monahanhosting.com/andvari/privacy/
 ```
 
-- **Store icon (128×128):** upload `extension/icons/icon128.png` (the treasury coin + ᛅ rune).
+- **Store icon (128×128):** upload `extension/icons/icon128.png` — the **dark-background ᛅ brand
+  mark**, the same one the desktop, phone and web surfaces carry, rendered from
+  `app-desktop/icons/andvari.svg`. (0.26.3 replaced the older treasury-coin artwork this line
+  used to describe; a maintainer who uploads what the doc *says* rather than the file it names
+  puts a different mark on the store listing than the one in the browser toolbar — audit H120.
+  Look at the PNG before you upload it; the path is the authority, not this sentence.)
 - **Screenshots (≥1 required, up to 5, 1280×800 PNG):** use the generated set in
   `extension/store-assets/` (popup vault + in-page fill dropdown + save banner). Must show the item
   in actual use — no pure marketing frames.
@@ -176,7 +181,7 @@ The listing screenshots show the unlocked experience.
 ## C. Privacy policy — **LIVE** at `https://monahanhosting.com/andvari/privacy/`
 
 Deployed 2026-07-14: `docs/legal/privacy-extension.md` rendered as a static, theme-aware HTML page
-on monahanhosting.com (CT 121 hermod, `/var/www/monahanhosting.com/andvari/privacy/index.html`;
+on monahanhosting.com (served from the maintainer's web host at `/var/www/monahanhosting.com/andvari/privacy/index.html`;
 mirrored in netplan `nginx-configs/webroot/monahanhosting.com/andvari/privacy/`). Verified 200
 through Cloudflare. If the markdown policy changes, re-render + redeploy both copies.
 

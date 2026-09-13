@@ -1,0 +1,495 @@
+{
+    "_about": "Hand-authored (no generator). The usage ledger's parse / merge / record / prune / serialize rules (spec 02 §8.2), pinned once for the three twins: core UsageLedger.kt, web usage.ts, extension usage.ts. Added 2026-09-13 (audit H92): the three suites were hand-mirrored and had already drifted green. Every `expected` is the TS twins' behaviour, which the row names as the one that is right: strings are never numbers, one malformed ENTRY drops that entry and never the whole ledger. Numbers are integers only — fractional stamps and counts are a representational difference between the engines (double vs long) that no writer emits and this file deliberately does not grade.",
+    "parse": [
+        {
+            "name": "round-trip-shape",
+            "inputUtf8": "{\"x\":{\"lastUsedAt\":1755000000000,\"useCount\":2},\"y\":{\"lastUsedAt\":1755000000001,\"useCount\":1}}",
+            "expected": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                },
+                "y": {
+                    "lastUsedAt": 1755000000001,
+                    "useCount": 1
+                }
+            }
+        },
+        {
+            "name": "missing-count-defaults-to-one",
+            "inputUtf8": "{\"x\":{\"lastUsedAt\":1755000000000}}",
+            "expected": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            }
+        },
+        {
+            "name": "missing-stamp-drops-the-entry",
+            "inputUtf8": "{\"noStamp\":{\"useCount\":4},\"good\":{\"lastUsedAt\":1755000000000,\"useCount\":2}}",
+            "expected": {
+                "good": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "string-typed-stamp-is-not-a-number",
+            "inputUtf8": "{\"s\":{\"lastUsedAt\":\"1755000000000\",\"useCount\":3},\"good\":{\"lastUsedAt\":1755000000000,\"useCount\":2}}",
+            "expected": {
+                "good": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "string-typed-count-defaults-rather-than-parses",
+            "inputUtf8": "{\"c\":{\"lastUsedAt\":1755000000000,\"useCount\":\"3\"}}",
+            "expected": {
+                "c": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            }
+        },
+        {
+            "name": "boolean-stamp-is-not-a-number",
+            "inputUtf8": "{\"b\":{\"lastUsedAt\":true,\"useCount\":1},\"good\":{\"lastUsedAt\":1755000000000,\"useCount\":2}}",
+            "expected": {
+                "good": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "nested-object-stamp-drops-only-that-entry",
+            "inputUtf8": "{\"bad\":{\"lastUsedAt\":{\"deep\":1755000000000},\"useCount\":1},\"good\":{\"lastUsedAt\":1755000000000,\"useCount\":2}}",
+            "expected": {
+                "good": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "array-stamp-drops-only-that-entry",
+            "inputUtf8": "{\"bad\":{\"lastUsedAt\":[1755000000000],\"useCount\":1},\"good\":{\"lastUsedAt\":1755000000000,\"useCount\":2}}",
+            "expected": {
+                "good": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "nested-object-count-defaults-only-that-entry",
+            "inputUtf8": "{\"c\":{\"lastUsedAt\":1755000000000,\"useCount\":{\"deep\":1}},\"good\":{\"lastUsedAt\":1755000000000,\"useCount\":2}}",
+            "expected": {
+                "c": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                },
+                "good": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "non-finite-stamp-drops-only-that-entry",
+            "inputUtf8": "{\"inf\":{\"lastUsedAt\":1e999,\"useCount\":1},\"good\":{\"lastUsedAt\":1755000000000,\"useCount\":2}}",
+            "expected": {
+                "good": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "non-finite-count-defaults-only-that-entry",
+            "inputUtf8": "{\"c\":{\"lastUsedAt\":1755000000000,\"useCount\":1e999}}",
+            "expected": {
+                "c": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            }
+        },
+        {
+            "name": "non-object-entries-are-skipped",
+            "inputUtf8": "{\"nul\":null,\"num\":42,\"str\":\"x\",\"arr\":[],\"good\":{\"lastUsedAt\":1755000000000,\"useCount\":2}}",
+            "expected": {
+                "good": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "unknown-entry-keys-are-dropped-not-preserved",
+            "inputUtf8": "{\"x\":{\"lastUsedAt\":1755000000000,\"useCount\":2,\"future\":\"ignored\"}}",
+            "expected": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "zero-and-negative-are-numbers",
+            "inputUtf8": "{\"z\":{\"lastUsedAt\":0,\"useCount\":0},\"n\":{\"lastUsedAt\":-1,\"useCount\":-2}}",
+            "expected": {
+                "z": {
+                    "lastUsedAt": 0,
+                    "useCount": 0
+                },
+                "n": {
+                    "lastUsedAt": -1,
+                    "useCount": -2
+                }
+            }
+        },
+        {
+            "name": "empty-object-is-an-empty-ledger",
+            "inputUtf8": "{}",
+            "expected": {}
+        },
+        {
+            "name": "garbage-empty-string",
+            "inputUtf8": "",
+            "expected": {}
+        },
+        {
+            "name": "garbage-not-json",
+            "inputUtf8": "not json",
+            "expected": {}
+        },
+        {
+            "name": "garbage-null",
+            "inputUtf8": "null",
+            "expected": {}
+        },
+        {
+            "name": "garbage-array",
+            "inputUtf8": "[]",
+            "expected": {}
+        },
+        {
+            "name": "garbage-number",
+            "inputUtf8": "42",
+            "expected": {}
+        },
+        {
+            "name": "garbage-string",
+            "inputUtf8": "\"str\"",
+            "expected": {}
+        }
+    ],
+    "merge": [
+        {
+            "name": "max-of-both-fields-per-item",
+            "a": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            },
+            "b": {
+                "x": {
+                    "lastUsedAt": 1755000001000,
+                    "useCount": 1
+                }
+            },
+            "expected": {
+                "x": {
+                    "lastUsedAt": 1755000001000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "entries-only-one-side-has-survive",
+            "a": {
+                "a": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            },
+            "b": {
+                "b": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            },
+            "expected": {
+                "a": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                },
+                "b": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            }
+        },
+        {
+            "name": "idempotent",
+            "a": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 5
+                }
+            },
+            "b": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 5
+                }
+            },
+            "expected": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 5
+                }
+            }
+        },
+        {
+            "name": "order-independent-ab",
+            "a": {
+                "x": {
+                    "lastUsedAt": 1755000000005,
+                    "useCount": 1
+                },
+                "y": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 9
+                }
+            },
+            "b": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 4
+                },
+                "z": {
+                    "lastUsedAt": 1755000000002,
+                    "useCount": 1
+                }
+            },
+            "expected": {
+                "x": {
+                    "lastUsedAt": 1755000000005,
+                    "useCount": 4
+                },
+                "y": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 9
+                },
+                "z": {
+                    "lastUsedAt": 1755000000002,
+                    "useCount": 1
+                }
+            }
+        },
+        {
+            "name": "order-independent-ba",
+            "a": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 4
+                },
+                "z": {
+                    "lastUsedAt": 1755000000002,
+                    "useCount": 1
+                }
+            },
+            "b": {
+                "x": {
+                    "lastUsedAt": 1755000000005,
+                    "useCount": 1
+                },
+                "y": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 9
+                }
+            },
+            "expected": {
+                "x": {
+                    "lastUsedAt": 1755000000005,
+                    "useCount": 4
+                },
+                "y": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 9
+                },
+                "z": {
+                    "lastUsedAt": 1755000000002,
+                    "useCount": 1
+                }
+            }
+        },
+        {
+            "name": "empty-sides",
+            "a": {},
+            "b": {},
+            "expected": {}
+        }
+    ],
+    "record": [
+        {
+            "name": "first-use-stamps-and-counts-one",
+            "map": {},
+            "itemId": "x",
+            "now": 1755000000000,
+            "expected": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            }
+        },
+        {
+            "name": "later-use-advances-and-increments",
+            "map": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            },
+            "itemId": "x",
+            "now": 1755000000005,
+            "expected": {
+                "x": {
+                    "lastUsedAt": 1755000000005,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "a-backwards-clock-never-walks-a-stamp-down",
+            "map": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            },
+            "itemId": "x",
+            "now": 1754999900001,
+            "expected": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            }
+        },
+        {
+            "name": "other-items-are-untouched",
+            "map": {
+                "y": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 3
+                }
+            },
+            "itemId": "x",
+            "now": 1755000000000,
+            "expected": {
+                "y": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 3
+                },
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            }
+        }
+    ],
+    "prune": [
+        {
+            "name": "drops-entries-whose-item-is-gone",
+            "map": {
+                "alive": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                },
+                "deleted": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            },
+            "liveItemIds": [
+                "alive"
+            ],
+            "expected": {
+                "alive": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            }
+        },
+        {
+            "name": "an-empty-live-set-drops-everything",
+            "map": {
+                "a": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            },
+            "liveItemIds": [],
+            "expected": {}
+        },
+        {
+            "name": "live-ids-without-entries-add-nothing",
+            "map": {
+                "a": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            },
+            "liveItemIds": [
+                "a",
+                "b"
+            ],
+            "expected": {
+                "a": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                }
+            }
+        }
+    ],
+    "serialize": [
+        {
+            "name": "the-wire-shape",
+            "map": {
+                "x": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 2
+                }
+            },
+            "expectedUtf8": "{\"x\":{\"lastUsedAt\":1755000000000,\"useCount\":2}}"
+        },
+        {
+            "name": "insertion-order-two-items",
+            "map": {
+                "b1c2d3e4-0000-4000-8000-000000000001": {
+                    "lastUsedAt": 1755000000000,
+                    "useCount": 1
+                },
+                "a1b2c3d4-0000-4000-8000-000000000002": {
+                    "lastUsedAt": 1755000000001,
+                    "useCount": 7
+                }
+            },
+            "expectedUtf8": "{\"b1c2d3e4-0000-4000-8000-000000000001\":{\"lastUsedAt\":1755000000000,\"useCount\":1},\"a1b2c3d4-0000-4000-8000-000000000002\":{\"lastUsedAt\":1755000000001,\"useCount\":7}}"
+        },
+        {
+            "name": "empty-ledger",
+            "map": {},
+            "expectedUtf8": "{}"
+        }
+    ]
+}

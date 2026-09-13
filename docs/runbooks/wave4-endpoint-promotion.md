@@ -1,9 +1,22 @@
 # Runbook — Wave-4 endpoint promotion + release (owner-gated)
 
-**Purpose:** promote the reference public origin `andvari.monahanhosting.com` from the break-glass
-régime to full service, then release the clients that default to it. This is the single owner-gated
-step the endpoint pivot (design `docs/design/2026-07-15-multi-tenant-endpoints.md` §6/§7) leaves for
-you. Nothing in the committed tree ships until you run this.
+> **EXECUTED 2026-07-17 with 0.19.0.** The promotion this runbook gates has happened: the reference
+> origin `andvari.monahanhosting.com` runs in full service and the shipped clients default to it
+> (`CHANGELOG.md` 0.19.0 — "the reference instance … is promoted to full service; updating the apps
+> moves them there"). **§0–§4 below are the record of what was run, not an outstanding gate** — their
+> unticked checkboxes are historical, including the CF tunnel-token rotation, which was done in the
+> same window. The one part of this file that is still live is **§5, the tailnet-front retirement**,
+> which is a separate, later, deliberate owner step (earliest 2026-10-15).
+>
+> The banner is here because for two months this file opened with "Nothing in the committed tree
+> ships until you run this" and a preconditions list reading as overdue — a maintainer walking
+> `docs/runbooks/` had no way to see from the file that both had been resolved in July (audit H119,
+> the G05/G42 class: a runbook that outlives its gate has to say so in its first paragraph).
+
+**Purpose (as written for the run):** promote the reference public origin
+`andvari.monahanhosting.com` from the break-glass régime to full service, then release the clients
+that default to it. This was the single owner-gated step the endpoint pivot (design
+`docs/design/2026-07-15-multi-tenant-endpoints.md` §6/§7) left outstanding.
 
 **Why it's gated (§6.3):** the Wave-4 build swaps the native `DEFAULT_BASE_URL` to the public origin
 and `migrateDefaultOnce` v2 rewrites existing installs from the old home/tailnet default to it. If a
@@ -12,6 +25,10 @@ refresh/recovery/sharing and demands TOTP. So: promote the origin first, verify 
 *then* release.
 
 ---
+
+---
+
+# The executed record (§0–§4) — done 2026-07-17, retained for the reasoning
 
 ## 0. Preconditions (verify before touching anything)
 
@@ -73,13 +90,22 @@ On a phone/desktop still on the old default, apply the update and confirm: the a
 `migrateDefaultOnce` v2 + §4.2 adoption carried them). A hand-set custom server address must be
 untouched.
 
+---
+
+# STILL LIVE
+
 ## 5. Tailnet front lifetime (§6.5 / B2-11 — do NOT retire early)
 
 Keep the `tailscale serve` front for `andvari.taila2dff2.ts.net` **active ≥ 90 days AND until fleet
 telemetry shows no pre-migration clients** (un-updated 0.17/0.18 natives + 0.14/0.15 ext point at it
 forever). Retiring it is a *later, deliberate* owner step — never a side effect of this release.
 
-## Rollback
+The 90 days ran from the 2026-07-17 promotion, so the **earliest** retirement date is
+**2026-10-15** — and the date alone is not the condition. The second clause is the binding one: no
+pre-migration client may still be pointed at that front. Those builds have the old default compiled
+in and cannot be steered; retiring the front strands them with no error a user can act on.
+
+## Rollback (spent — the §2 gate passed on 2026-07-17)
 
 If §2 fails or members break post-release: restore `ANDVARI_PUBLIC_HOSTNAME` (back to the break-glass
 régime) and restart the server; un-updated clients are unaffected (they still use the tailnet front).

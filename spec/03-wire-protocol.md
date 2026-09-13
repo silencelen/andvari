@@ -7,8 +7,15 @@ preconfigured for the reference instance `https://andvari.monahanhosting.com` an
 be repointed at any instance; a dual-origin deployment additionally serves a hardened
 break-glass twin origin (`ANDVARI_PUBLIC_HOSTNAME` — **opt-in**; single-origin is the
 default). All binary fields base64url unpadded.
-Server rejects request bodies > 256 KiB (sync push: > 8 MiB — a CSV import batch
-arrives as one body) except attachment uploads (streamed, quota-checked).
+Server rejects request bodies > 256 KiB except attachment uploads (streamed,
+quota-checked) and three per-route ceilings: `POST /sync/push` and
+`POST /items/{id}/restore` get **8 MiB** (a CSV import batch arrives as one body, and a
+restore re-uploads that item's blob, which was uncapped when push accepted it — a TIGHT
+restore would make a big item un-restorable from Trash), and `PUT /usage` gets
+**512 KiB + framing headroom** so an oversized ledger reaches §8.2's `bad_usage_blob`
+check instead of a generic 413 (under TIGHT that documented 512 KiB ceiling was
+unreachable dead code). Enumerated here in full because the previous version of this
+sentence named only two of the four and the third was added without it (audit H111).
 
 ## 1. Client identification & version pinning
 
@@ -115,8 +122,16 @@ cache OFF.
   escrow row (design §F.4, spec 02 §5). Failures are uniform `401 invalid_credentials` (no
   user/password distinction). **TOTP matrix (2026-07-15 pivot — enrolled TOTP is
   origin-independent):** an account with server-TOTP **enrolled** has it verified on
-  **every** origin (missing/wrong code → `401 totp_required`; the accepted-step
-  anti-replay below applies). An account **without** TOTP enrolled: instance
+  **every** origin. A **missing** code → `401 totp_required` (the client's cue to render
+  the code field). A **wrong or replayed** code → the uniform `401 invalid_credentials`,
+  NOT `totp_required`: the second factor is guessing surface exactly like the password, so
+  its failures join the same undifferentiated 401 and the same email-keyed backoff (§2.5),
+  and every client already renders one "wrong email, master password, or one-time code"
+  line on it. Answering `totp_required` to a wrong code would both narrow the guess for an
+  attacker who already has the password and make clients re-show the *enter your code*
+  instruction with no error — the code field is already on screen, so the user would see
+  nothing change. Distinguishing them is a **regression, not parity** (audit H111); the
+  accepted-step anti-replay below applies to both. An account **without** TOTP enrolled: instance
   `totpRequired=false` (§1.1) ⇒ password-only login; `totpRequired=true` ⇒ login
   succeeds into a **restricted session** — the response carries `mustEnrollTotp: true`
   (additive `SessionResponse` field, default `false`) and every authenticated route
@@ -163,7 +178,12 @@ cache OFF.
   Clients MUST batch — accumulate in memory and flush on a debounce and at lock / sign-out /
   page-hide, never one PUT per fill — so `updatedAt` cannot be read as an activity trace.
   Last-writer-wins: there is no conflict machinery, and a client SHOULD merge per item by
-  `max(lastUsedAt)` against the copy it holds rather than blindly overwriting. This endpoint is
+  `max(lastUsedAt)` against the copy it holds rather than blindly overwriting. **A client that
+  could not GET the current blob, or could not open the one it got, MUST NOT PUT that round**
+  (spec 02 §8.2's flush-round rule, 2026-09-13): a merge-less PUT is a first write only when the
+  GET answered `sealedUsage: null`. The lock / sign-out flush is awaited (bounded) BEFORE
+  `POST /auth/logout` revokes the session or the client forgets the pair — a PUT after either is
+  a 401 and the window's uses are lost. This endpoint is
   deliberately NOT audited (an audit row per flush would rebuild the very activity trace batching
   avoids, and the write grants nothing).
 
@@ -249,7 +269,7 @@ cache OFF.
 ```
 
 → `200 { "rev": <newGlobalMax>, "results": [ { "mutationId", "status", "newItemRev",
-"serverItem"? } ] }` with per-mutation status:
+"serverItem"?, "reason"? } ] }` with per-mutation status (`reason` on `rejected` only):
 
 - `applied` — clean write (`baseItemRev` matched server state).
 - `conflict` — divergence handled server-side, **write never rejected-and-dropped**:
@@ -271,12 +291,39 @@ cache OFF.
   fielded client legitimately downgrades, an invariant future clients MUST preserve;
   the same check 400s `fv_downgrade` on `POST /items/{id}/restore`); nothing written;
   audited.
+- `rejected` (audit 2026-09-13 H03) — a `put` the server can never apply AS
+  SENT, answered per mutation with a `reason`: `unknown_attachment` (an `attachmentIds`
+  entry names no stored attachment), `attachment_mismatch` (it exists but is bound to a
+  different item or vault — §9), or `item_attachment_quota` (the referenced total exceeds
+  `itemAttachmentsMaxBytes`). Nothing written; the rest of the batch proceeds; NOT
+  audited (a writer's stale reference is not an intrusion event); NEVER dedup-cached (a
+  replay of the same `mutationId` is re-evaluated against the live attachment rows, so a
+  client that re-uploads the file and re-sends the identical put lands). `serverItem`
+  carries the server's current row when one exists — a tombstone when a peer deleted the
+  item and its attachment rows with it — as information for the client's reconcile.
+  **Client duty:** a `rejected` row is a POISON row — drop it durably, tell the user
+  (the "write-rejected" notice; the editor error for a direct save), and continue the
+  drain and the pull. It MUST NOT stay queued. Before this status these three refusals
+  were thrown batch-wide (400/413) and no fielded client dequeued on a thrown push, so
+  one dangling ref — produced by a peer deleting the item under an offline edit, by the
+  24 h orphan sweep under a long-queued new item, or by a history restore over a
+  since-removed file — stopped the device syncing until a sign-out that discarded every
+  other queued edit. A pre-H03 client treats any status it does not know as
+  "definitive — dequeue", which is why this is a status and not a new error code.
 
 Batch limit 200 mutations; server applies the batch in order inside ONE transaction:
-a thrown validation failure (e.g. bad attachment refs) rolls back the WHOLE batch,
-while per-mutation `denied` results are recorded without aborting the rest. Clients
-maintain a durable outbound queue and MUST retry with the SAME mutationIds after
-connectivity loss.
+a thrown validation failure (a malformed request — `put_without_item`, `bad_op`,
+`batch_too_large`; the 8 MiB body cap's `413 body_too_large`, fired before the handler)
+rolls back the WHOLE batch, while per-mutation `denied` and `rejected` results are
+recorded without aborting the rest. Clients maintain a durable outbound queue and MUST
+retry with the SAME mutationIds after connectivity loss — but a thrown 400 or 413 is a
+DEFINITIVE refusal of that batch, never a transport blip: a client MUST NOT re-send it
+identically forever. The shipped drains bisect such a batch (re-sending halves is safe:
+a refused batch applied nothing and the dedup window makes re-sends idempotent) until
+the refusal isolates to single rows, which are dropped durably with the same
+"write-rejected" notice; and they bound each batch by approximate encoded size (6 MiB,
+below the cap) as well as by count, so only a lone row that is itself over the cap can
+ever draw the 413 (H19).
 
 **Conflict-copy materialization (client duty):** on seeing `conflict=true` with a
 decryptable displaced version, create a new item `{name: "<name> (conflict
@@ -300,11 +347,16 @@ upgrade request remains valid for non-browser callers. **Raw access tokens in th
 query are NOT accepted** — long-lived bearers must never ride URLs into edge logs.
 A ticket authenticates the account at mint time; if the session is revoked within the
 ticket's ≤30 s TTL, the already-minted ticket may still open the bell for that window
-(accepted: the socket carries only rev/policy/revoked signalling, never vault data, and
+(accepted: the socket carries only rev/revoked signalling, never vault data, and
 the session's access token is rejected on its next `/sync`).
-Server → client frames: `{"type":"rev","rev":N}` (something changed — pull if N >
-local), `{"type":"policy"}`, `{"type":"revoked"}` (session killed — drop to lock
-screen). Nothing else rides the socket; it is a dirty-bell, not a data plane.
+Server → client frames, **exhaustively**: `{"type":"rev","rev":N}` (something changed —
+pull if N > local) and `{"type":"revoked"}` (session killed — drop to lock screen).
+Nothing else rides the socket; it is a dirty-bell, not a data plane. Earlier versions of
+this section also listed `{"type":"policy"}`; no server has ever emitted it and the one
+client handler that existed for it was deleted as dead code, so it is struck rather than
+reserved (audit H111). A policy change reaches clients through the ordinary
+`/client-policy` poll and the `rev` bell; if a dedicated frame is ever wanted it is a new
+design (backlog F54), not a promise this document already made.
 **Liveness:** browser clients reconnect a dropped bell with exponential backoff (1 s
 doubling to a 60 s cap, jittered), minting a fresh single-use ticket per attempt, and
 pull `/sync` on every (re)open to recover bells missed while down (the notifier has no
@@ -359,7 +411,17 @@ strips them degrades every client to the poll path (correct, just slower).
   instance-wide lockout, recoverable only by DB surgery) and `400 no_such_user` for an
   unknown target; both refusals are audited (`user_disable_denied`). `POST
   /admin/devices/{id}/revoke`, `GET /admin/users/{id}/devices` — per-user device list
-  (feeds the revocation UI).
+  (feeds the revocation UI). Each row carries, beside the device's own fields,
+  **`live: Boolean`** and **`signedOutAt: Long?`** (both additive — an older client
+  decodes the object unchanged). "Live" is **derived**, not a column: the device is not
+  admin-revoked AND it still has a session that is neither revoked nor past its refresh
+  expiry. `signedOutAt` is stamped when the member signs out and is deliberately distinct
+  from `revokedAt` (an admin action). `deviceCount` on the user object is the count of
+  live devices under the same definition. This is normative because the obvious
+  implementation — count the rows whose `revokedAt` is null — counts every device the
+  member ever signed in on as a live, revocable device forever, which is what shipped
+  (audit H25); a server that reports raw rows here is wrong even though its JSON
+  validates.
 - `GET /admin/users/{id}/escrow` — step 1 of the admin recovery ceremony (spec 04 §4):
   returns the member's sealed escrow blob (base64url text; `404 no_escrow` when the
   account was enrolled `waived`). The blob is useless without the printed sheet, but the
@@ -394,7 +456,16 @@ strips them degrades every client to the poll path (correct, just slower).
   k-anonymity range API with a 7-day on-disk cache; response format identical to
   upstream (`SUFFIX:COUNT` lines). Client computes SHA-1 locally and compares
   suffixes locally; full hashes never leave the device.
-- `GET /downloads` — web UI + manifest `{ windows: { version, url, sha256 } }`.
+- `GET /downloads` — web UI + `manifest.json`, the signed update channel. One object per
+  platform key (`android`, `windows`, `linux`, `browserExtension`), each carrying at least
+  `version` and `url` (plus `sha256`, and the extension's `firefoxUrl`); a platform whose key
+  is absent or missing either field renders as "not published yet". Alongside it,
+  `manifest.json.sig` — a detached Ed25519 signature over the manifest bytes, verified against
+  the client's pinned key with the `seq` anti-rollback floor. `seq` (monotonic, one per publish)
+  and `signedAt` are manifest-level fields, not per-platform ones. The full schema, key custody
+  and ceremony are `docs/runbooks/release-signing-keys.md`; this document only fixes the route.
+  (The previous one-line sketch here described a Windows-only object three platforms after that
+  stopped being true — audit H111.)
 - `GET /selfhost` — static self-hosting page (bundled render of
   `docs/self-hosting.md` plus downloadable `docker-compose.yml` /
   `andvari.env.template` / `bringup.sh`), registered **before** the SPA fallback so
@@ -460,9 +531,11 @@ strips them degrades every client to the poll path (correct, just slower).
 - `GET /attachments/{attachmentId}` — any grant on the owning vault; raw body
   identical to the upload shape. Unknown/foreign ids answer 403 (hidden-as-403, §8).
 - Item pushes referencing `attachmentIds` are validated: every id must exist and be
-  bound to that exact (itemId, vaultId) (`400 unknown_attachment` /
-  `400 attachment_mismatch`), and the referenced total must fit
-  `itemAttachmentsMaxBytes` (413). A validation failure fails the whole push batch.
+  bound to that exact (itemId, vaultId) (`unknown_attachment` / `attachment_mismatch`),
+  and the referenced total must fit `itemAttachmentsMaxBytes` (`item_attachment_quota`).
+  On `POST /sync/push` a failure is the per-mutation `rejected` status carrying that
+  reason (§5, H03) — the rest of the batch proceeds; on `POST /items/{id}/restore` the
+  same checks are thrown (`400` / `413`), that route being a single direct request.
 - Tombstoning an item deletes its blobs immediately; uploads never referenced by a
   live item are GC'd after 24 h (spec 02 §6).
 

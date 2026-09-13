@@ -51,6 +51,9 @@ page again for newer versions.
 *Settings → Your devices* lists the Windows installer and the Linux `.deb` when your instance
 publishes them. Installing over an existing copy upgrades in place.
 
+If the desktop app ever misbehaves, it keeps a **diagnostic log** — see *Found something? Tell us*
+below, which explains what is in it and how to find it.
+
 **Android**
 *Settings → Your devices → Android* lists the app (`.apk`) when your instance publishes one.
 If the row says it isn't published yet, that instance builds and hands out the app itself —
@@ -129,6 +132,23 @@ No bug is too small — "this was confusing" counts. When you report, please inc
 - **What you did** (the steps) and **what happened** vs. what you expected.
 - A screenshot if you can grab one — but check it first: screenshots of the vault contain real
   secrets, and a recovery phrase or master password must never end up in a bug report.
+- **On the Windows/Linux desktop app, the diagnostic log** — `~/.andvari-desktop/diagnostic.log`
+  (on Windows, `C:\Users\<you>\.andvari-desktop\diagnostic.log`). The desktop app's *About*
+  dialog shows the exact path and has an **Open folder** button, because that directory is hidden
+  by default in Explorer and in most Linux file managers. Attach it, or the last few lines of it,
+  whenever the app says something went wrong and you cannot tell why.
+
+  **What it holds:** the technical reason behind the calm on-screen message — the type of error,
+  where it happened, the stack trace, and basic facts about the machine (OS, Java version, whether
+  the encryption library loaded). **What it never holds:** anything from the vault. No item names,
+  usernames, passwords, notes, attachment names, recovery phrases or server tokens — the app strips
+  error text down to a fixed set of structural fields precisely so this file is safe to send. It
+  also holds your **home-directory path**, which usually contains your account name, so it is not
+  secret but it is not anonymous either.
+
+  It is **capped and rotated** (256 KiB per file, one previous generation kept — 512 KiB total, no
+  matter how long the app runs), and it is **safe to delete** at any time: the app recreates it on
+  the next event and nothing depends on its contents.
 
 Send it back through whatever channel your test round is using; whoever invited you will have
 told you where.

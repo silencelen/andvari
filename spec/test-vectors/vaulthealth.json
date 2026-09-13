@@ -601,5 +601,829 @@
             "loserIds": [],
             "mergeRefusal": null
         }
-    ]
+    ],
+    "writes": {
+        "roles": {
+            "v3": "reader"
+        },
+        "items": [
+            {
+                "itemId": "failing-fresh",
+                "vaultId": "v1",
+                "updatedAt": 1754740800000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"failing-fresh\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://bank.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1754827200000,\n        \"result\": \"bad\"\n    }\n}"
+            },
+            {
+                "itemId": "failing-old",
+                "vaultId": "v1",
+                "updatedAt": 1754222400000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"failing-old\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://mail.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1747224000000,\n        \"result\": \"gone\"\n    }\n}"
+            },
+            {
+                "itemId": "never-old",
+                "vaultId": "v1",
+                "updatedAt": 1677240000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"never-old\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://ancient.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "never-new",
+                "vaultId": "v1",
+                "updatedAt": 1754913600000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"never-new\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://recent.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "over-year",
+                "vaultId": "v1",
+                "updatedAt": 1711800000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"over-year\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://yearly.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1720440000000,\n        \"result\": \"ok\"\n    }\n}"
+            },
+            {
+                "itemId": "six-to-twelve",
+                "vaultId": "v1",
+                "updatedAt": 1729080000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"six-to-twelve\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://halfyear.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1737720000000,\n        \"result\": \"ok\"\n    }\n}"
+            },
+            {
+                "itemId": "recent-ok",
+                "vaultId": "v1",
+                "updatedAt": 1754568000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"recent-ok\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://fresh.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1754740800000,\n        \"result\": \"ok\",\n        \"okAt\": 1754740800000\n    }\n}"
+            },
+            {
+                "itemId": "snoozed",
+                "vaultId": "v1",
+                "updatedAt": 1751544000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"snoozed\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://snoozed.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1754568000000,\n        \"result\": \"blocked\",\n        \"until\": 1755864000000\n    }\n}"
+            },
+            {
+                "itemId": "skewed-future",
+                "vaultId": "v1",
+                "updatedAt": 1753272000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"skewed-future\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://skew.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1841313600000,\n        \"result\": \"ok\"\n    }\n}"
+            },
+            {
+                "itemId": "unknown-verdict",
+                "vaultId": "v1",
+                "updatedAt": 1752408000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"unknown-verdict\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://future.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1754913600000,\n        \"result\": \"quantum-verified\"\n    }\n}"
+            },
+            {
+                "itemId": "app-only",
+                "vaultId": "v1",
+                "updatedAt": 1754395200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"app-only\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"androidapp://com.example.app\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "dupe-exact-old",
+                "vaultId": "v1",
+                "updatedAt": 1746360000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-exact-old\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"shared-pw\",\n        \"uris\": [\n            \"https://shop.example\",\n            \"https://old.shop.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "dupe-exact-new",
+                "vaultId": "v1",
+                "updatedAt": 1754136000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-exact-new\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"shared-pw\",\n        \"uris\": [\n            \"https://shop.example/login\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "dupe-differs-stale",
+                "vaultId": "v1",
+                "updatedAt": 1748088000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-differs-stale\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"stale-pw\",\n        \"uris\": [\n            \"https://news.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "dupe-differs-current",
+                "vaultId": "v1",
+                "updatedAt": 1754654400000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-differs-current\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"current-pw\",\n        \"uris\": [\n            \"https://news.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "dupe-crossvault-a",
+                "vaultId": "v1",
+                "updatedAt": 1750680000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-crossvault-a\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"twin-pw\",\n        \"uris\": [\n            \"https://social.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "dupe-crossvault-b",
+                "vaultId": "v2",
+                "updatedAt": 1751112000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-crossvault-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"twin-pw\",\n        \"uris\": [\n            \"https://social.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "weak",
+                "vaultId": "v1",
+                "updatedAt": 1754827200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"weak\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"aaa\",\n        \"uris\": [\n            \"https://weak.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "strong",
+                "vaultId": "v1",
+                "updatedAt": 1754827200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"strong\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"correct horse battery staple\",\n        \"uris\": [\n            \"https://strong.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "has-totp",
+                "vaultId": "v1",
+                "updatedAt": 1754827200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"has-totp\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"unique-pw-1\",\n        \"uris\": [\n            \"https://totp.example\"\n        ],\n        \"totp\": \"otpauth://totp/x?secret=GEZDGNBV\"\n    }\n}"
+            },
+            {
+                "itemId": "merge-fav-old",
+                "vaultId": "v1",
+                "updatedAt": 1749816000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-fav-old\",\n    \"favorite\": true,\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"fav-pw\",\n        \"uris\": [\n            \"https://fav.example/a\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "merge-fav-new",
+                "vaultId": "v1",
+                "updatedAt": 1754481600000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-fav-new\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"fav-pw\",\n        \"uris\": [\n            \"https://fav.example/b\",\n            \"https://fav.example/a\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "merge-notes-old",
+                "vaultId": "v1",
+                "updatedAt": 1748952000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-notes-old\",\n    \"notes\": \"keep these notes\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"notes-pw\",\n        \"uris\": [\n            \"https://notes.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "merge-notes-new",
+                "vaultId": "v1",
+                "updatedAt": 1754395200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-notes-new\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"notes-pw\",\n        \"uris\": [\n            \"https://notes.example/login\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "merge-split-a",
+                "vaultId": "v1",
+                "updatedAt": 1752408000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-split-a\",\n    \"notes\": \"only here\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"split-pw\",\n        \"uris\": [\n            \"https://split.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "merge-split-b",
+                "vaultId": "v1",
+                "updatedAt": 1754740800000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-split-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"split-pw\",\n        \"uris\": [\n            \"https://split.example\"\n        ]\n    },\n    \"attachments\": [\n        {\n            \"id\": \"split-att\",\n            \"name\": \"split-att.bin\",\n            \"size\": 1,\n            \"fileKey\": \"a2V5\"\n        }\n    ]\n}"
+            },
+            {
+                "itemId": "merge-reader-a",
+                "vaultId": "v3",
+                "updatedAt": 1753272000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-reader-a\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"reader-pw\",\n        \"uris\": [\n            \"https://reader.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "merge-reader-b",
+                "vaultId": "v3",
+                "updatedAt": 1754827200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-reader-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"reader-pw\",\n        \"uris\": [\n            \"https://reader.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "merge-totp-a",
+                "vaultId": "v1",
+                "updatedAt": 1753272000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-totp-a\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"totp-pw\",\n        \"uris\": [\n            \"https://totp2.example\"\n        ],\n        \"totp\": \"otpauth://totp/a?secret=GEZDGNBV\"\n    }\n}"
+            },
+            {
+                "itemId": "merge-totp-b",
+                "vaultId": "v1",
+                "updatedAt": 1754827200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-totp-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"totp-pw\",\n        \"uris\": [\n            \"https://totp2.example\"\n        ],\n        \"totp\": \"otpauth://totp/b?secret=GEZDGNBW\"\n    }\n}"
+            },
+            {
+                "itemId": "keep-hist-a",
+                "vaultId": "v1",
+                "updatedAt": 1750680000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-hist-a\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"p1\",\n        \"uris\": [\n            \"https://hist.example\"\n        ],\n        \"passwordHistory\": [\n            {\n                \"password\": \"p2\",\n                \"retiredAt\": 1746360000000\n            }\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "keep-hist-b",
+                "vaultId": "v1",
+                "updatedAt": 1753272000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-hist-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"p2\",\n        \"uris\": [\n            \"https://hist.example/b\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "keep-hist-c",
+                "vaultId": "v1",
+                "updatedAt": 1754827200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-hist-c\",\n    \"favorite\": true,\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"p3\",\n        \"uris\": [\n            \"https://hist.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "keep-totp-a",
+                "vaultId": "v1",
+                "updatedAt": 1753272000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-totp-a\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"kt1\",\n        \"uris\": [\n            \"https://kt.example\"\n        ],\n        \"totp\": \"otpauth://totp/a?secret=GEZDGNBV\"\n    }\n}"
+            },
+            {
+                "itemId": "keep-totp-b",
+                "vaultId": "v1",
+                "updatedAt": 1754827200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-totp-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"kt2\",\n        \"uris\": [\n            \"https://kt.example\"\n        ],\n        \"totp\": \"otpauth://totp/b?secret=GEZDGNBW\"\n    }\n}"
+            },
+            {
+                "itemId": "keep-attach-a",
+                "vaultId": "v1",
+                "updatedAt": 1753272000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-attach-a\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"ka1\",\n        \"uris\": [\n            \"https://ka.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "keep-attach-b",
+                "vaultId": "v1",
+                "updatedAt": 1754827200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-attach-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"ka2\",\n        \"uris\": [\n            \"https://ka.example/b\"\n        ]\n    },\n    \"attachments\": [\n        {\n            \"id\": \"ka-att\",\n            \"name\": \"ka-att.bin\",\n            \"size\": 1,\n            \"fileKey\": \"a2V5\"\n        }\n    ]\n}"
+            },
+            {
+                "itemId": "keep-notes-a",
+                "vaultId": "v1",
+                "updatedAt": 1753272000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-notes-a\",\n    \"notes\": \"A's notes\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"kn1\",\n        \"uris\": [\n            \"https://kn.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "keep-notes-b",
+                "vaultId": "v1",
+                "updatedAt": 1754827200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-notes-b\",\n    \"notes\": \"B's notes\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"kn2\",\n        \"uris\": [\n            \"https://kn.example\"\n        ]\n    }\n}"
+            },
+            {
+                "itemId": "dismissed-a",
+                "vaultId": "v1",
+                "updatedAt": 1753272000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dismissed-a\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"dis-pw\",\n        \"uris\": [\n            \"https://dismissed.example\"\n        ]\n    },\n    \"dupeAck\": \"dismissed-a|dismissed-b\"\n}"
+            },
+            {
+                "itemId": "dismissed-b",
+                "vaultId": "v1",
+                "updatedAt": 1754827200000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dismissed-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"dis-pw\",\n        \"uris\": [\n            \"https://dismissed.example\"\n        ]\n    },\n    \"dupeAck\": \"dismissed-a|dismissed-b\"\n}"
+            },
+            {
+                "itemId": "reader-login",
+                "vaultId": "v3",
+                "updatedAt": 1754136000000,
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"reader-login\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://readerlogin.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1754568000000,\n        \"result\": \"blocked\",\n        \"until\": 1755864000000\n    }\n}"
+            },
+            {
+                "itemId": "note-item",
+                "vaultId": "v1",
+                "updatedAt": 1754913600000,
+                "docJson": "{\n    \"type\": \"note\",\n    \"name\": \"note-item\",\n    \"notes\": \"a note\"\n}"
+            }
+        ],
+        "duplicates": [
+            {
+                "sites": [
+                    "dismissed.example"
+                ],
+                "kind": "exact",
+                "memberIds": [
+                    "dismissed-b",
+                    "dismissed-a"
+                ],
+                "signature": "dismissed-a|dismissed-b",
+                "dismissed": true,
+                "survivorId": "dismissed-b",
+                "loserIds": [
+                    "dismissed-a"
+                ],
+                "mergeDocJson": "{\n    \"type\": \"login\",\n    \"name\": \"dismissed-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"dis-pw\",\n        \"uris\": [\n            \"https://dismissed.example\"\n        ]\n    },\n    \"dupeAck\": \"dismissed-a|dismissed-b\"\n}",
+                "mergeRefusal": null
+            },
+            {
+                "sites": [
+                    "fav.example"
+                ],
+                "kind": "exact",
+                "memberIds": [
+                    "merge-fav-new",
+                    "merge-fav-old"
+                ],
+                "signature": "merge-fav-new|merge-fav-old",
+                "dismissed": false,
+                "survivorId": "merge-fav-new",
+                "loserIds": [
+                    "merge-fav-old"
+                ],
+                "mergeDocJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-fav-new\",\n    \"favorite\": true,\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"fav-pw\",\n        \"uris\": [\n            \"https://fav.example/b\",\n            \"https://fav.example/a\"\n        ]\n    }\n}",
+                "mergeRefusal": null
+            },
+            {
+                "sites": [
+                    "notes.example"
+                ],
+                "kind": "exact",
+                "memberIds": [
+                    "merge-notes-new",
+                    "merge-notes-old"
+                ],
+                "signature": "merge-notes-new|merge-notes-old",
+                "dismissed": false,
+                "survivorId": "merge-notes-old",
+                "loserIds": [
+                    "merge-notes-new"
+                ],
+                "mergeDocJson": "{\n    \"type\": \"login\",\n    \"name\": \"merge-notes-old\",\n    \"notes\": \"keep these notes\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"notes-pw\",\n        \"uris\": [\n            \"https://notes.example\",\n            \"https://notes.example/login\"\n        ]\n    }\n}",
+                "mergeRefusal": null
+            },
+            {
+                "sites": [
+                    "old.shop.example",
+                    "shop.example"
+                ],
+                "kind": "exact",
+                "memberIds": [
+                    "dupe-exact-new",
+                    "dupe-exact-old"
+                ],
+                "signature": "dupe-exact-new|dupe-exact-old",
+                "dismissed": false,
+                "survivorId": "dupe-exact-new",
+                "loserIds": [
+                    "dupe-exact-old"
+                ],
+                "mergeDocJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-exact-new\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"shared-pw\",\n        \"uris\": [\n            \"https://shop.example/login\",\n            \"https://shop.example\",\n            \"https://old.shop.example\"\n        ]\n    }\n}",
+                "mergeRefusal": null
+            },
+            {
+                "sites": [
+                    "reader.example"
+                ],
+                "kind": "exact",
+                "memberIds": [
+                    "merge-reader-b",
+                    "merge-reader-a"
+                ],
+                "signature": "merge-reader-a|merge-reader-b",
+                "dismissed": false,
+                "survivorId": null,
+                "loserIds": [],
+                "mergeDocJson": null,
+                "mergeRefusal": "These copies are in a vault you can only view — ask the vault's owner to merge them."
+            },
+            {
+                "sites": [
+                    "social.example"
+                ],
+                "kind": "exact",
+                "memberIds": [
+                    "dupe-crossvault-b",
+                    "dupe-crossvault-a"
+                ],
+                "signature": "dupe-crossvault-a|dupe-crossvault-b",
+                "dismissed": false,
+                "survivorId": null,
+                "loserIds": [],
+                "mergeDocJson": null,
+                "mergeRefusal": "These copies are in different vaults — merge by hand."
+            },
+            {
+                "sites": [
+                    "split.example"
+                ],
+                "kind": "exact",
+                "memberIds": [
+                    "merge-split-b",
+                    "merge-split-a"
+                ],
+                "signature": "merge-split-a|merge-split-b",
+                "dismissed": false,
+                "survivorId": null,
+                "loserIds": [],
+                "mergeDocJson": null,
+                "mergeRefusal": "The copies each hold data the others lack — merge by hand."
+            },
+            {
+                "sites": [
+                    "totp2.example"
+                ],
+                "kind": "exact",
+                "memberIds": [
+                    "merge-totp-b",
+                    "merge-totp-a"
+                ],
+                "signature": "merge-totp-a|merge-totp-b",
+                "dismissed": false,
+                "survivorId": null,
+                "loserIds": [],
+                "mergeDocJson": null,
+                "mergeRefusal": "The copies carry different one-time codes — merge by hand."
+            },
+            {
+                "sites": [
+                    "hist.example"
+                ],
+                "kind": "differs",
+                "memberIds": [
+                    "keep-hist-c",
+                    "keep-hist-b",
+                    "keep-hist-a"
+                ],
+                "signature": "keep-hist-a|keep-hist-b|keep-hist-c",
+                "dismissed": false,
+                "survivorId": null,
+                "loserIds": [],
+                "mergeDocJson": null,
+                "mergeRefusal": null
+            },
+            {
+                "sites": [
+                    "ka.example"
+                ],
+                "kind": "differs",
+                "memberIds": [
+                    "keep-attach-b",
+                    "keep-attach-a"
+                ],
+                "signature": "keep-attach-a|keep-attach-b",
+                "dismissed": false,
+                "survivorId": null,
+                "loserIds": [],
+                "mergeDocJson": null,
+                "mergeRefusal": null
+            },
+            {
+                "sites": [
+                    "kn.example"
+                ],
+                "kind": "differs",
+                "memberIds": [
+                    "keep-notes-b",
+                    "keep-notes-a"
+                ],
+                "signature": "keep-notes-a|keep-notes-b",
+                "dismissed": false,
+                "survivorId": null,
+                "loserIds": [],
+                "mergeDocJson": null,
+                "mergeRefusal": null
+            },
+            {
+                "sites": [
+                    "kt.example"
+                ],
+                "kind": "differs",
+                "memberIds": [
+                    "keep-totp-b",
+                    "keep-totp-a"
+                ],
+                "signature": "keep-totp-a|keep-totp-b",
+                "dismissed": false,
+                "survivorId": null,
+                "loserIds": [],
+                "mergeDocJson": null,
+                "mergeRefusal": null
+            },
+            {
+                "sites": [
+                    "news.example"
+                ],
+                "kind": "differs",
+                "memberIds": [
+                    "dupe-differs-current",
+                    "dupe-differs-stale"
+                ],
+                "signature": "dupe-differs-current|dupe-differs-stale",
+                "dismissed": false,
+                "survivorId": null,
+                "loserIds": [],
+                "mergeDocJson": null,
+                "mergeRefusal": null
+            }
+        ],
+        "planKeep": [
+            {
+                "name": "keep-current-over-stale",
+                "memberIds": [
+                    "dupe-differs-stale",
+                    "dupe-differs-current"
+                ],
+                "keepId": "dupe-differs-current",
+                "retiredAt": 1755000000000,
+                "survivorId": "dupe-differs-current",
+                "loserIds": [
+                    "dupe-differs-stale"
+                ],
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-differs-current\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"current-pw\",\n        \"uris\": [\n            \"https://news.example\"\n        ],\n        \"passwordHistory\": [\n            {\n                \"password\": \"stale-pw\",\n                \"retiredAt\": 1755000000000\n            }\n        ]\n    }\n}",
+                "refusal": null
+            },
+            {
+                "name": "keep-the-older-copy",
+                "memberIds": [
+                    "dupe-differs-stale",
+                    "dupe-differs-current"
+                ],
+                "keepId": "dupe-differs-stale",
+                "retiredAt": 1755000000000,
+                "survivorId": "dupe-differs-stale",
+                "loserIds": [
+                    "dupe-differs-current"
+                ],
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-differs-stale\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"stale-pw\",\n        \"uris\": [\n            \"https://news.example\"\n        ],\n        \"passwordHistory\": [\n            {\n                \"password\": \"current-pw\",\n                \"retiredAt\": 1755000000000\n            }\n        ]\n    }\n}",
+                "refusal": null
+            },
+            {
+                "name": "history-dedupe-and-favorite",
+                "memberIds": [
+                    "keep-hist-a",
+                    "keep-hist-b",
+                    "keep-hist-c"
+                ],
+                "keepId": "keep-hist-a",
+                "retiredAt": 1755000000000,
+                "survivorId": "keep-hist-a",
+                "loserIds": [
+                    "keep-hist-c",
+                    "keep-hist-b"
+                ],
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-hist-a\",\n    \"favorite\": true,\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"p1\",\n        \"uris\": [\n            \"https://hist.example\",\n            \"https://hist.example/b\"\n        ],\n        \"passwordHistory\": [\n            {\n                \"password\": \"p2\",\n                \"retiredAt\": 1746360000000\n            },\n            {\n                \"password\": \"p3\",\n                \"retiredAt\": 1755000000000\n            }\n        ]\n    }\n}",
+                "refusal": null
+            },
+            {
+                "name": "keep-the-copy-with-attachments",
+                "memberIds": [
+                    "keep-attach-a",
+                    "keep-attach-b"
+                ],
+                "keepId": "keep-attach-b",
+                "retiredAt": 1755000000000,
+                "survivorId": "keep-attach-b",
+                "loserIds": [
+                    "keep-attach-a"
+                ],
+                "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"keep-attach-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"ka2\",\n        \"uris\": [\n            \"https://ka.example/b\",\n            \"https://ka.example\"\n        ],\n        \"passwordHistory\": [\n            {\n                \"password\": \"ka1\",\n                \"retiredAt\": 1755000000000\n            }\n        ]\n    },\n    \"attachments\": [\n        {\n            \"id\": \"ka-att\",\n            \"name\": \"ka-att.bin\",\n            \"size\": 1,\n            \"fileKey\": \"a2V5\"\n        }\n    ]\n}",
+                "refusal": null
+            },
+            {
+                "name": "refuse-vanished-member",
+                "memberIds": [
+                    "dupe-differs-stale",
+                    "vanished-id"
+                ],
+                "keepId": "dupe-differs-stale",
+                "retiredAt": 1755000000000,
+                "survivorId": null,
+                "loserIds": [],
+                "docJson": null,
+                "refusal": "A copy changed under you — the list refreshes on its own; try again."
+            },
+            {
+                "name": "refuse-keep-id-not-a-member",
+                "memberIds": [
+                    "dupe-differs-stale",
+                    "dupe-differs-current"
+                ],
+                "keepId": "weak",
+                "retiredAt": 1755000000000,
+                "survivorId": null,
+                "loserIds": [],
+                "docJson": null,
+                "refusal": "A copy changed under you — the list refreshes on its own; try again."
+            },
+            {
+                "name": "refuse-cross-vault",
+                "memberIds": [
+                    "dupe-crossvault-a",
+                    "dupe-crossvault-b"
+                ],
+                "keepId": "dupe-crossvault-a",
+                "retiredAt": 1755000000000,
+                "survivorId": null,
+                "loserIds": [],
+                "docJson": null,
+                "refusal": "These copies are in different vaults — merge by hand."
+            },
+            {
+                "name": "refuse-reader",
+                "memberIds": [
+                    "merge-reader-a",
+                    "merge-reader-b"
+                ],
+                "keepId": "merge-reader-a",
+                "retiredAt": 1755000000000,
+                "survivorId": null,
+                "loserIds": [],
+                "docJson": null,
+                "refusal": "These copies are in a vault you can only view — ask the vault's owner to merge them."
+            },
+            {
+                "name": "refuse-loser-totp",
+                "memberIds": [
+                    "keep-totp-a",
+                    "keep-totp-b"
+                ],
+                "keepId": "keep-totp-a",
+                "retiredAt": 1755000000000,
+                "survivorId": null,
+                "loserIds": [],
+                "docJson": null,
+                "refusal": "The copies carry different one-time codes — merge by hand."
+            },
+            {
+                "name": "refuse-loser-notes",
+                "memberIds": [
+                    "keep-notes-a",
+                    "keep-notes-b"
+                ],
+                "keepId": "keep-notes-a",
+                "retiredAt": 1755000000000,
+                "survivorId": null,
+                "loserIds": [],
+                "docJson": null,
+                "refusal": "The copies carry different notes — merge by hand."
+            },
+            {
+                "name": "refuse-loser-attachments",
+                "memberIds": [
+                    "keep-attach-a",
+                    "keep-attach-b"
+                ],
+                "keepId": "keep-attach-a",
+                "retiredAt": 1755000000000,
+                "survivorId": null,
+                "loserIds": [],
+                "docJson": null,
+                "refusal": "A copy being removed has attachments — merge by hand."
+            }
+        ],
+        "planDismiss": [
+            {
+                "name": "dismiss-cross-vault-pair",
+                "memberIds": [
+                    "dupe-crossvault-a",
+                    "dupe-crossvault-b"
+                ],
+                "signature": "dupe-crossvault-a|dupe-crossvault-b",
+                "writes": [
+                    {
+                        "itemId": "dupe-crossvault-a",
+                        "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-crossvault-a\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"twin-pw\",\n        \"uris\": [\n            \"https://social.example\"\n        ]\n    },\n    \"dupeAck\": \"dupe-crossvault-a|dupe-crossvault-b\"\n}"
+                    },
+                    {
+                        "itemId": "dupe-crossvault-b",
+                        "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dupe-crossvault-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"twin-pw\",\n        \"uris\": [\n            \"https://social.example\"\n        ]\n    },\n    \"dupeAck\": \"dupe-crossvault-a|dupe-crossvault-b\"\n}"
+                    }
+                ],
+                "refusal": null
+            },
+            {
+                "name": "undismiss-clears-the-key",
+                "memberIds": [
+                    "dismissed-a",
+                    "dismissed-b"
+                ],
+                "signature": "",
+                "writes": [
+                    {
+                        "itemId": "dismissed-a",
+                        "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dismissed-a\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"dis-pw\",\n        \"uris\": [\n            \"https://dismissed.example\"\n        ]\n    }\n}"
+                    },
+                    {
+                        "itemId": "dismissed-b",
+                        "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"dismissed-b\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"dis-pw\",\n        \"uris\": [\n            \"https://dismissed.example\"\n        ]\n    }\n}"
+                    }
+                ],
+                "refusal": null
+            },
+            {
+                "name": "refuse-reader",
+                "memberIds": [
+                    "merge-reader-a",
+                    "merge-reader-b"
+                ],
+                "signature": "merge-reader-a|merge-reader-b",
+                "writes": null,
+                "refusal": "These copies are in a vault you can only view — ask the vault's owner."
+            },
+            {
+                "name": "refuse-vanished-member",
+                "memberIds": [
+                    "dupe-exact-old",
+                    "vanished-id"
+                ],
+                "signature": "dupe-exact-old|vanished-id",
+                "writes": null,
+                "refusal": "A copy changed under you — the list refreshes on its own; try again."
+            }
+        ],
+        "planCheck": [
+            {
+                "name": "ok-on-never-checked-stamps-okAt",
+                "itemId": "never-new",
+                "result": "ok",
+                "now": 1755000000000,
+                "snoozeMs": null,
+                "write": {
+                    "itemId": "never-new",
+                    "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"never-new\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://recent.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1755000000000,\n        \"result\": \"ok\",\n        \"okAt\": 1755000000000\n    }\n}"
+                },
+                "refusal": null
+            },
+            {
+                "name": "bad-carries-okAt-forward",
+                "itemId": "recent-ok",
+                "result": "bad",
+                "now": 1755000000000,
+                "snoozeMs": null,
+                "write": {
+                    "itemId": "recent-ok",
+                    "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"recent-ok\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://fresh.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1755000000000,\n        \"result\": \"bad\",\n        \"okAt\": 1754740800000\n    }\n}"
+                },
+                "refusal": null
+            },
+            {
+                "name": "blocked-with-snooze-sets-until",
+                "itemId": "failing-fresh",
+                "result": "blocked",
+                "now": 1755000000000,
+                "snoozeMs": 2592000000,
+                "write": {
+                    "itemId": "failing-fresh",
+                    "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"failing-fresh\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://bank.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1755000000000,\n        \"result\": \"blocked\",\n        \"until\": 1757592000000\n    }\n}"
+                },
+                "refusal": null
+            },
+            {
+                "name": "fresh-verdict-drops-an-old-snooze",
+                "itemId": "snoozed",
+                "result": "ok",
+                "now": 1755000000000,
+                "snoozeMs": null,
+                "write": {
+                    "itemId": "snoozed",
+                    "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"snoozed\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://snoozed.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1755000000000,\n        \"result\": \"ok\",\n        \"okAt\": 1755000000000\n    }\n}"
+                },
+                "refusal": null
+            },
+            {
+                "name": "unknown-verdict-is-recorded-verbatim",
+                "itemId": "over-year",
+                "result": "quantum-verified",
+                "now": 1755000000000,
+                "snoozeMs": null,
+                "write": {
+                    "itemId": "over-year",
+                    "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"over-year\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://yearly.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1755000000000,\n        \"result\": \"quantum-verified\"\n    }\n}"
+                },
+                "refusal": null
+            },
+            {
+                "name": "refuse-not-a-login",
+                "itemId": "note-item",
+                "result": "ok",
+                "now": 1755000000000,
+                "snoozeMs": null,
+                "write": null,
+                "refusal": "Only logins can be checked."
+            },
+            {
+                "name": "refuse-vanished",
+                "itemId": "vanished-id",
+                "result": "ok",
+                "now": 1755000000000,
+                "snoozeMs": null,
+                "write": null,
+                "refusal": "That item changed under you — the list refreshes on its own; try again."
+            },
+            {
+                "name": "refuse-reader",
+                "itemId": "reader-login",
+                "result": "ok",
+                "now": 1755000000000,
+                "snoozeMs": null,
+                "write": null,
+                "refusal": "This login is in a vault you can only view — ask the vault's owner to record a check."
+            }
+        ],
+        "planUnsnooze": [
+            {
+                "name": "clears-until-keeps-verdict",
+                "itemId": "snoozed",
+                "write": {
+                    "itemId": "snoozed",
+                    "docJson": "{\n    \"type\": \"login\",\n    \"name\": \"snoozed\",\n    \"login\": {\n        \"username\": \"u@example.com\",\n        \"password\": \"hunter2\",\n        \"uris\": [\n            \"https://snoozed.example\"\n        ]\n    },\n    \"check\": {\n        \"at\": 1754568000000,\n        \"result\": \"blocked\"\n    }\n}"
+                },
+                "refusal": null
+            },
+            {
+                "name": "no-snooze-is-a-no-op",
+                "itemId": "recent-ok",
+                "write": null,
+                "refusal": null
+            },
+            {
+                "name": "never-checked-is-a-no-op",
+                "itemId": "never-new",
+                "write": null,
+                "refusal": null
+            },
+            {
+                "name": "refuse-reader-before-the-no-op",
+                "itemId": "reader-login",
+                "write": null,
+                "refusal": "This login is in a vault you can only view — ask the vault's owner to record a check."
+            },
+            {
+                "name": "refuse-vanished",
+                "itemId": "vanished-id",
+                "write": null,
+                "refusal": "That item changed under you — the list refreshes on its own; try again."
+            }
+        ]
+    }
 }

@@ -29,6 +29,12 @@ export type UsageMap = Record<string, UsageEntry>;
  *  and an in-memory record dies with it — see the note on the recorder in background.ts. */
 export const FLUSH_DEBOUNCE_MS = 15_000;
 
+/** Bound on the lock / sign-out flush (audit G03 → H33): the natives' 2 s — long enough for a
+ *  GET+PUT round trip, short enough that a lock or sign-out is never noticeably held up by a
+ *  ranking hint. background.doLock/doSignOut AWAIT `flushUsage()` raced against this BEFORE they
+ *  drop the session, revoke it, or null the tokens the PUT rides on. */
+export const TEARDOWN_FLUSH_TIMEOUT_MS = 2_000;
+
 /**
  * Merge two ledgers. Both fields take the MAX, so `useCount` is a floor rather than a true total.
  * Summing is the intuitive choice and is wrong: flushes re-merge against the server copy, so the
@@ -61,6 +67,50 @@ export function pruneUsage(map: UsageMap, liveItemIds: ReadonlySet<string>): Usa
   const out: UsageMap = {};
   for (const [itemId, entry] of Object.entries(map)) if (liveItemIds.has(itemId)) out[itemId] = entry;
   return out;
+}
+
+/**
+ * What a flush learned about the server's copy before deciding whether to write (spec 02 §8.2,
+ * audit H05). Twin of web/src/vault/usage.ts — three DISTINCT outcomes rather than a nullable map,
+ * because two of them used to collapse into "empty", and an empty server view merged with one
+ * session's buffer and PUT back is how one SW's handful of fills overwrote the household's ledger.
+ */
+export type ServerLedger =
+  /** The GET succeeded and answered `sealedUsage: null`: no ledger yet. The ONLY case in which a
+   *  write with no server merge is a first write rather than an overwrite. */
+  | { kind: "absent" }
+  /** The GET succeeded and the blob opened under our key — `map` is authoritative (a blob that
+   *  opens but parses as garbage is a PRESENT, EMPTY ledger: parseUsage is tolerant by contract). */
+  | { kind: "present"; map: UsageMap }
+  /** The GET failed (offline, 5xx, 401, timeout) OR the blob would NOT open (wrong key, AD
+   *  mismatch, a future encoding). This client cannot see what it would be replacing, and spec 02
+   *  §8.2 says it MUST leave the ledger untouched. */
+  | { kind: "unreadable" };
+
+/**
+ * Decide what ONE flush round PUTs — the ledger to store, or null for "do not write this round".
+ * Pure, and the TWIN of `planFlush` in web/src/vault/usage.ts and `UsageLedger.planFlush` in core;
+ * usage.test.ts pins the same cases on all three so the engines cannot drift in WHEN they write.
+ *
+ *  - `unreadable` → null, ALWAYS, even with buffered fills (the caller re-buffers them; the
+ *    conservative direction loses at most one session's ranking hints, never the household's).
+ *  - `absent` → `mine` if non-empty (the first write), else null.
+ *  - `present` → merge, prune when handed a live set (against the live set PLUS `mine`'s keys — a
+ *    fill buffered after the caller's snapshot is inherently live), and write ONLY if something
+ *    changed, so a quiet post-sync prune costs one GET and no `updatedAt` bump (spec 03 §3).
+ */
+export function planFlush(server: ServerLedger, mine: UsageMap, liveItemIds?: ReadonlySet<string>): UsageMap | null {
+  switch (server.kind) {
+    case "unreadable":
+      return null;
+    case "absent":
+      return Object.keys(mine).length > 0 ? mine : null;
+    case "present": {
+      let merged = mergeUsage(server.map, mine);
+      if (liveItemIds) merged = pruneUsage(merged, new Set([...liveItemIds, ...Object.keys(mine)]));
+      return Object.keys(mine).length > 0 || Object.keys(merged).length !== Object.keys(server.map).length ? merged : null;
+    }
+  }
 }
 
 /** Stamp one use. Clamps backwards so a skewed-backward clock cannot walk a stamp down. */

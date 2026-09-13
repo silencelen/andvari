@@ -5,6 +5,7 @@ import io.silencelen.andvari.core.client.LifecycleNotice
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * ux-copy--3 (polish audit 2026-07-27): the §11 "replay-denied" notice is the one lifecycle
@@ -50,5 +51,32 @@ class LifecycleNoticeCopyTest {
     @Test
     fun replayDeniedIsNeverAWarning() {
         assertFalse(noticeBody(notice(3)).second)
+    }
+
+    // ---- audit 2026-09-13: the two notice kinds web had and the natives lacked / needed ----
+
+    /** H71: web's F20 "You were added to X" now has its native twin — calm, never a warning. */
+    @Test
+    fun addedRendersWebsSentence() {
+        val n = LifecycleNotice(id = "n2", vaultId = "v2", vaultName = "Family", kind = "added")
+        assertEquals("You were added to “Family”.", noticeBody(n).first)
+        assertFalse(noticeBody(n).second)
+        assertEquals("You were added to “a vault”.", noticeBody(n.copy(vaultName = "")).first)
+    }
+
+    /** H03/H19: a queue row the server definitively refused and the drain dropped renders the
+     *  canon [HouseholdCopy.writeRejectedNotice] — reason clause and count included — as a
+     *  warning (an edit was lost), never the permission sentence, never an inlined literal. */
+    @Test
+    fun writeRejectedRendersTheCanonSentenceWithItsReason() {
+        for ((count, reason) in listOf(1 to "unknown_attachment", 3 to "attachment_mismatch", 1 to "body_too_large", 2 to "item_attachment_quota", 1 to null)) {
+            val n = LifecycleNotice(id = "n3", vaultId = "v3", vaultName = "Family", kind = "write-rejected", parkedCount = count, reason = reason)
+            val (body, warn) = noticeBody(n)
+            assertEquals(HouseholdCopy.writeRejectedNotice(count, "Family", reason), body)
+            assertTrue(warn)
+            assertFalse(body.contains("permission"))
+        }
+        val missing = LifecycleNotice(id = "n4", vaultId = "v3", vaultName = "Family", kind = "write-rejected")
+        assertEquals(HouseholdCopy.writeRejectedNotice(0, "Family", null), noticeBody(missing).first)
     }
 }

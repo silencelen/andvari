@@ -21,6 +21,7 @@ import {
   fromB64,
   hkdfSha256,
   open,
+  openSharedGrant,
   seal,
   sealOpen,
   toB64,
@@ -68,12 +69,17 @@ test("kdf.json hkdf — RFC 5869 HKDF-SHA-256 with the empty salt", () => {
 });
 
 test("kdf.json chain — password → mk → authKey/wrapKey", () => {
-  for (const c of load("kdf.json").chain) {
-    const mk = deriveMasterKey(c.passwordUtf8, c.kdfParams as KdfParams, fromB64(c.saltB64));
+  const chain = load("kdf.json").chain as { kdfParams: KdfParams; passwordUtf8: string; saltB64: string; mkB64: string; authKeyB64: string; wrapKeyB64: string }[];
+  for (const c of chain) {
+    const mk = deriveMasterKey(c.passwordUtf8, c.kdfParams, fromB64(c.saltB64));
     assert.equal(toB64(mk), c.mkB64, c.passwordUtf8);
     assert.equal(toB64(authKey(mk)), c.authKeyB64);
     assert.equal(toB64(wrapKey(mk)), c.wrapKeyB64);
   }
+  // The corpus must keep carrying the non-KiB-multiple case (spec 01 §1, H16) or the loop above
+  // grades the floor on nobody; the local +512 test further up would then be the only pin, and
+  // it grades this engine against itself, not against the fleet.
+  assert.ok(chain.some((c) => c.kdfParams.memBytes % 1024 !== 0), "kdf.json chain carries a non-KiB-multiple memBytes case");
 });
 
 test("envelope.json — open() reads the frozen version‖alg‖nonce‖ct bytes another engine sealed", () => {
@@ -131,6 +137,27 @@ test("wrap.json — the whole enrollment chain reproduces through crypto.ts", ()
   assert.equal(
     fromUtf8(open(vk, fromB64(v.itemEnvelopeB64), adItem(v.personalVaultId, v.itemId, v.itemFormatVersion))),
     v.itemPlaintextUtf8,
+  );
+});
+
+// The THIRD SharedGrant twin (H93): the production open the unlock path calls from buildVaultKeys,
+// graded by the same sharedgrant.json core VectorsTest and web vectors.test.ts run — the payload
+// contract {v, vaultId, vk}, the vaultId binding, and the 32-byte VK guard the other two always had.
+test("sharedgrant.json — openSharedGrant yields the VK, refuses a reseated vaultId and a short VK", () => {
+  const v = load("sharedgrant.json");
+  const kp = boxKeypairFromSeed(fromB64(v.memberSeedB64));
+  assert.equal(toB64(kp.publicKey), v.memberIdentityPubB64);
+  assert.equal(toB64(openSharedGrant(kp.publicKey, kp.privateKey, v.vaultId, fromB64(v.sealedB64))), v.vkB64);
+  // A seal naming a different vaultId must be refused under the real vaultId (a reseated grant).
+  assert.throws(() =>
+    openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVaultMismatch.expectedVaultId, fromB64(v.rejectVaultMismatch.sealedB64)),
+  );
+  // A seal whose payload carries a non-32-byte "vk" under the RIGHT vaultId must be refused
+  // here, loudly — not accepted into vaultKeys to fail one item at a time later.
+  assert.notEqual(v.rejectVkLength.vkLen, 32);
+  assert.throws(
+    () => openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVkLength.expectedVaultId, fromB64(v.rejectVkLength.sealedB64)),
+    /32 bytes/,
   );
 });
 

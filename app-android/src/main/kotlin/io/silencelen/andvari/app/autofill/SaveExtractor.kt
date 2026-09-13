@@ -29,6 +29,8 @@ data class SavedCard(
  * Credentials a user typed into a submitted form, for "Save to andvari?". [webDomain] is the
  * password field's frame domain (null for a native app); [appPackage] is the requesting app.
  * [card] (0.7.0, additive) is the checkout's Luhn-valid card capture, when there is one.
+ * [webScheme] (H124, additive) is the same frame's `ViewNode.getWebScheme()` — "http" / "https"
+ * as the browser reports it, null when the browser or a native app gives none.
  */
 data class SavedCredentials(
     val username: String?,
@@ -36,12 +38,24 @@ data class SavedCredentials(
     val webDomain: String?,
     val appPackage: String,
     val card: SavedCard? = null,
+    val webScheme: String? = null,
 ) {
     /** A login is only worth saving if it has a password. */
     val savable: Boolean get() = !password.isNullOrEmpty()
 
-    /** The URI to store on the new login so it matches next time (spec: web host, else app package). */
-    fun uri(): String = webDomain?.let { "https://$it" } ?: "androidapp://$appPackage"
+    /**
+     * The URI to store on the new login so it matches next time (spec: web host, else app package).
+     *
+     * H124 (2026-09-13 audit): the scheme is the one the browser CAPTURED. This always wrote
+     * `https://<host>`, so a login saved on a plain-http page — a Pi-hole, a router, a loopback dev
+     * server, the F27-sanctioned intranet posture — got a site uri naming an origin that does not
+     * exist; matching ignores the scheme so the fill worked, but every "open site" surface pointed
+     * at a dead https origin. Only a positively reported `http` flips it: an absent or unknown
+     * scheme keeps https, because a browser that omits `webScheme` is far likelier to be on https
+     * than not, and a wrong `http://` on a real site would downgrade the link the user clicks.
+     * A native app never has a web scheme (and never a domain) — unaffected.
+     */
+    fun uri(): String = webDomain?.let { "${if (webScheme == "http") "http" else "https"}://$it" } ?: "androidapp://$appPackage"
 
     /** A human title for the saved item: the site host, else a readable app name. */
     fun title(): String = webDomain ?: appPackage.substringAfterLast('.').replaceFirstChar { it.uppercase() }
@@ -74,21 +88,24 @@ object SaveExtractor {
     fun extract(structure: AssistStructure): SavedCredentials {
         val appPackage = structure.activityComponent?.packageName ?: ""
 
-        class Captured(val signal: FieldSignal, val value: String?, val domain: String?, val isNewPassword: Boolean)
+        class Captured(val signal: FieldSignal, val value: String?, val domain: String?, val scheme: String?, val isNewPassword: Boolean)
         val nodes = ArrayList<Captured>()
 
-        fun visit(node: AssistStructure.ViewNode, inheritedDomain: String?, depth: Int) {
+        fun visit(node: AssistStructure.ViewNode, inheritedDomain: String?, inheritedScheme: String?, depth: Int) {
             if (depth > MAX_DEPTH) return
             if (node.importantForAutofill == View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS) return
             val nodeDomain = node.webDomain?.takeIf { it.isNotEmpty() } ?: inheritedDomain
+            // H124: the scheme rides with the domain, from the same node (API 28 getWebScheme) and
+            // inherited the same way, so the stored uri can keep an http capture http.
+            val nodeScheme = node.webScheme?.takeIf { it.isNotEmpty() } ?: inheritedScheme
             if (node.autofillId != null && node.importantForAutofill != View.IMPORTANT_FOR_AUTOFILL_NO) {
                 // Value-less fields are collected too: refine() clusters the WHOLE form by
                 // frame, and a CC_NUMBER sibling matters even when this walk sees no text in it.
-                nodes.add(Captured(StructureParser.signalOf(node, nodeDomain), textValue(node), nodeDomain, StructureParser.isNewPassword(node)))
+                nodes.add(Captured(StructureParser.signalOf(node, nodeDomain), textValue(node), nodeDomain, nodeScheme, StructureParser.isNewPassword(node)))
             }
-            for (i in 0 until node.childCount) visit(node.getChildAt(i), nodeDomain, depth + 1)
+            for (i in 0 until node.childCount) visit(node.getChildAt(i), nodeDomain, nodeScheme, depth + 1)
         }
-        for (i in 0 until structure.windowNodeCount) visit(structure.getWindowNodeAt(i).rootViewNode, null, 0)
+        for (i in 0 until structure.windowNodeCount) visit(structure.getWindowNodeAt(i).rootViewNode, null, null, 0)
 
         // ONE form-level classification — the same classifier path as the fill side.
         val kinds = CardForm.refine(nodes.map { it.signal }).kinds
@@ -96,6 +113,7 @@ object SaveExtractor {
         var username: String? = null
         var password: String? = null
         var domain: String? = null
+        var scheme: String? = null
         // Raw card captures — first value per kind wins, like the login capture. The ONE
         // exception is CC_NUMBER below: membership/rewards-style inputs can still classify
         // CC_NUMBER (the [T10] gift guard suppresses gift/egift/voucher/loyalty/coupon NAMES,
@@ -117,13 +135,13 @@ object SaveExtractor {
         val passwordNode = NewPasswordSignal.capturePassword(
             nodes.filterIndexed { i, n -> kinds[i] == FieldKind.PASSWORD && n.value != null },
         ) { it.isNewPassword }
-        if (passwordNode != null) { password = passwordNode.value; domain = passwordNode.domain }
+        if (passwordNode != null) { password = passwordNode.value; domain = passwordNode.domain; scheme = passwordNode.scheme }
 
         for ((i, n) in nodes.withIndex()) {
             val value = n.value ?: continue
             when (kinds[i]) {
                 FieldKind.PASSWORD -> {} // decided above
-                FieldKind.USERNAME -> if (username == null) { username = value; if (domain == null) domain = n.domain }
+                FieldKind.USERNAME -> if (username == null) { username = value; if (domain == null) { domain = n.domain; scheme = n.scheme } }
                 // Prefer the first LUHN-VALID number: a non-Luhn gift code never displaces a
                 // real PAN captured later. Residual (accepted, documented): two Luhn-valid
                 // PANs on one form keep first-wins — no value-blind way to rank them.
@@ -162,7 +180,7 @@ object SaveExtractor {
             username = null
             password = null
         }
-        return SavedCredentials(username, password, domain, appPackage, card)
+        return SavedCredentials(username, password, domain, appPackage, card, webScheme = scheme)
     }
 
     /** The field's current text: the typed AutofillValue if present, else the node's own text. */

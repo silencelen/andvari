@@ -3,9 +3,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ItemDoc } from "../api/types";
 import type { VaultItem } from "../vault/store";
-import { type RoleFor, duplicateClusters } from "./duplicates";
+import { type RoleFor, duplicateClusters, planDismiss, planKeep } from "./duplicates";
 import { healthRows } from "./Health";
-import { stalenessRows, stalenessSummary } from "./staleness";
+import { type CheckPlan, planCheck, planUnsnooze, stalenessRows, stalenessSummary } from "./staleness";
 
 /**
  * Consumes spec/test-vectors/vaulthealth.json — the SAME file the Kotlin
@@ -22,6 +22,13 @@ import { stalenessRows, stalenessSummary } from "./staleness";
  *
  * ORDER IS THE ASSERTION for the staleness lists. A set comparison would pass while the ranking
  * — the entire point of the view — was reversed.
+ *
+ * The `writes` block (audit H42, 2026-09-13) grades what the engines WRITE, not only what they
+ * derive: the composed merge doc, planKeep (passwordHistory's only writer), planDismiss,
+ * planCheck's okAt carry-forward and snooze horizon, planUnsnooze, and every reader / cross-vault
+ * refusal string verbatim under a real roles map. Those are the outputs that land in the vault and
+ * sync to every device — a divergence there is the silent write-side drift this file's own
+ * rationale calls the worst kind.
  */
 
 const vectorsDir = fileURLToPath(new URL("../../../spec/test-vectors/", import.meta.url));
@@ -121,3 +128,135 @@ describe("vault health — the shared cross-implementation corpus", () => {
     expect(rows.find((r) => r.itemId === "skewed-future")!.checkedAt, "a future check.at must clamp to now").toBe(now);
   });
 });
+
+// -----------------------------------------------------------------------------------------------
+// Write-side cases (H42). Docs are compared as CANONICAL JSON: JSON round-trip (drops undefined),
+// then drop any null-valued keys and empty arrays on BOTH sides. "Absent" and "null" / "[]" are one
+// value to every reader in the tree (`?.`, `?? []`, Kotlin `?: emptyList()`) but two encodings
+// across the language boundary — Kotlin omits a default, this engine spreads whatever key the
+// input had — so comparing raw strings would grade the serializers, not the engines. Everything
+// else (key presence, values, ORDER inside arrays such as uris and passwordHistory) is exact.
+// -----------------------------------------------------------------------------------------------
+type Row = { itemId: string; vaultId: string; updatedAt: number; docJson: string };
+const writes = v.writes as {
+  roles: Record<string, string>;
+  items: Row[];
+  duplicates: {
+    sites: string[];
+    kind: string;
+    memberIds: string[];
+    signature: string;
+    dismissed: boolean;
+    survivorId: string | null;
+    loserIds: string[];
+    mergeDocJson: string | null;
+    mergeRefusal: string | null;
+  }[];
+  planKeep: { name: string; memberIds: string[]; keepId: string; retiredAt: number; survivorId: string | null; loserIds: string[]; docJson: string | null; refusal: string | null }[];
+  planDismiss: { name: string; memberIds: string[]; signature: string; writes: { itemId: string; docJson: string }[] | null; refusal: string | null }[];
+  planCheck: { name: string; itemId: string; result: string; now: number; snoozeMs: number | null; write: { itemId: string; docJson: string } | null; refusal: string | null }[];
+  planUnsnooze: { name: string; itemId: string; write: { itemId: string; docJson: string } | null; refusal: string | null }[];
+};
+const writeItems: VaultItem[] = writes.items.map((o) => ({
+  itemId: o.itemId,
+  vaultId: o.vaultId,
+  rev: 1,
+  updatedAt: o.updatedAt,
+  formatVersion: 1,
+  doc: JSON.parse(o.docJson) as ItemDoc,
+}));
+const writeRoleFor: RoleFor = (vaultId) => writes.roles[vaultId] ?? null;
+
+function canon(x: unknown): unknown {
+  if (Array.isArray(x)) return x.map(canon);
+  if (x && typeof x === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(x as Record<string, unknown>)) {
+      if (val === null || val === undefined) continue;
+      if (Array.isArray(val) && val.length === 0) continue;
+      out[k] = canon(val);
+    }
+    return out;
+  }
+  return x;
+}
+const canonDoc = (doc: ItemDoc): unknown => canon(JSON.parse(JSON.stringify(doc)));
+const expectDoc = (actual: ItemDoc, expectedDocJson: string, label: string): void => {
+  expect(canonDoc(actual), label).toEqual(canon(JSON.parse(expectedDocJson)));
+};
+const expectCheckPlan = (plan: CheckPlan, c: { name: string; write: { itemId: string; docJson: string } | null; refusal: string | null }): void => {
+  expect(plan.refusal ?? null, `${c.name} refusal`).toBe(c.refusal);
+  if (c.write === null) {
+    expect(plan.write, `${c.name}: no write`).toBeUndefined();
+  } else {
+    expect(plan.write?.itemId, `${c.name} write target`).toBe(c.write.itemId);
+    expectDoc(plan.write!.doc, c.write.docJson, `${c.name} doc (check incl.)`);
+  }
+};
+
+describe("vault health — the write-side half of the shared corpus (H42)", () => {
+  it("clusters over the write fixture, and the composed MERGE DOC, match core", () => {
+    const actual = duplicateClusters(writeItems, writeRoleFor);
+    expect(actual.map((c) => c.signature), "cluster order").toEqual(writes.duplicates.map((c) => c.signature));
+    for (const [i, e] of writes.duplicates.entries()) {
+      const a = actual[i]!;
+      const label = `cluster ${a.signature}`;
+      expect(a.sites, label).toEqual(e.sites);
+      expect(a.kind, label).toBe(e.kind);
+      expect(a.members.map((m) => m.itemId), label).toEqual(e.memberIds);
+      expect(a.dismissed, label).toBe(e.dismissed);
+      expect(a.merge?.survivorId ?? null, label).toBe(e.survivorId);
+      expect(a.merge?.loserIds ?? [], label).toEqual(e.loserIds);
+      expect(a.mergeRefusal ?? null, label).toBe(e.mergeRefusal);
+      // THE point of this block: the doc the merge would save, not just who survives.
+      if (e.mergeDocJson === null) expect(a.merge, `${label}: refused clusters carry no plan`).toBeUndefined();
+      else expectDoc(a.merge!.doc, e.mergeDocJson, `${label} merge doc`);
+    }
+  });
+
+  it("planKeep — survivor, losers, refusal copy and the passwordHistory it writes — matches core", () => {
+    for (const c of writes.planKeep) {
+      const plan = planKeep(writeItems, c.memberIds, c.keepId, writeRoleFor, c.retiredAt);
+      expect(plan.keepRefusal ?? null, `${c.name} refusal`).toBe(c.refusal);
+      expect(plan.keep?.survivorId ?? null, `${c.name} survivor`).toBe(c.survivorId);
+      expect(plan.keep?.loserIds ?? [], `${c.name} losers`).toEqual(c.loserIds);
+      if (c.docJson === null) expect(plan.keep, `${c.name}: a refusal carries no plan`).toBeUndefined();
+      else expectDoc(plan.keep!.doc, c.docJson, `${c.name} doc (passwordHistory incl.)`);
+    }
+  });
+
+  it("planDismiss — every member write, the empty-signature clear, and the refusals — matches core", () => {
+    for (const c of writes.planDismiss) {
+      const plan = planDismiss(writeItems, c.memberIds, c.signature, writeRoleFor);
+      expect(plan.dismissRefusal ?? null, `${c.name} refusal`).toBe(c.refusal);
+      if (c.writes === null) {
+        expect(plan.writes, `${c.name}: a refusal carries no writes`).toBeUndefined();
+      } else {
+        expect(plan.writes!.map((w) => w.itemId), `${c.name} write order`).toEqual(c.writes.map((w) => w.itemId));
+        for (const [i, e] of c.writes.entries()) expectDoc(plan.writes![i]!.doc, e.docJson, `${c.name} write ${e.itemId}`);
+      }
+    }
+  });
+
+  it("planCheck — okAt carry-forward, the snooze horizon, and the refusals — matches core", () => {
+    for (const c of writes.planCheck) {
+      expectCheckPlan(planCheck(writeItems, c.itemId, c.result, c.now, writeRoleFor, c.snoozeMs ?? undefined), c);
+    }
+  });
+
+  it("planUnsnooze — until dropped, verdict kept, no-ops and refusals — matches core", () => {
+    for (const c of writes.planUnsnooze) expectCheckPlan(planUnsnooze(writeItems, c.itemId, writeRoleFor), c);
+  });
+
+  // The write fixture must keep exercising what it was added for, or the tests above grade
+  // nothing: a reader vault, a planKeep that retires a password, a dismissed cluster, and a
+  // non-ok planCheck that carries okAt forward.
+  it("still covers its reasons for existing", () => {
+    expect(Object.values(writes.roles)).toContain("reader");
+    expect(writes.planKeep.some((c) => c.docJson?.includes("passwordHistory"))).toBe(true);
+    expect(writes.planKeep.some((c) => c.refusal !== null)).toBe(true);
+    expect(writes.duplicates.some((c) => c.dismissed)).toBe(true);
+    expect(writes.planCheck.some((c) => c.result !== "ok" && c.write?.docJson.includes("okAt"))).toBe(true);
+  });
+});
+

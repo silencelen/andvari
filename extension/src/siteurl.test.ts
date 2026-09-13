@@ -2,7 +2,7 @@
 // and the popup detail view turns uris into clickable links — only http/https may become one.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { displaySite, safeSiteUrl } from "./siteurl.ts";
+import { capturedSiteUri, displaySite, safeSiteUrl } from "./siteurl.ts";
 
 test("plain and scheme-bearing http(s) uris become absolute https/http URLs", () => {
   assert.equal(safeSiteUrl("example.com"), "https://example.com/");
@@ -31,4 +31,28 @@ test("displaySite is host-first, drops the query, truncates, and never throws on
   const long = "https://example.com/" + "a".repeat(80);
   assert.ok(displaySite(long).length <= 44);
   assert.ok(displaySite(long).endsWith("…"));
+});
+
+// H124: a login captured on a plain-http page stores the scheme (and port) it was captured on, so the
+// popup's "open site" link reopens the origin that actually exists; https and everything else keep
+// the pre-H124 `https://<host>` byte-for-byte.
+test("H124 — an http capture stores its http origin, port included", () => {
+  assert.equal(capturedSiteUri("http://localhost:8080/admin/login", "localhost"), "http://localhost:8080");
+  assert.equal(capturedSiteUri("http://127.0.0.1/login.php", "127.0.0.1"), "http://127.0.0.1");
+  assert.equal(capturedSiteUri("http://pi.hole/admin/", "pi.hole"), "http://pi.hole");
+  assert.equal(capturedSiteUri("http://Router.LAN:80/", "router.lan"), "http://router.lan"); // URL lowercases + drops the default port
+  assert.equal(capturedSiteUri("http://192.168.1.1", "192.168.1.1"), "http://192.168.1.1");
+});
+
+test("H124 — https (and anything that is not a plain-http page) keeps the pre-H124 https://<host>", () => {
+  assert.equal(capturedSiteUri("https://accounts.example.com/signin?x=1", "example.com"), "https://example.com");
+  assert.equal(capturedSiteUri("https://example.com:8443/", "example.com"), "https://example.com"); // unchanged: the host, not the origin
+  assert.equal(capturedSiteUri("https://example.com", "example.com"), "https://example.com");
+  assert.equal(capturedSiteUri("file:///tmp/login.html", "example.com"), "https://example.com");
+  assert.equal(capturedSiteUri("not a url", "example.com"), "https://example.com");
+  assert.equal(capturedSiteUri("", "example.com"), "https://example.com");
+});
+
+test("H124 — the stored http origin is itself an openable safe link", () => {
+  assert.equal(safeSiteUrl(capturedSiteUri("http://localhost:8080/x", "localhost")), "http://localhost:8080/");
 });

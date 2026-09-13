@@ -338,7 +338,17 @@ class HouseholdCopyTest {
 
     @Test
     fun saveLadder() {
-        assertEquals("Offline — your save is queued and will finish when you're connected.", HouseholdCopy.forSaveError(IOException("socket closed")))
+        // H17 (audit 2026-09-13): a THROWN transport failure means the write was NOT queued —
+        // a durable engine returns SaveOutcome.QUEUED instead of throwing, and only that return
+        // renders SAVE_OFFLINE. This row used to pin the queued sentence unconditionally, which
+        // was the false safety claim on every InMemoryVaultCache client.
+        assertEquals("Offline — this couldn't be saved. Try again when you're connected.", HouseholdCopy.forSaveError(IOException("socket closed")))
+        assertEquals(HouseholdCopy.SAVE_FAILED_OFFLINE, HouseholdCopy.forSaveError(IOException("socket closed")))
+        assertFalse(HouseholdCopy.forSaveError(IOException("socket closed")).contains("queued"), "a throw never promises a queue")
+        // H03: the server's per-row `rejected` reasons — permanent, never "try again".
+        assertEquals("The server refused this save — an attachment it references is no longer there. Remove that attachment, then save again.", HouseholdCopy.forSaveError(api(400, "unknown_attachment")))
+        assertEquals(HouseholdCopy.SAVE_REJECTED_ATTACHMENT, HouseholdCopy.forSaveError(api(400, "attachment_mismatch")))
+        assertFalse(HouseholdCopy.forSaveError(api(400, "unknown_attachment")).contains("try again,"), "not the generic 400 row")
         assertEquals("Wrong master password.", HouseholdCopy.forSaveError(CryptoException("aead open failed")))
         assertEquals("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.", HouseholdCopy.forSaveError(identityMismatch))
         // Server refusals route through the shared map — 401, conflict, lifecycle rows.
@@ -346,6 +356,20 @@ class HouseholdCopyTest {
         assertEquals("That changed somewhere else — sync, then try again.", HouseholdCopy.forSaveError(api(409, "conflict")))
         assertEquals("This vault was deleted. The owner can restore it for a few more days.", HouseholdCopy.forSaveError(api(410, "vault_deleted")))
         assertEquals("Could not save — try again.", HouseholdCopy.forSaveError(RuntimeException("raw leak")))
+    }
+
+    /** H03/H19: the "write-rejected" lead — verbatim, both counts, every reason clause. Web
+     *  pins the same literals byte-equal (vault-copy.test.ts); the natives render this call. */
+    @Test
+    fun writeRejectedNotice_namesTheCause_neverPermission() {
+        assertEquals("An offline change to “Family” couldn't be applied — an attachment it referenced no longer exists there.", HouseholdCopy.writeRejectedNotice(1, "Family", "unknown_attachment"))
+        assertEquals("An offline change to “Family” couldn't be applied — an attachment it referenced no longer exists there.", HouseholdCopy.writeRejectedNotice(1, "Family", "attachment_mismatch"))
+        assertEquals("3 offline changes to “Family” couldn't be applied — attachments they referenced no longer exist there.", HouseholdCopy.writeRejectedNotice(3, "Family", "unknown_attachment"))
+        assertEquals("An offline change to “Family” couldn't be applied — it was too large for the server to accept.", HouseholdCopy.writeRejectedNotice(1, "Family", "body_too_large"))
+        assertEquals("2 offline changes to “Family” couldn't be applied — they were too large for the server to accept.", HouseholdCopy.writeRejectedNotice(2, "Family", "item_attachment_quota"))
+        assertEquals("An offline change to “Family” couldn't be applied — the server refused it.", HouseholdCopy.writeRejectedNotice(1, "Family", "bad_request"))
+        assertEquals("2 offline changes to “Family” couldn't be applied — the server refused them.", HouseholdCopy.writeRejectedNotice(2, "Family", null))
+        assertFalse(HouseholdCopy.writeRejectedNotice(1, "Family", "unknown_attachment").contains("permission"), "not the write-refused (permission) sentence")
     }
 
     @Test

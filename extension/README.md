@@ -55,9 +55,10 @@ automated:
 - **`web/src/extension-pins.test.ts`** — the house pattern, stated at that file's top: because the
   extension has no suite of its own for cross-engine values, its safety-critical constants
   (`format.ts` format-version ceiling/floor, `card.ts` derivations, `detect.ts` CVV classification,
-  `messages.ts` card-target choice) are pinned **from the web vitest suite**, alongside
-  `web/src/crypto/noble-extension-poc.test.ts`, which proves the `@noble` + `tweetnacl` crypto is
-  byte-identical to libsodium.
+  `messages.ts` card-target choice) are pinned **from the web vitest suite**; the proof that the
+  `@noble` + `tweetnacl` crypto is byte-identical to libsodium is the extension's own gated
+  `src/crypto.vectors.test.ts` (`web/src/crypto/noble-extension-poc.test.ts` is an opt-in spike
+  no default gate runs).
 - **`extension/package.mjs`** self-defends before it zips: refuses on manifest version drift, runs
   the same test glob, and caps `content.js` size so the ~144 KB PSL blob can never leak into the
   per-page bundle.
@@ -124,7 +125,8 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     with an inline fallback where nested workers aren't allowed.
   - **Member (shared-vault) grants** — `sealedVk` opened via `crypto_box_seal_open` reconstructed
     from **tweetnacl** (box) + `@noble` blake2b (nonce), verified byte-identical to libsodium
-    (`web/src/crypto/noble-extension-poc.test.ts`). Shared-vault logins fill too now.
+    by `src/crypto.vectors.test.ts` against `spec/test-vectors/sharedgrant.json`. Shared-vault
+    logins fill too now.
   - **Token refresh** — a 401 rotates the single-use token pair and retries once.
   - **Live change-push (`src/events.ts` + `src/livemsg.ts`)** — an unlock-scoped dirty-bell
     WebSocket (spec 03 §6) so a peer's edit lands in ~1–2 s instead of waiting for the poll. The

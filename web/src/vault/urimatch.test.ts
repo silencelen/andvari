@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { pslResolve, PSL_SNAPSHOT_HASH } from "./psl";
 import { PSL_RULES_JOINED } from "./pslData";
-import { classify, matches, parseSavedUri, RESOLVE_UNKNOWN, type FieldKind } from "./urimatch";
+import { classify, matches, normalizeHost, parseSavedUri, RESOLVE_UNKNOWN, type FieldKind } from "./urimatch";
 
 // Consumes the SAME spec/test-vectors/urimatch.json the Kotlin UriMatchVectorTest checks.
 const vectorsDir = fileURLToPath(new URL("../../../spec/test-vectors/", import.meta.url));
@@ -12,6 +12,8 @@ const vectorsDir = fileURLToPath(new URL("../../../spec/test-vectors/", import.m
 const v: any = JSON.parse(readFileSync(vectorsDir + "urimatch.json", "utf-8"));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const v2: any = JSON.parse(readFileSync(vectorsDir + "urimatch-etld1.json", "utf-8"));
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const v3: any = JSON.parse(readFileSync(vectorsDir + "urimatch-idna.json", "utf-8"));
 
 describe("urimatch.json — matching (byte-frozen originals)", () => {
   it("matches per the label-boundary rule — with the REAL resolver (frozen outcomes must hold under eTLD+1)", () => {
@@ -50,6 +52,27 @@ describe("urimatch-etld1.json — eTLD+1 / PSL (design 2026-07-10 A1-A12)", () =
 
   it("matches per the amended rules (R-SUFFIX-BARE, R-EQ, R-OLD)", () => {
     for (const c of v2.match) {
+      const saved = parseSavedUri(c.savedUri);
+      const actual = saved !== null && matches(saved, { webHost: c.webHost ?? null, packageName: c.packageName }, pslResolve);
+      expect(actual, `${c.savedUri} @ ${c.webHost}`).toBe(c.expected);
+    }
+  });
+});
+
+describe("urimatch-idna.json — A-label canonicalization (H22, 2026-09-13)", () => {
+  // The `normalize` section pins normalizeHost's OUTPUT bytes, not just a match outcome: three
+  // engines sharing one buggy encoder would still agree on saved == page, so the A-label itself
+  // (from an independent WHATWG oracle) is the contract. Core UriMatchIdnaVectorTest parity.
+  it("normalizeHost yields the browser's A-label, and is idempotent over it", () => {
+    for (const c of v3.normalize) {
+      const actual = normalizeHost(c.input);
+      expect(actual, `normalizeHost(${c.input})`).toBe(c.expected);
+      if (actual !== null) expect(normalizeHost(actual), `idempotent over ${c.input}`).toBe(actual);
+    }
+  });
+
+  it("a Unicode saved host matches the punycode page host (and vice versa) — real resolver", () => {
+    for (const c of v3.match) {
       const saved = parseSavedUri(c.savedUri);
       const actual = saved !== null && matches(saved, { webHost: c.webHost ?? null, packageName: c.packageName }, pslResolve);
       expect(actual, `${c.savedUri} @ ${c.webHost}`).toBe(c.expected);

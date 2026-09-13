@@ -2,7 +2,7 @@
 
 _Ceremony run 2026-07-14 on the owner's Windows workstation (PRESTIGE). All PRIVATE keys stay on that
 machine, ACL/file-perm locked, uncommitted and un-uploaded. Only the PUBLIC material below leaves it._
-Sibling to the escrow/recovery-ceremony record (`docs/drills/escrow-genesis-ceremony.md`).
+Sibling to the escrow/recovery-ceremony record (`docs/drills/escrow-genesis-ceremony.md` — **recorded elsewhere**: `docs/drills/` was never part of this repository, it is the reference instance's private, out-of-tree operational area, so read that as a pointer and not a broken link; same note as `CHANGELOG.md` and `docs/ROADMAP.md` carry).
 
 ## 0. The ceremony is one command (`signandvari`, 2026-08-20)
 
@@ -112,6 +112,55 @@ gNwuByi91u4o7pgD/VoZzh/N/hSiYNzHBX9UAP9JXVBhYc5GOokigvadNSG+olfm
 -----END PGP PUBLIC KEY BLOCK-----
 ```
 
+## 4. The GitHub release — `scripts/gh-release.sh` (added 2026-09-13, audit H102/H104)
+
+The GitHub release page is the one download surface a stranger lands on, and until this script it
+was the only published surface with no script behind it: assembled by hand with
+`gh release create` / `gh release upload`, so its asset layout was retyped every release and
+drifted apart from itself.
+
+- `v0.26.3` shipped `andvari_0.26.3-1_amd64.deb` (Debian's build-output name) next to
+  `andvari-0.26.3.deb.asc` (a signature named for the SERVED file) — a visitor cannot tell that
+  those two pair up.
+- `v0.26.2` shipped the opposite pairing (`andvari_0.26.2-1_amd64.deb` +
+  `andvari_0.26.2-1_amd64.deb.asc`).
+- §3's verify line, `gpg --verify andvari-<ver>.deb.asc andvari-<ver>.deb`, matched **neither**
+  release page. (The bytes were fine throughout: `SHA256SUMS-0.26.3.txt` lists both names against
+  the same digest `c0a32424…`.)
+
+**One convention now: the SERVED names**, the same ones `/downloads` uses, the same ones §3 tells
+users to verify, and the same ones `release-spec.sh` puts in the signed manifest. Run it on the
+build host after the deb is signed:
+
+```
+scripts/gh-release.sh --version 0.26.3 --ext-version 0.26.0     --msi /path/to/andvari-0.26.3.msi   # handed back from the signing workstation, optional
+```
+
+What it guarantees, and why each one is here:
+
+1. **`SHA256SUMS-<ver>.txt` is generated over exactly the asset set being uploaded** — never
+   hand-maintained. `SHA256SUMS-0.26.2.txt` listed the two extension `.zip`s and omitted
+   `andvari-extension-firefox-0.26.0.xpi` (sha `a704497…`, 191 892 B), which is the **only**
+   Firefox install artifact and the one the live manifest's `browserExtension.firefoxUrl` points
+   at: it shipped with no published digest anywhere. It was omitted because the AMO signing
+   round-trip returns the `.xpi` *after* the rest is packaged and nothing re-emitted the file.
+   Generating SUMS at upload time makes "in the release" and "in SUMS" the same event.
+2. **`SHA256SUMS-<ver>.txt.asc`** — signed with the same GPG release key as the deb (§3,
+   `741CF143…`). Unsigned checksums served from the same page as the artifacts prove nothing.
+3. **Never different bytes under a filename that already exists.** 0.26.2 published two
+   byte-different MSIs as `andvari-0.26.2.msi` (manifest seq 10 `windows.sha256` `1b8a94cd…`, then
+   a seq 11 re-cut `93a7b7f5…`, same URL). Clients were never at risk — they verify the signed
+   manifest's hash — but anyone who wrote down the seq-10 digest from the publish notification was
+   left with an unexplained mismatch, and nothing in the tree said a re-cut had happened. The
+   script refuses the overwrite at both the staging and the upload step. **A re-cut gets a new
+   filename** (`andvari-<ver>-2.msi`, or the next version) **and a line in the release notes.**
+4. **The deb is cross-checked against `release-spec.json`** when it is on the host, so the release
+   page and `/downloads` cannot end up describing two different builds of one version.
+
+`--dry-run` stages, hashes and prints the plan without gpg, `gh` or any network — use it to check
+an asset set before publishing.
+
+
 ## Status (2026-09-13)
 - **Channel state: signed manifest at seq 12** — linux **0.26.3**, windows **0.26.3**, browserExtension
   0.26.0; `signedAt 2026-09-05T22:56:25Z`, bundle ref `v0.26.3` / commit `39bf5944`. Recorded here from
@@ -139,14 +188,30 @@ gNwuByi91u4o7pgD/VoZzh/N/hSiYNzHBX9UAP9JXVBhYc5GOokigvadNSG+olfm
   pinned in core + extension, reference-instance-scoped (see §1); first signed manifest = seq 1
   (0.19.1). Fielded ≤0.17.0-ext / ≤0.19.0-desktop builds pin the sentinel and stay quiet; builds
   from the arming commit onward verify.
-- **Channel state:** signed manifest at **seq 9** — linux + windows **0.26.1**, browserExtension
-  0.25.0 — complete on every channel (`docs/ROADMAP.md`, verified 2026-08-24). The 0.25.0 lag this
-  section previously recorded cleared with its ceremony, but the channel-behind-fleet condition
-  recurred immediately: **0.26.0 was published on every channel and never signed** — 0.26.1
-  superseded it before the ceremony ran, so the manifest went seq 8 → 9 with exactly one signing.
-  Twice now the only detection was hand-written prose; nothing in the release path asserts the
-  published manifest names the tag just signed (a `signandvari` post-ceremony probe comparing the
-  manifest's `linux.version` to the signed tag would have flagged both).
+- **Channel-behind-fleet, twice, and the tripwire that now exists.** The 0.25.0 lag this section
+  once recorded cleared with its ceremony, and the condition recurred immediately: **0.26.0 was
+  published on every channel and never signed** — 0.26.1 superseded it before the ceremony ran, so
+  the manifest went seq 8 → 9 with exactly one signing. Both times the only detection was a
+  hand-typed paragraph in this file, which is stale the moment the next ceremony runs — and this
+  paragraph itself then rotted two releases behind for the third time (audit H110). Two changes
+  close it. **(1)** `signandvari.ps1` now ends with a **post-publish read-back** (§9): after the
+  drop it polls the public `/downloads/manifest.json`, cache-busted, until the watcher has
+  published, then fails hard unless the served manifest carries the seq this run minted, names the
+  tag just signed on `linux` and `windows`, and matches the MSI digest this run hashed. It also
+  dies immediately if another publish overtook the ceremony (a seq past ours can never be
+  published — clients refuse a non-increasing seq) or if nothing appears within 12 minutes.
+  `scripts/ci/powershell-gate.sh`, run by `verify.sh`, asserts that step is still there and still
+  fatal. **(2)** No file in this repo states the current channel state as prose any more. Ask the
+  wire:
+
+  ```
+  curl -s 'https://andvari.monahanhosting.com/downloads/manifest.json?cb=1' \
+    | jq '{seq, signedAt, linux: .linux.version, windows: .windows.version, ext: .browserExtension.version}'
+  ```
+
+  The dated per-release blocks above and in `docs/ROADMAP.md` stay as they are: they are records of
+  what was published *then*, verified at the time, and they are allowed to be historical. What is
+  not allowed back is a sentence claiming to describe the channel *now*.
 - **Extension store-signing DONE** (CWS + AMO live since 0.16.x, `extension-store-publishing.md`) —
   the load-bearing integrity for the extension; the signed manifest is the belt for zip installs.
 

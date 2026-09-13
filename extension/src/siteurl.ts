@@ -33,3 +33,24 @@ export function displaySite(raw: string, max = 44): string {
   const shown = u.host + (u.pathname !== "/" ? u.pathname : "");
   return shown.length > max ? shown.slice(0, max - 1) + "…" : shown;
 }
+
+/** H124 (2026-09-13 audit): the uri to STORE on a login captured from `pageUrl` whose normalized
+ *  match host is `host`. Auto-save and site-link used to write `https://<host>` unconditionally,
+ *  although the content script sends `location.href` (scheme included) and the manifest admits
+ *  `http://localhost/*`, `http://127.0.0.1/*` and `http://*\/*` injection — the F27-sanctioned
+ *  loopback / plain-http intranet posture (a Pi-hole, a router, a dev server). Matching ignores the
+ *  scheme so the fill kept working, but the stored uri is what the popup's "open site" link and
+ *  the web client's site label render, and `https://pi.hole` is an origin that does not exist.
+ *  An http page keeps its FULL origin (scheme + host + non-default port — `http://localhost:8080`
+ *  is the only address that reopens that dev server; normalizeHost drops the port for matching and
+ *  matching is unchanged). Anything else — https, a non-web scheme, an unparseable url — stores
+ *  the pre-H124 `https://<host>`, so nothing outside the plain-http case moves. */
+export function capturedSiteUri(pageUrl: string, host: string): string {
+  try {
+    const u = new URL(pageUrl);
+    if (u.protocol === "http:" && u.hostname !== "") return u.origin;
+  } catch {
+    /* not a url — the https fallback below */
+  }
+  return `https://${host}`;
+}

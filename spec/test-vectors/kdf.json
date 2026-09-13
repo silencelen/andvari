@@ -71,6 +71,20 @@
             "mkB64": "LcgvU8QgChzfOzV10Y-7umCS0JrGShxHE_GfRnDTzus",
             "authKeyB64": "7PVggEraU_X9vVFjsQScW0udUyc9NwNEjofed5TTgpI",
             "wrapKeyB64": "IQjxB0uqlJuJsdtf0jOoHOSttCGoPKOAR3kYR3SppUI"
+        },
+        {
+            "passwordUtf8": "correct horse battery staple",
+            "saltB64": "Rk1UW2JpcHd-hYyTmqGorw",
+            "kdfParams": {
+                "v": 1,
+                "alg": "argon2id13",
+                "ops": 2,
+                "memBytes": 16777728
+            },
+            "mkB64": "7Ldw5rCvFa5pK6Tdz_70ocv8VyPo3KKQhlXzT3qsJ7s",
+            "authKeyB64": "ZdPzN22zoqbgyKUYNb96P1-V37aw4zBV04OZCohehcI",
+            "wrapKeyB64": "qM1wg5BKt4fgWEnukypsdtap0tp_blTz2BXEVvpEor4",
+            "note": "memBytes is not a KiB multiple: every engine floors to KiB like libsodium, so mk == the first case (spec 01 §1, audit H16)"
         }
     ]
 }

@@ -4,7 +4,7 @@
 
 # andvari — Hardening-Gate Security Self-Audit
 
-**Repository:** `/root/netplan/dev-ledger/andvari` (own git repo)
+**Repository:** `andvari` (its own git repo, kept beside the operator's unrelated infrastructure repo)
 **Date:** 2026-07-06 · **Milestone:** post-P4, pre-real-secrets · **Auditor:** huginn (lead)
 **Deployment under test:** CT 122 `andvari`, Tailscale-primary, break-glass public via Cloudflare Tunnel + Access; single household.
 

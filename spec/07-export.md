@@ -13,8 +13,14 @@ Clients MUST sync before snapshotting (offline → proceed with a visible "vault
 last sync <time>" banner). Items from **every vault whose VK is held** are included —
 shared vaults by default with a visible per-vault line and an opt-out toggle (a member
 who can read a vault already holds its ciphertext + VK on-device; export grants no new
-capability — spec 05 R7). Web sessions arriving via the break-glass public origin
-SHOULD hide both export entry points (T6/T11 posture).
+capability — spec 05 R7). Export renders **whenever the vault is unlocked**, on every
+origin including the break-glass twin: an earlier draft of this spec had break-glass web
+sessions SHOULD-hide both entry points, and the 2026-07-15 multi-tenant design (§5.4.2)
+deleted that rule as SHOULD-level advertising — a page that is unlocked already holds the
+decrypted vault, so suppressing the button withholds nothing from an attacker who is
+already inside T6, and origin stopped being a posture signal at that pivot. Clients MUST
+NOT re-introduce an origin-conditional export gate (web's `isExportOriginAllowed` is
+deleted; `web/src/export/plan.ts` records the deletion).
 
 ## 1. CSV (plaintext, lossy — the migration escape hatch)
 
@@ -237,8 +243,8 @@ devices; PBS covers server loss; a restore on a living vault duplicates everythi
   fields on the ref), blob uploaded before the item put (spec 02 §6 order). On a
   plan retry, `400 attachment_id_taken` counts as **success** (the plan pinned
   fileKey + plaintext, so any stored copy under that id decrypts; ids are fresh
-  UUIDs). Without this rewrite every push 400s (`unknown_attachment` /
-  `attachment_mismatch`, spec 03).
+  UUIDs). Without this rewrite every such put comes back `rejected`
+  (`unknown_attachment` / `attachment_mismatch`, spec 03 §5) and is dropped.
 - Exported `updatedAt` / `origin` / `userId` are informational (preview only);
   restored items get fresh server revisions and timestamps; client-observed times
   inside docs (`passwordHistory[].retiredAt`) survive verbatim.
@@ -253,7 +259,12 @@ devices; PBS covers server loss; a restore on a living vault duplicates everythi
   normalization, totp column, empty url) — fully deterministic, byte-compared.
 - **Container cases**: FAST-class kdfParams (the vector-gen pattern — never
   production cost), fixed kdfSalt + envelope nonce (`sealWithNonce` hooks), pinned
-  `payloadUtf8` → byte-exact container both impls must **produce and open**.
+  `payloadUtf8` → byte-exact container both impls must **produce and open**. Fully
+  deterministic — a regenerate that changes these bytes is a behaviour change, not
+  noise. The third case (`schema-v9-check-and-dupeack`, 2026-09-13, audit H95) pins a
+  payload whose docs carry `check` (both the okAt carry-forward and the snooze shape)
+  and `dupeAck` populated, so the round-trip is graded with the spec 02 §3 v9 fields
+  present and not only tolerated as nulls.
   Cross-impl payload serialization is NOT byte-compared (key order differs);
   own-impl round-trip is a per-impl property test. Attachment sections are
   covered by round-trip + truncation-rejection tests (secretstream is

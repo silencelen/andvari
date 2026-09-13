@@ -1,0 +1,42 @@
+{
+  "comment": "IDN / A-label canonicalization vectors (spec 02 §3.1 Normalization, amended 2026-09-13 — audit H22). Runs on ALL THREE surfaces (core jvmTest, web vitest, extension node harness). `normalize` pins normalizeHost's OUTPUT (the A-label the engines must agree on byte-for-byte — expected values were produced by an independent oracle, WHATWG `new URL().hostname`, non-transitional UTS46); `match` pins the outcome with the REAL PSL resolver. One case per rule: IDN host, mixed case, trailing dot, www., port, userinfo, already-punycoded, decomposed (NFC), non-Latin scripts, the ß deviation (non-transitional), the Arabic-Indic digit host urimatch.json already freezes, and the empty-label reject surviving unchanged. Existing files stay byte-frozen: urimatch-etld1.json's `münchen.de → unknown` is a RESOLVER vector (Psl.resolve on a raw U-label) and is deliberately unchanged — canonicalization happens in normalizeHost, before the resolver ever sees the host.",
+  "normalize": [
+    { "input": "https://bücher.de/login", "expected": "xn--bcher-kva.de" },
+    { "input": "BÜCHER.DE", "expected": "xn--bcher-kva.de" },
+    { "input": "bücher.de.", "expected": "xn--bcher-kva.de" },
+    { "input": "https://www.bücher.de", "expected": "xn--bcher-kva.de" },
+    { "input": "https://login.bücher.de:8443/x?y#z", "expected": "login.xn--bcher-kva.de" },
+    { "input": "https://user:pw@bücher.de/", "expected": "xn--bcher-kva.de" },
+    { "input": "xn--bcher-kva.de", "expected": "xn--bcher-kva.de" },
+    { "input": "XN--BCHER-KVA.DE.", "expected": "xn--bcher-kva.de" },
+    { "input": "u\u0308ber.de", "expected": "xn--ber-goa.de" },
+    { "input": "über.de", "expected": "xn--ber-goa.de" },
+    { "input": "münchen.de", "expected": "xn--mnchen-3ya.de" },
+    { "input": "straße.de", "expected": "xn--strae-oqa.de" },
+    { "input": "пример.рф", "expected": "xn--e1afmkfd.xn--p1ai" },
+    { "input": "例え.テスト", "expected": "xn--r8jz45g.xn--zckzah" },
+    { "input": "١.٢.٣.٤", "expected": "xn--9hb.xn--bib.xn--cib.xn--dib" },
+    { "input": "https://[2001:db8::1]/", "expected": "2001:db8::1" },
+    { "input": "https://bü..cher.de", "expected": null },
+    { "input": "https://.bücher.de", "expected": null }
+  ],
+  "match": [
+    { "savedUri": "https://bücher.de", "webHost": "xn--bcher-kva.de", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://xn--bcher-kva.de", "webHost": "bücher.de", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://bücher.de", "webHost": "bücher.de", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://BÜCHER.DE/", "webHost": "login.xn--bcher-kva.de", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://bücher.de.", "webHost": "xn--bcher-kva.de.", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://www.bücher.de", "webHost": "xn--bcher-kva.de", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://login.bücher.de", "webHost": "xn--bcher-kva.de", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://u\u0308ber.de", "webHost": "xn--ber-goa.de", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://münchen.de", "webHost": "xn--mnchen-3ya.de", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://straße.de", "webHost": "xn--strae-oqa.de", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://пример.рф", "webHost": "xn--e1afmkfd.xn--p1ai", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://例え.テスト", "webHost": "xn--r8jz45g.xn--zckzah", "packageName": "com.android.chrome", "expected": true },
+    { "savedUri": "https://bücher.de", "webHost": "xn--bcher-kva.de.evil.net", "packageName": "com.android.chrome", "expected": false },
+    { "savedUri": "https://bücher.de", "webHost": "buecher.de", "packageName": "com.android.chrome", "expected": false },
+    { "savedUri": "https://bücher.de", "webHost": "xn--bcher-kva.com", "packageName": "com.android.chrome", "expected": false },
+    { "savedUri": "https://bücher.de", "webHost": null, "packageName": "com.android.chrome", "expected": false },
+    { "savedUri": "https://bü..cher.de", "webHost": "xn--bcher-kva.de", "packageName": "com.android.chrome", "expected": false }
+  ]
+}

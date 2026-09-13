@@ -97,6 +97,7 @@ export interface LifecycleNotice {
     | "transfer-anomaly"
     | "replay-denied"
     | "write-refused"
+    | "write-rejected"
     | "meta-regression";
   /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
   purgeAt?: number;
@@ -113,6 +114,12 @@ export interface LifecycleNotice {
    *  remainder (parkedCount − reverted − removed) had no applicable snapshot: the
    *  banner hedges ("may be out of date") instead of claiming a revert. */
   removedCount?: number;
+  /** write-rejected (H03/H19): the server's refusal reason for the (first) dropped row —
+   *  `unknown_attachment` / `attachment_mismatch` (the referenced attachment is gone),
+   *  `item_attachment_quota` / `body_too_large` (too large), else unspecified. Picks the
+   *  explanation clause; parkedCount/revertedCount/removedCount carry the counts as for
+   *  write-refused. Core twin: LifecycleNotice.reason. */
+  reason?: string;
   /** transfer-complete: who now owns the vault, and whether that is us. */
   newOwnerUserId?: string;
   becameMine?: boolean;
@@ -304,6 +311,22 @@ export class VaultStore {
   /** F20: vaults an "added to vault" notice has already fired for — fires once per store lifetime
    *  (mirrors the transfer-complete seq dedup) so a dismissed notice never re-surfaces on a re-pull. */
   private addedNoticed = new Set<string>();
+  /** H03/H19: queue rows the server DEFINITIVELY refused this session (per-row `rejected`,
+   *  or a whole-batch 400/413 the drain bisected down to one row) — durably dropped and
+   *  reverted in flushChunk; kept here (mutationId → reason) so save()/remove() can learn
+   *  their own row's fate and throw the honest editor error instead of reporting success. */
+  private rejectedMutationIds = new Map<string, string>();
+  /** H38: the highest rev a live bell has announced. A bell that rings while a pull is in
+   *  flight JOINS that pull (single-flight) — whose GET /sync was issued before the bell's
+   *  commit — so its rev would otherwise be discarded and the change stay invisible until
+   *  the next unrelated bell. sync() compares this against the cursor after the pull and
+   *  re-pulls once when the bell is still ahead. */
+  private bellRev = 0;
+
+  /** H38: record a live bell's rev (Vault.tsx onRev) — see sync(). */
+  noteRev(rev: number): void {
+    if (rev > this.bellRev) this.bellRev = rev;
+  }
   /** F20: shared vaults whose grant this device can't open (sealed to a key we don't hold, or a
    *  newer grant format). A PERSISTENT, non-dismissable warning — distinct from the dismissable
    *  lifecycle notices; cleared automatically when a later pull opens the grant, the grant is
@@ -508,6 +531,12 @@ export class VaultStore {
   async sync(): Promise<void> {
     await this.flushQueue();
     await this.pull();
+    // H38 (audit 2026-09-13): a bell that rang DURING that pull joined it and got a snapshot
+    // fetched before the bell's commit. If the bell's rev is still ahead of the cursor the
+    // change is not here yet — pull once more (a fresh single-flight cycle, since the joined
+    // one has settled). Bounded: one extra pull per sync; a bell landing during THIS pull is
+    // caught by its own syncNow's comparison after it joins.
+    if (this.bellRev > this.cursor) await this.pull();
     try {
       await this.surfaceStagedDenials();
     } finally {
@@ -908,7 +937,31 @@ export class VaultStore {
    * in-memory preParkedByVault staging still drives surfaceStagedDenials the same way.
    */
   private async flushChunk(chunk: Mutation[], displaced: { item: WireItem; winnerRev: number }[]): Promise<boolean> {
-    const resp = await this.api.push(chunk); // rejects offline → propagates; rows stay queued
+    let resp: PushResponse;
+    try {
+      resp = await this.api.push(chunk); // rejects offline → propagates; rows stay queued
+    } catch (e) {
+      // H03/H19 (audit 2026-09-13, core SyncEngine.pushBatch twin): a DEFINITIVE whole-batch
+      // refusal — 400 (a malformed request the client itself minted; on a pre-H03 server also
+      // `unknown_attachment` / `attachment_mismatch`, which it still throws batch-wide) or 413
+      // (`body_too_large`, fired before the handler) — must not leave the batch at the head of
+      // the queue where every later sync would re-send it identically, fail BEFORE its pull,
+      // and the tab would stop receiving anything (the sole "remedy" being a sign-out that
+      // wipes every other queued edit). Nothing of a refused batch was applied and the dedup
+      // window makes re-sends idempotent, so BISECT: re-send each half until the refusal
+      // narrows to single rows, each of which is dropped durably as a poison row. Every other
+      // failure — transport, 401/426, 403/409/410, 429, 5xx — propagates as before: the rows
+      // stay queued for the next flush.
+      if (!(e instanceof ApiError && (e.status === 400 || e.status === 413))) throw e;
+      if (chunk.length === 1) {
+        await this.rejectRow(chunk[0]!, e.code);
+        return true;
+      }
+      const mid = Math.floor(chunk.length / 2);
+      const a = await this.flushChunk(chunk.slice(0, mid), displaced);
+      const b = await this.flushChunk(chunk.slice(mid), displaced);
+      return a || b;
+    }
     const byId = new Map(resp.results.map((r) => [r.mutationId, r]));
     let progressed = false;
     for (const m of chunk) {
@@ -917,6 +970,14 @@ export class VaultStore {
       // C1: settled either way — a reinstate-replayed row's denial gets the calm-notice tag
       // (core flushQueue's `replayedMutationIds.remove` shape).
       const wasReplay = this.replayedMutationIds.delete(m.mutationId);
+      if (r.status === "rejected") {
+        // H03: the server answered for THIS row alone — it can never apply as sent (its
+        // attachment refs are gone, or it is over quota). Drop it, revert its optimistic
+        // apply, tell the user; the sibling rows and the pull proceed.
+        await this.rejectRow(m, r.reason ?? "rejected");
+        progressed = true;
+        continue;
+      }
       if (r.status === "denied") {
         // Stage durably + index with the epoch (stagedBefore = the last pull that STARTED).
         // The reconnect pull that follows either parks it (vault in-grace, F21) or
@@ -945,6 +1006,41 @@ export class VaultStore {
       progressed = true;
     }
     return progressed;
+  }
+
+  /**
+   * H03/H19 (core SyncEngine.rejectRow twin): durably drop ONE definitively-refused queue row.
+   * Its optimistic apply is undone from the C2 snapshot exactly as a genuine denial's would be
+   * (revertDeniedMutation: guarded so a fresher server row is never regressed) — the refused
+   * value must not outlive its refusal, and a delta server never re-delivers the unchanged
+   * row. The fate is recorded so save()/remove() can throw the honest editor error for their
+   * own row, and the durable "write-rejected" notice is minted — accumulated per vault so a
+   * batch that lost several rows reads as one banner with the true counts (pushNotice keeps
+   * one notice per vault+kind, so the merged notice replaces the earlier one). This is NOT
+   * the "write-refused" (permission) notice: nothing about the member's access changed.
+   */
+  private async rejectRow(m: Mutation, reason: string): Promise<void> {
+    this.replayedMutationIds.delete(m.mutationId);
+    const outcome = await this.revertDeniedMutation(m);
+    try {
+      await this.cache.dequeue(m.mutationId);
+    } catch {
+      /* best-effort durable drop — NullCache no-ops; a durable failure is retried by the next drain's re-verdict */
+    }
+    this.pendingSyncItemIds.delete(m.itemId);
+    this.preEditByMutation.delete(m.mutationId);
+    this.rejectedMutationIds.set(m.mutationId, reason);
+    const prior = this.noticeList.find((x) => x.vaultId === m.vaultId && x.kind === "write-rejected");
+    this.pushNotice({
+      id: crypto.randomUUID(),
+      vaultId: m.vaultId,
+      vaultName: this.liveVaultName(m.vaultId),
+      kind: "write-rejected",
+      reason: prior?.reason ?? reason,
+      parkedCount: (prior?.parkedCount ?? 0) + 1,
+      revertedCount: (prior?.revertedCount ?? 0) + (outcome === "reverted" ? 1 : 0),
+      removedCount: (prior?.removedCount ?? 0) + (outcome === "removed" ? 1 : 0),
+    });
   }
 
   /**
@@ -1866,6 +1962,28 @@ export class VaultStore {
     return "reverted";
   }
 
+  /**
+   * H03: the drain just DROPPED this very write as a poison row (per-row `rejected`, or a
+   * whole-batch refusal bisected down to it). Its optimistic apply is already reverted and
+   * the notice minted; the Editor must still hear "failed", not "saved" — so reconcile first
+   * (the pull shows the server's truth for the item, e.g. a peer's tombstone; a failed
+   * reconcile is not the point here) and then throw an ApiError carrying the server's reason
+   * so the 413 row renders its upload sentence and everything else "Save failed — nothing
+   * was changed." (true after the revert).
+   */
+  private async throwIfRejected(m: Mutation): Promise<void> {
+    const reason = this.rejectedMutationIds.get(m.mutationId);
+    if (reason === undefined) return;
+    this.rejectedMutationIds.delete(m.mutationId);
+    try {
+      await this.sync();
+    } catch {
+      /* the rejection is the verdict that matters; a failed reconcile trues up later */
+    }
+    const status = reason === "item_attachment_quota" || reason === "body_too_large" ? 413 : 400;
+    throw new ApiError(status, reason, `the server refused this write: ${reason}`);
+  }
+
   /** C2 (d): m still awaits its epoch-guarded verdict — staged, but every completed pull so
    *  far STARTED before the staging, so surfaceStagedDenials declined to classify it. */
   private mutationStillStaged(m: Mutation): boolean {
@@ -2015,6 +2133,7 @@ export class VaultStore {
       throw e;
     }
     for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
+    await this.throwIfRejected(m);
 
     // m settled (applied → dequeued; or denied → staged) — or, if this call joined a drain
     // already past its row, it is still pending and the sync()'s own flushQueue sends it.
@@ -2250,6 +2369,7 @@ export class VaultStore {
       throw e;
     }
     for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
+    await this.throwIfRejected(m);
     try {
       await this.sync();
       // C2 (d): epoch-deferral — see save(). One more cycle so a joined stale pull can't

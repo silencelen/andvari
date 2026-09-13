@@ -196,6 +196,23 @@ if [ "$USE_CADDY" = 1 ]; then
   esac
   set_dotenv COMPOSE_FILE "docker-compose.yml:docker-compose.caddy.yml"
   say "==> caddy overlay armed (COMPOSE_FILE in .env): auto-HTTPS for $(host_of "$ORIGIN") — ports 80/443 must be reachable and DNS must point here"
+  # ...and arm HSTS with it (audit H108). This is the ONE bring-up path that guarantees working
+  # end-to-end TLS — caddy terminates it and redirects http→https itself — and it was the only
+  # path that neither set the switch nor mentioned it: the reminder was printed on the *other*
+  # branch, so every instance that took the recommended route ran without Strict-Transport-Security
+  # until the operator happened to read the commented line in andvari.env.template ("always right
+  # behind the caddy overlay"). On a single-origin instance ANDVARI_PUBLIC_HOSTNAME is unset by
+  # design, so App.kt's `isPublicOrigin || config.forceHsts` makes this the only switch there is.
+  #
+  # Only arm it when the operator has expressed no opinion (unset, or still the commented template
+  # line — get_env returns '' for both). An explicit ANDVARI_FORCE_HSTS=0 is a deliberate choice on
+  # an idempotent re-run and this script does not overrule it.
+  if [ -z "$(get_env ANDVARI_FORCE_HSTS)" ]; then
+    set_env ANDVARI_FORCE_HSTS 1
+    say "    HSTS armed (ANDVARI_FORCE_HSTS=1 in $ENV_FILE) — caddy terminates TLS, so it is safe from the first request"
+  else
+    say "    HSTS left as you set it: ANDVARI_FORCE_HSTS=$(get_env ANDVARI_FORCE_HSTS) in $ENV_FILE"
+  fi
 fi
 
 # ---------- 3. escrow ceremony ------------------------------------------------
@@ -310,6 +327,7 @@ case "$ORIGIN" in
   https://*)
     if [ "$USE_CADDY" = 1 ]; then
       say "   * TLS: caddy is fetching certificates for $(host_of "$ORIGIN") automatically"
+      say "     HSTS: ANDVARI_FORCE_HSTS=$(get_env ANDVARI_FORCE_HSTS) in $ENV_FILE"
     else
       say "   * TLS: put your own front (proxy/cloudflared/tailscale serve) in front of"
       say "     127.0.0.1:8080 for $(host_of "$ORIGIN"), or re-run with --caddy;"

@@ -10,6 +10,7 @@ import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.MemberRecovery
+import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.Backup
 import io.silencelen.andvari.core.client.BackupItem
 import io.silencelen.andvari.core.client.BackupPayload
@@ -24,6 +25,7 @@ import io.silencelen.andvari.core.client.Duplicates
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.ItemCheck
 import io.silencelen.andvari.core.client.LoginData
+import io.silencelen.andvari.core.client.PasswordHistoryEntry
 import io.silencelen.andvari.core.client.Staleness
 import io.silencelen.andvari.core.client.VaultHealth
 import io.silencelen.andvari.core.client.VaultItem
@@ -143,18 +145,34 @@ private fun kdf(): JsonObject = buildJsonObject {
         }
     }
     putJsonArray("chain") {
-        for ((pw, seed) in listOf("correct horse battery staple" to 5, "🔐 emoji pass phrase 42" to 6)) {
-            val salt = pat(16, seed)
-            val mk = Keys.masterKey(crypto, pw, salt, FAST)
+        // The third case (audit H16, 2026-09-13) re-derives the FIRST case's password and salt
+        // under a memBytes that is NOT a KiB multiple. libsodium takes memlimit in bytes and
+        // floors it to KiB (memlimit / 1024U); an engine that takes KiB directly (the extension's
+        // @noble twin) must compute the same floor — spec 01 §1. The pinned mk is therefore the
+        // SAME bytes as case one: the vector says "these two policies are one policy", and an
+        // engine that rounds, rejects, or derives under the unfloored value reds here on all
+        // three sides instead of locking one client out of the fleet.
+        data class Chain(val pw: String, val seed: Int, val params: KdfParams, val note: String?)
+        for (c in listOf(
+            Chain("correct horse battery staple", 5, FAST, null),
+            Chain("🔐 emoji pass phrase 42", 6, FAST, null),
+            Chain(
+                "correct horse battery staple", 5, KdfParams(ops = FAST.ops, memBytes = FAST.memBytes + 512),
+                "memBytes is not a KiB multiple: every engine floors to KiB like libsodium, so mk == the first case (spec 01 §1, audit H16)",
+            ),
+        )) {
+            val salt = pat(16, c.seed)
+            val mk = Keys.masterKey(crypto, c.pw, salt, c.params)
             addJsonObject {
-                put("passwordUtf8", pw)
+                put("passwordUtf8", c.pw)
                 put("saltB64", b64(salt))
                 putJsonObject("kdfParams") {
-                    put("v", 1); put("alg", "argon2id13"); put("ops", FAST.ops); put("memBytes", FAST.memBytes)
+                    put("v", 1); put("alg", "argon2id13"); put("ops", c.params.ops); put("memBytes", c.params.memBytes)
                 }
                 put("mkB64", b64(mk))
                 put("authKeyB64", b64(Keys.authKey(crypto, mk)))
                 put("wrapKeyB64", b64(Keys.wrapKey(crypto, mk)))
+                if (c.note != null) put("note", c.note)
             }
         }
     }
@@ -330,6 +348,18 @@ private fun sharedGrant(): JsonObject = buildJsonObject {
         val wrongVaultId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
         put("expectedVaultId", vaultId)
         put("sealedB64", b64(SharedGrant.seal(crypto, member.publicKey, wrongVaultId, vk)))
+    }
+    // A seal whose payload carries a 31-byte "vk" under the RIGHT vaultId — open MUST reject
+    // (audit H93, 2026-09-13). Only a VK holder can seal a grant, so this is a buggy or foreign
+    // client, not a hostile server; the point of grading it is uniformity: the third twin
+    // (the extension's inline open) accepted it and then showed an empty vault, where core and
+    // web name the cause. The generator's canonicalPayload base64s whatever bytes it is handed,
+    // which is exactly what lets this vector exist without a second seal implementation.
+    putJsonObject("rejectVkLength") {
+        val shortVk = pat(31, 42)
+        put("expectedVaultId", vaultId)
+        put("vkLen", shortVk.size)
+        put("sealedB64", b64(SharedGrant.seal(crypto, member.publicKey, vaultId, shortVk)))
     }
 }
 
@@ -820,6 +850,42 @@ private fun exportVectors(): JsonObject {
         payloadUtf8 = unknownPayloadUtf8,
     )
 
+    // Schema v9 (99fae40: `check` + `dupeAck` on the item document, spec 02 §3) — a payload whose
+    // docs carry BOTH fields populated, so the container round-trip is graded with them present
+    // on every engine (audit H95, 2026-09-13: the corpus had been regenerated for neither, and both
+    // consumers decode payloadUtf8 semantically, so a stale corpus stayed green). The two docs
+    // between them exercise every ItemCheck field: a failing verdict that still carries the
+    // earlier `okAt` (the carry-forward rule) and a snoozed verdict with an `until` horizon.
+    val v9Payload = BackupPayload(
+        exportedAt = 1751850000002,
+        userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        vaults = listOf(BackupVault(vaultId, "personal", "Personal", "owner")),
+        items = listOf(
+            BackupItem(
+                itemId = "77777777-7777-4777-8777-777777777777", vaultId = vaultId, formatVersion = 2, updatedAt = 1751843000000,
+                doc = ItemDoc(
+                    type = "login", name = "Checked",
+                    login = LoginData(username = "u", password = "p", uris = listOf("https://checked.test")),
+                    dupeAck = "77777777-7777-4777-8777-777777777777|88888888-8888-4888-8888-888888888888",
+                    check = ItemCheck(at = 1751843000000, result = "bad", okAt = 1751800000000),
+                ),
+            ),
+            BackupItem(
+                itemId = "88888888-8888-4888-8888-888888888888", vaultId = vaultId, formatVersion = 2, updatedAt = 1751844000000,
+                doc = ItemDoc(
+                    type = "login", name = "Snoozed",
+                    login = LoginData(username = "u", password = "p", uris = listOf("https://checked.test")),
+                    dupeAck = "77777777-7777-4777-8777-777777777777|88888888-8888-4888-8888-888888888888",
+                    check = ItemCheck(at = 1751844000000, result = "blocked", until = 1754436000000),
+                ),
+            ),
+        ),
+    )
+    val (v9Obj, _) = containerCase(
+        "schema-v9-check-and-dupeack", passphrase, "99999999-9999-4999-8999-999999999999", saltSeed = 54, nonceSeed = 55,
+        payloadUtf8 = itemJson.encodeToString(BackupPayload.serializer(), v9Payload),
+    )
+
     // ---- (c) reject cases ----
     fun u32le(v: Int) = byteArrayOf(v.toByte(), (v ushr 8).toByte(), (v ushr 16).toByte(), (v ushr 24).toByte())
     fun u64le(v: Long) = ByteArray(8) { i -> ((v ushr (8 * i)) and 0xFF).toByte() }
@@ -861,7 +927,7 @@ private fun exportVectors(): JsonObject {
 
     return buildJsonObject {
         putJsonArray("csv") { for (c in csvCases) add(c) }
-        putJsonArray("container") { add(itemsOnlyObj); add(unknownObj) }
+        putJsonArray("container") { add(itemsOnlyObj); add(unknownObj); add(v9Obj) }
         putJsonArray("reject") { for (r in rejects) add(r) }
     }
 }
@@ -1167,6 +1233,219 @@ private fun vaultHealth(): JsonObject = buildJsonObject {
                 put("survivorId", c.merge?.survivorId)
                 putJsonArray("loserIds") { for (l in c.merge?.loserIds ?: emptyList()) add(l) }
                 put("mergeRefusal", c.mergeRefusal)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // WRITE-SIDE cases (audit H42, 2026-09-13). Everything above grades what the two engines
+    // DERIVE — rankings, clusters, refusals. Nothing graded what they WRITE: the composed merge
+    // doc, planKeep (passwordHistory's only writer, spec 02 §3), planDismiss, planCheck's okAt
+    // carry-forward and snooze horizon, planUnsnooze — the outputs that actually land in the
+    // vault and sync to every device. The two per-engine suites were ported from one another,
+    // so a write-side divergence could stay green on both. This block is a SEPARATE fixture
+    // (its own item list and roles map) rather than an extension of the one above, so the
+    // frozen derived cases keep their bytes: adding items to the shared list would re-rank
+    // every existing staleness row.
+    //
+    // Docs are emitted with defaults and nulls OMITTED (kotlinx encodeDefaults=false); the
+    // consumers compare docs after dropping null-valued keys and empty arrays on both sides,
+    // because "absent" and "null"/"[]" are one value to every reader in the tree but two
+    // encodings across the language boundary (ItemDocCheckRoundTripTest records the same).
+    // ------------------------------------------------------------------------------------
+    val roles = mapOf("v3" to "reader")
+    val writesRoleFor: (String) -> String? = { roles[it] }
+    val readerVault = "v3"
+
+    fun att(id: String) = AttachmentRef(id = id, name = "$id.bin", size = 1, fileKey = "a2V5")
+    val writeItems = items + listOf(
+        // planMerge composition: the newer copy survives, the older one's uris ride along
+        // (survivor's order first, raw-string dedupe) and favorite propagates from a loser.
+        item("merge-fav-old", updatedAt = now - 60 * day, uris = listOf("https://fav.example/a"), password = "fav-pw").let {
+            it.copy(doc = it.doc.copy(favorite = true))
+        },
+        item("merge-fav-new", updatedAt = now - 6 * day, uris = listOf("https://fav.example/b", "https://fav.example/a"), password = "fav-pw"),
+        // Survivor choice is data-driven, not age-driven: only the OLDER copy carries notes, so
+        // it is the only candidate and the newer one is the loser.
+        item("merge-notes-old", updatedAt = now - 70 * day, uris = listOf("https://notes.example"), password = "notes-pw").let {
+            it.copy(doc = it.doc.copy(notes = "keep these notes"))
+        },
+        item("merge-notes-new", updatedAt = now - 7 * day, uris = listOf("https://notes.example/login"), password = "notes-pw"),
+        // Data split across copies (notes on one, an attachment on the other): no candidate.
+        item("merge-split-a", updatedAt = now - 30 * day, uris = listOf("https://split.example"), password = "split-pw").let {
+            it.copy(doc = it.doc.copy(notes = "only here"))
+        },
+        item("merge-split-b", updatedAt = now - 3 * day, uris = listOf("https://split.example"), password = "split-pw").let {
+            it.copy(doc = it.doc.copy(attachments = listOf(att("split-att"))))
+        },
+        // A view-only vault: the cluster is reported, every write refuses with the reader copy.
+        item("merge-reader-a", vaultId = readerVault, updatedAt = now - 20 * day, uris = listOf("https://reader.example"), password = "reader-pw"),
+        item("merge-reader-b", vaultId = readerVault, updatedAt = now - 2 * day, uris = listOf("https://reader.example"), password = "reader-pw"),
+        item("merge-totp-a", updatedAt = now - 20 * day, uris = listOf("https://totp2.example"), password = "totp-pw", totp = "otpauth://totp/a?secret=GEZDGNBV"),
+        item("merge-totp-b", updatedAt = now - 2 * day, uris = listOf("https://totp2.example"), password = "totp-pw", totp = "otpauth://totp/b?secret=GEZDGNBW"),
+        // planKeep history composition: a three-way DIFFERS cluster where the survivor already
+        // retired one loser's password, so the dedupe must skip it, and the other loser is a
+        // favorite, so the flag must propagate.
+        item("keep-hist-a", updatedAt = now - 50 * day, uris = listOf("https://hist.example"), password = "p1").let {
+            it.copy(doc = it.doc.copy(login = it.doc.login!!.copy(passwordHistory = listOf(PasswordHistoryEntry("p2", now - 100 * day)))))
+        },
+        item("keep-hist-b", updatedAt = now - 20 * day, uris = listOf("https://hist.example/b"), password = "p2"),
+        item("keep-hist-c", updatedAt = now - 2 * day, uris = listOf("https://hist.example"), password = "p3").let {
+            it.copy(doc = it.doc.copy(favorite = true))
+        },
+        item("keep-totp-a", updatedAt = now - 20 * day, uris = listOf("https://kt.example"), password = "kt1", totp = "otpauth://totp/a?secret=GEZDGNBV"),
+        item("keep-totp-b", updatedAt = now - 2 * day, uris = listOf("https://kt.example"), password = "kt2", totp = "otpauth://totp/b?secret=GEZDGNBW"),
+        item("keep-attach-a", updatedAt = now - 20 * day, uris = listOf("https://ka.example"), password = "ka1"),
+        item("keep-attach-b", updatedAt = now - 2 * day, uris = listOf("https://ka.example/b"), password = "ka2").let {
+            it.copy(doc = it.doc.copy(attachments = listOf(att("ka-att"))))
+        },
+        item("keep-notes-a", updatedAt = now - 20 * day, uris = listOf("https://kn.example"), password = "kn1").let {
+            it.copy(doc = it.doc.copy(notes = "A's notes"))
+        },
+        item("keep-notes-b", updatedAt = now - 2 * day, uris = listOf("https://kn.example"), password = "kn2").let {
+            it.copy(doc = it.doc.copy(notes = "B's notes"))
+        },
+        // An already-dismissed pair (every member carries the cluster signature): the only
+        // dismissed=true cluster in the corpus, and the un-dismiss (empty signature) target.
+        item("dismissed-a", updatedAt = now - 20 * day, uris = listOf("https://dismissed.example"), password = "dis-pw", dupeAck = "dismissed-a|dismissed-b"),
+        item("dismissed-b", updatedAt = now - 2 * day, uris = listOf("https://dismissed.example"), password = "dis-pw", dupeAck = "dismissed-a|dismissed-b"),
+        // A login in the view-only vault, snoozed: planCheck and planUnsnooze must refuse it
+        // with the staleness reader copy BEFORE looking at the snooze.
+        item("reader-login", vaultId = readerVault, updatedAt = now - 10 * day, uris = listOf("https://readerlogin.example"), check = ItemCheck(now - 5 * day, "blocked", until = now + 10 * day)),
+        // Not a login: planCheck refuses with the not-login copy.
+        VaultItem(itemId = "note-item", vaultId = "v1", rev = 1, updatedAt = now - day, doc = ItemDoc(type = "note", name = "note-item", notes = "a note")),
+    )
+    val vanished = "vanished-id"
+    val keepRetiredAt = now
+
+    fun docJson(doc: ItemDoc) = json.encodeToString(ItemDoc.serializer(), doc)
+
+    putJsonObject("writes") {
+        putJsonObject("roles") { for ((k, r) in roles) put(k, r) }
+        putJsonArray("items") {
+            for (i in writeItems) {
+                addJsonObject {
+                    put("itemId", i.itemId)
+                    put("vaultId", i.vaultId)
+                    put("updatedAt", i.updatedAt)
+                    put("docJson", docJson(i.doc))
+                }
+            }
+        }
+
+        // Every cluster over the write fixture, with the composed merge doc this time.
+        putJsonArray("duplicates") {
+            for (c in Duplicates.duplicateClusters(writeItems, writesRoleFor)) {
+                addJsonObject {
+                    putJsonArray("sites") { for (s in c.sites) add(s) }
+                    put("kind", if (c.kind == Duplicates.Kind.EXACT) "exact" else "differs")
+                    putJsonArray("memberIds") { for (m in c.members) add(m.itemId) }
+                    put("signature", c.signature)
+                    put("dismissed", c.dismissed)
+                    put("survivorId", c.merge?.survivorId)
+                    putJsonArray("loserIds") { for (l in c.merge?.loserIds ?: emptyList()) add(l) }
+                    put("mergeDocJson", c.merge?.let { docJson(it.doc) })
+                    put("mergeRefusal", c.mergeRefusal)
+                }
+            }
+        }
+
+        data class KeepCase(val name: String, val memberIds: List<String>, val keepId: String)
+        putJsonArray("planKeep") {
+            for (k in listOf(
+                KeepCase("keep-current-over-stale", listOf("dupe-differs-stale", "dupe-differs-current"), "dupe-differs-current"),
+                KeepCase("keep-the-older-copy", listOf("dupe-differs-stale", "dupe-differs-current"), "dupe-differs-stale"),
+                KeepCase("history-dedupe-and-favorite", listOf("keep-hist-a", "keep-hist-b", "keep-hist-c"), "keep-hist-a"),
+                KeepCase("keep-the-copy-with-attachments", listOf("keep-attach-a", "keep-attach-b"), "keep-attach-b"),
+                KeepCase("refuse-vanished-member", listOf("dupe-differs-stale", vanished), "dupe-differs-stale"),
+                KeepCase("refuse-keep-id-not-a-member", listOf("dupe-differs-stale", "dupe-differs-current"), "weak"),
+                KeepCase("refuse-cross-vault", listOf("dupe-crossvault-a", "dupe-crossvault-b"), "dupe-crossvault-a"),
+                KeepCase("refuse-reader", listOf("merge-reader-a", "merge-reader-b"), "merge-reader-a"),
+                KeepCase("refuse-loser-totp", listOf("keep-totp-a", "keep-totp-b"), "keep-totp-a"),
+                KeepCase("refuse-loser-notes", listOf("keep-notes-a", "keep-notes-b"), "keep-notes-a"),
+                KeepCase("refuse-loser-attachments", listOf("keep-attach-a", "keep-attach-b"), "keep-attach-a"),
+            )) {
+                val plan = Duplicates.planKeep(writeItems, k.memberIds, k.keepId, writesRoleFor, keepRetiredAt)
+                addJsonObject {
+                    put("name", k.name)
+                    putJsonArray("memberIds") { for (m in k.memberIds) add(m) }
+                    put("keepId", k.keepId)
+                    put("retiredAt", keepRetiredAt)
+                    put("survivorId", plan.keep?.survivorId)
+                    putJsonArray("loserIds") { for (l in plan.keep?.loserIds ?: emptyList()) add(l) }
+                    put("docJson", plan.keep?.let { docJson(it.doc) })
+                    put("refusal", plan.keepRefusal)
+                }
+            }
+        }
+
+        data class DismissCase(val name: String, val memberIds: List<String>, val signature: String)
+        putJsonArray("planDismiss") {
+            for (d in listOf(
+                DismissCase("dismiss-cross-vault-pair", listOf("dupe-crossvault-a", "dupe-crossvault-b"), Duplicates.clusterSignature(listOf("dupe-crossvault-a", "dupe-crossvault-b"))),
+                DismissCase("undismiss-clears-the-key", listOf("dismissed-a", "dismissed-b"), ""),
+                DismissCase("refuse-reader", listOf("merge-reader-a", "merge-reader-b"), Duplicates.clusterSignature(listOf("merge-reader-a", "merge-reader-b"))),
+                DismissCase("refuse-vanished-member", listOf("dupe-exact-old", vanished), Duplicates.clusterSignature(listOf("dupe-exact-old", vanished))),
+            )) {
+                val plan = Duplicates.planDismiss(writeItems, d.memberIds, d.signature, writesRoleFor)
+                addJsonObject {
+                    put("name", d.name)
+                    putJsonArray("memberIds") { for (m in d.memberIds) add(m) }
+                    put("signature", d.signature)
+                    if (plan.writes == null) put("writes", JsonNull) else putJsonArray("writes") {
+                        for (w in plan.writes) addJsonObject { put("itemId", w.itemId); put("docJson", docJson(w.doc)) }
+                    }
+                    put("refusal", plan.dismissRefusal)
+                }
+            }
+        }
+
+        data class CheckCase(val name: String, val itemId: String, val result: String, val snoozeMs: Long?)
+        putJsonArray("planCheck") {
+            for (c in listOf(
+                CheckCase("ok-on-never-checked-stamps-okAt", "never-new", "ok", null),
+                CheckCase("bad-carries-okAt-forward", "recent-ok", "bad", null),
+                CheckCase("blocked-with-snooze-sets-until", "failing-fresh", "blocked", 30 * day),
+                CheckCase("fresh-verdict-drops-an-old-snooze", "snoozed", "ok", null),
+                CheckCase("unknown-verdict-is-recorded-verbatim", "over-year", "quantum-verified", null),
+                CheckCase("refuse-not-a-login", "note-item", "ok", null),
+                CheckCase("refuse-vanished", vanished, "ok", null),
+                CheckCase("refuse-reader", "reader-login", "ok", null),
+            )) {
+                val plan = Staleness.planCheck(writeItems, c.itemId, c.result, now, writesRoleFor, c.snoozeMs)
+                val write = plan.write
+                addJsonObject {
+                    put("name", c.name)
+                    put("itemId", c.itemId)
+                    put("result", c.result)
+                    put("now", now)
+                    put("snoozeMs", c.snoozeMs)
+                    if (write == null) put("write", JsonNull) else putJsonObject("write") {
+                        put("itemId", write.itemId); put("docJson", docJson(write.doc))
+                    }
+                    put("refusal", plan.refusal)
+                }
+            }
+        }
+
+        putJsonArray("planUnsnooze") {
+            for ((name, itemId) in listOf(
+                "clears-until-keeps-verdict" to "snoozed",
+                "no-snooze-is-a-no-op" to "recent-ok",
+                "never-checked-is-a-no-op" to "never-new",
+                "refuse-reader-before-the-no-op" to "reader-login",
+                "refuse-vanished" to vanished,
+            )) {
+                val plan = Staleness.planUnsnooze(writeItems, itemId, writesRoleFor)
+                val write = plan.write
+                addJsonObject {
+                    put("name", name)
+                    put("itemId", itemId)
+                    if (write == null) put("write", JsonNull) else putJsonObject("write") {
+                        put("itemId", write.itemId); put("docJson", docJson(write.doc))
+                    }
+                    put("refusal", plan.refusal)
+                }
             }
         }
     }

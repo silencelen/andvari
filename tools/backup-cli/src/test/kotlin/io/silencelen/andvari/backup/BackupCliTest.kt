@@ -67,6 +67,37 @@ class BackupCliTest {
         assertTrue(Backup.ERR_WRONG_PASSPHRASE_OR_CORRUPT in report.checks[1].detail)
     }
 
+    /**
+     * H83 at the CLI level. `verify`'s contract is that per-attachment failures are "collected,
+     * never fatal" — the whole point of the command in a recovery is to name EVERY attachment
+     * that will not restore, in one pass, before the operator makes a decision. A manifest
+     * `fileKey` that is not base64url used to throw a bare CryptoException from `Bytes.fromB64`
+     * one frame OUTSIDE the per-entry `catch (BackupException)`, so the first bad entry aborted
+     * the entire verify with `error: invalid base64url` and the operator learned nothing about
+     * the rest of the file. :core now translates that decode into the combined per-entry code;
+     * this pins the behaviour the CLI actually exposes, which is what the operator sees.
+     */
+    @Test
+    fun verify_manifestFileKeyNotBase64url_isACollectedFailRow() {
+        val sample = TestBackups.buildWithBadManifestFileKey("bad manifest key phrase")
+        // Must NOT throw: a per-entry problem is a FAIL row, not an aborted command.
+        val report = BackupInspect.verify(crypto, sample.passphrase, sample.file)
+        assertFalse(report.pass, "a manifest key that cannot decode must fail the file")
+        assertEquals(1, report.checks.size)
+        assertFalse(report.checks[0].pass)
+        // The row carries the spec error code, not a raw base64 complaint — and it names the item,
+        // so the operator can tell which attachment is lost.
+        assertTrue(
+            report.checks[0].detail.startsWith(Backup.ERR_WRONG_PASSPHRASE_OR_CORRUPT),
+            "detail should lead with the spec code, was: ${report.checks[0].detail}",
+        )
+        assertEquals("GitHub", report.checks[0].itemName)
+        // Everything else about the file is still readable — that is what makes this a per-entry
+        // verdict and not a corrupt container, and it is what Main.kt's summary reports around it.
+        assertEquals(listOf("Personal (personal, owner)" to 2, "Family (shared, writer)" to 1), report.itemsPerVault)
+        assertEquals(null, report.framingMismatch)
+    }
+
     @Test
     fun verify_truncatedFile_isTruncated() {
         val sample = TestBackups.buildSample("truncate phrase")

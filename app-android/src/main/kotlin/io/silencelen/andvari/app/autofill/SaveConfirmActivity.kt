@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
 import android.view.autofill.AutofillManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
@@ -58,6 +59,7 @@ import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.HouseholdCopy
+import io.silencelen.andvari.core.client.SaveOutcome
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.autofill.CardNormalize
@@ -366,7 +368,8 @@ class SaveConfirmActivity : ComponentActivity() {
                 }
                 val itemId = (plan as? CardPlan.Update)?.itemId // null → new item in the personal vault
                 withContext(Dispatchers.IO) { engine.save(itemId, doc) }
-            }.onSuccess {
+            }.onSuccess { outcome ->
+                announceIfQueued(outcome)
                 setResult(RESULT_OK) // something was saved, whatever the login stage decides
                 if (loginPlan != null) { busy = false; cardStageDone = true } // login stage next — never lost (BLOCKER 2)
                 else finish()
@@ -411,7 +414,8 @@ class SaveConfirmActivity : ComponentActivity() {
                         withContext(Dispatchers.IO) { engine.save(plan.itemId, doc) }
                     }
                 }
-            }.onSuccess {
+            }.onSuccess { outcome ->
+                announceIfQueued(outcome)
                 setResult(RESULT_OK)
                 finish()
             }.onFailure { busy = false; errorText = friendly(it) }
@@ -425,6 +429,15 @@ class SaveConfirmActivity : ComponentActivity() {
      *  copy (the target item vanished mid-flow) and a dead session must say "open andvari"
      *  (this surface renders inside another app) — then delegate to the shared household
      *  canon (wrong password, save-offline, conflict codes). Never a raw `.message`. */
+    /** H18 (G23 finished): an offline save on the durable cache returns QUEUED instead of
+     *  throwing — the row is in the SQLite queue and lands at the next sync — so the overlay
+     *  closes as a success and says so in passing. The one place the queued sentence is
+     *  rendered on this surface; a NON-durable engine throws and [friendly] renders the
+     *  honest "couldn't be saved" line instead (H17). */
+    private fun announceIfQueued(outcome: SaveOutcome) {
+        if (outcome == SaveOutcome.QUEUED) Toast.makeText(this, HouseholdCopy.SAVE_OFFLINE, Toast.LENGTH_LONG).show()
+    }
+
     private fun friendly(t: Throwable): String = when {
         t is SaveStageException -> t.message ?: HouseholdCopy.SAVE_FAILED
         t is ApiException && t.status == 401 -> HouseholdCopy.SESSION_EXPIRED_AUTOFILL

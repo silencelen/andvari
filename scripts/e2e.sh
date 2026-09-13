@@ -44,14 +44,58 @@ wait_health() {
   echo "server did not become healthy; log:"; cat "$WORK/server.log"; exit 1
 }
 
+# ---- phase runner ------------------------------------------------------------
+# Each phase used to be `(... npx vitest ...) | tail -15`, and the banner at the bottom printed
+# unconditionally. That lied in two ways at once (audit H96):
+#
+#   1. The phases were selected by an early `return` INSIDE the test body, so vitest counted the
+#      two phases that were not selected as PASSES: every phase printed "Tests  3 passed (3)"
+#      while running exactly one of them. The test file now uses `it.runIf(PHASE === …)`, so a
+#      phase reports `1 passed | 2 skipped` — which is a number worth asserting.
+#   2. Nothing asserted that any phase actually executed. `describe.skipIf(!BASE)` skipping the
+#      whole file, an unknown ANDVARI_E2E_PHASE, or a rename that makes the glob match nothing
+#      would all leave "E2E PASSED" on the screen having proved nothing — the exact
+#      collected-nothing-exits-0 trap scripts/verify.sh guards the extension leg against.
+#
+# So: run each phase into its own log, require the runner to report at least one PASSING test,
+# count the phases that cleared that floor, and refuse the final banner unless all three did.
+# The log also replaces `tail -15`: on failure the whole thing is printed, because a truncated
+# assertion message is the one line you needed.
+PHASES_RUN=0
+run_phase() {
+  local phase="$1" title="$2"
+  local log="$WORK/phase-$phase.log" rc=0 passed=""
+  echo "==> PHASE $(printf '%s' "$phase" | tr '[:lower:]' '[:upper:]'): $title"
+  if (cd "$REPO_DIR/web" && ANDVARI_E2E="$BASE" ANDVARI_E2E_PHASE="$phase" ANDVARI_E2E_STATE="$STATE" \
+        ANDVARI_E2E_BOOTSTRAP="$BOOTSTRAP" npx vitest run src/e2e/live.e2e.test.ts) >"$log" 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "    PHASE $phase FAILED (vitest exit $rc) — full output follows:" >&2
+    cat "$log" >&2
+    exit 1
+  fi
+  # vitest summary line: "Tests  1 passed | 2 skipped (3)". No "N passed" at all means the whole
+  # file was skipped (no BASE) or nothing was collected — a green exit code that proves nothing.
+  passed=$(grep -oE 'Tests[[:space:]]+[0-9]+ passed' "$log" | head -1 | grep -oE '[0-9]+' | head -1) || true
+  if [ "${passed:-0}" -lt 1 ]; then
+    cat "$log" >&2
+    echo "    PHASE $phase COLLECTED NOTHING: vitest reported ${passed:-0} passing tests." >&2
+    echo "    A phase that runs no test is not a phase that passed — refusing to continue." >&2
+    exit 1
+  fi
+  tail -15 "$log"
+  PHASES_RUN=$((PHASES_RUN + 1))
+}
+
 echo "==> starting server (pid capture)"
 start_server
 wait_health
 echo "    healthy at $BASE"
 
-echo "==> PHASE A: enroll + push + WebSocket propagation"
-(cd "$REPO_DIR/web" && ANDVARI_E2E="$BASE" ANDVARI_E2E_PHASE=a ANDVARI_E2E_STATE="$STATE" \
-  ANDVARI_E2E_BOOTSTRAP="$BOOTSTRAP" npx vitest run src/e2e/live.e2e.test.ts 2>&1) | tail -15
+run_phase a "enroll + push + WebSocket propagation"
 
 echo "==> SIGKILL the server mid-life, then restart on the SAME db (crash simulation)"
 kill -9 "$SRV_PID"; wait "$SRV_PID" 2>/dev/null || true
@@ -59,12 +103,14 @@ start_server
 wait_health
 echo "    server restarted, db survived"
 
-echo "==> PHASE B: replay same mutationId (idempotent) + continue"
-(cd "$REPO_DIR/web" && ANDVARI_E2E="$BASE" ANDVARI_E2E_PHASE=b ANDVARI_E2E_STATE="$STATE" \
-  ANDVARI_E2E_BOOTSTRAP="$BOOTSTRAP" npx vitest run src/e2e/live.e2e.test.ts 2>&1) | tail -15
+run_phase b "replay same mutationId (idempotent) + continue"
 
-echo "==> PHASE C: offline durable-cache drills (fake-indexeddb + the SAME surviving server/db)"
-(cd "$REPO_DIR/web" && ANDVARI_E2E="$BASE" ANDVARI_E2E_PHASE=c ANDVARI_E2E_STATE="$STATE" \
-  ANDVARI_E2E_BOOTSTRAP="$BOOTSTRAP" npx vitest run src/e2e/live.e2e.test.ts 2>&1) | tail -15
+run_phase c "offline durable-cache drills (fake-indexeddb + the SAME surviving server/db)"
 
-echo "==> E2E PASSED: WebSocket propagation + crash-durable idempotency + offline-cache drills"
+# The banner is a claim about three phases, so assert three phases. (Each already proved it ran at
+# least one test; this catches a phase deleted from the script or short-circuited past run_phase.)
+if [ "$PHASES_RUN" -ne 3 ]; then
+  echo "    E2E INCOMPLETE: $PHASES_RUN of 3 phases executed — not printing a pass banner." >&2
+  exit 1
+fi
+echo "==> E2E PASSED: WebSocket propagation + crash-durable idempotency + offline-cache drills ($PHASES_RUN/3 phases, each with a passing test)"

@@ -14,6 +14,7 @@ import io.silencelen.andvari.core.crypto.Attachments
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import kotlinx.serialization.json.Json
 
 /**
  * Builds REAL `.andvari` containers through the :core reference impl for the CLI tests
@@ -24,6 +25,10 @@ import io.silencelen.andvari.core.crypto.createCryptoProvider
 object TestBackups {
     val crypto = createCryptoProvider()
     val fast = KdfParams(ops = 1, memBytes = 8 * 1024 * 1024)
+
+    /** Mirrors the payload Json config :core and the CLI use, so a hand-built payload is byte-shaped
+     *  exactly like one Backup.build would have serialized. */
+    private val payloadJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     const val PERSONAL_VAULT = "11111111-1111-4111-8111-111111111111"
     const val FAMILY_VAULT = "77777777-7777-4777-8777-777777777777"
@@ -117,6 +122,42 @@ object TestBackups {
             off += p.size
         }
         return Sample(file, fileId, passphrase, payload, listOf(keyA, keyB))
+    }
+
+    /**
+     * A one-attachment container whose MANIFEST fileKey is [manifestFileKey] — deliberately not
+     * the section's real key, and by default not base64url at all (audit H83).
+     *
+     * [Backup.build] refuses a manifest whose fileKey disagrees with the section key it is handed,
+     * which is right for a producer and useless for this test, so the payload is serialized here
+     * and handed to [Backup.buildWithPayloadBytes]. The typed decoder cannot reject the string —
+     * `fileKey` is just a String on the wire — so the failure lands where a real corrupted or
+     * hand-edited backup would put it: at the base64url decode, inside the CLI's per-entry loop.
+     */
+    fun buildWithBadManifestFileKey(passphrase: String, manifestFileKey: String = "not-base64!"): Sample {
+        val key = crypto.randomBytes(32)
+        val payload = samplePayload(
+            listOf(
+                BackupAttachmentEntry(
+                    1, "aaaa1111-0000-4000-8000-000000000001", GITHUB_ITEM,
+                    "router-config.txt", attachmentA.size.toLong(), manifestFileKey,
+                ),
+            ),
+        )
+        val payloadUtf8 = payloadJson.encodeToString(BackupPayload.serializer(), payload).encodeToByteArray()
+        val fileId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        val parts = ArrayList<ByteArray>()
+        Backup.buildWithPayloadBytes(
+            crypto, passphrase, fileId, crypto.randomBytes(16), fast, payloadUtf8,
+            listOf(Backup.AttachmentSection(key) { attachmentA.copyOf() }), null,
+        ) { parts.add(it) }
+        val file = ByteArray(parts.sumOf { it.size })
+        var off = 0
+        for (part in parts) {
+            part.copyInto(file, off)
+            off += part.size
+        }
+        return Sample(file, fileId, passphrase, payload, listOf(key))
     }
 
     /** Offset of the first byte of section 0's envelope (magic + headerLen + header + u64 length). */

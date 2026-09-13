@@ -63,6 +63,58 @@ export function pruneUsage(map: UsageMap, liveItemIds: ReadonlySet<string>): Usa
   return out;
 }
 
+/**
+ * What a flush learned about the server's copy before deciding whether to write (spec 02 §8.2,
+ * audit H05). Three DISTINCT outcomes rather than a nullable map, because two of them used to
+ * collapse into "empty" — and an empty server view merged with one session's buffer and PUT back
+ * is how one device's handful of uses overwrote the whole household's ledger.
+ */
+export type ServerLedger =
+  /** The GET succeeded and answered `sealedUsage: null`: this account has never written a ledger.
+   *  The ONLY case in which a write with no server merge is a first write rather than an overwrite. */
+  | { kind: "absent" }
+  /** The GET succeeded and the blob opened under our key — `map` is authoritative. A blob that
+   *  opens but parses as garbage is a PRESENT, EMPTY ledger (parseUsage is tolerant by contract on
+   *  every twin): it authenticated under this user's key, so replacing it is the "corrupt ledger
+   *  costs one health column" posture, not a cross-client overwrite. */
+  | { kind: "present"; map: UsageMap }
+  /** The GET failed (offline, 5xx, 401, timeout) OR a blob came back that would NOT open (wrong
+   *  key, AD mismatch, a future encoding). Either way this client cannot see what it would be
+   *  replacing, and spec 02 §8.2 says it MUST leave the ledger untouched. */
+  | { kind: "unreadable" };
+
+/**
+ * Decide what ONE flush round PUTs — the ledger to store, or null for "do not write this round".
+ * Pure, and the TWIN of `planFlush` in extension/src/usage.ts and `UsageLedger.planFlush` in
+ * core: the three clients pin the same cases so they cannot drift in WHEN they write.
+ *
+ *  - `unreadable` → null, ALWAYS, even with buffered uses. The endpoint is last-writer-wins with
+ *    no server-side merge, so a PUT here would replace the household's whole ledger with `mine`
+ *    — spec 02 §8.2's "a client that cannot open the ledger MUST leave it untouched". The caller
+ *    re-buffers `mine` and the next flush retries; the conservative direction loses at most one
+ *    session's ranking hints.
+ *  - `absent` → `mine` if non-empty (the first write), else null.
+ *  - `present` → merge, then prune when `liveItemIds` was handed in (against the live set PLUS
+ *    `mine`'s keys — a use buffered after the caller's snapshot is inherently live: you cannot
+ *    copy a deleted item's secret — so a stale snapshot may under-prune, never drop a live
+ *    entry), and write ONLY if something changed: buffered uses, or a prune that dropped an
+ *    entry. A quiet post-sync prune therefore costs one GET and no `updatedAt` bump (spec 03 §3:
+ *    batched, never spurious).
+ */
+export function planFlush(server: ServerLedger, mine: UsageMap, liveItemIds?: ReadonlySet<string>): UsageMap | null {
+  switch (server.kind) {
+    case "unreadable":
+      return null;
+    case "absent":
+      return Object.keys(mine).length > 0 ? mine : null;
+    case "present": {
+      let merged = mergeUsage(server.map, mine);
+      if (liveItemIds) merged = pruneUsage(merged, new Set([...liveItemIds, ...Object.keys(mine)]));
+      return Object.keys(mine).length > 0 || Object.keys(merged).length !== Object.keys(server.map).length ? merged : null;
+    }
+  }
+}
+
 /** Tolerant parse: anything malformed reads as an EMPTY ledger, never throws. A corrupt ledger
  *  must degrade one health column, never break unlock or block a sync. */
 export function parseUsage(json: string): UsageMap {
@@ -106,10 +158,19 @@ export function recordUse(map: UsageMap, itemId: string, now: number): UsageMap 
 /**
  * Network + timer around the pure functions above. One per unlocked session; `dispose()` on lock
  * or sign-out.
+ *
+ * Two maps, deliberately (audit H79). `map` is the DISPLAY view — the unlock-time server copy
+ * with this session's uses stamped over it, what the health column reads. `pending` is the
+ * BUFFER — only what this session recorded and has not yet landed — and it is the ONLY thing a
+ * flush merges over the server copy, exactly as core (`take()`) and the extension
+ * (`pendingUsage`) do. Sending `map` instead re-added every entry another device's post-sync
+ * prune had removed, for as long as this tab stayed open, and forced that device's next sync to
+ * prune-and-PUT again: an `updatedAt` bump not driven by a use, the coarse-activity leak the
+ * batching rule exists to limit.
  */
 export class UsageTracker {
   private map: UsageMap = {};
-  private dirty = false;
+  private pending: UsageMap = {};
   private timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
@@ -140,7 +201,7 @@ export class UsageTracker {
   /** Record a use. In memory only — the flush is debounced (spec 03 §3). */
   record(itemId: string, now: number = Date.now()): void {
     this.map = recordUse(this.map, itemId, now);
-    this.dirty = true;
+    this.pending = recordUse(this.pending, itemId, now);
     if (this.timer !== null) return;
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -149,27 +210,52 @@ export class UsageTracker {
   }
 
   /**
-   * Re-merge against the server's current copy, then store. The re-read is what keeps
+   * Read the server's current copy, decide with planFlush, then store. The re-read is what keeps
    * last-writer-wins from meaning last-writer-DESTROYS: another device's entries survive our
    * flush even though the endpoint itself has no merge semantics.
+   *
+   * With a `liveItemIds` set (the post-sync point, the ONLY caller allowed to prune — Vault.tsx
+   * syncNow) the round runs even with NOTHING buffered (audit H35): the prune is the ledger's
+   * growth bound, and a sync almost never lands inside the 30 s debounce window after a use, so
+   * gating it behind a dirty buffer left it inert on this client. planFlush keeps a quiet sync
+   * write-free (one GET, no `updatedAt` bump).
+   *
+   * The three server outcomes stay DISTINCT (audit H05): a GET that failed or a blob that would
+   * not open is NOT an empty ledger to overwrite — no PUT, the buffer is re-armed, the next flush
+   * retries. Only a genuinely absent blob is written without a merge.
    */
   async flush(liveItemIds?: ReadonlySet<string>): Promise<void> {
-    if (!this.dirty) return;
-    this.dirty = false;
+    const mine = this.pending;
+    if (Object.keys(mine).length === 0 && !liveItemIds) return;
+    this.pending = {};
     try {
-      let merged = this.map;
+      let server: ServerLedger;
       try {
         const res = await this.client.getUsage();
-        if (res.sealedUsage) merged = mergeUsage(parseUsage(fromUtf8(await this.account.openUsage(res.sealedUsage))), this.map);
+        server = res.sealedUsage
+          ? { kind: "present", map: parseUsage(fromUtf8(await this.account.openUsage(res.sealedUsage))) }
+          : { kind: "absent" };
       } catch {
-        /* could not read the remote copy — store ours rather than lose the session's uses */
+        // Offline / HTTP failure on the GET, or a present blob that would not open under our key
+        // — the two cases spec 02 §8.2's MUST is about. NOT "no ledger yet": that is the null
+        // branch above.
+        server = { kind: "unreadable" };
       }
-      if (liveItemIds) merged = pruneUsage(merged, liveItemIds);
-      this.map = merged;
-      await this.client.putUsage(await this.account.sealUsage(utf8(serializeUsage(merged))));
+      const put = planFlush(server, mine, liveItemIds);
+      if (put === null) {
+        // Skipped the write on purpose — keep the uses for the next round. A null plan on a
+        // READABLE copy means there was simply nothing to write (quiet prune).
+        if (server.kind === "unreadable") this.pending = mergeUsage(mine, this.pending);
+        return;
+      }
+      // The display view follows what was stored: another device's newer stamps show up, and a
+      // pruned entry no longer lingers in this tab to be re-sent (H79).
+      this.map = put;
+      await this.client.putUsage(await this.account.sealUsage(utf8(serializeUsage(put))));
     } catch {
-      // Re-arm: a failed flush must not silently drop the session's recorded uses.
-      this.dirty = true;
+      // Re-arm: a failed flush must not silently drop the session's recorded uses. Reachable for a
+      // server refusal only because putUsage rides text() and REJECTS on a non-2xx (audit H34).
+      this.pending = mergeUsage(mine, this.pending);
     }
   }
 
@@ -179,6 +265,6 @@ export class UsageTracker {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
     this.map = {};
-    this.dirty = false;
+    this.pending = {};
   }
 }

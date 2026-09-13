@@ -8,8 +8,10 @@ import nacl from "tweetnacl";
 /**
  * andvari crypto for the extension — pure-JS @noble, no WASM, no eval → runs under the MV3
  * service-worker CSP. Byte-identical to the fleet's libsodium and to spec/test-vectors/kdf.json
- * (proven: web/src/crypto/noble-extension-poc.test.ts). Constructions mirror core Envelope.kt /
- * web envelope.ts exactly, so anything sealed here interoperates with every other client.
+ * (proven by THIS module's gated vector run, crypto.vectors.test.ts — the older
+ * web/src/crypto/noble-extension-poc.test.ts is an opt-in spike no default gate executes).
+ * Constructions mirror core Envelope.kt / web envelope.ts exactly, so anything sealed here
+ * interoperates with every other client.
  */
 
 export const KEY_BYTES = 32;
@@ -109,6 +111,39 @@ export function sealOpen(recipientPub: Uint8Array, recipientPriv: Uint8Array, se
   const pt = nacl.box.open.after(sealed.subarray(32), nonce, key);
   if (!pt) throw new Error("crypto_box_seal_open failed (wrong key or corrupt box)");
   return pt;
+}
+
+/**
+ * Open a sealed shared-vault grant → the 32-byte VK (spec 03 §10). The THIRD SharedGrant twin,
+ * beside core SharedGrant.open and web openSharedGrant, and graded by the same
+ * spec/test-vectors/sharedgrant.json (crypto.vectors.test.ts). It used to be inlined in
+ * background.ts buildVaultKeys with two of the three checks (audit H93, 2026-09-13): the payload
+ * version and the vaultId binding were there, the VK-length guard was not — so a grant whose
+ * payload decoded to a 31-byte "vk" was accepted into vaultKeys, every later open() on that
+ * vault's items threw inside @noble's key-length check, decryptItems swallowed each as
+ * "undecryptable — skip", and the vault silently showed EMPTY where core and web name the cause.
+ * Only a VK holder can seal a grant, so that is a buggy or foreign client rather than a hostile
+ * server — the reason this is a uniformity gap and not a key-exposure one. Hoisted so the
+ * production code path is what the vector grades, not a test-side re-implementation.
+ *
+ * Throws on every refusal; the caller (buildVaultKeys) treats a throw as "skip this grant".
+ */
+export function openSharedGrant(
+  memberIdentityPub: Uint8Array,
+  memberIdentityPriv: Uint8Array,
+  expectedVaultId: string,
+  sealed: Uint8Array,
+): Uint8Array {
+  const raw = sealOpen(memberIdentityPub, memberIdentityPriv, sealed);
+  const p = JSON.parse(new TextDecoder().decode(raw)) as { v?: unknown; vaultId?: unknown; vk?: unknown };
+  if (p.v !== 1) throw new Error(`unsupported shared-grant payload version ${String(p.v)}`);
+  // Binds the seal to the grant row it arrived on: a seal replayed onto another vault's row
+  // (a server cannot forge one, but it can reseat one) must not hand that row's items a key.
+  if (p.vaultId !== expectedVaultId) throw new Error("shared grant vaultId mismatch");
+  if (typeof p.vk !== "string") throw new Error("shared grant payload has no vk");
+  const vk = fromB64(p.vk);
+  if (vk.length !== KEY_BYTES) throw new Error("shared grant VK is not 32 bytes");
+  return vk;
 }
 
 /**

@@ -23,6 +23,9 @@ import kotlin.concurrent.withLock
  * transaction so a 410 resync replacement commits all-or-nothing.
  */
 class SqliteVaultCache(private val db: SqlBox, private val accountUserId: String) : VaultCache {
+    /** The queue is a SQLite table that outlives lock, quit and process death — the one
+     *  impl whose "queued" promise is true (H17/H18; see [VaultCache.durable]). */
+    override val durable: Boolean get() = true
     private val lock = ReentrantLock()
     private val items = LinkedHashMap<String, VaultItem>()
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }

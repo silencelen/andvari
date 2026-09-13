@@ -99,32 +99,37 @@ class AttachmentP4Test : P4TestSupport() {
         assertEquals(HttpStatusCode.PayloadTooLarge, tooBig.status)
         assertEquals("attachment_too_large", errorOf(tooBig))
 
-        // 2. put referencing a never-uploaded id → 400, and the WHOLE batch rolls back.
+        // 2. put referencing a never-uploaded id → per-mutation `rejected` (audit 2026-09-13
+        //    H03, spec 03 §5): the ghost row is refused ALONE and the healthy sibling in the same
+        //    batch lands. This step used to pin a thrown 400 that rolled the whole batch back —
+        //    the exact shape that left a poison row at the head of every client's queue.
         val itemX = vc.newItemId()
-        val ghostPush = client.pushRaw(
+        val ghostId = vc.newItemId()
+        val ghostPush = client.push(
             vc,
             putMutation(vc, itemX, """{"type":"note","name":"fine"}""", 0),
-            putMutation(vc, vc.newItemId(), """{"type":"note","name":"ghost"}""", 0, listOf(uuid())),
+            putMutation(vc, ghostId, """{"type":"note","name":"ghost"}""", 0, listOf(uuid())),
         )
-        assertEquals(HttpStatusCode.BadRequest, ghostPush.status)
-        assertEquals("unknown_attachment", errorOf(ghostPush))
-        assertTrue(client.sync(vc).items.none { it.itemId == itemX }, "a failed batch must roll back completely")
+        assertEquals(listOf("applied", "rejected"), ghostPush.results.map { it.status })
+        assertEquals("unknown_attachment", ghostPush.results[1].reason)
+        assertTrue(client.sync(vc).items.any { it.itemId == itemX }, "the healthy sibling is not rolled back with the rejected row")
+        assertTrue(client.sync(vc).items.none { it.itemId == ghostId }, "nothing written for the rejected row")
 
         // 3. An attachment bound to itemA cannot be referenced from another item.
         val att1 = uuid()
         val enc1 = Attachments.encrypt(crypto, fileKey, crypto.randomBytes(100))
         assertEquals(HttpStatusCode.OK, client.uploadAttachment(vc, att1, itemA, enc1.header + enc1.ciphertext).status)
-        val mismatch = client.pushRaw(vc, putMutation(vc, vc.newItemId(), """{"type":"note","name":"thief"}""", 0, listOf(att1)))
-        assertEquals(HttpStatusCode.BadRequest, mismatch.status)
-        assertEquals("attachment_mismatch", errorOf(mismatch))
+        val mismatch = client.push(vc, putMutation(vc, vc.newItemId(), """{"type":"note","name":"thief"}""", 0, listOf(att1))).results.single()
+        assertEquals("rejected", mismatch.status)
+        assertEquals("attachment_mismatch", mismatch.reason)
 
-        // 4. Per-item budget: att1(117) + att2(367) ciphertext > maxCipher(400)=417 → 413.
+        // 4. Per-item budget: att1(117) + att2(367) ciphertext > maxCipher(400)=417 → rejected.
         val att2 = uuid()
         val enc2 = Attachments.encrypt(crypto, fileKey, crypto.randomBytes(350))
         assertEquals(HttpStatusCode.OK, client.uploadAttachment(vc, att2, itemA, enc2.header + enc2.ciphertext).status)
-        val overItem = client.pushRaw(vc, putMutation(vc, itemA, """{"type":"note","name":"itemA"}""", 0, listOf(att1, att2)))
-        assertEquals(HttpStatusCode.PayloadTooLarge, overItem.status)
-        assertEquals("item_attachment_quota", errorOf(overItem))
+        val overItem = client.push(vc, putMutation(vc, itemA, """{"type":"note","name":"itemA"}""", 0, listOf(att1, att2))).results.single()
+        assertEquals("rejected", overItem.status)
+        assertEquals("item_attachment_quota", overItem.reason)
 
         // 5. Per-user budget: stored 484 + 117 more > maxCipher(500)=517 → 413.
         val enc3 = Attachments.encrypt(crypto, fileKey, crypto.randomBytes(100))

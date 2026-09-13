@@ -64,7 +64,8 @@ object UsageRecorder {
     fun flushForSession(session: VaultSession.Unlocked, then: () -> Unit = {}) = core.flushForSession(session, then)
 
     /** Flush AND prune against a COMPLETE live item set (audit G04) — the only caller is a
-     *  successful full sync, where `engine.items()` is authoritative. Never the teardown path. */
+     *  successful full sync, handing in `engine.liveItemIds()` (every live envelope, readable or
+     *  not — audit H36; never `items()`). Never the teardown path. */
     fun flushWithPrune(session: VaultSession.Unlocked, liveItemIds: Set<String>) =
         core.flushWithPrune(session, liveItemIds)
 
