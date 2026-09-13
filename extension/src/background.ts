@@ -47,11 +47,12 @@ import type {
 import { currentCode, isValidTotp, normalizeTotp } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
-import { resolveSaveAction, saveTargetFor } from "./savetarget";
+import { resolveSaveAction, saveTargetFor, stepUsernameFor, type StepUsername } from "./savetarget";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
 import { armGate, withRedeemInFlight } from "./locksequence";
+import { conflictCopyId, conflictCopyName } from "./conflictcopy";
 import { FLUSH_DEBOUNCE_MS, mergeUsage, parseUsage, pruneUsage, recordUse, serializeUsage, type UsageMap } from "./usage";
 import { applyServerSwitch, purgeServerDataFor } from "./serverswitch";
 
@@ -103,8 +104,9 @@ const QKEY = "quickUnlock"; // storage.session, namespaced: QuRecord (blob + cou
 // re-login to something we already hold" from "a genuinely new login" (knownlogins.ts has the
 // derivation + the disclosure bound). Same compartment posture as QKEY: its own storage.session
 // key under nsk(), rebuilt from the decrypted items on every persistSession, deliberately
-// RETAINED across an idle/manual lock (that survival is its whole function), wiped at sign-out
-// and on an untrusted compartment.
+// RETAINED across an idle/manual lock (that survival is its whole function), wiped at sign-out,
+// on an untrusted compartment, and by purgeOriginNamespace (H59 — it is per-origin namespaced
+// state, so "remove data for this server" has to take it too).
 const KLKEY = "knownLogins"; // storage.session, namespaced: KnownLoginsRecord
 const DKEY = "quOfferDismissed"; // storage.local, namespaced (non-secret): the offer card was dismissed once
 const BKEY = "quBioCred"; // storage.local, namespaced (non-secret, 0.17.0 amendment 4): { credentialId, prfSalt, userId } — reuse a passkey on re-enroll (avoid TPM/SEP litter). NOT secret: the PRF *output* needs the hardware + OS user-verification; salt/id/userId are public inputs (like a KDF salt).
@@ -159,6 +161,14 @@ const CARD_BADGE_TEXT = "•";
 // `totpOffer` joins for the same reason as cardChipOffer: a page can mint otpauth links (and the
 // mutation ticks that re-ask) at will — DOM-driveable is not user activity. Its accept twin
 // `addTotpFromPage` stays OUT (a real banner click), as does the popup's `setTotp`.
+// H01 (2026-09-13 audit): `passwordReuse` was added in 0.23.0 AFTER F01 and never classified —
+// the F01 regression by later addition. It rides a `focusout`, and a page drives trusted focusout
+// with `HTMLElement.focus(); blur()` at frame rate on a two-password form it authored itself, so
+// a blur loop re-armed the idle autolock forever with nothing on screen (count 0 draws no toast).
+// Same test as every entry above: page-DRIVEABLE ⇒ passive. The ask is separately gesture-gated
+// content-side (reusealert.ts typedByUser — a trusted keystroke, which no page API can mint), and
+// the SW additionally refuses sub-frames and throttles per tab (H02); the classification here is
+// the belt the SW can enforce by itself, since it cannot see a gesture.
 const PASSIVE_MSGS = new Set<Req["type"]>([
   "pageInfo",
   "totp",
@@ -170,6 +180,7 @@ const PASSIVE_MSGS = new Set<Req["type"]>([
   "pendingSave",
   "totpOffer",
   "capturedCredential",
+  "passwordReuse",
 ]);
 
 /** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
@@ -229,8 +240,9 @@ interface Session {
   vaultKeys: Map<string, Uint8Array>;
   /** Grant role per opened vault (G21, 2026-08-30 audit — web Account.vaultRoles twin): "reader"
    *  marks a view-only grant, so the save/link/TOTP-add paths never offer a write the server
-   *  would deny. Recorded alongside each key in buildVaultKeys; same staleness as vaultKeys
-   *  (refreshed at the next real unlock, by design — see resync). */
+   *  would deny. Minted alongside each key in buildVaultKeys and, since H70 (2026-09-13 audit),
+   *  REFRESHED on every resync() from the delivered grant rows — unlike vaultKeys, a role needs
+   *  no key to read, so there is no reason to make a mid-session demotion wait for a full unlock. */
   vaultRoles: Map<string, string>;
   personalVaultId: string;
   /** Rescue-issued temporary password in effect (E1-6) — surfaced in `status` for the popup nudge. */
@@ -273,8 +285,12 @@ interface SessionSnapshot {
 }
 
 interface TabState {
-  /** Username-only capture (multi-step step 1), merged into the password page's capture. */
-  lastUsername?: string;
+  /** Username-only capture (multi-step step 1), merged into the password page's capture — but
+   *  ONLY a capture on the same site (H13, 2026-09-13 audit: a bare per-tab string leaked site A's
+   *  username into a later password-only submit on site B in the same tab). Read through
+   *  savetarget.ts stepUsernameFor, which also tolerates the pre-H13 string shape in a persisted
+   *  snapshot; cleared by a top-frame pageInfo from another site. */
+  lastUsername?: StepUsername;
   /** The tab's pending save. The password stays SW-side — content only ever sees PendingSave.
    *  `frameId` is the frame that captured it: a DIFFERENT frame may not overwrite a live pending,
    *  so a hostile sub-frame can't silently redirect the top frame's Save banner to its own login.
@@ -999,7 +1015,19 @@ async function applyServerChange(): Promise<void> {
  *  key. Removes that origin's namespaced keys everywhere (storage.local + storage.session + the
  *  IDB co-key) and touches nothing else; safe for current and non-current origins alike. */
 export async function purgeOriginNamespace(originKey: string): Promise<void> {
-  const keys = [QKEY, DKEY, BKEY, UKEY, ULAST, USEQ, UQUIET].map((k) => nsKey(originKey, k));
+  // H59 (2026-09-13 audit): KLKEY belongs on this list and was missing from it — the classic
+  // "control written for the set of keys that existed at the time, reopened by an addition"
+  // (the known-logins digest landed 2026-08-18, after this purge path). The record is exactly
+  // the per-origin state this action promises to erase: a random 16-byte HMAC key beside
+  // truncated (site, username) digests, whose stated disclosure bound is that someone who can
+  // read the locked compartment can test GUESSED (site, username) pairs against it. Leaving it
+  // standing meant options.ts's "This removes only this browser's PIN / quick-unlock and cached
+  // state for that server." was false about the one piece of cached state with a disclosure
+  // bound of its own, and a re-connect to the same origin reused the stale digests as-is.
+  // KLKEY is storage.session-only, so the local.remove below is a harmless no-op for it; the
+  // list stays SINGLE on purpose, so a future namespaced key cannot be swept from one area and
+  // forgotten in the other.
+  const keys = [QKEY, KLKEY, DKEY, BKEY, UKEY, ULAST, USEQ, UQUIET].map((k) => nsKey(originKey, k));
   try {
     await chrome.storage.local.remove(keys);
   } catch {
@@ -1010,6 +1038,12 @@ export async function purgeOriginNamespace(originKey: string): Promise<void> {
   } catch {
     /* storage.session unavailable */
   }
+  // Removing the record is only half the wipe: the HMAC key is ALSO cached in SW memory, and a
+  // later refreshKnownLogins() for this origin would re-mint the very digests we just erased
+  // under the very key we just erased. Null it so the next rebuild mints a fresh key — the same
+  // pairing doLock's sign-out branch already does (wipe + `knownLoginsKey = null` together).
+  // Guarded on the current origin because the cache only ever holds THAT origin's key.
+  if (originKey === currentOriginKey) knownLoginsKey = null;
   try {
     await idbRun<void>("readwrite", (s) => s.delete(nsKey(originKey, IDB_KEY)));
   } catch {
@@ -1099,6 +1133,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   // can never send again, so this is memory reclamation only — never a gate that opens).
   topOriginPendingClear.delete(tabId);
   chipOfferLast.delete(tabId);
+  reuseAskLast.delete(tabId); // H02: same lifetime as the chip throttle
   chipRepairLast.delete(tabId);
   void (async () => {
     await ensureLoaded();
@@ -1405,6 +1440,24 @@ async function resync(): Promise<void> {
     const sync = await api.sync(0);
     if (writesInFlight > 0 || !session) return; // a write started mid-sync — its result would be clobbered
     session.items = decryptItems(sync, session.vaultKeys);
+    // H70 (2026-09-13 audit): refresh the G21 reader gate's input as well as the item projection.
+    // A grant's `role` needs no key to read and the server re-delivers the grant row on every role
+    // change (spec 03 §4), but this pull only ever rebuilt the items — so an owner demoting a
+    // member to reader mid-session left this client still OFFERING Update / TOTP-add against that
+    // vault, and the server's refusal rendered as the pre-G21 lying "Could not save — try again."
+    // until the next full unlock. That window is longest here of all four clients: quick-unlock
+    // can carry one session across days. Web is the twin that already gets this right (store.ts
+    // routes every delivered grant through addGrant, so a role change always applies).
+    //
+    // Scoped to vaults we hold a key for: a brand-new grant still needs uvk/identity to open and
+    // lands at the next real unlock (this function's contract above), and a role for a vault whose
+    // items we cannot decrypt would gate nothing. A grant that has VANISHED from the feed loses
+    // its role entry — that fails OPEN to the pre-G21 behaviour (the server still refuses the
+    // push, nothing new is exposed) and its items are gone from this feed anyway, so there is
+    // nothing left to offer a write against.
+    const granted = new Set(sync.grants.map((g) => g.vaultId));
+    for (const g of sync.grants) if (session.vaultKeys.has(g.vaultId)) session.vaultRoles.set(g.vaultId, g.role);
+    for (const vaultId of [...session.vaultRoles.keys()]) if (!granted.has(vaultId)) session.vaultRoles.delete(vaultId);
     persistSession();
     // G04: a landed full snapshot (cursor 0) is the one moment we hold the COMPLETE live item set,
     // so this is the only flush allowed to prune the usage ledger — never the debounce/lock flushes.
@@ -1741,6 +1794,20 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // memory; the count is the only thing that leaves, so a caller learns "yes, N others" and
       // never which item or which password.
       if (!session) return { locked: true, count: 0 } satisfies Res<"passwordReuse">;
+      // H02 (2026-09-13 audit): the unlocked side WAS the oracle — the trigger (a trusted
+      // focusout) is page-driveable and the answer is page-readable by hit-testing the toast. The
+      // real gate is content-side (a trusted keystroke, reusealert.ts typedByUser); this is the
+      // SW's belt, in the cardChipOffer idiom: (1) TOP FRAME ONLY — an ad/widget frame gets its
+      // own content script and its own toast, so it could run the probe entirely inside itself;
+      // (2) one answer per tab per REUSE_ASK_MIN_GAP_MS — a human settles one password at a time,
+      // a probe loop wants hundreds a second. Both refusals answer the silent shape (count 0),
+      // which reuseWarning renders as nothing; silence is never an all-clear on this path.
+      const tabId = sender.tab?.id;
+      if (tabId === undefined || sender.frameId !== 0) return { locked: false, count: 0 } satisfies Res<"passwordReuse">;
+      const now = Date.now();
+      const last = reuseAskLast.get(tabId);
+      if (last !== undefined && now - last < REUSE_ASK_MIN_GAP_MS) return { locked: false, count: 0 } satisfies Res<"passwordReuse">;
+      reuseAskLast.set(tabId, now);
       const pw = msg.password;
       if (!pw) return { locked: false, count: 0 } satisfies Res<"passwordReuse">;
       const count = session.items.filter((i) => i.doc.type === "login" && i.doc.login?.password === pw).length;
@@ -1756,6 +1823,19 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       if (!uri) return { ok: false } satisfies Res<"totp">;
       try {
         const { code, secondsLeft } = currentCode(uri, Date.now());
+        // H69 (2026-09-13 audit): copying a one-time code IS a use — desktop (Ui.kt TotpRow
+        // onUsed) and Android (MainActivity TotpRow onUsed) both record it under the G37 rule,
+        // and web counts it too; the extension was the fourth client that never came in line, so
+        // a login the household drives daily from this chip ranked as "never used" everywhere
+        // else. Recorded HERE, after the popup-only gate and a successful code, so a refused or
+        // malformed answer never counts.
+        //
+        // ONLY on `forCopy`. This same message is the popup's 1 s display ticker for every
+        // visible chip (that is why "totp" is passive), so an unconditional recordUsage would
+        // stamp every TOTP item once a second while the popup is open — the staleness column
+        // would say "just now" forever. Same batched flush as a fill: no per-use PUT (spec 03 §3
+        // forbids turning the ledger blob's updatedAt into a keystroke-grade activity trace).
+        if (msg.forCopy === true) recordUsage(msg.itemId);
         return { ok: true, code, secondsLeft } satisfies Res<"totp">;
       } catch {
         return { ok: false } satisfies Res<"totp">; // malformed stored totp
@@ -1780,6 +1860,14 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         if (typeof sender.origin === "string" && sender.origin !== "" && sender.origin !== "null") {
           const st = tabs.get(tabId) ?? {};
           st.topOrigin = sender.origin;
+          // H13: a top-frame load on ANOTHER site ends the multi-step flow the step-1 username
+          // belonged to — drop it, so a later password-only capture here cannot inherit it. Same-site
+          // loads (step 1 → step 2, a wrong-password retry) keep it: that is what it is for. Read
+          // through stepUsernameFor so a pre-H13 bare-string record is dropped too.
+          if (st.lastUsername !== undefined) {
+            const here = hostOfUrl(sender.origin);
+            if (stepUsernameFor(st.lastUsername, here === null ? null : (siteKeyOfHost(here, pslResolve) ?? here)) === "") st.lastUsername = undefined;
+          }
           tabs.set(tabId, st);
           // [S4a] SHIPPED-BUG FIX (design 2026-07-26 §C2): this write had NO persistTabs(), so the
           // recorded top origin lived only in SW memory and died with the ~30 s MV3 idle-death —
@@ -2891,6 +2979,11 @@ const CHIP_OFFER_MIN_GAP_MS = 250;
 const CHIP_REPAIR_MIN_GAP_MS = 2000;
 const chipOfferLast = new Map<number, { t: number; answer: Res<"cardChipOffer"> }>();
 const chipRepairLast = new Map<number, number>();
+/** H02: `passwordReuse` throttle — one answered ask per tab per second. Unlike the chip's replay
+ *  this REFUSES (answers count 0): a replayed count would itself be the oracle, and a human never
+ *  settles two new passwords inside a second. Cleared with the tab (tabs.onRemoved). */
+const REUSE_ASK_MIN_GAP_MS = 1000;
+const reuseAskLast = new Map<number, number>();
 
 /** [S4b] Repair on MISSING RECORD — the post-idle and post-lock states. `pageInfo` fires once at
  *  content init and `rescanCardForms` re-sends only `cardFormInfo`, so once the recorded top origin
@@ -3270,14 +3363,17 @@ async function capturedCredential(
     // sub-frame could poison it and steer the user's next real save away from the right item,
     // turning an intended update into a duplicate. A multi-step step 1 is a top-frame page.
     if (msg.username && frameId === 0) {
-      st.lastUsername = msg.username;
+      // H13: stamped WITH the site key so a later capture on another site in this tab cannot
+      // inherit it (stepUsernameFor is the one reader; a host that fails the PSL still keys on
+      // itself, never on "").
+      st.lastUsername = { username: msg.username, site: siteKeyOfHost(host, pslResolve) ?? host };
       tabs.set(tabId, st);
       persistTabs();
     }
     return { ok: true };
   }
 
-  const username = msg.username || st.lastUsername || "";
+  const username = msg.username || stepUsernameFor(st.lastUsername, siteKeyOfHost(host, pslResolve) ?? host);
   // Save-vs-update target (capture-time). A username picks the exact (host ∧ username) match; a
   // password-only submit (username "") falls back to a password-equal item (2a — a re-login) or a
   // lone host login (2b — a password change), else a new item (2c). Locked ⇒ matchesFor() is empty
@@ -3579,12 +3675,62 @@ async function putItem(
   }
 }
 
-/** Map a non-applied push status to the seam SaveErrorCode (E1-5): `conflict` is the one distinct
- *  case; denied/duplicate/no-vault-key/undefined all fold to "failed". The `error` string is
- *  debug-only detail the surface never renders (it maps the CODE to copy). */
+/** Map a non-landed push status to the seam SaveErrorCode (E1-5): denied/duplicate/no-vault-key/
+ *  undefined all fold to "failed". `conflict` is kept as a distinct code for the union's sake but
+ *  no longer reaches here from the three put paths — since H20 a conflict is a LANDED write
+ *  (putLanded), materialized, and answered ok:true. The `error` string is debug-only detail the
+ *  surface never renders (it maps the CODE to copy). */
 function saveFailure(status: MutationResult["status"] | undefined): { ok: false; code: SaveErrorCode; error: string } {
   const code: SaveErrorCode = status === "conflict" ? "conflict" : "failed";
   return { ok: false, code, error: `save failed (${status ?? "no vault key"})` };
+}
+
+/** H20 (2026-09-13 audit): did this put LAND? Spec 03 §5 is explicit that `conflict` is a write
+ *  the server APPLIED ("write never rejected-and-dropped": blob overwritten, rev bumped, the
+ *  displaced version archived and handed back as `serverItem`). The three put paths below used to
+ *  test `status === "applied"` alone, so a conflicting Update was reported as a failure ("This
+ *  login changed elsewhere — open it in the web vault") while the server had already kept OUR
+ *  value: the local rev stayed stale (the next Update conflicted again), no copy was made, and the
+ *  peer's value survived only in version history — web/core's pull-side fallback then built the
+ *  "(conflict)" copy from the winner, a duplicate of our own password. The extension is the ONE
+ *  party that receives the losing version, so it is the party that must materialize it. */
+function putLanded(r: MutationResult | undefined): r is MutationResult & { status: "applied" | "conflict" } {
+  return r?.status === "applied" || r?.status === "conflict";
+}
+
+/** H20: the pushing client's duty from spec 03 §5 — materialize the DISPLACED version as
+ *  "<name> (conflict YYYY-MM-DD)" (web store.ts materializeConflictFromServerItem / core
+ *  SyncEngine twin). Runs only on a landed `conflict` carrying a decryptable serverItem; every
+ *  other shape is a silent no-op, and a failure here never un-saves the write that already landed
+ *  (the pull side's flag-clearing fallback still runs on the next resync). The copy id is
+ *  deterministic over (itemId, winner rev) so a peer, our retry and the pull fallback converge on
+ *  one item — its own `conflict`/`duplicate` answer is that convergence, not an error. A reader
+ *  vault never materializes (its push would be denied — the web twin's first check). */
+async function materializeConflictCopy(r: MutationResult, vaultId: string): Promise<void> {
+  if (r.status !== "conflict" || r.newItemRev === undefined || !session) return;
+  const losing = r.serverItem;
+  if (!losing || losing.deleted || !losing.blob || losing.vaultId !== vaultId) return;
+  if (session.vaultRoles.get(vaultId) === "reader") return;
+  // Through decryptItems — the ONE wire-open site (the fv read ceiling, the per-vault key, the AD
+  // binding and the undecryptable-skip all live there; a second open here would dodge those pins).
+  const [displaced] = decryptItems({ rev: 0, vaults: [], grants: [], items: [losing] }, session.vaultKeys);
+  if (!displaced) return; // above the read ceiling, no key, or not ours to read — nothing safe to copy
+  const losingDoc = displaced.doc;
+  const copyId = conflictCopyId(losing.itemId, r.newItemRev);
+  if (session.items.some((i) => i.itemId === copyId)) return; // already materialized (peer / retry / pull fallback)
+  const copyDoc: ItemDoc = { ...losingDoc, name: conflictCopyName(losingDoc.name, losing.updatedAt ?? Date.now()) };
+  // Seal the copy at the fv the displaced version carried (floored by its doc type, the monotonic
+  // rule every re-seal here follows) — the copy IS that version, so that is the fv its semantics are.
+  const fv = Math.max(losingDoc.type === "card" ? CARD_FORMAT_VERSION : LOGIN_FORMAT_VERSION, losing.formatVersion);
+  try {
+    const cr = await putItem(copyId, vaultId, copyDoc, 0, fv);
+    if (putLanded(cr)) {
+      session.items.push({ itemId: copyId, vaultId, rev: cr.newItemRev ?? 1, formatVersion: fv, doc: copyDoc });
+      persistSession();
+    }
+  } catch {
+    /* the landed write above stands; the pull side's fallback preserves at least the winner */
+  }
 }
 
 async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
@@ -3595,11 +3741,12 @@ async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: b
   // (floor CARD_FORMAT_VERSION), NEVER here (a login floor would down-seal a card).
   const fv = Math.max(LOGIN_FORMAT_VERSION, target.formatVersion);
   const r = await putItem(target.itemId, target.vaultId, doc, target.rev, fv);
-  if (r?.status !== "applied") return saveFailure(r?.status);
+  if (!putLanded(r)) return saveFailure(r?.status);
   target.doc = doc;
   target.rev = r.newItemRev ?? target.rev + 1;
   target.formatVersion = fv; // what this write actually sealed at (web store.ts parity)
   persistSession();
+  await materializeConflictCopy(r, target.vaultId); // H20: no-op unless status === "conflict"
   return { ok: true };
 }
 
@@ -3610,10 +3757,11 @@ async function putNewLogin(host: string, username: string, password: string): Pr
   // NEW logins seal at the login doc floor (format.ts). G2 added card creation via a SEPARATE
   // card-aware seal (CARD_FORMAT_VERSION); this path is logins-only.
   const r = await putItem(itemId, session.personalVaultId, doc, 0, LOGIN_FORMAT_VERSION);
-  if (r?.status !== "applied") return saveFailure(r?.status);
+  if (!putLanded(r)) return saveFailure(r?.status); // H20: a conflict on a fresh id still LANDED
   const rev = r.newItemRev ?? 1; // matchable immediately:
   session.items.push({ itemId, vaultId: session.personalVaultId, rev, formatVersion: LOGIN_FORMAT_VERSION, doc });
   persistSession();
+  await materializeConflictCopy(r, session.personalVaultId);
   return { ok: true };
 }
 
@@ -3636,10 +3784,11 @@ async function putNewCard(rec: {
   if (rec.postalCode) card.postalCode = rec.postalCode;
   const doc: ItemDoc = { type: "card", name: rec.host, card };
   const r = await putItem(itemId, session.personalVaultId, doc, 0, CARD_FORMAT_VERSION);
-  if (r?.status !== "applied") return saveFailure(r?.status);
+  if (!putLanded(r)) return saveFailure(r?.status); // H20: a conflict on a fresh id still LANDED
   const rev = r.newItemRev ?? 1;
   session.items.push({ itemId, vaultId: session.personalVaultId, rev, formatVersion: CARD_FORMAT_VERSION, doc });
   persistSession();
+  await materializeConflictCopy(r, session.personalVaultId);
   return { ok: true };
 }
 

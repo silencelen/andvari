@@ -16,6 +16,8 @@ import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
 import { QrSvg } from "./QrSvg";
+import { adminDeviceState } from "./admindevices";
+import { BUNDLE_NOT_A_BUNDLE, checkRecoveryBundle } from "./recoverybundle";
 import { ViewHeader } from "./ViewHeader";
 import { qrModules } from "../vendor/qrcode-generator";
 
@@ -154,6 +156,8 @@ function UsersTab({ client, signupMode }: { client: ApiClient; signupMode: strin
                   onDisable={() => disableUser(u.userId)}
                   onRevoke={(deviceId) => revokeDevice(u.userId, deviceId)}
                   onDownloadEscrow={() => client.adminUserEscrow(u.userId)}
+                  onApplyRecovery={(text) => client.adminRecovery(text)}
+                  onApplied={load}
                 />
               ))}
             </tbody>
@@ -164,7 +168,7 @@ function UsersTab({ client, signupMode }: { client: ApiClient; signupMode: strin
   );
 }
 
-function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable, onRevoke, onDownloadEscrow }: {
+function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable, onRevoke, onDownloadEscrow, onApplyRecovery, onApplied }: {
   user: AdminUserSummary;
   expanded: boolean;
   devices: AdminDeviceSummary[];
@@ -173,6 +177,10 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
   onDisable: () => void;
   onRevoke: (deviceId: string) => void;
   onDownloadEscrow: () => Promise<string>;
+  /** F59 step 3: POST the recovery-cli bundle text VERBATIM (ApiClient.adminRecovery). */
+  onApplyRecovery: (bundleText: string) => Promise<string>;
+  /** Reload the list after a recovery lands (status flips back to active; sessions are revoked). */
+  onApplied: () => void;
 }) {
   // Disabling is drastic (revokes every session; sign-in then fails like a wrong
   // password) — never fire it off a single click. The server additionally refuses to
@@ -202,6 +210,55 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
       setEscrowMsg(e instanceof ApiError && e.code === "no_escrow" ? "no backstop key on file" : "download failed — try again");
     } finally {
       setEscrowBusy(false);
+    }
+  };
+  // F59 recovery step 3 — H24 (audit 2026-09-13): the ceremony's LAST leg. The admin ran
+  // recovery-cli offline and holds a bundle (the server's exact RecoveryUpload, also written to
+  // andvari-recovery-<userId>.json) plus a one-time temporary password; until this control
+  // existed the only in-tree consumer of POST /admin/recovery was the e2e drill's hand-built
+  // fetch, and self-hosting.md's "upload the result in the admin panel" pointed at nothing.
+  // The text is posted AS-IS (PRC-1: re-serializing once 400'd the ceremony); the pre-flight in
+  // recoverybundle.ts only refuses non-bundles and bundles naming a DIFFERENT member — the
+  // server accepts any existing userId, so this row is the one guard against resetting the
+  // wrong account. The server answers "ok" after setting mustChangePassword and revoking the
+  // member's sessions; the temp password itself never touches this panel — it is handed over
+  // out of band, and the sentence below says so because nothing else in the flow will.
+  const [applying, setApplying] = useState(false);
+  const [bundleText, setBundleText] = useState("");
+  const [applyBusy, setApplyBusy] = useState(false);
+  const [applyMsg, setApplyMsg] = useState<{ tone: "good" | "bad"; text: string } | null>(null);
+  const pickBundleFile = async (f: File | undefined) => {
+    if (!f) return;
+    setApplyMsg(null);
+    try {
+      setBundleText(await f.text());
+    } catch {
+      setApplyMsg({ tone: "bad", text: "Couldn't read that file — paste the bundle text instead." });
+    }
+  };
+  const applyRecovery = async () => {
+    setApplyMsg(null);
+    const check = checkRecoveryBundle(bundleText, u.userId);
+    if (!check.ok) {
+      setApplyMsg({ tone: "bad", text: check.reason });
+      return;
+    }
+    setApplyBusy(true);
+    try {
+      await onApplyRecovery(check.text);
+      setBundleText("");
+      setApplying(false);
+      setApplyMsg({
+        tone: "good",
+        text: `Recovery applied for ${u.email}. Hand them the one-time temporary password out of band — in person or by phone, never in a message — and their next sign-in forces a new master password.`,
+      });
+      onApplied();
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "bad_request") setApplyMsg({ tone: "bad", text: BUNDLE_NOT_A_BUNDLE });
+      else if (e instanceof ApiError && e.code === "kdf_too_weak") setApplyMsg({ tone: "bad", text: "This server refuses the bundle's password settings as too weak — re-run recovery-cli from the current release and upload the new bundle." });
+      else setApplyMsg({ tone: "bad", text: errText(e) });
+    } finally {
+      setApplyBusy(false);
     }
   };
   return (
@@ -234,10 +291,32 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
           {u.escrowFingerprint && (
             <div style={{ marginBottom: u.status === "active" ? 6 : 0 }}>
               {/* #23: "escrow" is ops jargon — member flow + audit say "backstop key". */}
-              <button type="button" className="ghost" disabled={escrowBusy} onClick={downloadEscrow}>{escrowBusy ? <Busy>Fetching…</Busy> : "Download backstop key"}</button>
+              <button type="button" className="ghost" disabled={escrowBusy} onClick={downloadEscrow}>{escrowBusy ? <Busy>Fetching…</Busy> : "Download backstop key"}</button>{" "}
+              <button type="button" className="ghost" disabled={applyBusy} aria-expanded={applying} onClick={() => { setApplyMsg(null); setApplying((v) => !v); }}>Apply recovery bundle</button>
               {escrowMsg && <span className="muted" style={{ marginLeft: 8 }}>{escrowMsg}</span>}
             </div>
           )}
+          {u.escrowFingerprint && applying && (
+            <div className="recovery-apply">
+              <div className="muted" style={{ marginBottom: 6 }}>
+                Step 3 of the recovery: paste the bundle recovery-cli printed (or pick the andvari-recovery-….json it wrote) and apply it unedited. Their sessions are signed out and the temporary password becomes their sign-in.
+              </div>
+              <Field label="Recovery bundle">
+                <textarea className="mono" rows={4} value={bundleText} disabled={applyBusy} onChange={(e) => setBundleText(e.target.value)} placeholder="{ &quot;userId&quot;: … }" />
+              </Field>
+              <div className="row" style={{ marginBottom: 8 }}>
+                <input type="file" accept=".json,application/json" aria-label="Pick the recovery bundle file" disabled={applyBusy} onChange={(e) => void pickBundleFile(e.target.files?.[0])} />
+              </div>
+              <div className="row">
+                <button type="button" className="ghost" disabled={applyBusy} onClick={() => void applyRecovery()}>{applyBusy ? <Busy>Applying…</Busy> : "Apply"}</button>
+                <button type="button" className="ghost" disabled={applyBusy} onClick={() => { setApplying(false); setApplyMsg(null); }}>Cancel</button>
+              </div>
+            </div>
+          )}
+          {/* The outcome stays visible after the panel closes (role="alert" on a refusal, the
+              Msg contract) — the out-of-band hand-over instruction is the one line the admin
+              must not lose. */}
+          {applyMsg && (applyMsg.tone === "bad" ? <Msg kind="err">{applyMsg.text}</Msg> : <Msg kind="info">{applyMsg.text}</Msg>)}
           {u.status === "active" && (confirming ? (
             <span style={{ whiteSpace: "nowrap" }}>
               <span className="muted">Disable {u.email}?&nbsp;</span>
@@ -267,11 +346,18 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
                       <td className="muted">{d.clientVersion ?? "—"}</td>
                       <td className="muted">{fmtDate(d.lastSeenAt)}</td>
                       <td>
-                        {d.revokedAt ? (
-                          <span className="tone-bad">revoked</span>
-                        ) : (
-                          <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy} onClick={() => onRevoke(d.deviceId)}>Revoke</button>
-                        )}
+                        {/* H25: a signed-out device holds no session — nothing to revoke, and a
+                            Revoke button on it taught admins the list is noise (admindevices.ts). */}
+                        {(() => {
+                          const state = adminDeviceState(d);
+                          return state === "revoked" ? (
+                            <span className="tone-bad">revoked</span>
+                          ) : state === "signed_out" ? (
+                            <span className="muted">signed out</span>
+                          ) : (
+                            <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy} onClick={() => onRevoke(d.deviceId)}>Revoke</button>
+                          );
+                        })()}
                       </td>
                     </tr>
                   ))}
@@ -534,12 +620,12 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
         </Field>
         <label className="check" style={{ margin: "0 0 10px" }}>
           <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} />
-          <span>admin</span>
+          <span>Admin</span>
         </label>
         {qrAvailable && emailAvailable && (
           <label className="check" style={{ margin: "0 0 10px" }}>
             <input type="checkbox" checked={sendEmail} onChange={(e) => { setSendEmail(e.target.checked); if (e.target.checked) setTtl("1h"); }} />
-            <span>email it</span>
+            <span>Email it</span>
           </label>
         )}
         <button className="ghost" disabled={busy || !email.trim()}>{busy ? <Busy>Inviting…</Busy> : "Invite"}</button>

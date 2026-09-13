@@ -21,6 +21,20 @@ MK = Argon2id_v1.3(password = UTF-8(master password, as typed — no normalizati
 - libsodium `crypto_pwhash` with `crypto_pwhash_ALG_ARGON2ID13`. libsodium fixes
   Argon2 parallelism at **p = 1**; this is deliberate (browser WASM is
   single-threaded — native and web cost the same).
+- **`memBytes` MUST be a multiple of 1024 (a whole number of KiB)** — normative for every
+  producer of `kdfParams`: the org policy (`PUT /admin/policy`, spec 03 §7), registration,
+  password change / KDF upgrade (§7) and the recovery bundle (spec 04 §4). Argon2 takes its
+  memory cost in KiB; libsodium converts `memLimit` bytes with integer division
+  (`memlimit / 1024`, silently flooring), while an engine that takes KiB directly (the
+  extension's Argon2id twin) must compute the same `⌊memBytes / 1024⌋` — a non-integer
+  KiB value is not a cost, it is an error. The rule exists so that no in-range value can
+  make two conformant engines derive different master keys from the same password
+  (audit H16: an admin policy of `100000000` — "100 MB" — enrolled every libsodium
+  client and locked the extension out until its twin floored). Servers MUST reject a
+  policy or account `kdfParams` whose `memBytes % 1024 != 0` (`bad_request`); clients
+  MUST floor when converting to KiB, never round. The shared KDF vectors
+  (`spec/test-vectors/kdf.json`) carry a non-KiB-multiple case so every engine is graded on
+  the floor.
 - **kdfParams v1 default: `{ "v": 1, "alg": "argon2id13", "ops": 3, "memBytes": 67108864 }`**
   (t=3, m=64 MiB). Params are per-user, stored server-side and returned by prelogin;
   they also ride inside `wrappedUvk` (§4) so an offline cache can unlock without the

@@ -68,6 +68,16 @@ describe("contrast tokens (parsed from styles.css) meet WCAG AA on both surfaces
     }
   }
 
+  // H52 (audit 2026-09-13): placeholders paint with --ink-dim on --bg-input (styles.css
+  // `input::placeholder`), the popup's a11y 7b rule ported — so the token has to clear AA on the
+  // INPUT surface too, in both themes, or the port drifts back under the floor.
+  for (const [theme, map] of [["dark", dark], ["light", light]] as const) {
+    it(`${theme} --ink-dim (placeholder ink) ≥ ${AA}:1 on --bg-input`, () => {
+      expect(map["--bg-input"], "--bg-input").toMatch(/^#[0-9a-fA-F]{3,8}$/);
+      expect(ratio(map["--ink-dim"]!, map["--bg-input"]!)).toBeGreaterThanOrEqual(AA);
+    });
+  }
+
   it("pins the reviewed hex values (guards against a silent 'improvement' back below AA)", () => {
     expect(dark["--ink-faint"]).toBe("#8d8370");
     expect(light["--ink-faint"]).toBe("#786c50");

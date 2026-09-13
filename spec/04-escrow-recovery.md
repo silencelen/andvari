@@ -76,14 +76,19 @@ on the recovered account's next sync like any offline device.
 4. First (admin) enrollment proceeds only after 3 passes.
 
 **Account recovery (forgot master password):**
-1. Admin fetches the user's sealed blob (`/admin/users/{id}` → escrow).
+1. Admin fetches the user's sealed blob: `GET /admin/users/{id}/escrow` (spec 03 §7;
+   audited `escrow_admin_read`) — in the web admin panel, the member row's "Download
+   backstop key".
 2. Offline: `recovery-cli recover <sealedBlobB64>` (positional arg — matches the CLI) — prompts for sheet seed, opens
    blob, validates internal sha256 + keyType, then generates a one-time temp
    password, derives temp salt/params/authKey/wrapKey, re-wraps UVK, and prints an
    upload bundle `{tempAuthKey, tempWrappedUvk, tempKdfSalt, tempKdfParams}`.
    The UVK itself never touches the online machine.
 3. Admin uploads via `POST /admin/recovery` (sets mustChangePassword, revokes
-   sessions), hands the temp password to the user out-of-band.
+   sessions) — in the web admin panel, the same member row's "Apply recovery bundle"
+   (paste or pick the CLI's JSON; it is posted verbatim) — and hands the temp password to
+   the user out-of-band. The CLI's bundle file is a login credential until step 4
+   completes: it is written owner-only and MUST be deleted once the upload is accepted.
 4. User logs in with temp password → forced password change (normal spec 01 §7
    flow) → all devices re-auth. Escrow blob unchanged (UVK unchanged).
 

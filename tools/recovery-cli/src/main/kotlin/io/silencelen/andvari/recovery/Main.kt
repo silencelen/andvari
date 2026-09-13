@@ -13,6 +13,10 @@ import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.RecoveryUpload
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 import java.time.LocalDate
 
 /**
@@ -216,14 +220,67 @@ private fun recover(sealedBlobB64: String) {
     println("1. Give the user this ONE-TIME temporary password (out-of-band, e.g. in person):")
     println("       $tempPassword")
     println()
-    println("2. Upload this bundle to the server: POST /api/v1/admin/recovery")
-    println("   (as admin; the server sets mustChangePassword and revokes their sessions)")
+    println("2. Upload this bundle from the web admin panel: Admin → the member's row →")
+    println("   \"Apply recovery bundle\" (paste the JSON or pick the file below). Wire route for")
+    println("   scripts: POST /api/v1/admin/recovery as admin. The server sets mustChangePassword")
+    println("   and revokes their sessions.")
     println()
     println(bundleJson)
     println()
     println("3. User logs in with the temp password on any client → forced password change.")
-    File("andvari-recovery-$userId.json").writeText(bundleJson + "\n")
-    println("(also written to andvari-recovery-$userId.json)")
+    val bundleFile = writeBundleOwnerOnly(Path.of("andvari-recovery-$userId.json"), bundleJson + "\n")
+    println("(also written to $bundleFile, owner-only 0600)")
+    println("   DELETE that file once the upload is accepted: it carries tempAuthKey, which is the")
+    println("   account's live login credential until the member completes the forced change.")
+}
+
+/**
+ * Write the recovery upload bundle with OWNER-ONLY permissions, create-then-verify, and never
+ * over an existing file — the update-signer keygen discipline (tools/update-signer Main.kt),
+ * applied here because this file is a credential too (audit H60): `tempAuthKey` is turned
+ * straight into the member's login verifier by `POST /admin/recovery`, and login accepts the raw
+ * authKey, so anyone who can read the bundle can authenticate as the recovered member (sessions,
+ * ciphertext download, a lockout via PUT /account/password) until the forced password change.
+ * A default-umask write (typically 0644) left it world-readable on BOTH machines it visits — the
+ * offline box and the online one it is carried to. The UVK stays wrapped under the temp password,
+ * so this is credential exposure, not key exposure — but it was the one recovery artefact not
+ * under the tree's owner-only rule (0.26.2 desktop export temp files, update-signer keys).
+ *
+ * Create-then-VERIFY: `supportedFileAttributeViews().contains("posix")` is a property of the
+ * JVM's default provider, not of the mount — on FAT/exFAT/CIFS (a plausible USB used to carry the
+ * bundle) createFile silently yields the mount-default perms. So the perms are re-read and, if
+ * 0600 did not take, the empty file is deleted and the write refused rather than a warning
+ * printed over a readable credential. On a non-POSIX JVM (Windows) we warn and write: the
+ * ceremony must still complete, and the operator is told to secure the file. Refusing to clobber
+ * protects a bundle from an earlier ceremony (O_EXCL via createFile — also refuses a dangling
+ * symlink target).
+ */
+internal fun writeBundleOwnerOnly(path: Path, text: String): Path {
+    if (Files.exists(path)) {
+        error("refusing to overwrite existing $path — move it aside (or delete it if its ceremony is finished) and re-run")
+    }
+    val posix = path.fileSystem.supportedFileAttributeViews().contains("posix")
+    val ownerOnly = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
+    if (posix) {
+        Files.createFile(path, PosixFilePermissions.asFileAttribute(ownerOnly))
+        val got = Files.getPosixFilePermissions(path)
+        if (got != ownerOnly) {
+            Files.deleteIfExists(path)
+            error("cannot enforce owner-only (0600) perms on $path (got $got) — refusing to write the recovery bundle (a login credential) to a world-readable location; write it to a POSIX filesystem")
+        }
+    } else {
+        Files.createFile(path)
+        System.err.println("WARNING: non-POSIX filesystem — cannot set owner-only (0600) permissions on $path; secure it yourself (it carries the member's temporary login credential).")
+    }
+    Files.write(path, text.toByteArray(Charsets.UTF_8))
+    if (posix) {
+        val perms = Files.getPosixFilePermissions(path)
+        if (perms != ownerOnly) {
+            Files.deleteIfExists(path)
+            error("could not keep $path at 0600 (got $perms) — deleted it; refusing to leave a login credential readable")
+        }
+    }
+    return path.toAbsolutePath()
 }
 
 /**
@@ -248,7 +305,10 @@ internal fun recoveryBundle(
     tempKdfParams = params,
 )
 
-// A readable temp password: 4 short words + digits (owner types it once).
+// A readable temp password: 16 characters, letters + digits, no symbols, ambiguous glyphs
+// (0/O, 1/l/I) excluded — it is read out or typed once by the member, then replaced by the
+// forced change at first sign-in. (Not words: the comment used to promise a passphrase the
+// generator never produced.)
 private fun humanTempPassword(): String =
     PasswordGenerator.generate(crypto, io.silencelen.andvari.core.crypto.GeneratorOptions(length = 16, symbols = false, avoidAmbiguous = true))
 

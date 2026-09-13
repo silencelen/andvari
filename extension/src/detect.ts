@@ -34,6 +34,13 @@ export interface LoginForm {
   password: HTMLInputElement | null;
   /** Generator fill targets: every new-password field (primary + confirm). Empty when !isSignup. */
   newPasswords: HTMLInputElement[];
+  /** H04 (2026-09-13 audit): the field whose value the CAPTURE engine records as "the password"
+   *  — distinct from `password`, which is the FILL target. On a change-password form the fill
+   *  target is the current-password field (that is what a login fill must write), but the value
+   *  worth saving is the NEW one; reading `password` for capture saved the OLD password (or, with
+   *  the generator, nothing the vault ever learned — the generated value went only into
+   *  newPasswords). Chosen by chooseCapturePassword; null only on a username-step form. */
+  capturePassword: HTMLInputElement | null;
   isSignup: boolean;
   /** CVV-negative rule (cards design 2026-07-09): true when the form's LONE password-typed
    *  field is name/id-token-matched cvv|cvc|csc — a checkout CVV box, not a login password.
@@ -593,6 +600,7 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
       username: users[0]!.input,
       password: null,
       newPasswords: [],
+      capturePassword: null,
       isSignup: false,
       suppressSave: isCardForm,
     };
@@ -606,6 +614,7 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
   const newPasswords =
     flagged.length > 0 ? flagged.map((p) => p.input) : isSignup ? passwords.map((p) => p.input) : [];
   const primary = passwords.find((p) => !p.isNewPassword) ?? passwords[0]!;
+  const capturePassword = chooseCapturePassword(passwords.map((p) => p.input), newPasswords, primary.input);
 
   // Username = nearest classified-username above the primary password, per-group; fall back
   // to the nearest non-negative text/email above (today's heuristic) when nothing classifies.
@@ -641,7 +650,31 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
       primary.input.type === "password" &&
       (isCvvNameOrId(primary.input.name) || isCvvNameOrId(primary.input.id)));
 
-  return { kind: "login", form, container, username, password: primary.input, newPasswords, isSignup, suppressSave };
+  return { kind: "login", form, container, username, password: primary.input, newPasswords, capturePassword, isSignup, suppressSave };
+}
+
+/**
+ * H04 (2026-09-13 audit): which password field the capture engine should read as "the password
+ * being set". Pure over the form's password fields in document order so node --test can pin
+ * every shape (detect.capture.test.ts) — the DOM builders above only ever pass through it.
+ *
+ *  - any NEW-password field (autocomplete=new-password, or the two-unflagged signup pair) → the
+ *    FIRST of them: that is the value the user is choosing, and the value the generator wrote;
+ *  - three or more password fields with NO hint at all → the SECOND: this is the change-password
+ *    shape detect recognises for fill (current, new, confirm — current first, which is why fill
+ *    keeps targeting passwords[0]); the value worth saving is the new one, never the current;
+ *  - otherwise → the fill target itself (a plain sign-in: one password, and it is the password).
+ *
+ * Both fixed shapes previously captured the CURRENT password: the 2a rule then saw "same
+ * password as stored" and drew no banner at all, so a site-side password change (or a generated
+ * password the vault never learned) was silently lost — the user's next hypothesis was "I forgot
+ * my password". The fill target is deliberately NOT changed here: `password` stays the field a
+ * login fill writes into.
+ */
+export function chooseCapturePassword<T>(passwords: readonly T[], newPasswords: readonly T[], fillTarget: T): T {
+  if (newPasswords.length > 0) return newPasswords[0]!;
+  if (passwords.length >= 3) return passwords[1]!;
+  return fillTarget;
 }
 
 interface FieldGroup {

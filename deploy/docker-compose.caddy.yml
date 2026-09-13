@@ -24,7 +24,13 @@ services:
       - "443:443"
 
   caddy:
-    image: caddy:2
+    # Pinned by tag AND digest (audit H99): `caddy:2` resolved to whatever the registry served on
+    # pull day, so the TLS terminator in front of a password manager was the one component of
+    # this stack with no fixed identity — while the andvari image's own Dockerfile digest-pins all
+    # three of its bases. The digest is the multi-arch index for the tag (amd64 + arm64 resolve
+    # through it). Dependabot's docker-compose ecosystem (.github/dependabot.yml) bumps it; when
+    # bumping by hand, take the digest from `docker buildx imagetools inspect caddy:<tag>`.
+    image: caddy:2.11.4@sha256:13ba145cba2f3e28fa801994876e4c086d1b95d5aa2a520a734765ffb6b12017
     restart: unless-stopped
     network_mode: "service:andvari"
     depends_on:

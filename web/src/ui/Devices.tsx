@@ -46,7 +46,6 @@ export type PlatformRow =
   | { kind: "loading" }
   | { kind: "unpublished" }
   | { kind: "available"; version: string; url: string };
-export type WindowsRow = PlatformRow;
 
 export type ExtensionRow =
   | { kind: "loading" }
@@ -88,10 +87,10 @@ export function platformRowState(
   return { kind: "unpublished" };
 }
 
-/** Kept as the named export the tests pin; now just the windows column of platformRowState. */
-export function windowsRowState(manifest: DownloadsManifest | null | "error"): WindowsRow {
-  return platformRowState(manifest, "windows");
-}
+// H86: `windowsRowState` (and the `WindowsRow` alias it returned) lived here only so the
+// pre-generalisation tests could keep their name — a test-only shim exported from a production
+// module, which every reader had to check before believing the render really goes through
+// platformRowState. The shim now lives in Devices.test.ts, where its one caller is.
 
 /**
  * Same decision for the browser-extension row. Available needs a version plus AT LEAST

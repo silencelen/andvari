@@ -32,6 +32,11 @@ data class ParsedField(
     /** The control's declared capacity (HTML maxlength / maxTextLength; null = undeclared) —
      *  CardFill's fit-guard consumes it so a LengthFilter can never truncate a fill. */
     val maxLength: Int? = null,
+    /** H21: a PASSWORD field the site hints as its NEW password (signup / change-password box).
+     *  Metadata only ([NewPasswordSignal]); the fill path uses it to keep the stored password
+     *  OUT of new/confirm boxes when a current-password field exists. Default false so every
+     *  pre-existing construction and its verdicts stay bit-identical. */
+    val isNewPassword: Boolean = false,
 )
 
 /**
@@ -79,6 +84,7 @@ object StructureParser {
         val domain: String?,
         val autofillType: Int,
         val options: List<String>,
+        val isNewPassword: Boolean,
     )
 
     fun parse(structure: AssistStructure): ParsedForm {
@@ -97,7 +103,7 @@ object StructureParser {
                 kind.isCardKind -> ccFields
                 else -> continue // NONE dropped, as before
             }
-            target.add(ParsedField(c.id, kind, c.domain, winningSignal(c.signal, kind), c.autofillType, c.options, c.signal.maxLength))
+            target.add(ParsedField(c.id, kind, c.domain, winningSignal(c.signal, kind), c.autofillType, c.options, c.signal.maxLength, c.isNewPassword))
         }
         return ParsedForm(fields, appPackage, ccFields, refined.formKind)
     }
@@ -122,6 +128,7 @@ object StructureParser {
                     // LIST nodes' choice labels: metadata describing the picker UI (what COULD
                     // be selected), never what the user typed — the walk stays value-blind.
                     options = node.autofillOptions?.map(CharSequence::toString) ?: emptyList(),
+                    isNewPassword = isNewPassword(node),
                 ),
             )
         }
@@ -165,6 +172,17 @@ object StructureParser {
      * both walks resolve inheritance identically); maxLength/inputMode feed only
      * [CardForm.refine]'s CSC demotion — [FieldClassifier.classify] never reads them.
      */
+    /**
+     * H04/H21: the new-password flag, read from the SAME node metadata [signalOf] reads (the
+     * platform/Chrome-mapped hints) plus the raw HTML `autocomplete` attribute — a belt for a
+     * structure that carries the attribute without mapping it into hints. `internal` for the
+     * same reason as [signalOf]: the save walk must flag exactly what the fill walk flags.
+     */
+    internal fun isNewPassword(node: AssistStructure.ViewNode): Boolean {
+        val autocomplete = node.htmlInfo?.attributes?.firstOrNull { it.first == "autocomplete" }?.second
+        return NewPasswordSignal.isNewPassword(node.autofillHints?.toList() ?: emptyList(), autocomplete)
+    }
+
     internal fun signalOf(node: AssistStructure.ViewNode, frameDomain: String?): FieldSignal {
         val hints = node.autofillHints?.toList() ?: emptyList()
         val inputType = node.inputType

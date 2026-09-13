@@ -126,17 +126,23 @@ fun main() {
     // sidestepping lazysodium's resource-loader (which dies on a jpackage install under a spaced
     // path like "Program Files"). Must run before the self-check below — the first crypto call.
     NativeSodium.prepare()
+    // Audit H81: reclaim the per-launch `%TEMP%\andvari-libsodium-*.dll` orphans 0.26.2/0.26.3
+    // left behind (deleteOnExit cannot unlink a DLL JNA still has mapped). After prepare, and it
+    // skips the file the property names, so it can never delete the library about to be loaded.
+    NativeSodium.sweepLegacyTempExtractions()
     // Field diagnostics BEFORE any UI: confirm the native libsodium layer loads on this machine
     // (the one thing that differs between a fresh install and the dev/CI boxes where it always
     // works) and record the environment. Writes to ~/.andvari-desktop/diagnostic.log; never
     // throws. The sign-in canon flattens a native-crypto failure to the same calm line as every
     // other cause, so without this a field failure has no readable trail.
-    DesktopDiagnostics.runStartupSelfCheck()
+    // Audit H15: the verdict is HELD, not discarded — a failed load renders the blocking
+    // "this is not a password problem" state instead of the password field (applySelfCheck).
+    val selfCheck = DesktopDiagnostics.runStartupSelfCheck()
     application {
         // The state holder must exist before Window's key-event callback references it, so
         // hoist scope+state to the application scope (the window IS the app lifetime here).
         val scope = rememberCoroutineScope()
-    val state = remember { DesktopState(scope).also { it.start() } }
+    val state = remember { DesktopState(scope).also { it.applySelfCheck(selfCheck); it.start() } }
     Window(
         onCloseRequest = ::exitApplication,
         title = "andvari",

@@ -84,10 +84,14 @@ describe("Trash / history dates are local and in the house dialect", () => {
     expect(vaultTsx).not.toContain("toISOString().slice(0, 10)");
   });
 
-  it("the Trash row and the history row both call fmtDay", () => {
+  it("the Trash row calls fmtDay and the history row fmtDayYear (H131)", () => {
+    // H131 moved half of this pin: Trash rows expire in 30 days, so "July 14" is unambiguous
+    // there and the year would be noise — but version history is capped at ten SAVES with no age
+    // bound at all, so an item edited twice a year rendered a 2024 version as a bare "July 14"
+    // that reads as this July. fmtDayYear adds the year only when it is not the current one.
     expect(vaultTsx).toContain("deleted {fmtDay(d.deletedAt)}");
-    expect(vaultTsx).toContain("{fmtDay(v.archivedAt)}");
-    expect(vaultTsx).toContain('import { fmtDay, humanSize } from "./format"');
+    expect(vaultTsx).toContain("{fmtDayYear(v.archivedAt)}");
+    expect(vaultTsx).toContain('import { fmtDay, fmtDayYear, humanSize } from "./format"');
   });
 
   it("TrashView's doc comment no longer contradicts its own copy about retention", () => {

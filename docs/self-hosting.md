@@ -194,10 +194,17 @@ cryptographically verified by clients.
 - **Health:** `GET /healthz` (the compose healthcheck uses it). **Metrics:**
   `GET /metrics` is Prometheus-format, loopback-trust only — scrape from inside the
   network namespace or drop a sidecar; never expose it.
-- **Recovery of a locked-out member** (admin backstop, `required` members): dump the
-  escrow blob, run `recovery-cli recover` with the printed seed on an **offline**
-  machine, upload the result in the admin panel — the full runbook ships in the spec
-  (spec 04 §4). The recovery-cli in the image is the same tool:
+- **Recovery of a locked-out member** (admin backstop, `required` members): in the web
+  app's **Admin** page, the member's row has **Download backstop key** — that file is the
+  sealed escrow blob. Carry it to an **offline** machine and run
+  `recovery-cli recover <blob>` with the printed seed; it prints a one-time temporary
+  password and writes `andvari-recovery-<userId>.json`. Back in the same Admin row,
+  **Apply recovery bundle** takes that JSON (paste it, or pick the file) and posts it as-is
+  to the server, which forces a password change and signs the member out everywhere. Hand
+  the temporary password over out-of-band (in person, not in the same chat as the bundle),
+  then delete the bundle file — until the member completes the forced change it is their
+  login credential. The normative steps are spec 04 §4. The recovery-cli in the image is
+  the same tool:
   `docker run --rm -it --network none ghcr.io/silencelen/andvari:<ver> recovery-cli`.
 - **Members' self-service recovery** works out of the box (`/recovery/self/*`): each
   member gets a personal recovery phrase at enrollment. These endpoints are

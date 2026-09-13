@@ -367,9 +367,13 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
       onChanged();
     });
 
+  // H06: the removal goes through the store so it carries the spec 03 §11 removal proof (nonce +
+  // HMAC under the vault's lifecycle key). A bodyless client.removeVaultMember here made every
+  // legitimate removal land on the removed member's devices as the "server may be misbehaving"
+  // anomaly banner — the attribution copy inverted for the only case that ever occurs.
   const remove = (userId: string) =>
     run(async () => {
-      await client.removeVaultMember(vault.vaultId, userId);
+      await store.removeVaultMember(vault.vaultId, userId);
       setRemoving(null);
       await store.sync();
       await load();
@@ -731,7 +735,7 @@ function DeleteVaultControl({ vault, store, onDeleted, onDeletedNote, onBackup, 
           </div>
 
           {err && <Msg kind="err">{err}</Msg>}
-          <label style={{ marginTop: 10 }}>Type the vault's name to delete it:</label>
+          <label className="prompt" style={{ marginTop: 10 }}>Type the vault's name to delete it:</label>
           <input aria-label="Type the vault's name to delete it" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={vault.name} disabled={inFlight} />
           <div className="actions" style={{ marginTop: 10 }}>
             <button type="button" className="ghost" disabled={busy} onClick={() => { setOpen(false); setTyped(""); setErr(""); }}>Cancel</button>

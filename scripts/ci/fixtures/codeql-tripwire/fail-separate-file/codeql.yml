@@ -1,0 +1,18 @@
+# Clean JS/TS-only workflow — identical in shape to the live one. The trip is in the sibling file.
+name: CodeQL
+on: { push: { branches: [main] } }
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - run: bash scripts/ci/codeql-kotlin-tripwire.sh
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - uses: github/codeql-action/analyze@v4

@@ -2355,6 +2355,26 @@ export class VaultStore {
     return { purgeAt: resp.purgeAt };
   }
 
+  /** REMOVE a member (spec 03 §11 removal proof; skipti design §49). Mints a fresh nonce + remove
+   *  proof under the held VK and sends both with the DELETE, the way deleteSharedVault above mints
+   *  its deleteId + delete proof before the call. The proof is the ONLY thing that lets the removed
+   *  member's client tell an owner action from a server forgery: both sync engines classify a
+   *  removal that arrives without one as "anomaly" by design (verifyRemoval below; core
+   *  SyncEngine.verifyRemoval), which renders the danger-tone "the server may be misbehaving —
+   *  tell your admin" banner. H06 (audit 2026-09-13): the web Sharing screen — the only production
+   *  caller of member removal on any client — called the route with no body, so every legitimate
+   *  removal reached the victim as that forgery warning and the one signal that exists to catch a
+   *  real forgery cried wolf 100% of the time. The owner is unlocked by construction here (VK in
+   *  hand), so minting is free; this is the one sanctioned way to remove a member from the web app
+   *  — never call api.removeVaultMember bodyless from a UI (store.lifecycle.test.ts pins both the
+   *  minted body and that a victim lands it as "removed", not "anomaly"). */
+  async removeVaultMember(vaultId: string, userId: string): Promise<void> {
+    const nonce = crypto.randomUUID();
+    const key = await this.account.lifecycleKeyFor(vaultId);
+    const proof = await removeProof(key, vaultId, userId, nonce);
+    await this.api.removeVaultMember(vaultId, userId, { proof, nonce });
+  }
+
   /** The caller's own in-grace deleted vaults — re-opens each VK from the wrappedVk it already
    *  owned so the name shows AND restore can mint its proof (ZK-clean). */
   async listDeleted(): Promise<DeletedVaultInfo[]> {

@@ -45,12 +45,18 @@ kotlin {
                 // lazysodium-android pulls JNA as a plain .jar; Android needs the .aar
                 // (it carries the native libs). Exclude the transitive jar to avoid a
                 // duplicate-class clash, then add the aar explicitly. String coordinates
-                // (versions match the catalog: lazysodium-android + jna) because the KMP
-                // source-set DSL doesn't accept a catalog provider with a configure lambda.
-                implementation("com.goterl:lazysodium-android:5.1.0") {
+                // because the KMP source-set DSL doesn't accept a catalog provider with a
+                // configure lambda — but the VERSIONS are read from the catalog, never
+                // retyped (audit H101): the JVM target and the server take `libs.jna` /
+                // `libs.lazysodium.java` from the same file, and the one crypto adapter
+                // (LazySodiumCryptoProvider.kt) is compiled against both artifacts, so a
+                // catalog bump that left a literal behind would ship the phone a different
+                // libsodium than the JVM clients, surfacing only as an UnsatisfiedLinkError
+                // on the device.
+                implementation("com.goterl:lazysodium-android:${libs.versions.lazysodium.android.get()}") {
                     exclude(group = "net.java.dev.jna", module = "jna")
                 }
-                implementation("net.java.dev.jna:jna:5.14.0@aar")
+                implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
                 api(libs.ktor.client.okhttp)
             }
         }

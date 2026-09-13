@@ -96,7 +96,23 @@ fun ApplicationCall.declaredClientVersion(): String? {
  * forwarded-header trust gate and the /metrics access gate so the two can never drift.
  */
 fun ApplicationCall.peerIsLoopback(): Boolean =
-    runCatching { java.net.InetAddress.getByName(request.origin.remoteAddress).isLoopbackAddress }.getOrDefault(false)
+    runCatching { java.net.InetAddress.getByName(peerAddress()).isLoopbackAddress }.getOrDefault(false)
+
+/**
+ * The direct TCP peer's SOCKET ADDRESS as a literal — the one accessor both [peerIsLoopback] and
+ * [clientIp]'s fallback read, so the two halves of spec 03 §8's "client IP" paragraph can never
+ * disagree about what a peer IS (H82, audit 2026-09-13). Deliberately `remoteAddress`, never
+ * Ktor's `remoteHost`: on the Netty engine remoteHost is InetSocketAddress.getHostName — a
+ * blocking reverse-DNS (PTR) lookup, name first and the literal only as a fallback — so the
+ * old fallback (a) wrote `localhost` into audit rows for every loopback peer and, on a LAN with
+ * PTR records, DHCP-lease-dependent hostnames into a column labelled "ip", (b) keyed the login
+ * bucket on whatever the resolver said (two hosts sharing a stale PTR shared one 5/min budget),
+ * and (c) parked every un-forwarded new peer's first request on a PTR timeout while the LAN
+ * resolver was down. The reference front-ends always carry XFF and never hit the fallback; the
+ * direct-LAN self-host (ANDVARI_BIND=0.0.0.0) and every local audit read did. Reverse names,
+ * if ever wanted for the admin view, belong in the UI — never in the request path.
+ */
+internal fun ApplicationCall.peerAddress(): String = request.origin.remoteAddress
 
 /**
  * Reverse-proxy forwarding headers that a genuine LOCAL scrape/caller never carries but that
@@ -123,7 +139,7 @@ fun ApplicationCall.hasForwardedHeader(extraTrusted: List<String> = emptyList())
     (FORWARDED_HEADER_NAMES + extraTrusted).any { request.header(it) != null }
 
 fun ApplicationCall.clientIp(config: Config): String =
-    pickClientIp(peerIsLoopback(), { request.header(it) }, config.trustedIpHeaders, request.origin.remoteHost)
+    pickClientIp(peerIsLoopback(), { request.header(it) }, config.trustedIpHeaders, peerAddress())
 
 /**
  * Pure header selection: the first trusted header bearing a non-loopback IP LITERAL wins.

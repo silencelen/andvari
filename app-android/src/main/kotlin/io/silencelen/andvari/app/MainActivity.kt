@@ -63,11 +63,13 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.BackupPreflight
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.BackupRequest
 import io.silencelen.andvari.core.client.BackupResult
+import io.silencelen.andvari.core.client.ExportVault
 import io.silencelen.andvari.core.client.CsvPreflight
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
@@ -111,14 +113,21 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    /** True once the crash screen took over onCreate — the normal startup path (and its
+     *  ViewModel) never ran. Read by [onDestroy]. */
+    private var crashScreenShown = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // If the previous run crashed, show the captured trace using a PLAIN Android view
         // (no Compose/theme), so even a crash in the Compose layer itself is still visible
-        // to screenshot. Skips the (possibly still-crashing) normal startup path.
-        val crashFile = java.io.File(filesDir, AndvariApplication.CRASH_FILE)
+        // to screenshot. Skips the (possibly still-crashing) normal startup path. H56: the
+        // report lives in no_backup/ (out of Auto Backup and device transfer) and carries class
+        // names + frames only — showing it screenshot-able is safe only in that scrubbed form.
+        val crashFile = java.io.File(noBackupFilesDir, AndvariApplication.CRASH_FILE)
         if (crashFile.exists()) {
             val trace = runCatching { crashFile.readText() }.getOrDefault("(crash file unreadable)")
+            crashScreenShown = true // H54: no ViewModel exists on this path — see onDestroy
             showCrash(trace) { crashFile.delete(); recreate() }
             return
         }
@@ -168,6 +177,31 @@ class MainActivity : FragmentActivity() {
     override fun dispatchGenericMotionEvent(ev: MotionEvent?): Boolean {
         VaultSession.touch() // mouse wheel / rotary / hover-scroll on tablets & ChromeOS
         return super.dispatchGenericMotionEvent(ev)
+    }
+
+    /**
+     * The Back-button hole in lock-on-background (audit 2026-09-13 H54).
+     *
+     * The ProcessLifecycleOwner observer that calls `lockFromBackground()` is installed inside
+     * `AndvariApp`'s composition, so it lives exactly as long as this activity's composition —
+     * and ProcessLifecycleOwner dispatches ON_STOP only 700 ms after the last activity pauses.
+     * A FINISHING activity (Back on the vault list, which has no BackHandler of its own; a swipe
+     * away in Recents) runs onPause → onStop → onDestroy in one transaction, and on API 29/30
+     * that transaction commonly completes inside the 700 ms window: the composition is disposed,
+     * the observer is removed, and the delayed ON_STOP reaches nobody. `onCleared` only clears
+     * the in-flight-op latch and the 1 s idle ticker dies with `viewModelScope`, so the keys
+     * stayed live in the process-wide VaultSession — autofill-servable — until the fill path's
+     * own idle gate expired them, up to the policy window later. API 31+ dispatches ON_STOP
+     * before the destroy transaction, where this is simply a harmless second lock.
+     *
+     * Deliberately BEFORE `super.onDestroy()`: super is what clears the ViewModelStore.
+     */
+    override fun onDestroy() {
+        // Never through `vm`'s lazy accessor on the crash-screen path — the ViewModel was never
+        // created there (the early return skips it), and creating one to lock a session that was
+        // never opened would run SessionStore's migrations from a dying activity.
+        if (isFinishing && !crashScreenShown) vm.lockOnExit()
+        super.onDestroy()
     }
 
     private companion object {
@@ -224,7 +258,8 @@ fun AndvariApp(vm: AndvariViewModel) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_STOP -> vm.lockFromBackground()
-                Lifecycle.Event.ON_START -> ExternalExcursion.clear()
+                // H08: returning also voids a background lock deferred under an in-flight op.
+                Lifecycle.Event.ON_START -> { ExternalExcursion.clear(); vm.onProcessStart() }
                 else -> {}
             }
         }
@@ -487,6 +522,15 @@ private fun UpgradeRequiredScreen(message: String, onSignOut: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.widthIn(max = 380.dp).padding(top = 8.dp),
+            )
+            // H125: the 426 message says this build is too old without saying WHICH build it is —
+            // the one screen where the user is being asked to act on their version number.
+            Text(
+                VERSION_LINE,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
             )
             Spacer(Modifier.height(24.dp))
             // Cut D review: the OTHER live signOut site — same one-tap cache/quick-unlock/unsynced
@@ -1605,7 +1649,9 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                 // demand (additive; the icon-removal decision stands).
                 LazyColumn(Modifier.fillMaxSize().semantics { customActions = listOf(CustomAccessibilityAction("Refresh") { vm.refresh(); true }) }, contentPadding = PaddingValues(16.dp)) {
                     item(key = "toolbar") {
-                        Column {
+                        // H32: the toolbar is the first node linear navigation lands on — it
+                        // carries the same "Refresh" action the rows do (see VaultRow).
+                        Column(Modifier.semantics { customActions = listOf(CustomAccessibilityAction("Refresh") { vm.refresh(); true }) }) {
                             // a11yand-10 (the desktop a11ydesk-07 twin): a placeholder is NOT a
                             // programmatic name — it disappears the moment text is entered, leaving
                             // the search box nameless. The label names it in both states.
@@ -1661,7 +1707,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
                         }
                     } else {
                         items(filtered, key = { it.itemId }) { item ->
-                            VaultRow(item, vaultTags[item.vaultId]) { detailId = item.itemId }
+                            VaultRow(item, vaultTags[item.vaultId], onRefresh = { vm.refresh() }) { detailId = item.itemId }
                             Spacer(Modifier.height(8.dp))
                         }
                     }
@@ -1902,8 +1948,17 @@ private fun readBounded(input: java.io.InputStream, limit: Int): ByteArray? {
 }
 
 @Composable
-private fun VaultRow(item: VaultItem, vaultTag: String? = null, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+private fun VaultRow(item: VaultItem, vaultTag: String? = null, onRefresh: (() -> Unit)? = null, onClick: () -> Unit) {
+    // H32 (audit 2026-09-13, G24 residue): the "Refresh" custom action lived only on the
+    // LazyColumn container, a non-speaking node TalkBack steps over in linear navigation, so
+    // pull-to-refresh stayed gesture-only for screen-reader and switch-access users. Every row
+    // is a node those users actually land on — the per-item Actions-menu idiom mail apps use.
+    val rowModifier = if (onRefresh != null) {
+        Modifier.fillMaxWidth().semantics { customActions = listOf(CustomAccessibilityAction("Refresh") { onRefresh(); true }) }
+    } else {
+        Modifier.fillMaxWidth()
+    }
+    Card(onClick = onClick, modifier = rowModifier) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
                 // a11yand-11 (the a11yand-06 idiom): the avatar letter IS the name's first
@@ -2695,9 +2750,47 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                     }
                 }
             }
+            Spacer(Modifier.height(16.dp))
+            AboutCard()
         }
     }
 }
+
+/**
+ * H125 (audit 2026-09-13; desktop's About dialog is the sibling that got this right): the phone
+ * displayed its version NOWHERE. A household member hitting the 426 upgrade wall, reporting
+ * "autofill stopped working", or asked "did the update land?" — the devstore path skips a release
+ * with no `latest.json`, so that is a real question — could not answer which build they are on.
+ *
+ * [ANDVARI_CLIENT_VERSION] is core's constant, the same one the wire's client header is built
+ * from and the one desktop aliases as DESKTOP_VERSION, so this line cannot drift from what the
+ * server is told (and verify.sh's version-lockstep check keeps the constant honest against the
+ * gradle/manifest versionName). No BuildConfig wiring, deliberately: a second source of truth for
+ * "what version is this" is how the two would disagree.
+ *
+ * Selectable, like the identity code above it: the point is to be read out or pasted into a
+ * message, and a version a user has to transcribe by eye is one they transcribe wrong.
+ */
+@Composable
+private fun AboutCard() {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("About", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(8.dp))
+            SelectionContainer {
+                Text(VERSION_LINE, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Quote this when you report a problem or are asked to update.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** The one spelling of "which build is this", shown in Settings ▸ About and on the 426 wall. */
+internal val VERSION_LINE = "andvari $ANDVARI_CLIENT_VERSION · android"
 
 // ---- export & backup (spec 07) ----
 
@@ -2864,19 +2957,7 @@ private fun BackupPreflightDialog(
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(8.dp))
-                pre.vaults.forEach { v ->
-                    if (v.type == "personal") {
-                        Text("• ${v.name} — ${v.itemCount} item(s), personal", style = MaterialTheme.typography.bodySmall)
-                    } else {
-                        Row(
-                            Modifier.toggleable(value = v.vaultId in selected, role = Role.Checkbox, onValueChange = { on -> selected = if (on) selected + v.vaultId else selected - v.vaultId }),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Checkbox(v.vaultId in selected, onCheckedChange = null)
-                            Text("${v.name} — ${v.itemCount} item(s), shared (${v.role})", style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
+                ExportVaultRows(pre.vaults, selected) { vaultId, on -> selected = if (on) selected + vaultId else selected - vaultId }
                 Spacer(Modifier.height(8.dp))
                 Row(
                     Modifier.toggleable(value = includeAttachments, role = Role.Checkbox, onValueChange = { includeAttachments = it }),
@@ -2960,6 +3041,32 @@ private fun BackupResultDialog(r: BackupResult, onDone: () -> Unit) {
     )
 }
 
+/**
+ * The per-vault preflight lines (spec 07 intro: "Items from every vault whose VK is held are
+ * included — shared vaults by default with a visible per-vault line and an opt-out toggle",
+ * stated for BOTH artifacts). ONE composable for the backup AND the CSV dialog (H23, audit
+ * 2026-09-13): the CSV preflight used to show a bare login count while every VK-held shared
+ * vault's passwords went into the plaintext file unannounced — the control existed one dialog
+ * away, in the backup preflight, and web's ExportPanel renders it for both modes from one place.
+ * The personal vault always exports (a line, no toggle); shared vaults toggle.
+ */
+@Composable
+private fun ExportVaultRows(vaults: List<ExportVault>, selected: Set<String>, onToggle: (String, Boolean) -> Unit) {
+    vaults.forEach { v ->
+        if (v.type == "personal") {
+            Text("• ${v.name} — ${v.itemCount} item(s), personal", style = MaterialTheme.typography.bodySmall)
+        } else {
+            Row(
+                Modifier.toggleable(value = v.vaultId in selected, role = Role.Checkbox, onValueChange = { on -> onToggle(v.vaultId, on) }),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(v.vaultId in selected, onCheckedChange = null)
+                Text("${v.name} — ${v.itemCount} item(s), shared (${v.role})", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
 @Composable
 private fun CsvPreflightDialog(vm: AndvariViewModel, ui: UiState, pre: CsvPreflight, onChooseDestination: () -> Unit) {
     AlertDialog(
@@ -2979,6 +3086,16 @@ private fun CsvPreflightDialog(vm: AndvariViewModel, ui: UiState, pre: CsvPrefli
                     "⚠ The CSV holds every password in PLAINTEXT. Anyone who reads the file reads your vault — and your Downloads folder may auto-sync to cloud storage. Delete it (and empty the trash) as soon as the other manager has imported it.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                 )
+                Spacer(Modifier.height(8.dp))
+                // H23: which vaults the plaintext file spans, shared ones opt-out-able — the
+                // count and skips below are re-planned by the ViewModel over the selection.
+                ExportVaultRows(ui.csvVaults, ui.csvSelectedVaults) { vaultId, _ -> vm.csvToggleVault(vaultId) }
+                if (ui.csvVaults.any { it.type != "personal" }) {
+                    Text(
+                        "Exporting is private — other members and the server are not notified.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 Text("${pre.loginCount} login(s) will be written.", style = MaterialTheme.typography.bodySmall)
                 NamedSkips("Not exported (secure notes):", pre.warnings.noteItems)
@@ -3291,7 +3408,7 @@ private fun CopyRow(label: String, value: String, ctx: Context, clearSeconds: In
  *  from non-focused apps (and 13+ auto-expires sensitive clips). Never promise an
  *  unconditional "clears in Ns". */
 @Composable
-private fun CopiedNote(clearSeconds: Int, onExpire: () -> Unit) {
+internal fun CopiedNote(clearSeconds: Int, onExpire: () -> Unit) {
     Text(
         if (clearSeconds > 0) "Copied — andvari clears it in ${clearSeconds}s while open; your device hides it from other apps" else "Copied",
         style = MaterialTheme.typography.labelSmall,

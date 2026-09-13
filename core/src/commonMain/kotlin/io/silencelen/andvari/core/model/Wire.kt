@@ -36,8 +36,12 @@ data class EscrowUpload(val sealed: String, val fingerprint: String)
 data class UsageUpload(val sealedUsage: String)
 
 /** The stored ledger, or `sealedUsage = null` when this account has never written one. The
- *  `updatedAt` is the SERVER clock at the last write — clients use it only to decide whether the
- *  copy they hold is stale, never as a usage timestamp (those live inside the ciphertext). */
+ *  `updatedAt` is the SERVER clock at the last write. NO client consumes it today (every reader —
+ *  core UsageRecorderCore, web usage.ts, the extension — takes `sealedUsage` alone); it is
+ *  RESERVED as the natural optimistic-concurrency token should the accepted two-device
+ *  last-writer-wins race (spec 02 §8.2) ever be closed: PUT `{ sealedUsage, ifUpdatedAt }` → 409
+ *  → re-merge. It is never a usage timestamp — those live inside the ciphertext. (Audit H116:
+ *  this doc used to claim clients read it for staleness; none ever did.) */
 @Serializable
 data class UsageResponse(val sealedUsage: String? = null, val updatedAt: Long = 0)
 

@@ -55,3 +55,26 @@ export function resolveSaveAction<T extends LoginLike>(
   if (hostMatches.some((i) => (i.doc.login?.password ?? "") === password)) return { kind: "suppress" };
   return { kind: "create" };
 }
+
+/** H13 (2026-09-13 audit): the multi-step step-1 username, as the SW remembers it per TAB. It
+ *  carries the SITE it was captured on because a tab outlives a site: a username-step on A followed
+ *  by a password-only submit on B in the same tab used to inherit A's username, so B's re-login
+ *  (2a) or password change (2b) became a wrong-account "Save new" — a duplicate under a foreign
+ *  username with B's real item left stale. `site` is the knownlogins siteKey (registrable domain),
+ *  so login.example.com step 1 → account.example.com step 2 still joins. */
+export interface StepUsername {
+  username: string;
+  site: string;
+}
+
+/** The remembered step-1 username to merge into a capture on `site`, or "" when there is none for
+ *  THIS site. Takes `unknown` on purpose: the record rides storage.session and a pre-H13 snapshot
+ *  holds a bare string there — an unshaped value must read as "nothing remembered", never as a
+ *  username for every site. */
+export function stepUsernameFor(remembered: unknown, site: string | null): string {
+  if (site === null || site === "") return "";
+  if (typeof remembered !== "object" || remembered === null) return "";
+  const r = remembered as Partial<StepUsername>;
+  if (typeof r.username !== "string" || typeof r.site !== "string") return "";
+  return r.site === site ? r.username : "";
+}

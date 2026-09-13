@@ -1,6 +1,7 @@
 package io.silencelen.andvari.core.client
 
 import io.silencelen.andvari.core.crypto.CryptoException
+import io.silencelen.andvari.core.crypto.CryptoUnavailableException
 import kotlinx.io.IOException
 
 /**
@@ -46,6 +47,7 @@ import kotlinx.io.IOException
  *  - [PUBLIC_LOGIN_REQUIRES_TOTP]     ← web Welcome.tsx sign-in "public_login_requires_totp"
  *  - [IDENTITY_MISMATCH]              ← web account.ts IdentityMismatchError message + extension unlockErrorCopy("identity_mismatch")
  *  - [WEAK_KDF_ACTION]                ← web crypto/keys.ts WEAK_KDF_MESSAGE
+ *  - [WEAK_KDF_SIGN_IN]               ← extension/src/errors.ts weakened-KDF row (unlock/sign-in/enroll ladders)
  *  - [SERVER_PROBLEM]                 ← web Recover.tsx verifyErrorMessage/resetErrorMessage ApiError branch
  *  - [SAVE_FAILED]                    ← extension saveErrorCopy("failed")
  *  - [replayDeniedNotice]             ← web Vault.tsx noticeBody "replay-denied" (BOTH count
@@ -55,8 +57,11 @@ import kotlinx.io.IOException
  * NATIVE-PINNED (sentences the natives already show today, promoted here byte-equal so
  * next-wave adoption is a zero-copy-diff swap; the android/desktop friendlyError maps and
  * autofill `friendly()` helpers are the prior source):
- *  - [WEAK_KDF_SIGN_IN] (both natives' H1 branch; the extension's variant deliberately
- *    says "contact your admin." — popup brevity — and stays extension-local),
+ *  - [WEAK_KDF_SIGN_IN] (both natives' H1 branch — and, since audit H122, the byte-twin of
+ *    extension/src/errors.ts's weakened-KDF row: all three canons end "contact your admin.",
+ *    the word the [IDENTITY_MISMATCH] twin and every other admin-facing sentence already use;
+ *    this KDoc once called the extension's "admin" a deliberate popup-brevity variant, which
+ *    was the story that let the three copies drift),
  *  - [TOO_MANY_REQUESTS], the ten vault-lifecycle rows inside [forError]'s code map,
  *  - [SAVE_OFFLINE] (SaveConfirmActivity), [SYNC_OFFLINE] (desktop manual refresh),
  *  - [SESSION_EXPIRED_AUTOFILL] + [UNLOCK_OFFLINE_NO_KEYS] (android autofill activities —
@@ -108,12 +113,31 @@ object HouseholdCopy {
     const val IDENTITY_MISMATCH = "Server identity key mismatch — possible tampering. Do not proceed; contact your admin."
 
     /** TWIN of web crypto/keys.ts WEAK_KDF_MESSAGE (H1, spec 05 T1) — the general-context
-     *  variant ("The action was blocked"): password change, sync, any non-sign-in surface. */
-    const val WEAK_KDF_ACTION = "This server sent weakened security settings for your master password. The action was blocked to protect you — contact your administrator."
+     *  variant ("The action was blocked"): password change, sync, any non-sign-in surface.
+     *  "contact your admin." — the house word (see [WEAK_KDF_SIGN_IN]); web's copy moved with it. */
+    const val WEAK_KDF_ACTION = "This server sent weakened security settings for your master password. The action was blocked to protect you — contact your admin."
 
-    /** NATIVE-PINNED: both natives' H1 sentence today — the sign-in/unlock-context variant.
-     *  (The extension's popup says "contact your admin." — deliberate, extension-local.) */
-    const val WEAK_KDF_SIGN_IN = "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your administrator."
+    /** TWIN of extension/src/errors.ts's weakened-KDF row (unlock/sign-in/enroll ladders) and
+     *  both natives' H1 sentence — the sign-in/unlock-context variant. Byte-equal on all three
+     *  canons since audit H122 ("admin", never "administrator": the identity-mismatch twin two
+     *  rows up already said "admin" everywhere, so the split was a slip, not a choice). This is
+     *  the sentence the house rules say must never soften — pinned verbatim on every side. */
+    const val WEAK_KDF_SIGN_IN = "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin."
+
+    /**
+     * NATIVE-ONLY (audit H15): the platform's libsodium binding did not LOAD — the JVM/Android
+     * `createCryptoProvider()` actual wraps that failure in [CryptoUnavailableException]. Web has
+     * no native layer, so this row has no web twin by construction. It is a PERMANENT, LOCAL
+     * failure (a noexec/unwritable temp dir, a missing VCRUNTIME/UCRT, AV quarantine of the
+     * extracted DLL, an unknown platform) that used to fall into the `else` branch of every
+     * ladder and read as "Sign-in failed. Please try again." / "Couldn't unlock — please try
+     * again." — the two hypotheses a password manager must never induce ("I forgot my
+     * password", "the server is broken"). The sentence therefore names the real cause, says
+     * outright that retrying and the password are not the issue, and points at the only two
+     * things that can help. Desktop's blocking startup state (its self-check already computes
+     * this verdict) may say more — the diagnostic.log path — but must not say less.
+     */
+    const val CRYPTO_UNAVAILABLE = "andvari couldn't start its encryption library on this device, so it can't sign in — this is not a password problem, and trying again won't help. Reinstall andvari; if it keeps happening, tell whoever set up your server."
 
     /** TWIN of web Welcome.tsx unlock-gate terminal (crypto throw = bad secret). */
     const val WRONG_MASTER_PASSWORD = "Wrong master password."
@@ -245,6 +269,9 @@ object HouseholdCopy {
      * [SOMETHING_WENT_WRONG]. NEVER the exception's own `.message`.
      */
     fun forError(t: Throwable): String = when {
+        // H15: a native crypto layer that never loaded is checked FIRST in every ladder — it is
+        // permanent and local, so no other row (transport, server, password) may claim it.
+        t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE
         t is KdfPolicyViolationException -> WEAK_KDF_ACTION
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
         t is ApiException -> apiCopy(t)
@@ -263,6 +290,7 @@ object HouseholdCopy {
      * the password is proven, so a late crypto throw must not read as wrong-password.
      */
     fun forSignInError(t: Throwable, totpTried: Boolean = false): String = when {
+        t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE // H15: never "Sign-in failed. Please try again."
         t is KdfPolicyViolationException -> WEAK_KDF_SIGN_IN
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
         t is ApiException -> when {
@@ -286,6 +314,7 @@ object HouseholdCopy {
      * [SESSION_EXPIRED_AUTOFILL] when its context applies, then delegate the rest.
      */
     fun forUnlockError(t: Throwable): String = when {
+        t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE // H15: never "Couldn't unlock — please try again."
         t is KdfPolicyViolationException -> WEAK_KDF_SIGN_IN
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
         t is CryptoException -> WRONG_MASTER_PASSWORD
@@ -307,6 +336,7 @@ object HouseholdCopy {
      * re-auth path is wrong-password; anything else → [SAVE_FAILED].
      */
     fun forSaveError(t: Throwable): String = when {
+        t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE
         t is KdfPolicyViolationException -> WEAK_KDF_ACTION
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
         t is CryptoException -> WRONG_MASTER_PASSWORD
@@ -323,6 +353,7 @@ object HouseholdCopy {
      * site; the PUSH phase of an import (network) should map with [forError]/[forSyncError].
      */
     fun forImportError(t: Throwable): String = when {
+        t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE
         t is KdfPolicyViolationException -> WEAK_KDF_ACTION
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
         t is ApiException -> apiCopy(t)
@@ -335,6 +366,7 @@ object HouseholdCopy {
      * screen do so BEFORE delegating, exactly like today.
      */
     fun forSyncError(t: Throwable): String = when {
+        t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE
         t is KdfPolicyViolationException -> WEAK_KDF_ACTION
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
         t is ApiException -> apiCopy(t)

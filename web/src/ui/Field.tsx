@@ -22,17 +22,22 @@ export function Field({
   children,
   hint,
   style,
+  prompt,
 }: {
   label: ReactNode;
   children: ReactElement;
   hint?: ReactNode;
   /** Preserves the inline `.field` styling some rows rely on (e.g. `flex: 1`). */
   style?: CSSProperties;
+  /** H49: the label is a SENTENCE-length prompt ("Type the FIRST 16 characters of…"), not a
+   *  caption — rendered in normal case (`label.prompt`, styles.css) so its length and its
+   *  emphasis capitals survive; the association is unchanged. */
+  prompt?: boolean;
 }) {
   const id = useId();
   return (
     <div className="field" style={style}>
-      <label htmlFor={id}>{label}</label>
+      <label htmlFor={id} className={prompt ? "prompt" : undefined}>{label}</label>
       {cloneElement(children, { id })}
       {hint}
     </div>

@@ -37,6 +37,7 @@ import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupVault
 import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CsvPreflight
+import io.silencelen.andvari.core.client.ExportVault
 import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.client.ExportPlanner
 import io.silencelen.andvari.core.client.InMemoryVaultCache
@@ -162,6 +163,13 @@ data class TrustGateModel(
     val displayOrigin: String,
     val internationalized: Boolean,
     val plainHttp: Boolean,
+    /**
+     * Audit H68: an `http://` origin whose HOST is loopback — the on-device self-host story this
+     * project explicitly supports. Judged on the RESOLVED host (post-userinfo-strip, post-IDN),
+     * exactly like Android's [CLEARTEXT_EXEMPT_HOSTS] test, so `http://127.0.0.1@evil.example` is
+     * judged on `evil.example` and gets the network warning it deserves.
+     */
+    val loopbackHttp: Boolean,
     val enrollment: Boolean,
 ) {
     val lead: String get() = "Connect to a different server?"
@@ -175,9 +183,55 @@ data class TrustGateModel(
     val internationalCaution: String? get() = if (internationalized)
         "This address uses international characters, shown above in their ASCII (punycode) form. " +
             "Lookalike letters are a common phishing trick — confirm it matches exactly what you were given." else null
-    val httpCaution: String? get() = if (plainHttp)
-        "This is an unencrypted http:// connection — traffic to this server can be read on the " +
-            "network. Only continue on a network you trust." else null
+    /**
+     * Audit H68 — the F27 loopback/LAN split, ported from Android (AndvariViewModel's
+     * TRUST_GATE_HTTP_LOOPBACK / TRUST_GATE_HTTP_BLOCKED pair).
+     *
+     * Desktop showed ONE sentence for every `http://` origin, 127.0.0.1 included: "traffic to this
+     * server can be read on the network". For a server running on this same machine that is simply
+     * false — the traffic never reaches a network — and it is false at the exact moment the
+     * documented on-device self-host story asks the user to say yes. A warning that is wrong where
+     * the user can check it is worse than no warning: it teaches them to dismiss the one that is
+     * right, which is the LAN case one line below.
+     *
+     * The split is desktop-shaped, not a copy of Android's: Android has no middle case (loopback is
+     * permitted, every other cleartext host is REFUSED before a socket opens, hence its "Android
+     * will refuse this connection"), while a JVM will happily dial `http://192.168.1.5:8080` — a
+     * real LAN self-host, and the case the original sentence was written for. So desktop keeps the
+     * eavesdropping sentence for non-loopback and gains the loopback one, in Android's words with
+     * "the phone" → "this computer".
+     */
+    val httpCaution: String? get() = when {
+        !plainHttp -> null
+        loopbackHttp -> TRUST_GATE_HTTP_LOOPBACK
+        else -> TRUST_GATE_HTTP_LAN
+    }
+}
+
+/** Audit H68: the two mutually exclusive plain-http sentences, pinned as constants so the
+ *  phishing/transport wording cannot drift (the Android twin's idiom). */
+internal const val TRUST_GATE_HTTP_LOOPBACK =
+    "This is an unencrypted http:// address on this computer. Traffic to it never leaves the machine, so it isn't exposed to the network."
+internal const val TRUST_GATE_HTTP_LAN =
+    "This is an unencrypted http:// connection — traffic to this server can be read on the network. Only continue on a network you trust."
+
+/**
+ * Hosts whose traffic never reaches a network (audit H68). IPv4 loopback is the whole `127.0.0.0/8`
+ * block, not just `127.0.0.1`: `http://127.0.1.1:8080` is as local as `127.0.0.1:8080`, and telling
+ * that user their traffic is readable on the network would be the same false warning. `localhost`
+ * is included as the name every self-host doc writes, and `::1` for the IPv6 literal (the trust
+ * gate's host extraction has already stripped the brackets).
+ *
+ * Deliberately NOT here: `0.0.0.0` (a wildcard BIND address, not a destination) and link-local or
+ * RFC1918 ranges — those really do put bytes on a wire.
+ */
+internal fun isLoopbackHost(host: String): Boolean {
+    val h = host.trim().lowercase().removeSuffix(".") // a trailing root dot is the same name
+    if (h == "localhost" || h == "::1" || h == "0:0:0:0:0:0:0:1") return true
+    val octets = h.split('.')
+    if (octets.size != 4 || octets.any { it.isEmpty() || it.length > 3 || it.any { c -> !c.isDigit() } }) return false
+    val nums = octets.map { it.toInt() }
+    return nums[0] == 127 && nums.all { it in 0..255 }
 }
 
 /** The reg-name/IP host of a stored-baseUrl-shaped origin (`scheme://host[:port]`), tolerant of a
@@ -215,6 +269,11 @@ internal fun trustGateModel(origin: String, variant: TrustGateVariant): TrustGat
         displayOrigin = display,
         internationalized = nonAscii,
         plainHttp = plainHttp,
+        // Audit H68: judged on the EXTRACTED host — the one the HTTP stack will dial — never on the
+        // raw string, so a reassuring `http://127.0.0.1@evil.example` prefix cannot buy the calm
+        // loopback sentence. (canonicalServerOrigin already rejects userinfo on the manual path;
+        // this model is also built from invite payloads, so it re-derives rather than assuming.)
+        loopbackHttp = plainHttp && isLoopbackHost(host),
         enrollment = variant == TrustGateVariant.Enrollment,
     )
 }
@@ -272,6 +331,16 @@ internal fun idleLockDecision(
     return IdleLockDecision.Lock
 }
 
+/**
+ * Audit H12: the CR-02 expiry verdict for one tick of the self-recovery idle watcher, as a PURE
+ * function (the [idleLockDecision] precedent — a rule that decides when a UVK-equivalent secret
+ * stops being resident must have executed coverage, and the watcher itself lives on a launched
+ * coroutine). Expired ⇔ idle for the whole window and no commit in flight ([busy] defers ONE tick,
+ * never stands the clock down — the commit's own exit zeroes the secret regardless).
+ */
+internal fun recoverIdleExpired(idleMs: Long, timeoutMs: Long, busy: Boolean): Boolean =
+    !busy && idleMs >= timeoutMs
+
 /** F74: the Settings server-TOTP status fetch as an honest tri-state — Failed must STOP
  *  the spinner and offer Retry, instead of spinning forever beside its own error (the old
  *  shape used totpStatus==null for both "checking" and "check failed"). */
@@ -288,6 +357,13 @@ class DesktopState(
     // commit/revert, marker reconcile — is driven against a temp-dir store); production uses the
     // default ~/.andvari-desktop store.
     private val store: DesktopSessionStore = DesktopSessionStore(),
+    // Audit H10, injectable for tests only: the flat whole-op bound every op{} runs under
+    // (production: [SYNC_TIMEOUT_MS]). A test points an op at a socket that accepts and never
+    // answers and needs the bound to fire in milliseconds, not a minute.
+    private val opTimeoutMs: Long = SYNC_TIMEOUT_MS,
+    // Audit H12, injectable for tests only: the CR-02 idle cap on the self-recovery reset step
+    // (production: [RECOVER_IDLE_TIMEOUT_MS], web's REVEAL_TIMEOUT_S).
+    private val recoverIdleTimeoutMs: Long = RECOVER_IDLE_TIMEOUT_MS,
 ) {
 
     init {
@@ -431,6 +507,16 @@ class DesktopState(
     // "update required" screen. Advisory: the gate is a nudge for honest clients.
     var upgradeRequired by mutableStateOf<String?>(null)
         private set
+    // Audit H15: the startup crypto self-check found that native libsodium does not load on this
+    // machine ([SelfCheck.CryptoUnavailable]), or an op hit the same failure class later
+    // ([isNativeCryptoLoadFailure]). Non-null ⇒ the UI renders the blocking, honest state in the
+    // 426-upgrade-screen idiom — NOT the password field: every sign-in / unlock / enroll needs the
+    // provider, so letting the user type a password only manufactures "wrong password" and "server
+    // broken" hypotheses for a permanent local condition. Holds the STATIC sentence
+    // ([CRYPTO_UNAVAILABLE_NOTICE]) — the diagnosis itself lives in the log the sentence names.
+    // Never cleared by lock/sign-out: the condition outlives every session (a restart re-checks).
+    var cryptoUnavailable by mutableStateOf<String?>(null)
+        private set
     var signInTotpRequired by mutableStateOf(false)
         private set
     // F58: the sign-in SessionResponse flagged this account "must change password" — an admin
@@ -498,6 +584,12 @@ class DesktopState(
         private set
     private var recoverVerify: RecoveryVerifyResponse? = null
     private var recoverSecret: ByteArray? = null
+    // Audit H12 (web Recover.tsx CR-02 twin): the idle watcher that bounds how long the raw
+    // recovery secret above may sit in memory. The reset step runs PRE-SESSION — no engine is
+    // bound — so [maybeIdleLock] returns Defer on every tick and never reaches it; this job is
+    // the only clock on that window. Armed when verify accepts, cancelled by every exit of
+    // [clearRecoverState].
+    private var recoverIdleJob: kotlinx.coroutines.Job? = null
     // (v2 #15) pre-lock protection: TRUE while the vault screen has an item editor mounted —
     // mirrored in by the UI (the editor's draft is remember-scoped Compose state this holder
     // can't see). While set, maybeIdleLock defers by ONE bounded grace window instead of
@@ -590,6 +682,13 @@ class DesktopState(
     var backupResult by mutableStateOf<BackupResult?>(null)
         private set
     var csvPreflight by mutableStateOf<CsvPreflight?>(null)
+        private set
+    // Audit H23 (spec 07 intro; web ExportPanel.tsx per-vault rows shared by BOTH artifacts): the
+    // vault lines behind the CSV preflight — the personal vault as a plain line, every VK-held
+    // shared vault as an opt-out row. Set beside [csvPreflight] (core's CsvPreflight carries no
+    // vault dimension, and that type is core's to grow — see the wave-2 note), cleared with it.
+    // Before this, every shared vault's passwords went into the plaintext CSV unannounced.
+    var csvPreflightVaults by mutableStateOf<List<ExportVault>>(emptyList())
         private set
     var lastExportAt by mutableStateOf(store.lastExportAt)
         private set
@@ -827,6 +926,26 @@ class DesktopState(
             is UpdateCheck.Disabled -> { updateAvailable = null; updateChannelNotice = null }
         }
     }
+
+    /**
+     * Audit H15: fold the startup crypto self-check's verdict into UI state. Main runs the check
+     * before any UI exists and hands the result here BEFORE [start]; a [SelfCheck.CryptoUnavailable]
+     * raises the blocking state (see [cryptoUnavailable]). The verdict was computed and thrown away
+     * in 0.26.3 — "machinery built, never connected" — which is exactly what this seam closes.
+     */
+    fun applySelfCheck(check: SelfCheck) {
+        when (check) {
+            is SelfCheck.Ok -> Unit
+            is SelfCheck.CryptoUnavailable -> cryptoUnavailable = CRYPTO_UNAVAILABLE_NOTICE
+        }
+    }
+
+    /** The absolute diagnostic-log path the [cryptoUnavailable] screen names (read-only display). */
+    val diagnosticLogPath: String get() = DesktopDiagnostics.logFile.absolutePath
+
+    /** The directory holding the diagnostic log — About's "Open folder" (audit H126). Null when
+     *  the path has no parent (unreachable in production; defensive for the test override). */
+    val diagnosticLogDir: File? get() = DesktopDiagnostics.logFile.absoluteFile.parentFile
 
     /** The floor only ever ratchets UP, and only off a verified manifest (§D#5). */
     private fun ratchetAcceptedSeq(seq: Long) {
@@ -1662,6 +1781,7 @@ class DesktopState(
                 recoverSecret = secret
                 recoverVerify = resp
                 recoverVerified = true
+                armRecoverIdleWatch() // H12: the secret is live from this instant — so is its clock
             } catch (t: Throwable) {
                 secret.fill(0) // failed verify: the parsed bytes must not linger (§F.7)
                 if (screen == DesktopScreen.Recover) recoverError = recoverVerifyError(t)
@@ -1733,12 +1853,48 @@ class DesktopState(
     /** §F.7 teardown for the self-recovery slice: zero + drop the parsed phrase bytes and every
      *  flow field. Called at entry, cancel, commit success, and (belt) session teardown. */
     private fun clearRecoverState() {
+        recoverIdleJob?.cancel(); recoverIdleJob = null // H12: no secret, no clock
         recoverSecret?.fill(0)
         recoverSecret = null
         recoverVerify = null
         recoverVerified = false
         recoverError = null
         recoverPrefillEmail = ""
+    }
+
+    /**
+     * Audit H12 — web Recover.tsx's CR-02 idle cap, ported. The reset step holds a UVK-equivalent
+     * recovery secret (spec 05 R9 / TM-R9) in memory OUTSIDE the vault phase: no engine is bound,
+     * so [maybeIdleLock] defers on every tick and the 0.26.0 lock-on-background never reaches it.
+     * Before this a member who got their phrase accepted and walked away left a secret that opens
+     * their whole vault resident until the process died — while the 5-minute server ticket
+     * expired underneath it, so the later commit failed with "Your recovery session expired" and
+     * the bytes stayed live anyway. Same clock as the vault lock ([lastInteractionMs], reset by
+     * every window-level key/pointer event) and web's window (300 s); the decision itself is the
+     * pure [recoverIdleExpired] so the rule is testable without the watcher. An in-flight commit
+     * ([busy]) defers one tick rather than yanking the secret from under [Account.recover] — the
+     * commit's own exit zeroes it a moment later either way.
+     */
+    private fun armRecoverIdleWatch() {
+        recoverIdleJob?.cancel()
+        recoverIdleJob = scope.launch {
+            while (recoverVerified) {
+                delay(1_000)
+                if (!recoverVerified) break
+                if (recoverIdleExpired(System.currentTimeMillis() - lastInteractionMs, recoverIdleTimeoutMs, busy)) {
+                    expireRecover()
+                    break
+                }
+            }
+        }
+    }
+
+    /** The CR-02 expiry, executed: zero the secret (§F.7), leave the flow exactly as Cancel does,
+     *  and say why in web's words ([RECOVER_TIMEOUT_NOTICE] — byte-equal to REVEAL_TIMEOUT_NOTICE). */
+    private fun expireRecover() {
+        if (screen != DesktopScreen.Recover) { clearRecoverState(); return } // left the flow — nothing to announce
+        cancelRecover()
+        notice = RECOVER_TIMEOUT_NOTICE
     }
 
     /** Web Recover.tsx `verifyErrorMessage` twin — static curated copy only (§F.7); the uniform
@@ -1794,16 +1950,25 @@ class DesktopState(
     // F71: [onSaved] fires ONLY on success — the editor closes there and nowhere else, so a
     // failed save/upload keeps the typed fields + picked attachments editable with the error
     // beside them (the Android op{}+onSaved contract).
-    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op {
+    // Audit H10: the save is bounded like the G10 download — the whole-op cap scales with the bytes
+    // being uploaded ([attachmentTimeoutMs] over the uploads' total). The bound is applied INSIDE the
+    // try so a timeout reaches the editor's inline error surface (F71: the editor stays open, the
+    // typed fields and picked attachments survive, the canon's "try saving again when connected"
+    // sits beside Save); op()'s own bound sits one flat window above it as the belt.
+    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op(
+        timeoutMs = uploadsTimeoutMs(uploads) + opTimeoutMs,
+    ) {
         saveError = null
         if (itemId == null && draftItemId == null) draftItemId = account?.newItemId()
         try {
             // Named: a trailing lambda binds to the LAST parameter (the runGesture rule).
-            engine!!.saveWithUploads(
-                itemId, doc, uploads, vaultId,
-                onProgress = { done, total -> saveProgress = done to total },
-                newItemId = if (itemId == null) draftItemId else null,
-            )
+            withTimeoutOrNull(uploadsTimeoutMs(uploads)) {
+                engine!!.saveWithUploads(
+                    itemId, doc, uploads, vaultId,
+                    onProgress = { done, total -> saveProgress = done to total },
+                    newItemId = if (itemId == null) draftItemId else null,
+                )
+            } ?: throw java.io.InterruptedIOException("save timed out")
         } catch (e: UpgradeRequiredException) {
             throw e // the blocking upgrade screen owns 426 — never an inline save error
         } catch (t: Throwable) {
@@ -1893,7 +2058,14 @@ class DesktopState(
                 val g = if (memo != null && memo.sourceRev == current.rev) memo
                         else e.newMoveGesture(itemId, targetVaultId, move).also { moveGestures[gKey] = it }
                 // Named: a trailing lambda would bind to `finalSync: Boolean`, not onProgress.
-                e.runGesture(g, onProgress = { done, total -> moveProgress = done to total })
+                // Audit H10: bounded — the gesture re-uploads every attachment of the SOURCE item
+                // (MoveGesture.attachments carries only ids/keys, so the byte total comes from
+                // current.doc.attachments), and [busy] is held for the duration. A timeout lands
+                // in the transient branch below: the memoized gesture survives, so Retry replays
+                // the same ids and converges instead of duplicating.
+                withTimeoutOrNull(attachmentTimeoutMs(current.doc.attachments.sumOf { it.size })) {
+                    e.runGesture(g, onProgress = { done, total -> moveProgress = done to total })
+                } ?: throw java.io.InterruptedIOException("move/copy timed out")
                 moveGestures.remove(gKey)
                 val target = e.vaultInfos().find { it.vaultId == targetVaultId }?.name ?: "the other vault"
                 refreshItems() // clears busy; a MOVE also empties the detail (source item is gone)
@@ -2086,7 +2258,16 @@ class DesktopState(
         copyProgress = 0 to 0; copyVaultId = vaultId; copyOpVaultId = vaultId
         scope.launch {
             try {
-                val copied = e.copyAllToPersonal(vaultId) { done, total -> copyProgress = done to total }
+                // Audit H10: bounded — the rescue copy re-uploads every attachment of every item in
+                // the vault under [busy] + the copy gate (both defer the idle lock). Scaled over the
+                // vault's attachment bytes plus one flat window per item; a timeout is an IOException
+                // → the canon's unreachable copy, and the engine's memoized bulk gestures make a
+                // re-run converge on the same ids rather than duplicate.
+                val bytes = e.items().filter { it.vaultId == vaultId }.sumOf { i -> i.doc.attachments.sumOf { it.size } }
+                val count = e.items().count { it.vaultId == vaultId }
+                val copied = withTimeoutOrNull(attachmentTimeoutMs(bytes) + count * opTimeoutMs) {
+                    e.copyAllToPersonal(vaultId) { done, total -> copyProgress = done to total }
+                } ?: throw java.io.InterruptedIOException("rescue copy timed out")
                 // A4: copyVaultId stays — the surviving note is named through it.
                 copyProgress = null
                 items = e.items()
@@ -2399,7 +2580,13 @@ class DesktopState(
         importBusy = true; importError = null; importRetryable = true; importProgress = 0 to plan.items.size
         scope.launch {
             try {
-                engine!!.importAll(plan.items, onProgress = { done, total -> importProgress = done to total }, vaultId = dest)
+                // Audit H10: bounded per batch — importAll pushes [IMPORT_BATCH_ROWS]-row chunks, so
+                // the budget is one flat window per chunk (a 10,000-row file gets 50 windows, never
+                // an open-ended hold on [importBusy] and the idle-lock deferral). A timeout is an
+                // IOException → the retryable branch below: the same plan replays idempotently.
+                withTimeoutOrNull(importTimeoutMs(plan.items.size)) {
+                    engine!!.importAll(plan.items, onProgress = { done, total -> importProgress = done to total }, vaultId = dest)
+                } ?: throw java.io.InterruptedIOException("import timed out")
                 // The destination can be deleted INTO GRACE mid-import: denials park (F21) and
                 // importAll returns normally — success copy telling the user to delete the CSV
                 // would then be a lie. A held/gone destination is not a success.
@@ -2476,7 +2663,9 @@ class DesktopState(
     // Audit G63: the same #23 carve-out as the backup/CSV callers of writeVerifiedAtomically —
     // its app-minted ISE sentences ("verification failed…", the kept-temp move failure that names
     // the surviving file) must reach the user verbatim, never flatten to SOMETHING_WENT_WRONG.
-    fun saveAttachmentTo(ref: AttachmentRef, dest: File) = op(map = ::exportError) {
+    // Audit H10: op()'s own bound sits one flat window ABOVE the size-scaled inner one so the
+    // inner (G10) cap fires first and a large legitimate download is never severed by the belt.
+    fun saveAttachmentTo(ref: AttachmentRef, dest: File) = op(map = ::exportError, timeoutMs = attachmentTimeoutMs(ref.size) + opTimeoutMs) {
         downloadingAttachmentId = ref.id
         try {
             withContext(Dispatchers.IO) {
@@ -2736,6 +2925,17 @@ class DesktopState(
                 val plain = opened.readAttachment(entry)
                 val ok = plain.size.toLong() == entry.size
                 plain.fill(0)
+                // Audit H58 named this sentence as a vault-material leak INTO THE DIAGNOSTIC LOG:
+                // `entry.name` is a decrypted attachment name, and op()'s catch used to write every
+                // throwable's message chain to `~/.andvari-desktop/diagnostic.log` in cleartext.
+                // The leak is closed at the log, not here: DesktopDiagnostics.redactedLink now
+                // allowlists which TYPES may contribute a message, and IllegalStateException — this
+                // one included — is not among them, so no message minted from decrypted content can
+                // reach the file whoever writes it next. The name stays HERE because this string is
+                // also the user-facing sentence (exportError's #23 carve-out passes app-minted ISE
+                // messages through verbatim, pinned by ExportErrorCopyTest) and it is byte-twinned
+                // with android AndvariViewModel's backup verify — naming the failing file is the
+                // useful half for the person holding the backup, and it never leaves their screen.
                 if (!ok) throw IllegalStateException("backup verification failed — attachment \"${entry.name}\" does not round-trip")
             }
 
@@ -2767,27 +2967,49 @@ class DesktopState(
             }
             val acct = account
             if (acct == null) { busy = false; return@launch }
-            val docs = orderedDocs(e, acct)
+            // Audit H23: the vault lines come first — the preflight's counts/warnings are computed
+            // over every held vault (the dialog's default selection = all), and the dialog
+            // recomputes them for the user's selection via [csvPreflightFor].
+            val vaults = ExportPlanner.vaultLines(e, acct)
+            val docs = orderedDocs(e, vaults.map { it.vaultId })
             items = e.items()
+            csvPreflightVaults = vaults
             csvPreflight = CsvPreflight(ExportCsv.warnings(docs), docs.count { it.type == "login" }, offlineNote(offline))
             busy = false
         }
     }
 
-    fun csvDismiss() { csvPreflight = null }
+    /** Audit H23: the CSV preflight's warnings + login count for the dialog's CURRENT vault
+     *  selection (pure in-memory reads — cheap enough for recomposition, the attachmentPlan
+     *  idiom). A deselected shared vault's items must vanish from "N login(s) will be written"
+     *  and from every named-skip row, or the line would promise what the file won't hold. */
+    fun csvPreflightFor(selected: Set<String>): CsvPreflight? {
+        val e = engine ?: return null
+        val pre = csvPreflight ?: return null
+        val docs = orderedDocs(e, csvPreflightVaults.map { it.vaultId }.filter { it in selected })
+        return CsvPreflight(ExportCsv.warnings(docs), docs.count { it.type == "login" }, pre.offlineNote)
+    }
+
+    fun csvDismiss() { csvPreflight = null; csvPreflightVaults = emptyList() }
 
     /** CSV step 2: write the spec 07 §1 bytes (UTF-8, no BOM) to [dest] via
      *  temp-then-atomic-move (same overwrite safety as the backup: a failure must
      *  never delete a pre-existing file at [dest] — the helper only ever cleans up
      *  its own temp, so no delete in the catch here). */
-    fun csvRun(dest: File) {
+    // Audit H23: [selectedVaults] is the preflight dialog's per-vault selection — the personal
+    // vault always, each shared vault only if its opt-out row stayed checked (web ExportPanel's
+    // `orderForExport(allItems, includedVaults)`, which feeds writeCsv exactly as it feeds the
+    // backup). Filtered against the preflight's OWN vault lines, never re-read from the engine, so
+    // the file holds exactly what the dialog named.
+    fun csvRun(dest: File, selectedVaults: Set<String>) {
         val e = engine ?: return
-        val acct = account ?: return
-        busy = true; error = null; csvPreflight = null
+        if (account == null) return
+        val order = csvPreflightVaults.map { it.vaultId }.filter { it in selectedVaults }
+        busy = true; error = null; csvPreflight = null; csvPreflightVaults = emptyList()
         scope.launch {
             try {
                 val count = withContext(Dispatchers.IO) {
-                    val docs = orderedDocs(e, acct)
+                    val docs = orderedDocs(e, order)
                     val bytes = ExportCsv.write(docs).encodeToByteArray()
                     try { writeVerifiedAtomically(dest, bytes) } finally { bytes.fill(0) } // plaintext passwords — wipe our copy
                     docs.count { it.type == "login" }
@@ -2861,11 +3083,11 @@ class DesktopState(
         }
     }
 
-    /** All VK-held docs in the pinned export order (vault order, then updatedAt). */
-    private fun orderedDocs(e: SyncEngine, acct: Account): List<ItemDoc> {
-        val order = ExportPlanner.vaultLines(e, acct).map { it.vaultId }
-        return ExportPlanner.orderedItems(e, order).map { it.doc }
-    }
+    /** The docs of [vaultOrder]'s vaults in the pinned export order (vault order, then updatedAt).
+     *  Audit H23: takes the SELECTED vault order rather than enumerating every held vault, so the
+     *  CSV honours the preflight's opt-out exactly as [buildAndWriteBackup] honours the backup's. */
+    private fun orderedDocs(e: SyncEngine, vaultOrder: List<String>): List<ItemDoc> =
+        ExportPlanner.orderedItems(e, vaultOrder).map { it.doc }
 
     /** "July 14"-style day (spec 03 §11 copy — the deleteVault notice). Falls back
      *  gracefully for a missing time. Private MEMBER by design: it must never collide
@@ -2993,7 +3215,7 @@ class DesktopState(
         clearRecoverState() // §F.7 belt: the self-recovery stash never outlives a session teardown
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
         breachAdvisory = null // F31: the advisory belongs to the session's own master password
-        backupPreflight = null; backupResult = null; csvPreflight = null
+        backupPreflight = null; backupResult = null; csvPreflight = null; csvPreflightVaults = emptyList()
         // F19: drop any in-flight move state + memoized gesture ids/fileKeys on lock/sign-out.
         moveError = null; moveProgress = null; moveGestures.clear()
         // §7 teardown (N3): the ENTIRE lifecycle/sharing slice dies with the session — the
@@ -3210,17 +3432,47 @@ class DesktopState(
      */
     private fun enrollError(t: Throwable): String = HouseholdCopy.forEnrollError(t)
 
-    private fun op(map: (Throwable) -> String = HouseholdCopy::forError, block: suspend () -> Unit) {
+    /**
+     * Audit H10 — every op{} is BOUNDED. G10 bounded the attachment download and the two
+     * pre-export syncs and stopped; the other op{} sites (sign-in, unlock, enroll, save, delete,
+     * rename, the transfer/leave/restore vault ops, Trash restore/purge, …) still held [busy] over
+     * an unbounded HTTP call on the connect-only client ([newHttpClient] — deliberately no
+     * request/socket cap, so a legitimately large transfer is never severed), and [maybeIdleLock]
+     * returns Defer on every tick while [busy] is up. A server that accepts the TCP/TLS connect and
+     * then never answers could therefore keep the vault unlocked past the policy window for as long
+     * as it held the socket — the exact outcome G10 claimed closed, on every other leg.
+     *
+     * [timeoutMs] defaults to the flat [opTimeoutMs] ([SYNC_TIMEOUT_MS]) — right for the small-JSON
+     * legs. The byte-carrying legs pass a size-scaled bound (save-with-uploads, the attachment
+     * download) so a large file over a slow household link still fits while a black-holed server
+     * cannot hold the lock off open-endedly. A timeout is mapped to [java.io.InterruptedIOException]
+     * — an IOException — so every existing mapper's "can't reach the server" row applies unchanged.
+     */
+    private fun op(
+        map: (Throwable) -> String = HouseholdCopy::forError,
+        timeoutMs: Long = opTimeoutMs,
+        block: suspend () -> Unit,
+    ) {
         busy = true; error = null; notice = null
         scope.launch {
             try {
-                block()
+                withTimeoutOrNull(timeoutMs) { block() }
+                    ?: throw java.io.InterruptedIOException("operation timed out")
             } catch (e: UpgradeRequiredException) {
                 // A 426 is not a per-action error — this desktop build is too old for the
                 // server's pin. Surface the blocking upgrade screen instead of a toast.
                 busy = false
                 upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${baseUrl}/downloads."
             } catch (t: Throwable) {
+                // Audit H15 belt: a native-crypto load failure is a permanent LOCAL condition the
+                // household canon would flatten to "try again" / "wrong password". The startup
+                // self-check normally catches it before any UI; if it first surfaces here (an AV
+                // quarantine of the extracted library after launch), raise the same blocking state.
+                if (isNativeCryptoLoadFailure(t)) {
+                    DesktopDiagnostics.logThrowable("op() native crypto load failure", t)
+                    busy = false; cryptoUnavailable = CRYPTO_UNAVAILABLE_NOTICE
+                    return@launch
+                }
                 // #23: the shared household canon replaces the deleted desktop friendlyError —
                 // its ten vault-lifecycle rows live byte-equal in HouseholdCopy's code map, and
                 // the `t.message` fallback is gone for good (the canon NEVER returns raw wire
@@ -3240,8 +3492,40 @@ class DesktopState(
     private fun desktopPlatform(): String =
         if (System.getProperty("os.name").orEmpty().lowercase().contains("win")) "windows" else "linux"
 
-    private companion object {
+    // `internal` (was private, audit H10): the timeout tiers and the pure bound helpers below are
+    // now asserted by DesktopAsyncFlowsTest — a bound that only exists in prose is the G10 shape.
+    internal companion object {
         const val POLL_INTERVAL_MS = 5L * 60 * 1000 // spec 03 §6 poll interval
+
+        /** Audit H10: the size-scaled whole-op cap for a save carrying [uploads] — the G10
+         *  download bound over the uploads' byte total (no uploads ⇒ the flat window). */
+        fun uploadsTimeoutMs(uploads: List<PendingUpload>): Long =
+            attachmentTimeoutMs(uploads.sumOf { it.data.size.toLong() })
+
+        /** Audit H10: SyncEngine.importAll pushes chunks of this many rows (its private
+         *  SERVER_BATCH_MAX, the server's push cap). Mirrored here only to SIZE the import budget —
+         *  a drift would mis-scale the bound by a constant factor, never break an import. */
+        const val IMPORT_BATCH_ROWS = 200
+
+        /** Audit H10: one flat window per pushed batch, so a large import gets a proportionate
+         *  budget while a black-holed server cannot hold [importBusy] open-endedly. */
+        fun importTimeoutMs(rows: Int): Long =
+            SYNC_TIMEOUT_MS * (1 + (rows.coerceAtLeast(0) + IMPORT_BATCH_ROWS - 1) / IMPORT_BATCH_ROWS)
+
+        /** Audit H12 (web Recover.tsx REVEAL_TIMEOUT_S, "kept in sync with Welcome's"): the idle
+         *  cap on the self-recovery reset step, while the raw recovery secret is in memory. */
+        const val RECOVER_IDLE_TIMEOUT_MS = 300L * 1000
+        /** Audit H12: byte-equal to web's REVEAL_TIMEOUT_NOTICE — static copy, never interpolated
+         *  (§F.7). Rendered on the screen the expiry lands on (Unlock's or Welcome's notice bar). */
+        const val RECOVER_TIMEOUT_NOTICE =
+            "Timed out for your security. Sign in again — a fresh recovery phrase will be shown."
+
+        /** Audit H15: the blocking-state sentence for a native-crypto load failure. Deliberately
+         *  says what it is NOT (a password problem, a server problem) — the two hypotheses the
+         *  calm "try again" canon induces — and names the file that holds the diagnosis. Static;
+         *  the log path renders beside it from [diagnosticLogPath]. */
+        const val CRYPTO_UNAVAILABLE_NOTICE =
+            "andvari couldn't start its encryption library on this computer, so it can't sign in — this is not a password problem, and the server is fine. Details were written to the diagnostic log below; send that file to whoever set up your server."
 
         // Cut O (v2 #17) timeout tiers — see newHttpClient()/runSync() for the full rationale:
         /** TCP/TLS connect cap on EVERY desktop client (java.net.http ships with none). */

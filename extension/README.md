@@ -1,9 +1,12 @@
 # andvari browser extension (MV3)
 
 Desktop autofill for Chromium (Chrome/Edge/Brave) + Firefox — logins and payment cards.
-**Status: shipping.** The version lives in `manifest.json` (0.25.0 as of this writing; the
-extension rides its **own** version track — separate store-review cadence, so it does not move
-with every fleet release — and the top `CHANGELOG.md` heading names both versions);
+**Status: shipping.** The version lives in `manifest.json` — read it there, this sentence
+deliberately does not repeat the number (a hand-copied literal beside "the version lives in
+manifest.json" is exactly the drift the G43 pins were added to stop, and it had already gone
+stale by one release). The extension rides its **own** version track — separate store-review
+cadence, so it does not move with every fleet release — and the top `CHANGELOG.md` heading names
+both versions;
 `package.mjs` refuses to package if `manifest.json`, `manifest.firefox.json`, and
 `package.json` disagree, so that one file is the answer. Per-release detail is in the repo-root
 [`CHANGELOG.md`](../CHANGELOG.md).
@@ -28,7 +31,7 @@ work the usage ledger and the signup reuse alert come out of
 
 ```bash
 cd extension
-npm install
+npm ci --ignore-scripts   # exactly the committed lockfile, and no dependency install hooks (.npmrc sets it too)
 npm run build        # → dist/ dev build (readable, sourcemaps; esbuild — 0 wasm, 0 eval; copies popup.html/popup.css/icons/INSTALL.txt)
 npm run typecheck    # tsc --noEmit
 npm run test         # node --test over src/**/*.test.ts
@@ -192,7 +195,9 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     `/downloads/manifest.json` with an anti-rollback sequence floor, fails closed and quiet, and
     runs **only** against the shipped default origin (the pinned key signs that instance's
     `/downloads` alone). A custom origin gets no fetch at all. Per-instance keys are later work.
-- **Manifests (both):** branded icons (`icons/icon{16,32,48,128}.png` — the treasury coin + ᛅ rune),
+- **Manifests (both):** branded icons (`icons/icon{16,32,48,128}.png` — the dark-background ᛅ brand
+  mark shared with the desktop, phone and web surfaces; `app-desktop/icons/andvari.svg` is the
+  source the PNGs are rendered from),
   extension-page CSP without `'wasm-unsafe-eval'` (nothing loads wasm). The autofill content script
   is **registered dynamically by the service worker** (`chrome.scripting.registerContentScripts`,
   all frames, `document_idle`) — there is deliberately **no static `content_scripts` entry**: a

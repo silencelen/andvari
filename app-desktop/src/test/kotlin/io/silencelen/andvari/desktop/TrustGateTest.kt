@@ -62,6 +62,62 @@ class TrustGateTest {
         assertNull(https.httpCaution)
     }
 
+    // ---- audit H68: the F27 loopback/LAN split, which had been applied to Android only ----
+
+    // A server on THIS machine: the traffic never reaches a network, so the eavesdropping sentence
+    // was false exactly where the on-device self-host story asks the user to say yes.
+    @Test
+    fun loopbackHttpGetsTheLocalSentenceAndNeverTheNetworkOne() {
+        for (origin in listOf(
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "http://LocalHost:8080", // the gate is fed raw input; the host test is case-insensitive
+            "http://127.0.1.1:8080", // all of 127.0.0.0/8 is as local as 127.0.0.1
+            "http://[::1]:8080",
+        )) {
+            val m = trustGateModel(origin, TrustGateVariant.Baseline)
+            assertTrue(m.plainHttp, "$origin is still plain http")
+            assertTrue(m.loopbackHttp, "$origin is loopback")
+            assertEquals(TRUST_GATE_HTTP_LOOPBACK, m.httpCaution, "$origin must get the on-this-computer sentence")
+            assertFalse(m.httpCaution!!.contains("read on the network"), "$origin: the false half must be gone")
+        }
+    }
+
+    // Everything else keeps the sentence that is true of it — a JVM will happily dial a LAN host,
+    // so unlike Android this is a caution, not a refusal.
+    @Test
+    fun nonLoopbackHttpKeepsTheNetworkEavesdroppingSentence() {
+        for (origin in listOf(
+            "http://192.168.1.5:8080",
+            "http://vault.example.org",
+            "http://128.0.0.1", // one octet away from loopback, and firmly on the wire
+            "http://127.0.0.1.evil.example", // a hostname that merely STARTS with the literal
+        )) {
+            val m = trustGateModel(origin, TrustGateVariant.Baseline)
+            assertFalse(m.loopbackHttp, "$origin is not loopback")
+            assertEquals(TRUST_GATE_HTTP_LAN, m.httpCaution, "$origin must keep the network warning")
+        }
+    }
+
+    // The userinfo vector: the calm loopback sentence must be earned by the host the client will
+    // actually dial, never by a reassuring prefix (the same rule Android's split is judged under).
+    @Test
+    fun aReassuringLoopbackUserinfoPrefixDoesNotBuyTheCalmSentence() {
+        val m = trustGateModel("http://127.0.0.1@evil.example", TrustGateVariant.Baseline)
+        assertFalse(m.loopbackHttp, "the dialed host is evil.example")
+        assertEquals(TRUST_GATE_HTTP_LAN, m.httpCaution)
+    }
+
+    // The two sentences are mutually exclusive and neither is ever shown for https.
+    @Test
+    fun theTwoHttpSentencesAreExclusiveAndAbsentUnderHttps() {
+        val https = trustGateModel("https://127.0.0.1:8443", TrustGateVariant.Baseline)
+        assertFalse(https.plainHttp)
+        assertFalse(https.loopbackHttp, "loopback only qualifies the plain-http caution")
+        assertNull(https.httpCaution)
+        assertFalse(TRUST_GATE_HTTP_LOOPBACK == TRUST_GATE_HTTP_LAN)
+    }
+
     // §4.3 copy selection: BASELINE (manual repoint) has no enrollment note; ENROLLMENT adds the
     // B2-8 new-account/password-reuse warning verbatim. Both share the lead + body.
     @Test

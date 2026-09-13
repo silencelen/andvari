@@ -215,8 +215,15 @@ Fill these into `~/.andvari/store-publish.env` (chmod 600 — **outside the repo
 1. Google Cloud Console → new project → **APIs & Services → Enable APIs → "Chrome Web Store API"**.
 2. **OAuth consent screen** (External; add yourself as a test user) → **Credentials → Create OAuth client → Desktop app** → copy the **client id + secret**.
 3. Mint a refresh token on a machine with a browser (the loopback OAuth flow — the old copy/paste
-   `oob` flow is deprecated). Easiest: `npx chrome-webstore-upload-keys` → paste the client id/secret →
+   `oob` flow is deprecated). Easiest: `npx --yes chrome-webstore-upload-keys@2.0.1` → paste the client id/secret →
    it opens the consent page → outputs `CWS_CLIENT_ID` / `CWS_CLIENT_SECRET` / `CWS_REFRESH_TOKEN`.
+   The version is **pinned on purpose** (audit H63): this tool is handed the store's client secret and
+   mints the refresh token that can publish to the household's listing, so it is the one place an
+   unpinned `npx <latest>` would hand a fresh, unreviewed npm tree exactly the credential the signed
+   manifest exists to protect. Bump the pin deliberately (read the diff) rather than dropping it.
+   The publish script itself never puts a store secret on a command line — `/proc/*/cmdline` is
+   world-readable — it feeds curl a config block on stdin and hands web-ext the AMO pair through
+   `WEB_EXT_API_KEY`/`WEB_EXT_API_SECRET` scoped to that one child (`scripts/publish-extension.sh`).
 
 **Firefox (AMO API key):**
 - addons.mozilla.org → **Developer Hub → Manage API Keys → Generate new credentials** → copy the

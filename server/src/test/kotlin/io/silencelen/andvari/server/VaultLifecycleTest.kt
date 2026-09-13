@@ -979,7 +979,8 @@ class VaultLifecycleTest : LifecycleTestSupport() {
         // Hand-build a v3-shaped DB: meta(schemaVersion=3), v1 vaults + items + invites, v3 grants
         // (items because the v5 tombstone index is created on it; invites because the v6 recovery
         // migration ALTERs it — ADD COLUMN escrowPolicy; users because the v7 §F.9 migration ALTERs
-        // it — ADD COLUMN recoveryConfirmed).
+        // it — ADD COLUMN recoveryConfirmed; devices because the v10 H25 migration ALTERs it —
+        // ADD COLUMN signedOutAt).
         DriverManager.getConnection("jdbc:sqlite:${dbFile.absolutePath}").use { c ->
             c.createStatement().use { st ->
                 st.executeUpdate("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -1007,6 +1008,13 @@ class VaultLifecycleTest : LifecycleTestSupport() {
                        status TEXT NOT NULL DEFAULT 'active', mustChangePassword INTEGER NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL,
                        totpSecret TEXT, totpPendingSecret TEXT, totpEnrolledAt INTEGER, totpLastStep INTEGER NOT NULL DEFAULT 0)""",
                 )
+                // v1-shaped devices table so the v10 H25 migration (ADD COLUMN signedOutAt) has a table
+                // to extend — the same reason users/invites are here for v6/v7.
+                st.executeUpdate(
+                    """CREATE TABLE devices(deviceId TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(userId),
+                       platform TEXT NOT NULL, name TEXT NOT NULL, clientVersion TEXT, createdAt INTEGER NOT NULL,
+                       lastSeenAt INTEGER, revokedAt INTEGER)""",
+                )
                 st.executeUpdate("INSERT INTO vaults(vaultId,type,rev,metaBlob,createdAt) VALUES('v','shared',1,'m',1)")
                 st.executeUpdate("INSERT INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES('v','u','owner','wv',1)")
                 st.executeUpdate("INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES('th','e@x.com',0,1,9)")
@@ -1018,7 +1026,7 @@ class VaultLifecycleTest : LifecycleTestSupport() {
 
         Db(dbFile.absolutePath).use { db ->
             db.read { c ->
-                assertEquals("9", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
+                assertEquals("10", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
                 // Pre-v4 rows read back NULL lifecycle state, transferSeq=0.
                 val v = c.queryOne("SELECT deletedAt, purgeAt, purgedAt, deleteId, transferSeq, pendingOfferId FROM vaults WHERE vaultId='v'") { rs ->
                     listOf(rs.getObject(1), rs.getObject(2), rs.getObject(3), rs.getObject(4), rs.getLong(5), rs.getObject(6))
@@ -1044,7 +1052,7 @@ class VaultLifecycleTest : LifecycleTestSupport() {
         }
         // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("9", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("10", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

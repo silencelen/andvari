@@ -101,6 +101,14 @@ if [ -n "$DOC_LEAKS" ]; then
 fi
 echo "    docs + root/module prose carry no reference-instance hostname (3 stated exemptions)"
 
+echo "==> CI tripwires: CodeQL Kotlin-emptiness tripwire self-test + live workflows"
+# The G18 tripwire's first version recognised exactly one YAML spelling of the empty Kotlin leg and
+# passed four others green (audit H40) — a gate that reports more than it ran. Its fixtures now
+# assert the coverage: every fail-* shape must trip, the live workflows must pass. Runs here so a
+# narrowing of the tripwire fails the release gate on the box that made the change, not the next
+# audit. (CI runs the same two commands from .github/workflows/codeql-tripwire.yml.)
+(cd "$REPO_DIR" && bash scripts/ci/codeql-kotlin-tripwire.test.sh)
+
 echo "==> Kotlin: :core + :server + :app-desktop + the tools/ CLIs (RFC pins, vectors, full server integration)"
 # :app-desktop:test was missing until 0.20.x — the desktop suites (endpoint-switch token isolation,
 # originKey byte-parity, trust gate) had gone 2.5 days stale behind HEAD and, worse, the module was

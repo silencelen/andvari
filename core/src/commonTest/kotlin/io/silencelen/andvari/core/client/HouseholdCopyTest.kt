@@ -1,6 +1,7 @@
 package io.silencelen.andvari.core.client
 
 import io.silencelen.andvari.core.crypto.CryptoException
+import io.silencelen.andvari.core.crypto.CryptoUnavailableException
 import io.silencelen.andvari.core.crypto.KdfParams
 import kotlinx.io.IOException
 import kotlin.test.Test
@@ -51,9 +52,12 @@ class HouseholdCopyTest {
         // TWIN: web account.ts IdentityMismatchError + extension "identity_mismatch".
         assertEquals("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.", HouseholdCopy.IDENTITY_MISMATCH)
         // TWIN: web crypto/keys.ts WEAK_KDF_MESSAGE (H1, spec 05 T1).
-        assertEquals("This server sent weakened security settings for your master password. The action was blocked to protect you — contact your administrator.", HouseholdCopy.WEAK_KDF_ACTION)
-        // NATIVE-PINNED: both natives' H1 friendlyError sentence.
-        assertEquals("This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your administrator.", HouseholdCopy.WEAK_KDF_SIGN_IN)
+        assertEquals("This server sent weakened security settings for your master password. The action was blocked to protect you — contact your admin.", HouseholdCopy.WEAK_KDF_ACTION)
+        // TWIN (H122): extension/src/errors.ts weakened-KDF row + both natives' H1 sentence — all
+        // three canons end "contact your admin." now; "administrator" on any side is drift.
+        assertEquals("This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.", HouseholdCopy.WEAK_KDF_SIGN_IN)
+        // NATIVE-ONLY (H15): the libsodium binding did not load — permanent, local, not the password.
+        assertEquals("andvari couldn't start its encryption library on this device, so it can't sign in — this is not a password problem, and trying again won't help. Reinstall andvari; if it keeps happening, tell whoever set up your server.", HouseholdCopy.CRYPTO_UNAVAILABLE)
         // TWIN: web Welcome.tsx unlock-gate terminal.
         assertEquals("Wrong master password.", HouseholdCopy.WRONG_MASTER_PASSWORD)
         // TWIN: web Welcome.tsx sign-in 401 + extension "bad_credentials".
@@ -126,7 +130,7 @@ class HouseholdCopyTest {
     @Test
     fun enrollLadder_isTheGeneralMapPlusTheSignInContextForH1() {
         // An enroll IS a credential ceremony — H1 reads with the sign-in wording, not the neutral one.
-        assertEquals("This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your administrator.", HouseholdCopy.forEnrollError(weakKdf()))
+        assertEquals("This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.", HouseholdCopy.forEnrollError(weakKdf()))
         assertEquals("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.", HouseholdCopy.forEnrollError(identityMismatch))
         assertEquals("Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.", HouseholdCopy.forEnrollError(IOException("no route")))
         assertEquals("Too many requests — please wait a bit and try again.", HouseholdCopy.forEnrollError(api(429, "rate_limited")))
@@ -217,7 +221,7 @@ class HouseholdCopyTest {
     @Test
     fun forError_transportSecurityAndUnknownTypes() {
         assertEquals("Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.", HouseholdCopy.forError(IOException("connect timed out")))
-        assertEquals("This server sent weakened security settings for your master password. The action was blocked to protect you — contact your administrator.", HouseholdCopy.forError(weakKdf()))
+        assertEquals("This server sent weakened security settings for your master password. The action was blocked to protect you — contact your admin.", HouseholdCopy.forError(weakKdf()))
         // The tampering signal NEVER softens — and never echoes the long core message.
         assertEquals("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.", HouseholdCopy.forError(identityMismatch))
         // A plain crypto failure in a GENERIC context is not attributable to the password.
@@ -235,6 +239,8 @@ class HouseholdCopyTest {
             api(500, "internal"), api(418, "im_a_teapot"),
             UpgradeRequiredException("upgrade_required", leak),
             IOException("raw leak"), RuntimeException("raw leak"), CryptoException("raw leak"),
+            // H15: its own message embeds the loader's — "raw leak" here — and must not surface.
+            CryptoUnavailableException(IllegalStateException("raw leak")),
         )
         val mappers = listOf<(Throwable) -> String>(
             HouseholdCopy::forError,
@@ -264,7 +270,7 @@ class HouseholdCopyTest {
 
     @Test
     fun signInLadder_rendersWebsExactCopy() {
-        assertEquals("This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your administrator.", HouseholdCopy.forSignInError(weakKdf()))
+        assertEquals("This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.", HouseholdCopy.forSignInError(weakKdf()))
         assertEquals("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.", HouseholdCopy.forSignInError(identityMismatch))
         assertEquals("Wrong email or master password.", HouseholdCopy.forSignInError(api(401, "unauthorized")))
         assertEquals("Wrong email, master password, or one-time code.", HouseholdCopy.forSignInError(api(401, "unauthorized"), totpTried = true))
@@ -287,7 +293,7 @@ class HouseholdCopyTest {
         assertEquals("Wrong master password.", HouseholdCopy.forUnlockError(CryptoException("aead open failed")))
         // The crown rule: the identity-mismatch CryptoException must NOT read as wrong-password.
         assertEquals("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.", HouseholdCopy.forUnlockError(identityMismatch))
-        assertEquals("This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your administrator.", HouseholdCopy.forUnlockError(weakKdf()))
+        assertEquals("This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.", HouseholdCopy.forUnlockError(weakKdf()))
         assertEquals("Session expired — sign in again.", HouseholdCopy.forUnlockError(api(401, "unauthorized")))
         assertEquals("Too many requests — please wait a bit and try again.", HouseholdCopy.forUnlockError(api(429, "rate_limited")))
         assertEquals("The server had a problem answering — your password may be fine. Try again in a moment.", HouseholdCopy.forUnlockError(api(500, "internal")))
@@ -296,6 +302,36 @@ class HouseholdCopyTest {
         // Unknown Throwable: never blame the password for an arbitrary failure (unlike web,
         // whose unlock structure guarantees only crypto reaches its terminal).
         assertEquals("Couldn't unlock — please try again.", HouseholdCopy.forUnlockError(RuntimeException("raw leak")))
+    }
+
+    // ---- native crypto did not load (audit H15) ----
+
+    /**
+     * The desktop's 0.26.3 startup self-check detected "native libsodium did not load" and the
+     * sign-in/unlock ladders STILL said "Sign-in failed. Please try again." / "Couldn't unlock —
+     * please try again." — a permanent, local failure rendered as the user's fault (H15). The
+     * JVM/Android createCryptoProvider() actuals now throw the one typed
+     * [CryptoUnavailableException]; every ladder must map it to the honest sentence, ahead of
+     * every other row, and never to a retry or wrong-password line.
+     */
+    @Test
+    fun cryptoUnavailable_isTheHonestSentenceOnEveryLadder_neverTryAgainOrWrongPassword() {
+        val t = CryptoUnavailableException(IllegalStateException("java.lang.UnsatisfiedLinkError: raw leak"))
+        val expected = "andvari couldn't start its encryption library on this device, so it can't sign in — this is not a password problem, and trying again won't help. Reinstall andvari; if it keeps happening, tell whoever set up your server."
+        assertEquals(expected, HouseholdCopy.forSignInError(t))
+        assertEquals(expected, HouseholdCopy.forSignInError(t, totpTried = true))
+        assertEquals(expected, HouseholdCopy.forUnlockError(t))
+        assertEquals(expected, HouseholdCopy.forEnrollError(t))
+        assertEquals(expected, HouseholdCopy.forError(t))
+        assertEquals(expected, HouseholdCopy.forSaveError(t))
+        assertEquals(expected, HouseholdCopy.forImportError(t))
+        assertEquals(expected, HouseholdCopy.forSyncError(t))
+        assertEquals(expected, HouseholdCopy.forTotpError(t))
+        // The two retired outcomes, by name.
+        assertFalse(expected.contains("Please try again"))
+        assertFalse(expected.contains("Wrong master password"))
+        // Not a CryptoException on purpose: the unlock ladder reads a bare one as wrong-password.
+        assertFalse(CryptoException::class.isInstance(t))
     }
 
     // ---- save / import / sync / totp specializations ----

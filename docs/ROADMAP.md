@@ -57,6 +57,18 @@ the direction-level record of what they closed.
   sign-in screens whose username box is left empty. Design:
   **`docs/design/2026-08-22-login-health-staleness-verification.md`**.
 
+## 0.26.3 — Windows desktop sign-in fix (**signed manifest seq 12, 2026-09-05**)
+
+> **Publication state, reconstructed for the record (audit H47).** Fleet **0.26.3**, extension
+> unchanged at 0.26.0. Signed manifest at **seq 12** (`signedAt 2026-09-05T22:56:25Z`, bundle ref
+> `v0.26.3` / `39bf5944`): linux 0.26.3 (deb `c0a32424…cc9e77`), windows 0.26.3 (MSI
+> `9d2831bb…680111`, 117 235 712 B), browserExtension 0.26.0. The publish was run BY HAND from an
+> interactive session one minute ahead of the cron tick and therefore appears in neither the
+> watcher log nor the Telegram audit log — the archive
+> (`~/.andvari/manifest-archive/seq12-20260905T230007Z/`) is the only primary record and every file
+> in it re-hashes to its bundle.json. Detail + the watcher fix: `docs/runbooks/release-signing-keys.md`
+> § Status. Owner step: redeploy the watcher to `/usr/local/bin`.
+
 ## 0.26.0 + 0.26.1 — Android vault health (**COMPLETE ON EVERY CHANNEL 2026-08-24**)
 
 > **Publication state, verified independently of the watcher's own report.** Fleet **0.26.1**,

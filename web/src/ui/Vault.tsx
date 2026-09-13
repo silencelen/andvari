@@ -20,7 +20,7 @@ import {
   type VaultItem,
   type VaultStore,
 } from "../vault/store";
-import { ImportError, type ImportFormat, type ImportPlan, type ImportReport, type Parsed, type ParsedRow, parseCsvImport, planImport, rowOrdinalsByLine } from "../import/csv";
+import { ImportError, MAX_BYTES, type ImportFormat, type ImportPlan, type ImportReport, type Parsed, type ParsedRow, parseCsvImport, planImport, rowOrdinalsByLine } from "../import/csv";
 import { Admin } from "./Admin";
 import { scheduleClipboardClear, writeClipboard } from "./clipboard";
 import { useCopy } from "./usecopy";
@@ -28,9 +28,10 @@ import { UsageTracker } from "../vault/usage";
 import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, CLIPBOARD_NOT_CLEARED_SHORT, net, NetworkError, UNREACHABLE } from "./errors";
 import { ExportPanel, type ExportMode } from "./ExportPanel";
 import { Field } from "./Field";
-import { fmtDay, humanSize } from "./format";
+import { fmtDay, fmtDayYear, humanSize } from "./format";
 import { applyListView, type SortMode, type TypeFilter } from "./listview";
 import { hashToView, viewToHash } from "./routes";
+import { safeSiteHref } from "./safeurl";
 import { Announcer, Msg } from "./Msg";
 import { Health } from "./Health";
 import { clampClipboardClearSeconds } from "./policyclamp";
@@ -987,6 +988,7 @@ function ReSealBanner({ account, client, escrowFingerprint }: { account: Account
             input hearing "edit, blank". Same component, same association, same copy. */}
         <Field
           label="Type the FIRST 16 characters of the fingerprint on your printed recovery sheet"
+          prompt
           /* The banner is a flex column with its own gap — .field's own margin would double it. */
           style={{ marginBottom: 0 }}
           hint={
@@ -1116,6 +1118,13 @@ function ExportMenu({ onBackup, onCsv }: { onBackup: () => void; onCsv: () => vo
 }
 
 // ---- copy with auto-clear ----
+/** H53: the Detail's website rows — every NON-BLANK saved uri, in stored order (spec 02 §3.1 lets
+ *  a login carry several; the search matches on all of them, F79, so the view lists all of them).
+ *  Exported pure so vault-copy.test.ts can pin it without a render seam. */
+export function detailUris(uris: string[] | undefined): string[] {
+  return (uris ?? []).filter((u) => u.trim().length > 0);
+}
+
 function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets, onUsed, onEdit, onDelete, onMoved, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; moveTargets: VaultInfo[]; onUsed: () => void; onEdit: () => void; onDelete: () => Promise<void>; onMoved: () => void; onBack: () => void }) {
   // §2.3 clamp (B1-1): a server-declared clipboard window is honored only inside [1, 300 s].
   const clearSecs = clampClipboardClearSeconds(policy?.clipboardClearSeconds ?? 30);
@@ -1194,10 +1203,31 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
             </div>
           )}
           {doc.login.totp && <TotpView uri={doc.login.totp} pill={copyPill("code")} onCopy={(code) => { onUsed(); copy("code", code); }} />}
-          {doc.login.uris?.[0] && (
-            <Field label="Website">
-              <input readOnly value={doc.login.uris[0]} />
-            </Field>
+          {/* H53 (audit 2026-09-13): the website was a read-only text box — no link, no copy, and
+              only uris[0] — while the extension detail, the Staleness run card and the Duplicates
+              checker all offer a safeSiteHref link. Every saved uri is listed; a navigable one is
+              an "open site" link (the click is a genuine use, as Staleness records — it is the
+              sign-in the password was just copied for) and a rejected one (safeSiteHref: http(s)
+              only — in a SHARED vault another member authored it, which is what makes a
+              javascript: value a real vector) stays inert text, never rendered as a link anyway.
+              Copy hands the raw stored value over, for parity with every other Detail row. */}
+          {detailUris(doc.login.uris).length > 0 && (
+            <div className="field">
+              <span className="field-head">{detailUris(doc.login.uris).length === 1 ? "Website" : "Websites"}</span>
+              {detailUris(doc.login.uris).map((uri, i) => {
+                const href = safeSiteHref(uri);
+                return (
+                  <div className="secret-row" key={`${i}:${uri}`} style={{ marginBottom: 6 }}>
+                    {href ? (
+                      <a className="link site-uri" href={href} target="_blank" rel="noreferrer" onClick={onUsed}>{uri} ↗</a>
+                    ) : (
+                      <span className="site-uri">{uri}</span>
+                    )}
+                    <button className="ghost" onClick={() => copy("website", uri)}>Copy</button>
+                  </div>
+                );
+              })}
+            </div>
           )}
           {doc.login.password && <HealthLine password={doc.login.password} client={client} />}
         </>
@@ -1499,8 +1529,11 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
       {versions?.length === 0 && <div className="muted">No earlier versions yet — history starts from the next change.</div>}
       {versions?.map((v) => (
         <div key={v.rev} className="secret-row" style={{ alignItems: "center", marginTop: 6 }}>
-          {/* bug-web--6 / ux-parity--6: same UTC-ISO substring as Trash, same fix. */}
-          <span className="muted mono" style={{ minWidth: 92 }}>{fmtDay(v.archivedAt)}</span>
+          {/* bug-web--6 / ux-parity--6: same UTC-ISO substring as Trash, same fix.
+              H131: fmtDayYear, not fmtDay — the list is capped at ten SAVES with no age bound, so
+              an item edited twice a year puts a 2024 version on screen as a bare "July 14" that
+              reads as this July. Trash keeps fmtDay: its rows expire in 30 days. */}
+          <span className="muted mono" style={{ minWidth: 92 }}>{fmtDayYear(v.archivedAt)}</span>
           {v.doc.type === "login" && v.doc.login?.password ? (
             <PasswordField value={v.doc.login.password} />
           ) : (
@@ -2415,6 +2448,16 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
         );
         return;
       }
+      // H77: SIZE FIRST, before a single byte is materialised. csv.ts's MAX_BYTES check runs
+      // on an already-read buffer, so a mis-picked multi-GB file (a disk image, a video) used
+      // to be pulled into memory in full — freezing or crashing a tab that has an UNLOCKED
+      // vault in it — instead of producing the honest one-line refusal. Both natives already
+      // stream through readBounded for exactly this reason (MainActivity's "BOUNDED read (never
+      // buffer a multi-GB file)", DesktopState's "a mislabeled multi-GB pick is rejected without
+      // being buffered"); `File.size` is available synchronously, so web can be as strict for
+      // free. Thrown, not returned, so the refusal lands on the same friendlyParseError copy the
+      // post-read gate produces — one sentence for one condition.
+      if (file.size > MAX_BYTES) throw new ImportError("too_large");
       const bytes = new Uint8Array(await file.arrayBuffer());
       const p = parseCsvImport(bytes);
       setFormat(p.format);

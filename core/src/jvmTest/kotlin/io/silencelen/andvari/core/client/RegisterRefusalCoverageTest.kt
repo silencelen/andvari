@@ -32,8 +32,14 @@ class RegisterRefusalCoverageTest {
      * can act on. For those two the generic 400's "try again, and update andvari if it keeps
      * happening" is not filler, it is the accurate advice: a retry mints a fresh id, and a
      * malformed one means this build is broken.
+     *
+     * `bad_vault_id` / `vault_id_taken` (audit H62, 2026-09-13) are the SAME two faults one row
+     * down — the personal vault's UUID, which `Account.enroll` mints beside the userId with the
+     * same generator — and take the same answer for the same reason. This set grew exactly the
+     * way its KDoc promises: the server added the refusals, this pin failed, and the decision
+     * that they are honest-generic is recorded here rather than shipped as a silent default.
      */
-    private val GENERIC_400_IS_HONEST = setOf("bad_user_id", "user_id_taken")
+    private val GENERIC_400_IS_HONEST = setOf("bad_user_id", "user_id_taken", "bad_vault_id", "vault_id_taken")
 
     /** The generic 400 row — a code that still renders THIS is uncurated by definition. */
     private val generic400 = HouseholdCopy.forError(ApiException(400, "definitely_not_a_real_code", "raw"))

@@ -14,8 +14,10 @@ package io.silencelen.andvari.core.client
  * reads THIS file) — bump all three together, deliberately. Any raise ships as a client build
  * constant, never a server value (design §11.5).
  *
- * Wave 1 DEFINES the constants only; the call-site clamping (`useAutoLock.ts`,
- * `AndvariViewModel.kt`, `DesktopState.kt`, extension policy consumers) is wave-2 client work.
+ * Every client clamps at its call site today: web `ui/policyclamp.ts`, extension `api.ts`, Android
+ * `VaultSession.kt`, desktop `DesktopState.kt`. (This file once said the clamping was "wave-2
+ * client work" — audit H112: that sentence outlived the work by months and read as if the
+ * constants were still unenforced.)
  */
 object ClientPolicyClamps {
     /** Ceiling for `ClientPolicy.autoLockSeconds` — effective = clamp into [floor, this] (§2.3). */

@@ -506,6 +506,12 @@ export interface AdminDeviceSummary {
   createdAt: number;
   lastSeenAt: number | null;
   revokedAt: number | null;
+  /** H25 (audit 2026-09-13; additive, optional): whether the device still holds a live session
+   *  (a non-revoked session under a non-revoked device with an unexpired refresh — the
+   *  Service.deviceHasLiveSession definition). Logout revokes sessions and used to leave the device
+   *  row looking live and revocable forever; `false` renders "signed out" instead of Revoke.
+   *  Old servers omit it → treated as live (the pre-fix reading). */
+  live?: boolean;
 }
 
 export interface AdminStatus {

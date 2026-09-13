@@ -385,8 +385,17 @@ export type Req =
    *  item match a site the user never visited. Popup senders (no tab) are unrestricted. */
   | { type: "linkUri"; itemId: string; host: string }
   | { type: "generate" }
-  /** Popup: live TOTP code for an item's detail row. */
-  | { type: "totp"; itemId: string }
+  /** Popup: live TOTP code for an item's detail row.
+   *
+   *  `forCopy` marks the ONE send that is a user action rather than a render: the chip's click
+   *  handler (copyTotp), which puts the code on the clipboard. Everything else on this message is
+   *  the popup's 1 s ticker refreshing every visible chip, which is why "totp" is in PASSIVE_MSGS.
+   *  H69 (2026-09-13 audit) needs the two told apart before the SW can count a copied code as a
+   *  use (spec 02 §8.2, the G37 rule the other three clients already follow): recording on every
+   *  answer would stamp lastUsedAt on every TOTP item, once a second, for as long as the popup is
+   *  open — which would not fix the staleness signal, it would delete it. A page cannot forge the
+   *  flag: the handler refuses any sender with a tab before it is read. */
+  | { type: "totp"; itemId: string; forCopy?: true }
   /** Popup ONLY (the SW refuses tab senders): add a one-time-code secret to a login item that
    *  has NONE (TOTP-add lane, design 2026-08-12). ADD-ONLY BY CONTRACT — the extension never
    *  replaces or removes an existing login.totp (that stays a web-vault edit); the SW enforces

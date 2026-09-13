@@ -7,7 +7,8 @@ package io.silencelen.andvari.server
  * past [ITEM_TOMBSTONE_RETENTION_MS], (d) prune `changes` below the fence AND advance
  * `oldestRetainedRev` in the same tx — floored at MAX(rev) so `currentRev` never
  * regresses (spec 02 §7 invariants (a)+(b)), (e)–(i) prune dead sessions
- * ([SESSION_RETENTION_MS]), the mutation-dedup journal ([MUTATION_RETENTION_MS]),
+ * ([SESSION_RETENTION_MS]) and then the device rows those sessions were the last evidence
+ * of (H25 — same horizon, session-less rows only), the mutation-dedup journal ([MUTATION_RETENTION_MS]),
  * audit rows ([AUDIT_RETENTION_MS]), dead invites ([INVITE_RETENTION_MS]), and stale
  * hibp_cache rows ([HIBP_RETENTION_MS]). The changes fence REUSES the item-tombstone
  * horizon by construction: any cursor old enough to have missed a purged tombstone is
@@ -53,6 +54,7 @@ class Janitor(
         // rows that WOULD have been deleted (nothing is deleted, the fence does not move).
         val prunedChanges: Long,
         val prunedSessions: Long,
+        val prunedDevices: Long,
         val prunedMutations: Long,
         val prunedAudit: Long,
         val prunedInvites: Long,
@@ -66,6 +68,7 @@ class Janitor(
         purgedItemTombstones = purgeOldItemTombstones(nowMs),
         prunedChanges = pruneChanges(nowMs),
         prunedSessions = pruneOldSessions(nowMs),
+        prunedDevices = pruneOrphanDevices(nowMs), // after sessions: a row orphaned by THIS sweep goes in the same pass
         prunedMutations = pruneOldMutations(nowMs),
         prunedAudit = pruneOldAudit(nowMs),
         prunedInvites = pruneOldInvites(nowMs),
@@ -176,6 +179,24 @@ class Janitor(
     fun pruneOldSessions(nowMs: Long): Long {
         val cutoff = nowMs - SESSION_RETENTION_MS
         return prune("sessions", "dead session row(s) past 90d", "(revokedAt IS NOT NULL AND revokedAt<?) OR refreshExpiresAt<?", cutoff, cutoff)
+    }
+
+    /** (e2) H25 (audit 2026-09-13): device rows with NO session rows left. issueSession inserts a
+     *  device and its first session in one tx, so a device with zero sessions is one whose every
+     *  session rule (e) has already aged out — dead for ≥90 d by construction; the createdAt belt
+     *  keeps a row that is mid-insert on a relaxed lock out of the sweep. Before this no rule ever
+     *  touched `devices`, so every login's fresh row (and every signed-out phone) lived forever and
+     *  the Admin device list grew monotonically with sign-ins. Runs AFTER (e) in the same sweep so
+     *  a row orphaned today is gone today. Only session-less rows: sessions.deviceId is a FK, and
+     *  a device that still has any session row — live, revoked or expired-but-inside-90d — is
+     *  still evidence an admin may want. audit.deviceId / mutations.deviceId / member_recovery.
+     *  setupDeviceId are plain text columns, not FKs, and none dereferences the device row. */
+    fun pruneOrphanDevices(nowMs: Long): Long {
+        val cutoff = nowMs - SESSION_RETENTION_MS
+        return prune(
+            "devices", "session-less device row(s) past 90d",
+            "createdAt<? AND NOT EXISTS(SELECT 1 FROM sessions s WHERE s.deviceId = devices.deviceId)", cutoff,
+        )
     }
 
     /** (f) Mutation-dedup journal >180d. Accepted residual: a >180d replay of a put whose item

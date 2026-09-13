@@ -50,9 +50,15 @@ export function assertServerKdfParams(p: KdfParams): void {
   if (p.memBytes > KDF_MAX_MEM_BYTES || p.ops > KDF_MAX_OPS) throw new KdfPolicyError("kdf_above_ceiling", p);
 }
 
-/** Shared user-facing copy for a KdfPolicyError — a distinct security block, never a wrong-password. */
+/** Shared user-facing copy for a KdfPolicyError — a distinct security block, never a wrong-password.
+ *  Byte-twin of core HouseholdCopy.WEAK_KDF_ACTION and of extension/src/errors.ts's weakened-KDF
+ *  row; pinned equal in extension-pins.test.ts. H86-adjacent slip (H122): this sentence ended
+ *  "contact your administrator." while the other two canons ended "contact your admin." — the
+ *  house word, used by the identity-mismatch sentence directly beside it in all three files. It
+ *  is a security sentence the house rules say must never soften, and three hand-maintained copies
+ *  with no cross-leg pin is how the next reword lands on two clients and not the third. */
 export const WEAK_KDF_MESSAGE =
-  "This server sent weakened security settings for your master password. The action was blocked to protect you — contact your administrator.";
+  "This server sent weakened security settings for your master password. The action was blocked to protect you — contact your admin.";
 
 const INFO_AUTH = utf8("andvari/v1/auth");
 const INFO_WRAP = utf8("andvari/v1/wrap");

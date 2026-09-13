@@ -3,7 +3,7 @@
 // stricter rule of its own (no silent 2b clobber) — that lives in background.ts, tested by shape here.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { resolveSaveAction, saveTargetFor } from "./savetarget.ts";
+import { resolveSaveAction, saveTargetFor, stepUsernameFor } from "./savetarget.ts";
 
 const item = (itemId: string, username: string, password: string) => ({ itemId, doc: { login: { username, password } } });
 
@@ -76,4 +76,25 @@ test("resolve BLOCKER-1 GUARD: locked-at-capture password-only for a DIFFERENT a
 
 test("resolve: password-only, no host logins → create", () => {
   assert.deepEqual(resolveSaveAction(undefined, [], "", "P"), { kind: "create" });
+});
+
+// H13 (2026-09-13 audit) — the multi-step step-1 username is remembered WITH its site and consulted
+// only for a capture on the same site. Before, it was a bare per-tab string: a password-only submit
+// on another site in the same tab inherited it and landed as a wrong-account "Save new".
+test("H13: step-1 username merges into a capture on the SAME site", () => {
+  assert.equal(stepUsernameFor({ username: "alice@a.com", site: "a.com" }, "a.com"), "alice@a.com");
+});
+
+test("H13: step-1 username is NOT consulted for a capture on another site (a wrong-account duplicate otherwise)", () => {
+  assert.equal(stepUsernameFor({ username: "alice@a.com", site: "a.com" }, "b.com"), "");
+});
+
+test("H13: nothing remembered, a null/empty site, or a pre-H13 bare-string snapshot → \"\"", () => {
+  assert.equal(stepUsernameFor(undefined, "a.com"), "");
+  assert.equal(stepUsernameFor({ username: "alice@a.com", site: "a.com" }, null), "");
+  assert.equal(stepUsernameFor({ username: "alice@a.com", site: "a.com" }, ""), "");
+  // The shipped shape was `lastUsername?: string`; a snapshot from that build must never read as a
+  // username valid for every site.
+  assert.equal(stepUsernameFor("alice@a.com", "a.com"), "");
+  assert.equal(stepUsernameFor({ username: "alice@a.com" }, "a.com"), "");
 });

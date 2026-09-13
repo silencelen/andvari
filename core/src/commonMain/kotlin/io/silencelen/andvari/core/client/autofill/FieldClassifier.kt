@@ -210,6 +210,44 @@ object FieldClassifier {
         return FieldKind.NONE
     }
 
+    // ---- fill-target selection (audit H21; the extension detect.ts `primary` rule, generalised) ----
+
+    /** The W3C `new-password` autocomplete token / Android `newPassword` hint, in the exact form
+     *  classify() step 0 folds every hint to (lowercase, `_`/`-` stripped). */
+    private const val NEW_PASSWORD_HINT = "newpassword"
+
+    /**
+     * True when [hints] (RAW, as they arrive from `ViewNode.autofillHints` / autocomplete tokens)
+     * carry the new-password hint. classify() deliberately collapses that hint into PASSWORD — a
+     * new-password box IS a password box for classification parity with urimatch.json and for
+     * save-capture — which is exactly why the FILL leg needs this second look: the hint is the
+     * one signal that says "the STORED password does not belong here".
+     */
+    fun hasNewPasswordHint(hints: List<String>): Boolean =
+        hints.any { it.lowercase().replace("_", "").replace("-", "") == NEW_PASSWORD_HINT }
+
+    /**
+     * Which PASSWORD-classified fields a login fill may write the stored password into. Android
+     * used to broadcast the one value to EVERY password field of the form, so picking a login on a
+     * change-password page put the OLD password, masked, into the new-password and confirm boxes
+     * — a member who typed only the current field then set the password to itself (or hit a
+     * "must differ" refusal). The extension never did this: it fills only its `primary`
+     * (`passwords.find(p => !p.isNewPassword) ?? passwords[0]`). Same rule, kept as a set because
+     * Android fills per field rather than per form:
+     *  - when at least one password field LACKS the new-password hint, only the un-hinted ones are
+     *    targets — the current-password box on a change-password page; the hinted new/confirm
+     *    boxes stay empty for the generator or the user;
+     *  - when EVERY password field is hinted new-password (a pure signup form), all of them stay
+     *    targets — today's behaviour, so a member re-registering with a password they already hold
+     *    is not silently refused a fill (the extension's `?? passwords[0]` arm).
+     * Pure over any field type: [hintsOf] returns that field's raw hints. It never re-classifies
+     * and never matches — the caller has already filtered to `kind == PASSWORD` and URI-matched.
+     */
+    fun <T> passwordFillTargets(passwordFields: List<T>, hintsOf: (T) -> List<String>): List<T> {
+        val current = passwordFields.filter { !hasNewPasswordHint(hintsOf(it)) }
+        return if (current.isEmpty()) passwordFields else current
+    }
+
     /** One string's card-keyword verdict, or null when its tokens matched no group. NONE (not
      *  null) on a gift-suppressed CC_NUMBER — suppression must TERMINATE the fallback ([T10]:
      *  the guard binds to the verdict-producing string, and a suppressed anchor is a decided

@@ -12,6 +12,16 @@
  *  - never twice for the same settled value on the same field (tab-through, or a blur that
  *    changed nothing).
  *  - a trivially short value is a half-typed one, not a decision worth interrupting.
+ *  - H02 (2026-09-13 audit): only a value the USER TYPED — a trusted keystroke on that field.
+ *    Every other input above is page-controlled: a page authors the two-password form (so
+ *    isSignup/isNewPasswordField hold), sets `.value` to any guess, and drives a TRUSTED
+ *    focusout with `focus(); blur()`. Without this rule that made the unlocked vault a
+ *    password-membership oracle — the SW answered a count per guess, and the count was readable
+ *    from the page by hit-testing the closed-shadow toast (elementFromPoint retargets to our host
+ *    element; the toast renders iff count > 0). A page can forge focus and values but no page
+ *    API produces a trusted keydown, so this is the login-capture gesture idiom (content.ts
+ *    consumeLoginGesture) applied to the ask. Paste-by-context-menu and browser autofill leave
+ *    the mark unset and simply get no warning — a missed nicety, never a leak.
  */
 
 /** Below this, the user is still typing — asking would both nag and ship fragments to the SW. */
@@ -28,11 +38,17 @@ export interface ReuseAskInput {
   isSignup: boolean;
   /** This exact field is one of the form's new-password targets (detect.ts newPasswords). */
   isNewPasswordField: boolean;
+  /** A trusted keystroke landed on THIS field since the last fill (content.ts reuseTyped). The
+   *  one input here a page cannot forge — see the H02 rule above. */
+  typedByUser: boolean;
 }
 
 /** Whether a blurred field's value should be checked against the vault for reuse. */
 export function shouldAskReuse(i: ReuseAskInput): boolean {
   if (i.filling) return false;
+  // H02: the gesture gate sits FIRST among the form-shape rules — every rule below reads
+  // page-controlled state, so none of them can stand in for it.
+  if (!i.typedByUser) return false;
   if (!i.isSignup || !i.isNewPasswordField) return false;
   if (i.value.length < MIN_ASKABLE_LENGTH) return false;
   return i.lastAsked !== i.value;

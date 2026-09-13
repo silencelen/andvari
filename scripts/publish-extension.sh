@@ -43,9 +43,14 @@ done
   exit 1
 }
 # Sourced WITHOUT `set -a`: the credentials stay shell-local instead of being exported into the
-# environment of every child this script spawns. Each leg hands its own secrets over explicitly
-# (curl -d args for CWS, web-ext --api-key/--api-secret for AMO), so no child process — in
-# particular the npm-installed web-ext tree — inherits the OTHER store's credential set.
+# environment of every child this script spawns. Each leg hands its own secrets over explicitly —
+# and NEVER on a command line (audit H63): argv of every process is world-readable on Linux via
+# /proc/<pid>/cmdline, while a process's environment is readable only by its own uid (and root).
+# The G17 fix that dropped `set -a` moved the secrets from the uid-private environment onto child
+# argv, the MORE visible channel. So: curl reads the CWS token-exchange form from a config block on
+# stdin (`--config -`), and web-ext reads the AMO pair from WEB_EXT_API_KEY / WEB_EXT_API_SECRET
+# set for THAT ONE child via `env` — scoped to it, never exported here, so the npm-installed
+# web-ext tree still never inherits the OTHER store's credential set.
 # shellcheck source=/dev/null
 . "$ENV_FILE"
 
@@ -65,10 +70,21 @@ publish_chrome() {
   echo "[chrome] item $CWS_ITEM_ID  package $(basename "$CHROME_ZIP")"
   if [ "$DRY" = 1 ]; then echo "[chrome] DRY-RUN: would mint token, upload $(basename "$CHROME_ZIP"), publish item $CWS_ITEM_ID"; return; fi
 
+  # H63: the client secret + refresh token go to curl through a config block on STDIN, never as
+  # `-d` argv (world-readable in /proc/*/cmdline for the life of the request). `--data-urlencode`
+  # inside the config keeps the encoding curl would have applied on the command line. The
+  # here-doc is unquoted on purpose (the values must expand) and stays inside this function's
+  # pipe — it is never a file on disk.
   local tok=""
-  tok=$(curl -sf -X POST https://oauth2.googleapis.com/token \
-        -d client_id="$CWS_CLIENT_ID" -d client_secret="$CWS_CLIENT_SECRET" \
-        -d refresh_token="$CWS_REFRESH_TOKEN" -d grant_type=refresh_token 2>/dev/null | jq -r '.access_token // empty') || true
+  tok=$(curl -sf --config - 2>/dev/null <<CURLCFG | jq -r '.access_token // empty'
+url = "https://oauth2.googleapis.com/token"
+request = "POST"
+data-urlencode = "client_id=$CWS_CLIENT_ID"
+data-urlencode = "client_secret=$CWS_CLIENT_SECRET"
+data-urlencode = "refresh_token=$CWS_REFRESH_TOKEN"
+data-urlencode = "grant_type=refresh_token"
+CURLCFG
+  ) || true
   [ -n "$tok" ] || { echo "[chrome] ERROR: OAuth token exchange failed — check CWS_* creds" >&2; return 1; }
 
   echo "[chrome] uploading package…"
@@ -115,7 +131,7 @@ publish_firefox() {
   # running a fresh npm tree (install scripts included) at every publish. --no-install below
   # refuses to fetch anything at sign time; a missing install fails loudly here instead.
   [ -x "$REPO_DIR/extension/node_modules/.bin/web-ext" ] || {
-    echo "[firefox] ERROR: web-ext not installed — run: (cd extension && npm install)" >&2; return 1; }
+    echo "[firefox] ERROR: web-ext not installed — run: (cd extension && npm ci --ignore-scripts)" >&2; return 1; }
 
   local tmp out addon; tmp="$(mktemp -d)"; out="$REPO_DIR/extension/artifacts"
   unzip -oq "$FIREFOX_ZIP" -d "$tmp"
@@ -124,9 +140,13 @@ publish_firefox() {
 
   if [ "$DRY" = 1 ]; then echo "[firefox] DRY-RUN: would 'web-ext sign --channel=unlisted' the $VERSION firefox build"; rm -rf "$tmp"; return; fi
 
-  (cd "$REPO_DIR/extension" && npx --no-install web-ext sign \
+  # H63: web-ext reads WEB_EXT_API_KEY / WEB_EXT_API_SECRET itself (its documented env form of
+  # --api-key/--api-secret). `env` scopes the pair to this ONE child process instead of putting
+  # the JWT secret on argv, where any local uid could read it for the whole sign run. The CWS
+  # creds are not in this env because this script never exported them (no `set -a` above).
+  (cd "$REPO_DIR/extension" && env WEB_EXT_API_KEY="$AMO_JWT_ISSUER" WEB_EXT_API_SECRET="$AMO_JWT_SECRET" \
+      npx --no-install web-ext sign \
       --channel=unlisted \
-      --api-key="$AMO_JWT_ISSUER" --api-secret="$AMO_JWT_SECRET" \
       --source-dir="$tmp" --artifacts-dir="$out") \
     || { echo "[firefox] ERROR: web-ext sign failed" >&2; rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"

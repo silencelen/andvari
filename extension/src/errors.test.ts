@@ -43,6 +43,20 @@ test("unlock ladder: every code renders the exact copy", () => {
   assert.equal(unlockErrorCopy("upgrade_required"), "Your server requires a newer extension — get the update from the web vault or the link above.");
   // web IdentityMismatchError's message, byte-equal — never rendered as wrong-password.
   assert.equal(unlockErrorCopy("identity_mismatch"), "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.");
+  // H122 (2026-09-13 audit): pinned to the LITERAL, not merely to its siblings. The PIN and bio
+  // ladders below assert equality with THIS call, so with no literal anywhere all three could be
+  // reworded together and stay green — which is how the weakened-KDF sentence came to end
+  // "contact your admin." here and "contact your administrator." in core and web, despite
+  // HouseholdCopy.kt declaring itself a byte-twin of this file. One wording won: "admin", which
+  // is what the identity-mismatch line directly above (byte-equal across all three canons) and
+  // the ~500 other uses in the tree already say. Core's twin is HouseholdCopy.WEAK_KDF_SIGN_IN
+  // (its WEAK_KDF_ACTION is the "The action was blocked" variant web renders). This is the
+  // sentence the house rules say must never be softened, so it never falls back to a generic
+  // failure: an edit here has to be a deliberate, three-canon change.
+  assert.equal(
+    unlockErrorCopy("kdf_policy"),
+    "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.",
+  );
   assert.equal(unlockErrorCopy("server_error"), "The server had a problem answering — your details may be fine. Try again in a moment.");
   assert.equal(unlockErrorCopy("network"), UNREACHABLE);
   assert.equal(unlockErrorCopy("unknown"), "Sign-in failed. Please try again.");
@@ -57,7 +71,12 @@ test("save banner: the three codes render copy, never SW-internal strings", () =
   // click summons the unlock screen and shows SAVE_UNLOCK_* instead); the rung stays pinned for
   // the card banner's lock-mid-resolve race.
   assert.equal(saveErrorCopy("locked"), "Could not save — unlock andvari and try again.");
-  assert.equal(saveErrorCopy("conflict"), "This login changed elsewhere — open it in the web vault.");
+  // H20 (2026-09-13 audit): a `conflict` push status is a write the server APPLIED (spec 03 §5).
+  // The old sentence ("changed elsewhere — open it in the web vault") said the save did not happen
+  // when it had. The SW no longer emits the code from any put path (conflicts land as ok:true and
+  // the displaced version is materialized), so the rung only has to stay TRUE, never a failure.
+  assert.equal(saveErrorCopy("conflict"), "Saved — this login also changed elsewhere; both versions are in your vault.");
+  assert.doesNotMatch(saveErrorCopy("conflict"), /could not|open it in the web vault/i);
   assert.equal(saveErrorCopy("failed"), "Could not save — try again.");
   assert.equal(saveErrorCopy(undefined), "Could not save — try again."); // SW unreachable
 });
@@ -70,8 +89,9 @@ test("TOTP add (2026-08-12): every code renders copy; exists routes to the web v
   // must never suggest retrying from the extension.
   assert.equal(totpAddErrorCopy("exists"), "This login already has a one-time code — manage it in the web vault.");
   assert.equal(totpAddErrorCopy("not_allowed"), "andvari couldn't tell which login this code belongs to — add it from the popup instead.");
-  // Deliberately the save banner's conflict sentence (same situation, same advice).
-  assert.equal(totpAddErrorCopy("conflict"), "This login changed elsewhere — open it in the web vault.");
+  // H20: the same truth as the save banner's conflict rung — a landed write, never a failure.
+  assert.equal(totpAddErrorCopy("conflict"), "One-time code added — this login also changed elsewhere; both versions are in your vault.");
+  assert.doesNotMatch(totpAddErrorCopy("conflict"), /could not|open it in the web vault/i);
   assert.equal(totpAddErrorCopy("failed"), "Could not add the code — try again.");
   assert.equal(totpAddErrorCopy(undefined), "Could not add the code — try again."); // SW mid-restart
 });

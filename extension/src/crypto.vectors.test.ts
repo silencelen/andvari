@@ -46,6 +46,20 @@ test("kdf.json argon2id — deriveMasterKey == libsodium crypto_pwhash ARGON2ID1
   }
 });
 
+// H16 (2026-09-13 audit): libsodium floors memlimit to KiB (memlimit / 1024U); @noble rejects a
+// non-integer m. A policy memBytes that is not a KiB multiple must derive the SAME key libsodium
+// derives — the kdf.json 8 MiB vector + 512 bytes is exactly that case, and the expected output is
+// the vector's own (libsodium-produced) bytes, so this is graded against the fleet, not against us.
+test("kdf.json argon2id — a non-KiB-multiple memBytes floors like libsodium (same MK as the KiB vector)", () => {
+  const c = load("kdf.json").argon2id.find((x: { memBytes: number }) => x.memBytes === 8388608);
+  assert.ok(c, "kdf.json carries the 8 MiB argon2id case");
+  const out = deriveMasterKey(c.passwordUtf8, kdfParams(c.ops, c.memBytes + 512), fromB64(c.saltB64));
+  assert.equal(toB64(out), c.outB64);
+  // …and a full KiB more is a DIFFERENT key — the floor is a floor, not a clamp to the vector.
+  const next = deriveMasterKey(c.passwordUtf8, kdfParams(c.ops, c.memBytes + 1024), fromB64(c.saltB64));
+  assert.notEqual(toB64(next), c.outB64);
+});
+
 test("kdf.json hkdf — RFC 5869 HKDF-SHA-256 with the empty salt", () => {
   for (const c of load("kdf.json").hkdf) {
     const okm = hkdfSha256(fromB64(c.ikmB64), new Uint8Array(0), utf8(c.infoUtf8), c.len);

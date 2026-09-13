@@ -7,6 +7,7 @@ import type { CardFieldKind } from "../../extension/src/detect";
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "../../extension/src/format";
 import { chooseCardTarget } from "../../extension/src/messages";
 import type { ItemDoc } from "./api/types";
+import { WEAK_KDF_MESSAGE } from "./crypto/keys";
 import {
   brand as webBrand,
   cardSubtitle as webCardSubtitle,
@@ -1343,6 +1344,68 @@ describe("2026-08-30 audit pins (extension lane) — KLKEY residency/wipe, pendi
     for (const t of touches) expect(t[1], "KLKEY must never touch a non-session storage area").toBe("session");
     // The rebuild writes the whole record (key + digests) under the namespaced key, typed.
     expect(bg).toContain("await chrome.storage.session.set({ [nsk(KLKEY)]: { key: toB64(knownLoginsKey), digests } satisfies KnownLoginsRecord });");
+
+    // H91 (2026-09-13 audit): the sweep above claims more than it performs. It only sees the
+    // INLINE spelling `chrome.storage.<area>.<op>(… KLKEY …)`, so
+    // `const area = chrome.storage.local; await area.set({ [nsk(KLKEY)]: … })` — or a small
+    // `persist(key, value)` helper — adds a non-session touch the regex never matches while the
+    // four session touches keep the count at >= 4, and the pin stays green while the digests
+    // move to disk. Account for EVERY mention of KLKEY instead of counting matches: strip the
+    // prose (the routes.test.ts code() idiom — the comments legitimately name the key to state
+    // the rule) and require each remaining line to be one of the shapes deliberately approved.
+    const code = bg
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"));
+    const klLines = code.filter((l) => l.includes("KLKEY"));
+    expect(klLines.length, "the constant plus its touches").toBeGreaterThanOrEqual(touches.length + 1);
+    for (const l of klLines) {
+      const approved =
+        /^const KLKEY = /.test(l.trim()) || // the constant itself
+        /chrome\.storage\.session\.(?:get|set|remove)\(/.test(l) || // an inline session touch
+        l.includes("= got[nsk(KLKEY)] as KnownLoginsRecord") || // reading the record a session get returned
+        l.includes("const keys = [QKEY, KLKEY,"); // purgeOriginNamespace's single key list, below
+      expect(approved, `KLKEY reached code this pin has not approved: ${l.trim()}`).toBe(true);
+    }
+    // The one non-session line is the purge list, and it is safe only because that path REMOVES
+    // from both areas (the same list is swept from local and session on purpose, so a future
+    // namespaced key cannot be erased from one area and forgotten in the other). A get or a set
+    // against local/sync there would be a real residency break, not a no-op.
+    const purge = spanOf(bg, "export async function purgeOriginNamespace(", "// Removing the record is only half the wipe");
+    expect(purge).toContain("await chrome.storage.local.remove(keys);");
+    expect(purge).toContain("await chrome.storage.session.remove(keys);");
+    expect(purge).not.toMatch(/chrome\.storage\.(?:local|sync)\.(?:get|set)\(/);
+  });
+
+  /**
+   * H90 (2026-09-13 audit): the pins above hold for what they name, but they pin STORAGE LINES,
+   * not call sites — every one of them is satisfied by the definition of a helper. Deleting the
+   * single invocation that wires a helper into the session lifecycle leaves every definition,
+   * every constant and every storage literal in place, so the suite stays green while the
+   * control stops running. Both live wirings and one deliberate ABSENCE are pinned here, the way
+   * the reuse-alert block below pins its call site and its ordering rather than its helper.
+   */
+  it("the digest rebuild is WIRED: persistSession invokes refreshKnownLogins on every persist", () => {
+    // Fail-open-to-nothing if dropped: the pre-digest nag simply returns silently, so no screen
+    // ever says the known-logins record went stale. Nothing but this line rebuilds it.
+    const persist = spanOf(bg, "function persistSession(", "let knownLoginsKey");
+    expect(persist).toContain("void refreshKnownLogins();");
+  });
+
+  it("the digest is CONSULTED: capturedCredential asks isKnownLoginWhileLocked before offering a save", () => {
+    const captured = spanOf(bg, "async function capturedCredential(", "async function resolvePendingSave(");
+    expect(captured).toContain("await isKnownLoginWhileLocked(host, username)");
+  });
+
+  it("the TOTP challenge NEVER reaches the session snapshot — its keys are memory-only by construction", () => {
+    // pendingTotp holds an authKey and a wrapKey (B1: key material, not a token). It is correctly
+    // absent from the SessionSnapshot today and nothing asserted that, so a future "persist the
+    // challenge so a popup reopen survives SW death" change would put wrapKey into storage.session
+    // with no tripwire — exactly what the declaration's comment argues against. Pin the absence.
+    const snap = spanOf(bg, "function persistSession(", "return chrome.storage.session.set({ [SKEY]: snap });");
+    for (const secret of ["pendingTotp", "authKey", "wrapKey"]) {
+      expect(snap, `${secret} must never be written into the session snapshot`).not.toContain(secret);
+    }
   });
 
   it("the KLKEY wipe pair: sign-out AND an untrusted compartment erase the record and null the cached key", () => {
@@ -1391,5 +1454,46 @@ describe("2026-08-30 audit pins (extension lane) — KLKEY residency/wipe, pendi
     expect(listener).toContain("if (t) void checkPasswordReuse(t);");
     // Definition + that one call site and nothing else — a keystroke-path caller would add a third.
     expect(ct.match(/checkPasswordReuse\(/g), "one definition + one (blur-only) call site").toHaveLength(2);
+  });
+});
+
+/**
+ * H122 (audit 2026-09-13): the weakened-KDF security sentence is declared a byte-twin across the
+ * three canons — web's WEAK_KDF_MESSAGE, core HouseholdCopy, extension/src/errors.ts — and it had
+ * drifted: two canons said "contact your administrator." and the extension said "contact your
+ * admin.", which is also what the identity-mismatch sentence directly beside it says in ALL three
+ * files. Cosmetic on the day, but this is a sentence the house rules say must never soften, and
+ * three hand-maintained copies with no cross-leg pin is exactly how the next reword lands on two
+ * clients and not the third. The pin reads the Kotlin and the extension source as text (the
+ * enroll-errors/vault-copy idiom) so a one-sided edit breaks here, deliberately, first.
+ */
+describe("H122 — the weakened-KDF sentence is one sentence in all three canons", () => {
+  const errorsTs = readFileSync(extensionSrc + "errors.ts", "utf-8");
+  const householdKt = readFileSync(
+    fileURLToPath(new URL("../../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/HouseholdCopy.kt", import.meta.url)),
+    "utf-8",
+  );
+  const kotlinConst = (name: string): string => {
+    const m = householdKt.match(new RegExp(`const val ${name} = "([^"]+)"`));
+    expect(m, `HouseholdCopy.${name} moved — update the pin`).not.toBeNull();
+    return m![1]!;
+  };
+
+  it("web's WEAK_KDF_MESSAGE is byte-equal to core's WEAK_KDF_ACTION", () => {
+    expect(WEAK_KDF_MESSAGE).toBe(kotlinConst("WEAK_KDF_ACTION"));
+  });
+
+  it("the extension's sign-in row is byte-equal to core's WEAK_KDF_SIGN_IN, at every one of its copies", () => {
+    const signIn = kotlinConst("WEAK_KDF_SIGN_IN");
+    const copies = errorsTs.match(/"This server sent weakened security settings[^"]*"/g) ?? [];
+    expect(copies.length, "errors.ts states the sentence once per error surface").toBeGreaterThanOrEqual(3);
+    for (const c of copies) expect(JSON.parse(c)).toBe(signIn);
+  });
+
+  it("all three canons end on the house word — 'admin', the identity-mismatch twin's word", () => {
+    for (const s of [WEAK_KDF_MESSAGE, kotlinConst("WEAK_KDF_ACTION"), kotlinConst("WEAK_KDF_SIGN_IN"), kotlinConst("IDENTITY_MISMATCH")]) {
+      expect(s.endsWith("contact your admin."), s).toBe(true);
+    }
+    expect(errorsTs).not.toContain("contact your administrator");
   });
 });

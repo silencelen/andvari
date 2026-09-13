@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { VaultItem, VaultStore } from "../vault/store";
-import { fmtDay } from "./format";
+import { ago, fmtDay } from "./format";
 import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED } from "./errors";
 import { Announcer, Msg } from "./Msg";
 import { useCopy } from "./usecopy";
@@ -55,16 +55,12 @@ const VERDICTS: { result: string; label: string; hint: string }[] = [
   { result: "blocked", label: "Couldn't complete", hint: "MFA, a lockout or a captcha stopped the test." },
 ];
 
-/** "3 months ago" at day resolution — enough for a staleness column, and it never implies a
- *  precision the underlying client clock does not have. */
-function ago(ms: number | undefined, now: number): string {
-  if (ms === undefined) return "—";
-  const days = Math.max(0, Math.floor((now - ms) / 86_400_000));
-  if (days === 0) return "today";
-  if (days === 1) return "yesterday";
-  if (days < 60) return `${days} days ago`;
-  const months = Math.floor(days / 30);
-  return months < 24 ? `${months} months ago` : `${Math.floor(days / 365)} years ago`;
+/** H30: the sentence the run feeds its live region on every advance — the login's name AND its
+ *  position, because the verdict buttons keep their DOM place across record() → advance(), so a
+ *  screen-reader user whose focus never moved would otherwise answer for a login they were never
+ *  told about. Exported pure so staleness-run-a11y.test.ts pins the shape. */
+export function runPositionSentence(name: string, index: number, total: number): string {
+  return `Now checking ${name} · ${index + 1} of ${total}`;
 }
 
 function CheckCell({ row, now }: { row: StalenessRow; now: number }) {
@@ -104,6 +100,24 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
 
   const current = run ? items.find((it) => it.itemId === run.queue[run.index]) : undefined;
   const currentRow = current ? rows.find((r) => r.itemId === current.itemId) : undefined;
+
+  // H30 (audit 2026-09-13): the run used to advance SILENTLY. Two things made it so: nothing in the
+  // Announcer chain changed on an advance (setMsg(null) blanks it), and focus stayed on the verdict
+  // button just pressed while React swapped the heading to the next login — or, on start, the
+  // run-actions buttons were unmounted wholesale under the focused element and focus fell to
+  // <body>. So a screen-reader user recorded "Signed in" against logins they could not see. Fix,
+  // both legs: (1) a DEDICATED persistent live region carries the name + position sentence, and
+  // its text changes on every index change (the persistent-node mutation is what a polite region
+  // actually announces — Msg.tsx); it is separate from the outcome Announcer so a copy flash or a
+  // delete offer never masks the position. (2) the run head is a focus target (tabIndex -1) and
+  // takes focus whenever the run starts or advances, so the swap that unmounts the start buttons
+  // lands focus ON the card, and each verdict lands it on the next login's name.
+  const runNotice = current && currentRow && run ? runPositionSentence(currentRow.name, run.index, run.queue.length) : "";
+  const runHeadRef = useRef<HTMLDivElement>(null);
+  const runKey = run ? `${run.index}/${run.queue.join(",")}` : null;
+  useEffect(() => {
+    if (runKey !== null) runHeadRef.current?.focus();
+  }, [runKey]);
 
   const advance = () =>
     setRun((r) => {
@@ -199,7 +213,14 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
         <div className="sigil"><EmptySigil /></div>
         {snoozedCount > 0 ? (
           <>
-            <p>Every login here is snoozed — show them to unsnooze one early.</p>
+            {/* H123: ONE sentence with the Android twin (HealthScreen.kt's all-snoozed Empty),
+                pinned in staleness-empty-state-copy.test.ts. G31 fixed this empty state on both
+                clients in the same remediation and each lane wrote its own wording from the
+                feature description rather than from a pinned string — the exact drift the
+                predecessor audit named. The phone's sentence wins because it NAMES the control
+                the user has to operate ("Show snoozed", the label on the checkbox directly
+                below) instead of the vaguer "show them". */}
+            <p>Every login is snoozed right now — Show snoozed to see them or bring one back early.</p>
             <label className="inline-check">
               <input type="checkbox" checked={showSnoozed} onChange={(e) => setShowSnoozed(e.target.checked)} />
               Show snoozed
@@ -232,11 +253,17 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
       <Announcer
         text={wipeStuck ? CLIPBOARD_NOT_CLEARED : copyErr ? CLIPBOARD_FAILED : flash ? `${flash} copied` : offerSentence ? offerSentence : msg && msg.kind === "info" ? msg.text : ""}
       />
+      {/* H30: the run's position, on its own persistent region (see the note at runNotice). */}
+      <Announcer text={runNotice} />
 
       {offerDelete && (
         <div className="confirm-row">
           <span>{offerSentence}</span>
-          <button type="button" className="danger" disabled={busy} onClick={() => void removeGone(offerDelete)}>
+          {/* H50: the house destructive idiom (Vault's Confirm delete / Delete forever, Sharing's
+              Delete vault) — a ghost in the danger ink. This carried a bare `danger` class name, a class
+              defined nowhere, so the one destructive control in the row fell through to the UA's
+              grey system button with no red tone, no theme, and no focus-ring parity. */}
+          <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy} onClick={() => void removeGone(offerDelete)}>
             Move to Deleted items
           </button>
           <button type="button" className="ghost" onClick={() => setOfferDelete(null)}>Keep it</button>
@@ -245,7 +272,7 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
 
       {current && currentRow ? (
         <div className="run-card">
-          <div className="run-head">
+          <div className="run-head" ref={runHeadRef} tabIndex={-1}>
             <strong>{currentRow.name}</strong>
             <span className="muted"> · {run!.index + 1} of {run!.queue.length}</span>
           </div>

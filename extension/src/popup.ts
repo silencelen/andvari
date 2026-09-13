@@ -743,7 +743,10 @@ function totpChip(itemId: string): HTMLElement {
 }
 
 async function copyTotp(itemId: string, codeEl: HTMLElement): Promise<void> {
-  const r = await ask({ type: "totp", itemId });
+  // `forCopy` (H69, 2026-09-13 audit): this send is the user's click, not the ticker's render, so
+  // the SW counts it as a use of the item — the G37 rule desktop, Android and web already follow.
+  // tickTotp's poll deliberately omits the flag; see the messages.ts contract for why.
+  const r = await ask({ type: "totp", itemId, forCopy: true });
   if (!r?.ok || !r.code) return;
   if (await toClipboard(r.code)) {
     announce("One-time code copied"); // a11y 2d (the chip's "copied" text is aria-hidden)

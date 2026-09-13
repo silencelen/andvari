@@ -13,6 +13,7 @@ const base = {
   filling: false,
   isSignup: true,
   isNewPasswordField: true,
+  typedByUser: true,
 };
 
 describe("shouldAskReuse", () => {
@@ -50,6 +51,17 @@ describe("shouldAskReuse", () => {
 
   it("ignores an empty field", () => {
     assert.equal(shouldAskReuse({ ...base, value: "" }), false);
+  });
+
+  // H02 (2026-09-13 audit): a page can author the signup form, set the field's value and drive a
+  // TRUSTED focusout (focus(); blur()) — every other input to this decision is page-controlled.
+  // Without a real keystroke on the field the ask must not happen, or the unlocked vault is a
+  // password-membership oracle readable by hit-testing the toast. This is the pin that fails if
+  // the gate is ever dropped or reordered behind a page-controlled rule.
+  it("never asks about a value the user did not type (page-set value + forged trusted blur)", () => {
+    assert.equal(shouldAskReuse({ ...base, typedByUser: false }), false);
+    // …even when every page-controlled signal says "signup, new-password, fresh value".
+    assert.equal(shouldAskReuse({ ...base, typedByUser: false, lastAsked: "something else" }), false);
   });
 });
 

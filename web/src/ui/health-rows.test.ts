@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ItemDoc } from "../api/types";
 import type { VaultItem } from "../vault/store";
-import { healthRows } from "./Health";
+import { BREACH_SCAN_FAILED, BREACH_SCAN_INCOMPLETE, type BreachEntry, breachVerdict, healthRows } from "./Health";
 
 /**
  * bug-web--1 (polish audit 2026-07-27): Health's rows used to memoize on the identity-stable
@@ -138,5 +138,111 @@ describe("Health duplicates — the differs resolution keeps its promises on scr
   it("a dismissed group collapses to a quiet line with its Restore", () => {
     expect(healthTsx).toContain("Marked not duplicates");
     expect(healthTsx).toContain('onClick={() => void runDismiss(c, true)}');
+  });
+});
+
+/**
+ * H26 (audit 2026-09-13; G35's other half): the breach cache is keyed by itemId while it describes
+ * the PASSWORD. G35 made an ABSENT key render "—"; a CHANGED password kept the key and so kept the
+ * old verdict — a rotated password stayed red, and (worse) a green "none" survived an edit to a
+ * breached password. Each entry now carries the rev the scan saw and a verdict is reported only
+ * while the item still sits at it. Never a false "none".
+ */
+describe("breachVerdict — a verdict is only as current as the rev it was scanned at", () => {
+  const cache = (entries: [string, BreachEntry][]) => new Map<string, BreachEntry>(entries);
+
+  it("reports the count while the item is at the scanned rev (a real 'none' stays 'none')", () => {
+    const c = cache([["a", { count: 12345, rev: 3 }], ["b", { count: 0, rev: 1 }]]);
+    expect(breachVerdict(c, { itemId: "a", rev: 3 })).toBe(12345);
+    expect(breachVerdict(c, { itemId: "b", rev: 1 })).toBe(0);
+  });
+
+  it("an item EDITED since the scan (rev moved) is unscanned — the old count, red or green, is withdrawn", () => {
+    const c = cache([["a", { count: 12345, rev: 3 }], ["b", { count: 0, rev: 1 }]]);
+    expect(breachVerdict(c, { itemId: "a", rev: 4 }), "rotated a breached password").toBeUndefined();
+    expect(breachVerdict(c, { itemId: "b", rev: 2 }), "edited a clean one to who-knows-what").toBeUndefined();
+  });
+
+  it("G35 still holds: an absent key (added/restored since, or the range failed) and a null cache are unscanned", () => {
+    expect(breachVerdict(cache([["a", { count: 1, rev: 1 }]]), { itemId: "z", rev: 1 })).toBeUndefined();
+    expect(breachVerdict(null, { itemId: "a", rev: 1 })).toBeUndefined();
+  });
+
+  it("healthRows carries the rev the verdict is keyed on, so the scan and the row read the same number", () => {
+    const rows = healthRows([{ ...login("a", "hunter2"), rev: 7 }]);
+    expect(rows[0]!.rev).toBe(7);
+  });
+
+  it("the Health view derives every breach cell, the tile and the sort through breachVerdict (source pin)", () => {
+    const src = readFileSync(here("./Health.tsx"), "utf8");
+    expect(src).toContain("const count = breachVerdict(breachByItem, r);");
+    expect(src).toContain("rows.filter((r) => (breachVerdict(breachByItem, r) ?? 0) > 0).length");
+    expect(src).toContain("const n = (r: Row) => breachVerdict(breachByItem, r) ?? 0;");
+    // The scan writes the rev beside the count — without it every verdict is instantly stale.
+    // (H73 moved this pin: the count is no longer defaulted to 0, because a row whose range
+    // FAILED must be absent from the map rather than present at a fabricated zero.)
+    expect(src).toContain("{ count: result.get(r.password)!, rev: r.rev }");
+    // The pre-fix direct read is gone.
+    expect(src).not.toContain("breachByItem?.get(r.itemId)");
+  });
+});
+
+/**
+ * H73/H74 (audit 2026-09-13): web was the LAXER twin on both counts. It aborted the whole scan on
+ * the first range that failed — throwing away every verdict already earned, so a large vault on a
+ * flaky relay could never complete a scan on web while the phone completed the same one — and its
+ * failure sentence named "the HIBP relay", an internal the household cannot act on.
+ *
+ * Neither leg can be driven end to end here: `scan` is a closure inside the component and the web
+ * suite has no DOM/effects harness (the house pattern is renderToStaticMarkup, which runs no
+ * effects). So the CONTROL FLOW is pinned as source shape and the two sentences are pinned
+ * byte-equal against the Android original they were ported from — the drift this row is about is
+ * exactly what a byte-equality pin catches and a paraphrase test does not.
+ */
+describe("H73/H74 — the breach scan fails open per range and speaks the phone's words", () => {
+  const healthTsx = readFileSync(here("./Health.tsx"), "utf8");
+  const androidVm = readFileSync(
+    here("../../../app-android/src/main/kotlin/io/silencelen/andvari/app/AndvariViewModel.kt"),
+    "utf8",
+  );
+  /** Pull a Kotlin string literal by its opening words — the twin is the source of truth. */
+  const kotlinSentence = (starts: string): string => {
+    const m = androidVm.match(new RegExp('"(' + starts + '[^"]*)"'));
+    if (!m) throw new Error("Android twin no longer contains a sentence starting: " + starts);
+    return m[1]!;
+  };
+
+  it("the failure sentence is the Android twin's, byte for byte — no 'HIBP relay' internal", () => {
+    expect(BREACH_SCAN_FAILED).toBe(kotlinSentence("Breach scan failed"));
+    // The jargon survives only in the comment that records why it went.
+    expect(BREACH_SCAN_FAILED).not.toContain("HIBP");
+    expect(healthTsx.split("\n").filter((l) => l.includes("HIBP relay") && !l.trimStart().startsWith("*"))).toEqual([]);
+  });
+
+  it("the incomplete sentence is the Android twin's, byte for byte", () => {
+    expect(BREACH_SCAN_INCOMPLETE).toBe(kotlinSentence("Breach scan incomplete"));
+  });
+
+  it("both failure paths speak through the one constant — no hand-written copy left in the scan", () => {
+    const scan = healthTsx.slice(healthTsx.indexOf("const scan = async () =>"), healthTsx.indexOf("const weak = rows.filter"));
+    expect(scan).not.toMatch(/setScanErr\("[^"]/); // only setScanErr("") and setScanErr(BREACH_SCAN_FAILED)
+    expect(scan.match(/setScanErr\(BREACH_SCAN_FAILED\)/g)?.length).toBe(2); // all-failed + throw
+  });
+
+  it("a failed range is caught PER RANGE and only its passwords are dropped (source pin)", () => {
+    const scan = healthTsx.slice(healthTsx.indexOf("const scan = async () =>"), healthTsx.indexOf("const weak = rows.filter"));
+    // The await is inside a try of its own — one bad range no longer unwinds the whole loop.
+    expect(scan).toContain("body = await client.hibpRange(prefix);");
+    expect(scan).toContain("if (body === null) failedRanges++;");
+    // Rows whose range failed are ABSENT from the map, which breachVerdict reports as unscanned
+    // ("—"), never as a fabricated clean 0.
+    expect(scan).toContain("rows.filter((r) => result.has(r.password))");
+    // Every range failed is no scan at all: keep the previous map, say so, publish nothing.
+    expect(scan).toContain("if (failedRanges === byPrefix.size) {");
+  });
+
+  it("an incomplete scan's zero leaves the Breached tile neutral, never a green clean bill", () => {
+    expect(healthTsx).toContain("breached === null || (breached === 0 && scanIncomplete) ? undefined");
+    expect(healthTsx).toContain("setScanIncomplete(failedRanges > 0);");
   });
 });

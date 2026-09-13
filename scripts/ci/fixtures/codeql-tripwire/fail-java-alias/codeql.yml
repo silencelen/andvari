@@ -1,0 +1,19 @@
+# CodeQL accepts `java` as the language id for the java-kotlin extractor; the leg is just as empty.
+name: CodeQL
+on: { push: { branches: [main] } }
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: java
+            build-mode: none
+    steps:
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - uses: github/codeql-action/analyze@v4

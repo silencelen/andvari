@@ -4,7 +4,6 @@ import {
   PATTERN_WARNING,
   entropyProxyScore,
   estimateStrength,
-  hasPatternWeakness,
   masterPasswordHasNonAscii,
   meetsMasterPasswordFloor,
   patternWarning,
@@ -96,8 +95,11 @@ describe("pattern collapse (F31)", () => {
 
   it("warns only when the pattern is what makes it weak", () => {
     expect(patternWarning("Password1!Password1!")).toBe(PATTERN_WARNING);
-    expect(hasPatternWeakness("a".repeat(40))).toBe(true);
+    // H86: the two assertions that used to pin the deleted `hasPatternWeakness` boolean now
+    // pin the SHIPPED signal on the same inputs — the run collapses (warning fires) and the
+    // empty string is quiet. Mirrors core StrengthTest.patternWarning_*.
+    expect(patternWarning("a".repeat(40))).toBe(PATTERN_WARNING);
+    expect(patternWarning("correct-horse-battery-staple")).toBeNull();
     expect(patternWarning("")).toBeNull();
-    expect(hasPatternWeakness("")).toBe(false);
   });
 });

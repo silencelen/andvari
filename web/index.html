@@ -18,7 +18,16 @@
          frames before the bundle (and its tokens) arrives, so the values are inlined. -->
     <style>
       html { background: #14120e; }
-      .boot { display: flex; min-height: 100vh; min-height: 100dvh; align-items: center; justify-content: center; color: #a79c85; font: 15px/1.4 "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; letter-spacing: 0.04em; }
+      .boot { display: flex; flex-direction: column; gap: 14px; min-height: 100vh; min-height: 100dvh; align-items: center; justify-content: center; text-align: center; padding: 0 24px; color: #a79c85; font: 15px/1.4 "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; letter-spacing: 0.04em; }
+      /* H76 (audit 2026-09-13): the server now sends no-cache on this document and 404s a missing
+         hashed asset, so the strand this line answers is rare — but it is not impossible (a proxy,
+         an offline-ish cache, a genuinely slow first paint), and when it happens there is no bundle
+         running to say anything at all: the tab simply sits on "unsealing…" and the reader's first
+         hypothesis is that their vault is broken. One reload fixes every version of it, so say so.
+         CSS-only on purpose — the CSP bars inline JS (script-src 'self'), and a delayed reveal
+         needs no script. Hidden until it is true: 8 s is well past a cold parse of the bundle. */
+      .boot-stuck { max-width: 34em; font-size: 13px; opacity: 0; visibility: hidden; animation: boot-stuck 0s linear 8s forwards; }
+      @keyframes boot-stuck { to { opacity: 1; visibility: visible; } }
       @media (prefers-color-scheme: light) {
         html { background: #f4efe4; }
         .boot { color: #6b6047; }
@@ -39,7 +48,10 @@
     <div id="root">
       <!-- Boot placeholder over the blank first paint; createRoot clears the container,
            so React's first render sweeps this away. Copy mirrors App's loading phase. -->
-      <div class="boot">unsealing…</div>
+      <div class="boot">
+        <span>unsealing…</span>
+        <span class="boot-stuck">Still on this screen? Reload the page — that clears it.</span>
+      </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

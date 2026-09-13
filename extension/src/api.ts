@@ -47,6 +47,10 @@ export interface WireItem {
   deleted: boolean;
   formatVersion: number;
   blob: string | null;
+  /** Server write time (ms since epoch). Optional here because the extension never needed it
+   *  before H20: it stamps the "(conflict YYYY-MM-DD)" copy name from the DISPLACED version's
+   *  write day (web store.ts parity); absent ⇒ the materializer falls back to now. */
+  updatedAt?: number;
 }
 export interface WireVault {
   vaultId: string;
