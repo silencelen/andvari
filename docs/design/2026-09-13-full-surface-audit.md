@@ -1,8 +1,10 @@
 # Full-surface audit — every platform at 0.26.3
 
-**Status: REPORTED 2026-09-13 — remediation underway; §8 records closure as it lands.** As the two
-predecessors learned, a report becomes a liability the moment its subject moves, so the §5 "Plan"
-column is intent at report time and §8 is the record the tree actually supports.
+**Status: REMEDIATED 2026-09-13 — 102 of the 108 fix-plan rows landed on `main` in four commits after
+this report (not pushed; the owner's release-cadence call), plus one defect the fresh gate found
+(H139); the gate is green on a real execution and every fix was re-read adversarially. §8 is the
+closure record; the §5 "Plan" column is the intent at report time.** As the two predecessors learned,
+a report becomes a liability the moment its subject moves.
 
 - **Tree audited:** `39bf594` (tag `v0.26.3` — fleet 0.26.3, extension 0.26.0), 2026-09-12/13.
 - **Gate baseline:** `scripts/verify.sh` EXIT=0 at `39bf594` before a line was changed — web vitest
@@ -257,6 +259,7 @@ marks a regression of, or residue from, a previously-closed finding. Plan is the
 | H136 | low | polish | web | The web app ships an apple-touch-icon and theme-color but no web app manifest, so 'Add to Home screen' yields a bare shortcut with no name, icon, theme or standalone display | owner |
 | H137 | low | polish | web | There is no print stylesheet: a revealed password, the live TOTP code, card number and the whole Health table print as-is with Ctrl+P | owner |
 | H138 | low | polish | web, extension, app-desktop, docs | The brand mark ships in two geometries (14-unit inset stave on the tile icons, 18-unit wordmark stave in BrandSigil, the popup headers and the Android launcher) and the web appbar is the one header with no mark | owner |
+| H139 | medium | code-quality | web, extension, spec | The WebSocket client reported "open" on the 101 upgrade before the server had registered the socket with its notifier, so a rev bell for a change committed in that window rang nobody — found by the wave-3 gate's fresh e2e run under load, not by any lane; fixed on both clients (onOpen on the first echoed pong, spec 03 §6) | fix |
 
 ## 6. Did the 08-30 fixes hold?
 
@@ -351,13 +354,97 @@ saw, and should be read as *weaker corroboration* than the eight three-lens verd
 finding set. The remediation re-reads every medium at its call site before changing it, and the
 post-fix connectedness recheck is adversarial. The lows (85) are lane claims only.
 
-## 8. Closure
+## 8. Closure (2026-09-13)
 
-*Pending — updated as remediation lands.* Planned shape: file-disjoint module waves (extension, web,
-Android, desktop, core, server, spec/docs/scripts/CI), then the cross-cutting rows that touch twins
-(the sync wedge H03, the usage-ledger cluster H05/H33–H36/H79, URI matching H22, the vector and twin
-pins H42/H92/H93), then the missing regression tests (H41), then `scripts/verify.sh --rerun-tasks`, then
-an adversarial re-read of every "wire a helper" fix at its production call site.
+**Landed on `main` after the report commit `e947528`: `d2b2ad7` wave 1 · `a658d64` wave 2 · `e82ec73`
+wave 3 · `3077d83` extension parity for H139. Not pushed. Gate GREEN on a real execution
+(`gradlew --rerun-tasks`, 66/66 tasks executed, 0 UP-TO-DATE): core 525, server 233, desktop 120,
+tools 37, Android 172 + assembleDebug, web vitest 1236 passed / 9 skipped, extension 362, `e2e.sh`
+3/3 phases each with a passing test, doc-leak scan + self-test, PowerShell gate, lockfile gate.**
+
+- **Wave 1** — seven directory-owned lanes (extension, web, Android, desktop, core, server, spec/docs/
+  scripts) in parallel, chained into twelve parts; 70 rows landed with a pin per behaviour change.
+  Three rows correctly skipped: H24 on the natives (no admin surface exists) and H10 in core (no core
+  leg — the bounds belong at the desktop call sites, where they landed).
+- **Wave 2** — four cross-cutting clusters with exclusive file ownership across modules: sync/offline
+  (H03 H17 H18 H19 H38 H71), usage ledger (H05 H33–H36 H79 H88), URI matching (H22 H124), vectors and
+  twin pins (H42 H92 H93 H95 H114 H115), plus the two deferred documentation parts; 37 rows.
+- **Wave 3** — the cross-wave hand-offs (H92 core parse, H80 web zeroization twin, H111, H112, H33),
+  the H41 regression pins (five new `RegressionPins0262` suites, security controls first, red-when-
+  reverted where a seam exists), the gate run fresh, and then **an adversarial re-read of every fix
+  by eleven independent reviewers at its production call site: 49 findings, 0 disputed, 48 fixed,
+  1 deferred.** The re-read earned its cost: it found helpers built and never called (core
+  `passwordFillTargets`, `nativeSodiumFallbackCause`), legs that never landed (the extension is a
+  push client and had not learned the new `rejected` status; the PASSIVE_MSGS membership pin H01
+  asked for; the H02 typed-gesture mark was never consumed; the backup's attachment download was the
+  one busy leg still unbounded; `kdfSalt` was the one register field left unvalidated), one fix that
+  would have bricked an instance with an already-persisted non-KiB KDF policy (the server now heals it
+  on read), one that crossed a registrable domain (a UTS46-mapped spelling; `normalizeHost` now rejects
+  it and displays U-labels), and pins that pinned nothing. Gate 2 was green on its first fresh run.
+
+**Final disposition of the 108 fix rows: 102 fixed, 6 partial.** H19 (byte-bound batches landed; a
+plan-time "row too large to sync" import-report entry is an owner call); H44 (the web lock is bumped;
+exercising it needs an operator `npm ci` with `NODE_ENV` unset — R30); H47 (the watcher's log-of-record
+fix is committed in its mirror of record, deployment is an operator step); H104 (the same-bytes SUMS
+mechanism landed in `scripts/gh-release.sh`; re-uploading `SHA256SUMS-0.26.2.txt` with the .xpi digest
+is an owner action on a published release); H109 and H126 (their last leg is a CHANGELOG sentence,
+carried into the next release's entry below).
+
+**H139 — found by the fresh gate, not by any lane.** `scripts/e2e.sh` phase A failed under load: the
+web client reported the WebSocket "open" on the 101 upgrade, but the server registers the socket with
+its notifier only when the route body runs, so a bell for a change committed in that few-millisecond
+window rang nobody — and the notifier has no replay. Both clients now report open on the first echoed
+`pong`, which the server can only send after `notifier.register()` (spec 03 §6 amended; the
+extension's binding design doc amended in the same places; three red-when-reverted tests per client).
+Twenty-six lanes read this code and none saw it; running the drill did. That is the argument for the
+CI test job (H39) in one paragraph.
+
+**Owner decisions (§4) are unchanged: 25 rows.** Operator steps before the next cut, in order:
+1. `cd web && NODE_ENV=development npm ci --ignore-scripts && npx vitest run && npm run build` — the
+   only unverified change in the tree (R30, the browserslist/caniuse lock bump).
+2. Deploy the manifest watcher from its mirror of record (H47); close Dependabot PR #56 as superseded
+   and confirm Scorecard alert #23 clears on the next run (H44); re-upload the 0.26.2 SUMS with the .xpi
+   line (H104); flip the ghcr package public or stop calling it public (H43).
+3. On the phone: the TalkBack smokes for H09, H31, H32 (overlay unlock then a second fill; breach-scan
+   and run-finished announcements; the "Refresh" custom action in the Actions menu).
+4. At the cut: the `signandvari` read-back (H110) and `scripts/gh-release.sh` (H102) run live for the
+   first time — both are proven only by parse and dry-run; record the image digest in the release body
+   (H99); the next CHANGELOG entry (draft below) carries H109/H126's sentences.
+
+**Verification stance, stated plainly.** Everything above was executed, not inferred: two fresh gate
+runs with per-suite counts, every re-read finding re-tested by the closing agent, the extension parity
+fix proven red-when-reverted. What is *not* proven: H110 and H102 (dry-run only), the device smokes,
+and R30. The single-lens verification debt of §7 was paid by the eleven-reviewer re-read: of 49
+findings it raised, none was disputed by the closing agent.
+
+**Draft changelog for the next cut** (house voice; the owner sets the version):
+
+> *A full audit of every platform, the third, found no crypto defect and a long list of the same shape
+> as last time: a fix that shipped its first leg and not its last. The serious ones: a browser page
+> could keep the extension unlocked and probe the vault for a password; one bad attachment reference
+> could stop a device syncing until you signed out; a change-password form saved the old password
+> instead of the new one; and a change made in the same instant a device reconnected could go
+> unnoticed until the next one. All fixed, on every client, with a test for each.*
+>
+> - **Extension:** a page can no longer hold the vault unlocked or test passwords against it; the
+>   reuse check now needs you to actually type. Card updates that conflict keep both versions.
+> - **Sync:** a stale attachment reference is refused for that one item instead of blocking
+>   everything behind it; big imports are sent in bounded batches; a change made while a device was
+>   reconnecting is caught up on every client.
+> - **Autofill:** change-password forms save the new password on the phone and in the extension; the
+>   phone no longer fills the old password into the new-password box; sites with international names
+>   match the way browsers spell them.
+> - **Offline saves** on the phone and desktop now appear in the list immediately and the message is
+>   true for the kind of vault you have; the "last used" ledger never overwrites the household's copy
+>   with one device's guess, and is trimmed after every sync.
+> - **Honesty and polish:** the desktop app stops at start if its encryption library will not load and
+>   says so, instead of "Sign-in failed"; admin device counts distinguish signed-out from live;
+>   diagnostic logs are owner-only, bounded and documented (`~/.andvari-desktop/diagnostic.log` is safe
+>   to delete); dozens of copy, contrast, focus and screen-reader fixes across all four clients.
+> - **Under the hood:** master-key material is wiped after use on web as on the natives; the server
+>   heals a mis-sized KDF policy and bounds every registration field; the doc-leak, PowerShell and
+>   lockfile gates got fixtures; 0.26.2's fixes got the regression tests they shipped without. Full
+>   report: `docs/design/2026-09-13-full-surface-audit.md`.
 
 ## 9. What this audit says about the next one
 
