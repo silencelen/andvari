@@ -39,8 +39,10 @@ plus accept-SW-death as the tolerated degradation.** Rationale (attack log):
 - Chrome 116+ extends SW lifetime on *JS-visible* WS send/receive activity within the 30 s idle
   window. The server's 30 s protocol pings are handled in the network process (never surface as
   `onmessage`) → NOT sufficient alone; relying on them risks SW death between pings.
-- Client sends `"ping"` every 20 s (< 30 s idle window, < 60 s Ktor `timeoutMillis`); the server's
-  existing echo answers `"pong"` — both directions JS-visible, timer reset guaranteed.
+- Client sends `"ping"` every 20 s (< 30 s idle window, < 60 s Ktor `timeoutMillis`), plus one
+  immediately on open; the server's existing echo answers `"pong"` — both directions JS-visible,
+  timer reset guaranteed. That first echo is also the REGISTRATION PROOF the catch-up waits on
+  (§4, amended 2026-09-13) — the on-open probe is what makes it arrive in ~1 RTT instead of ≤20 s.
 - `manifest.json` has `minimum_chrome_version: "109"`; on 109–115 (and Firefox event-page
   suspension) WS activity does NOT extend SW life → SW dies ~30 s idle, socket drops, and the
   design degrades to the 5-min alarm floor. **Do NOT bump minimum_chrome_version.**
@@ -131,9 +133,18 @@ because the handle is closed and `ensureSocket` guards on `session`).
 `{"type":"rev"}` → **trailing-debounced (500 ms) call of the EXISTING `resync()`** — never a new
 decrypt/sync path. The debounce lives INSIDE `events.ts` (testable under node); `onBell` in glue is
 exactly `() => void resync()`.
-- `onopen` ALSO fires `onBell` (same debounce channel): catch-up for bells missed while down —
-  parity with web `events()` `onOpen` → `syncNow()` (no server-side replay). The redundant
-  post-unlock first-open sync is accepted: it closes the unlock-sync→socket-open missed-bell window.
+- The FIRST `"pong"` of each socket ALSO fires `onBell` (same debounce channel): catch-up for bells
+  missed while down — parity with web `events()` `onOpen` → `syncNow()` (no server-side replay). The
+  redundant post-unlock first-open sync is accepted: it closes the unlock-sync→socket-open
+  missed-bell window.
+  **AMENDED 2026-09-13 (wave-3 gate, spec 03 §6): the catch-up hangs off the first `"pong"`, not off
+  `onopen`.** As designed it rode the 101 — but the server calls `notifier.register()` only when the
+  route handler body runs, a few ms after the upgrade, and the notifier has no replay: a catch-up
+  pull fired on the 101 can complete just before a change commits into that window, and that
+  change's bell reaches nobody (the E2E gate reproduced it against the WEB twin under load). The
+  echo loop runs after `register()`, so the first `"pong"` PROVES the bell can reach this socket.
+  `onopen` therefore only resets backoff and sends the probe ping; a socket that upgraded is healthy
+  transport, registered or not.
 - The frame's `rev` payload is IGNORED (no cursor state; `api.sync(0)` full pull stays). Self-echo
   after our own put = one extra debounced sync — harmless; `resync()` already yields to
   `writesInFlight` and re-checks it after the await.
@@ -149,7 +160,7 @@ The `"resync"` alarm STAYS at `RESYNC_PERIOD_MIN = 5` (do not shorten; do not re
 - Socket up (Chrome 116+, unlocked): peer edit → bell → ≤0.5 s debounce + sync RTT ≈ **1–2 s**.
 - Socket down / SW dead / Chrome ≤115 / Firefox suspended: **≤5 min** (alarm tick syncs AND revives
   the socket via T3).
-- Every socket (re)open: immediate catch-up sync (§4).
+- Every socket (re)open: immediate catch-up sync on its registration `"pong"` (§4, as amended).
 - Unlock: immediate full sync (existing) + socket up within ~1 s.
 
 ## 6. `extension/src/events.ts` — the new module (chrome-free, injectable)
@@ -192,10 +203,12 @@ Binding behavior (web `client.ts events()` parity except where stated):
    must abort — web `if (closed) return` parity).
 2. Mint result: `null` → return (no timer, no socket; a later `kick()` starts a fresh cycle).
    Throw → `scheduleReconnect()`. Ticket → `makeSocket(wsUrl + "?ticket=" + encodeURIComponent(t))`.
-3. `onopen`: `attempts = 0`; start keepalive `setInterval` — `send("ping")` iff `readyState === 1`;
-   `scheduleBell()`.
-4. `onmessage`: `JSON.parse` inside try/catch (the `"pong"` echo and any garbage are silently
-   ignored — web parity). `type === "rev"` → `scheduleBell()`. `type === "revoked"` → set `closed`,
+3. `onopen`: `attempts = 0`; send the registration probe `"ping"` (try/catch — a socket that cannot
+   send is about to close); start keepalive `setInterval` — `send("ping")` iff `readyState === 1`.
+   NO `scheduleBell()` here (amended 2026-09-13, §4).
+4. `onmessage`: `"pong"` → the registration proof; the FIRST one per socket calls `scheduleBell()`
+   (the catch-up), later ones are no-ops. Everything else: `JSON.parse` inside try/catch (garbage is
+   silently ignored — web parity). `type === "rev"` → `scheduleBell()`. `type === "revoked"` → set `closed`,
    clear ALL timers, close socket, fire `onRevoked()` exactly once. No reconnect ever follows a
    revoked frame (the server closes right after — `Notifier.notifyRevokedDevice`).
 5. `onclose`: clear keepalive; drop the socket ref only if it is still the current one
@@ -245,12 +258,18 @@ delays, hand-rolled `WsLike` fake):
 - E6 mint throw: reconnect timer scheduled.
 - E7 revoked frame: `onRevoked` fired exactly once; socket closed; no timer; subsequent onclose
   schedules nothing.
-- E8 bell debounce: 3 rev frames inside the window → exactly 1 `onBell` after 500 ms; `onopen`
-  also produces a (debounced) `onBell`.
-- E9 keepalive: after open, advancing 20 s intervals sends `"ping"` each tick; a `"pong"` text
-  frame is ignored (no onBell/onRevoked/throw); pings stop after close/onclose.
+- E8 bell debounce: 3 rev frames inside the window → exactly 1 `onBell` after 500 ms; the
+  registration `"pong"` also produces a (debounced) `onBell`.
+- E9 keepalive: the probe `"ping"` goes out on open, then advancing 20 s intervals send `"ping"`
+  each tick (the probe is an extra send at t=0, NOT a shift of the cadence); a later `"pong"` is
+  inert (no second onBell, no onRevoked, no throw); pings stop after close/onclose.
 - E10 `close()`: idempotent; clears bell debounce (a pending bell never fires); late socket
-  callbacks are no-ops.
+  callbacks are no-ops (a late `onopen` sends no second probe).
+- E11–E13 (added 2026-09-13, §4 amendment — twins of web `client.events.test.ts`): the 101 alone
+  rings NO catch-up and the first `"pong"` rings exactly one, once per socket (E11); a rev frame
+  that arrives before the `"pong"` is still delivered — the proof gates the catch-up only, and a rev
+  is not itself a proof (E12); a reconnected socket re-proves registration, carrying no credit from
+  the socket it replaced (E13).
 
 **Extend `extension/src/api.test.ts`**: one test — `eventsTicket()` POSTs
 `/api/v1/events/ticket` with the Bearer + `X-Andvari-Client` headers and returns the parsed body.

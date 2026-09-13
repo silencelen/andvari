@@ -7,9 +7,10 @@
  * Frames are server→client only ({"type":"rev"} / {"type":"revoked"}); the bell triggers the
  * caller's EXISTING pull via onBell — this module never sees vault data. Auth = a single-use
  * ~30 s ticket minted per connect attempt (mintTicket); the ticket lives only inside one attempt
- * and is never stored. The 20 s app-level "ping" (server echoes "pong") keeps the WS traffic
+ * and is never stored. The app-level "ping" (server echoes "pong") keeps the WS traffic
  * JS-visible so Chrome 116+ extends the SW's life; on browsers that don't, the SW dies and the
- * caller's alarm-floor triggers reconnect on the next wake — never an error state.
+ * caller's alarm-floor triggers reconnect on the next wake — never an error state. That same echo
+ * is the REGISTRATION PROOF the missed-bell catch-up waits on (spec 03 §6) — see sock.onopen.
  */
 
 export interface WsLike {
@@ -29,7 +30,9 @@ export interface EventsDeps {
    *  A throw = transient (offline / 5xx) → jittered backoff. */
   mintTicket(): Promise<string | null>;
   makeSocket(url: string): WsLike;
-  /** Debounced dirty signal — fired on open (missed-bell catch-up) and on every rev frame. */
+  /** Debounced dirty signal — fired on the first "pong" of each socket (the missed-bell catch-up,
+   *  which needs a REGISTERED socket, not merely an upgraded one — see sock.onopen) and on every
+   *  rev frame. */
   onBell(): void;
   /** Explicit {"type":"revoked"} frame ONLY — never fired for mint failures or drops. */
   onRevoked(): void;
@@ -114,23 +117,49 @@ export function startEvents(deps: EventsDeps): EventsHandle {
       if (ticket === null) return; // definitive auth refusal — stop the cycle, no timer
       const sock = deps.makeSocket(deps.wsUrl + "?ticket=" + encodeURIComponent(ticket));
       ws = sock;
+      let registered = false; // per socket: a reconnect must prove ITSELF (web client.ts parity)
       sock.onopen = () => {
         if (closed || ws !== sock) return;
         attempts = 0; // healthy again — future drops restart the backoff from 1 s
+        // The 101 is transport, NOT registration (gate fix, audit 2026-09-13 wave 3; spec 03 §6,
+        // and the web client.ts events() twin fixed in the same pass). `onopen` fires on the
+        // upgrade, but the server registers the socket with its notifier only when the route
+        // handler body runs a few ms later — and the notifier has no replay. A catch-up pull
+        // fired here can therefore finish just before a change commits into that window, and
+        // that change's bell rings nobody: the vault stays stale until some unrelated later
+        // bell. So this is only a PROBE — the server's echo loop starts after register(), so
+        // the first "pong" proves the bell can reach us, and the catch-up runs there instead.
+        // Backoff reset stays on the 101: a socket that upgraded is healthy transport,
+        // registered or not. If a server never echoed (none does — the echo is spec 03 §6),
+        // the extension would degrade to the 5-min resync alarm floor, never to an error.
+        try {
+          sock.send("ping");
+        } catch {
+          /* a socket that cannot send is about to close; the paired onclose reconnects */
+        }
         // App-level keepalive: JS-visible send/receive resets Chrome's SW idle timer (the
-        // server's protocol pings never surface to JS, so they cannot). Server echoes "pong".
+        // server's protocol pings never surface to JS, so they cannot). Cadence unchanged —
+        // the probe above is an extra send at t=0, not a shift of this interval.
         keepaliveTimer = setInterval(() => {
           if (sock.readyState === 1) sock.send("ping");
         }, keepaliveMs);
-        scheduleBell(); // catch-up: bells missed while down (web onOpen → syncNow parity)
       };
       sock.onmessage = (ev) => {
         if (closed) return;
+        if (String(ev.data) === "pong") {
+          // Registration proof (see onopen). Exactly once per socket: the keepalive echoes that
+          // follow are the plain no-ops they always were, and a reconnect starts over at false.
+          if (!registered) {
+            registered = true;
+            scheduleBell(); // catch-up: bells missed while down, now that one can reach us
+          }
+          return;
+        }
         let type: unknown;
         try {
           type = (JSON.parse(String(ev.data)) as { type?: unknown }).type;
         } catch {
-          return; // the "pong" echo and any garbage — silently ignored (web parity)
+          return; // garbage — silently ignored (web parity)
         }
         if (type === "rev") scheduleBell(); // payload rev is ignored — the pull is a full sync(0)
         else if (type === "revoked") {
