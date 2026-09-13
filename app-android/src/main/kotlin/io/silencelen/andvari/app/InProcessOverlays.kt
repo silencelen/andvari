@@ -49,10 +49,21 @@ object InProcessOverlays {
     @Volatile
     private var lastEventWasOverlayStop = false
 
+    /** R12: the start side. A process ON_START caused by an overlay coming forward is not "the
+     *  user is back in the app" either — a deferred background lock (H08) must survive it. */
+    @Volatile
+    private var lastStartWasOverlay = false
+
     fun isOverlay(activity: Activity): Boolean = activity.javaClass.name in OVERLAY_ACTIVITIES
 
-    /** Any activity started: whatever stops next decides the next process ON_STOP. */
-    fun noteStarted() { lastEventWasOverlayStop = false }
+    /** Any activity started: whatever stops next decides the next process ON_STOP, and
+     *  [isOverlay] says whether the start itself was an overlay's (R12). Application callbacks
+     *  run inside Activity.onStart, ahead of ProcessLifecycleOwner's ReportFragment / post-start
+     *  dispatch, so the verdict is in place before the process ON_START observer reads it. */
+    fun noteStarted(isOverlay: Boolean) {
+        lastEventWasOverlayStop = false
+        lastStartWasOverlay = isOverlay
+    }
 
     /** An activity stopped; [isOverlay] says whether it was one of the three overlays. */
     fun noteStopped(isOverlay: Boolean) { lastEventWasOverlayStop = isOverlay }
@@ -60,10 +71,13 @@ object InProcessOverlays {
     /** True when the process ON_STOP being handled was caused by an overlay closing. */
     fun lastStopWasOverlay(): Boolean = lastEventWasOverlayStop
 
+    /** True when the process ON_START being handled was caused by an overlay coming forward. */
+    fun lastStartWasOverlay(): Boolean = lastStartWasOverlay
+
     /** Register once from [AndvariApplication.onCreate] — before any Activity exists. */
     fun install(app: Application) {
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
-            override fun onActivityStarted(activity: Activity) = noteStarted()
+            override fun onActivityStarted(activity: Activity) = noteStarted(isOverlay(activity))
             override fun onActivityStopped(activity: Activity) = noteStopped(isOverlay(activity))
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
             override fun onActivityResumed(activity: Activity) {}

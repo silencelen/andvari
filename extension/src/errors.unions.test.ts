@@ -129,7 +129,7 @@ test("the parser reads whole unions, past trailing comments and line breaks", ()
   // union spans six lines. A truncating parser reports 1 member here and then "passes" forever.
   assert.deepEqual(seam.get("FillFailCode"), ["locked", "not_allowed", "no_form", "no_fields", "no_secret", "unreachable"]);
   assert.equal(seam.get("UnlockCode")?.length, 13); // multi-line + commented
-  assert.deepEqual(seam.get("SaveErrorCode"), ["locked", "conflict", "failed"]); // single-line
+  assert.deepEqual(seam.get("SaveErrorCode"), ["locked", "conflict", "rejected", "failed"]); // single-line (H03/R37 added `rejected`)
   // Object-shaped unions (Req/TabMsg) and generic conditionals (Res) are not string unions and
   // must not leak into the comparison set as truncated garbage.
   assert.equal(seam.has("Req"), false);

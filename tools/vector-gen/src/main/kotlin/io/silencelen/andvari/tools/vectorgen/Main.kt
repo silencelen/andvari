@@ -361,6 +361,14 @@ private fun sharedGrant(): JsonObject = buildJsonObject {
         put("vkLen", shortVk.size)
         put("sealedB64", b64(SharedGrant.seal(crypto, member.publicKey, vaultId, shortVk)))
     }
+    // A seal under the RIGHT vaultId with a 32-byte vk whose payload carries "v":2 — open MUST
+    // reject on the version (recheck R48: spec 01 §6 lists three recipient checks and the corpus
+    // graded two). Sealed by hand: canonicalPayload only ever writes v:1, which is the point.
+    putJsonObject("rejectVersion") {
+        put("expectedVaultId", vaultId)
+        put("v", 2)
+        put("sealedB64", b64(crypto.sealTo(member.publicKey, """{"v":2,"vaultId":"$vaultId","vk":"${b64(vk)}"}""".encodeToByteArray())))
+    }
 }
 
 /** spec 06 — CSV import. Expectations are produced by the :core reference impl. */

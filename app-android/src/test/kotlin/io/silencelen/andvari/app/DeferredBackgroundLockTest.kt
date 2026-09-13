@@ -32,9 +32,22 @@ class DeferredBackgroundLockTest {
         val d = DeferredBackgroundLock()
         d.left()
         d.defer()
-        d.returned()
+        d.returned(startedByOverlay = false)
         assertFalse(d.isPending)
         assertFalse(d.takeIfDue(opInProgress = false))
+    }
+
+    /** R12: ProcessLifecycleOwner's ON_START fires for ANY activity in the process — including the
+     *  autofill overlays H09 ruled are not "the app". An overlay coming forward must not void the
+     *  lock the user earned by leaving: the op ends, the lock still fires. */
+    @Test
+    fun anOverlayWakingTheProcessDoesNotVoidTheDeferredLock() {
+        val d = DeferredBackgroundLock()
+        d.left()
+        d.defer()
+        d.returned(startedByOverlay = true)
+        assertTrue(d.isPending, "still requested — the user is in a browser, not back here")
+        assertTrue(d.takeIfDue(opInProgress = false), "op ended while the overlay is up — fire")
     }
 
     /** The choke point asks on EVERY op transition — with nothing deferred, it must stay quiet. */
@@ -42,7 +55,7 @@ class DeferredBackgroundLockTest {
     fun anOpEndingInTheForegroundNeverLocks() {
         val d = DeferredBackgroundLock()
         assertFalse(d.takeIfDue(opInProgress = false))
-        d.left(); d.returned()
+        d.left(); d.returned(startedByOverlay = false)
         assertFalse(d.takeIfDue(opInProgress = false))
     }
 

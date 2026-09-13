@@ -94,6 +94,28 @@ internal fun requireKdfMemKib(p: KdfParams) {
 }
 
 /**
+ * Recheck R25: the refusal above only guards NEW writes. An instance that persisted a non-KiB
+ * policy before H16 (the very instance the row was written about) hands that value to every
+ * client via /client-policy; they enrol / change password / KDF-upgrade with it, and the new
+ * refusal then bricks all three paths. Heal it on READ instead of only refusing: floor to the
+ * KiB the value already meant — `memBytes / 1024 * 1024` is byte-identical to what libsodium's
+ * `memlimit / 1024` computed for every key ever derived under it, so no derived key changes and
+ * no user is re-keyed; the extension's twin floors the same way. The stored row is left as-is
+ * (the next admin PUT replaces it under the rule); only what the server SERVES is healed.
+ */
+/** R26: base64url, at most 32 raw bytes (16 is the only size clients accept; the rest is headroom). */
+internal fun requireKdfSaltB64(value: String) {
+    val ok = value.isNotEmpty() && value.length <= 32 * 4 / 3 + 4 &&
+        value.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }
+    if (!ok) throw BadRequest("bad_kdf_salt")
+}
+
+internal fun healKdfMemKib(p: ClientPolicy): ClientPolicy {
+    val mem = p.kdfParams.memBytes
+    return if (mem % 1024L == 0L) p else p.copy(kdfParams = p.kdfParams.copy(memBytes = mem / 1024L * 1024L))
+}
+
+/**
  * Business logic — decoupled from ktor so integration tests drive it directly and
  * routes stay thin. Emits (userIds, rev) sync notifications through [onChange] which
  * the app layer forwards to the [Notifier].
@@ -154,7 +176,7 @@ class Service(
             // Re-check under the lock: a writer may have invalidated, or another reader published,
             // while this thread queued for it.
             cachedStoredPolicy
-                ?: (repo.policyJsonOn(c)?.let { json.decodeFromString(ClientPolicy.serializer(), it) } ?: ClientPolicy())
+                ?: (repo.policyJsonOn(c)?.let { healKdfMemKib(json.decodeFromString(ClientPolicy.serializer(), it)) } ?: ClientPolicy())
                     .also { cachedStoredPolicy = it }
         }
         return stored.copy(
@@ -260,6 +282,12 @@ class Service(
         requireB64(req.wrappedUvk, 1024, "wrapped_uvk")
         requireB64(req.identityPub, 64, "identity_pub")
         requireB64(req.encryptedIdentitySeed, 1024, "encrypted_identity_seed")
+        // Recheck R26: the ONE field here echoed to an UNAUTHENTICATED caller (prelogin returns it
+        // for any known email) and the one every client asserts is exactly 16 bytes (core
+        // Keys.masterKey's `require(kdfSalt.size == SALT_BYTES)`) — a junk or oversized salt is
+        // otherwise stored and then thrown at every client's KDF step forever. 16 raw bytes is
+        // 22 base64url chars; the 32-byte cap is additive headroom, not a second format.
+        requireKdfSalt(req.kdfSalt)
         val displayName = requireBoundedText(req.displayName, "display_name")
 
         val tokenHash = ServerCrypto.hashToken(req.inviteToken)
@@ -543,6 +571,7 @@ class Service(
             throw Unauthorized()
         }
         requireKdfFloor(req.newKdfParams)
+        requireKdfSalt(req.newKdfSalt) // R26: same bound as register — the salt is served to prelogin
         repo.db.tx { c ->
             c.exec(
                 "UPDATE users SET verifier=?, kdfSalt=?, kdfParams=?, wrappedUvk=?, mustChangePassword=0 WHERE userId=?",
@@ -612,6 +641,7 @@ class Service(
         // The ticket is the sole authorization: single-use (ConcurrentHashMap.remove) + userId-bound.
         val userId = recoveryTickets.redeem(req.recoveryTicket) ?: throw Unauthorized("invalid_ticket")
         requireKdfFloor(req.newKdfParams)
+        requireKdfSalt(req.newKdfSalt) // R26
         repo.db.tx { c ->
             val status = c.queryOne("SELECT status FROM users WHERE userId=?", userId) { it.getString(1) }
                 ?: throw BadRequest("no_such_user")
@@ -1130,6 +1160,10 @@ class Service(
         if (!isB64(value, maxBytes)) throw BadRequest("bad_$field")
         return value
     }
+
+    /** R26: the KDF salt bound shared by every path that persists one (register, password change,
+     *  self-recovery commit here; the admin recovery upload in [AdminService]). */
+    private fun requireKdfSalt(value: String) { requireKdfSaltB64(value) }
 
     /**
      * H62: the bound for client-chosen FREE TEXT the server persists and other people's screens

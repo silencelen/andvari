@@ -1,5 +1,5 @@
 {
-  "comment": "IDN / A-label canonicalization vectors (spec 02 §3.1 Normalization, amended 2026-09-13 — audit H22). Runs on ALL THREE surfaces (core jvmTest, web vitest, extension node harness). `normalize` pins normalizeHost's OUTPUT (the A-label the engines must agree on byte-for-byte — expected values were produced by an independent oracle, WHATWG `new URL().hostname`, non-transitional UTS46); `match` pins the outcome with the REAL PSL resolver. One case per rule: IDN host, mixed case, trailing dot, www., port, userinfo, already-punycoded, decomposed (NFC), non-Latin scripts, the ß deviation (non-transitional), the Arabic-Indic digit host urimatch.json already freezes, and the empty-label reject surviving unchanged. Existing files stay byte-frozen: urimatch-etld1.json's `münchen.de → unknown` is a RESOLVER vector (Psl.resolve on a raw U-label) and is deliberately unchanged — canonicalization happens in normalizeHost, before the resolver ever sees the host.",
+  "comment": "IDN / A-label canonicalization vectors (spec 02 §3.1 Normalization, amended 2026-09-13 — audit H22). Runs on ALL THREE surfaces (core jvmTest, web vitest, extension node harness). `normalize` pins normalizeHost's OUTPUT (the A-label the engines must agree on byte-for-byte — expected values were produced by an independent oracle, WHATWG `new URL().hostname`, non-transitional UTS46); `match` pins the outcome with the REAL PSL resolver. One case per rule: IDN host, mixed case, trailing dot, www., port, userinfo, already-punycoded, decomposed (NFC), non-Latin scripts, the ß deviation (non-transitional), the Arabic-Indic digit host urimatch.json already freezes, and the empty-label reject surviving unchanged, and (R44) the U+1E9E capital sharp s REJECTED outright: lowercasing maps it to ß where UTS46 maps it to 'ss', so a saved `straẞe.de` would otherwise canonicalize to `xn--strae-oqa.de` (straße.de) — a different registrable domain from the `strasse.de` the browser reports — and fill across origins; the paired `match` case pins that it never does, beside the genuine straße.de match. Existing files stay byte-frozen: urimatch-etld1.json's `münchen.de → unknown` is a RESOLVER vector (Psl.resolve on a raw U-label) and is deliberately unchanged — canonicalization happens in normalizeHost, before the resolver ever sees the host.",
   "normalize": [
     { "input": "https://bücher.de/login", "expected": "xn--bcher-kva.de" },
     { "input": "BÜCHER.DE", "expected": "xn--bcher-kva.de" },
@@ -18,7 +18,9 @@
     { "input": "١.٢.٣.٤", "expected": "xn--9hb.xn--bib.xn--cib.xn--dib" },
     { "input": "https://[2001:db8::1]/", "expected": "2001:db8::1" },
     { "input": "https://bü..cher.de", "expected": null },
-    { "input": "https://.bücher.de", "expected": null }
+    { "input": "https://.bücher.de", "expected": null },
+    { "input": "straẞe.de", "expected": null },
+    { "input": "https://STRAẞE.DE/login", "expected": null }
   ],
   "match": [
     { "savedUri": "https://bücher.de", "webHost": "xn--bcher-kva.de", "packageName": "com.android.chrome", "expected": true },
@@ -37,6 +39,8 @@
     { "savedUri": "https://bücher.de", "webHost": "buecher.de", "packageName": "com.android.chrome", "expected": false },
     { "savedUri": "https://bücher.de", "webHost": "xn--bcher-kva.com", "packageName": "com.android.chrome", "expected": false },
     { "savedUri": "https://bücher.de", "webHost": null, "packageName": "com.android.chrome", "expected": false },
-    { "savedUri": "https://bü..cher.de", "webHost": "xn--bcher-kva.de", "packageName": "com.android.chrome", "expected": false }
+    { "savedUri": "https://bü..cher.de", "webHost": "xn--bcher-kva.de", "packageName": "com.android.chrome", "expected": false },
+    { "savedUri": "https://straẞe.de", "webHost": "xn--strae-oqa.de", "packageName": "com.android.chrome", "expected": false },
+    { "savedUri": "https://straße.de", "webHost": "xn--strae-oqa.de", "packageName": "com.android.chrome", "expected": true }
   ]
 }

@@ -208,7 +208,7 @@ export type UnlockCode =
 
 /** Save-failure code for a resolved pending save — mapped to copy by the surface (never the raw
  *  SW error string, which used to leak "locked"/"save failed (conflict)" into the banner). */
-export type SaveErrorCode = "locked" | "conflict" | "failed";
+export type SaveErrorCode = "locked" | "conflict" | "rejected" | "failed";
 
 /** TOTP-add failure code (setTotp / addTotpFromPage, design 2026-08-12) — mapped to copy by the
  *  surface. `exists` = the add-only contract refused a replace; `not_allowed` = wrong sender or

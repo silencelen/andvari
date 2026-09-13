@@ -88,7 +88,9 @@ import kotlinx.coroutines.withContext
  * here too.
  */
 internal fun launderUntrustedCapture(raw: SavedCredentials, trusted: Boolean): SavedCredentials =
-    if (trusted) raw else raw.copy(webDomain = null, card = raw.card?.copy(webDomain = null))
+    // webScheme (H124) is the third domain-bearing claim this KDoc foresaw (R45): an untrusted
+    // caller's "http" must not survive to shape the stored uri any more than its host may.
+    if (trusted) raw else raw.copy(webDomain = null, webScheme = null, card = raw.card?.copy(webDomain = null))
 
 /**
  * What the unlock prompt says it is unlocking FOR ("a card & login for github.com"). File-level

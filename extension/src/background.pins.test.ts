@@ -129,16 +129,31 @@ test("H90 — the TOTP challenge stays MEMORY-ONLY: no part of it reaches the se
 // ---- H33 / H35 / H05: the usage-ledger seams (the leaf planFlush is behaviour-tested in usage.test.ts;
 // these pin that the SW CALLS it and that the teardown flush is awaited before the tokens go) ----
 
-test("H33 — doLock AWAITS the bounded usage flush BEFORE dropping the session and the tokens", () => {
+test("H33/R43 — doLock captures the flush, drops the session AT ONCE, and awaits the bound before the tokens go", () => {
   const lock = spanOf(bg, "async function doLock(", "async function doSignOut(");
-  const flush = "await Promise.race([flushUsage(), delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);";
-  assert.ok(lock.includes(flush), "the lock-path flush must be awaited, bounded by TEARDOWN_FLUSH_TIMEOUT_MS");
+  const capture = "const teardownFlush = flushUsageForTeardown();";
+  const awaited = "await Promise.race([teardownFlush, delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);";
+  const drop = "session = null;";
+  const forget = "api.setTokens(null, null);";
+  for (const anchor of [capture, awaited, drop, forget]) assert.ok(lock.includes(anchor), `doLock anchor missing: ${anchor}`);
   // The old `void flushUsage()` dispatched the GET with a token and issued the PUT after
   // api.setTokens(null, null) had emptied the header — 401, dropped, not re-armed. A bare `void`
   // reintroduces exactly that race.
   assert.ok(!/^\s*void flushUsage\(\);/m.test(lock), "the lock-path flush must not be fire-and-forget");
-  assert.ok(lock.indexOf(flush) < lock.indexOf("session = null;"), "flush before the session drops (flushUsage reads it)");
-  assert.ok(lock.indexOf(flush) < lock.indexOf("api.setTokens(null, null);"), "flush before the tokens the PUT rides on are forgotten");
+  assert.ok(!lock.includes("await Promise.race([flushUsage(), delay("), "the lock path must not await the SESSION-reading flush ahead of the drop (R43: that kept reveal/fill serviceable for 2 s)");
+  // Natives' lock-path shape (VaultSession.lock): capture the context, drop the session and keys
+  // immediately, and only the token pair waits — bounded — for the round that rides on it.
+  assert.ok(lock.indexOf(capture) < lock.indexOf(drop), "the round's context is captured BEFORE the session drops");
+  assert.ok(lock.indexOf(drop) < lock.indexOf(awaited), "the session drops BEFORE the bounded await — the lock itself is never delayed by the flush");
+  assert.ok(lock.indexOf(awaited) < lock.indexOf(forget), "the bounded await lands BEFORE the tokens the PUT rides on are forgotten");
+  // And the capture really is synchronous + self-contained: the round takes vk/userId/mine as
+  // arguments, never reads `session` after the caller nulls it.
+  const td = spanOf(bg, "function flushUsageForTeardown(): Promise<void> {", "async function flushUsageRound(");
+  assert.ok(td.includes("const mine = pendingUsage;") && td.includes("pendingUsage = {};"), "the teardown flush takes the buffer synchronously");
+  assert.ok(td.includes("return flushUsageRound({ vk, userId: session.userId, mine });"), "the teardown flush hands the round an explicit context");
+  const round = spanOf(bg, "async function flushUsageRound(", "function reveal(");
+  assert.ok(!round.includes("session.userId") && !round.includes("session.vaultKeys"), "the round must not read the session it may have outlived");
+  assert.ok(round.includes("if (session) pendingUsage = mergeUsage(mine, pendingUsage);"), "the re-arm stays session-gated so a late teardown round cannot resurrect records into a locked SW");
 });
 
 test("H33 — doSignOut AWAITS the bounded usage flush BEFORE api.logout() revokes the session", () => {
@@ -149,7 +164,7 @@ test("H33 — doSignOut AWAITS the bounded usage flush BEFORE api.logout() revok
 });
 
 test("H35 — flushUsage runs the prune round even with an EMPTY buffer when handed a live set", () => {
-  const fu = spanOf(bg, "async function flushUsage(", "function reveal(");
+  const fu = spanOf(bg, "async function flushUsage(", "function flushUsageForTeardown(");
   // The gate must let a live-set call through with nothing buffered; `length === 0) return;` on
   // its own (the pre-fix gate) is exactly the dirty-gate that left the G04 prune inert here.
   assert.ok(fu.includes("if (Object.keys(pendingUsage).length === 0 && !liveItemIds) return;"), "the empty-buffer gate must be conditioned on no live set");
@@ -160,9 +175,77 @@ test("H35 — flushUsage runs the prune round even with an EMPTY buffer when han
 
 test("H05 — flushUsage decides through planFlush and re-arms (never PUTs) on an unreadable server copy", () => {
   const fu = spanOf(bg, "async function flushUsage(", "function reveal(");
+  assert.ok(fu.includes("await flushUsageRound({ vk, userId: session.userId, mine, liveItemIds });"), "the live flush runs the shared round");
   assert.ok(fu.includes("const put = planFlush(server, mine, liveItemIds);"), "the write decision must be the shared pure leaf");
   assert.ok(fu.includes('server = { kind: "unreadable" };'), "a failed GET / unopenable blob must be classified unreadable, not empty");
   assert.ok(fu.includes('if (server.kind === "unreadable" && session) pendingUsage = mergeUsage(mine, pendingUsage);'), "the skipped round must re-arm the buffer (session-gated)");
   // The pre-fix shape: a merge seeded from `mine` that fell through to the PUT on any GET failure.
   assert.ok(!fu.includes("let merged = mine;"), "the 'store ours on a read miss' seed must be gone");
+});
+
+// ---- H01 (recheck R02): the reuse ask is page-driveable, so it must never re-arm the autolock ----
+
+test("H01 — passwordReuse is in PASSIVE_MSGS (page-driveable: value-set + trusted blur)", () => {
+  // Same extraction as the web [C2] pin so the two gates read the same literal. A page can set
+  // `input.value` and drive a TRUSTED focusout on its own signup field at will (F01's
+  // driveability test), so the ask stream is page traffic, not user activity; out of this set it
+  // would re-arm the idle alarm forever. The typed-gesture gate (H02) bounds the ORACLE, not the
+  // arm — both are needed.
+  const set = bg.match(/const PASSIVE_MSGS = new Set<Req\["type"\]>\(\[([^\]]*)\]\)/)?.[1] ?? "";
+  assert.ok(set.length > 0, "PASSIVE_MSGS literal must exist");
+  assert.ok(set.includes('"passwordReuse"'), "passwordReuse must be passive");
+});
+
+// ---- H02 (recheck R04): the typed mark is consumed by the ask, so each answer costs a keystroke ----
+
+test("H02 — checkPasswordReuse CONSUMES the typed mark right after it records the ask", () => {
+  const content = readFileSync(new URL("./content.ts", import.meta.url), "utf-8");
+  const ask = spanOf(content, "async function checkPasswordReuse(", "// ---- capture engine ----");
+  const rec = "reuseAsked.set(input, value);";
+  const consume = "reuseTyped.delete(input);";
+  const send = 'await safeSend({ type: "passwordReuse", password: value });';
+  for (const a of [rec, consume, send]) assert.ok(ask.includes(a), `checkPasswordReuse anchor missing: ${a}`);
+  // The mark is per-FIELD and a page drives trusted focus/blur at will: without the consume, one
+  // real keystroke armed the membership oracle for every later `value = guess; blur()`.
+  assert.ok(ask.indexOf(rec) < ask.indexOf(consume) && ask.indexOf(consume) < ask.indexOf(send), "record → consume → send, in that order");
+  // The mark is still only ever SET by a trusted keydown (the listener) — never by the ask path.
+  assert.ok(!ask.includes("reuseTyped.add("), "the ask path must never mint the mark");
+});
+
+// ---- H20 (recheck R01/R03): every put path lands a `conflict` and materializes the displaced version ----
+
+test("H20 — all FOUR put paths treat a landed conflict as ok:true and materialize the displaced version", () => {
+  // Spec 03 §5: `conflict` is a write the server APPLIED. The pre-fix `status === "applied"` test
+  // reported a landed write as a failure and left the local rev stale; the extension is the one
+  // party handed the losing version, so it is the party that must materialize it. The pure leaves
+  // (conflictcopy.test.ts) stay green when the SW stops calling them — hence a call-site pin.
+  const paths: Array<[string, string, string]> = [
+    ["putExisting", "async function putExisting(", "/** `uri` is the stored site uri"],
+    ["putNewLogin", "async function putNewLogin(", "/** [X2-A6] NEW card (G2 save-card)"],
+    ["putNewCard", "async function putNewCard(", "// ---- TOTP add (design 2026-08-12"],
+    ["putCard", "async function putCard(", "/** One-tap URI backfill for legacy items"],
+  ];
+  for (const [name, from, to] of paths) {
+    const span = spanOf(bg, from, to);
+    assert.ok(span.includes("if (!putLanded(r)) return saveFailure(r?.status);"), `${name}: the landed test must be putLanded (applied OR conflict)`);
+    assert.ok(!span.includes('status !== "applied"'), `${name}: a bare applied-only test reports a landed conflict as a failure`);
+    assert.ok(/await materializeConflictCopy\(r, (target\.vaultId|session\.personalVaultId)\);/.test(span), `${name}: must materialize the displaced version after persistSession()`);
+    assert.ok(span.indexOf("persistSession();") < span.indexOf("await materializeConflictCopy("), `${name}: the landed write persists BEFORE the best-effort copy`);
+  }
+  // putLanded keeps both landed statuses; saveFailure keeps conflict's slot in the union (the
+  // rung's copy is true only because no put path emits it any more).
+  const landed = spanOf(bg, "function putLanded(", "/** H20: the pushing client's duty");
+  assert.ok(landed.includes('r?.status === "applied" || r?.status === "conflict"'), "putLanded = applied OR conflict");
+  const sf = spanOf(bg, "function saveFailure(", "/** H20 (2026-09-13 audit): did this put LAND?");
+  assert.ok(sf.includes('status === "conflict" ? "conflict"'), "saveFailure still maps conflict so the union keeps its slot");
+});
+
+// ---- H03 (recheck R37): the extension is a push client — a server `rejected` is permanent ----
+
+test("H03 — saveFailure maps the server's `rejected` verdict to its own rung, never the retryable default", () => {
+  const sf = spanOf(bg, "function saveFailure(", "/** H20 (2026-09-13 audit): did this put LAND?");
+  assert.ok(sf.includes('status === "rejected" ? "rejected"'), "rejected must not fold into \"failed\" (the same put fails identically forever)");
+  const api = readFileSync(new URL("./api.ts", import.meta.url), "utf-8");
+  assert.match(api, /status: "applied" \| "conflict" \| "duplicate" \| "denied" \| "rejected";/, "api.ts MutationResult must carry the rejected status the server answers");
+  assert.ok(api.includes("reason?: string;"), "and the refusal reason beside it");
 });

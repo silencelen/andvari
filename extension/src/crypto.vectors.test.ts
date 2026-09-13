@@ -159,6 +159,12 @@ test("sharedgrant.json — openSharedGrant yields the VK, refuses a reseated vau
     () => openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVkLength.expectedVaultId, fromB64(v.rejectVkLength.sealedB64)),
     /32 bytes/,
   );
+  // R48: the third recipient check — a payload whose `v` is not 1 is refused on the version.
+  assert.notEqual(v.rejectVersion.v, 1);
+  assert.throws(
+    () => openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVersion.expectedVaultId, fromB64(v.rejectVersion.sealedB64)),
+    /version/,
+  );
 });
 
 test("seal.json — sealOpen reads a libsodium crypto_box_seal (the shared-vault grant path)", () => {

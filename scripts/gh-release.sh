@@ -36,7 +36,10 @@
 #     refused. 0.26.2 published two byte-different MSIs under one name (manifest seq 10 → 11
 #     re-cut); clients were fine (they verify the signed manifest's hash) but anyone who had
 #     written down the seq-10 digest was left with an unexplained mismatch. A re-cut gets a new
-#     filename — that is what --allow-new-name is for — never new bytes under the old one.
+#     filename (stage it as andvari-<ver>-2.msi, or cut a new version) — never new bytes under
+#     the old one. The generated SHA256SUMS pair is the one exception: it is derived from the
+#     asset set and its detached signature carries a timestamp, so it is re-uploaded (clobbered)
+#     on every run; only real artifacts get the byte-identity refusal.
 #
 # What it does NOT do: build anything, sign the deb, sign the update manifest, or touch
 # /downloads. Those have their own scripts and, for the Windows half, their own host.
@@ -47,7 +50,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-VERSION="" EXT_VERSION="" STAGE="" MSI="" APK="" NOTES="" DRY=0 DRAFT=0 ALLOW_NEW_NAME=0
+VERSION="" EXT_VERSION="" STAGE="" MSI="" APK="" NOTES="" DRY=0 DRAFT=0
 EXTRA=()
 
 usage() { awk 'NR>1 && /^#/{sub(/^# ?/,"");print;next} NR>1{exit}' "$0"; }
@@ -64,7 +67,6 @@ while [ $# -gt 0 ]; do
     --extra)           EXTRA+=("${2:?--extra needs a value}"); shift 2 ;;
     --notes-file)      NOTES="${2:?--notes-file needs a value}"; shift 2 ;;
     --draft)           DRAFT=1; shift ;;
-    --allow-new-name)  ALLOW_NEW_NAME=1; shift ;;
     --dry-run)         DRY=1; shift ;;
     -h|--help)         usage; exit 0 ;;
     *) die "unknown arg: $1 (see --help)" ;;
@@ -201,11 +203,14 @@ if gh release view "$TAG" >/dev/null 2>&1; then
   tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
   existing="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
   for name in "${ASSETS[@]}"; do
+    # The sums pair is REGENERATED from the artifact set every run and `gpg --detach-sign` stamps
+    # a creation time, so its bytes never repeat — comparing it here made the script die on its
+    # own second run (recheck R28). It is meant to change; --clobber below replaces it.
+    case "$name" in "$SUMS"|"$SUMS.asc") continue ;; esac
     printf '%s\n' "$existing" | grep -qxF "$name" || continue
     ( cd "$tmp" && gh release download "$TAG" --pattern "$name" --clobber >/dev/null 2>&1 ) || {
       note "could not download the published $name to compare — refusing to overwrite it blind"; exit 1; }
     if ! cmp -s "$tmp/$name" "$STAGE/$name"; then
-      [ "$ALLOW_NEW_NAME" = 1 ] && die "$name is already published with DIFFERENT bytes. --allow-new-name does not license overwriting it: give the re-cut a new filename (andvari-${VERSION}-2.msi, or a new version) and record the re-cut in the release notes."
       die "$name is already published with DIFFERENT bytes — refusing.
   A same-name re-publish leaves everyone who recorded the old digest with an unexplained
   mismatch (audit H104, the 0.26.2 MSI). Re-cut under a NEW filename and say so in the notes."

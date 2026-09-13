@@ -559,9 +559,13 @@ internal fun ErrorBar(msg: String?, onDismiss: () -> Unit) {
 }
 
 @Composable
-internal fun NoticeBar(msg: String?, onDismiss: () -> Unit) {
+internal fun NoticeBar(msg: String?, onDismiss: () -> Unit, announce: Boolean = true) {
     if (msg != null) {
-        Card(Modifier.fillMaxWidth().padding(vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Polite }) {
+        // [announce] = false when the screen already owns a persistent live region for this
+        // message (HealthScreen's HealthAnnouncer, R11) — two polite regions for one sentence
+        // read it twice. Everywhere else the bar is the only region and announces itself.
+        val region = if (announce) Modifier.semantics { liveRegion = LiveRegionMode.Polite } else Modifier
+        Card(Modifier.fillMaxWidth().padding(vertical = 8.dp).then(region)) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(msg, Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall)
                 // a11y (Cut B): primary on the default card tone is ~3.7:1 in light — use onSurfaceVariant.

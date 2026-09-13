@@ -44,7 +44,15 @@ object UriMatch {
      * The result is always ASCII: a Unicode (U-label) host comes back as its punycode A-label,
      * so a saved `bücher.de` and the browser-reported `xn--bcher-kva.de` are one string (H22).
      */
-    fun normalizeHost(raw: String): String? {
+    fun normalizeHost(raw: String): String? = normalizeHostUnicode(raw)?.let { Idna.toAscii(it) }
+
+    /**
+     * R46: the SAME normalizer stopped before the A-label step — every ASCII rule applied, the
+     * U-label kept. For DISPLAY only (the Health duplicate clusters show what the member typed,
+     * `bücher.de`, not `xn--bcher-kva.de`); never a matching input — the canonical form is the
+     * A-label and [normalizeHost] is the only thing matches() compares.
+     */
+    fun normalizeHostUnicode(raw: String): String? {
         var s = raw.trim()
         if (s.isEmpty()) return null
         s = Regex("^[A-Za-z][A-Za-z0-9+.\\-]*://").replace(s, "")
@@ -64,6 +72,13 @@ object UriMatch {
             val oneColon = colon >= 0 && s.indexOf(':') == colon
             if (oneColon && colon < s.length - 1 && s.substring(colon + 1).all { it in '0'..'9' }) s.substring(0, colon) else s
         }
+        // R44 (H22 recheck): U+1E9E CAPITAL SHARP S must be refused BEFORE the lowercase step,
+        // because `lowercase()` maps it to ß (U+00DF) while UTS46 — what every browser applies —
+        // maps it to "ss". A saved `straẞe.de` would otherwise canonicalize to `xn--strae-oqa.de`
+        // (straße.de), a DIFFERENT registrable domain from the `strasse.de` the browser reports:
+        // not an under-match but a cross-origin fill. Every other omitted UTS46 mapping encodes to
+        // a label no registry can hold (an under-match); this is the one that lands on a real one.
+        if (s.any { it.code == 0x1E9E }) return null
         s = s.trim().trimEnd('.').lowercase()
         // Strip EVERY leading "www." label (not just one) — normalizeHost must be idempotent,
         // and a single-strip made normalize(normalize("www.www.x")) ≠ normalize("www.www.x"),
@@ -75,13 +90,13 @@ object UriMatch {
         // real family and quietly grant it the new equality rule. (IPv6 hosts contain no
         // dots between hex groups, so this cannot reject them.)
         if (s.split('.').any { it.isEmpty() }) return null
-        // H22 (2026-09-13 audit): canonicalize to the A-label LAST, after every ASCII rule has run.
-        // Browsers report `xn--bcher-kva.de`; the household saves `bücher.de` — without this the
-        // two never met and IDN logins silently never filled. Symmetric (matches() normalizes
-        // the page host through here too), idempotent (ASCII in → unchanged), and fail-closed
-        // (an encoder overflow yields null, which matches nothing). See Idna.kt for why the
-        // encoder is hand-rolled rather than java.net.IDN.
-        return Idna.toAscii(s)
+        // H22 (2026-09-13 audit): normalizeHost canonicalizes to the A-label LAST, after every
+        // ASCII rule above has run. Browsers report `xn--bcher-kva.de`; the household saves
+        // `bücher.de` — without this the two never met and IDN logins silently never filled.
+        // Symmetric (matches() normalizes the page host through here too), idempotent (ASCII in
+        // → unchanged), and fail-closed (an encoder overflow yields null, which matches nothing).
+        // See Idna.kt for why the encoder is hand-rolled rather than java.net.IDN.
+        return s
     }
 
     private fun isIpLiteral(host: String): Boolean {

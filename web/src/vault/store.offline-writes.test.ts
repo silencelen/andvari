@@ -45,6 +45,8 @@ class FakeApi {
   rejectItems = new Map<string, string>();
   /** H03 legacy shape: a batch containing any of these itemIds is refused WHOLE with a thrown 400. */
   refuseBatchIfContains = new Set<string>();
+  /** R39: answer every push with this ApiError (a 5xx / 429 — TRANSIENT, never a verdict). */
+  refuseWithStatus: { status: number; code: string } | null = null;
   /** Gate the NEXT api.sync (pull): it parks at the gate until releaseSync(), and `gated`
    *  resolves the instant it is reached — so a test knows the pull is IN FLIGHT (flush done,
    *  pull-start counter already bumped). */
@@ -99,6 +101,7 @@ class FakeApi {
 
   async push(mutations: Mutation[]): Promise<PushResponse> {
     if (this.offline || this.failPushes) throw new TypeError("offline");
+    if (this.refuseWithStatus) throw new ApiError(this.refuseWithStatus.status, this.refuseWithStatus.code, "transient");
     if (mutations.some((m) => this.refuseBatchIfContains.has(m.itemId))) throw new ApiError(400, "unknown_attachment", "bad attachment refs");
     this.pushes.push(mutations);
     return {
@@ -959,6 +962,25 @@ describe("VaultStore poison rows (H03/H19) and the in-flight bell (H38)", () => 
     api.failPushes = false;
     await store.sync();
     expect(await cache.pending()).toHaveLength(0);
+  });
+
+  it("a 500 or a 429 on the push keeps the row queued and mints no write-rejected notice (R39)", async () => {
+    // isWholeBatchRefusal is `400 || 413` on purpose: "any 4xx" / "any >= 400" would start
+    // DISCARDING rows on a rate limit or a server hiccup, with a notice blaming the user's edit.
+    for (const refusal of [{ status: 500, code: "internal" }, { status: 429, code: "rate_limited" }, { status: 503, code: "unavailable" }]) {
+      const { api, cache, store } = await seeded("writer");
+      stubPersisted(true);
+      api.offline = true;
+      await store.save(null, { type: "note", name: "keep me" });
+      api.offline = false;
+      api.refuseWithStatus = refusal;
+      await expect(store.sync(), `${refusal.status} surfaces as the transient failure it is`).rejects.toThrow();
+      expect(await cache.pending(), `${refusal.status}: the row stays queued`).toHaveLength(1);
+      expect(store.notices().some((n) => n.kind === "write-rejected"), `${refusal.status}: nothing was refused`).toBe(false);
+      api.refuseWithStatus = null;
+      await store.sync();
+      expect(await cache.pending(), `${refusal.status}: drained once the server recovers`).toHaveLength(0);
+    }
   });
 
   it("a bell that rings during an in-flight pull re-pulls once (H38) — without it the rev is discarded", async () => {

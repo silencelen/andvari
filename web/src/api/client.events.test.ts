@@ -14,9 +14,17 @@ class FakeWS {
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
   closedByCaller = false;
+  sent: string[] = [];
   constructor(url: string) {
     this.url = url;
     FakeWS.instances.push(this);
+  }
+  send(data: string) {
+    this.sent.push(data);
+  }
+  /** The server's echo of the registration probe — what makes a socket "open" to consumers. */
+  pong() {
+    this.onmessage?.({ data: "pong" });
   }
   close() {
     this.closedByCaller = true;
@@ -83,7 +91,42 @@ describe("ApiClient.events reconnection", () => {
     expect(sock(0).url).toContain("ticket=t1");
     expect(sock(0).url.startsWith("ws://server/api/v1/events")).toBe(true);
     sock(0).onopen?.();
+    sock(0).pong();
     expect(onOpen).toHaveBeenCalledTimes(1);
+    close();
+  });
+
+  /**
+   * Gate fix (audit 2026-09-13 wave 3): the 101 is NOT "open" to consumers. The server
+   * registers the socket with its notifier only when the route body runs, after the upgrade,
+   * so a consumer that pulled on the 101 and then relied on the bell could miss a change
+   * committed in that window for good (no replay). The client now probes with the app-level
+   * "ping" the server echoes after register() and reports onOpen on the first "pong" —
+   * exactly once per socket, and never for a socket the server never answered.
+   */
+  it("onOpen waits for the registration pong, not the 101", async () => {
+    const onOpen = vi.fn();
+    const close = makeClient().events(vi.fn(), vi.fn(), onOpen);
+    await flush();
+    sock(0).onopen?.();
+    expect(sock(0).sent).toEqual(["ping"]); // the probe rides the upgrade, immediately
+    expect(onOpen).not.toHaveBeenCalled(); // upgraded ≠ registered
+    sock(0).onmessage?.({ data: JSON.stringify({ type: "rev", rev: 7 }) }); // a bell is not the proof either
+    expect(onOpen).not.toHaveBeenCalled();
+    sock(0).pong();
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    sock(0).pong(); // a later echo (none is sent today, but the server may keepalive) never re-fires
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    close();
+  });
+
+  it("a bell that arrives before the pong is still delivered (the probe gates onOpen only)", async () => {
+    const onRev = vi.fn();
+    const close = makeClient().events(onRev, vi.fn(), vi.fn());
+    await flush();
+    sock(0).onopen?.();
+    sock(0).onmessage?.({ data: JSON.stringify({ type: "rev", rev: 3 }) });
+    expect(onRev).toHaveBeenCalledWith(3);
     close();
   });
 
@@ -92,6 +135,7 @@ describe("ApiClient.events reconnection", () => {
     const close = makeClient().events(vi.fn(), vi.fn(), onOpen);
     await flush();
     sock(0).onopen?.();
+    sock(0).pong();
     sock(0).onclose?.(); // server deploy / sleep drop
     await vi.advanceTimersByTimeAsync(1_000); // first backoff step
     await flush();
@@ -99,6 +143,8 @@ describe("ApiClient.events reconnection", () => {
     expect(mintCount).toBe(2); // one-shot tickets: re-minted per attempt
     expect(sock(1).url).toContain("ticket=t2");
     sock(1).onopen?.();
+    expect(onOpen).toHaveBeenCalledTimes(1); // the NEW socket must prove itself again
+    sock(1).pong();
     expect(onOpen).toHaveBeenCalledTimes(2);
     close();
   });

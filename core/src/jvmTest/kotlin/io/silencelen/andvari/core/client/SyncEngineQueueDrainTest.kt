@@ -79,6 +79,9 @@ class SyncEngineQueueDrainTest {
         /** App.kt body cap twin: a push body over this many bytes 413s before the handler. */
         var refuseBodyOverBytes: Long? = null
 
+        /** R39: answer every push with this HTTP status (a 5xx / 429 — TRANSIENT, never a verdict). */
+        var refuseWithStatus: HttpStatusCode? = null
+
         fun applied(): Set<String> = pushes.flatten().map { it.itemId }.filter { it !in rejectItems && it !in refuseBatchIfContains }.toSet()
 
         fun api(): AndvariApi {
@@ -98,7 +101,10 @@ class SyncEngineQueueDrainTest {
                     "/api/v1/sync/push" -> {
                         val bytes = req.body.toByteArray()
                         val cap = refuseBodyOverBytes
-                        if (cap != null && bytes.size > cap) {
+                        val transient = refuseWithStatus
+                        if (transient != null) {
+                            err(transient, "transient_${transient.value}")
+                        } else if (cap != null && bytes.size > cap) {
                             err(HttpStatusCode.PayloadTooLarge, "body_too_large")
                         } else {
                             val body = json.decodeFromString(PushRequest.serializer(), bytes.decodeToString())
@@ -244,8 +250,8 @@ class SyncEngineQueueDrainTest {
 
     @Test
     fun transientFailures_stillKeepTheRowsQueued() = runBlocking<Unit> {
-        // The poison-row path must not widen into "any error drops the row": a 5xx and a
-        // 429 are transient and the rows stay queued for the next drain.
+        // The poison-row path must not widen into "any error drops the row": a transport
+        // failure keeps the row queued for the next drain.
         val s = seeded(DurableFakeCache())
         s.server.offline = true
         assertEquals(SaveOutcome.QUEUED, s.engine.save(null, doc))
@@ -253,6 +259,28 @@ class SyncEngineQueueDrainTest {
         s.server.offline = false
         s.engine.sync()
         assertTrue(s.cache.pending().isEmpty())
+    }
+
+    /** R39: the HTTP statuses the poison path must NEVER widen to. isWholeBatchRefusal is
+     *  `400 || 413` on purpose; "any 4xx" or "any >= 400" would start DISCARDING rows on a
+     *  rate limit or a server hiccup — with a write-rejected notice blaming the user's edit. */
+    @Test
+    fun aFiveHundredOrATwentyNineOnThePush_keepsTheRowQueuedAndMintsNoRejectedNotice() = runBlocking<Unit> {
+        for (status in listOf(HttpStatusCode.InternalServerError, HttpStatusCode.TooManyRequests, HttpStatusCode.ServiceUnavailable)) {
+            val s = seeded(DurableFakeCache())
+            s.server.offline = true
+            assertEquals(SaveOutcome.QUEUED, s.engine.save(null, doc))
+            s.server.offline = false
+            s.server.refuseWithStatus = status
+            val e = assertFailsWith<ApiException>("$status must surface as the transient failure it is") { s.engine.sync() }
+            assertEquals(status.value, e.status)
+            assertEquals(1, s.cache.pending().size, "$status: the row stays queued")
+            assertTrue(s.engine.notices().none { it.kind == "write-rejected" }, "$status: no write-rejected notice — nothing was refused")
+            // …and the next drain lands it.
+            s.server.refuseWithStatus = null
+            s.engine.sync()
+            assertTrue(s.cache.pending().isEmpty(), "$status: drained once the server recovers")
+        }
     }
 
     // ==== H18 / H17: success-as-QUEUED only over a durable queue ====

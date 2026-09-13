@@ -1,8 +1,10 @@
 package io.silencelen.andvari.desktop
 
+import io.silencelen.andvari.core.client.HouseholdCopy
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -149,6 +151,12 @@ class SurfacePinsTest {
         assertTrue(state.contains("e.copyAllToPersonal(vaultId)") && state.contains("InterruptedIOException(\"rescue copy timed out\")"), "the bulk rescue copy")
         // …and G10's own download keeps its inner bound (the outer op bound sits one window above it).
         assertTrue(state.contains("withTimeoutOrNull(attachmentTimeoutMs(ref.size)) { engine!!.downloadAttachment(ref) }"))
+        // R13: the backup build's per-attachment fetch — the last busy-holding leg, which this
+        // test's own name claimed and did not cover (a stalled body held `busy` forever, twice).
+        assertTrue(state.contains("bytes = withTimeoutOrNull(attachmentTimeoutMs(p.ref.size)) { runCatching { e.downloadAttachment(p.ref) }.getOrNull() }"), "the backup attachment fetch")
+        assertFalse(state.contains("bytes = runCatching { e.downloadAttachment(p.ref) }.getOrNull()"), "an unbounded backup fetch is the R13 regression")
+        // R18: no hand copy of core's batch size.
+        assertFalse(state.contains("IMPORT_BATCH_ROWS"), "size the import budget off SyncEngine.SERVER_BATCH_MAX, never a mirrored constant")
     }
 
     // ---- audit H12 ----
@@ -173,6 +181,18 @@ class SurfacePinsTest {
         assertTrue(ui.contains("state.cryptoUnavailable?.let { msg ->"), "the blocking state must render (426 idiom)")
         assertTrue(ui.contains("state.diagnosticLogPath"), "…naming the log that holds the diagnosis")
         assertTrue(state.contains("if (isNativeCryptoLoadFailure(t)) {"), "op()'s belt for a load failure that first surfaces mid-session")
+        // R23: HouseholdCopy's contract — desktop "may say more (the log) but must not say less".
+        assertTrue(DesktopState.CRYPTO_UNAVAILABLE_NOTICE.startsWith(HouseholdCopy.CRYPTO_UNAVAILABLE), "the desktop notice must open with core's sentence verbatim")
+        assertTrue(DesktopState.CRYPTO_UNAVAILABLE_NOTICE.contains("diagnostic log"), "…and add the one thing only desktop has")
+    }
+
+    // ---- H80 (recheck R22): the KDF-upgrade re-wrap zeroizes MK / wrapKey ----
+
+    @Test
+    fun theKdfUpgradeRewrapWipesTheNewMasterAndWrapKeys() {
+        val site = state.substringAfter("val mkNew = Keys.masterKey(crypto, password, newSalt, newParams)").substringBefore("val currentAuth =")
+        assertTrue(site.contains("val (authNew, wrapNew) = try {\n                    Bytes.toB64(Keys.authKey(crypto, mkNew)) to Keys.wrapKey(crypto, mkNew)\n                } finally {\n                    mkNew.fill(0)\n                }"), "MK must be wiped the moment it has been split (Account.enroll's shape)")
+        assertTrue(site.contains("uvk.fill(0)\n                    wrapNew.fill(0)"), "the new wrapKey must die with the UVK egress copy once the seal is done")
     }
 
     // ---- audit H23 (spec 07 intro — both artifacts get the per-vault opt-out) ----

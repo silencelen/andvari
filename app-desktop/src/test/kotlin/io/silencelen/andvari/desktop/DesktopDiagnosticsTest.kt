@@ -72,6 +72,56 @@ class DesktopDiagnosticsTest {
         assertTrue(text.contains("at io.silencelen.andvari.desktop.DesktopDiagnosticsTest"), "…and the stack trace")
     }
 
+    /** R16: the create-time modes only reach installs created after the fix. A 0.26.3 install —
+     *  0755 directory, 0644 log — is repaired once at startup, `.log.1` included. */
+    @Test
+    fun aPreExistingWorldReadableStoreAndLogAreRepairedAtStartup() {
+        val posix = java.nio.file.FileSystems.getDefault().supportedFileAttributeViews().contains("posix")
+        if (!posix) return
+        val dir = File(root, "old-install/.andvari-desktop")
+        dir.mkdirs()
+        val log = File(dir, "diagnostic.log")
+        log.writeText("from 0.26.3\n")
+        val gen1 = File(dir, "diagnostic.log.1")
+        gen1.writeText("older\n")
+        val perms = java.nio.file.attribute.PosixFilePermissions::fromString
+        Files.setPosixFilePermissions(dir.toPath(), perms("rwxr-xr-x"))
+        Files.setPosixFilePermissions(log.toPath(), perms("rw-r--r--"))
+        Files.setPosixFilePermissions(gen1.toPath(), perms("rw-r--r--"))
+        DesktopDiagnostics.logFileOverride = log
+
+        assertIs<SelfCheck.Ok>(DesktopDiagnostics.runStartupSelfCheck())
+
+        assertEquals("rwx------", mode(dir), "the 0755 store directory must come back owner-only")
+        assertEquals("rw-------", mode(log), "the 0644 log must come back owner-only")
+        assertEquals("rw-------", mode(gen1), "…and the rotated generation")
+        assertTrue(log.readText().startsWith("from 0.26.3\n"), "repair is a chmod, never a rewrite")
+        // Only this app's own directory — a shared parent is never touched.
+        assertEquals("rwxr-xr-x", mode(File(root, "old-install")).let { it }, "the parent keeps its mode")
+    }
+
+    /** R14/R20: the self-check records WHICH loader served the process — the property being set is
+     *  no longer proof its path was used (core falls back to the bundled loader). */
+    @Test
+    fun theSelfCheckRecordsAPropertyPathFallback() {
+        val src = listOf(
+            File("src/main/kotlin/io/silencelen/andvari/desktop/DesktopDiagnostics.kt"),
+            File("app-desktop/src/main/kotlin/io/silencelen/andvari/desktop/DesktopDiagnostics.kt"),
+        ).first { it.isFile }.readText()
+        val check = src.substringAfter("fun runStartupSelfCheck(): SelfCheck {").substringBefore("private fun dirWritable(")
+        assertTrue(check.contains("val fallback = nativeSodiumFallbackCause()"), "the self-check must ASK core which loader served the process")
+        assertTrue(check.contains("fallback != null -> logThrowable(\"native libsodium: the property path did NOT load"), "…and record the fallback cause")
+        assertTrue(check.contains("log(\"\$NATIVE_SODIUM_PATH_PROPERTY = "), "the property line names the constant, not a literal")
+        assertFalse(src.contains("System.getProperty(\"andvari.native.sodium.path\")"), "no string literal for the property")
+        // On the test box nothing sets the property, so the log must carry neither loader line.
+        val dir = File(root, ".andvari-desktop")
+        DesktopDiagnostics.logFileOverride = File(dir, "diagnostic.log")
+        DesktopDiagnostics.runStartupSelfCheck()
+        val text = File(dir, "diagnostic.log").readText()
+        assertTrue(text.contains("andvari.native.sodium.path = (unset"), "the unset line")
+        assertFalse(text.contains("the property path did NOT load"))
+    }
+
     @Test
     fun theDiagnosticsSourceHasNoBareMkdirsOrAppendText() {
         // H11's regression class: a control written for the set of files that existed at the time,
@@ -183,6 +233,13 @@ class DesktopDiagnosticsTest {
         assertTrue(isNativeCryptoLoadFailure(UnsatisfiedLinkError("no libsodium in java.library.path")))
         assertTrue(isNativeCryptoLoadFailure(RuntimeException("wrapped", UnsatisfiedLinkError("x"))), "JNA/lazysodium wrap the real error")
         assertTrue(isNativeCryptoLoadFailure(NoClassDefFoundError("Could not initialize class com.sun.jna.Native")))
+        // R15: the type core now guarantees for EVERY native load failure — recognised whatever it
+        // wraps (here a cause no loader-type arm would match), because that wrapper IS the verdict.
+        assertTrue(isNativeCryptoLoadFailure(io.silencelen.andvari.core.crypto.CryptoUnavailableException(IllegalStateException("unknown platform"))))
+        assertTrue(isNativeCryptoLoadFailure(RuntimeException("op", io.silencelen.andvari.core.crypto.CryptoUnavailableException(IllegalStateException("x")))))
+        // R15: a bare NoClassDefFoundError is any missing class — an unrelated one must not strand
+        // the app on the "encryption library" screen.
+        assertFalse(isNativeCryptoLoadFailure(NoClassDefFoundError("org/example/SomeOptionalFeature")))
         assertTrue(isNativeCryptoLoadFailure(java.nio.file.FileSystemNotFoundException("Provider \"jar\" not installed")), "the 0.26.3 Program Files shape")
         // The canon's own rows must keep their meaning: network, server refusals, wrong password.
         assertFalse(isNativeCryptoLoadFailure(java.io.IOException("connection reset")))

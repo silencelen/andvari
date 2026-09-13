@@ -243,8 +243,17 @@ object FieldClassifier {
      * Pure over any field type: [hintsOf] returns that field's raw hints. It never re-classifies
      * and never matches — the caller has already filtered to `kind == PASSWORD` and URI-matched.
      */
-    fun <T> passwordFillTargets(passwordFields: List<T>, hintsOf: (T) -> List<String>): List<T> {
-        val current = passwordFields.filter { !hasNewPasswordHint(hintsOf(it)) }
+    fun <T> passwordFillTargets(passwordFields: List<T>, hintsOf: (T) -> List<String>): List<T> =
+        passwordFillTargetsBy(passwordFields) { hasNewPasswordHint(hintsOf(it)) }
+
+    /**
+     * The same rule over a caller-supplied new-password verdict (recheck R19): Android's
+     * `NewPasswordSignal.isNewPassword` folds a second source — the raw HTML `autocomplete`
+     * attribute an `HtmlInfo` carries — into the verdict, so it delegates here with that
+     * predicate rather than keeping a second copy of the set rule. ONE home for the rule.
+     */
+    fun <T> passwordFillTargetsBy(passwordFields: List<T>, isNew: (T) -> Boolean): List<T> {
+        val current = passwordFields.filter { !isNew(it) }
         return if (current.isEmpty()) passwordFields else current
     }
 

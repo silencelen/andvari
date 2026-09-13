@@ -1329,15 +1329,17 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   events?.close(); // live socket + all its timers die FIRST — locked means no bell traffic at all
   events = null;
   const secondsAtLock = autoLockSeconds; // capture before the reset below (web App.tsx:209 parity)
-  // Audit G03 → H33: store what this session recorded BEFORE the keys and the tokens go — AWAITED,
-  // bounded. The old `void flushUsage()` dispatched the GET with a live token, but its PUT was
-  // issued after that round trip, by which time the chrome.storage awaits below had run and
-  // `api.setTokens(null, null)` had emptied the header: 401 → tryRefresh with a null refresh
-  // token → thrown, and the re-arm catch found `session` already null, so the last 15 s of fills
-  // were dropped on every manual/idle lock. Same shape and bound as the natives' lock path
-  // (UsageRecorderCore.flushForSession): the lock is delayed by at most TEARDOWN_FLUSH_TIMEOUT_MS,
-  // and a flush that outlives the bound is abandoned exactly as before, never awaited further.
-  await Promise.race([flushUsage(), delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);
+  // Audit G03 → H33 → recheck R43: store what this session recorded BEFORE the TOKENS go — captured
+  // here, awaited (bounded) below, just ahead of api.setTokens(null, null). The old `void
+  // flushUsage()` dispatched the GET with a live token, but its PUT was issued after that round
+  // trip, by which time `api.setTokens(null, null)` had emptied the header: 401 → tryRefresh with
+  // a null refresh token → thrown, and the re-arm catch found `session` already null, so the last
+  // 15 s of fills were dropped on every manual/idle lock. The first H33 shape awaited the flush
+  // BEFORE `session = null`, which kept reveal/fill answering for up to 2 s after the user asked
+  // to lock. This is the natives' lock-path shape instead (VaultSession.lock): the round takes an
+  // explicitly-captured context, the session and keys drop on the next line, and only the token
+  // pair waits — at most TEARDOWN_FLUSH_TIMEOUT_MS; a flush that outlives the bound is abandoned.
+  const teardownFlush = flushUsageForTeardown();
   session = null; // in-memory vault material — INCLUDING the memory-only uvk (breaker B1) — is dropped
   clearPendingUsage(); // behavioral records must not outlive the session that produced them
   clearPendingTotp(); // and any in-flight TOTP challenge (covers sign-out; a normal lock has none)
@@ -1384,6 +1386,9 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
     await quickUnlock.wipe();
   }
 
+  // H33/R43: the tokens are what the teardown PUT rides on — the ONE thing the flush still needs
+  // once the session is gone — so they are forgotten only after the bounded await.
+  await Promise.race([teardownFlush, delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);
   api.setTokens(null, null); // the api forgets the pair; while armed it lives ONLY in QKEY.lockedTokens
   await chrome.storage.session.remove([SKEY, TKEY]); // full vault snapshot always erased — locked reports locked
   // The known-logins digest (KLKEY) deliberately SURVIVES an idle/manual lock — that survival is
@@ -2735,9 +2740,35 @@ async function flushUsage(liveItemIds?: ReadonlySet<string>): Promise<void> {
   if (!vk) return; // no personal vault ⇒ no ledger (spec 02 §8.2), not an error
   const mine = pendingUsage;
   pendingUsage = {};
+  await flushUsageRound({ vk, userId: session.userId, mine, liveItemIds });
+}
+
+/** H33 (recheck R43): the LOCK-path flush, in the natives' explicit-session shape
+ *  (VaultSession.lock → UsageRecorder.flushForSession(live)). Everything the round needs — the
+ *  buffer, the personal VK and the userId — is captured SYNCHRONOUSLY here, so doLock can drop
+ *  `session` on the very next line and the round still completes: the PUT rides on the TOKEN
+ *  pair, not on the session, and the tokens are forgotten only after the bounded await. The
+ *  earlier shape awaited flushUsage() BEFORE `session = null`, which kept reveal/fill serviceable
+ *  for up to TEARDOWN_FLUSH_TIMEOUT_MS after the user asked to lock — the delay the natives'
+ *  lock path deliberately refuses ("the LOCK itself is not delayed"). Never re-arms: the
+ *  session-gated re-arm in flushUsageRound sees null, exactly as clearPendingUsage() intends. */
+function flushUsageForTeardown(): Promise<void> {
+  if (!session) return Promise.resolve();
+  const vk = session.vaultKeys.get(session.personalVaultId);
+  const mine = pendingUsage;
+  pendingUsage = {};
+  if (!vk || Object.keys(mine).length === 0) return Promise.resolve();
+  return flushUsageRound({ vk, userId: session.userId, mine });
+}
+
+/** One GET → planFlush → PUT round over an explicitly-captured context. `mine` has already been
+ *  taken off the buffer by the caller; on a skipped or failed round it is re-armed ONLY while a
+ *  session still stands (the lock path's clearPendingUsage() must win over a late re-arm). */
+async function flushUsageRound(round: { vk: Uint8Array; userId: string; mine: UsageMap; liveItemIds?: ReadonlySet<string> }): Promise<void> {
+  const { vk, userId, mine, liveItemIds } = round;
   try {
     const key = usageKey(vk);
-    const adu = adUsage(session.userId);
+    const adu = adUsage(userId);
     let server: ServerLedger;
     try {
       const res = await api.getUsage();
@@ -3715,18 +3746,22 @@ async function putItem(
 }
 
 /** Map a non-landed push status to the seam SaveErrorCode (E1-5): denied/duplicate/no-vault-key/
- *  undefined all fold to "failed". `conflict` is kept as a distinct code for the union's sake but
- *  no longer reaches here from the three put paths — since H20 a conflict is a LANDED write
+ *  undefined all fold to "failed". `rejected` (H03, recheck R37) is the server's PERMANENT
+ *  refusal — the put's attachment refs no longer resolve — and must never fold into the
+ *  retryable "failed" rung: the same put fails identically forever, so "try again" would lie.
+ *  `conflict` is kept as a distinct code for the union's sake but
+ *  no longer reaches here from the four put paths (putExisting/putNewLogin/putNewCard/putCard) — since H20 a conflict is a LANDED write
  *  (putLanded), materialized, and answered ok:true. The `error` string is debug-only detail the
  *  surface never renders (it maps the CODE to copy). */
 function saveFailure(status: MutationResult["status"] | undefined): { ok: false; code: SaveErrorCode; error: string } {
-  const code: SaveErrorCode = status === "conflict" ? "conflict" : "failed";
+  const code: SaveErrorCode = status === "conflict" ? "conflict" : status === "rejected" ? "rejected" : "failed";
   return { ok: false, code, error: `save failed (${status ?? "no vault key"})` };
 }
 
 /** H20 (2026-09-13 audit): did this put LAND? Spec 03 §5 is explicit that `conflict` is a write
  *  the server APPLIED ("write never rejected-and-dropped": blob overwritten, rev bumped, the
- *  displaced version archived and handed back as `serverItem`). The three put paths below used to
+ *  displaced version archived and handed back as `serverItem`). The four put paths (putExisting,
+ *  putNewLogin, putNewCard, putCard) used to
  *  test `status === "applied"` alone, so a conflicting Update was reported as a failure ("This
  *  login changed elsewhere — open it in the web vault") while the server had already kept OUR
  *  value: the local rev stayed stale (the next Update conflicted again), no copy was made, and the
@@ -3919,11 +3954,15 @@ async function addTotpFromPage(
 async function putCard(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
   const fv = Math.max(CARD_FORMAT_VERSION, target.formatVersion);
   const r = await putItem(target.itemId, target.vaultId, doc, target.rev, fv);
-  if (r?.status !== "applied") return saveFailure(r?.status);
+  // H20 (recheck R01): the FOURTH put path — a card UPDATE conflicts exactly like a login update
+  // (the server applied our value, the displaced card comes back as serverItem), so it gets the
+  // putExisting treatment: a landed conflict is ok:true and the displaced version is materialized.
+  if (!putLanded(r)) return saveFailure(r?.status);
   target.doc = doc;
   target.rev = r.newItemRev ?? target.rev + 1;
   target.formatVersion = fv;
   persistSession();
+  await materializeConflictCopy(r, target.vaultId); // H20: no-op unless status === "conflict"
   return { ok: true };
 }
 

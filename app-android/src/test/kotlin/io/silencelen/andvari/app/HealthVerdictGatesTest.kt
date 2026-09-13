@@ -46,14 +46,14 @@ class HealthVerdictGatesTest {
         val scanned = mapOf("a" to 12_345L, "b" to 0L, "c" to 7L)
         val revs = mapOf("a" to 3L, "b" to 5L, "c" to 1L)
         val live = mapOf("a" to 3L, "b" to 6L /* edited since */) // c: deleted since
-        val fresh = freshBreachVerdicts(scanned, revs) { live[it] }
+        val fresh = freshBreachVerdicts(scanned, revs, pendingIds = emptySet()) { live[it] }
         assertEquals(mapOf("a" to 12_345L), fresh, "the edited item's count and the deleted item's count are gone")
     }
 
     /** THE BUG's worse half: green "none" surviving an edit to a breached password. */
     @Test
     fun aCleanVerdictDoesNotOutliveAPasswordChange() {
-        val fresh = freshBreachVerdicts(mapOf("x" to 0L), mapOf("x" to 1L)) { 2L }
+        val fresh = freshBreachVerdicts(mapOf("x" to 0L), mapOf("x" to 1L), pendingIds = emptySet()) { 2L }
         assertNull(fresh?.get("x"), "0 (rendered 'none') must not be asserted about a rev the scan never saw")
     }
 
@@ -61,7 +61,25 @@ class HealthVerdictGatesTest {
      *  (impossible by construction, but the safe reading) is not shown either. */
     @Test
     fun neverScannedStaysNullAndAnUnrecordedRevIsNotShown() {
-        assertNull(freshBreachVerdicts(null, emptyMap()) { 1L })
-        assertEquals(emptyMap(), freshBreachVerdicts(mapOf("x" to 3L), emptyMap()) { 1L })
+        assertNull(freshBreachVerdicts(null, emptyMap(), pendingIds = emptySet()) { 1L })
+        assertEquals(emptyMap(), freshBreachVerdicts(mapOf("x" to 3L), emptyMap(), pendingIds = emptySet()) { 1L })
+    }
+
+    /** R09: a QUEUED offline edit keeps the PRIOR rev (H18's overlay is server-relative), so rev
+     *  equality is not proof the password is the one the scan saw — a pending write retires it. */
+    @Test
+    fun aVerdictIsRetiredWhileTheItemHasAnUnflushedWrite() {
+        val fresh = freshBreachVerdicts(mapOf("x" to 0L, "y" to 4L), mapOf("x" to 1L, "y" to 1L), pendingIds = setOf("x")) { 1L }
+        assertEquals(mapOf("y" to 4L), fresh, "rev unchanged but the doc is not — x must not render its old verdict")
+    }
+
+    /** R08: a retired verdict is a NON-verdict — the tile goes neutral with "incomplete", never a
+     *  good-tone "0" over rows that render "—" (H75's rule, same file, same wave). */
+    @Test
+    fun aRetiredVerdictMarksTheScanIncompleteNeverClean() {
+        assertTrue(breachVerdictsRetired(scanned = mapOf("x" to 12L), fresh = emptyMap()), "the only breached login was edited ⇒ no clean bill")
+        assertFalse(breachVerdictsRetired(scanned = mapOf("x" to 12L), fresh = mapOf("x" to 12L)), "nothing retired ⇒ the verdict stands")
+        assertFalse(breachVerdictsRetired(scanned = null, fresh = null), "never scanned is its own state, not 'incomplete'")
+        assertFalse(breachVerdictsRetired(scanned = emptyMap(), fresh = emptyMap()))
     }
 }

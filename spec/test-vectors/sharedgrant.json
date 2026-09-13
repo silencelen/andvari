@@ -16,5 +16,10 @@
         "expectedVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "vkLen": 31,
         "sealedB64": "assaTt7W5AcKsth_L9E5IOMfUkBExPsvcGSQK4p7TTjK528yukeoreDAoF__GPHaDrW8poZdQcWVt98RfzWW5I1pq-ZPJBOJmaT71Z3zS8xB-pAK3Ij-NI-oxlzCk50RG5R63nc8nlooVwF0teJD0zE0yqwSi7xBWwU4lvatn6OpxZjydtVriEQxMv2Ja_OqgtyKJGLxbkQhJA"
+    },
+    "rejectVersion": {
+        "expectedVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "v": 2,
+        "sealedB64": "_ANuthFwupuUzthDupzxzbWFlDkYBt2e9XqO5sIaby58EyzjDw2rSZo62eXV07ICxmP7GUnX5124YzDqsrVsfGV2RV_jbkthpsTg4rDEoTF9jyDmwLpxF_9CTrP0C0rAVYjhlX7anp4weRIh9KrzWog6zw0YM3Nh9T9GkaHD9NCVlRUcJjEbKfyGJEBFs_2dtoGW60jUYypaPlM"
     }
 }

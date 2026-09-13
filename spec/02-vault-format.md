@@ -194,8 +194,17 @@ no bidi/joiner validity checks, and the four IDNA2008 deviation characters follo
 NON-transitional form modern browsers report (`straße.de` → `xn--strae-oqa.de`, never
 `strasse.de` — which is why clients MUST NOT substitute a platform IDNA2003 converter such
 as `java.net.IDN`). A spelling outside that subset still canonicalizes identically on every
-client; it simply does not meet the browser's spelling — an under-match, never a
-cross-origin fill. Encoder overflow (an absurd label) yields "unparseable" (never matches).
+client; it simply does not meet the browser's spelling, and encodes to a label no registry
+can hold — an under-match. The one omitted mapping that would NOT stay an under-match is
+`ẞ` (U+1E9E) → `ss`: lowercasing maps it to `ß`, a deviation character browsers keep, so a
+saved `straẞe.de` would canonicalize to `xn--strae-oqa.de` (`straße.de`) — a real, different
+registrable domain from the `strasse.de` the browser reports — and fill across origins.
+Clients MUST therefore reject a host containing U+1E9E outright (unparseable, matches
+nothing); `urimatch-idna.json` grades it. Encoder overflow (an absurd label) yields
+"unparseable" (never matches). Surfaces that DISPLAY a normalized host (the Health
+duplicate clusters) show the U-label the member typed, not the A-label key: the canonical
+form is the A-label and no decoder is specified, so a client keeps the U-label from the
+raw uri (`normalizeHostUnicode`, the same normalizer stopped before the A-label step).
 Vectors: `spec/test-vectors/urimatch-idna.json` (`normalize` pins the output bytes, `match`
 the outcome); the pre-existing vector files are byte-frozen and unchanged.
 
@@ -583,11 +592,17 @@ server-visible table — the property §8 states holds unchanged.
   on the server and readable on the user's other devices, and pruning its entry ranks it "unused"
   everywhere. Never a lock / page-hide / teardown view, which can be pre-sync.
 - **Teardown flush ordering (2026-09-13 amendment, audit H33; the G03 rule generalised).** The
-  lock, sign-out and page-hide flushes MUST be given a chance to complete **before** the client
-  drops the session, forgets or revokes the tokens the PUT rides on, or closes the transport —
-  awaited, with a short bound (2 s on the natives and the extension), never fire-and-forget into
-  the teardown. A flush that outlives the bound is abandoned; the teardown is never delayed past
-  it. In particular the sign-out flush precedes the server-side session revocation.
+  lock, sign-out and page-hide flushes MUST NOT be cancelled by their own teardown, and the
+  teardown MUST NOT invalidate the credentials or the transport the flush's GET+PUT ride on
+  before the flush has had its bounded chance — never fire-and-forget into a teardown that
+  drops the tokens underneath it. Two mechanisms conform: **awaiting** the flush under a short
+  bound (2 s) before the teardown proceeds (the sign-out paths, the page-hide flush), or
+  handing the flush an **explicitly captured** context — the session/token pair it needs —
+  and closing that transport / forgetting those tokens only when the bounded flush ends (the
+  natives' and the extension's lock paths, where the session and keys drop immediately and
+  only the transport's close or the token pair waits). A flush that outlives the bound is
+  abandoned; the lock itself is never delayed by it. In every case the sign-out flush precedes
+  the server-side session revocation.
 - **Writes are batched, never per-use.** A client accumulates in memory and flushes on a debounce
   (and on lock / sign-out / page-hide), so the blob's own `updatedAt` cannot be read as a
   keystroke-level activity trace. Clients MUST NOT flush synchronously on every fill.

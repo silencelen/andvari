@@ -2603,7 +2603,7 @@ class DesktopState(
         importBusy = true; importError = null; importRetryable = true; importProgress = 0 to plan.items.size
         scope.launch {
             try {
-                // Audit H10: bounded per batch — importAll pushes [IMPORT_BATCH_ROWS]-row chunks, so
+                // Audit H10: bounded per batch — importAll pushes SERVER_BATCH_MAX-row chunks, so
                 // the budget is one flat window per chunk (a 10,000-row file gets 50 windows, never
                 // an open-ended hold on [importBusy] and the idle-lock deferral). A timeout is an
                 // IOException → the retryable branch below: the same plan replays idempotently.
@@ -2892,7 +2892,12 @@ class DesktopState(
         for (p in plan.included) {
             var bytes: ByteArray? = null
             for (attempt in 0 until 2) {
-                bytes = runCatching { e.downloadAttachment(p.ref) }.getOrNull()
+                // Audit H10 (recheck R13): the one busy-holding network leg that was still
+                // unbounded — the client is connect-only, so a server that stalls mid-body held
+                // `busy` (and the idle-lock deferral) forever, twice per attachment. Under the same
+                // G10 size-scaled bound the sibling download uses; a timeout is a null, which falls
+                // into the existing skip-by-name path — a stalled server degrades to a named skip.
+                bytes = withTimeoutOrNull(attachmentTimeoutMs(p.ref.size)) { runCatching { e.downloadAttachment(p.ref) }.getOrNull() }
                 if (bytes != null) break
             }
             if (bytes == null) fetchFailed.add(p.ref.name) else fetched.add(p to bytes)
@@ -3330,9 +3335,15 @@ class DesktopState(
                 val crypto = createCryptoProvider()
                 val newSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
                 val newParams = pol.kdfParams
+                // ZEROIZATION (H80, recheck R22 — Account.enroll's shape): the new MK lives only
+                // long enough to split into its two purposes, and the new wrapKey dies once the
+                // UVK is sealed under it. authNew is only ever the base64 string the request carries.
                 val mkNew = Keys.masterKey(crypto, password, newSalt, newParams)
-                val authNew = Bytes.toB64(Keys.authKey(crypto, mkNew))
-                val wrapNew = Keys.wrapKey(crypto, mkNew)
+                val (authNew, wrapNew) = try {
+                    Bytes.toB64(Keys.authKey(crypto, mkNew)) to Keys.wrapKey(crypto, mkNew)
+                } finally {
+                    mkNew.fill(0)
+                }
                 // The UVK never changes across a KDF upgrade (spec 01 §4/§7) — re-wrap the SAME UVK
                 // under the new wrapKey. The egress copy is zeroed whatever happens.
                 val uvk = acct.uvkCopyForPlatformWrap()
@@ -3340,6 +3351,7 @@ class DesktopState(
                     Envelope.sealB64(crypto, wrapNew, uvk, Ad.uvk(userId))
                 } finally {
                     uvk.fill(0)
+                    wrapNew.fill(0)
                 }
                 val currentAuth = Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, crypto)
                 a.changePassword(
@@ -3531,15 +3543,12 @@ class DesktopState(
         fun uploadsTimeoutMs(uploads: List<PendingUpload>): Long =
             attachmentTimeoutMs(uploads.sumOf { it.data.size.toLong() })
 
-        /** Audit H10: SyncEngine.importAll pushes chunks of this many rows (its private
-         *  SERVER_BATCH_MAX, the server's push cap). Mirrored here only to SIZE the import budget —
-         *  a drift would mis-scale the bound by a constant factor, never break an import. */
-        const val IMPORT_BATCH_ROWS = 200
-
         /** Audit H10: one flat window per pushed batch, so a large import gets a proportionate
          *  budget while a black-holed server cannot hold [importBusy] open-endedly. */
         fun importTimeoutMs(rows: Int): Long =
-            SYNC_TIMEOUT_MS * (1 + (rows.coerceAtLeast(0) + IMPORT_BATCH_ROWS - 1) / IMPORT_BATCH_ROWS)
+            // R18: sized off core's own batch size (public) — a hand copy here was the drift the
+            // deleted comment warned about.
+            SYNC_TIMEOUT_MS * (1 + (rows.coerceAtLeast(0) + SyncEngine.SERVER_BATCH_MAX - 1) / SyncEngine.SERVER_BATCH_MAX)
 
         /** Audit H12 (web Recover.tsx REVEAL_TIMEOUT_S, "kept in sync with Welcome's"): the idle
          *  cap on the self-recovery reset step, while the raw recovery secret is in memory. */
@@ -3554,7 +3563,9 @@ class DesktopState(
          *  calm "try again" canon induces — and names the file that holds the diagnosis. Static;
          *  the log path renders beside it from [diagnosticLogPath]. */
         const val CRYPTO_UNAVAILABLE_NOTICE =
-            "andvari couldn't start its encryption library on this computer, so it can't sign in — this is not a password problem, and the server is fine. Details were written to the diagnostic log below; send that file to whoever set up your server."
+            // R23: core's sentence VERBATIM plus what only desktop can add (the log) — HouseholdCopy's
+            // contract is "may say more, must not say less", pinned by SurfacePinsTest.
+            HouseholdCopy.CRYPTO_UNAVAILABLE + " Details were written to the diagnostic log below — send that file along."
 
         // Cut O (v2 #17) timeout tiers — see newHttpClient()/runSync() for the full rationale:
         /** TCP/TLS connect cap on EVERY desktop client (java.net.http ships with none). */

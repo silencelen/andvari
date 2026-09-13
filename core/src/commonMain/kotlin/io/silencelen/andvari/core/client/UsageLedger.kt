@@ -2,12 +2,13 @@ package io.silencelen.andvari.core.client
 
 import io.silencelen.andvari.core.model.WireItem
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * The usage ledger (spec 02 §8.2) — "when did I last use this login", the signal behind the
@@ -134,22 +135,45 @@ object UsageLedger {
         }
     }
 
-    /** Tolerant parse: anything malformed reads as an EMPTY ledger and never throws. A corrupt
-     *  ledger must cost one health column, never an unlock or a fill. */
-    fun parse(text: String): Map<String, Entry> = runCatching {
-        val root = json.parseToJsonElement(text) as? JsonObject ?: return emptyMap()
-        buildMap {
+    /**
+     * Tolerant parse: anything malformed reads as an EMPTY ledger and never throws. A corrupt
+     * ledger must cost one health column, never an unlock or a fill.
+     *
+     * The tolerance is PER ENTRY and the typing is STRICT — the contract spec 02 §8.2 states and
+     * `spec/test-vectors/usageledger.json` pins for all three twins ([UsageLedgerVectorsTest]):
+     *  - a value that is not a JSON number (a string "1755…", a boolean, an object, an array)
+     *    is NOT a number: a string-typed stamp drops that entry, a string-typed count defaults
+     *    to 1 — exactly what `typeof x === "number"` does in the web and extension twins. Reading
+     *    "1755000000000" as a number here would make this client rank an item the other two
+     *    consider unstamped, and the first flush would then write that stamp back for everyone.
+     *  - one bad ENTRY costs that entry and never the ledger. There is deliberately NO
+     *    `runCatching` around the entry loop: the previous one turned a single nested-object
+     *    stamp (which made `jsonPrimitive` throw) into "read as empty", and because a flush
+     *    re-merges against what it parsed, "empty" became "overwrite the household's ledger with
+     *    this session's few uses" (audit H92 + H05). The only guard is around the JSON parse
+     *    itself, where the document as a whole is garbage and there is no entry to save.
+     *  - unknown entry keys are dropped, not preserved (unlike item documents, spec 02 §3): the
+     *    blob is wholly rewritten by one writer at a time and carries nothing user-authored.
+     */
+    fun parse(text: String): Map<String, Entry> {
+        val root = runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject ?: return emptyMap()
+        return buildMap {
             for ((itemId, v) in root) {
                 val o = v as? JsonObject ?: continue
                 // Encoded as JSON numbers; read through Double because the web twin writes them
                 // as IEEE-754 and epoch millis sit far inside the exactly-representable range.
-                val last = o["lastUsedAt"]?.jsonPrimitive?.doubleOrNull ?: continue
-                if (!last.isFinite()) continue
-                val count = o["useCount"]?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() } ?: 1.0
+                // 1e999 lexes as a literal whose Double is infinite, so the finiteness check is
+                // what rejects it — the same `Number.isFinite` gate the twins apply.
+                val last = o["lastUsedAt"].asFiniteNumber() ?: continue
+                val count = o["useCount"].asFiniteNumber() ?: 1.0
                 put(itemId, Entry(last.toLong(), count.toLong()))
             }
         }
-    }.getOrDefault(emptyMap())
+    }
+
+    /** A JSON NUMBER as a finite Double, or null for anything else — a quoted number is a string. */
+    private fun JsonElement?.asFiniteNumber(): Double? =
+        (this as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull?.takeIf { it.isFinite() }
 
     /** Serialize in the shape the web and extension twins read. Built through the JSON tree
      *  rather than string concatenation so an itemId can never break out of its own key. */

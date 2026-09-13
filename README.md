@@ -98,14 +98,15 @@ instance also serves at `<your-origin>/selfhost` alongside downloadable copies o
 | `web/` | Independent TypeScript implementation of the spec (Vite + React) |
 | `extension/` | MV3 browser extension, Chromium + Firefox — in-browser fill/save (pure-JS @noble crypto) |
 | `deploy/` | The self-host bundle: `docker-compose.yml`, the caddy overlay, `andvari.env.template`, `bringup.sh` |
-| `tools/vector-gen` | Emits most of `spec/test-vectors/*.json` from the Kotlin reference implementation (six are hand-authored — see below) |
+| `tools/vector-gen` | Emits most of `spec/test-vectors/*.json` from the Kotlin reference implementation (the rest are hand-authored — see below) |
 | `tools/recovery-cli` / `tools/backup-cli` | Offline escrow ceremony/recovery + offline `.andvari` backup reader (verify/dump/extract) |
 | `tools/update-signer` | Signs the `/downloads` update manifest the extension's update channel verifies |
 | `scripts/` | `verify.sh` (the every-ship gate — see Build), `build.sh`, `e2e.sh`, `publish-image.sh`, `publish-extension.sh`, `gh-release.sh` (assembles the GitHub release: served names, generated + signed `SHA256SUMS`), and the Windows release ceremony (`build-windows.ps1`, `prestige-release.ps1`, `signandvari.ps1`) |
 
-Six vector files — `card`, `cardfill`, `cardform`, `enrolllink`, `import-foreign`,
-`urimatch-etld1` — are hand-authored fixtures rather than `vector-gen` output. Both
-engines still consume them, so the lockstep holds either way.
+Some vector files are hand-authored fixtures rather than `vector-gen` output;
+`spec/test-vectors/README.md` is the provenance manifest and carries the per-file list and
+the counts (this README deliberately does not repeat them). Every engine consumes all of
+them either way, so the lockstep holds regardless of provenance.
 
 ## Build
 

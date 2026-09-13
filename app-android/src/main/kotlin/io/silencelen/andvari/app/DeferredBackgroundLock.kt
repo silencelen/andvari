@@ -35,8 +35,13 @@ class DeferredBackgroundLock {
     /** Process ON_STOP observed (whether or not the lock actually happened). */
     fun left() { foregrounded = false }
 
-    /** Process ON_START observed: any deferred request is void — the user is back. */
-    fun returned() {
+    /** Process ON_START observed: any deferred request is void — the user is back. Unless the
+     *  start was an autofill OVERLAY's (R12; [InProcessOverlays.lastStartWasOverlay]): the user
+     *  is in a browser, the app is still "left", and the request stands. `foregrounded` is not
+     *  raised either — an overlay stop is skipped by H09, so nothing would ever lower it again
+     *  before the op ends, and the lock would silently never fire. */
+    fun returned(startedByOverlay: Boolean) {
+        if (startedByOverlay) return
         foregrounded = true
         pending = false
     }

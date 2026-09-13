@@ -665,7 +665,21 @@ export class ApiClient {
    * Liveness: any drop (server deploy, laptop sleep, proxy hiccup) reconnects with
    * exponential backoff (1 s → 60 s cap, jittered). `onOpen` fires on EVERY (re)open —
    * consumers use it to `/sync` and catch bells missed while the socket was down (the
-   * notifier has no replay). A 401/403 at ticket mint means the session itself is dead
+   * notifier has no replay).
+   *
+   * "Open" means REGISTERED, not merely upgraded (gate fix, audit 2026-09-13 wave 3): the
+   * browser's `onopen` fires on the 101, but the server registers the socket with its
+   * notifier only when the route handler body runs — a window of a few ms in which a bell
+   * for a change that has just committed goes to nobody, and the notifier has no replay.
+   * A consumer that pulled on the 101 and then relied on the bell (Vault.tsx) missed that
+   * change until the next unrelated bell; the E2E gate reproduced it under load (push
+   * 3 ms after the 101, no bell in 10 s). So the client sends the app-level "ping" the
+   * server has always echoed as "pong" (spec 03 §6 — the extension's keepalive rides the
+   * same echo), and reports `onOpen` on the FIRST pong: the echo loop starts after
+   * register(), so a pong proves the registration. The catch-up pull therefore runs after
+   * the socket can ring, which closes the window instead of narrowing it. Backoff reset and
+   * the "back up" signal still key off the raw 101 — a socket that upgraded is healthy
+   * transport, registered or not. A 401/403 at ticket mint means the session itself is dead
    * (the client already tried a token refresh): reconnection stops and `onRevoked`
    * fires so the consumer drops to the lock screen — with kind "expired", because a
    * dead session is usually plain expiry; only the server's explicit `revoked` frame
@@ -726,12 +740,27 @@ export class ApiClient {
         if (closed) return;
         const sock = new WebSocket(this.baseUrl.replace(/^http/, "ws") + `/api/v1/events?ticket=${encodeURIComponent(t.ticket)}`);
         ws = sock;
+        let registered = false; // per socket: a reconnect proves itself again
         sock.onopen = () => {
           attempts = 0; // healthy again — future drops restart the backoff from 1 s
           clearDown();
-          onOpen?.();
+          // Registration probe (see the doc comment): onOpen waits for the echo.
+          try {
+            sock.send("ping");
+          } catch {
+            /* a socket that cannot send is about to close; onclose reconnects */
+          }
         };
         sock.onmessage = (ev) => {
+          if (ev.data === "pong") {
+            // The echo loop runs after the server's notifier.register(): the first pong is
+            // the proof the bell can reach this socket. Exactly once per socket.
+            if (!registered) {
+              registered = true;
+              onOpen?.();
+            }
+            return;
+          }
           try {
             const msg = JSON.parse(ev.data);
             if (msg.type === "rev") onRev(msg.rev);

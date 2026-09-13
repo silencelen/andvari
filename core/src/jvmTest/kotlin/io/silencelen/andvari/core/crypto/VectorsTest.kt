@@ -174,6 +174,14 @@ class VectorsTest {
             SharedGrant.open(crypto, kp.publicKey, kp.privateKey, shortVk.s("expectedVaultId"), shortVk.b("sealedB64"))
         }
         assertTrue(e.message!!.contains("32 bytes"), e.message)
+        // R48: the third recipient check — a payload whose `v` is not 1 is refused on the version
+        // (the one an interop bug would trip first), under the RIGHT vaultId with a 32-byte vk.
+        val badVersion = v.getValue("rejectVersion").jsonObject
+        assertNotEquals(1, badVersion.i("v"))
+        val ev = assertFailsWith<CryptoException> {
+            SharedGrant.open(crypto, kp.publicKey, kp.privateKey, badVersion.s("expectedVaultId"), badVersion.b("sealedB64"))
+        }
+        assertTrue(ev.message!!.contains("version"), ev.message)
         // Round-trip this impl's own (nondeterministic) seal.
         val ownSeal = SharedGrant.seal(crypto, kp.publicKey, vaultId, v.b("vkB64"))
         assertContentEquals(v.b("vkB64"), SharedGrant.open(crypto, kp.publicKey, kp.privateKey, vaultId, ownSeal))

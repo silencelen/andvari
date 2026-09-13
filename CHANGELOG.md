@@ -23,6 +23,13 @@ extension; if you are on those, there is nothing to do.*
 - **Desktop app icon.** The desktop app (and installer, taskbar, and window) now carry the andvari
   brand mark, matching the web and phone. The browser-extension icons were refreshed to the same
   dark-background mark.
+- **A desktop diagnostic log.** The desktop app writes `~/.andvari-desktop/diagnostic.log`
+  (on Windows, `C:\Users\<you>\.andvari-desktop\diagnostic.log`): the startup self-check, the
+  paths and properties the crypto loader used, and the class chain and trace of any failed
+  operation — never a password, a vault item, a key, or the text of a server error. It is
+  bounded (it rotates at 256 KiB and keeps one older generation, so at most 512 KiB), owner-only,
+  and safe to delete at any time; the app's *About* dialog names the exact path. Attach it to a
+  bug report.
 
 ## 0.26.2 (2026-08-31) — the audit release · fleet 0.26.2, extension 0.26.0
 
@@ -73,7 +80,13 @@ and the "last used" ranking stops dropping the copy you just made before leaving
 **Under the hood**
 - The privacy policy, specs, user guide, and release runbook were reconciled with the shipped code.
 - CodeQL's Kotlin leg (which had been analysing nothing) is retired with a tripwire; the gradle
-  distribution and the release path are pinned; the doc-leak scan covers the whole public tree.
+  distribution and the release path are pinned; the doc-leak scan reads `spec/` and the
+  docs/root prose (with a short, stated exemption list — see `scripts/ci/doc-leak-scan.sh`).
+- The Windows installer for this release was re-cut after publication (update manifest seq 10 →
+  seq 11) and the new bytes were published under the **same** filename; clients were unaffected
+  (they verify the signed manifest's hash), but anyone who recorded the seq-10 digest of
+  `andvari-0.26.2.msi` will see a mismatch. Future re-cuts get a new filename
+  (`scripts/gh-release.sh` refuses same-name/different-bytes).
 - Full report: `docs/design/2026-08-30-full-surface-audit.md`.
 
 ## 0.26.1 (2026-08-23) — a nudge toward fingerprint unlock · fleet 0.26.1, extension unchanged at 0.25.0

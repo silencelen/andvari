@@ -224,4 +224,33 @@ class SurfaceCopyPinsTest {
         assertTrue(viewModel.contains("checkEnrolledPasswordForBreach(a, password)"), "enrollOp must run the check once a session exists")
         assertTrue(viewModel.contains("Strength.breachCount("), "the check must go through the shared core seam")
     }
+
+    // ---- H15 (recheck R21): the two recovery ladders name a crypto-unavailable device ----
+
+    /** Both hand-rolled ladders are reached with a live CryptoUnavailableException (MemberRecovery
+     *  runs createCryptoProvider() on the wizard) and used to end at "Recovery failed. Please try
+     *  again." — the retry hypothesis the H15 row exists to forbid. The row is FIRST, above the
+     *  KDF and Api rows, exactly as HouseholdCopy.forError orders it. */
+    @Test
+    fun recoveryLaddersNameACryptoUnavailableDeviceFirst() {
+        for (fn in listOf("private fun recoverVerifyError(t: Throwable): String = when {", "private fun recoverResetError(t: Throwable): String = when {")) {
+            val body = viewModel.substringAfter(fn).substringBefore("\n    }\n")
+            val rows = body.lines().map { it.trim() }.filter { it.startsWith("t is ") }
+            assertTrue(rows.isNotEmpty(), "$fn: no rows?")
+            assertTrue(rows.first().startsWith("t is CryptoUnavailableException -> HouseholdCopy.CRYPTO_UNAVAILABLE"), "$fn: the crypto row must be the FIRST row, got: ${rows.first()}")
+            assertTrue(body.contains("else -> \"Recovery failed. Please try again.\""), "$fn: the terminal stays for the genuinely unknown")
+        }
+    }
+
+    // ---- H80 (recheck R22): the KDF-upgrade re-wrap zeroizes MK / wrapKey ----
+
+    /** The one MK derivation outside Account.kt on this client. Account.enroll's shape: MK lives
+     *  only long enough to split, the new wrapKey dies with the seal. */
+    @Test
+    fun theKdfUpgradeRewrapWipesTheNewMasterAndWrapKeys() {
+        val qu = sourceFile("src/main/kotlin/io/silencelen/andvari/app/QuickUnlock.kt").readText()
+        val site = qu.substringAfter("val mkNew = Keys.masterKey(crypto, password, newSalt, newParams)").substringBefore("val currentAuth =")
+        assertTrue(site.contains("val (authNew, wrapNew) = try {\n                Bytes.toB64(Keys.authKey(crypto, mkNew)) to Keys.wrapKey(crypto, mkNew)\n            } finally {\n                mkNew.fill(0)\n            }"), "MK must be wiped the moment it has been split")
+        assertTrue(site.contains("uvk.fill(0)\n                wrapNew.fill(0)"), "the new wrapKey must die with the UVK egress copy once the seal is done")
+    }
 }

@@ -237,11 +237,17 @@ class UsageRecorderCoreTest {
         val transport = FakeTransport(mapOf("alive" to Entry(T, 3), "deleted" to Entry(T, 9))).apply { failFetch = true }
         val rec = recorder(transport)
 
+        // R41: WITH a buffered use — an empty buffer made this pin vacuous (no shape of the
+        // Unreadable branch PUTs nothing over nothing). Pre-fix, or with Unreadable flipped to
+        // Present(empty), this round PUTs {local} over the household's {alive, deleted}.
+        rec.record("local", T + 1000)
         val job = rec.flushWithPrune(Session, liveItemIds = setOf("alive"))
         runBlocking { job.join() }
 
+        assertEquals(1, transport.gets.get(), "the round did reach the server")
         assertEquals(0, transport.puts.get())
         assertEquals(setOf("alive", "deleted"), transport.stored().keys, "untouched — the prune is retried next sync")
+        assertEquals(setOf("local"), rec.peek().keys, "the buffered use is re-armed for the next round, not dropped")
     }
 
     /** The one merge-less write that is a FIRST write: the GET succeeded and said there is no
@@ -265,13 +271,19 @@ class UsageRecorderCoreTest {
     fun aTeardownFlushOverAnUnreadableLedgerDoesNotWrite() {
         val transport = FakeTransport(mapOf("other-device-item" to Entry(T, 2))).apply { failFetch = true }
         val before = transport.blob
-        val rec = recorder(transport, session = { null })
+        // R40: live-then-dropped (the teardownThenRuns… shape). With `session = { null }` from
+        // the start, record() is a no-op, the buffer stays empty, store() is never entered and
+        // the pin was vacuous — flipping Unreadable to Present(empty) stayed green.
+        var live: Session? = Session
+        val rec = recorder(transport, session = { live })
 
         rec.record("local-item", T + 1000) // recorded while live…
+        live = null // …then the lock dropped the session; only the explicit one below is in hand
         val thenRan = AtomicInteger(0)
         val job = rec.flushForSession(Session) { thenRan.incrementAndGet() }
         runBlocking { job.join() }
 
+        assertEquals(1, transport.gets.get(), "the teardown flush did reach the server")
         assertEquals(0, transport.puts.get())
         assertEquals(before, transport.blob)
         assertEquals(1, thenRan.get())

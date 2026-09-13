@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ItemDoc } from "../api/types";
 import type { VaultItem } from "../vault/store";
-import { type RoleFor, clusterSignature, duplicateClusters, planDismiss, planKeep, siteKeysOf } from "./duplicates";
+import { type RoleFor, clusterSignature, duplicateClusters, planDismiss, planKeep, siteKeysOf, siteLabelsOf } from "./duplicates";
 
 /**
  * Duplicate-entry checker pins (owner-requested 2026-08-12; ROADMAP P6). The clustering, the
@@ -53,6 +53,20 @@ describe("siteKeysOf — the registrable-domain site key", () => {
       login: { uris: ["https://accounts.example.com/login", "http://192.168.1.10:8443", "androidapp://com.example.app", "not a uri", ""] },
     });
     expect(keys).toEqual(new Set(["example.com", "192.168.1.10", "app:com.example.app", "not a uri"]));
+  });
+});
+
+describe("siteLabelsOf — the U-label the member typed, never punycode (R46)", () => {
+  it("labels an IDN key with the typed registrable domain and an ASCII key with itself", () => {
+    const labels = siteLabelsOf({ type: "login", name: "x", login: { uris: ["https://login.BÜCHER.de/x", "https://accounts.example.com"] } });
+    expect([...labels.entries()]).toEqual([["xn--bcher-kva.de", "bücher.de"], ["example.com", "example.com"]]);
+  });
+
+  it("a cluster keyed on the A-label still DISPLAYS the U-label — and bücher.de meets xn--bcher-kva.de", () => {
+    const clusters = duplicateClusters([login("a", { uris: ["https://bücher.de"] }), login("b", { uris: ["https://xn--bcher-kva.de/login"] })], noRole);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]!.sites).toEqual(["bücher.de"]);
+    expect(clusters[0]!.sites.join(" ")).not.toContain("xn--");
   });
 });
 

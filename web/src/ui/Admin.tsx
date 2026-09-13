@@ -16,7 +16,7 @@ import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
 import { QrSvg } from "./QrSvg";
-import { adminDeviceState } from "./admindevices";
+import { adminDeviceState, deviceCountLabel } from "./admindevices";
 import { BUNDLE_NOT_A_BUNDLE, checkRecoveryBundle } from "./recoverybundle";
 import { ViewHeader } from "./ViewHeader";
 import { qrModules } from "../vendor/qrcode-generator";
@@ -187,7 +187,9 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
   // disable the last active admin (last_admin).
   const [confirming, setConfirming] = useState(false);
   // F59 recovery step 1 — hand the admin the sealed escrow blob as a file to carry to the
-  // offline recovery-cli (docs/drills/account-recovery-drill.md). The blob is crypto_box_seal'd
+  // offline recovery-cli (the drill is docs/drills/account-recovery-drill.md — recorded
+  // elsewhere: docs/drills/ is the reference instance's private, out-of-tree operational area,
+  // a pointer and not a broken link). The blob is crypto_box_seal'd
   // to the org recovery PUBLIC key — useless without the printed sheet — so this is safe to
   // download. `no_escrow` (a race: the escrow was removed since the list loaded) surfaces
   // inline; the button itself only shows for users who have an escrow blob on file.
@@ -256,7 +258,13 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
     } catch (e) {
       if (e instanceof ApiError && e.code === "bad_request") setApplyMsg({ tone: "bad", text: BUNDLE_NOT_A_BUNDLE });
       else if (e instanceof ApiError && e.code === "kdf_too_weak") setApplyMsg({ tone: "bad", text: "This server refuses the bundle's password settings as too weak — re-run recovery-cli from the current release and upload the new bundle." });
-      else setApplyMsg({ tone: "bad", text: errText(e) });
+      else {
+        // R06: errText's no_such_user sentence promises "the list has been refreshed" — make it
+        // true here the way disableUser does (onApplied = the parent's load), so a ghost row the
+        // admin just tried to recover disappears instead of sitting under a sentence that lies.
+        if (e instanceof ApiError && e.code === "no_such_user") onApplied();
+        setApplyMsg({ tone: "bad", text: errText(e) });
+      }
     } finally {
       setApplyBusy(false);
     }
@@ -270,7 +278,7 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
         </td>
         <td>{u.status === "active" ? u.status : <span className="tone-bad">{u.status}</span>}</td>
         <td className="muted">{fmtDate(u.createdAt)}</td>
-        <td><button type="button" className="link" onClick={onToggleDevices}>{u.deviceCount} device{u.deviceCount === 1 ? "" : "s"} {expanded ? "▴" : "▾"}</button></td>
+        <td><button type="button" className="link" onClick={onToggleDevices}>{deviceCountLabel(u.deviceCount, expanded ? devices.length : null)} {expanded ? "▴" : "▾"}</button></td>
         {(() => {
           // §F.9 reconciliation: a null fingerprint is "waived (intended)" (member holds their own
           // piece), a flagged anomaly (the v8 row says the backstop was REQUIRED), or
@@ -650,7 +658,7 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
           ) : (
             <>
               <div className="secret-row" style={{ alignItems: "flex-end" }}>
-                <Field label="Confirm your recovery sheet (first 16 characters) to stamp a scannable code into the QR" style={{ flex: 1, marginBottom: 0 }}>
+                <Field label="Confirm your recovery sheet (first 16 characters) to stamp a scannable code into the QR" prompt style={{ flex: 1, marginBottom: 0 }}>
                   <input className="mono" value={orgFpInput} onChange={(e) => setOrgFpInput(e.target.value)} placeholder="from your printed sheet, not the server" />
                 </Field>
                 <button type="button" className="ghost" onClick={confirmOrgFp}>Confirm</button>
@@ -892,7 +900,7 @@ function PolicyTab({ client }: { client: ApiClient }) {
         {numField("Per user", Math.round(policy.userAttachmentsMaxBytes / MIB), (n) => patch({ userAttachmentsMaxBytes: n * MIB }), "MiB")}
       </div>
 
-      <Field label="KDF (read-only — changing it requires a coordinated re-enrollment)">
+      <Field label="KDF (read-only — changing it requires a coordinated re-enrollment)" prompt>
         <input readOnly className="mono" value={`${policy.kdfParams.alg} · ops ${policy.kdfParams.ops} · mem ${humanSize(policy.kdfParams.memBytes)}`} />
       </Field>
 

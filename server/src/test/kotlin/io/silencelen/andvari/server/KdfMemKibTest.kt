@@ -1,6 +1,7 @@
 package io.silencelen.andvari.server
 
 import io.ktor.client.request.get
+import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
@@ -10,6 +11,8 @@ import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.model.ClientPolicy
+import io.silencelen.andvari.core.model.InviteRequest
+import io.silencelen.andvari.core.model.InviteResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -73,6 +76,42 @@ class KdfMemKibTest : P4TestSupport() {
         assertEquals(HttpStatusCode.BadRequest, resp.status, resp.bodyAsText())
         assertEquals("kdf_mem_not_kib_multiple", errorOf(resp))
         assertTrue(client.auditRows(admin, "password_change").isEmpty(), "refused before the verifier/UVK write")
+    }
+
+    /** Recheck R25: an instance that persisted a non-KiB policy BEFORE H16 must not be bricked by
+     *  the new refusal — the served policy is healed (floored to the KiB it already meant, which
+     *  changes no derived key), so a client enrolling / changing password with what the server
+     *  hands it succeeds, while the raw un-floored value stays refused. */
+    @Test
+    fun aPersistedNonKibPolicy_isHealedOnRead_soRegisterAndPasswordChangeStillSucceed() = testApplication {
+        val services = buildServices(config(), Notifier())
+        // Seed the row directly, the way a pre-H16 admin PUT left it — never through setPolicy.
+        services.repo.setPolicyJson(json.encodeToString(ClientPolicy.serializer(), ClientPolicy(kdfParams = KdfParams(ops = 3, memBytes = 100_000_000))))
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+
+        val served = json.decodeFromString(ClientPolicy.serializer(), client.get("/api/v1/client-policy").bodyAsText()).kdfParams
+        assertEquals(100_000_000L / 1024 * 1024, served.memBytes, "the served policy is floored to whole KiB")
+        assertEquals(0L, served.memBytes % 1024)
+
+        val admin = VirtualClient("admin@x.com", "healed policy password one", fast = true)
+        client.register(admin, bootstrapToken)
+        val invite = client.post("/api/v1/admin/users") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(InviteRequest("newbie@x.com", false))
+        }.let { json.decodeFromString(InviteResponse.serializer(), it.bodyAsText()) }
+        val newbie = VirtualClient("newbie@x.com", "newbie healed password one", fast = true)
+        val good = newbie.buildRegister(invite.inviteToken, recovery.publicKey, fingerprint)
+        // What a client adopts from /client-policy registers; the raw stored value would not.
+        services.service.register(good.copy(kdfParams = served), "127.0.0.1", "1.0.0")
+        val e = assertFailsWith<BadRequest> { services.service.register(good.copy(email = "other@x.com", kdfParams = KdfParams(ops = 3, memBytes = 100_000_000)), "127.0.0.1", "1.0.0") }
+        assertEquals("kdf_mem_not_kib_multiple", e.reason)
+
+        val change = client.put("/api/v1/account/password") {
+            contentType(ContentType.Application.Json); authed(admin)
+            setBody(admin.buildPasswordChange("healed policy password two").copy(newKdfParams = served))
+        }
+        assertEquals(HttpStatusCode.OK, change.status, change.bodyAsText())
     }
 
     /** The shared gate itself: the floor passes, the KiB rule is the second check, and the test

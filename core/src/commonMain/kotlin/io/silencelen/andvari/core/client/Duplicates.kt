@@ -99,6 +99,38 @@ object Duplicates {
      *  the delimiter has no forgery surface (unlike the username NUL below). */
     fun clusterSignature(memberIds: List<String>): String = memberIds.sorted().joinToString("|")
 
+    /**
+     * R46: what the cluster DISPLAYS for each site key. The key is the A-label (H22 made
+     * `bücher.de` and `xn--bcher-kva.de` one key, which is the clustering win) but a household
+     * member who typed `bücher.de` must not read punycode back: the label is the U-label form of
+     * the same registrable domain — the last N labels of the raw uri's Unicode host, N = the
+     * key's label count (the encoder maps label-for-label). ASCII keys label themselves. Web
+     * twin: duplicates.ts siteLabelsOf. Display only — grouping still runs on [siteKeysOf].
+     */
+    fun siteLabelsOf(doc: ItemDoc): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        for (raw in doc.login?.uris ?: emptyList()) {
+            val saved = UriMatch.parseSavedUri(raw) ?: continue
+            when (saved) {
+                is SavedUri.AndroidApp -> out.putIfAbsent("app:${saved.pkg}", "app:${saved.pkg}")
+                is SavedUri.Web -> {
+                    val r = Psl.resolve(saved.host)
+                    val key = if (r is PslResult.Registrable) r.domain else saved.host
+                    out.putIfAbsent(key, siteLabel(key, raw))
+                }
+            }
+        }
+        return out
+    }
+
+    private fun siteLabel(key: String, raw: String): String {
+        if (key.split('.').none { it.startsWith("xn--") }) return key
+        val unicode = UriMatch.normalizeHostUnicode(raw) ?: return key
+        val n = key.count { it == '.' } + 1
+        val labels = unicode.split('.')
+        return if (labels.size >= n) labels.takeLast(n).joinToString(".") else key
+    }
+
     /** Site keys for one login item (exposed for the tests). */
     fun siteKeysOf(doc: ItemDoc): Set<String> {
         val out = LinkedHashSet<String>()
@@ -269,7 +301,7 @@ object Duplicates {
     fun duplicateClusters(items: List<VaultItem>, roleFor: (String) -> String?): List<DuplicateCluster> {
         val logins = items
             .filter { it.doc.type == "login" }
-            .map { Entry(it, siteKeysOf(it.doc), normUser(it.doc)) }
+            .map { Entry(it, siteKeysOf(it.doc), normUser(it.doc), siteLabelsOf(it.doc)) }
             .filter { it.sites.isNotEmpty() }
 
         // Union-find over shared (site, username) keys — transitive by design (see class KDoc).
@@ -306,9 +338,16 @@ object Duplicates {
             val kind = if (passwords.size == 1) Kind.EXACT else Kind.DIFFERS
             val signature = clusterSignature(members.map { it.it.itemId })
             val planned = if (kind == Kind.EXACT) planMerge(members.map { it.it }, roleFor) else null to null
+            // R46: ONE label per site key across the cluster — a member who typed the U-label
+            // names the site for everyone (a punycode-typed sibling must not add a second entry).
+            val labelByKey = LinkedHashMap<String, String>()
+            for (m in members) for ((k, l) in m.labels) {
+                val cur = labelByKey[k]
+                if (cur == null || (cur.contains("xn--") && !l.contains("xn--"))) labelByKey[k] = l
+            }
             clusters.add(
                 DuplicateCluster(
-                    sites = members.flatMap { it.sites }.distinct().sorted(),
+                    sites = members.flatMap { it.sites }.distinct().map { labelByKey[it] ?: it }.distinct().sorted(),
                     members = sorted.map { e ->
                         DuplicateMember(
                             itemId = e.it.itemId,
@@ -339,5 +378,5 @@ object Duplicates {
         }
     }
 
-    private data class Entry(val it: VaultItem, val sites: Set<String>, val user: String)
+    private data class Entry(val it: VaultItem, val sites: Set<String>, val user: String, val labels: Map<String, String>)
 }

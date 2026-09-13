@@ -97,6 +97,17 @@ describe("Vault.tsx error copy — canon sentences, never wire text", () => {
     expect(vaultTsx).not.toContain("Save rejected: ${");
   });
 
+  it("the editor's rejected-attachment save shows core HouseholdCopy.SAVE_REJECTED_ATTACHMENT, byte-equal (R38)", () => {
+    const m = householdKt.match(/const val SAVE_REJECTED_ATTACHMENT = "([^"]+)"/);
+    expect(m, "HouseholdCopy.SAVE_REJECTED_ATTACHMENT moved — update the pin").not.toBeNull();
+    expect(vaultTsx).toContain(`"${m![1]}"`);
+    // The branch is keyed on the server's two attachment refusal codes, ahead of the 413 row.
+    const branch = vaultTsx.match(/const rejectedAttachment = [^\n]+/);
+    expect(branch).not.toBeNull();
+    expect(branch![0]).toContain('err.code === "unknown_attachment"');
+    expect(branch![0]).toContain('err.code === "attachment_mismatch"');
+  });
+
   it("the MoveCopy 403 shows core HouseholdCopy's 403 row, byte-equal", () => {
     expect(vaultTsx).toContain(`"${canonStatusRow(403)}"`);
   });

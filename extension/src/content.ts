@@ -186,9 +186,10 @@ const nativeSelectedIndexSetter = Object.getOwnPropertyDescriptor(HTMLSelectElem
  *  success under the [T7] canonical verify; a masker that re-clears after the single re-assert
  *  ends as a truthful miss, accepted). */
 function setValue(input: HTMLInputElement, value: string): void {
-  // H02: a fill replaces whatever the user typed — the typed mark is about the value, not the
-  // field, so it must not outlive the value it was earned on (the keydown we dispatch below is
-  // synthetic, !isTrusted, and never sets it). Applies to every fill path through here.
+  // H02: a fill replaces whatever the user typed, so the field's typed mark is cleared here — the
+  // mark is per-FIELD (not bound to a value); it is earned by a trusted keydown, cleared by a fill
+  // and consumed by each reuse ask (checkPasswordReuse), and the keydown we dispatch below is
+  // synthetic, !isTrusted, so it never re-sets it. Applies to every fill path through here.
   reuseTyped.delete(input);
   input.focus();
   input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, composed: true }));
@@ -918,6 +919,12 @@ async function checkPasswordReuse(input: HTMLInputElement): Promise<void> {
     return;
   }
   reuseAsked.set(input, value);
+  // H02 (recheck R04): the typed mark is CONSUMED by the ask. It is per-field, and a page can
+  // drive trusted focus/blur on its own field at will — so without this, one real keystroke
+  // would arm the membership oracle for every later `input.value = guess; blur()` at the
+  // throttle rate. Each answered ask now costs a fresh trusted keystroke; a real user re-arms it
+  // by typing (the paste-gets-no-warning tradeoff the module header documents is unchanged).
+  reuseTyped.delete(input);
   const r = await safeSend({ type: "passwordReuse", password: value });
   if (!r) return;
   const warning = reuseWarning(r.count, r.locked);

@@ -224,9 +224,15 @@ class MultiTenantEndpointTest : P4TestSupport() {
         assertEquals(HttpStatusCode.Unauthorized, missing.status)
         assertEquals("totp_required", errorOf(missing))
 
-        // Wrong code → 401. ("12345" is 5 digits — deterministically unequal to any 6-digit code,
-        // no wrongCode() search needed.)
-        assertEquals(HttpStatusCode.Unauthorized, client.loginRaw(vc.email, vc.authKey, code = "12345").status)
+        // Wrong code → 401 invalid_credentials. ("12345" is 5 digits — deterministically unequal
+        // to any 6-digit code, no wrongCode() search needed.) The BODY code is pinned, not just
+        // the status: spec 03 §2 makes it normative that only a MISSING code says `totp_required`,
+        // while a wrong or replayed one is indistinguishable from a wrong password — a distinct
+        // code here would tell an attacker holding a stolen password that the password is right
+        // and only the second factor stands (audit H111: "restoring parity" is a regression).
+        val wrong = client.loginRaw(vc.email, vc.authKey, code = "12345")
+        assertEquals(HttpStatusCode.Unauthorized, wrong.status)
+        assertEquals("invalid_credentials", errorOf(wrong))
 
         // Fresh (unconsumed) step inside the ±1 window → 200, and the session is NOT restricted.
         val code = totpCode(setup.secretBase32, stepOffset = 1)
@@ -236,8 +242,11 @@ class MultiTenantEndpointTest : P4TestSupport() {
         assertTrue(session.totpEnrolled)
         assertFalse(session.mustEnrollTotp)
 
-        // The anti-replay consume guards the internal origin too.
-        assertEquals(HttpStatusCode.Unauthorized, client.loginRaw(vc.email, vc.authKey, code = code).status)
+        // The anti-replay consume guards the internal origin too — and a replay is the same
+        // uniform 401 as a wrong code (spec 03 §2), never a code of its own.
+        val replayed = client.loginRaw(vc.email, vc.authKey, code = code)
+        assertEquals(HttpStatusCode.Unauthorized, replayed.status)
+        assertEquals("invalid_credentials", errorOf(replayed))
     }
 
     /** Row 4: totpRequired + not enrolled + private origin → RESTRICTED session until enrollment. */
