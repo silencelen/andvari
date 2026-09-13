@@ -1,7 +1,9 @@
 // events.ts engine tests (node --test, chrome-free — sockets and tickets are injected fakes).
 // Covers the design 2026-07-13-ext-live-sync.md §8 plan E1–E10: single-flight connect, fresh
 // ticket per attempt, jittered backoff + cap + reset, the mint-null stop, revoked teardown,
-// bell debounce, the 20 s keepalive, and close() idempotence. Mock timers make the delays
+// bell debounce, the 20 s keepalive, and close() idempotence — plus E11–E13, the registration
+// -proof race closed in the 2026-09-13 wave-3 gate (the catch-up runs on the first "pong", not
+// on the 101; web client.events.test.ts holds the twin). Mock timers make the delays
 // deterministic (rand: () => 1 pins jitter at the top of the [base/2, base] window = base).
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
@@ -33,6 +35,10 @@ class FakeSocket implements WsLike {
   }
   frame(data: unknown): void {
     this.onmessage?.({ data });
+  }
+  /** The server's echo of the registration probe — what makes a socket "registered" (E11). */
+  pong(): void {
+    this.frame("pong");
   }
   drop(): void {
     this.readyState = 3;
@@ -196,7 +202,8 @@ test("E7: revoked frame → onRevoked exactly once, socket closed, no timer, no 
   const handle = h.start();
   await flush();
   const s = h.sockets[0];
-  s.open(); // schedules the catch-up bell — revoked must clear it
+  s.open();
+  s.pong(); // registration proved → the catch-up bell is scheduled; revoked must clear it
   s.frame(REVOKED);
   assert.equal(h.counts.revoked, 1);
   assert.equal(s.closeCalls, 1);
@@ -210,13 +217,14 @@ test("E7: revoked frame → onRevoked exactly once, socket closed, no timer, no 
   assert.equal(h.counts.bells, 0, "the pending catch-up bell was cleared with the timers");
 });
 
-test("E8: bell debounce — open + a 3-frame burst → ONE onBell after 500 ms; later bells re-fire", async (t) => {
+test("E8: bell debounce — catch-up + a 3-frame burst → ONE onBell after 500 ms; later bells re-fire", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const h = makeHarness();
   h.start();
   await flush();
   const s = h.sockets[0];
-  s.open(); // the open itself rings the (debounced) catch-up bell
+  s.open();
+  s.pong(); // the registration proof rings the (debounced) catch-up bell
   s.frame(rev(1));
   s.frame(rev(2));
   s.frame(rev(3));
@@ -228,27 +236,31 @@ test("E8: bell debounce — open + a 3-frame burst → ONE onBell after 500 ms; 
   assert.equal(h.counts.bells, 2);
 });
 
-test("E9: keepalive pings every 20 s while open; a pong frame is ignored; pings stop on drop", async (t) => {
+test("E9: the probe ping on open, then keepalive pings every 20 s; pings stop on drop", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const h = makeHarness();
   h.start();
   await flush();
   const s = h.sockets[0];
   s.open();
-  t.mock.timers.tick(500); // let the catch-up bell land so the count below is exact
-  assert.equal(h.counts.bells, 1);
-  t.mock.timers.tick(19_500); // t = 20 s since open
+  // The first ping is the E11 registration probe, sent at t=0 — the 20 s CADENCE below is
+  // unchanged by it (this pin used to read ["ping"] at t=20 s; it moved, the interval did not).
   assert.deepEqual(s.sent, ["ping"]);
-  s.frame("pong"); // the server echo — not JSON, silently ignored
+  s.pong();
+  t.mock.timers.tick(500); // let the catch-up bell land so the counts below are exact
+  assert.equal(h.counts.bells, 1);
+  t.mock.timers.tick(19_500); // t = 20 s since open — the first keepalive tick
+  assert.deepEqual(s.sent, ["ping", "ping"]);
+  s.frame("pong"); // a later echo: not JSON, and registration is already proved — no second bell
   assert.equal(h.counts.bells, 1);
   assert.equal(h.counts.revoked, 0);
   t.mock.timers.tick(20_000); // t = 40 s
-  assert.deepEqual(s.sent, ["ping", "ping"]);
+  assert.deepEqual(s.sent, ["ping", "ping", "ping"]);
   s.drop(); // keepalive dies with the socket…
   t.mock.timers.tick(60_000); // (the 1 s backoff re-mints a new, never-opened socket)
   await flush();
-  assert.deepEqual(s.sent, ["ping", "ping"], "no pings after onclose");
-  assert.equal(h.sockets[1].sent.length, 0, "an unopened socket never pings");
+  assert.deepEqual(s.sent, ["ping", "ping", "ping"], "no pings after onclose");
+  assert.equal(h.sockets[1].sent.length, 0, "an unopened socket never pings — not even the probe");
 });
 
 test("E10: close() is idempotent, kills a pending bell, and late socket callbacks are no-ops", async (t) => {
@@ -271,11 +283,76 @@ test("E10: close() is idempotent, kills a pending bell, and late socket callback
   assert.equal(h.counts.mints, 1, "no reconnect after close");
   s.open(); // late callbacks from the dying socket — all no-ops
   s.frame(rev(2));
+  s.frame("pong");
   s.frame(REVOKED);
   s.drop();
   t.mock.timers.tick(600_000);
   await flush();
+  assert.deepEqual(s.sent, ["ping"], "the late open() sent no second probe — `closed` blocked it");
   assert.equal(h.counts.bells, 0);
   assert.equal(h.counts.revoked, 0);
   assert.equal(h.counts.mints, 1);
+});
+
+/**
+ * E11–E13 close the registration race the 2026-09-13 wave-3 gate found in the WEB twin and this
+ * engine shares (spec 03 §6; web client.events.test.ts "onOpen waits for the registration pong").
+ * The 101 is transport only: the server calls notifier.register() when the route body runs, a few
+ * ms later, and the notifier has NO replay — so a catch-up pull fired on the upgrade can complete
+ * just before a change commits into that window, and that change's bell reaches nobody. The echo
+ * loop starts after register(), so the first "pong" is the proof, and the catch-up rides it.
+ */
+test("E11: the 101 alone rings NO catch-up; the first pong does, exactly once per socket", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const h = makeHarness();
+  h.start();
+  await flush();
+  const s = h.sockets[0];
+  s.open();
+  assert.deepEqual(s.sent, ["ping"], "the probe rides the upgrade immediately — not the 20 s tick");
+  t.mock.timers.tick(600_000); // 10 min of an upgraded-but-unanswered socket
+  assert.equal(h.counts.bells, 0, "upgraded ≠ registered — the 101 alone never rings the catch-up");
+  s.pong(); // …the server answered: the bell can reach us now
+  t.mock.timers.tick(500);
+  assert.equal(h.counts.bells, 1);
+  s.pong(); // every later keepalive echo — the catch-up is once per socket, not per pong
+  t.mock.timers.tick(500);
+  assert.equal(h.counts.bells, 1);
+});
+
+test("E12: a bell arriving before the pong is still delivered (the proof gates the CATCH-UP only)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const h = makeHarness();
+  h.start();
+  await flush();
+  const s = h.sockets[0];
+  s.open();
+  s.frame(rev(9)); // a real bell that beat the echo back — never dropped for lack of a proof
+  t.mock.timers.tick(500);
+  assert.equal(h.counts.bells, 1);
+  s.pong(); // and a rev is NOT the proof: the catch-up still owes us the bells missed while down
+  t.mock.timers.tick(500);
+  assert.equal(h.counts.bells, 2);
+});
+
+test("E13: a reconnect re-proves registration — each socket's own pong rings its own catch-up", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const h = makeHarness();
+  h.start();
+  await flush();
+  h.sockets[0].open();
+  h.sockets[0].pong();
+  t.mock.timers.tick(500);
+  assert.equal(h.counts.bells, 1);
+  h.sockets[0].drop(); // server deploy / laptop sleep → reconnect in base(0) = 1 s (rand = 1)
+  t.mock.timers.tick(1_000);
+  await flush();
+  assert.equal(h.sockets.length, 2);
+  const s1 = h.sockets[1];
+  s1.open();
+  t.mock.timers.tick(600_000);
+  assert.equal(h.counts.bells, 1, "the NEW socket carries no registration credit from the old one");
+  s1.pong();
+  t.mock.timers.tick(500);
+  assert.equal(h.counts.bells, 2, "…and its own proof rings its own catch-up — the reconnect case");
 });
