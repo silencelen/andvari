@@ -54,8 +54,12 @@ data class SavedCredentials(
  * ONE form-level [CardForm.refine]) so save can never disagree with fill about what a
  * field IS; for card-free forms refine() is bit-identical to the old per-field classify.
  * NEVER logs a value; the result is handed straight to the confirm UI + client-side item
- * encryption. Takes the FIRST value it finds per kind (login forms have one of each; a
- * change-password form's "new password" is the first PASSWORD field).
+ * encryption. Takes the FIRST value it finds per kind (login forms have one of each) — with
+ * ONE exception, the password (audit 2026-09-13 H04): a change-password form's "new password"
+ * is NOT its first PASSWORD field. Real change-password forms put the CURRENT password first,
+ * so first-wins captured the old password and the vault silently kept it after every change.
+ * The capture now follows [NewPasswordSignal.capturePassword]: the first field hinted as the
+ * new password, else the second of a hintless three-password form, else the first.
  *
  * Card capture (0.7.0): CC_* values canonicalize via [CardNormalize] and the capture is
  * REAL only when the number passes the Luhn gate — else it is discarded silently (a phone
@@ -70,7 +74,7 @@ object SaveExtractor {
     fun extract(structure: AssistStructure): SavedCredentials {
         val appPackage = structure.activityComponent?.packageName ?: ""
 
-        class Captured(val signal: FieldSignal, val value: String?, val domain: String?)
+        class Captured(val signal: FieldSignal, val value: String?, val domain: String?, val isNewPassword: Boolean)
         val nodes = ArrayList<Captured>()
 
         fun visit(node: AssistStructure.ViewNode, inheritedDomain: String?, depth: Int) {
@@ -80,7 +84,7 @@ object SaveExtractor {
             if (node.autofillId != null && node.importantForAutofill != View.IMPORTANT_FOR_AUTOFILL_NO) {
                 // Value-less fields are collected too: refine() clusters the WHOLE form by
                 // frame, and a CC_NUMBER sibling matters even when this walk sees no text in it.
-                nodes.add(Captured(StructureParser.signalOf(node, nodeDomain), textValue(node), nodeDomain))
+                nodes.add(Captured(StructureParser.signalOf(node, nodeDomain), textValue(node), nodeDomain, StructureParser.isNewPassword(node)))
             }
             for (i in 0 until node.childCount) visit(node.getChildAt(i), nodeDomain, depth + 1)
         }
@@ -107,10 +111,18 @@ object SaveExtractor {
         var ccCsc: String? = null
         var ccDomain: String? = null
 
+        // H04: the password capture is decided over the form's VALUED password fields as a set,
+        // not first-wins — the new-password field of a change-password form (see the KDoc). The
+        // domain still follows whichever field was captured, exactly as before.
+        val passwordNode = NewPasswordSignal.capturePassword(
+            nodes.filterIndexed { i, n -> kinds[i] == FieldKind.PASSWORD && n.value != null },
+        ) { it.isNewPassword }
+        if (passwordNode != null) { password = passwordNode.value; domain = passwordNode.domain }
+
         for ((i, n) in nodes.withIndex()) {
             val value = n.value ?: continue
             when (kinds[i]) {
-                FieldKind.PASSWORD -> if (password == null) { password = value; if (domain == null) domain = n.domain }
+                FieldKind.PASSWORD -> {} // decided above
                 FieldKind.USERNAME -> if (username == null) { username = value; if (domain == null) domain = n.domain }
                 // Prefer the first LUHN-VALID number: a non-Luhn gift code never displaces a
                 // real PAN captured later. Residual (accepted, documented): two Luhn-valid

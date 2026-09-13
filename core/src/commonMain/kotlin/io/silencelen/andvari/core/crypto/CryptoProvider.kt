@@ -3,6 +3,22 @@ package io.silencelen.andvari.core.crypto
 /** Raised whenever a primitive fails — bad MAC, malformed input, unavailable backend. */
 class CryptoException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+/**
+ * The platform's native libsodium binding could not be LOADED at all (audit H15/H89): the
+ * JVM/Android [createCryptoProvider] actuals wrap whatever the loader threw — an
+ * `UnsatisfiedLinkError`, lazysodium's `LibraryLoadingException`, a `NoClassDefFoundError`
+ * — in this ONE common type so household copy can name the condition without knowing a
+ * platform class.
+ *
+ * Deliberately NOT a [CryptoException]: the unlock and save ladders read a bare
+ * [CryptoException] as "wrong master password" (the AEAD-open contract), and a library that
+ * never loaded is neither the password's fault nor retryable. It is permanent and local for
+ * the life of the process — every later `createCryptoProvider()` re-throws it — so clients
+ * treat it as a blocking state, not a per-action error.
+ */
+class CryptoUnavailableException(cause: Throwable) :
+    RuntimeException("native crypto library did not load: ${cause::class.simpleName}: ${cause.message}", cause)
+
 class KeyPairBytes(val publicKey: ByteArray, val privateKey: ByteArray)
 
 class SecretStreamResult(val header: ByteArray, val chunks: List<ByteArray>)

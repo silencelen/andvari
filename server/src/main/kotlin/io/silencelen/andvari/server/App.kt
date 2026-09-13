@@ -112,11 +112,22 @@ fun requireUuid(value: String?, field: String): String {
  * payload (Escrow.canonicalPayload: uuid userId, keyType "uvk", 32B key + its sha256,
  * both base64url) is exactly 178 bytes → 226 sealed. Bounds leave headroom for future
  * additive payload versions while still rejecting truncated/random junk. Real
- * verification happens offline: `recovery-cli verify` (docs/drills/escrow-canary-drill.md).
+ * verification happens offline: `recovery-cli verify` (docs/drills/escrow-canary-drill.md —
+ * recorded elsewhere: the reference instance's private, out-of-tree operational area, never part
+ * of this repository; see the note at the top of CHANGELOG.md).
  */
 const val ESCROW_SEAL_OVERHEAD = 48
 const val ESCROW_SEALED_MIN = ESCROW_SEAL_OVERHEAD + 150
 const val ESCROW_SEALED_MAX = ESCROW_SEAL_OVERHEAD + 1024
+
+/** H76: Cache-Control for the SPA's hash-named assets/ bundles — content-addressed by Vite, so a
+ *  year + immutable is exact (a release never changes bytes under an existing name). */
+internal const val STATIC_CACHE_IMMUTABLE = "public, max-age=31536000, immutable"
+
+/** H76: Cache-Control for index.html, the SPA fallback and every un-hashed static file — store,
+ *  but always revalidate (Last-Modified → 304), so a release is picked up on the next navigation
+ *  instead of after a heuristic-freshness window nobody chose. */
+internal const val STATIC_CACHE_REVALIDATE = "no-cache"
 
 /** Ceiling on the §8.2 usage-ledger blob, in base64 characters. An entry is roughly 70 bytes of
  *  plaintext (itemId + two numbers), so this clears a vault of tens of thousands of items with
@@ -543,6 +554,16 @@ fun Application.andvariModule(services: Services) {
         }
         put("/api/v1/account/password") {
             val p = requirePrincipal(call, service)
+            // H07 (audit 2026-09-13): version-pinned like /sync/push and /items/{id}/restore. A
+            // password change persists client-PRODUCED ciphertext — the re-wrapped UVK — plus a
+            // fresh verifier and KDF params; the pin exists precisely for a shipped build with a
+            // crypto/format defect (the 0.2.x fv-stripping precedent), and such a build must not be
+            // able to rotate the account's only key-wrap through this door. If its wrap path is the
+            // defective part, the new wrappedUvk is unusable and the member is locked out of their
+            // own account. Before the rate bucket so a banned build cannot even spend it; the
+            // /recovery/self/* routes keep their documented exemption (recovery must work for a
+            // client the pin gates) — this route carries none.
+            enforceVersion(call, service)
             // bug-server--5: same bucket shape as the recovery routes — the verify below is a
             // memory-hard 64 MiB argon2 per attempt (plus an audit row per miss), so it must not
             // be free to loop. Per-user, not per-IP: the caller is authenticated, matching the
@@ -806,6 +827,11 @@ fun Application.andvariModule(services: Services) {
         // ---- escrow ----
         put("/api/v1/escrow/self") {
             val p = requirePrincipal(call, service)
+            // H07: version-pinned — this REPLACES the account's only admin-backstop blob with
+            // client-sealed ciphertext the server cannot verify (spec 04 §3). A build the pin bans
+            // must not be the one that overwrites it: a defective seal here silently voids the
+            // backstop until the next recovery drill discovers it. Gated before the body is read.
+            enforceVersion(call, service)
             val body = call.receive<io.silencelen.andvari.core.model.EscrowUpload>()
             // F19: the §F.4 escrow-polarity gate is TOTAL over BOTH ingestion points, not just
             // register. Without this the second one leaked: a member enrolled under a `waived`
@@ -842,6 +868,12 @@ fun Application.andvariModule(services: Services) {
         }
         put("/api/v1/usage") {
             val p = requirePrincipal(call, service)
+            // H07: version-pinned — the ledger is AEAD ciphertext produced by the client (spec 02
+            // §8.2) and this PUT overwrites the household copy wholesale; a banned build must not
+            // write it (same rule as push/restore: "the pin exists to keep a banned build from
+            // WRITING ciphertext"). The GET above stays ungated — reading back what a current
+            // build wrote is how a banned build shows its (stale) health column until it upgrades.
+            enforceVersion(call, service)
             val body = call.receive<io.silencelen.andvari.core.model.UsageUpload>()
             // Bounded like every other client-supplied blob: the ledger is ~50 bytes of ciphertext
             // per item, so this ceiling clears a very large vault by a wide margin while keeping an
@@ -995,15 +1027,32 @@ fun Application.andvariModule(services: Services) {
             call.respondText("ok")
         }
         get("/api/v1/admin/users/{id}/escrow") {
-            requireAdmin(call, service)
+            val p = requireAdmin(call, service)
+            val targetId = requireUuid(call.parameters["id"], "user_id")
+            // H61 (audit 2026-09-13): step 1 of the takeover-capable admin recovery ceremony
+            // (spec 04 §4) — pulling a member's sealed blob — was the one admin call with no audit
+            // row, against spec 03 §7's "every call audited". The blob is useless without the
+            // offline sheet, so this is trail completeness, not disclosure: an operator reviewing
+            // GET /admin/audit after a suspected admin-session hijack must be able to see WHICH
+            // members' blobs were pulled. Written BEFORE the lookup so a miss (a waived member,
+            // an unknown id) is recorded too — the attempt is the interesting event. Meta = the
+            // target userId, the same shape user_disable / recovery_apply use; the row's own
+            // userId is the ACTING admin. Own tx (repo.audit): the route holds no tx here.
+            services.repo.audit("escrow_admin_read", p.userId, null, call.clientIp(config), targetId)
             // 404, not 400: the id was well-formed, the row simply isn't there — the same stance
             // every other state-of-the-world miss takes (no_such_user, not_a_member). A 400 told
             // the Admin UI "you sent a bad id" for a member who is merely waived (bug-server--9).
-            val sealed = services.admin.userSealed(requireUuid(call.parameters["id"], "user_id")) ?: throw NotFound("no_escrow")
+            val sealed = services.admin.userSealed(targetId) ?: throw NotFound("no_escrow")
             call.respondText(sealed)
         }
         post("/api/v1/admin/recovery") {
             val p = requireAdmin(call, service)
+            // H61: applyRecovery runs ServerCrypto.hashVerifier — a memory-hard 64 MiB argon2 per
+            // call — with no bucket, while its sibling PUT /account/password earned one for exactly
+            // that cost (bug-server--5). Admin-only, so this bounds resource use by a hijacked or
+            // looping admin session, not guessing. Per-admin like the invite bucket; 5/min is
+            // one ceremony with room for a retyped bundle, never a loop.
+            if (!limiter.allow("recovery_apply:${p.userId}", 5, 60_000)) throw RateLimited()
             val req = call.receive<RecoveryUpload>()
             services.admin.applyRecovery(req, p.userId)
             services.notifier.notifyRevokedUser(req.userId) // M8: admin recovery revokes all the user's sessions
@@ -1115,8 +1164,36 @@ fun Application.andvariModule(services: Services) {
                 val rel = call.parameters.getAll("path")?.joinToString("/") ?: ""
                 val safe = rel.replace("..", "")
                 val file = File(root, safe.ifEmpty { "index.html" })
+                // H76 (audit 2026-09-13): a missing HASHED asset is a 404, never the SPA fallback.
+                // Vite emits assets/[name].[hash].* and every release replaces dist/ wholesale, so a
+                // stale index.html (heuristically cached — see the Cache-Control note below) asking
+                // for /assets/index.<oldhash>.js used to get index.html back as 200 text/html, which
+                // nosniff makes the module loader refuse — the React root never mounts and the tab
+                // is stranded on the pre-hydration "unsealing…" placeholder with no bundle running
+                // to show the 426 bar or any error. A loud 404 fails the load instead; only a path
+                // under assets/ is treated this way because those are the only hash-named files.
+                val hashedAsset = safe.startsWith("assets/")
+                if (hashedAsset && !file.isFile) {
+                    call.respond(HttpStatusCode.NotFound, "not found")
+                    return@get
+                }
                 val target = if (file.isFile) file else File(root, "index.html")
                 if (target.isFile) {
+                    // H76: explicit freshness on BOTH halves of the static pipeline. Before this the
+                    // SPA sent no Cache-Control at all — only ConditionalHeaders' Last-Modified —
+                    // so browsers applied heuristic freshness (~10 % of the file's age) to
+                    // index.html on ordinary bookmark/typed navigations and did NOT revalidate,
+                    // serving a stale document that references the previous release's hashes.
+                    //   assets/ (hash-named, content-addressed) → cache forever; a new release
+                    //     produces new names, never new bytes under an old one.
+                    //   everything else (index.html, the SPA fallback, the un-hashed /public files
+                    //     such as theme-boot.js) → no-cache: store it, but ALWAYS revalidate, which
+                    //     the existing Last-Modified → 304 path makes a one-round-trip check.
+                    call.response.headers.append(
+                        HttpHeaders.CacheControl,
+                        if (hashedAsset) STATIC_CACHE_IMMUTABLE else STATIC_CACHE_REVALIDATE,
+                        false,
+                    )
                     // style-src 'unsafe-inline' is deliberate (audit INFO-8, document-and-keep):
                     // React inline style={{…}} is used across web/src/ui, there is no
                     // HTML-injection sink, and script-src already blocks inline JS — dropping

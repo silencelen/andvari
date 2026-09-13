@@ -121,7 +121,12 @@ export function saveErrorCopy(code: SaveErrorCode | undefined): string {
     case "locked":
       return "Could not save — unlock andvari and try again.";
     case "conflict":
-      return "This login changed elsewhere — open it in the web vault.";
+      // H20 (2026-09-13 audit): a `conflict` push status is a write the server APPLIED (spec 03
+      // §5), so "changed elsewhere — open it in the web vault" told the user the save did not
+      // happen when it had. The SW now lands a conflict as ok:true and materializes the displaced
+      // version itself, so this rung is no longer produced by any put path; it keeps the code's
+      // slot in the union with copy that is TRUE if a future path ever emits it.
+      return "Saved — this login also changed elsewhere; both versions are in your vault.";
     default:
       // "failed" and an absent code (SW unreachable) — retryable, no jargon.
       return "Could not save — try again.";
@@ -149,7 +154,9 @@ export function totpAddErrorCopy(code: TotpAddCode | undefined): string {
     case "not_allowed":
       return "andvari couldn't tell which login this code belongs to — add it from the popup instead.";
     case "conflict":
-      return "This login changed elsewhere — open it in the web vault.";
+      // H20: same truth as saveErrorCopy — a conflict is a LANDED write; no put path emits this
+      // code any more, and if one ever does the sentence must not claim the add failed.
+      return "One-time code added — this login also changed elsewhere; both versions are in your vault.";
     case "read_only":
       // G21: a reader-role shared vault — the owner has to add the code, or move the login to a
       // vault you can edit. Honest, not the lying retry the server refusal used to render.

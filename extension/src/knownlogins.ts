@@ -13,8 +13,10 @@ import { normalizeHost, parseSavedUri, type PslResolve } from "./urimatch.ts";
  * NO password material: a set of truncated HMACs over (site key, normalized username) pairs,
  * keyed by a random per-install key, rebuilt from the decrypted items while unlocked and
  * retained across a lock under its own storage.session key (the QKEY posture — memory-backed,
- * browser-exit-cleared, trusted contexts only; wiped at sign-out and on an untrusted
- * compartment, exactly like the quick-unlock blob).
+ * browser-exit-cleared, trusted contexts only; wiped at sign-out, on an untrusted compartment,
+ * and by the per-origin "remove data for this server" purge, exactly like the quick-unlock blob.
+ * That last one was MISSING until H59, 2026-09-13: the record outlived the one user action whose
+ * copy promises the origin's cached state is gone).
  *
  * Honest disclosure bound: someone who can read the locked compartment can test GUESSED
  * (site, username) pairs for membership — strictly less than the plaintext pendings the same

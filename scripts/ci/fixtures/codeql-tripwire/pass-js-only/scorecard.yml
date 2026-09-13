@@ -1,0 +1,11 @@
+# A non-CodeQL workflow in the same directory: no language key anywhere, must not confuse the scan.
+name: Scorecard
+on: { push: { branches: [main] } }
+jobs:
+  analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ossf/scorecard-action@v2.4.4
+        with: { results_file: results.sarif, results_format: sarif }
+      - uses: github/codeql-action/upload-sarif@v4
+        with: { sarif_file: results.sarif }

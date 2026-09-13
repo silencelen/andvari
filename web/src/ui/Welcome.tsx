@@ -1045,6 +1045,7 @@ function FingerprintProvenance(p: {
           <>
             <Field
               label="Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet"
+              prompt
               hint={
                 <>
                   {p.shortFp.trim() && !p.shortOk && (
@@ -1183,6 +1184,7 @@ function RecoveryReveal({
           and pasting is deliberately refused, so there is no way to guess around it. */}
       <Field
         label="Type your recovery phrase back to confirm you saved it"
+        prompt
         hint={
           <>
             {pasteTried && !matches && (

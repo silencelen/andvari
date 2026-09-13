@@ -65,13 +65,12 @@ object Strength {
      *  the pattern penalty can only warn (class KDoc) — not for display. */
     fun entropyProxyScore(pw: String): Int = scoreOf(pw.length, classCount(pw))
 
-    /** True when the repeat/sequence collapse actually bit — i.e. this password is shorter
-     *  than it looks. Advisory input for the UI; never a gate. */
-    fun hasPatternWeakness(pw: String): Boolean = pw.isNotEmpty() && effectiveLength(pw) < pw.length
-
     /** [PATTERN_WARNING] when the collapse cost this password a score, else null. Only fires
      *  when the pattern is what makes it weak — a long, strong passphrase that happens to
-     *  contain "aaaa" keeps its score and stays quiet. */
+     *  contain "aaaa" keeps its score and stays quiet. This is the ONE pattern signal the
+     *  meters consult; a raw "did the collapse bite at all" boolean (`hasPatternWeakness`)
+     *  used to sit beside it with no production caller in either twin and was deleted
+     *  (audit H86) so no reader mistakes it for a meter input. */
     fun patternWarning(pw: String): String? =
         if (estimateStrength(pw) < entropyProxyScore(pw)) PATTERN_WARNING else null
 

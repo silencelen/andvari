@@ -5,6 +5,7 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
@@ -33,7 +34,13 @@ import kotlin.test.assertTrue
  * Exercises the 426 upgrade_required min-version pin end-to-end (spec 03 §1) — the
  * machinery had never been fired before real secrets. Policy pins live in the DB
  * (PUT /admin/policy → Service.setPolicy), NOT env; the drill doc is
- * docs/drills/426-min-version-drill.md.
+ * docs/drills/426-min-version-drill.md (recorded elsewhere — the reference instance's private,
+ * out-of-tree operational area, never part of this repository; see the note atop CHANGELOG.md).
+ *
+ * H07 (audit 2026-09-13): the GATED SET is pinned here, not hand-maintained — every route that
+ * persists client-produced ciphertext must 426 a banned build, and [gatedRoutesRefuseABannedBuild]
+ * is the list. Add a ciphertext-writing route without adding it there and this file is the
+ * reminder.
  */
 class MinVersionGateTest : P4TestSupport() {
 
@@ -194,6 +201,65 @@ class MinVersionGateTest : P4TestSupport() {
             runBlocking { api.login(LoginRequest(vc.email, vc.authKey, DeviceInfo("android", "pixel"))) }
         }
         assertEquals(426, onLogin.status)
+    }
+
+    /**
+     * H07 (audit 2026-09-13): the routes that persist CLIENT-PRODUCED ciphertext are gated as a
+     * SET, pinned here so the gated set is not hand-maintained. Live-probed at 0.26.3: a banned
+     * build could still rotate the login verifier + re-wrap the UVK (PUT /account/password),
+     * replace the account's only admin-backstop blob (PUT /escrow/self) and overwrite the sealed
+     * usage ledger (PUT /usage) — while push, restore and attachments were refused. The pin exists
+     * for a shipped build with a crypto/format defect; a defective wrap path through the password
+     * route locks the member out of their own account. Each refusal is asserted to have happened
+     * BEFORE the write (no audit row, no ledger row), and a current build still passes each door.
+     */
+    @Test
+    fun gatedRoutesRefuseABannedBuild() = testWith { services, builder ->
+        val client = jsonClient(builder)
+        val vc = VirtualClient("gated@x.com", "gated routes password one", fast = true)
+        client.register(vc, bootstrapToken) // bootstrap ⇒ admin, so it can read its own audit rows
+
+        pin(services, "test", "2.0.0")
+
+        fun io.ktor.client.request.HttpRequestBuilder.build(version: String) {
+            contentType(ContentType.Application.Json)
+            header("Authorization", "Bearer ${vc.accessToken}")
+            header("X-Andvari-Client", "test/$version")
+        }
+        fun escrowBody() = io.silencelen.andvari.core.model.EscrowUpload(
+            io.silencelen.andvari.core.crypto.Bytes.toB64(
+                io.silencelen.andvari.core.crypto.Escrow.sealUvk(crypto, recovery.publicKey, vc.userId, crypto.randomBytes(32)),
+            ),
+            fingerprint,
+        )
+        val usageBody = io.silencelen.andvari.core.model.UsageUpload("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+        // PUT /account/password — 426 before the verifier is even checked: no password_change AND
+        // no password_change_fail row, so the banned build spent nothing and changed nothing.
+        val pw = client.put("/api/v1/account/password") { build("1.0.0"); setBody(vc.buildPasswordChange("gated routes password two")) }
+        assertEquals(426, pw.status.value, pw.bodyAsText())
+        assertEquals("upgrade_required", errorOf(pw))
+        assertTrue(client.auditRows(vc, "password_change").isEmpty(), "banned build must not rotate the verifier/UVK wrap")
+        assertTrue(client.auditRows(vc, "password_change_fail").isEmpty(), "426 must land before the argon2 verify")
+
+        // PUT /escrow/self — 426 before the blob is read; the register-time escrow row is untouched.
+        val esc = client.put("/api/v1/escrow/self") { build("1.0.0"); setBody(escrowBody()) }
+        assertEquals(426, esc.status.value, esc.bodyAsText())
+        assertTrue(client.auditRows(vc, "escrow_self_upload").isEmpty(), "banned build must not replace the backstop blob")
+
+        // PUT /usage — 426 and no ledger row appears (the route is deliberately un-audited, so the
+        // table itself is the witness). GET /usage stays open to the banned build.
+        val use = client.put("/api/v1/usage") { build("1.0.0"); setBody(usageBody) }
+        assertEquals(426, use.status.value, use.bodyAsText())
+        val ledgerRows = services.repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM usage_ledger") { it.getLong(1) } ?: 0L }
+        assertEquals(0L, ledgerRows, "banned build must not write the usage ledger")
+        assertEquals(HttpStatusCode.OK, client.get("/api/v1/usage") { build("1.0.0") }.status, "reading the ledger is not gated")
+
+        // A current build passes all three doors (the pin bans builds, not the routes).
+        assertEquals(HttpStatusCode.OK, client.put("/api/v1/usage") { build("2.0.0"); setBody(usageBody) }.status)
+        assertEquals(HttpStatusCode.OK, client.put("/api/v1/escrow/self") { build("2.0.0"); setBody(escrowBody()) }.status)
+        val pwOk = client.put("/api/v1/account/password") { build("2.0.0"); setBody(vc.buildPasswordChange("gated routes password two")) }
+        assertEquals(HttpStatusCode.OK, pwOk.status, pwOk.bodyAsText())
     }
 
     /** testApplication with the Services handle exposed so tests can flip policy mid-flight. */

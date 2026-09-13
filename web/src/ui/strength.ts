@@ -63,15 +63,12 @@ export function meetsMasterPasswordFloor(pw: string): boolean {
   return entropyProxyScore(pw) >= MASTER_PW_MIN_SCORE;
 }
 
-/** True when the repeat/sequence collapse actually bit — this password is shorter than it
- *  looks. Advisory input for the UI; never a gate. */
-export function hasPatternWeakness(pw: string): boolean {
-  return pw.length > 0 && effectiveLength(pw) < pw.length;
-}
-
 /** PATTERN_WARNING when the collapse cost this password a score, else null. Only fires when
  *  the pattern is what makes it weak — a long, strong passphrase that happens to contain
- *  "aaaa" keeps its score and stays quiet. */
+ *  "aaaa" keeps its score and stays quiet. This is the ONE pattern signal the meters consult;
+ *  a raw "did the collapse bite at all" boolean (`hasPatternWeakness`) used to sit beside it
+ *  with no production caller in either twin and was deleted (audit H86) so no reader mistakes
+ *  it for a meter input. */
 export function patternWarning(pw: string): string | null {
   return estimateStrength(pw) < entropyProxyScore(pw) ? PATTERN_WARNING : null;
 }

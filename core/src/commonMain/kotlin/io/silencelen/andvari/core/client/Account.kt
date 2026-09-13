@@ -295,10 +295,30 @@ class Account private constructor(
             return d.toLong()
         }
 
-        /** Derive the login authKey a fresh device sends after prelogin. */
+        /**
+         * Derive the login authKey a fresh device sends after prelogin.
+         *
+         * ZEROIZATION (audit H80, spec 01 §2 "MK never leaves the KDF step"): MK and the derived
+         * authKey are dead the moment the base64 string exists, and are `fill(0)`-ed in a
+         * `finally` — the same discipline the backup path already applies to MKx/exportKey
+         * (spec 07 §2.3, [Backup]). Best-effort by nature (the JVM may have copied the arrays,
+         * and the caller holds the encoded string), but it takes the MK — from which the login
+         * credential AND the UVK wrap key re-derive — off the heap for a heap dump or swap page
+         * instead of leaving it until GC. Every MK-derivation site in this class does the same:
+         * [enroll], [unlock], [recover], and the identity seed in [unlockFromUvk].
+         */
         fun deriveAuthKey(password: String, kdfSaltB64: String, params: KdfParams, crypto: CryptoProvider = createCryptoProvider()): String {
             val mk = Keys.masterKey(crypto, password, Bytes.fromB64(kdfSaltB64), params)
-            return Bytes.toB64(Keys.authKey(crypto, mk))
+            try {
+                val authKey = Keys.authKey(crypto, mk)
+                try {
+                    return Bytes.toB64(authKey)
+                } finally {
+                    authKey.fill(0)
+                }
+            } finally {
+                mk.fill(0)
+            }
         }
 
         /**
@@ -335,56 +355,69 @@ class Account private constructor(
             val userId = uuid(crypto)
             val personalVaultId = uuid(crypto)
             val kdfSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
+            // ZEROIZATION (audit H80; see [deriveAuthKey]): MK lives only long enough to split
+            // into its two purposes (spec 01 §2 "MK never leaves the KDF step"); authKey, wrapKey
+            // and the raw identity seed die once the request carries their encoded/sealed forms.
+            // The UVK and VK are NOT wiped — the returned [Account] owns them for the session.
             val mk = Keys.masterKey(crypto, password, kdfSalt, params)
-            val authKey = Keys.authKey(crypto, mk)
-            val wrapKey = Keys.wrapKey(crypto, mk)
+            val (authKey, wrapKey) = try {
+                Keys.authKey(crypto, mk) to Keys.wrapKey(crypto, mk)
+            } finally {
+                mk.fill(0)
+            }
 
             val uvk = crypto.randomBytes(32)
             val identitySeed = crypto.randomBytes(32)
-            val identity = crypto.boxKeypairFromSeed(identitySeed)
-            val vk = crypto.randomBytes(32)
+            try {
+                val identity = crypto.boxKeypairFromSeed(identitySeed)
+                val vk = crypto.randomBytes(32)
 
-            // Org escrow is CONDITIONAL (§F.4): sealed only for a `required` invite (org key present),
-            // preserving the verified-fingerprint discipline — refuse to seal the UVK to a key whose
-            // fingerprint the enrollee did not confirm out-of-band. Waived ⇒ no escrow blob.
-            val escrow: EscrowUpload? = if (recoveryPublicKey != null) {
-                val fp = requireNotNull(recoveryFingerprint) { "recoveryFingerprint is required when sealing org escrow" }
-                val computedFp = Escrow.fingerprint(crypto, recoveryPublicKey)
-                if (computedFp != fp) throw CryptoException("recovery public key does not match its fingerprint")
-                EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recoveryPublicKey, userId, uvk)), fp)
-            } else {
-                null
+                // Org escrow is CONDITIONAL (§F.4): sealed only for a `required` invite (org key present),
+                // preserving the verified-fingerprint discipline — refuse to seal the UVK to a key whose
+                // fingerprint the enrollee did not confirm out-of-band. Waived ⇒ no escrow blob.
+                val escrow: EscrowUpload? = if (recoveryPublicKey != null) {
+                    val fp = requireNotNull(recoveryFingerprint) { "recoveryFingerprint is required when sealing org escrow" }
+                    val computedFp = Escrow.fingerprint(crypto, recoveryPublicKey)
+                    if (computedFp != fp) throw CryptoException("recovery public key does not match its fingerprint")
+                    EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recoveryPublicKey, userId, uvk)), fp)
+                } else {
+                    null
+                }
+
+                // Per-member self-service recovery piece — MANDATORY for every new account (§F.4). The
+                // 256-bit recoverySecret is GENERATED (never user input) and returned to be SHOWN ONCE.
+                val recovery = MemberRecovery.generate(crypto, userId, uvk)
+
+                val req = RegisterRequest(
+                    inviteToken = inviteToken,
+                    userId = userId,
+                    email = email,
+                    displayName = displayName,
+                    kdfSalt = Bytes.toB64(kdfSalt),
+                    kdfParams = params,
+                    authKey = Bytes.toB64(authKey),
+                    wrappedUvk = Envelope.sealB64(crypto, wrapKey, uvk, Ad.uvk(userId)),
+                    identityPub = Bytes.toB64(identity.publicKey),
+                    encryptedIdentitySeed = Envelope.sealB64(crypto, uvk, identitySeed, Ad.idkey(userId)),
+                    escrow = escrow,
+                    memberRecovery = MemberRecoveryBlock(recovery.recoveryWrappedUvk, recovery.recoveryAuthKey),
+                    personalVault = PersonalVaultUpload(
+                        vaultId = personalVaultId,
+                        wrappedVk = Envelope.sealB64(crypto, uvk, vk, Ad.vk(personalVaultId, userId)),
+                        metaBlob = Envelope.sealB64(crypto, vk, """{"name":"Personal"}""".encodeToByteArray(), Ad.vaultMeta(personalVaultId)),
+                    ),
+                    device = DeviceInfo(platform, deviceName),
+                )
+                val account = Account(
+                    crypto, userId, uvk, identity.publicKey, identity.privateKey, personalVaultId,
+                    mutableMapOf(personalVaultId to vk), mutableMapOf(personalVaultId to "owner"),
+                )
+                return EnrollResult(req, account, recovery.recoverySecret)
+            } finally {
+                authKey.fill(0)
+                wrapKey.fill(0)
+                identitySeed.fill(0)
             }
-
-            // Per-member self-service recovery piece — MANDATORY for every new account (§F.4). The
-            // 256-bit recoverySecret is GENERATED (never user input) and returned to be SHOWN ONCE.
-            val recovery = MemberRecovery.generate(crypto, userId, uvk)
-
-            val req = RegisterRequest(
-                inviteToken = inviteToken,
-                userId = userId,
-                email = email,
-                displayName = displayName,
-                kdfSalt = Bytes.toB64(kdfSalt),
-                kdfParams = params,
-                authKey = Bytes.toB64(authKey),
-                wrappedUvk = Envelope.sealB64(crypto, wrapKey, uvk, Ad.uvk(userId)),
-                identityPub = Bytes.toB64(identity.publicKey),
-                encryptedIdentitySeed = Envelope.sealB64(crypto, uvk, identitySeed, Ad.idkey(userId)),
-                escrow = escrow,
-                memberRecovery = MemberRecoveryBlock(recovery.recoveryWrappedUvk, recovery.recoveryAuthKey),
-                personalVault = PersonalVaultUpload(
-                    vaultId = personalVaultId,
-                    wrappedVk = Envelope.sealB64(crypto, uvk, vk, Ad.vk(personalVaultId, userId)),
-                    metaBlob = Envelope.sealB64(crypto, vk, """{"name":"Personal"}""".encodeToByteArray(), Ad.vaultMeta(personalVaultId)),
-                ),
-                device = DeviceInfo(platform, deviceName),
-            )
-            val account = Account(
-                crypto, userId, uvk, identity.publicKey, identity.privateKey, personalVaultId,
-                mutableMapOf(personalVaultId to vk), mutableMapOf(personalVaultId to "owner"),
-            )
-            return EnrollResult(req, account, recovery.recoverySecret)
         }
 
         /**
@@ -426,25 +459,50 @@ class Account private constructor(
             )
 
             // 3. Derive fresh password material and re-wrap the SAME UVK (invariant).
+            //    ZEROIZATION (audit H80; see [deriveAuthKey]): the new MK dies after its purpose
+            //    split, its two children once the commit body carries their encoded/sealed forms —
+            //    and so does the recovered UVK: recover() returns a commit body, not a session (the
+            //    commit revokes every session and the member signs in afresh), so no caller holds
+            //    this copy. The throw-away Account the step-2 probe built shares the reference and
+            //    is already unreachable.
             val newKdfSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
             val newMk = Keys.masterKey(crypto, newPassword, newKdfSalt, newParams)
-            return RecoveryCommitRequest(
-                recoveryTicket = verifyResponse.recoveryTicket,
-                newAuthKey = Bytes.toB64(Keys.authKey(crypto, newMk)),
-                newKdfSalt = Bytes.toB64(newKdfSalt),
-                newKdfParams = newParams,
-                newWrappedUvk = Envelope.sealB64(crypto, Keys.wrapKey(crypto, newMk), uvk, Ad.uvk(userId)),
-            )
+            val (newAuthKey, newWrapKey) = try {
+                Keys.authKey(crypto, newMk) to Keys.wrapKey(crypto, newMk)
+            } finally {
+                newMk.fill(0)
+            }
+            try {
+                return RecoveryCommitRequest(
+                    recoveryTicket = verifyResponse.recoveryTicket,
+                    newAuthKey = Bytes.toB64(newAuthKey),
+                    newKdfSalt = Bytes.toB64(newKdfSalt),
+                    newKdfParams = newParams,
+                    newWrappedUvk = Envelope.sealB64(crypto, newWrapKey, uvk, Ad.uvk(userId)),
+                )
+            } finally {
+                newAuthKey.fill(0)
+                newWrapKey.fill(0)
+                uvk.fill(0)
+            }
         }
 
         /** Unlock a device holding only the password + the server's account keys. */
         fun unlock(userId: String, password: String, keys: AccountKeys, crypto: CryptoProvider = createCryptoProvider()): Account {
+            // ZEROIZATION (audit H80; see [deriveAuthKey]): after the wrappedUvk open the session
+            // needs only the UVK — MK and wrapKey are wiped on the way out, success or failure.
             val mk = Keys.masterKey(crypto, password, Bytes.fromB64(keys.kdfSalt), keys.kdfParams)
-            val wrapKey = Keys.wrapKey(crypto, mk)
+            val wrapKey = try {
+                Keys.wrapKey(crypto, mk)
+            } finally {
+                mk.fill(0)
+            }
             val uvk = try {
                 Envelope.openB64(crypto, wrapKey, keys.wrappedUvk, Ad.uvk(userId))
             } catch (e: CryptoException) {
                 throw CryptoException("wrong master password")
+            } finally {
+                wrapKey.fill(0)
             }
             // Password path validates the password by the wrappedUvk open above; from here the
             // work is identical to the UVK (quick-unlock) path — one shared tail, no drift.
@@ -491,7 +549,14 @@ class Account private constructor(
          */
         private fun unlockFromUvk(userId: String, uvk: ByteArray, keys: AccountKeys, crypto: CryptoProvider): Account {
             val identitySeed = Envelope.openB64(crypto, uvk, keys.encryptedIdentitySeed, Ad.idkey(userId))
-            val identity = crypto.boxKeypairFromSeed(identitySeed)
+            // ZEROIZATION (audit H80): the seed's only job is to derive the keypair the Account
+            // holds — it never needs to be resident after that (a compromise of the seed IS a
+            // compromise of the identity key, so it gets the same care as the MK).
+            val identity = try {
+                crypto.boxKeypairFromSeed(identitySeed)
+            } finally {
+                identitySeed.fill(0)
+            }
             // spec 01 §5 (web account.ts parity): a MALFORMED/undecodable server identityPub is itself
             // the tampering signal — decode defensively so garbage-where-the-key-belongs raises the
             // SAME "possible server compromise" CryptoException, never a generic base64 decode error.

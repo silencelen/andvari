@@ -1,11 +1,38 @@
 package io.silencelen.andvari.server
 
-import io.silencelen.andvari.core.model.AdminDeviceSummary
 import io.silencelen.andvari.core.model.AdminStatus
 import io.silencelen.andvari.core.model.AdminUserSummary
 import io.silencelen.andvari.core.model.InviteResponse
 import io.silencelen.andvari.core.model.RecoveryUpload
+import kotlinx.serialization.Serializable
 import java.io.File
+
+/**
+ * H25 (audit 2026-09-13): the device row the Admin device list renders — core's
+ * `AdminDeviceSummary` (the client-decodable subset) plus the two liveness fields the server
+ * derives. A SERVER-side superset in the InviteCreateResponse mould (App.kt): the wire stays
+ * additive — every client decodes with ignoreUnknownKeys, so a build that only knows the core
+ * shape sees exactly what it saw before — while the server can say what only it knows.
+ *   live        — the device still holds access: not revoked, and a session exists that is not
+ *                 revoked and whose refresh chain has not lapsed ([AdminService.LIVE_SESSION_FOR_DEVICE_SQL]).
+ *                 THE field the console keys the Revoke control on: `!live` renders "signed out"
+ *                 (or "revoked" when revokedAt is set), never a Revoke button over nothing.
+ *   signedOutAt — when the member's own /auth/logout stamped the row (Service.logout); null for
+ *                 a device that was revoked, lapsed, or is still live. Distinct from revokedAt on
+ *                 purpose: an admin revoke and a member sign-out are different events.
+ */
+@Serializable
+data class AdminDeviceView(
+    val deviceId: String,
+    val platform: String,
+    val name: String,
+    val clientVersion: String?,
+    val createdAt: Long,
+    val lastSeenAt: Long?,
+    val revokedAt: Long?,
+    val signedOutAt: Long?,
+    val live: Boolean,
+)
 
 /** Admin operations (spec 03 §7). All callers are already checked isAdmin by the route. */
 class AdminService(private val repo: Repo, private val config: Config) {
@@ -22,7 +49,16 @@ class AdminService(private val repo: Repo, private val config: Config) {
                 isAdmin = rs.getInt("isAdmin") != 0,
                 status = rs.getString("status"),
                 createdAt = rs.getLong("createdAt"),
-                deviceCount = c.queryOne("SELECT COUNT(*) FROM devices WHERE userId=? AND revokedAt IS NULL", userId) { r -> r.getInt(1) } ?: 0,
+                // H25 (audit 2026-09-13): the count answers "how many devices still hold access to
+                // the household vault", so it is DERIVED from live sessions — not read off the
+                // admin-only revokedAt column, which a member's own sign-out never touched. Every
+                // login mints a fresh device row, so the old COUNT(*) grew monotonically with
+                // sign-ins ("5 devices" for one phone re-enrolled five times) and an admin could
+                // not tell a compromised live device from a long-gone one. Same definition of
+                // "live" as Service.deviceHasLiveSession (a non-revoked session under a non-revoked
+                // device), plus the refresh-chain expiry: a device whose last refresh token lapsed
+                // cannot come back without a fresh login, which mints a new row.
+                deviceCount = c.queryOne(LIVE_DEVICE_COUNT_SQL, userId, now()) { r -> r.getInt(1) } ?: 0,
                 // Posture reconciliation (design §F.4): escrowFingerprint==null ⇒ no admin backstop
                 // (waived, intended — or, for a legacy pre-migration account, never escrowed).
                 // recoveryEnrolled ⇒ the account holds its self-service piece. The two together let the
@@ -148,18 +184,45 @@ class AdminService(private val repo: Repo, private val config: Config) {
         it.queryOne("SELECT sealed FROM escrow WHERE userId=?", userId) { rs -> rs.getString(1) }
     }
 
-    fun listDevices(userId: String): List<AdminDeviceSummary> = repo.db.read { c ->
-        c.queryAll("SELECT * FROM devices WHERE userId=? ORDER BY createdAt DESC", userId) { rs ->
-            AdminDeviceSummary(
+    /**
+     * H25: every device row the user ever minted, each with its liveness DERIVED from the sessions
+     * join — the same rule [LIVE_DEVICE_COUNT_SQL] counts by, so the list and the count can never
+     * disagree. Newest first, dead rows included: the admin's question is "which of these still
+     * holds access", and the answer for a signed-out row is `live=false` + `signedOutAt`, rendered
+     * as "signed out", not a Revoke button (the janitor ages session-less rows out after 90 d).
+     */
+    fun listDevices(userId: String): List<AdminDeviceView> = repo.db.read { c ->
+        c.queryAll(
+            """SELECT d.*, EXISTS($LIVE_SESSION_FOR_DEVICE_SQL) AS live
+               FROM devices d WHERE d.userId=? ORDER BY d.createdAt DESC""",
+            now(), userId,
+        ) { rs ->
+            val revokedAt = rs.getLong("revokedAt").let { v -> if (rs.wasNull()) null else v }
+            AdminDeviceView(
                 deviceId = rs.getString("deviceId"),
                 platform = rs.getString("platform"),
                 name = rs.getString("name"),
                 clientVersion = rs.getString("clientVersion"),
                 createdAt = rs.getLong("createdAt"),
                 lastSeenAt = rs.getLong("lastSeenAt").let { v -> if (rs.wasNull()) null else v },
-                revokedAt = rs.getLong("revokedAt").let { v -> if (rs.wasNull()) null else v },
+                revokedAt = revokedAt,
+                signedOutAt = rs.getLong("signedOutAt").let { v -> if (rs.wasNull()) null else v },
+                // A revoked device is never live regardless of its session rows (revokeDevice stamps
+                // both, but the row's own flag is the authority the M8 socket re-check reads too).
+                live = revokedAt == null && rs.getInt("live") != 0,
             )
         }
+    }
+
+    companion object {
+        /** H25: "this device still holds access" — a session that is not revoked and whose refresh
+         *  chain has not lapsed. Parameter 1 = now (ms). Correlated against the outer `d` row. */
+        internal const val LIVE_SESSION_FOR_DEVICE_SQL =
+            "SELECT 1 FROM sessions s WHERE s.deviceId = d.deviceId AND s.revokedAt IS NULL AND s.refreshExpiresAt > ?"
+
+        /** H25: the user table's device count. Parameters: userId, now (ms). */
+        internal const val LIVE_DEVICE_COUNT_SQL =
+            """SELECT COUNT(*) FROM devices d WHERE d.userId=? AND d.revokedAt IS NULL AND EXISTS($LIVE_SESSION_FOR_DEVICE_SQL)"""
     }
 
     /** spec 03 §7: server version, break-glass state (read-only), storage stats. */

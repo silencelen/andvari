@@ -8,8 +8,13 @@ import {
   extensionRowState,
   PlatformRowView,
   platformRowState,
-  windowsRowState,
 } from "./Devices";
+
+/** H86: the windows column of [platformRowState], as a LOCAL helper — it used to be exported
+ *  from Devices.tsx purely to keep this suite's name, i.e. dead weight in the shipped bundle.
+ *  The render at Devices.tsx calls platformRowState(manifest, "windows") directly, which is
+ *  exactly what this composes, so the exhaustive table below still pins the shipped path. */
+const windowsRowState = (manifest: Parameters<typeof platformRowState>[0]) => platformRowState(manifest, "windows");
 
 describe("coerceManifest (fetch-parse → state, review finding web-correctness-2)", () => {
   it("a JSON body of literal null (or any non-object) is 'error', NEVER the loading state", () => {

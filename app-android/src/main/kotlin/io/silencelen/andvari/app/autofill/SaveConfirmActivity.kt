@@ -68,6 +68,42 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
+ * Strip every caller-claimed domain out of a capture whose requesting package is NOT a
+ * cert-pinned browser (G11; audit 2026-09-13 H55).
+ *
+ * `webDomain` is ATTACKER-CONTROLLED — any app populates its own AssistStructure, so a package
+ * can put `webDomain = "paypal.com"` on the node it hands us. G11 laundered the login-level
+ * field and stopped there, but [SavedCard] carries its OWN copy of the frame domain
+ * ([SaveExtractor] sets it from the CC_NUMBER node), and a `copy(webDomain = null)` on the
+ * outer class does not reach a nested data class. A card-only capture therefore still put the
+ * claimed host in the "Unlock to save a card for paypal.com" subject — the sentence the user
+ * reads while deciding whether to type their master password.
+ *
+ * Pure and file-level so `SaveConfirmLaunderTest` can pin BOTH halves without an Activity (the
+ * DatasetBuilderSaveTriggerTest idiom): the rule is "an untrusted caller's claim never reaches
+ * the screen and never reaches the store", not "these two
+ * fields happen to be nulled today", so a THIRD domain-bearing field added later must be nulled
+ * here too.
+ */
+internal fun launderUntrustedCapture(raw: SavedCredentials, trusted: Boolean): SavedCredentials =
+    if (trusted) raw else raw.copy(webDomain = null, card = raw.card?.copy(webDomain = null))
+
+/**
+ * What the unlock prompt says it is unlocking FOR ("a card & login for github.com"). File-level
+ * and pure for the same reason as [launderUntrustedCapture] — this is the string H55 was about.
+ */
+internal fun saveSubject(creds: SavedCredentials): String {
+    val what = buildList {
+        if (creds.card != null) add("a card")
+        if (creds.savable) add("a login")
+    }.joinToString(" & ")
+    // Card-only capture: the login title() is the app package's label (there is no login), so the
+    // card's frame domain is the only site name available — laundered above when untrusted.
+    val site = (if (!creds.savable) creds.card?.webDomain else null) ?: creds.title()
+    return "$what for $site"
+}
+
+/**
  * Card confirm variant, resolved POST-unlock (the normalized-PAN dedupe needs the decrypted
  * working set). [display] is brand + masked last4 ("Visa ••4242") — the ONLY card identity
  * the confirm surface ever shows: never a full PAN, never any CVV.
@@ -137,9 +173,10 @@ class SaveConfirmActivity : ComponentActivity() {
         // uri()/title() straight off the claim — an untrusted app claiming webDomain="github.com"
         // would mint an item whose URI matches the real github.com thereafter. Launder ONCE here:
         // an untrusted caller's capture carries androidapp://<pkg> and an app-derived title, so the
-        // stored identity, the confirm sheet's "Site" and the unlock subject all agree.
+        // stored identity, the confirm sheet's "Site" and the unlock subject all agree. H55: the
+        // launder is [launderUntrustedCapture] so it reaches the CARD's own copy of the domain too.
         val raw = SaveExtractor.extract(structure)
-        val creds = if (TrustedBrowsers.isTrusted(this, raw.appPackage)) raw else raw.copy(webDomain = null)
+        val creds = launderUntrustedCapture(raw, TrustedBrowsers.isTrusted(this, raw.appPackage))
         if (!creds.savable && creds.card == null) { finish(); return } // nothing savable captured
 
         VaultSession.setAutoLockSeconds(SessionStore(applicationContext).autoLockSeconds)
@@ -178,16 +215,6 @@ class SaveConfirmActivity : ComponentActivity() {
         }
         // Never let our own save overlay be autofilled (belt-and-suspenders with the service self-guard).
         window.decorView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
-    }
-
-    /** What the unlock prompt says it is unlocking FOR ("a card & login for github.com"). */
-    private fun saveSubject(creds: SavedCredentials): String {
-        val what = buildList {
-            if (creds.card != null) add("a card")
-            if (creds.savable) add("a login")
-        }.joinToString(" & ")
-        val site = (if (!creds.savable) creds.card?.webDomain else null) ?: creds.title()
-        return "$what for $site"
     }
 
     /**

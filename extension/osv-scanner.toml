@@ -1,0 +1,25 @@
+# H44 (2026-09-13 audit) — OpenSSF Scorecard's Vulnerabilities check runs osv-scanner over every
+# committed lockfile, devDependencies included, and honours this per-directory config. The tree's
+# stated standard (web/package.json overridesComment) is a CLEAN check, "which for a public
+# password manager is part of the product".
+#
+# image-size 2.0.2 arrived with the G17 web-ext 10.6.0 pin (commit 152efe1, via addons-linter).
+# 2.0.2 is the NEWEST release and both advisories carry first_patched_version = null, so there is
+# nothing to bump to. Scope, stated for the record so the ignore is auditable rather than a mute:
+#   - devDependency only — web-ext is the release-time signer/linter (scripts/publish-extension.sh); NO byte of
+#     image-size ships in the extension bundle (build.mjs bundles src/ with esbuild; the manifest's
+#     icons are our own PNGs).
+#   - the advisories are DoS-class bugs in image-size's ICNS/JXL/HEIF PARSERS on attacker-supplied
+#     images; addons-linter only ever feeds it the icons from OUR manifest, never untrusted input.
+# Revisit when web-ext/addons-linter move off image-size 2.0.x, or when a patched release exists
+# (then the pin moves and this file shrinks). `ignoreUntil` is deliberately absent: the reason
+# above does not expire on a date, it expires when the dependency changes — and the release
+# runbook's Scorecard check is where the change would surface.
+
+[[IgnoredVulns]]
+id = "GHSA-5p2g-fcmc-qvqq"
+reason = "image-size 2.0.2 (devDependency via web-ext -> addons-linter): DoS in an image parser that only ever sees our own manifest icons; no upstream fix exists (newest release)."
+
+[[IgnoredVulns]]
+id = "GHSA-w3rx-r6r6-pgpr"
+reason = "image-size 2.0.2 (devDependency via web-ext -> addons-linter): DoS in an image parser that only ever sees our own manifest icons; no upstream fix exists (newest release)."

@@ -28,6 +28,7 @@ import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CsvPreflight
 import io.silencelen.andvari.core.client.Duplicates
 import io.silencelen.andvari.core.client.ExportPlanner
+import io.silencelen.andvari.core.client.ExportVault
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
 import io.silencelen.andvari.core.client.PlannedAttachment
@@ -117,6 +118,38 @@ internal const val RECOVERY_PHRASE_REPLACED_NOTICE =
     "This recovery phrase was replaced — a newer one was created, possibly from another device. " +
         "A fresh phrase will be shown; discard any phrase you saved before it."
 
+// H12 (audit 2026-09-13; web Recover.tsx CR-02 twin, the sibling that is right): the forgot-password
+// wizard's reset step holds a UVK-equivalent recovery secret (spec 05 R9 / TM-R9) in memory PRE-
+// session — where neither the idle lock (keyed to an unlocked VaultSession) nor lock-on-background
+// (which returns early when VaultSession is null) ever reached it, so a member who got the phrase
+// accepted and walked away left a secret that decrypts their whole vault resident until the
+// process died. Web bounds that window with a fixed conservative 300 s idle cap (KH-22 / TM-T4);
+// this is the same cap, on the same clock the vault idle lock uses, with web's exact notice.
+internal const val RECOVER_IDLE_TIMEOUT_S = 300L
+internal const val RECOVER_TIMEOUT_NOTICE = "Timed out for your security. Sign in again — a fresh recovery phrase will be shown."
+
+/** The pure H12 gate: only the reset step (phrase verified, secret held) is bounded — phase 1
+ *  holds nothing yet, and an actively-typing user is never interrupted (idle resets on input). */
+internal fun recoverSecretIdleExpired(onRecoverScreen: Boolean, recoverVerified: Boolean, idleSeconds: Long): Boolean =
+    onRecoverScreen && recoverVerified && idleSeconds >= RECOVER_IDLE_TIMEOUT_S
+
+/**
+ * H26 (audit 2026-09-13; G35's "never a false none" rule applied to the CHANGED-since-scan half):
+ * the breach map is keyed by the stable itemId while the thing it describes is the password, so
+ * an edit that rotated a breached password kept rendering the old red count — and, worse, an item
+ * that read green "none" and was edited to a breached password stayed green until a rescan. Each
+ * scan now records the item's `rev` beside its count; a verdict whose rev no longer matches the
+ * live item is dropped here, so the row renders "—" (absent key, G35's branch) and the Breached
+ * tile stops counting it. `rev` is the right key on this client: the cache only ever changes an
+ * item's doc through a server-acknowledged put/pull that bumps it. Pure; pinned in
+ * `HealthVerdictGatesTest`.
+ */
+internal fun freshBreachVerdicts(
+    byItem: Map<String, Long>?,
+    scannedRev: Map<String, Long>,
+    liveRev: (String) -> Long?,
+): Map<String, Long>? = byItem?.filterKeys { id -> scannedRev[id] != null && scannedRev[id] == liveRev(id) }
+
 sealed interface Screen {
     data object Loading : Screen
     data object Welcome : Screen
@@ -185,6 +218,9 @@ data class UiState(
      * null = never scanned this session (the column renders "—" and the button reads "Scan").
      */
     val breachByItem: Map<String, Long>? = null,
+    /** H26: itemId → the item's `rev` at scan time. A verdict is only rendered while the live
+     *  item still carries that rev ([freshBreachVerdicts]); same wipe rules as [breachByItem]. */
+    val breachScanRev: Map<String, Long> = emptyMap(),
     val breachScanning: Boolean = false,
     /** done / total prefix ranges, for the scan button's progress text. */
     val breachProgress: Pair<Int, Int> = 0 to 0,
@@ -193,6 +229,10 @@ data class UiState(
     val breachScanIncomplete: Boolean = false,
     /** A refusal or failure from a health action, rendered verbatim (the plan* refusal idiom). */
     val healthMessage: String? = null,
+    /** H27 (web Staleness.tsx `offerDelete` twin): the itemId whose "Account gone" verdict just
+     *  landed. The run has already advanced, so the offer row names the item; never automatic —
+     *  a deletion the user did not ask for is the one outcome the health view exists to avoid. */
+    val healthOfferDelete: String? = null,
     /** The verification run: the ordered itemIds still to visit, and where we are in them. */
     val verifyQueue: List<String> = emptyList(),
     val verifyIndex: Int = 0,
@@ -295,6 +335,12 @@ data class UiState(
     val backupPreflight: BackupPreflight? = null,
     val backupResult: BackupResult? = null,
     val csvPreflight: CsvPreflight? = null,
+    /** H23 (spec 07 intro; web ExportPanel.tsx:329-352 twin): the per-vault lines of the CSV
+     *  preflight and the vaults currently opted IN. The personal vault always exports; every
+     *  shared vault is on by default with an opt-out, and [csvPreflight] is re-planned over the
+     *  selection so its counts and named skips describe the file that will actually be written. */
+    val csvVaults: List<ExportVault> = emptyList(),
+    val csvSelectedVaults: Set<String> = emptySet(),
     val lastExportAt: Long = 0,
     // Vault lifecycle (spec 03 §11) — notices banner, verified incoming ownership offers,
     // the Sharing screen's members/deleted/held lists, and bulk-copy / move progress.
@@ -406,7 +452,7 @@ data class UiState(
 internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     items = emptyList(), needsUpdateCount = 0,
     notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
-    backupPreflight = null, backupResult = null, csvPreflight = null,
+    backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(),
     lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
     sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
     undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
@@ -430,9 +476,9 @@ internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     // made "gone at the wipe choke point" the rule for the first; this file's deletedItems /
     // itemVersions precedent makes an Android LOCK a wipe point for both. A fresh unlock
     // re-reads the ledger and the next scan re-derives the map — neither is persisted anywhere.
-    usage = emptyMap(), breachByItem = null, breachScanning = false, breachProgress = 0 to 0,
+    usage = emptyMap(), breachByItem = null, breachScanRev = emptyMap(), breachScanning = false, breachProgress = 0 to 0,
     breachScanIncomplete = false,
-    healthMessage = null, verifyQueue = emptyList(), verifyIndex = 0, verifyRunning = false,
+    healthMessage = null, healthOfferDelete = null, verifyQueue = emptyList(), verifyIndex = 0, verifyRunning = false,
     healthTab = "passwords", showSnoozed = false, pendingDetailId = null,
     // N2 §3/§6 (review MED): clear the probe-failure flag only when a policy is LOADED — then
     // it's stale noise. With policy == null the failure is CURRENT (nothing re-probes on the
@@ -737,6 +783,10 @@ class AndvariViewModel(
     private val _ui = MutableStateFlow(UiState(baseUrl = store.baseUrl, lastExportAt = store.lastExportAt, mustChangePassword = store.mustChangePassword))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
+    /** H08: the deferred-background-lock request (see [DeferredBackgroundLock]). Declared ABOVE
+     *  `init`: the collector below runs on Main.immediate and reads it before construction ends. */
+    private val deferredBackgroundLock = DeferredBackgroundLock()
+
     init {
         // Cold-start fallback: arm the last-known auto-lock window BEFORE the first policy
         // fetch lands (offline starts must still enforce it, spec 01 §8).
@@ -765,8 +815,14 @@ class AndvariViewModel(
         // stall for tens of seconds offline — must not hold the auto-lock open past the
         // policy window. A lock landing mid-sync is safe: the durable queue survives it,
         // and backgroundSync swallows the resulting teardown error instead of surfacing it.
+        // H08: the same choke point is where a background lock deferred under an op re-fires —
+        // the op's end is a `busy`/`importBusy`/`copyOp` transition, and this collector sees it.
         viewModelScope.launch {
-            _ui.collect { VaultSession.setOperationInProgress(it.busy || it.importBusy || it.copyOpVaultId != null) }
+            _ui.collect {
+                val inProgress = it.busy || it.importBusy || it.copyOpVaultId != null
+                VaultSession.setOperationInProgress(inProgress)
+                if (deferredBackgroundLock.takeIfDue(inProgress)) lock(reason = REASON_BACKGROUND)
+            }
         }
     }
 
@@ -2018,6 +2074,22 @@ class AndvariViewModel(
     }
 
     /**
+     * H12: the CR-02 idle cap fired (or the app was backgrounded, [lockFromBackground]) while the
+     * reset step held the raw recovery secret — zero everything the wizard holds and land where
+     * [cancelRecover] lands, with web's exact notice on the Unlock/Welcome screen. Like
+     * cancelRecover it is not busy-gated: the §F.7 cancel fences inside an in-flight verify/commit
+     * key on the screen swap and zero their own material instead of landing.
+     */
+    fun recoverTimedOut() {
+        zeroPendingRecover()
+        val session = store.load()
+        _ui.value = _ui.value.copy(
+            screen = if (session != null && session.accessToken.isNotEmpty()) Screen.Unlock(session.email) else Screen.Welcome,
+            recoverVerified = false, error = null, busy = false, notice = RECOVER_TIMEOUT_NOTICE,
+        )
+    }
+
+    /**
      * Phase 1 (web submitVerify parity): parse the typed phrase (total — a malformed phrase is a
      * user error, not an exception), derive the recovery authKey (HKDF only, no Argon2id — the
      * server proves possession without ever seeing the phrase) and POST /recovery/self/verify.
@@ -2511,6 +2583,12 @@ class AndvariViewModel(
      */
     fun checkIdleLock() {
         val s = _ui.value
+        // H12: the forgot-password reset step is PRE-session — VaultSession is null, so every
+        // check below would skip it. Its secret gets web's 300 s idle cap on the same clock.
+        if (recoverSecretIdleExpired(s.screen is Screen.Recover, s.recoverVerified, VaultSession.idleSeconds())) {
+            recoverTimedOut()
+            return
+        }
         // §F.7 (desktop v2 #15 parity): a lock that lands mid-reveal destroys the shown-once
         // phrase — the honest reason says so, and that the §F.9 gate re-issues at the next unlock.
         // Mid-reveal gets NO grace: leaving a secret on an unattended screen is the wrong trade.
@@ -3059,16 +3137,40 @@ class AndvariViewModel(
                 fail(t); return@launch
             }
             val current = VaultSession.get() ?: run { _ui.value = _ui.value.copy(busy = false); return@launch }
-            val docs = orderedDocs(current)
+            // H23: every VK-held vault is listed and opted in by default (the backup preflight's
+            // rule) — a member exporting "for another password manager" sees which household
+            // vaults the plaintext file spans and can leave the shared ones out.
+            val vaults = ExportPlanner.vaultLines(current.engine, current.account)
+            val selected = vaults.map { it.vaultId }.toSet()
             _ui.value = _ui.value.copy(
                 busy = false,
                 items = current.engine.items(),
-                csvPreflight = CsvPreflight(ExportCsv.warnings(docs), docs.count { it.type == "login" }, offlineNote(offline)),
+                csvVaults = vaults,
+                csvSelectedVaults = selected,
+                csvPreflight = csvPreflightFor(current, selected, offlineNote(offline)),
             )
         }
     }
 
-    fun csvDismiss() { _ui.value = _ui.value.copy(csvPreflight = null) }
+    /** H23: the preflight for a vault selection — counts and named skips over exactly the docs
+     *  [csvRun] will write for it (web recomputes `preflight` on every toggle the same way). */
+    private fun csvPreflightFor(current: VaultSession.Unlocked, selected: Set<String>, offlineNote: String?): CsvPreflight {
+        val docs = orderedDocs(current, selected)
+        return CsvPreflight(ExportCsv.warnings(docs), docs.count { it.type == "login" }, offlineNote)
+    }
+
+    /** H23: opt a shared vault in or out of the CSV. The personal vault always exports
+     *  ([ExportVault.type] "personal" rows carry no toggle), so it is never removed here. */
+    fun csvToggleVault(vaultId: String) {
+        val u = _ui.value
+        val pre = u.csvPreflight ?: return
+        if (u.csvVaults.firstOrNull { it.vaultId == vaultId }?.type == "personal") return
+        val current = VaultSession.get() ?: return
+        val selected = if (vaultId in u.csvSelectedVaults) u.csvSelectedVaults - vaultId else u.csvSelectedVaults + vaultId
+        _ui.value = u.copy(csvSelectedVaults = selected, csvPreflight = csvPreflightFor(current, selected, pre.offlineNote))
+    }
+
+    fun csvDismiss() { _ui.value = _ui.value.copy(csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet()) }
 
     /** CSV step 2: write the spec 07 §1 bytes (UTF-8, no BOM) through [write], then
      *  verify the on-disk bytes via [readBack] (backstops providers that ignore the
@@ -3082,17 +3184,21 @@ class AndvariViewModel(
             // (empty-only) document and surface the abort — never a silent 0-byte file.
             runCatching { discard(false) }
             _ui.value = _ui.value.copy(
-                busy = false, csvPreflight = null,
+                busy = false, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(),
                 error = "The vault locked while choosing where to save — nothing was exported.",
             )
             return
         }
-        _ui.value = _ui.value.copy(busy = true, error = null, csvPreflight = null)
+        // H23: the selection the preflight was confirmed with — read BEFORE the state is cleared.
+        // It lives in UiState, not Compose `remember`, for the same reason BackupRequest does: a
+        // configuration change while the SAF picker is up must not drop it.
+        val selected = _ui.value.csvSelectedVaults
+        _ui.value = _ui.value.copy(busy = true, error = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet())
         viewModelScope.launch {
             var writeBegan = false
             try {
                 val count = withContext(Dispatchers.IO) {
-                    val docs = orderedDocs(current)
+                    val docs = orderedDocs(current, selected)
                     val bytes = ExportCsv.write(docs).encodeToByteArray()
                     try {
                         writeBegan = true
@@ -3115,9 +3221,11 @@ class AndvariViewModel(
         }
     }
 
-    /** All VK-held docs in the pinned export order (vault order, then updatedAt). */
-    private fun orderedDocs(current: VaultSession.Unlocked): List<ItemDoc> {
-        val order = ExportPlanner.vaultLines(current.engine, current.account).map { it.vaultId }
+    /** The docs of the SELECTED VK-held vaults in the pinned export order (vault order, then
+     *  updatedAt) — H23: filtered by the preflight's opt-in set exactly as [buildAndWriteBackup]
+     *  filters `allLines`, so a deselected shared vault's passwords never reach the CSV. */
+    private fun orderedDocs(current: VaultSession.Unlocked, selected: Set<String>): List<ItemDoc> {
+        val order = ExportPlanner.vaultLines(current.engine, current.account).filter { it.vaultId in selected }.map { it.vaultId }
         return ExportPlanner.orderedItems(current.engine, order).map { it.doc }
     }
 
@@ -3217,7 +3325,7 @@ class AndvariViewModel(
     fun openSettings() {
         _ui.value = _ui.value.copy(
             screen = Screen.Settings, totpStatus = null, totpSetup = null, totpMessage = null,
-            backupPreflight = null, backupResult = null, csvPreflight = null, lastExportAt = store.lastExportAt,
+            backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), lastExportAt = store.lastExportAt,
         )
         refreshQuickUnlockState() // the quick-unlock toggle reflects current enrollment/eligibility
         viewModelScope.launch {
@@ -3259,14 +3367,55 @@ class AndvariViewModel(
      * password manager, but it is a daily-feel change and it is deliberate, not a regression.
      */
     fun lockFromBackground() {
+        deferredBackgroundLock.left()
+        // H12: a half-finished forgot-password attempt holds a UVK-equivalent secret PRE-session,
+        // where VaultSession is null and the early return below would skip it. Leaving the app
+        // ends it (web's CR-02 bounds the same window by idle time; lock-on-background is the
+        // stricter Android posture for anything secret-bearing on screen).
+        if (_ui.value.screen is Screen.Recover && _ui.value.recoverVerified) recoverTimedOut()
         if (VaultSession.get() == null) return // already locked, or never unlocked — nothing to do
+        // H09: an autofill overlay closing is not "leaving the app" — the exemption the 0.26.0
+        // design ratified (see [InProcessOverlays]). Checked BEFORE the excursion arm so an
+        // overlay's stop never burns an arm meant for a Custom Tab / picker launch.
+        if (InProcessOverlays.lastStopWasOverlay()) return
         if (ExternalExcursion.consume()) return // the user asked to leave and means to come back
         // The VaultSession.kt invariant: an expiry-driven lock must NEVER close the engine/api
         // while a mutation/import/copy coroutine is running — REGARDLESS of which entry point
-        // observes it. Same deferral as [checkIdleLock]; the deferred lock lands via
-        // getIfFresh/the next checkIdleLock tick once the op completes.
+        // observes it. Same deferral as [checkIdleLock] — but unlike the idle lock, whose
+        // predicate stays true on every later tick, this one's trigger was a one-time event, so
+        // the request is RECORDED (H08): the `_ui` collector in init fires it the moment the op
+        // signal drops while the app is still in the background, and ON_START voids it.
         val s = _ui.value
-        if (s.busy || s.importBusy || s.copyOpVaultId != null) return
+        if (s.busy || s.importBusy || s.copyOpVaultId != null) { deferredBackgroundLock.defer(); return }
+        lock(reason = REASON_BACKGROUND)
+    }
+
+    /** Process ON_START (H08): the user is back — a deferred background lock is void. */
+    fun onProcessStart() = deferredBackgroundLock.returned()
+
+    /**
+     * The hosting activity is FINISHING — Back out of the vault list, a Recents swipe (H54).
+     *
+     * Lock-on-background rides ProcessLifecycleOwner's ON_STOP, which is dispatched 700 ms after
+     * the last activity pauses; on API 29/30 a finishing activity's onPause → onStop → onDestroy
+     * transaction commonly completes inside that window, disposing the composition (and with it
+     * the observer) before the event is delivered. See MainActivity.onDestroy for the full trace.
+     *
+     * UNCONDITIONAL, unlike [lockFromBackground]:
+     *  - the in-flight-op deferral exists so a background lock cannot close the engine under a
+     *    running save/import/copy — but this ViewModel's scope is cancelled milliseconds from
+     *    now, so that coroutine is dying regardless, and nothing would ever re-fire a deferred
+     *    request (the `_ui` collector that consumes [DeferredBackgroundLock] dies with it too);
+     *  - [ExternalExcursion] and the [InProcessOverlays] exemption both describe flows that leave
+     *    this activity ALIVE in the background. None of them finishes it, so neither may excuse
+     *    a lock here — an exemption that fired on a finishing activity would be the whole hole
+     *    reopened.
+     *
+     * Locking twice is free (the second call sees a null session), so on API 31+ — where ON_STOP
+     * arrives first — this changes nothing.
+     */
+    fun lockOnExit() {
+        if (VaultSession.get() == null) return // already locked, or never unlocked
         lock(reason = REASON_BACKGROUND)
     }
 
@@ -3279,6 +3428,7 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(
             screen = Screen.Vault,
             healthMessage = null,
+            healthOfferDelete = null,
             verifyRunning = false,
             verifyQueue = emptyList(),
             verifyIndex = 0,
@@ -3308,6 +3458,14 @@ class AndvariViewModel(
         (_ui.value.policy?.clipboardClearSeconds ?: 30).coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS)
 
     fun healthRows(): List<VaultHealth.HealthRow> = VaultHealth.healthRows(_ui.value.items)
+
+    /** H26: the breach map the SCREEN renders — only verdicts whose item is unchanged since the
+     *  scan. null keeps its "never scanned" meaning; a scanned-then-edited item is simply absent. */
+    fun freshBreachByItem(): Map<String, Long>? {
+        val u = _ui.value
+        val live = u.items.associate { it.itemId to it.rev }
+        return freshBreachVerdicts(u.breachByItem, u.breachScanRev) { live[it] }
+    }
 
     fun duplicateClusters(): List<Duplicates.DuplicateCluster> =
         Duplicates.duplicateClusters(_ui.value.items, ::roleFor)
@@ -3365,6 +3523,9 @@ class AndvariViewModel(
         val rows = healthRows()
         if (rows.isEmpty() || _ui.value.breachScanning) return
         val crypto = createCryptoProvider()
+        // H26: the rev each verdict will be ABOUT, snapshotted with the rows — an applied sync
+        // mid-scan must not pair a pre-scan password's count with a post-scan rev.
+        val revs = _ui.value.items.associate { it.itemId to it.rev }
         _ui.value = _ui.value.copy(breachScanning = true, healthMessage = null, breachProgress = 0 to 0)
         viewModelScope.launch {
             try {
@@ -3403,8 +3564,11 @@ class AndvariViewModel(
                 // Keyed by itemId — NEVER by the plaintext password, which was only the lookup key.
                 val byItem = rows.mapNotNull { r -> byPassword[r.password]?.let { r.itemId to it } }.toMap()
                 val breachedLogins = rows.count { (byItem[it.itemId] ?: 0L) > 0L }
+                // H26: remember which revision each verdict is ABOUT (snapshotted above with the
+                // rows) — a later edit changes the rev and retires the verdict.
                 _ui.value = _ui.value.copy(
                     breachByItem = byItem,
+                    breachScanRev = byItem.keys.mapNotNull { id -> revs[id]?.let { id to it } }.toMap(),
                     breachScanning = false,
                     // Some ranges failed: their logins render "—" and the Breached tile must
                     // not claim a clean verdict it doesn't have.
@@ -3441,8 +3605,26 @@ class AndvariViewModel(
             return
         }
         _ui.value = _ui.value.copy(healthMessage = null) // a new verdict clears the last refusal (web's setMsg(null))
-        saveItem(write.itemId, write.doc) { onDone() }
+        saveItem(write.itemId, write.doc) {
+            // H27 (web Staleness.tsx:137 twin): "gone" records the verdict and then OFFERS a
+            // delete, once the save has landed; any other verdict withdraws a standing offer.
+            _ui.value = _ui.value.copy(healthOfferDelete = if (result == "gone") itemId else null)
+            onDone()
+        }
     }
+
+    /** H27: the offer accepted — the ordinary delete (30-day Trash), then web's exact sentence. */
+    fun removeGoneItem(itemId: String) = op {
+        engine!!.remove(itemId)
+        refreshItems()
+        _ui.value = _ui.value.copy(
+            healthOfferDelete = null,
+            healthMessage = "Moved to Deleted items — it stays restorable there for 30 days.",
+        )
+    }
+
+    /** H27: "Keep it" — the verdict stays recorded; only the offer goes away. */
+    fun keepGoneItem() { _ui.value = _ui.value.copy(healthOfferDelete = null) }
 
     fun unsnooze(itemId: String) {
         val plan = Staleness.planUnsnooze(_ui.value.items, itemId, ::roleFor)
@@ -3450,18 +3632,23 @@ class AndvariViewModel(
             plan.refusal?.let { _ui.value = _ui.value.copy(healthMessage = it) }
             return
         }
-        saveItem(write.itemId, write.doc)
+        // H72: the row leaves the snoozed list and re-enters the ranking — an outcome the user
+        // cannot see when "Show snoozed" is off, because the row simply disappears. Web's twin
+        // sentence (Staleness.tsx), stated on the save actually landing, never before it.
+        saveItem(write.itemId, write.doc) { _ui.value = _ui.value.copy(healthMessage = BACK_ON_THE_LIST) }
     }
 
     // ---- the verification run ----
 
-    /** Start a run over the CURRENT ranking, worst first. The queue is itemIds, not rows: the
-     *  list re-derives itself on every applied sync, and a run must follow the item rather than
-     *  a stale snapshot's index. */
-    fun startVerifyRun() {
-        val queue = stalenessRows().map { it.itemId }
+    /** Start a run over [queue] — by default the CURRENT ranking, worst first. The queue is
+     *  itemIds, not rows: the list re-derives itself on every applied sync, and a run must follow
+     *  the item rather than a stale snapshot's index. H29 (web Staleness.tsx:303-307/346 twin):
+     *  the screen also starts it over the never-checked subset and over a single row, so one
+     *  login can be checked without skipping through everything. Starting withdraws a standing
+     *  gone-offer (web's startRun clears offerDelete). */
+    fun startVerifyRun(queue: List<String> = stalenessRows().map { it.itemId }) {
         if (queue.isEmpty()) return
-        _ui.value = _ui.value.copy(verifyQueue = queue, verifyIndex = 0, verifyRunning = true, healthMessage = null)
+        _ui.value = _ui.value.copy(verifyQueue = queue, verifyIndex = 0, verifyRunning = true, healthMessage = null, healthOfferDelete = null)
     }
 
     fun stopVerifyRun() {
@@ -3508,11 +3695,48 @@ class AndvariViewModel(
     /** The guided merge for an EXACT cluster: save the composed survivor, then remove the losers.
      *  Removal is the ordinary delete, so the copies land in Deleted items (30-day Trash) rather
      *  than oblivion — which is what the confirm sentence promises. */
-    fun mergeDuplicates(plan: Duplicates.MergePlan) = op(mapError = HouseholdCopy::forSaveError) {
-        engine!!.saveWithUploads(plan.survivorId, plan.doc, emptyList(), null)
-        for (id in plan.loserIds) engine!!.remove(id)
-        refreshItems()
-    }
+    fun mergeDuplicates(plan: Duplicates.MergePlan) = runMergePlan(
+        plan,
+        success = { n -> "Merged — ${if (n == 1) "the duplicate copy" else "$n duplicate copies"} moved to Deleted items (kept 30 days)." },
+        partial = MERGE_DIDNT_FINISH,
+    )
+
+    /**
+     * The survivor-then-losers write both duplicate actions share, and the three sentences that
+     * outcome can have (audit 2026-09-13 H72; web Health.tsx runMerge/runKeep are the twins).
+     *
+     * Every one of these actions used to complete in SILENCE: the confirm dialog closed, the
+     * cluster vanished on the refresh, and the user was left to infer from an empty list that
+     * several logins had just been moved to the Trash. Web states each outcome; the phone said
+     * nothing, which is the worst version of a destructive-looking action.
+     *
+     * The PARTIAL state is why this is a helper and not two notices. The survivor is saved
+     * first (deliberately: nothing is deleted before the merged history has landed), so a throw
+     * in the loser loop leaves a real half-done state — survivor saved, some copies already in
+     * Deleted items. Routing that through the generic save-error mapper reported "Could not save
+     * — try again", which is false twice over: the save DID happen, and a blind retry re-merges
+     * whatever is left. Web's sentence names the state instead, and so does this.
+     *
+     * The outcome goes to [UiState.healthMessage], not [UiState.notice]: it is the health
+     * surface's own channel, it renders in the health NoticeBar where the action was taken, and
+     * it is the string the always-composed live region announces (H31) — a `notice` set behind
+     * the health screen would be both silent to TalkBack and, on the vault list, unexplained.
+     */
+    private fun runMergePlan(plan: Duplicates.MergePlan, success: (Int) -> String, partial: String) =
+        op(mapError = HouseholdCopy::forSaveError) {
+            engine!!.saveWithUploads(plan.survivorId, plan.doc, emptyList(), null)
+            // Past this line a failure is PARTIAL, never "nothing happened" — hence the local
+            // catch rather than letting op()'s mapper claim the save didn't land.
+            try {
+                for (id in plan.loserIds) engine!!.remove(id)
+            } catch (t: Throwable) {
+                refreshItems() // busy=false; the cluster re-derives to whatever actually survived
+                _ui.value = _ui.value.copy(healthMessage = partial)
+                return@op
+            }
+            refreshItems()
+            _ui.value = _ui.value.copy(healthMessage = success(plan.loserIds.size))
+        }
 
     /** "Keep this one" for a DIFFERS cluster. The losers' passwords ride into the survivor's
      *  passwordHistory (planKeep is that field's first and only writer) BEFORE the losers go to
@@ -3523,7 +3747,17 @@ class AndvariViewModel(
             _ui.value = _ui.value.copy(healthMessage = plan.keepRefusal)
             return
         }
-        mergeDuplicates(keep)
+        // H72: the same write as a merge, a DIFFERENT outcome sentence — this one has to say where
+        // the losers' passwords went (into the kept item's history), because that is the whole
+        // reason picking the wrong survivor is recoverable. Web's runKeep twin.
+        runMergePlan(
+            keep,
+            success = { n ->
+                "Kept one copy — ${if (n == 1) "the other copy" else "$n other copies"} moved to Deleted items (kept 30 days); " +
+                    "the passwords they carried stay in the kept item's password history."
+            },
+            partial = "The clean-up didn't finish — any removed copy is in Deleted items. Check the cluster and try again.",
+        )
     }
 
     /** Refusal PREVIEW at first tap (retiredAt 0 — the probe never writes), so a cluster that
@@ -3538,9 +3772,28 @@ class AndvariViewModel(
             _ui.value = _ui.value.copy(healthMessage = plan.dismissRefusal)
             return
         }
+        // An empty signature is the UNDO direction (Restore), so the two directions get the two
+        // sentences web gives them (H72) — "Back on the list." is the same string Unsnooze uses,
+        // because it is the same statement.
+        val restoring = signature.isEmpty()
         op(mapError = HouseholdCopy::forSaveError) {
-            for (w in writes) engine!!.saveWithUploads(w.itemId, w.doc, emptyList(), null)
+            var written = 0
+            try {
+                for (w in writes) { engine!!.saveWithUploads(w.itemId, w.doc, emptyList(), null); written++ }
+            } catch (t: Throwable) {
+                // A per-copy write: some members may already carry the acknowledgment, so the
+                // group can come back until a retry lands. Web's sentence says exactly that.
+                if (written == 0) throw t // nothing landed — the ordinary save failure is honest
+                refreshItems()
+                _ui.value = _ui.value.copy(
+                    healthMessage = "Couldn't update every copy — the group may reappear until a retry lands. Try again.",
+                )
+                return@op
+            }
             refreshItems()
+            _ui.value = _ui.value.copy(
+                healthMessage = if (restoring) BACK_ON_THE_LIST else "Marked as not duplicates — this group stays quiet unless its copies change.",
+            )
         }
     }
 
@@ -3647,6 +3900,20 @@ class AndvariViewModel(
         }
     }
 }
+
+/**
+ * The two vault-health outcome sentences that are said in more than one place (audit 2026-09-13
+ * H72). "Back on the list." is the SAME statement for an unsnoozed login and for a restored
+ * "not duplicates" group, so it is one string rather than two that can drift apart; the partial
+ * merge sentence is named because it is the one outcome a reader is most likely to re-word into
+ * something untrue ("the merge failed" — it half-succeeded, and the copies are recoverable).
+ *
+ * Web is the reference for both (Health.tsx / Staleness.tsx); `SurfaceCopyPinsTest` pins that the
+ * screens render these constants instead of re-typing the sentence at the call site.
+ */
+internal const val BACK_ON_THE_LIST = "Back on the list."
+internal const val MERGE_DIDNT_FINISH =
+    "The merge didn't finish — any removed copy is in Deleted items. Check the cluster and try again."
 
 /** ux-error--1: the import PUSH phase's retryable sentence — kept verbatim from the old catch-all,
  *  because for a TRANSIENT failure its promise is true (the plan's itemIds double as push

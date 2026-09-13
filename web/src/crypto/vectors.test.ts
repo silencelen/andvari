@@ -24,7 +24,7 @@ import {
   secretstreamEncrypt,
 } from "./provider";
 import { initSodium } from "./sodium";
-import { base32Decode, base32Encode, normalizeTotp, parseOtpauthUri, totpCode, type TotpAlgorithm } from "./totp";
+import { base32Decode, normalizeTotp, parseOtpauthUri, totpCode, type TotpAlgorithm } from "./totp";
 
 /**
  * Consumes spec/test-vectors — the SAME files the Kotlin VectorsTest verifies.
@@ -209,7 +209,9 @@ describe("totp.json", () => {
   it("uris", () => {
     for (const c of v.uris) {
       const parsed = parseOtpauthUri(c.uri);
-      expect(base32Encode(parsed.secret)).toBe(c.expect.secretBase32);
+      // H86: compared through the DECODE direction (the one that ships) now that the unused
+      // base32Encode is gone — same assertion about the same two values.
+      expect(parsed.secret).toEqual(base32Decode(c.expect.secretBase32));
       expect(parsed.algorithm).toBe(c.expect.algorithm);
       expect(parsed.digits).toBe(c.expect.digits);
       expect(parsed.periodSeconds).toBe(c.expect.period);

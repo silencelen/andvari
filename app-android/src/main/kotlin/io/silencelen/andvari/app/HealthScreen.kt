@@ -39,8 +39,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -48,6 +51,7 @@ import io.silencelen.andvari.core.client.Duplicates
 import io.silencelen.andvari.core.client.Staleness
 import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.VaultHealth
+import io.silencelen.andvari.core.client.VaultInfo
 
 /**
  * Vault health on the phone (design `docs/design/2026-08-23-android-vault-health.md`).
@@ -76,6 +80,10 @@ fun HealthScreen(vm: AndvariViewModel, ui: UiState) {
     // changes the list below, never the Failing/Unchecked counts.
     val staleSummary = remember(ui.items, ui.usage) { Staleness.stalenessSummary(vm.stalenessRows(includeSnoozed = false)) }
     val summary = VaultHealth.summarize(rows)
+    // H26: the breach map the screen renders drops every verdict whose item changed since the
+    // scan (rev mismatch) — the row reads "—" and the tile stops counting it, never a stale
+    // count in either tone. Keyed on items too: an applied sync can retire a verdict.
+    val breachByItem = remember(ui.items, ui.breachByItem, ui.breachScanRev) { vm.freshBreachByItem() }
 
     Scaffold(
         topBar = {
@@ -102,8 +110,10 @@ fun HealthScreen(vm: AndvariViewModel, ui: UiState) {
             // Refusals from the plan* functions render VERBATIM — they are the reason, and
             // paraphrasing one on the way to the screen is how a refusal becomes a mystery.
             ui.healthMessage?.let { NoticeBar(it, vm::dismissHealthMessage) }
+            HealthAnnouncer(ui.healthMessage)
+            ui.healthOfferDelete?.let { GoneOfferRow(vm, ui, it) }
 
-            HealthTiles(summary, dupes, staleSummary, ui.breachByItem, ui.breachScanIncomplete, rows)
+            HealthTiles(summary, dupes, staleSummary, breachByItem, ui.breachScanIncomplete, rows)
 
             TabRow(selectedTabIndex = TABS.indexOfFirst { it.first == ui.healthTab }.coerceAtLeast(0)) {
                 for ((key, label) in TABS) {
@@ -114,7 +124,7 @@ fun HealthScreen(vm: AndvariViewModel, ui: UiState) {
             when (ui.healthTab) {
                 "duplicates" -> DuplicatesTab(vm, ui, dupes)
                 "staleness" -> StalenessTab(vm, ui, stale)
-                else -> PasswordsTab(vm, ui, rows)
+                else -> PasswordsTab(vm, ui, rows, breachByItem)
             }
         }
     }
@@ -123,6 +133,53 @@ fun HealthScreen(vm: AndvariViewModel, ui: UiState) {
 }
 
 private val TABS = listOf("passwords" to "Passwords", "duplicates" to "Duplicates", "staleness" to "Staleness")
+
+/**
+ * H31 (audit 2026-09-13; the a11y design's AM-6 remedy, web Msg.tsx `<Announcer>` twin): the
+ * health notice's live region, ALWAYS composed. [NoticeBar] is the sighted copy and it mounts
+ * already carrying its text — `scanBreaches()` and `startVerifyRun()` clear `healthMessage`
+ * first, so every result lands as null → text, i.e. a freshly-composed polite node. Compose
+ * raises live-region text events only for a node present in both the previous and the current
+ * semantics snapshot; a node that appears populated yields a subtree-change event to its parent,
+ * which TalkBack does not read as an announcement on every version. This node is present from
+ * the screen's first frame and only its TEXT mutates, which is the one case that is announced by
+ * construction. Transparent, one dp tall: it must have real bounds to be in the accessibility
+ * tree at all (an empty rect is pruned), and it must not be a second visible copy.
+ *
+ * Still to be smoked on a device (recorded for the a11y design doc): whether the conditional
+ * NoticeBar ALSO speaks on the household's TalkBack build — if it does, the message is heard
+ * twice, which is the cheap failure; silence was the expensive one.
+ */
+@Composable
+private fun HealthAnnouncer(message: String?) {
+    Text(
+        message ?: "",
+        modifier = Modifier.fillMaxWidth().height(1.dp).semantics { liveRegion = LiveRegionMode.Polite },
+        color = Color.Transparent,
+        style = MaterialTheme.typography.bodySmall,
+        maxLines = 1,
+    )
+}
+
+/**
+ * H27 (web Staleness.tsx:236-244 twin, design 2026-08-22 §4 "gone → offers: delete"): the run
+ * has already moved on by the time this renders, so the sentence NAMES the item — a bare "it"
+ * would point at whatever is now on screen. Never automatic; "Keep it" leaves the verdict
+ * recorded and only withdraws the offer.
+ */
+@Composable
+private fun GoneOfferRow(vm: AndvariViewModel, ui: UiState, itemId: String) {
+    val name = vm.item(itemId)?.doc?.name?.takeIf { it.isNotBlank() } ?: "(untitled)"
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text("“$name” is marked as gone. Remove it from the vault?", style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = { vm.removeGoneItem(itemId) }, enabled = !ui.busy) { Text("Move to Deleted items") }
+                TextButton(onClick = vm::keepGoneItem) { Text("Keep it") }
+            }
+        }
+    }
+}
 
 /**
  * The always-visible summary. Seven tiles do not fit a phone row, so they wrap — and they are
@@ -155,16 +212,38 @@ private fun HealthTiles(
         Tile("Reused", summary.reused.toString(), summary.reused > 0)
         // An INCOMPLETE scan's findings are real (red), but its zero is "no verdict" (neutral),
         // the same statement the skipped rows' "—" makes — never a good-tone clean bill.
-        Tile("Breached", breached?.toString() ?: "—", breached?.let { if (it > 0) true else if (breachIncomplete) null else false })
+        //
+        // H75: that distinction used to be carried by the TONE ALONE, so a screen reader heard
+        // "Breached: 0" for a clean vault and for a vault half of whose passwords could not be
+        // checked — the good-tone falsehood G62 removed for sighted users, still standing for
+        // everyone else. The state is text now (web's `hint` idiom, Health.tsx's Breached tile),
+        // and [Tile] speaks the hint as part of the tile's one announcement.
+        Tile(
+            "Breached",
+            breached?.toString() ?: "—",
+            breached?.let { if (it > 0) true else if (breachIncomplete) null else false },
+            hint = when {
+                breached == null -> "run a scan"
+                breachIncomplete -> "incomplete"
+                else -> null
+            },
+        )
         Tile("Duplicates", activeDupes.toString(), activeDupes > 0)
         Tile("Unchecked", stale.unchecked.toString(), stale.unchecked > 0)
         Tile("Failing", stale.failing.toString(), stale.failing > 0)
     }
 }
 
-/** [bad] null = no verdict (the unscanned "—"), so the tile stays neutral rather than green. */
+/**
+ * [bad] null = no verdict (the unscanned "—"), so the tile stays neutral rather than green.
+ *
+ * [hint] is that non-verdict said in WORDS (H75, web's `Tile hint` twin). A tone is not a
+ * statement: it is invisible to a screen reader and ambiguous to a colour-blind reader, so any
+ * state a tile expresses only by colour has to be spelled out here as well — visibly, and inside
+ * the single contentDescription so it is heard in the same breath as the number.
+ */
 @Composable
-private fun Tile(label: String, value: String, bad: Boolean?) {
+private fun Tile(label: String, value: String, bad: Boolean?, hint: String? = null) {
     val tone = when (bad) {
         null -> MaterialTheme.colorScheme.onSurfaceVariant
         true -> MaterialTheme.colorScheme.error
@@ -175,10 +254,12 @@ private fun Tile(label: String, value: String, bad: Boolean?) {
             // One announcement per tile: "Weak, 3" rather than two orphaned strings.
             Text(value, style = MaterialTheme.typography.titleMedium, color = tone, modifier = Modifier.clearAndSetSemantics {})
             Text(
-                label,
+                if (hint == null) label else "$label · $hint",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.semantics { contentDescription = "$label: $value" },
+                modifier = Modifier.semantics {
+                    contentDescription = if (hint == null) "$label: $value" else "$label: $value · $hint"
+                },
             )
         }
     }
@@ -189,21 +270,22 @@ private fun Tile(label: String, value: String, bad: Boolean?) {
 // ---------------------------------------------------------------------------------------------
 
 @Composable
-private fun PasswordsTab(vm: AndvariViewModel, ui: UiState, rows: List<VaultHealth.HealthRow>) {
+private fun PasswordsTab(vm: AndvariViewModel, ui: UiState, rows: List<VaultHealth.HealthRow>, breachByItem: Map<String, Long>?) {
     if (rows.isEmpty()) {
         Empty("No logins with passwords yet — nothing to assess.")
         return
     }
     // Highest breach count first, then alphabetical; unscanned/no-breach items tie at 0.
-    val sorted = remember(rows, ui.breachByItem) {
+    // [breachByItem] is the H26 rev-checked map: a login edited since the scan sorts as 0.
+    val sorted = remember(rows, breachByItem) {
         rows.sortedWith(
-            compareByDescending<VaultHealth.HealthRow> { ui.breachByItem?.get(it.itemId) ?: 0L }
+            compareByDescending<VaultHealth.HealthRow> { breachByItem?.get(it.itemId) ?: 0L }
                 .thenBy { it.name },
         )
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
         items(sorted, key = { it.itemId }) { r ->
-            val count = ui.breachByItem?.get(r.itemId)
+            val count = breachByItem?.get(r.itemId)
             Card(
                 onClick = { vm.openItemFromHealth(r.itemId) },
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -230,8 +312,9 @@ private fun PasswordsTab(vm: AndvariViewModel, ui: UiState, rows: List<VaultHeal
                     }
                     Text(
                         when {
-                            // Absent from the map after a scan means the RANGE failed, not that
-                            // the password is clean — "—" either way, never a false "none".
+                            // Absent from the map after a scan means the RANGE failed — or (H26)
+                            // the password CHANGED since the scan — not that it is clean: "—"
+                            // either way, never a false "none".
                             ui.breachByItem == null || count == null -> "breaches: —"
                             count > 0L -> "breaches: $count"
                             else -> "breaches: none"
@@ -259,6 +342,12 @@ private fun DuplicatesTab(vm: AndvariViewModel, ui: UiState, clusters: List<Dupl
     }
     var confirmMerge by remember { mutableStateOf<Duplicates.MergePlan?>(null) }
     var confirmKeep by remember { mutableStateOf<Pair<Duplicates.DuplicateCluster, String>?>(null) }
+    // G07 residue (audit 2026-09-13 H78): `vaultInfos()` AEAD-DECRYPTS every vault name and sorts
+    // the result on every call, and this tab called it once per member row plus twice per confirm
+    // sentence — repeated on every recomposition, i.e. on every `busy` flip and every breach-scan
+    // progress tick. Web memoizes the same lookup on `items` (Health.tsx `vaultsInfo`); Cut K
+    // memoized this file's three top-level derivations and stopped one level short of this one.
+    val vaults = remember(ui.items) { vm.vaultInfos() }
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
         item(key = "intro") {
@@ -294,7 +383,7 @@ private fun DuplicatesTab(vm: AndvariViewModel, ui: UiState, clusters: List<Dupl
                             // audit F03: every member row names its VAULT. A merge moves real
                             // items out of a real place, and this screen used to name neither.
                             Text(
-                                vm.vaultInfos().firstOrNull { it.vaultId == m.vaultId }?.name ?: "shared",
+                                vaultLabel(vaults, m.vaultId),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.tertiary,
                             )
@@ -339,8 +428,8 @@ private fun DuplicatesTab(vm: AndvariViewModel, ui: UiState, clusters: List<Dupl
         // rows above (web Health.tsx's twin sentence). planMerge refuses cross-vault clusters,
         // so these are the same place today — naming both is what makes that visible, and keeps
         // the sentence honest if the refusal is ever relaxed.
-        val survivorVault = vaultLabel(vm, vm.item(plan.survivorId)?.vaultId)
-        val loserVaults = plan.loserIds.map { vaultLabel(vm, vm.item(it)?.vaultId) }.distinct().joinToString(" · ")
+        val survivorVault = vaultLabel(vaults, vm.item(plan.survivorId)?.vaultId)
+        val loserVaults = plan.loserIds.map { vaultLabel(vaults, vm.item(it)?.vaultId) }.distinct().joinToString(" · ")
         AlertDialog(
             onDismissRequest = { confirmMerge = null },
             title = { Text("Merge ${plan.loserIds.size + 1} copies?") },
@@ -358,8 +447,8 @@ private fun DuplicatesTab(vm: AndvariViewModel, ui: UiState, clusters: List<Dupl
         val keepName = c.members.firstOrNull { it.itemId == keepId }?.name ?: "this copy"
         // audit F03, as above: name the vault the kept copy stays in and the vault(s) the
         // losers leave — planKeep refuses cross-vault clusters, so one place today.
-        val keepVault = vaultLabel(vm, c.members.firstOrNull { it.itemId == keepId }?.vaultId)
-        val loserVaults = c.members.filter { it.itemId != keepId }.map { vaultLabel(vm, it.vaultId) }.distinct().joinToString(" · ")
+        val keepVault = vaultLabel(vaults, c.members.firstOrNull { it.itemId == keepId }?.vaultId)
+        val loserVaults = c.members.filter { it.itemId != keepId }.map { vaultLabel(vaults, it.vaultId) }.distinct().joinToString(" · ")
         AlertDialog(
             onDismissRequest = { confirmKeep = null },
             title = { Text("Keep “$keepName”?") },
@@ -378,14 +467,17 @@ private fun DuplicatesTab(vm: AndvariViewModel, ui: UiState, clusters: List<Dupl
 }
 
 /** audit F03: which vault a copy is in is the one thing that decides whether removing it
- *  touches anybody else — the member rows' lookup, shared by both confirm sentences. */
-private fun vaultLabel(vm: AndvariViewModel, vaultId: String?): String =
-    vm.vaultInfos().firstOrNull { it.vaultId == vaultId }?.name ?: "shared"
+ *  touches anybody else — the member rows' lookup, shared by both confirm sentences. Takes the
+ *  ALREADY-DECRYPTED list (H78): the decrypt belongs to the caller's `remember`, not to a lookup
+ *  called once per row. */
+private fun vaultLabel(vaults: List<VaultInfo>, vaultId: String?): String =
+    vaults.firstOrNull { it.vaultId == vaultId }?.name ?: "shared"
 
 // ---------------------------------------------------------------------------------------------
 // Staleness
 // ---------------------------------------------------------------------------------------------
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun StalenessTab(vm: AndvariViewModel, ui: UiState, rows: List<Staleness.StalenessRow>) {
     if (rows.isEmpty() && !ui.showSnoozed) {
@@ -412,9 +504,16 @@ private fun StalenessTab(vm: AndvariViewModel, ui: UiState, rows: List<Staleness
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
         item(key = "controls") {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = vm::startVerifyRun, enabled = rows.isNotEmpty()) { Text("Start check run") }
-                Spacer(Modifier.weight(1f))
+            // H29 (web Staleness.tsx:303-307 twin): two starters, web's labels — the never-checked
+            // subset (the cheapest pass), and the whole ranking worst first.
+            val unchecked = remember(rows) { rows.filter { it.bucket == Staleness.StaleBucket.NEVER }.map { it.itemId } }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.Center) {
+                TextButton(onClick = { vm.startVerifyRun(unchecked) }, enabled = unchecked.isNotEmpty()) {
+                    Text("Check the ${unchecked.size} never-checked")
+                }
+                TextButton(onClick = { vm.startVerifyRun(rows.map { it.itemId }) }, enabled = rows.isNotEmpty()) {
+                    Text("Check everything, worst first")
+                }
                 TextButton(onClick = { vm.setShowSnoozed(!ui.showSnoozed) }) {
                     Text(if (ui.showSnoozed) "Hide snoozed" else "Show snoozed")
                 }
@@ -442,6 +541,9 @@ private fun StalenessTab(vm: AndvariViewModel, ui: UiState, rows: List<Staleness
                     )
                     if (r.snoozed) {
                         TextButton(onClick = { vm.unsnooze(r.itemId) }) { Text("Unsnooze") }
+                    } else {
+                        // H29 (web :346 twin): check THIS login without a run over everything.
+                        TextButton(onClick = { vm.startVerifyRun(listOf(r.itemId)) }, enabled = !ui.busy) { Text("Check") }
                     }
                 }
             }
@@ -483,20 +585,49 @@ private fun bucketLabel(r: Staleness.StalenessRow): String = when (r.bucket) {
  * to ANSWER rendered subordinate to the two ways to answer nothing — and nothing in a unit suite
  * can see visual weight, so it is stated here rather than re-earned.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun VerifyRunDialog(vm: AndvariViewModel, ui: UiState) {
     val ctx = LocalContext.current
-    val row = vm.verifyCurrent()
+    // H78: `verifyCurrent()` re-derives the WHOLE staleness ranking (every item, sorted) to find
+    // one row. This dialog recomposes on every UiState emission — each verdict save flips `busy`
+    // twice — so it ran that scan several times per tap. Keyed on everything the ranking reads:
+    // the items, where the run is, and the usage ledger it ranks by (web memoizes its twin the
+    // same way, Staleness.tsx's `rows`).
+    val row = remember(ui.items, ui.verifyQueue, ui.verifyIndex, ui.usage) { vm.verifyCurrent() }
     if (row == null) {
         // The queue outlived its items (a sync removed one) — end rather than show an empty run.
         vm.stopVerifyRun()
         return
     }
+    val position = "${ui.verifyIndex + 1} of ${ui.verifyQueue.size}"
+    // H28 (web Staleness.tsx:255-265 twin): the copy buttons take the same clipboard window every
+    // other copy site does, and copying the password IS a use (spec 02 §8.2), exactly as web
+    // records it. The password is looked up FRESH from the item, never carried on the row.
+    val clipClear = vm.healthClipboardSeconds()
+    val password = vm.item(row.itemId)?.doc?.login?.password?.takeIf { it.isNotEmpty() }
+    var copied by remember(row.itemId) { mutableStateOf<String?>(null) }
     AlertDialog(
         onDismissRequest = vm::stopVerifyRun,
-        title = { Text("Check ${ui.verifyIndex + 1} of ${ui.verifyQueue.size}") },
+        title = {
+            // H30: the dialog stays mounted across verdicts and its Texts change in place — the
+            // one case Compose announces — so THIS node is the run's live region: its text
+            // changes on every advance (the index moves even when two logins share a name), and
+            // the description carries the login's name with its position, so a screen-reader
+            // user is told which login they are now answering for.
+            Text(
+                "Check $position",
+                modifier = Modifier.semantics {
+                    liveRegion = LiveRegionMode.Polite
+                    contentDescription = "${row.name} — check $position"
+                },
+            )
+        },
         text = {
             Column {
+                // H27: the offer must be visible HERE too — this dialog is modal and the run has
+                // already moved on, so the Scaffold copy underneath is hidden until the run ends.
+                ui.healthOfferDelete?.let { GoneOfferRow(vm, ui, it) }
                 Text(row.name, style = MaterialTheme.typography.titleSmall)
                 Text(
                     row.username.ifEmpty { "(no username)" },
@@ -505,14 +636,32 @@ private fun VerifyRunDialog(vm: AndvariViewModel, ui: UiState) {
                 )
                 // A refusal must be visible HERE: the NoticeBar renders BEHIND this modal
                 // dialog, and a run that says nothing while staying put looks stuck rather
-                // than refused. Verbatim, per the health-message rule.
-                ui.healthMessage?.let {
-                    Spacer(Modifier.height(8.dp))
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                }
+                // than refused. Verbatim, per the health-message rule. H30: the slot is
+                // ALWAYS composed, so a refusal is a text change on a present live-region
+                // node (announced) rather than a populated mount (not reliably announced).
+                if (ui.healthMessage != null) Spacer(Modifier.height(8.dp))
+                Text(
+                    ui.healthMessage ?: "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
                 Spacer(Modifier.height(8.dp))
                 Text("Open the site and sign in yourself, then say what happened.", style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(8.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (row.username.isNotEmpty()) {
+                        TextButton(onClick = { copyToClipboard(ctx, "Username", row.username, clipClear); copied = "Username" }) { Text("Copy username") }
+                    }
+                    if (password != null) {
+                        TextButton(onClick = {
+                            vm.recordUse(row.itemId)
+                            copyToClipboard(ctx, "Password", password, clipClear)
+                            copied = "Password"
+                        }) { Text("Copy password") }
+                    }
+                }
+                copied?.let { CopiedNote(clipClear) { copied = null } }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(
                         onClick = {

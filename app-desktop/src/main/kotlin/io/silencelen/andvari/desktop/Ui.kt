@@ -87,6 +87,36 @@ private const val DEFAULT_ATTACHMENT_MAX_BYTES = 25L * 1024 * 1024
 
 @Composable
 fun DesktopApp(state: DesktopState) {
+    // Audit H15: native crypto did not load on this machine — the startup self-check (or an op)
+    // said so. Blocks everything in the 426 idiom BEFORE any password field can render: sign-in,
+    // unlock and enroll all need the provider, so a password prompt here could only produce the
+    // two hypotheses a password manager must never induce ("I forgot my password", "the server is
+    // broken") for a permanent, local, already-diagnosed condition. No Retry — the lazy provider
+    // rethrows on every access until the machine is fixed and the app restarted. No sign-out
+    // either: nothing here can be improved by leaving the account, and sign-out's revoke needs
+    // no crypto only by accident. The log path is rendered as selectable text (copyPlain is
+    // pinned to its two non-secret rows by SurfacePinsTest; a third copy button is not worth
+    // loosening that pin for).
+    state.cryptoUnavailable?.let { msg ->
+        Center {
+            Sigil()
+            Spacer(Modifier.height(16.dp))
+            Text("andvari can't start on this computer", style = MaterialTheme.typography.titleMedium)
+            Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 380.dp).padding(top = 8.dp))
+            Spacer(Modifier.height(12.dp))
+            Text("Diagnostic log", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SelectionContainer {
+                Text(state.diagnosticLogPath, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 380.dp))
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Your vault and your master password are unaffected — nothing was changed. Once the library loads, restart andvari and sign in as usual.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 380.dp),
+            )
+        }
+        return
+    }
     // A 426 blocks everything: this build is too old for the server's minVersion pin.
     state.upgradeRequired?.let { msg ->
         Center {
@@ -253,7 +283,9 @@ private fun AboutDialog(state: DesktopState) {
         onDismissRequest = { state.dismissAbout() },
         title = { Text("About andvari") },
         text = {
-            Column {
+            // Scrollable: the H126 diagnostic-log block pushed this past a short window's dialog
+            // height, and a clipped About is how the log path would go unread again.
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("andvari — the keeper of the hoard", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(12.dp))
                 Text("Version $DESKTOP_VERSION", style = MaterialTheme.typography.bodySmall)
@@ -264,6 +296,40 @@ private fun AboutDialog(state: DesktopState) {
                 state.updateAvailable?.let {
                     Spacer(Modifier.height(12.dp))
                     Text("Version $it is available.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                }
+                // Audit H126 — the door to 0.26.3's diagnostic log. The log was machinery with no
+                // door: nothing in the app, the About dialog, the CHANGELOG or docs/ named the
+                // file, so the only way to learn it existed was to read the source — and the next
+                // Windows sign-in failure would still open with "can you find a hidden file?".
+                // About is where a support conversation already starts (version, platform, server),
+                // so the path belongs here, beside them. It says what the file holds AND what it
+                // does not, because a user asked to send a file from a password manager deserves
+                // to know that before they send it — and because the claim is now enforced in code
+                // (DesktopDiagnostics.redactedLink), not merely asserted in a KDoc.
+                Spacer(Modifier.height(12.dp))
+                Text("Diagnostic log", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectionContainer {
+                    Text(state.diagnosticLogPath, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                }
+                Text(
+                    "Errors this app couldn't explain on screen are recorded here — error types and where in the app they happened, " +
+                        "never anything from your vault. It's kept small, safe to delete, and safe to send to whoever is helping you.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // Secondary to the selectable path above, never a replacement for it: the folder is
+                // a dotfile directory both Explorer and the Linux file managers hide by default,
+                // and Desktop.open throws on a headless/file-manager-less session. A button that
+                // silently does nothing is the shape the 426 screen's "Couldn't open a browser"
+                // line exists to avoid (Cut I / v2 #9), so say so and leave the path to paste.
+                var openFailed by remember { mutableStateOf(false) }
+                state.diagnosticLogDir?.let { dir ->
+                    TextButton(onClick = { openFailed = !openFolder(dir) }) { Text("Open folder") }
+                }
+                if (openFailed) {
+                    Text(
+                        "Couldn't open a file manager on this machine — copy the path above instead.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         },
@@ -825,11 +891,25 @@ private fun ManualTrustGateDialog(state: DesktopState, target: String) {
  * §4.3 (B2-9): the launch-time reconcile prompt for an uncommitted invite switch found on disk —
  * "Finish setting up at <origin>" (re-shows the raw-origin gate then repoints) or "Discard" (revert
  * + clear marker). The origin is monospaced + selectable; never a display name.
+ *
+ * Audit H128 — the destructive choice is no longer the dismiss path. Escape, a click outside and
+ * the dismiss button ALL called discardPendingReconcile(), so a reflexive Esc on the first launch
+ * after an interrupted invite switch silently threw the switch away and cleared the on-disk marker:
+ * an outcome the user never chose, on a decision the design calls a two-outcome one. Every other
+ * dialog on this surface reserves destructive verbs for the confirm button and puts Cancel / Keep /
+ * Keep editing on dismiss (see the Delete-forever and discard-changes dialogs). onDismissRequest is
+ * now a no-op, which — because the state layer holds `pendingReconcile` until one of the two
+ * buttons answers it — makes Esc mean "decide later, ask me again" rather than "revert". The
+ * dismiss button also NAMES what it reverts to, like the Android sibling's
+ * "Discard — return to <previousOrigin>"; desktop's [PendingServer] carries no previousOrigin
+ * because it never moved `store.baseUrl` (commit is on Connect, §4.1 rule 3), so the server it
+ * stays on is the live default, and the verb says "stay on" rather than Android's "return to"
+ * for the same reason.
  */
 @Composable
 private fun PendingReconcileDialog(state: DesktopState, marker: PendingServer) {
     AlertDialog(
-        onDismissRequest = { state.discardPendingReconcile() },
+        onDismissRequest = { /* audit H128: not an answer — the prompt stays until one is given */ },
         title = { Text("Finish setting up your account?") },
         text = {
             Column {
@@ -849,7 +929,9 @@ private fun PendingReconcileDialog(state: DesktopState, marker: PendingServer) {
             }
         },
         confirmButton = { TextButton(onClick = { state.finishPendingReconcile() }) { Text("Finish setting up") } },
-        dismissButton = { TextButton(onClick = { state.discardPendingReconcile() }) { Text("Discard") } },
+        dismissButton = {
+            TextButton(onClick = { state.discardPendingReconcile() }) { Text("Discard — stay on ${state.baseUrl}") }
+        },
     )
 }
 
@@ -1097,6 +1179,11 @@ private fun Unlock(state: DesktopState, email: String) {
         }
         Spacer(Modifier.height(20.dp))
         ErrorBar(state.error, state::clearError)
+        // Audit H12: the self-recovery idle expiry (RECOVER_TIMEOUT_NOTICE) lands here when a
+        // stored session exists — Unlock composed no notice surface before, so the line explaining
+        // why the recovery flow vanished would have been silently lost (the Welcome twin already
+        // renders one for the reset-success notice).
+        NoticeBar(state.notice, state::clearNotice)
         Secret("Master password", password, onEnter = submit, autoFocus = true) { password = it } // a11ydesk-06: focus password on unlock (the most-repeated interaction)
         Spacer(Modifier.height(12.dp))
         Primary("Unlock", password.isNotBlank() && !state.busy, state.busy, submit)
@@ -1660,6 +1747,16 @@ private fun TrashScreen(state: DesktopState) {
                 // Audit G22: reader-gate — a reader's restore/purge is refused server-side, so
                 // refuse it in the client, with the reason (the same rule as Detail's view-only
                 // gate and ItemHistory's "Readers can view but not restore").
+                //
+                // Audit H127: G22 landed here as visible-but-DISABLED buttons plus a sentence of
+                // its own ("view only — readers can’t restore or delete shared items"), where web
+                // (Vault.tsx) and Android (MainActivity) both hide the two buttons and append
+                // " · view only" to the deleted line. Same feature, three treatments — and this
+                // surface already speaks the other dialect one screen away (the Detail kind line,
+                // below). A reader was shown a greyed-out red "Delete forever" on the desktop and
+                // no button at all on the phone for the same tombstone, which reads as a different
+                // rule rather than the same one. Matched to the reference; the removed sentence
+                // said nothing the suffix does not, and an absent control needs no disabled state.
                 val reader = state.roleFor(d.vaultId) == "reader"
                 androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                     Column(Modifier.weight(1f)) {
@@ -1668,24 +1765,19 @@ private fun TrashScreen(state: DesktopState) {
                             color = if (d.doc != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
-                            "deleted ${java.time.Instant.ofEpochMilli(d.deletedAt).toString().take(10)}",
+                            "deleted ${java.time.Instant.ofEpochMilli(d.deletedAt).toString().take(10)}" + (if (reader) " · view only" else ""),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        if (reader) {
-                            Text(
-                                "view only — readers can’t restore or delete shared items",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
                     }
                     val docToRestore = d.doc
-                    if (docToRestore != null) {
-                        TextButton(enabled = !state.busy && !reader, onClick = { state.restoreDeleted(d.itemId, d.vaultId, docToRestore) }) { Text("Restore") }
-                    }
-                    TextButton(enabled = !state.busy && !reader, onClick = { confirmPurgeId = d.itemId }) {
-                        Text("Delete forever", color = MaterialTheme.colorScheme.error)
+                    if (!reader) {
+                        if (docToRestore != null) {
+                            TextButton(enabled = !state.busy, onClick = { state.restoreDeleted(d.itemId, d.vaultId, docToRestore) }) { Text("Restore") }
+                        }
+                        TextButton(enabled = !state.busy, onClick = { confirmPurgeId = d.itemId }) {
+                            Text("Delete forever", color = MaterialTheme.colorScheme.error)
+                        }
                     }
                 }
             }
@@ -3167,14 +3259,14 @@ private fun ExportDialogs(state: DesktopState) {
     }
     state.backupResult?.let { BackupResultDialog(it, state::backupResultDismiss) }
     state.csvPreflight?.let { pre ->
-        CsvPreflightDialog(state, pre) {
+        CsvPreflightDialog(state, pre) { selected ->
             val dialog = FileDialog(null as Frame?, "Save CSV export", FileDialog.SAVE)
             dialog.file = "andvari-export-${exportDateSuffix()}.csv"
             dialog.isVisible = true
             val dir = dialog.directory; val file = dialog.file
             if (dir != null && file != null) {
                 val dest = File(dir, file)
-                overwrite.request(dest) { state.csvRun(dest) }
+                overwrite.request(dest) { state.csvRun(dest, selected) }
             }
         }
     }
@@ -3325,13 +3417,31 @@ private fun BackupResultDialog(r: BackupResult, onDone: () -> Unit) {
     )
 }
 
+/**
+ * Audit H23 (spec 07 intro: "Items from every vault whose VK is held are included — shared vaults
+ * by default with a visible per-vault line and an opt-out toggle", stated for BOTH artifacts; web
+ * ExportPanel.tsx renders its per-vault rows outside the `mode === "backup"` branch). The CSV
+ * preflight rendered only "N login(s) will be written" and the six named-skip buckets — no vault
+ * line, no checkbox — so a member exporting "for another password manager" to move their OWN
+ * logins wrote the household's shared-vault secrets (the ones they can only read) into a plaintext
+ * file bound for a third-party importer or a cloud-synced Downloads folder, unannounced. The rows
+ * are the [BackupPreflightDialog]'s, one dialog away; the selection feeds [DesktopState.csvRun] the
+ * way the backup's feeds backupRun, and the count/skip lines recompute for it
+ * ([DesktopState.csvPreflightFor]) so the dialog never promises what the file won't hold.
+ */
 @Composable
-private fun CsvPreflightDialog(state: DesktopState, pre: CsvPreflight, onChooseDestination: () -> Unit) {
+private fun CsvPreflightDialog(state: DesktopState, synced: CsvPreflight, onChooseDestination: (Set<String>) -> Unit) {
+    val vaults = state.csvPreflightVaults
+    var selected by remember(synced) { mutableStateOf(vaults.map { it.vaultId }.toSet()) }
+    // `pre` is the LIVE preflight for the current selection; [synced] (computed over every held
+    // vault at sync time) is the fallback only while the engine is unbound (a lock mid-dialog —
+    // the dialog dies with the session anyway).
+    val pre = remember(synced, selected) { state.csvPreflightFor(selected) ?: synced }
     val dismiss = { if (!state.busy) state.csvDismiss() } // F72: Escape = Cancel (no fields → no Enter path)
     AlertDialog(
         onDismissRequest = dismiss,
         confirmButton = {
-            TextButton(onClick = onChooseDestination, enabled = !state.busy && pre.loginCount > 0) { Text("Choose where to save") }
+            TextButton(onClick = { onChooseDestination(selected) }, enabled = !state.busy && pre.loginCount > 0) { Text("Choose where to save") }
         },
         dismissButton = { TextButton(onClick = state::csvDismiss, enabled = !state.busy) { Text("Cancel") } },
         title = { Text("Export for another password manager?") },
@@ -3345,6 +3455,25 @@ private fun CsvPreflightDialog(state: DesktopState, pre: CsvPreflight, onChooseD
                     "⚠ The CSV holds every password in PLAINTEXT. Anyone who reads the file reads your vault. Delete it (and empty the trash) as soon as the other manager has imported it.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                 )
+                Spacer(Modifier.height(8.dp))
+                // H23: the per-vault lines — byte-equal in shape to the backup dialog's, so the two
+                // artifacts read the same. Personal is a plain line (it always exports); every
+                // shared vault is an opt-out row, on by default (spec 07).
+                Text(
+                    "Exporting is private — other members and the server are not notified.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                vaults.forEach { v ->
+                    if (v.type == "personal") {
+                        Text("• ${v.name} — ${v.itemCount} item(s), personal", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        Row(Modifier.toggleable(value = v.vaultId in selected, role = Role.Checkbox, onValueChange = { on -> selected = if (on) selected + v.vaultId else selected - v.vaultId }), verticalAlignment = Alignment.CenterVertically) { // a11ydesk-03
+                            Checkbox(v.vaultId in selected, onCheckedChange = null)
+                            Text("${v.name} — ${v.itemCount} item(s), shared (${v.role})", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
                 Text("${pre.loginCount} login(s) will be written.", style = MaterialTheme.typography.bodySmall)
                 NamedSkips("Not exported (secure notes):", pre.warnings.noteItems)

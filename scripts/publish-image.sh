@@ -62,6 +62,7 @@ TAGS=(-t "$IMAGE:$VERSION")
 [ "$TAG_LATEST" = 1 ] && TAGS+=(-t "$IMAGE:latest")
 
 run() { if [ "$DRY_RUN" = 1 ]; then echo "DRY-RUN: $*"; else "$@"; fi }
+META="$(mktemp -t andvari-image-meta.XXXXXX)"; trap 'rm -f "$META"' EXIT
 
 if [ "$SINGLE_ARCH" = 1 ] || ! docker buildx version >/dev/null 2>&1; then
   echo "==> single-arch build + push ($(docker version -f '{{.Server.Arch}}' 2>/dev/null || echo host-arch))"
@@ -72,10 +73,40 @@ else
   echo "==> buildx multi-arch build + push: $PLATFORMS"
   docker buildx inspect andvari-builder >/dev/null 2>&1 \
     || run docker buildx create --name andvari-builder --driver docker-container
+  # H99 (2026-09-13 audit): provenance was explicitly DISABLED here, so the pushed index carried
+  # no SLSA attestation and no SBOM — a self-hoster could pull an image they could not tie to the
+  # source they can read. `mode=max` records the full build definition (Dockerfile, base-image
+  # digests, build args); `sbom=true` attaches the per-release SBOM the W3 trust-attestation
+  # strategy promised. Both ride inside the OCI index as attestation manifests, so
+  # `docker buildx imagetools inspect` shows them and plain pulls are unaffected.
+  # --metadata-file captures the pushed index digest — the ONE identifier that names these exact
+  # bytes across registries and tags — so it can be printed and recorded below.
   run docker buildx build --builder andvari-builder --platform "$PLATFORMS" \
-      "${TAGS[@]}" --provenance=false --push .
+      "${TAGS[@]}" --provenance=mode=max --sbom=true --metadata-file "$META" --push .
 fi
 
 echo "==> published: $IMAGE:$VERSION$( [ "$TAG_LATEST" = 1 ] && echo " (+ :latest)" )"
+# Print + record the immutable identity of what was just pushed. A tag can be re-pointed; a digest
+# cannot. The line goes into the GitHub release body / SHA256SUMS by the release ceremony
+# (docs/runbooks/release-signing-keys.md), so a self-hoster can pin
+# `image: ghcr.io/silencelen/andvari:<ver>@sha256:…` in deploy/docker-compose.yml and verify the
+# provenance with `docker buildx imagetools inspect <ref> --format '{{json .Provenance}}'`.
+if [ "$DRY_RUN" = 1 ]; then
+  echo "    DRY-RUN: would print the pushed index digest here (from $META / imagetools inspect)"
+else
+  DIGEST=""
+  if [ -f "$META" ]; then DIGEST=$(jq -r '."containerimage.digest" // empty' "$META" 2>/dev/null || true); fi
+  # Single-arch path (plain docker push) writes no metadata file; ask the registry instead.
+  [ -n "$DIGEST" ] || DIGEST=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+  if [ -n "$DIGEST" ]; then
+    echo "    digest: $IMAGE@$DIGEST"
+    echo "    pin as: image: $IMAGE:$VERSION@$DIGEST   # deploy/docker-compose.yml (ANDVARI_VERSION=$VERSION@$DIGEST also works)"
+    echo "    record that digest line in the release notes + SHA256SUMS — it is the image's only verifiable identity"
+    mkdir -p build && echo "$IMAGE:$VERSION@$DIGEST" > "build/image-digest-$VERSION.txt" \
+      && echo "    written: build/image-digest-$VERSION.txt (gitignored release artefact — attach it to the release)"
+  else
+    echo "    WARNING: could not determine the pushed digest — run: docker buildx imagetools inspect $IMAGE:$VERSION" >&2
+  fi
+fi
 echo "    smoke: docker run --rm $IMAGE:$VERSION recovery-cli   # prints usage"
 echo "    remember the one-time package-visibility flip if this was the first push (header of this script)"

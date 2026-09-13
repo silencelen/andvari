@@ -438,9 +438,29 @@ object Backup {
             }
         }
 
-        /** Convenience over [readAttachmentSection] driven by a §2.4 manifest entry. */
-        fun readAttachment(entry: BackupAttachmentEntry): ByteArray =
-            readAttachmentSection(entry.section, Bytes.fromB64(entry.fileKey))
+        /**
+         * Convenience over [readAttachmentSection] driven by a §2.4 manifest entry.
+         *
+         * The manifest `fileKey` is a plain String the typed decoder cannot reject, so a key that
+         * is not base64url at all (a buggy exporter, or a file crafted by whoever holds the
+         * passphrase — the payload is AEAD-authenticated, nothing else can reach here) used to
+         * throw [CryptoException] from the decode ONE FRAME OUTSIDE the section reader's
+         * CryptoException→[BackupException] translation. backup-cli `verify` catches only
+         * [BackupException] per entry, so that single bad entry aborted the whole verify with
+         * "error: invalid base64url" instead of a FAIL row (audit H83) — for exactly the recovery
+         * scenario where the reader of record must name EVERY attachment that will not restore.
+         * A wrong-LENGTH key was already translated (it fails inside the guarded decrypt); the
+         * wrong-ALPHABET key now is too, under the same combined code, mirroring how [open]
+         * translates a malformed header kdfSalt.
+         */
+        fun readAttachment(entry: BackupAttachmentEntry): ByteArray {
+            val fileKey = try {
+                Bytes.fromB64(entry.fileKey)
+            } catch (e: CryptoException) {
+                throw BackupException(ERR_WRONG_PASSPHRASE_OR_CORRUPT, "attachment section ${entry.section} manifest fileKey is not base64url")
+            }
+            return readAttachmentSection(entry.section, fileKey)
+        }
     }
 
     /**

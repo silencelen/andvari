@@ -42,17 +42,22 @@ jobs:
     # (web + extension) is scanned.
     #
     # EMPTINESS TRIPWIRE: so this can never silently recur, the first step below runs
-    # scripts/ci/codeql-kotlin-tripwire.sh, which FAILS the run if this workflow ever re-introduces a
-    # java-kotlin leg with `build-mode: none` (or none specified). Re-enable Kotlin only with a real
-    # build-mode — never the empty one.
+    # scripts/ci/codeql-kotlin-tripwire.sh, which FAILS the run if ANY workflow in .github/workflows/
+    # names a Kotlin leg (java-kotlin, or the `java`/`kotlin` spellings) without a real build-mode
+    # (autobuild/manual) — in any shape: include item, list-form matrix, or `languages:` handed to
+    # the init action directly (audit H40 widened it from the one spelling G18 had deleted). It
+    # also runs from its own always-on workflow, codeql-tripwire.yml, so a NEW workflow file
+    # cannot route around this step. Re-enable Kotlin only with a real build-mode — never the
+    # empty one — and add the language to the tripwire's ALLOWED_LANGUAGES in the same change.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # EMPTINESS TRIPWIRE (G18): fail fast if an empty java-kotlin leg is ever re-introduced. See
-      # the script header and the NOTE above; Kotlin currently has no CodeQL SAST by design.
+      # EMPTINESS TRIPWIRE (G18/H40): fail fast if an empty Kotlin leg is ever re-introduced, in
+      # this file or any sibling. See the script header and the NOTE above; Kotlin currently has
+      # no CodeQL SAST by design.
       - name: Kotlin-emptiness tripwire
-        run: bash scripts/ci/codeql-kotlin-tripwire.sh
+        run: bash scripts/ci/codeql-kotlin-tripwire.sh .github/workflows
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4

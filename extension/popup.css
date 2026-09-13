@@ -182,6 +182,18 @@ button.ghost {
   border: 1px solid var(--edge); border-radius: var(--radius); padding: 7px 12px; cursor: pointer; transition: 0.15s;
 }
 button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
+/* H51 (2026-09-13 audit): only button.primary had a disabled look — a disabled ghost/link/fill
+   pill or input kept its pointer cursor and its hover lift, so "unavailable right now" read as
+   "broken button" (web styles.css twin). Author-origin `color`/`background` on input also beat
+   the UA's own :disabled greying, so the busy-verify TOTP input looked live. Same treatment as
+   the primary: dimmed, not-allowed, hover pinned to the resting colours. (Disabled is WCAG-exempt;
+   this is an affordance fix, like Cut A.) */
+button.ghost:disabled, .link:disabled, .item .fill-btn:disabled, .detail .fill-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+button.ghost:disabled:hover { color: var(--ink-dim); border-color: var(--edge); }
+.link:disabled:hover { color: var(--link); text-decoration: none; }
+.link.dim:disabled:hover { color: var(--ink-faint); }
+.item .fill-btn:disabled:hover, .detail .fill-btn:disabled:hover { color: var(--link); background: transparent; border-color: var(--edge-strong); }
+input:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .msg { font-size: 12.5px; padding: 8px 10px; border-radius: var(--radius); margin-top: 10px; }
 .msg.err { background: rgba(207, 107, 90, 0.12); color: var(--danger); border: 1px solid rgba(207, 107, 90, 0.3); }

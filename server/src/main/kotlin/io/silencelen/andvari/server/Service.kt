@@ -73,6 +73,24 @@ private fun inviteRowOf(rs: ResultSet) = InviteRow(
  */
 internal fun requireKdfFloor(p: KdfParams, config: Config) {
     if (p.memBytes < config.minKdfMemBytes || p.ops < config.minKdfOps) throw BadRequest("kdf_too_weak")
+    requireKdfMemKib(p)
+}
+
+/**
+ * The KiB-multiple rule for Argon2id memBytes (H16, audit 2026-09-13; spec 01 §1). libsodium's
+ * crypto_pwhash takes memlimit in BYTES and silently floors it to KiB (memlimit / 1024U); the
+ * extension's @noble twin takes `m` in KiB and REQUIRES a safe integer. The two engines agree
+ * only when memBytes is a multiple of 1024 — for anything else every libsodium client (web,
+ * Android, desktop) derives the floored key and the extension throws before deriving at all,
+ * rendered as 'Sign-in failed. Please try again.' with the same password working everywhere
+ * else. The extension now floors too, so this is defence in depth: refuse to PERSIST such a
+ * value on any path that sets it — the admin policy (setPolicy) and every password-set path
+ * through [requireKdfFloor] — so a fleet can never be handed a value one engine cannot take.
+ * Distinct reason from kdf_too_weak: the admin who typed "100 MB" needs to know it is the
+ * shape, not the strength, being refused.
+ */
+internal fun requireKdfMemKib(p: KdfParams) {
+    if (p.memBytes % 1024L != 0L) throw BadRequest("kdf_mem_not_kib_multiple")
 }
 
 /**
@@ -152,6 +170,12 @@ class Service(
     }
 
     fun setPolicy(p: ClientPolicy, byUserId: String? = null, ip: String? = null) {
+        // H16: the org KDF params are what every new enrolment and every silent KdfUpgrade re-key
+        // adopt (web Welcome enrols with policy.kdfParams; core KdfUpgrade re-keys to any in-range
+        // policy), so a non-KiB memBytes persisted HERE spreads to the whole fleet on its next
+        // unlock. Refuse it at the one write that sets it — before the tx, like the register
+        // pre-flight, so a bad body never takes the writer lock.
+        requireKdfMemKib(p.kdfParams)
         repo.db.tx { c ->
             // Strip EVERY read-time overlay field back to its wire default before persisting (§2.2 —
             // widened from the original serverTime-only strip): policy() re-overlays them from config on
@@ -217,6 +241,26 @@ class Service(
         // A self-service recovery piece for EVERY new account, regardless of escrow policy (the
         // owner's core ask). Absent/structurally-invalid ⇒ recovery_required (never trust the client).
         val memberRecovery = requireMemberRecovery(req.memberRecovery)
+        // H62 (audit 2026-09-13): shape + size gates on everything register PERSISTS, the same
+        // gates createSharedVault already applies to the same fields (UUID_RE on the vault id,
+        // requireB64 bounds on the ciphertext) — the only bound here used to be the 256 KiB TIGHT
+        // body cap, so an invitee could park ~250 KB of arbitrary text in displayName or a device
+        // name that the Admin console and every co-member's member list then render, persist an
+        // uppercase personal vaultId that later fails requireUuid on the attachment upload route
+        // (attachments silently unusable for that account), or collide with an existing vaultId
+        // and surface a logged 500 from the vaults PRIMARY KEY instead of a 400. Pure body checks,
+        // so they sit with the other pre-flight rejections — before the invite read, before the
+        // writer lock. Caps are the sibling's (metaBlob 4096 / wrappedVk 1024) or generous
+        // multiples of the real size (a wrapped 32-byte key is ~74 bytes in an Envelope, an X25519
+        // public key 32 bytes), sized to refuse junk without ever refusing a future additive
+        // payload version.
+        if (!UUID_RE.matches(req.personalVault.vaultId)) throw BadRequest("bad_vault_id")
+        requireB64(req.personalVault.metaBlob, 4096, "meta_blob")
+        requireB64(req.personalVault.wrappedVk, 1024, "wrapped_vk")
+        requireB64(req.wrappedUvk, 1024, "wrapped_uvk")
+        requireB64(req.identityPub, 64, "identity_pub")
+        requireB64(req.encryptedIdentitySeed, 1024, "encrypted_identity_seed")
+        val displayName = requireBoundedText(req.displayName, "display_name")
 
         val tokenHash = ServerCrypto.hashToken(req.inviteToken)
         requireUsableInvite(repo.db.read { c -> c.queryOne(INVITE_BY_HASH, tokenHash, map = ::inviteRowOf) }, req.email)
@@ -241,12 +285,16 @@ class Service(
             val userId = req.userId
             if (!UUID_RE.matches(userId)) throw BadRequest("bad_user_id")
             if (c.queryOne("SELECT userId FROM users WHERE userId=?", userId) { it.getString(1) } != null) throw BadRequest("user_id_taken")
+            // H62: a colliding personal vaultId is a refusal (the sibling's vault_id_taken), not a
+            // PRIMARY KEY violation logged as a 500. Inside the tx like user_id_taken, where it is
+            // ordered against any concurrent insert of the same id.
+            if (repo.vaultType(c, req.personalVault.vaultId) != null) throw BadRequest("vault_id_taken")
             val t = now()
             c.exec(
                 """INSERT INTO users(userId,email,displayName,kdfSalt,kdfParams,verifier,wrappedUvk,identityPub,
                    encryptedIdentitySeed,isAdmin,status,mustChangePassword,createdAt,escrowPolicy)
                    VALUES(?,?,?,?,?,?,?,?,?,?, 'active', 0, ?, ?)""",
-                userId, req.email.lowercase(), req.displayName, req.kdfSalt, encodeParams(req.kdfParams),
+                userId, req.email.lowercase(), displayName, req.kdfSalt, encodeParams(req.kdfParams),
                 ServerCrypto.hashVerifier(req.authKey), req.wrappedUvk, req.identityPub,
                 req.encryptedIdentitySeed, invite.isAdmin, t,
                 // §F.4 posture reconciliation (v8): persist the ENFORCED polarity of the invite's
@@ -726,7 +774,18 @@ class Service(
     }
 
     fun logout(principal: Principal) = repo.db.tx { c ->
-        c.exec("UPDATE sessions SET revokedAt=? WHERE deviceId=? AND revokedAt IS NULL", now(), principal.deviceId)
+        val t = now()
+        c.exec("UPDATE sessions SET revokedAt=? WHERE deviceId=? AND revokedAt IS NULL", t, principal.deviceId)
+        // H25 (audit 2026-09-13): stamp the DEVICE too. Before this only the admin revoke path ever
+        // touched a device row, so a member who signed out left a row with revokedAt NULL and no
+        // live session — which the Admin device list rendered as live-with-a-Revoke-button forever
+        // and the user table counted as a device that "still holds access". signedOutAt is its own
+        // column, NOT revokedAt: an admin revoke and a member's own sign-out are different events
+        // in the audit trail (device_revoke vs logout) and must stay different in the row. Safe to
+        // stamp once and never clear because issueSession mints a FRESH device row per login — a
+        // signed-out row is never reused. Liveness itself is derived from the sessions join in
+        // AdminService (this stamp is the human-readable "when", the join is the truth).
+        c.exec("UPDATE devices SET signedOutAt=? WHERE deviceId=? AND signedOutAt IS NULL", t, principal.deviceId)
         repo.auditOn(c, "logout", principal.userId, principal.deviceId, null)
     }
 
@@ -1035,6 +1094,22 @@ class Service(
     private fun requireB64(value: String, maxBytes: Int, field: String): String {
         if (!isB64(value, maxBytes)) throw BadRequest("bad_$field")
         return value
+    }
+
+    /**
+     * H62: the bound for client-chosen FREE TEXT the server persists and other people's screens
+     * render — displayName (the Admin user table, every co-member's VaultMemberSummary) and the
+     * device name/platform (the Admin device list). Same reasoning as Auth.kt's
+     * declaredClientVersion bound: attacker-chosen text reaching a rendered row is capped at the
+     * DB, not only escaped at the console. Control characters are STRIPPED (a pasted name with a
+     * stray newline should still enrol — it is the operator's table, not a security boundary, that
+     * a control character breaks), then the length is refused past [TEXT_MAX]: a name longer than
+     * that is nobody's name. Returns the stored form so callers persist exactly what was checked.
+     */
+    private fun requireBoundedText(value: String, field: String): String {
+        val cleaned = value.filterNot { Character.isISOControl(it) }
+        if (cleaned.length > TEXT_MAX) throw BadRequest("bad_$field")
+        return cleaned
     }
 
     suspend fun createSharedVault(p: Principal, req: CreateVaultRequest, ip: String): CreateVaultResponse {
@@ -1520,9 +1595,14 @@ class Service(
      */
     private fun issueSession(c: Connection, userId: String, platform: String, name: String, clientVersion: String? = null): IssuedSession {
         val deviceId = uuid()
+        // H62: DeviceInfo.name/platform are client-chosen text rendered in the Admin device list;
+        // bounded HERE so register AND login inherit the same cap (refresh only re-stamps
+        // lastSeenAt/clientVersion, which Auth.kt already bounds).
+        val boundedPlatform = requireBoundedText(platform, "device_platform")
+        val boundedName = requireBoundedText(name, "device_name")
         c.exec(
             "INSERT INTO devices(deviceId,userId,platform,name,clientVersion,createdAt,lastSeenAt) VALUES(?,?,?,?,?,?,?)",
-            deviceId, userId, platform, name, clientVersion, now(), now(),
+            deviceId, userId, boundedPlatform, boundedName, clientVersion, now(), now(),
         )
         val access = ServerCrypto.newToken()
         val refresh = ServerCrypto.newToken()
@@ -1553,6 +1633,9 @@ class Service(
         // Single-use self-recovery ticket lifetime (design §F.3): a short window that still leaves a
         // human time to choose a new password (its Argon2id derivation is ~1 s). In-memory + userId-bound.
         const val RECOVERY_TICKET_TTL_MS = 5L * 60 * 1000
+        /** H62: the cap on persisted, rendered free text (displayName, device name/platform) — a
+         *  household name or a device label, never a paragraph. */
+        internal const val TEXT_MAX = 128
         // A fixed valid argon2id string so unknown-user logins spend the same CPU (timing).
         val DUMMY_VERIFIER: String = ServerCrypto.hashVerifier("andvari-dummy-authkey")
         internal const val DAY_MS = 24L * 3600 * 1000

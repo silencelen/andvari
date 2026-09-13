@@ -47,6 +47,11 @@ import { assertServerKdfParams } from "../crypto/keys";
 export const CLIENT_VERSION = "0.26.3";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
 
+/** A request body that is ALREADY JSON text and must not be re-serialized (see adminRecovery). */
+class PreSerializedJson {
+  constructor(readonly text: string) {}
+}
+
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
     super(message);
@@ -139,7 +144,9 @@ export class ApiClient {
     const resp = await fetch(this.baseUrl + path, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      // A PreSerializedJson body goes on the wire byte-for-byte (adminRecovery); everything
+      // else is serialized here, as before.
+      body: body === undefined ? undefined : body instanceof PreSerializedJson ? body.text : JSON.stringify(body),
     });
     if (resp.status === 401 && auth && attempt < MAX_AUTH_ATTEMPTS && this.tokens) {
       // A refresh that completed while this request was in flight (another caller's
@@ -596,6 +603,18 @@ export class ApiClient {
    *  out. Throws ApiError `no_escrow` (404) if the user never enrolled one. */
   adminUserEscrow(userId: string) {
     return this.text("GET", `/api/v1/admin/users/${userId}/escrow`);
+  }
+
+  /** F59 recovery step 3 (spec 04 §4) — POST the recovery-cli bundle to `/admin/recovery`. H24
+   *  (audit 2026-09-13): the route, the CLI that emits the exact wire body and the self-hosting
+   *  guide's "upload the result in the admin panel" all existed, and no shipped client had a call
+   *  site — the admin was left to improvise curl with a bearer token the web app never shows. The
+   *  bundle text goes on the wire VERBATIM: it is the server's own RecoveryUpload type serialized
+   *  by the CLI, and PRC-1 taught that re-serializing it once turned `tempKdfParams` into a JSON
+   *  string and 400'd the household's only path back from a forgotten master password. Answers
+   *  "ok"; `no_such_user` / `kdf_too_weak` / a decode 400 surface as ApiError for the panel. */
+  adminRecovery(bundleText: string) {
+    return this.text("POST", "/api/v1/admin/recovery", new PreSerializedJson(bundleText));
   }
 
   adminRevokeDevice(deviceId: string) {

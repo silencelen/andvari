@@ -23,6 +23,24 @@ import { VaultStore } from "../vault/store";
  */
 const BASE = process.env.ANDVARI_E2E;
 const PHASE = process.env.ANDVARI_E2E_PHASE ?? "a";
+/**
+ * H96 (audit 2026-09-13): phase selection used to be an early `return` inside each test body, so
+ * the two phases NOT selected were counted by vitest as passes — every phase printed "Tests 3
+ * passed (3)" while it had proved exactly one thing, and any value this file did not recognise
+ * (a typo, a renamed phase, a fourth phase added to scripts/e2e.sh before the test learned it)
+ * made all three "pass" in about a second with the script still announcing E2E PASSED. That is
+ * the collected-nothing trap scripts/verify.sh explicitly guards against ("node --test EXITS 0
+ * WHEN IT COLLECTED NOTHING … assert both"), reproduced in the one suite that talks to a real
+ * server. Unselected phases are now reported as SKIPPED (it.runIf below), so the runner's own
+ * count is the truth, and an unknown phase is a hard failure at collection rather than a green
+ * run that proved nothing.
+ */
+const PHASES = ["a", "b", "c"] as const;
+if (!(PHASES as readonly string[]).includes(PHASE)) {
+  throw new Error(
+    `ANDVARI_E2E_PHASE=${JSON.stringify(PHASE)} is not one of ${PHASES.join("/")} — refusing to pass vacuously`,
+  );
+}
 const STATE = process.env.ANDVARI_E2E_STATE ?? "/tmp/andvari-e2e-state.json";
 const BOOTSTRAP = process.env.ANDVARI_E2E_BOOTSTRAP ?? "";
 
@@ -144,8 +162,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     await initSodium();
   });
 
-  it("phase A: enroll, push, second client sees it over WebSocket < 2s", async () => {
-    if (PHASE !== "a") return;
+  it.runIf(PHASE === "a")("phase A: enroll, push, second client sees it over WebSocket < 2s", async () => {
     const policyResp = await fetch(`${BASE}/api/v1/client-policy`);
     const policy = await policyResp.json();
     const recoveryPub = fromB64((await (await fetch(`${BASE}/api/v1/recovery-pubkey`)).text()).trim());
@@ -289,7 +306,9 @@ describe.skipIf(!BASE)("live server e2e", () => {
     expect(storeC2.list().some((i) => i.doc.name === "shared-wifi"), "invitee decrypted the owner's shared item").toBe(true);
     expect(accountC2.roleFor(share.vaultId), "invitee holds the writer role").toBe("writer");
 
-    await clientA.removeVaultMember(share.vaultId, sessionC.userId);
+    // H06: the owner's store mints the spec 03 §11 removal proof; a bodyless client call here
+    // would pin the proofless shape the production Sharing screen used to send.
+    await storeA.removeVaultMember(share.vaultId, sessionC.userId);
     await storeC2.sync();
     expect(storeC2.list().some((i) => i.vaultId === share.vaultId), "removed member's shared items are purged").toBe(false);
     expect(accountC2.roleFor(share.vaultId), "removed member lost the vault key/role").toBeNull();
@@ -333,8 +352,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     writeFileSync(STATE, JSON.stringify(state));
   }, 30_000); // several real argon2id (64 MiB) derivations — well past vitest's 5 s default
 
-  it("phase B: after SIGKILL+restart, re-pushing the same mutationId is idempotent", async () => {
-    if (PHASE !== "b") return;
+  it.runIf(PHASE === "b")("phase B: after SIGKILL+restart, re-pushing the same mutationId is idempotent", async () => {
     const state: State = JSON.parse(readFileSync(STATE, "utf-8"));
     const client = new ApiClient(BASE!, state.tokens);
 
@@ -363,8 +381,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     expect(store.list().some((i) => i.doc.name === "post-crash note")).toBe(true);
   });
 
-  it("phase C: offline durable cache — A2 tripwire, offline unlock, torn-cache resync, queued-save flush", async () => {
-    if (PHASE !== "c") return;
+  it.runIf(PHASE === "c")("phase C: offline durable cache — A2 tripwire, offline unlock, torn-cache resync, queued-save flush", async () => {
     await initSodium();
     const state: State = JSON.parse(readFileSync(STATE, "utf-8"));
     const userId = state.userId;

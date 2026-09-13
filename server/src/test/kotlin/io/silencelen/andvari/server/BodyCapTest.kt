@@ -114,7 +114,10 @@ class BodyCapTest : P4TestSupport() {
         // big item accepted at creation would be un-restorable from Trash.
         assertEquals(BODY_CAP_PUSH_BYTES, bodyCapBytes("/api/v1/items/abc-123/restore"))
         // the usage-ledger PUT clears USAGE_SEALED_MAX so the handler's bad_usage_blob check —
-        // not the generic 413 — is the authority on an oversized ledger (spec 03 §8.2).
+        // not the generic 413 — is the authority on an oversized ledger (spec 03 §8.2). This is
+        // the THIRD cap exception, and spec 03's normative header sentence ("Server rejects
+        // request bodies > 256 KiB …") must enumerate it beside push and attachments — the G41
+        // fix updated §8.2 but not that sentence (H111, audit 2026-09-13); keep the two in step.
         assertEquals(BODY_CAP_USAGE_BYTES, bodyCapBytes("/api/v1/usage"))
         assertEquals(BODY_CAP_TIGHT_BYTES, bodyCapBytes("/api/v1/auth/prelogin"))
         assertEquals(BODY_CAP_TIGHT_BYTES, bodyCapBytes("/api/v1/items/abc-123/purge"))

@@ -360,14 +360,31 @@ strips them degrades every client to the poll path (correct, just slower).
   unknown target; both refusals are audited (`user_disable_denied`). `POST
   /admin/devices/{id}/revoke`, `GET /admin/users/{id}/devices` — per-user device list
   (feeds the revocation UI).
+- `GET /admin/users/{id}/escrow` — step 1 of the admin recovery ceremony (spec 04 §4):
+  returns the member's sealed escrow blob (base64url text; `404 no_escrow` when the
+  account was enrolled `waived`). The blob is useless without the printed sheet, but the
+  read is the first move of a takeover-capable ceremony, so it is **audited** like every
+  other admin call — audit type **`escrow_admin_read`**, `userId` = the admin, `meta` =
+  the target user id (audit H61: the route shipped for the web admin's "Download backstop
+  key" without a row, so a hijacked admin session could pull every member's blob and leave
+  no trail).
 - `POST /admin/recovery { userId, tempAuthKey, tempWrappedUvk, tempKdfSalt,
-  tempKdfParams }` — uploads recovery-cli output (spec 04 §4); sets
-  `mustChangePassword`; revokes all the user's sessions.
+  tempKdfParams }` — uploads recovery-cli output (spec 04 §4; the web admin panel's "Apply
+  recovery bundle" control posts the CLI's JSON verbatim); sets `mustChangePassword`;
+  revokes all the user's sessions. Audited (`recovery_apply`). **Rate bucket
+  `recovery_apply:{adminUserId}`, 5 / 60 s** — the server hashes `tempAuthKey` with the
+  memory-hard verifier KDF (spec 01 §3, 64 MiB argon2 per call), the same cost that earned
+  `PUT /account/password` its bucket, and admin-only is not a reason to let it loop.
 - `GET /admin/audit?since&type&userId` — filterable event log (also shipped to Loki
   via journald).
 - `GET/PUT /admin/policy` — org policy JSON: `minVersion{platform}`, default
   kdfParams, autoLockSeconds, clipboardClearSeconds, offlineCacheAllowed, quotas,
-  sessionTtls.
+  sessionTtls. `PUT` validates `kdfParams` against spec 01: in range (§7/§9 bounds) **and
+  `memBytes % 1024 == 0`** (spec 01 §1) — a non-KiB-multiple is rejected `400 bad_request`
+  rather than persisted, because it would fan out through the silent KDF upgrade into a
+  fleet where the engines disagree on the master key (audit H16). The same divisibility
+  check applies wherever the server accepts account `kdfParams` (register, password
+  change, recovery upload), alongside the existing `minKdfMemBytes` floor.
 - `GET /admin/status` — server version, break-glass tunnel state (read-only),
   storage stats.
 

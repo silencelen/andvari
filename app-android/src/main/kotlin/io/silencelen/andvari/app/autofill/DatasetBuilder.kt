@@ -209,12 +209,14 @@ object DatasetBuilder {
                 login
             }
             trace.loginItemCount = logins.size
+            val fillable = fillPasswordFields(form)
             trace.setMatchCounts(
                 form.fields.map { f ->
                     logins.count { login ->
                         val hasCred = when (f.kind) {
                             FieldKind.USERNAME -> !login.username.isNullOrEmpty()
-                            FieldKind.PASSWORD -> !login.password.isNullOrEmpty()
+                            // H21: a new/confirm box the builder leaves alone counts 0, like it fills.
+                            FieldKind.PASSWORD -> !login.password.isNullOrEmpty() && f in fillable
                             else -> false
                         }
                         hasCred && UriMatch.matchLogins(login.uris, targetFor(f, form, trusted))
@@ -253,7 +255,7 @@ object DatasetBuilder {
                 form.fields.filter { it.kind == FieldKind.USERNAME && UriMatch.matchLogins(login.uris, targetFor(it, form, trusted)) }
             } else emptyList()
             val passFields = if (password != null) {
-                form.fields.filter { it.kind == FieldKind.PASSWORD && UriMatch.matchLogins(login.uris, targetFor(it, form, trusted)) }
+                fillPasswordFields(form).filter { UriMatch.matchLogins(login.uris, targetFor(it, form, trusted)) }
             } else emptyList()
             if (userFields.isEmpty() && passFields.isEmpty()) continue
 
@@ -375,6 +377,18 @@ object DatasetBuilder {
             runCatching { b.build() }.getOrNull()
         }
     }
+
+    /**
+     * H21 (audit 2026-09-13): the PASSWORD fields a stored password is written into. The dataset
+     * used to broadcast one value to EVERY password-classified id — a change-password page's
+     * new + confirm boxes included, so picking a login pre-filled the OLD password behind the
+     * masking dots and a user who typed only the current field set the password to itself.
+     * [NewPasswordSignal.fillablePasswordFields] keeps hinted new-password fields out whenever a
+     * current-password field exists (the extension's primary rule); [annotate]'s match counts
+     * go through the same seam so the status screen can't contradict what actually filled.
+     */
+    private fun fillPasswordFields(form: ParsedForm): List<ParsedField> =
+        NewPasswordSignal.fillablePasswordFields(form.fields.filter { it.kind == FieldKind.PASSWORD }) { it.isNewPassword }
 
     private fun targetFor(field: ParsedField, form: ParsedForm, trusted: Boolean): FillTarget =
         FillTarget(webHost = if (trusted) field.webDomain else null, packageName = form.appPackage)

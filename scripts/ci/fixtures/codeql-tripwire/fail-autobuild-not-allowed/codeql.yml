@@ -1,0 +1,20 @@
+# A REAL build-mode, but the language was not added to ALLOWED_LANGUAGES: the positive assertion
+# makes re-enabling Kotlin a deliberate two-part edit (build-mode + allow-list), never a drive-by.
+name: CodeQL
+on: { push: { branches: [main] } }
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: java-kotlin
+            build-mode: autobuild
+    steps:
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - uses: github/codeql-action/analyze@v4

@@ -30,21 +30,12 @@ export function base32Decode(text: string): Uint8Array {
   return Uint8Array.from(out);
 }
 
-export function base32Encode(bytes: Uint8Array): string {
-  let out = "";
-  let buffer = 0;
-  let bits = 0;
-  for (const b of bytes) {
-    buffer = (buffer << 8) | b;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      out += ALPHABET[(buffer >> bits) & 0x1f];
-    }
-  }
-  if (bits > 0) out += ALPHABET[(buffer << (5 - bits)) & 0x1f];
-  return out;
-}
+// H86: `base32Encode` lived here with zero production callers — the web vault DECODES a stored
+// secret to compute a code and stores what the user pasted; nothing re-serialises bytes back to
+// base32. The extension's identical copy was deleted for the same reason (quality-deadcode--3,
+// extension/src/totp.ts), and keeping web's "for symmetry" left a second implementation to keep
+// honest and a few hundred bytes in every bundle. The vector suite now checks the parsed secret
+// against the fixture's base32 through base32Decode — the direction that actually ships.
 
 export type TotpAlgorithm = "SHA1" | "SHA256" | "SHA512";
 

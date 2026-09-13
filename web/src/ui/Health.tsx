@@ -4,6 +4,7 @@ import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import type { VaultItem, VaultStore } from "../vault/store";
 import { duplicateClusters, planDismiss, planKeep, type DuplicateCluster, type RoleFor } from "./duplicates";
 import { Announcer, Msg } from "./Msg";
+import { ago } from "./format";
 import { clampClipboardClearSeconds } from "./policyclamp";
 import { safeSiteHref } from "./safeurl";
 import { Staleness } from "./Staleness";
@@ -11,6 +12,19 @@ import { stalenessRows, stalenessSummary } from "./staleness";
 import { EmptySigil } from "./Sigil";
 import { STRENGTH_LABELS, estimateStrength } from "./strength";
 import { ViewHeader } from "./ViewHeader";
+
+/**
+ * The breach-scan verdict sentences, exported so health-rows.test.ts can pin them byte-equal
+ * against the Android twin (AndvariViewModel.scanBreaches).
+ *
+ * H74: the failure sentence used to name "the HIBP relay" — an internal the household cannot
+ * act on and that the copy canon's no-internals rule forbids. The phone has said "the service"
+ * since its twin was written; web is the reference client and was the one carrying the jargon.
+ * H73: the incomplete sentence is the phone's, word for word, including the curly quotes around
+ * the em dash the skipped rows render.
+ */
+export const BREACH_SCAN_FAILED = "Breach scan failed — the service is unavailable. Partial results were discarded.";
+export const BREACH_SCAN_INCOMPLETE = "Breach scan incomplete — some passwords couldn't be checked and show “—”. Rescan to cover them.";
 
 interface Props {
   /** Vault's live items state (refreshed after every sync/pull) — NOT a store snapshot. */
@@ -42,6 +56,32 @@ interface Row {
   strength: number;
   reused: number; // other items sharing this password
   hasTotp: boolean;
+  /** The item's rev at derivation — the breach cache's staleness key (see breachVerdict). */
+  rev: number;
+}
+
+/** A breach-scan verdict: the count the scan found for the password the item held at `rev`. */
+export interface BreachEntry {
+  count: number;
+  rev: number;
+}
+
+/**
+ * H26 (audit 2026-09-13; G35's other half): the breach cache is keyed by the stable itemId while
+ * the thing it describes is the PASSWORD. G35 closed the added-since-scan case (absent key → "—",
+ * never a false "none"); this closes the changed-since-scan case, which had no guard because the
+ * key is present. Each entry now carries the item's rev at scan time, and a verdict is only
+ * reported while the live item still sits at that rev: a rotated Netflix password no longer keeps
+ * showing the old red count (first hypothesis: "my change didn't save"), and — worse — a green
+ * "none" no longer survives an edit to a breached password typed by hand. Any edit bumps rev, so
+ * a rename also blanks the verdict; that is the conservative side (an unscanned "—", never a
+ * false "none"), exactly the rule G35 applied to absent keys. Returns undefined for "unscanned".
+ * Pure so health-rows.test.ts pins it; the Android twin applies the same rev rule.
+ */
+export function breachVerdict(byItem: Map<string, BreachEntry> | null, row: { itemId: string; rev: number }): number | undefined {
+  const e = byItem?.get(row.itemId);
+  if (!e || e.rev !== row.rev) return undefined;
+  return e.count;
 }
 
 /** bug-web--1: rows derive from Vault's `items` prop, whose identity changes on every applied
@@ -64,6 +104,7 @@ export function healthRows(items: VaultItem[]): Row[] {
       strength: estimateStrength(pw),
       reused: (byPassword.get(pw) ?? 1) - 1,
       hasTotp: !!it.doc.login!.totp,
+      rev: it.rev,
     };
   });
 }
@@ -97,14 +138,19 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
   const staleRows = useMemo(() => stalenessRows(items, { lastUsedAt }), [items, lastUsedAt]);
   const staleSummary = stalenessSummary(staleRows);
 
-  // itemId → breach count, filled by a scan and cached ON-DEVICE (by itemId — never the plaintext
-  // password, which is only the scan's lookup key) so it survives navigating away from Health.
-  // Loaded from the cache on mount → the button reads "Rescan" and the column shows last results.
-  const [breachByItem, setBreachByItem] = useState<Map<string, number> | null>(() => loadBreachCache(userId));
+  // itemId → {breach count, rev at scan}, filled by a scan and cached ON-DEVICE (by itemId — never
+  // the plaintext password, which is only the scan's lookup key) so it survives navigating away
+  // from Health. Loaded from the cache on mount → the button reads "Rescan" and the column shows
+  // last results — for items still at the rev the scan saw (breachVerdict, H26).
+  const [breachByItem, setBreachByItem] = useState<Map<string, BreachEntry> | null>(() => loadBreachCache(userId));
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [scanErr, setScanErr] = useState("");
   const [scanMsg, setScanMsg] = useState("");
+  // H73: some ranges failed, so the verdicts we DO have are real but the zero is not a clean
+  // bill — the Breached tile goes neutral rather than green. Session-scoped like the Android
+  // twin's UiState flag: a reload that re-reads the cache is back to "as far as we know".
+  const [scanIncomplete, setScanIncomplete] = useState(false);
 
   const scan = async () => {
     setScanning(true);
@@ -124,19 +170,51 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
       setProgress({ done: 0, total: byPrefix.size });
       const result = new Map<string, number>();
       let done = 0;
+      let failedRanges = 0;
       for (const [prefix, passwords] of byPrefix) {
-        const body = await client.hibpRange(prefix);
-        for (const pw of passwords) result.set(pw, hibpCountInRange(body, hashes.get(pw)!));
+        // H73: FAIL OPEN, PER RANGE — the Android twin's rule (AndvariViewModel.scanBreaches).
+        // A vault of a few hundred distinct passwords is a few hundred sequential relay round
+        // trips, so one transient failure late in the run used to throw away every verdict the
+        // scan had already earned; on a flaky relay a large vault could never finish a scan on
+        // web while the phone finished it, and the two clients then disagreed about the same
+        // vault. A failed range now leaves ITS passwords out of the map, which the column
+        // already renders as "—" (unscanned), rather than scoring them 0 — "couldn't check" and
+        // "clean" are different statements and only one of them would be true.
+        let body: string | null = null;
+        try {
+          body = await client.hibpRange(prefix);
+        } catch {
+          body = null;
+        }
+        if (body === null) failedRanges++;
+        else for (const pw of passwords) result.set(pw, hibpCountInRange(body, hashes.get(pw)!));
         setProgress({ done: ++done, total: byPrefix.size });
       }
-      // Persist + display keyed by itemId — never the plaintext password (the scan's lookup key).
-      const byItem = new Map(rows.map((r) => [r.itemId, result.get(r.password) ?? 0]));
+      if (failedRanges === byPrefix.size) {
+        // EVERY range failed — that is no scan at all, not an empty result. Keep the previous
+        // breachByItem exactly as it was (publishing an empty non-null map would flip the tile
+        // to a good-tone "Breached 0" while fully offline) and say so. Android's twin branch.
+        setScanErr(BREACH_SCAN_FAILED);
+        return;
+      }
+      // Persist + display keyed by itemId — never the plaintext password (the scan's lookup key)
+      // — with the rev the verdict was computed against (H26: a later edit invalidates it).
+      // Rows whose range failed are ABSENT (not 0), so breachVerdict returns undefined for them
+      // and the cell renders the same "—" an added-since-scan item gets.
+      const byItem = new Map<string, BreachEntry>(
+        rows.filter((r) => result.has(r.password)).map((r) => [r.itemId, { count: result.get(r.password)!, rev: r.rev }]),
+      );
       setBreachByItem(byItem);
+      setScanIncomplete(failedRanges > 0);
       saveBreachCache(userId, byItem);
-      const found = [...byItem.values()].filter((n) => n > 0).length;
-      setScanMsg(`Breach scan finished — ${found} login${found === 1 ? "" : "s"} found in known breaches.`);
+      const found = [...byItem.values()].filter((e) => e.count > 0).length;
+      setScanMsg(
+        failedRanges > 0
+          ? BREACH_SCAN_INCOMPLETE
+          : `Breach scan finished — ${found} login${found === 1 ? "" : "s"} found in known breaches.`,
+      );
     } catch {
-      setScanErr("Breach scan failed — the HIBP relay is unavailable. Partial results were discarded.");
+      setScanErr(BREACH_SCAN_FAILED);
     } finally {
       setScanning(false);
     }
@@ -144,11 +222,13 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
 
   const weak = rows.filter((r) => r.strength <= 1).length;
   const reused = rows.filter((r) => r.reused > 0).length;
-  const breached = breachByItem ? rows.filter((r) => (breachByItem.get(r.itemId) ?? 0) > 0).length : null;
+  // The tile counts only CURRENT verdicts (H26): an item edited since the scan is unscanned, so
+  // it can neither hold the tile red on a rotated password nor hide behind a stale green.
+  const breached = breachByItem ? rows.filter((r) => (breachVerdict(breachByItem, r) ?? 0) > 0).length : null;
   // Highest breach count first (owner ask), then alphabetical; unscanned/no-breach items tie at 0.
   const sorted = useMemo(() => {
-    const n = (id: string) => breachByItem?.get(id) ?? 0;
-    return [...rows].sort((a, b) => n(b.itemId) - n(a.itemId) || a.name.localeCompare(b.name));
+    const n = (r: Row) => breachVerdict(breachByItem, r) ?? 0;
+    return [...rows].sort((a, b) => n(b) - n(a) || a.name.localeCompare(b.name));
   }, [rows, breachByItem]);
 
   return (
@@ -171,7 +251,10 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
         <Tile label="Logins" value={String(rows.length)} />
         <Tile label="Weak" value={String(weak)} tone={weak > 0 ? "bad" : "good"} />
         <Tile label="Reused" value={String(reused)} tone={reused > 0 ? "bad" : "good"} />
-        <Tile label="Breached" value={breached === null ? "—" : String(breached)} tone={breached === null ? undefined : breached > 0 ? "bad" : "good"} hint={breached === null ? "run a scan" : undefined} />
+        {/* H73: an INCOMPLETE scan's findings are real (bad tone), but its zero is "no verdict"
+            (neutral) — the same statement the skipped rows' "—" makes, never a good-tone clean
+            bill. Android's HealthTiles makes exactly this distinction. */}
+        <Tile label="Breached" value={breached === null ? "—" : String(breached)} tone={breached === null || (breached === 0 && scanIncomplete) ? undefined : breached > 0 ? "bad" : "good"} hint={breached === null ? "run a scan" : undefined} />
         {/* Active clusters only — an acknowledged "not duplicates" must not keep the tile red. */}
         <Tile label="Duplicates" value={String(dupes.filter((d) => !d.dismissed).length)} tone={dupes.some((d) => !d.dismissed) ? "bad" : "good"} />
         <Tile label="Unchecked" value={String(staleSummary.unchecked)} tone={staleSummary.unchecked > 0 ? "bad" : "good"} />
@@ -229,7 +312,7 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
             </thead>
             <tbody>
               {sorted.map((r) => {
-                const count = breachByItem?.get(r.itemId);
+                const count = breachVerdict(breachByItem, r);
                 return (
                   // F80: the whole row stays a click target for pointer users.
                   // a11y-webext--2: the keyboard/AT affordance is the real <button> in the
@@ -250,8 +333,9 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
                     <td>
                       {breachByItem === null || count === undefined ? (
                         // Absent from the map after a scan (added/restored since, or the range
-                        // failed) means UNSCANNED, not clean — "—" either way, never a false
-                        // "none" (the Android twin's rule).
+                        // failed) OR present at a different rev (edited since — H26) means
+                        // UNSCANNED, not clean — "—" either way, never a false "none" (the
+                        // Android twin's rule).
                         <span className="muted">—</span>
                       ) : count > 0 ? (
                         <span className="tone-bad">{count.toLocaleString()}</span>
@@ -279,7 +363,7 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
 // retained across a lock and Health unmount/remount (module scope survives a phase change), GONE
 // on sign-out (clearBreachCache, called from App.signOut, the one wipe choke point) and on reload.
 // Nothing is written at rest, so there is no residue, no public-origin leak, and no gate to bypass.
-const breachCacheByUser = new Map<string, Map<string, number>>();
+const breachCacheByUser = new Map<string, Map<string, BreachEntry>>();
 /** CR-08: the retired global localStorage key. Proactively purged (below) so the pre-fix at-rest
  *  residue — item count + a password-popularity fingerprint on the public break-glass origin — is
  *  removed from devices that ran the old build, not merely left un-updated. */
@@ -291,12 +375,12 @@ function purgeLegacyBreachResidue(): void {
     /* storage unreachable (privacy mode / non-window) — nothing to purge */
   }
 }
-function loadBreachCache(userId: string): Map<string, number> | null {
+function loadBreachCache(userId: string): Map<string, BreachEntry> | null {
   purgeLegacyBreachResidue(); // opening Health scrubs any old at-rest map first
   const m = breachCacheByUser.get(userId);
   return m ? new Map(m) : null; // a copy — callers own their snapshot; never share the stored ref
 }
-function saveBreachCache(userId: string, byItem: Map<string, number>): void {
+function saveBreachCache(userId: string, byItem: Map<string, BreachEntry>): void {
   breachCacheByUser.set(userId, new Map(byItem));
 }
 /** CR-08 / WC-13 §E.4: drop every account's in-memory breach map. Called from App.signOut (the
@@ -326,6 +410,9 @@ function Duplicates({ clusters, items, roleFor, store, vaultNameById, onOpenItem
   // picked as survivor. One at a time, the merge-confirm idiom.
   const [keepConfirm, setKeepConfirm] = useState<{ sig: string; keepId: string } | null>(null);
   const [msg, setMsg] = useState<{ kind: "err" | "info"; text: string } | null>(null);
+  // H131: one clock for every row's "updated …", read once per render — Staleness's idiom
+  // (`const now = Date.now()` there), so two rows can never straddle a midnight.
+  const now = Date.now();
 
   const active = clusters.filter((c) => !c.dismissed);
   const dismissed = clusters.filter((c) => c.dismissed);
@@ -465,7 +552,10 @@ function Duplicates({ clusters, items, roleFor, store, vaultNameById, onOpenItem
                     whether removing it touches anybody else. */}
                 <span className="tag" style={{ color: "var(--gold-text)" }}>{vaultLabel(m.vaultId)}</span>
                 <span className="muted">
-                  {m.username.trim() || "(no username)"} · updated {new Date(m.updatedAt).toLocaleDateString()}
+                  {/* H131: the same relative form the Staleness tab beside it uses. This row used
+                      to print a raw numeric locale date, so one Health view spoke three time
+                      dialects on adjacent tabs ("updated 9/12/2026" next to "yesterday"). */}
+                  {m.username.trim() || "(no username)"} · updated {ago(m.updatedAt, now)}
                   {m.hasTotp ? " · has a one-time code" : ""}
                 </span>
                 {/* The honest password test (owner decision 2026-08-18): open the site and sign

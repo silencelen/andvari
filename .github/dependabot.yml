@@ -89,3 +89,29 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # H45 (2026-09-13 audit): github/codeql-action/init and /analyze in codeql.yml are
+    # LOCKSTEP-coupled — the action refuses to run when they differ ("Loaded a configuration file
+    # for version '4.37.9', but running version '4.37.7'"). Without a group Dependabot treats each
+    # `uses:` line as its own dependency and opens one PR per step (PRs #53/#54 both failed CI on
+    # exactly that mismatch), and merging either alone would redden the one real CodeQL leg on
+    # main. Grouping every github/codeql-action* ref (upload-sarif in scorecard.yml rides along —
+    # it is independent, but one PR for one upstream release is the right shape anyway) makes
+    # each bump a single, self-consistent, CI-checkable PR — the same reason gradle/web/extension
+    # above are grouped.
+    groups:
+      codeql-action:
+        patterns: ["github/codeql-action*"]
+
+  # H99 (2026-09-13 audit): the Dockerfile digest-pins its three base images and
+  # deploy/docker-compose.caddy.yml digest-pins caddy — a pin nobody bumps rots into an
+  # unpatched base, so Dependabot bumps both digests (one PR each, weekly, like everything else).
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: docker-compose
+    directory: "/deploy"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

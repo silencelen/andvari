@@ -112,7 +112,24 @@ gNwuByi91u4o7pgD/VoZzh/N/hSiYNzHBX9UAP9JXVBhYc5GOokigvadNSG+olfm
 -----END PGP PUBLIC KEY BLOCK-----
 ```
 
-## Status (2026-08-31)
+## Status (2026-09-13)
+- **Channel state: signed manifest at seq 12** — linux **0.26.3**, windows **0.26.3**, browserExtension
+  0.26.0; `signedAt 2026-09-05T22:56:25Z`, bundle ref `v0.26.3` / commit `39bf5944`. Recorded here from
+  the archive on huginn (`~/.andvari/manifest-archive/seq12-20260905T230007Z/`) and re-verified for the
+  2026-09-13 audit, because the publish itself left **no line in the watcher log and no PUBLISHED
+  telegram** (audit H47): it was run by hand from an interactive tmux session at 16:00:07 local, about
+  three minutes after the bundle landed (every bundle file mtime 15:57) and one minute before the
+  cron tick would have taken it — against this runbook's own "do NOT run it by hand" rule. Hashes of
+  record: `manifest.json` sha256 `bb94611b…0501be` (688 B), `manifest.json.sig` sha256
+  `4ec672d9…8d1cd0`, `andvari-0.26.3.msi` sha256 `9d2831bb…680111` (117 235 712 B, matches
+  `windows.sha256`), deb `c0a32424…cc9e77`; every file in the archive re-hashes to the bundle.json it
+  was signed with. **Fix landed in the watcher's mirror of record** (netplan
+  `scripts/active/andvari-manifest-watch.sh`): the script now opens its own log, refuses a real
+  publish from a tty unless `--interactive-ok` AND the log is writable, and names the supported hand
+  path (`systemd-run --wait --pipe --collect …`, which has a writable /var/log for both logs).
+  **Operator step outstanding: redeploy it to `/usr/local/bin/andvari-manifest-watch.sh`** — the
+  deployed copy still has the hole until then.
+- **(2026-08-31)** entries follow.
 - **Load-bearing OS-signing DONE for desktop:** MSI Authenticode + deb GPG, live on the reference
   instance. That closes the H2 §M-D1 "trojaned installer → RCE" path for the `.msi`/`.deb` the
   user runs — the bytes are OS-verifiable, independent of the server. Both have run every release

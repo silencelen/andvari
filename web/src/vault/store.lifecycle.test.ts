@@ -109,6 +109,10 @@ class FakeApi {
     this.calls.push({ name: "updateVaultMeta", args: { id, body } });
     return { rev: ++this.rev };
   }
+  async removeVaultMember(id: string, userId: string, body?: unknown) {
+    this.calls.push({ name: "removeVaultMember", args: { id, userId, body } });
+    return { rev: ++this.rev };
+  }
 
   asClient(): ApiClient {
     return this as unknown as ApiClient;
@@ -252,6 +256,37 @@ describe("Skipti tri-state removedGrants (spec 03 §11)", () => {
     });
     await store_sync(s2);
     expect(s2.store.notices().find((x) => x.vaultId === s2.vaultId)?.kind).toBe("anomaly");
+  });
+
+  it("H06: the owner's store MINTS the removal proof, and a victim relayed that proof lands 'removed', not 'anomaly'", async () => {
+    // Audit 2026-09-13 H06: the only production caller of member removal (web Sharing) sent the
+    // DELETE with no body, so the server relayed NULL proof/nonce and every legitimate removal
+    // reached the removed member as the forgery ("anomaly") banner. The test above proves the
+    // VERIFY side; this one proves the MINT side and joins the two: the exact body the owner's
+    // store sends, relayed verbatim by the server, must be what the victim's store accepts.
+    const s = await seededMember();
+    const ownerApi = new FakeApi();
+    const ownerStore = new VaultStore(ownerApi.asClient(), s.owner);
+    await ownerStore.removeVaultMember(s.vaultId, s.member.userId);
+    const call = ownerApi.calls.find((c) => c.name === "removeVaultMember");
+    expect(call, "the DELETE went out").toBeTruthy();
+    expect(call!.args.id).toBe(s.vaultId);
+    expect(call!.args.userId).toBe(s.member.userId);
+    const body = call!.args.body as { proof?: string; nonce?: string } | undefined;
+    expect(body?.nonce, "a fresh nonce rides the body").toMatch(/^[0-9a-f-]{36}$/);
+    expect(body?.proof, "a proof rides the body").toBeTruthy();
+    // The proof is the spec 03 §11 remove MAC under the vault's lifecycle key, over THIS target.
+    const key = await s.owner.lifecycleKeyFor(s.vaultId);
+    expect(body!.proof).toBe(await removeProof(key, s.vaultId, s.member.userId, body!.nonce!));
+
+    // Server relay (Service.kt stores proof+nonce on the grant; Repo.kt hands them back in
+    // removedGrantsInfo) → the victim's engine attributes the removal to the owner.
+    s.api.queue.push({
+      rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
+      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "removed", removeProof: body!.proof, removeNonce: body!.nonce }],
+    });
+    await store_sync(s);
+    expect(s.store.notices().find((x) => x.vaultId === s.vaultId)?.kind).toBe("removed");
   });
 
   it("notices never fire on a since=0 / fresh-device pull", async () => {

@@ -21,7 +21,14 @@
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+# --ignore-scripts (audit H98): npm runs every dependency's preinstall/install/postinstall hook by
+# default, which is arbitrary code execution at install time for a compromised transitive package
+# — on the image build and on the release host. Nothing in this lockfile needs a hook to work:
+# the only package with an install script is esbuild, whose postinstall merely swaps in the
+# platform binary that the optional @esbuild/<platform> package already provides. web/.npmrc
+# carries the same setting for developer installs; this flag makes the image build honour it
+# even if that file is ever dropped from the COPY above.
+RUN npm ci --no-audit --no-fund --ignore-scripts
 COPY web/ ./
 # `npm run build` = `tsc --noEmit && vite build`, and tsc type-checks the test
 # files too — web/src/extension-pins.test.ts imports ../../extension/src/* and

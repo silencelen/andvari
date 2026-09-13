@@ -270,6 +270,15 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible, summary:fo
 }
 .navbtn:focus-visible { outline-offset: -2px; }
 input.mono, textarea.mono { font-family: var(--mono); font-size: 13px; }
+/* H52 (audit 2026-09-13) — the port of the popup's a11y 7b rule that web never got: with no
+   author colour, placeholders fell to the UA default, which on the light theme's #fff inputs is
+   Chromium's darkgray at ≈2.4:1 (Firefox: the text colour at 0.54 alpha, ≈3.6:1) — and differs
+   per browser, so the same field read differently across the household's machines. The
+   placeholder is the search box's only visible label-text and carries the one-shot ceremonies'
+   safety hints ("from the sheet, not this screen"); --ink-dim clears AA on --bg-input in both
+   themes (contrast.test.ts pins it). `opacity: 1` because Firefox applies its own alpha ON TOP
+   of an author colour, which would put the token back under the floor there. */
+input::placeholder, textarea::placeholder { color: var(--ink-dim); opacity: 1; }
 
 button.primary {
   width: 100%; font: inherit; font-weight: 600; font-size: 15px;
@@ -287,6 +296,18 @@ button.ghost {
   border: 1px solid var(--edge); border-radius: var(--radius); padding: 8px 14px; cursor: pointer; transition: 0.15s;
 }
 button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
+/* H51 (audit 2026-09-13): only button.primary had a disabled treatment. A disabled ghost /
+   link-button kept its pointer cursor and its hover lift, and author-origin `color`/`background`
+   on inputs and selects overrode the UA's own disabled greying — so Admin's "email it" freezing
+   the TTL/Recovery selects, the frozen import destination, and Merge/Keep/Cancel during a merge
+   all looked live and hovered like it. Same opacity + cursor the primary carries (Cut A), and the
+   hover lift is pinned back to the resting colours so a disabled control never answers the
+   pointer. (Disabled is WCAG-exempt; this is an affordance fix, like the primary's.) The popup
+   twin carries the same rules for .ghost / .link / .fill-btn. */
+button.ghost:disabled, .link:disabled { opacity: 0.55; cursor: not-allowed; }
+button.ghost:disabled:hover { color: var(--ink-dim); border-color: var(--edge); }
+.link:disabled:hover { color: var(--link); text-decoration: none; }
+input:disabled, select:disabled, textarea:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* ---- busy dial (UI-audit #24 — see Busy.tsx) ---- */
 /* The one shared progress affordance for multi-second work (the Argon2id unlock and
@@ -310,6 +331,19 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 
 .check { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; color: var(--ink-dim); margin-bottom: 18px; }
 .check input { width: auto; margin-top: 3px; }
+/* H49 (audit 2026-09-13; the 2026-07-12 UI audit's action item #8 that never landed): the global
+   `label` rule above is the caption paint — 12px uppercase, tracked — and it is right for a
+   two-word caption over a box. It is wrong for a SENTENCE: every consent acknowledgment
+   (`label.check` / `label.inline-check` — the waived-recovery "gone forever" gate, the in-person
+   fingerprint attestations, the plaintext-CSV acknowledgment) rendered as 20–40 words of
+   letterspaced ALL CAPS, and the words the copy capitalises for emphasis (AND / NO / FIRST 16)
+   became invisible. `.check` only declared the properties it set, so text-transform and
+   letter-spacing inherited from the element selector. Same reset for `label.prompt`: Field's
+   opt-in for a sentence-length prompt over a box (the recovery-sheet check, the type-the-vault-
+   name confirm, the type-the-phrase-back gate) — those keep the block layout and the caption
+   colour but read as a sentence. The caps stay everywhere else. */
+.check, .inline-check, label.prompt { text-transform: none; letter-spacing: 0; }
+label.prompt { font-size: 13px; color: var(--ink-dim); }
 .fingerprint { font-family: var(--mono); font-size: 13px; color: var(--gold-bright); word-break: break-all; }
 
 .muted { color: var(--ink-faint); font-size: 12px; }
@@ -418,6 +452,9 @@ button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
 .getbtns a:hover { color: var(--gold-bright); border-color: var(--edge-strong); }
 .secret-row { display: flex; gap: 8px; align-items: stretch; }
 .secret-row input { flex: 1; }
+/* H53: a website row in Detail is a link (or inert text) beside its Copy — it takes the input's
+   slot, breaks a long uri instead of pushing Copy off the row, and sits on the button's baseline. */
+.secret-row .site-uri { flex: 1; min-width: 0; overflow-wrap: anywhere; align-self: center; padding: 6px 0; }
 .copy-flash { color: var(--ok); font-size: 12px; }
 .totp { font-family: var(--mono); font-size: 24px; letter-spacing: 0.14em; color: var(--gold-bright); }
 .totp-wrap { display: flex; align-items: center; gap: 14px; }
@@ -613,3 +650,6 @@ input.token { font-size: 15px; color: var(--gold-bright); }
   padding: 10px 12px; margin-bottom: 10px;
 }
 .inline-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-dim); }
+/* H24: the Admin row's recovery-bundle upload (F59 step 3) — a paste box + file picker inside
+   a table cell needs a floor width or the cell squeezes the textarea to a slit. */
+.recovery-apply { margin-top: 8px; min-width: 320px; }

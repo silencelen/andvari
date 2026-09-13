@@ -95,6 +95,25 @@ fun openInBrowser(url: String): Boolean = runCatching {
 }.getOrDefault(false)
 
 /**
+ * Audit H126: open [dir] in the OS file manager — the About dialog's door to the diagnostic log.
+ * The log lives in a DOTFILE directory (`~/.andvari-desktop`), which is hidden by default in both
+ * Explorer and every GNOME/KDE file manager, so "the path is written down" is not on its own a way
+ * for a household member to reach it during a support conversation.
+ *
+ * Same graceful-failure contract as [openInBrowser] (a headless or file-manager-less Linux session
+ * throws out of `Desktop.open`): false means nothing opened, and the caller keeps the path on
+ * screen as selectable text — which is the primary affordance either way, never this button.
+ */
+fun openFolder(dir: java.io.File): Boolean = runCatching {
+    if (!Desktop.isDesktopSupported()) return false
+    val desktop = Desktop.getDesktop()
+    if (!desktop.isSupported(Desktop.Action.OPEN)) return false
+    if (!dir.isDirectory) return false
+    desktop.open(dir)
+    true
+}.getOrDefault(false)
+
+/**
  * The outcome of one update check (H2, design 2026-07-13-signed-updates §M). Everything that is
  * not a VERIFIED manifest collapses into [Unverified] — a deliberately QUIET state (§M-D5): a
  * tampering/sig-stripping server must never be able to force a scary banner (cry-wolf DoS), so

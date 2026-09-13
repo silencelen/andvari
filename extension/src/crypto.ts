@@ -118,9 +118,16 @@ export function sealOpen(recipientPub: Uint8Array, recipientPriv: Uint8Array, se
 export function deriveMasterKey(password: string, params: KdfParams, salt: Uint8Array): Uint8Array {
   if (params.v !== 1 || params.alg !== "argon2id13") throw new Error("unsupported kdfParams");
   if (salt.length !== 16) throw new Error("kdf salt must be 16 bytes");
+  // H16 (2026-09-13 audit): libsodium's crypto_pwhash takes memlimit in BYTES and floors it to
+  // KiB by integer division (memlimit / 1024U); @noble takes `m` in KiB and REJECTS a non-integer
+  // ("m" must be 0..2^32). Nothing in the fleet constrains a policy memBytes to a KiB multiple, so
+  // an admin's memBytes=100000000 ("100 MB") let every libsodium client (core/web/Android/desktop)
+  // enrol and re-key while this twin threw before deriving anything — rendered as "Sign-in failed.
+  // Please try again." Math.floor is byte-identical to libsodium's division, so the extension now
+  // derives the same MK the fleet does (crypto.vectors.test.ts pins the floor against kdf.json).
   return argon2id(utf8(password), salt, {
     t: params.ops,
-    m: params.memBytes / 1024,
+    m: Math.floor(params.memBytes / 1024),
     p: 1,
     dkLen: KEY_BYTES,
     version: 0x13,

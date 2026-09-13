@@ -69,11 +69,12 @@ class StrengthTest {
     @Test
     fun patternWarning_firesOnlyWhenThePatternIsWhatMakesItWeak() {
         assertNotNull(Strength.patternWarning("Password1!Password1!"))
+        // H86: the two assertions that used to pin the deleted `hasPatternWeakness` boolean now
+        // pin the SHIPPED signal on the same inputs — the run collapses (warning fires) and the
+        // empty string is quiet.
         assertEquals(Strength.PATTERN_WARNING, Strength.patternWarning("a".repeat(40)))
-        assertTrue(Strength.hasPatternWeakness("a".repeat(40)))
         assertNull(Strength.patternWarning("correct-horse-battery-staple"))
         assertNull(Strength.patternWarning(""))
-        assertFalse(Strength.hasPatternWeakness(""))
     }
 
     @Test

@@ -12,10 +12,17 @@ The pitch is "don't trust us, read it", so the verification path is meant to be 
 ```sh
 git clone https://github.com/silencelen/andvari
 cd andvari
-(cd web && npm install)
-(cd extension && npm install)
+(cd web && npm ci --ignore-scripts)
+(cd extension && npm ci --ignore-scripts)
 bash scripts/verify.sh
 ```
+
+`npm ci` installs exactly the committed lockfile; `--ignore-scripts` refuses to run any
+dependency's install hooks (both `.npmrc` files set it too, so a plain `npm install` behaves the
+same — the flag is spelled out so the property survives a copy-paste into another checkout).
+Nothing in either tree needs a hook: esbuild's postinstall only swaps in the platform binary that
+its optional `@esbuild/<platform>` package already provides. A password manager's build host is
+the last place a transitive package should get to run code at install time.
 
 You need **JDK 17**, **Node ≥ 22**, and — because `verify.sh` includes the Android client — an
 **Android SDK**, found via `ANDROID_HOME` or an `sdk.dir` line in `local.properties`. Without one,

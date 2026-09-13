@@ -325,3 +325,10 @@ phone" is thin.
    human-anchored `rfp` (or with a server-sourced one) is a §F.1 violation and reopens
    T10 for `required` members — the exact class the 2026-07-12 breaker flagged as
    CRITICAL (review :209-217).
+
+**Addendum (2026-09-13, audit H24) — the same pre-commitment covers the recovery ceremony.** If a
+native admin surface is ever built, it carries *both* halves of the escrow-recovery ceremony or
+neither: "Download backstop key" (`GET /admin/users/{id}/escrow`) **and** "Apply recovery bundle"
+(`POST /admin/recovery`, the recovery-cli JSON posted verbatim — PRC-1). The web admin shipped the
+download half alone for two months while `docs/self-hosting.md` told the admin to "upload the result
+in the admin panel"; a native surface must not repeat that half-landing.

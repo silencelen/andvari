@@ -436,5 +436,19 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 10) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // H25 (audit 2026-09-13): when the member's OWN /auth/logout signed this device
+                    // out (Service.logout). Additive, nullable, no backfill — a pre-v10 signed-out
+                    // row simply has no stamp; its liveness is derived from the sessions join in
+                    // AdminService regardless (the stamp is the "when", the join is the truth).
+                    // Deliberately NOT reusing revokedAt: an admin revoke and a member sign-out are
+                    // different events in the audit trail and must stay different in the row.
+                    st.executeUpdate("ALTER TABLE devices ADD COLUMN signedOutAt INTEGER")
+                    st.executeUpdate("UPDATE meta SET value='10' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }

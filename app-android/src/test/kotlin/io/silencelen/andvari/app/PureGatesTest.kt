@@ -379,4 +379,48 @@ class PureGatesTest {
         assertFalse(importPushRetryable(t))
         assertEquals(HouseholdCopy.UPGRADE_REQUIRED, importPushError(t))
     }
+
+    // ---- H56: the last-resort crash report never carries an exception MESSAGE ----
+
+    /**
+     * The report is written to disk, survives to the next launch, is shown WITHOUT FLAG_SECURE
+     * (crash traces are deliberately screenshot-able) and its copy tells the user to send it on.
+     * So the one thing it must never contain is an exception message: those quote their input,
+     * and on this client the input is decrypted vault material — the exact rule
+     * `AutofillDebugLog.exceptionDetail` states for the fill log.
+     */
+    @Test
+    fun theCrashReportCarriesClassNamesAndFramesButNeverAMessage() {
+        val secret = "correct-horse-battery-staple"
+        val t = IllegalStateException("JSON input: {\"password\":\"$secret\"}")
+        val report = scrubbedTrace(t)
+        assertFalse(report.contains(secret), "an exception message reached the crash report: $report")
+        assertFalse(report.contains("JSON input"), "…messages are dropped whole, not filtered for known secrets")
+        assertTrue(report.contains("java.lang.IllegalStateException"), "the CLASS is what a report is for")
+        assertTrue(report.contains("theCrashReportCarriesClassNamesAndFramesButNeverAMessage"), "…with frames to place it")
+    }
+
+    /** Every level of the cause chain, which is where `printStackTrace` leaked most of them. */
+    @Test
+    fun everyCauseIsScrubbedToo() {
+        val root = IllegalArgumentException("Illegal character in scheme at index 0: https://user:hunter2@example.com")
+        val report = scrubbedTrace(RuntimeException("wrapper: hunter2", root))
+        assertFalse(report.contains("hunter2"), "a nested message leaked: $report")
+        assertTrue(report.contains("Caused by: java.lang.IllegalArgumentException"), "the chain still reads as a chain")
+    }
+
+    /** A self-referential cause (a Throwable whose cause was never set answers `this`) and a
+     *  long chain must both terminate — this handler runs while the process is already dying. */
+    @Test
+    fun theCauseWalkAlwaysTerminates() {
+        var t = RuntimeException("root")
+        repeat(40) { t = RuntimeException("layer", t) }
+        val report = scrubbedTrace(t)
+        assertEquals(
+            AndvariApplication.MAX_CAUSES,
+            report.lines().count { it.startsWith("Caused by:") } + 1,
+            "the cause chain is capped",
+        )
+        assertTrue(scrubbedTrace(Throwable()).isNotEmpty(), "a cause-less throwable still reports")
+    }
 }

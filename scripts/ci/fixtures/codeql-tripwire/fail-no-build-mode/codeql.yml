@@ -1,0 +1,17 @@
+# A Kotlin leg with no build-mode at all: the action's default is not guaranteed to extract.
+name: CodeQL
+on: { push: { branches: [main] } }
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: kotlin
+    steps:
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+      - uses: github/codeql-action/analyze@v4

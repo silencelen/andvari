@@ -353,10 +353,22 @@ class AndvariApi(
     suspend fun setVaultMemberRole(vaultId: String, userId: String, role: String): CreateVaultResponse =
         call("PUT", "/api/v1/vaults/$vaultId/members/$userId", VaultMemberRole(role))
 
-    /** [removal] is the optional removal proof (spec 03 §10/§11): minted by the removing
-     *  owner's unlocked client and relayed to the victim via removedGrantsInfo so a 0.5.0
-     *  client can verify the removal as a real owner action. Omitted → bare removal (the
-     *  victim retains-and-warns). */
+    /**
+     * [removal] is the removal proof (spec 03 §10/§11): minted by the removing owner's unlocked
+     * client — `nonce = fresh UUID`, `proof = LifecycleProof.remove(lifecycleKeyFor(vaultId),
+     * vaultId, userId, nonce)` — and relayed to the victim via removedGrantsInfo so a 0.5.0+
+     * client can verify the removal as a real owner action.
+     *
+     * The body is OPTIONAL on the wire but NOT in practice (audit H06): both sync engines
+     * ([SyncEngine.verifyRemoval], web store.ts) classify a removal WITHOUT a proof as an
+     * `anomaly` — the victim's every client renders the danger-tone "couldn't be verified as a
+     * real owner action … the server may be misbehaving" banner instead of the calm "Your access
+     * was removed." A caller that omits it therefore cries wolf on the one signal that exists to
+     * catch a forged revocation (spec 05 F16), on every legitimate removal. Any native member
+     * management that lands here MUST mint the proof first, exactly as [SyncEngine.deleteSharedVault]
+     * mints its delete proof; web's Sharing.tsx is the twin. The `null` default survives only for
+     * the server test harness's bare-removal cases.
+     */
     suspend fun removeVaultMember(vaultId: String, userId: String, removal: VaultMemberRemoveRequest? = null): CreateVaultResponse =
         call("DELETE", "/api/v1/vaults/$vaultId/members/$userId", removal?.takeIf { it.proof != null || it.nonce != null })
 

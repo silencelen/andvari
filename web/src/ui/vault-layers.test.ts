@@ -99,7 +99,8 @@ describe("quality-deadcode--7 — fmtDay has exactly one home", () => {
   it("neither view declares its own copy any more", () => {
     expect(vaultTsx).not.toMatch(/function fmtDay\(/);
     expect(sharingTsx).not.toMatch(/function fmtDay\(/);
-    expect(vaultTsx).toMatch(/import \{ fmtDay, humanSize \} from "\.\/format"/);
+    // H131: Vault also pulls fmtDayYear now (version history), from the same one home.
+    expect(vaultTsx).toMatch(/import \{ fmtDay, fmtDayYear, humanSize \} from "\.\/format"/);
     expect(sharingTsx).toMatch(/import \{ fmtDay \} from "\.\/format"/);
   });
 });

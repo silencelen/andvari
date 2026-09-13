@@ -299,7 +299,8 @@ class SharedVaultTest : P4TestSupport() {
         // tables (no sealedVk; vaults included because the v4 lifecycle migration ALTERs it too,
         // items because the v5 tombstone index is created on it, invites because the v6 recovery
         // migration ALTERs it — ADD COLUMN escrowPolicy; users because the v7 §F.9 migration ALTERs
-        // it — ADD COLUMN recoveryConfirmed).
+        // it — ADD COLUMN recoveryConfirmed; devices because the v10 H25 migration ALTERs it —
+        // ADD COLUMN signedOutAt).
         DriverManager.getConnection("jdbc:sqlite:${dbFile.absolutePath}").use { c ->
             c.createStatement().use { st ->
                 st.executeUpdate("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -327,6 +328,13 @@ class SharedVaultTest : P4TestSupport() {
                        status TEXT NOT NULL DEFAULT 'active', mustChangePassword INTEGER NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL,
                        totpSecret TEXT, totpPendingSecret TEXT, totpEnrolledAt INTEGER, totpLastStep INTEGER NOT NULL DEFAULT 0)""",
                 )
+                // v1-shaped devices table so the v10 H25 migration (ADD COLUMN signedOutAt) has a table
+                // to extend — the same reason users/invites are here for v6/v7.
+                st.executeUpdate(
+                    """CREATE TABLE devices(deviceId TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(userId),
+                       platform TEXT NOT NULL, name TEXT NOT NULL, clientVersion TEXT, createdAt INTEGER NOT NULL,
+                       lastSeenAt INTEGER, revokedAt INTEGER)""",
+                )
                 st.executeUpdate("INSERT INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES('v','u','owner','wv',1)")
                 st.executeUpdate("INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES('th','e@x.com',0,1,9)")
                 st.executeUpdate("INSERT INTO users(userId,email,displayName,kdfSalt,kdfParams,verifier,wrappedUvk,identityPub,encryptedIdentitySeed,createdAt) VALUES('u','e@x.com','n','s','p','vf','wu','ip','eis',1)")
@@ -341,7 +349,7 @@ class SharedVaultTest : P4TestSupport() {
                 val s = c.queryOne("SELECT sealedVk FROM grants WHERE userId='u'") { rs -> rs.getString(1) }
                 v to s
             }
-            assertEquals("9", version)
+            assertEquals("10", version)
             assertNull(sealed, "the pre-existing v2 grant reads back sealedVk=NULL")
             db.read { c ->
                 // v6 recovery migration landed: member_recovery table + invites.escrowPolicy default.
@@ -356,7 +364,7 @@ class SharedVaultTest : P4TestSupport() {
         }
         // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("9", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("10", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

@@ -1,0 +1,36 @@
+# CodeQL Kotlin-emptiness tripwire — ALWAYS-ON (audit G18 → H40, docs/design/2026-09-13-full-surface-audit.md).
+#
+# The tripwire (scripts/ci/codeql-kotlin-tripwire.sh) fails if any workflow in this directory
+# re-introduces a Kotlin CodeQL leg without a real build-mode — the empty-database false-green
+# the owner retired on purpose. It also runs as the first step of codeql.yml's analyze job, but a
+# step INSIDE codeql.yml only guards codeql.yml: a new codeql-kotlin.yml would never execute it.
+# This workflow runs the same script over the WHOLE workflows directory on every push and PR,
+# whatever files they touch, so there is no workflow shape that can route around it. Make it a
+# required check in branch protection to close the last gap (a PR merged with the job red).
+name: CodeQL tripwire
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tripwire:
+    name: Kotlin-emptiness tripwire (all workflows)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # The self-test first: a tripwire whose fixtures no longer trip it is not a tripwire.
+      - name: Tripwire self-test (fixtures must trip, live workflows must pass)
+        run: bash scripts/ci/codeql-kotlin-tripwire.test.sh
+
+      - name: Tripwire over .github/workflows/
+        run: bash scripts/ci/codeql-kotlin-tripwire.sh .github/workflows

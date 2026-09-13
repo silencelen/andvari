@@ -32,6 +32,7 @@ class SurfacePinsTest {
 
     private val ui by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/desktop/Ui.kt").readText() }
     private val state by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/desktop/DesktopState.kt").readText() }
+    private val main by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/desktop/Main.kt").readText() }
 
     // ---- F04 ----
 
@@ -132,5 +133,118 @@ class SurfacePinsTest {
         assertTrue(ui.contains("state.breachAdvisory?.let"), "the enrollment advisory needs a banner on screen")
         assertTrue(state.contains("checkEnrolledPasswordForBreach(a, password)"), "enrollOp must run the check once a session exists")
         assertTrue(state.contains("Strength.breachCount("), "the check must go through the shared core seam")
+    }
+
+    // ---- audit H10 (G10's remaining legs) ----
+
+    @Test
+    fun everyBusyHoldingNetworkLegIsBounded() {
+        // op() itself: the flat bound every op{} site inherits (sign-in, unlock, enroll, delete,
+        // rename, the transfer/leave/restore ops, Trash restore/purge, …).
+        assertTrue(state.contains("withTimeoutOrNull(timeoutMs) { block() }"), "op() must run its block under the bound")
+        // The byte-carrying legs the audit named, each scaled over the bytes it moves.
+        assertTrue(state.contains("withTimeoutOrNull(uploadsTimeoutMs(uploads))"), "save-with-uploads")
+        assertTrue(state.contains("withTimeoutOrNull(attachmentTimeoutMs(current.doc.attachments.sumOf { it.size }))"), "the move/copy gesture, sized from the SOURCE item's attachments")
+        assertTrue(state.contains("withTimeoutOrNull(importTimeoutMs(plan.items.size))"), "the CSV import push")
+        assertTrue(state.contains("e.copyAllToPersonal(vaultId)") && state.contains("InterruptedIOException(\"rescue copy timed out\")"), "the bulk rescue copy")
+        // …and G10's own download keeps its inner bound (the outer op bound sits one window above it).
+        assertTrue(state.contains("withTimeoutOrNull(attachmentTimeoutMs(ref.size)) { engine!!.downloadAttachment(ref) }"))
+    }
+
+    // ---- audit H12 ----
+
+    @Test
+    fun theRecoverySecretHasAClockAndTheExpiryHasASurface() {
+        assertTrue(state.contains("armRecoverIdleWatch() // H12"), "verify-accept must arm the CR-02 watcher")
+        assertTrue(state.contains("recoverIdleJob?.cancel(); recoverIdleJob = null"), "every exit of the flow must stop it")
+        // The expiry lands on Unlock when a session exists — which composed no notice bar before.
+        for (screen in listOf("private fun Welcome(", "private fun Unlock(")) {
+            val body = ui.substringAfter(screen).substringBefore("\n@Composable")
+            assertTrue(body.contains("NoticeBar(state.notice, state::clearNotice)"), "$screen must render the notice the expiry sets")
+        }
+    }
+
+    // ---- audit H15 ----
+
+    @Test
+    fun theStartupSelfCheckVerdictReachesTheScreen() {
+        assertTrue(main.contains("val selfCheck = DesktopDiagnostics.runStartupSelfCheck()"), "main() must HOLD the verdict")
+        assertTrue(main.contains("it.applySelfCheck(selfCheck)"), "…and hand it to the state before start()")
+        assertTrue(ui.contains("state.cryptoUnavailable?.let { msg ->"), "the blocking state must render (426 idiom)")
+        assertTrue(ui.contains("state.diagnosticLogPath"), "…naming the log that holds the diagnosis")
+        assertTrue(state.contains("if (isNativeCryptoLoadFailure(t)) {"), "op()'s belt for a load failure that first surfaces mid-session")
+    }
+
+    // ---- audit H23 (spec 07 intro — both artifacts get the per-vault opt-out) ----
+
+    @Test
+    fun theCsvPreflightNamesEveryVaultAndHonoursTheOptOut() {
+        val csv = ui.substringAfter("private fun CsvPreflightDialog(")
+        assertTrue(csv.contains("item(s), personal"), "the personal vault line")
+        assertTrue(csv.contains("item(s), shared (${'$'}{v.role})"), "one opt-out row per shared vault, in the backup dialog's words")
+        assertTrue(csv.contains("Checkbox(v.vaultId in selected, onCheckedChange = null)"), "…as a real toggle, not a label")
+        assertTrue(ui.contains("state.csvRun(dest, selected)"), "the selection must reach the writer")
+        assertTrue(state.contains("fun csvRun(dest: File, selectedVaults: Set<String>)"))
+        assertTrue(state.contains("filter { it in selectedVaults }"), "csvRun must FILTER by the selection, never re-enumerate every held vault")
+        assertTrue(state.contains("fun csvPreflightFor(selected: Set<String>)"), "the count/skip lines recompute for the selection")
+    }
+
+    // ---- audit H126 (the diagnostic log gets a door) ----
+
+    @Test
+    fun aboutNamesTheDiagnosticLog() {
+        val about = ui.substringAfter("private fun AboutDialog(").substringBefore("\n@Composable")
+        assertTrue(about.contains("state.diagnosticLogPath"), "About must name the file a support conversation will ask for")
+        assertTrue(about.contains("SelectionContainer"), "…as selectable text, so it can be copied out")
+        assertTrue(about.contains("openFolder(dir)"), "…with the folder button, since ~/.andvari-desktop is hidden by default")
+        // The claim on screen must be the one the code enforces (H58's allowlist), not a softer one.
+        assertTrue(about.contains("never anything from your vault"), "About must say what the log does NOT hold")
+    }
+
+    // ---- audit H127 (one Trash reader-gate treatment across all three clients) ----
+
+    @Test
+    fun theTrashReaderGateMatchesWebAndAndroid() {
+        val trash = ui.substringAfter("val deleted = state.deletedItems").substringBefore("confirmPurgeId?.let")
+        // web Vault.tsx:1419 / android MainActivity:2527 — the suffix on the deleted line…
+        assertTrue(
+            trash.contains("+ (if (reader) \" · view only\" else \"\")"),
+            "the deleted line must carry the shared \" · view only\" suffix",
+        )
+        // …and the buttons REMOVED, not disabled (android MainActivity:2546 `if (!readOnly) {`).
+        assertTrue(trash.contains("if (!reader) {"), "Restore/Delete forever must be hidden from a reader, not greyed out")
+        assertTrue(
+            !trash.contains("!state.busy && !reader"),
+            "a disabled-but-visible control is the treatment H127 replaced",
+        )
+        // The desktop-only sentence is no longer RENDERED anywhere (it survives above only as the
+        // comment explaining what it was replaced with, which is why this looks for a Text call).
+        assertEquals(
+            0,
+            Regex("""Text\(\s*"view only""").findAll(ui).count(),
+            "the desktop-only sentence is gone — the suffix is the whole copy now",
+        )
+    }
+
+    // ---- audit H128 (the destructive choice is not the dismiss path) ----
+
+    @Test
+    fun theLaunchReconcilePromptDoesNotDiscardOnEscapeAndNamesWhatDiscardKeeps() {
+        val dialog = ui.substringAfter("private fun PendingReconcileDialog(").substringBefore("\n@Composable")
+        val onDismiss = dialog.substringAfter("onDismissRequest = {").substringBefore("}")
+        assertTrue(
+            !onDismiss.contains("discardPendingReconcile"),
+            "Escape / click-away must not take the destructive branch: $onDismiss",
+        )
+        // Exactly one caller left — the explicit button.
+        assertEquals(
+            1,
+            Regex("discardPendingReconcile\\(\\)").findAll(dialog).count(),
+            "discard must be reachable only from the button the user chose",
+        )
+        assertTrue(
+            dialog.contains("Text(\"Discard — stay on \${state.baseUrl}\")"),
+            "the discard label must name the server the user ends up on (android's 'Discard — return to …')",
+        )
     }
 }

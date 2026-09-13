@@ -326,6 +326,40 @@ class ExportTest {
         assertEquals(Backup.ERR_WRONG_PASSPHRASE_OR_CORRUPT, e.code)
     }
 
+    /**
+     * H83: a manifest `fileKey` that is not base64url at all must surface as a per-entry
+     * [BackupException] (the combined code), never as the bare CryptoException `Bytes.fromB64`
+     * throws — backup-cli `verify` collects the former per attachment ("never fatal") and would
+     * abort the WHOLE verify on the latter, at the first bad entry, in exactly the recovery
+     * scenario where it must name every attachment that will not restore.
+     */
+    @Test
+    fun container_readAttachment_manifestFileKeyNotBase64url_isAPerEntryBackupException() {
+        val key = crypto.randomBytes(32)
+        val plain = ByteArray(64) { 5 }
+        // build() refuses a manifest whose fileKey disagrees with its section key, so hand the
+        // container pre-serialized payload bytes: the manifest carries a fileKey the typed decoder
+        // cannot reject but the base64url decode will.
+        val payload = samplePayload().copy(
+            attachments = listOf(
+                BackupAttachmentEntry(1, "aaaa1111-0000-4000-8000-000000000001", "22222222-2222-4222-8222-222222222222", "a.bin", plain.size.toLong(), "not-base64!"),
+            ),
+        )
+        val payloadUtf8 = json.encodeToString(BackupPayload.serializer(), payload).encodeToByteArray()
+        val file = collect { sink ->
+            Backup.buildWithPayloadBytes(
+                crypto, "bad manifest key passphrase", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", crypto.randomBytes(16), fast,
+                payloadUtf8, listOf(Backup.AttachmentSection(key) { plain.copyOf() }), null, sink,
+            )
+        }
+        val opened = Backup.open(crypto, "bad manifest key passphrase", file)
+        val e = assertFailsWith<BackupException> { opened.readAttachment(opened.payload.attachments[0]) }
+        assertEquals(Backup.ERR_WRONG_PASSPHRASE_OR_CORRUPT, e.code)
+        // Only the manifest key is malformed — the section itself still opens under the real key,
+        // which is what makes this a per-entry verdict rather than a corrupt-file one.
+        assertContentEquals(plain, opened.readAttachmentSection(1, key))
+    }
+
     @Test
     fun container_build_rejectsManifestSectionMismatch() {
         val payload = samplePayload().copy(
