@@ -9,11 +9,12 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { pslResolve, PSL_SNAPSHOT_HASH } from "./psl.ts";
 import { PSL_RULES_JOINED } from "./pslData.ts";
-import { classify, matches, parseSavedUri, RESOLVE_UNKNOWN, type FieldKind } from "./urimatch.ts";
+import { classify, matches, normalizeHost, parseSavedUri, RESOLVE_UNKNOWN, type FieldKind } from "./urimatch.ts";
 
 const vectorsDir = fileURLToPath(new URL("../../spec/test-vectors/", import.meta.url));
 const v = JSON.parse(readFileSync(vectorsDir + "urimatch.json", "utf-8"));
 const v2 = JSON.parse(readFileSync(vectorsDir + "urimatch-etld1.json", "utf-8"));
+const v3 = JSON.parse(readFileSync(vectorsDir + "urimatch-idna.json", "utf-8"));
 
 test("urimatch.json byte-frozen outcomes hold — real resolver AND RESOLVE_UNKNOWN", () => {
   for (const resolve of [pslResolve, RESOLVE_UNKNOWN]) {
@@ -57,6 +58,26 @@ test("urimatch-etld1.json registrable vectors", () => {
 
 test("urimatch-etld1.json match vectors (R-SUFFIX-BARE, R-EQ, R-OLD)", () => {
   for (const c of v2.match) {
+    const saved = parseSavedUri(c.savedUri);
+    const actual = saved !== null && matches(saved, { webHost: c.webHost ?? null, packageName: c.packageName }, pslResolve);
+    assert.equal(actual, c.expected, `${c.savedUri} @ ${c.webHost}`);
+  }
+});
+
+// H22 (2026-09-13 audit): the extension's normalizeHost is what turns `sender.origin` /
+// `location.hostname` (always ASCII) and a saved `bücher.de` into ONE string — the `normalize`
+// section pins the A-label bytes (independent WHATWG oracle), `match` the outcome. Same loop as
+// web/src/vault/urimatch.test.ts and core UriMatchIdnaVectorTest.
+test("urimatch-idna.json normalize vectors — A-label output, idempotent", () => {
+  for (const c of v3.normalize) {
+    const actual = normalizeHost(c.input);
+    assert.equal(actual, c.expected, `normalizeHost(${c.input})`);
+    if (actual !== null) assert.equal(normalizeHost(actual), actual, `idempotent over ${c.input}`);
+  }
+});
+
+test("urimatch-idna.json match vectors — Unicode saved host ↔ punycode page host", () => {
+  for (const c of v3.match) {
     const saved = parseSavedUri(c.savedUri);
     const actual = saved !== null && matches(saved, { webHost: c.webHost ?? null, packageName: c.packageName }, pslResolve);
     assert.equal(actual, c.expected, `${c.savedUri} @ ${c.webHost}`);

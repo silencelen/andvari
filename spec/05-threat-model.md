@@ -122,7 +122,7 @@ model; spec 04 §6.5).
 client may be pointed at ANY server, including a hostile one, at any time — including
 mid-enrollment, since the invite carries its issuing server's origin. What holds the line:
 (1) **The policy-trust boundary** (spec 03 §1.1) — the client-side hostname trust
-heuristic (`*.ts.net`/RFC1918 ⇒ trusted) is deleted; device posture derives from
+heuristic (a tailnet or private-range hostname ⇒ trusted) is deleted; device posture derives from
 server-declared policy fetched from an unauthenticated endpoint on an untrusted server,
 applied under the invariant *trusted-as-declared iff the field governs the server's own
 behavior; client-floor-only iff it touches the device's at-rest posture, factor floors, or

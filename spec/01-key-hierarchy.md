@@ -5,8 +5,10 @@ and SHA-1/SHA-256, which use platform crypto (javax.crypto on JVM/Android, WebCr
 on web). The one whole-stack exception is the MV3 extension: its service-worker CSP
 rules out WASM, so it implements the entire hierarchy (Argon2id, HKDF,
 XChaCha20-Poly1305, X25519 sealed boxes, BLAKE2b) in pure-JS @noble + tweetnacl —
-byte-parity with libsodium proven against the shared test vectors
-(web/src/crypto/noble-extension-poc.test.ts). No hand-rolled primitives anywhere.
+byte-parity with libsodium proven against the shared test vectors by the extension's own
+gated vector run (`extension/src/crypto.vectors.test.ts`; the older
+`web/src/crypto/noble-extension-poc.test.ts` is an opt-in spike that no default gate runs).
+No hand-rolled primitives anywhere.
 
 ## 1. Master key derivation
 
@@ -57,6 +59,18 @@ the KDF step; authKey and wrapKey MUST NOT be persisted (only re-derived) — wi
 exception: quick-unlock (§8) persists a wrapped **UVK** — **(Android) hardware-wrapped**
 (§8.1) or **(extension) PIN-wrapped, session-scoped** (§8.4) — never authKey/wrapKey/MK.
 
+**Zeroization.** MK, authKey, wrapKey and the identity seed (§5) are zeroed (`fill(0)`)
+once their consumers return, on all platforms — the same rule spec 07 §2.3 states for
+MKx, exportKey and the export payload buffer, and for the same reason: these are the
+shortest-lived and highest-value buffers in the system, they exist only to derive or
+unwrap something else, and a process that keeps them alive turns a memory disclosure or
+a core dump into a full account compromise rather than a session one. The **UVK and
+vault keys an unlocked session owns are deliberately NOT wiped** — they are the working
+set, and wiping them would be wiping the unlocked vault. This is best-effort hygiene, not
+a guarantee: a managed runtime may have copied a buffer during GC and immutable string
+types (passphrases) are explicitly out of scope, exactly as spec 07 §2.3 says. It is
+still normative, because "we tried" is the difference between one derivation buffer left
+in memory and every derivation buffer left in memory (audit H80).
 ### 2.1 Per-member recovery secret split (spec 04 §6)
 
 Per-member self-service recovery (full flow + trust model: spec 04 §6; endpoints: spec
@@ -154,7 +168,14 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
   - **Member grants** use `sealedVk = crypto_box_seal(recipient = member identityPub,
     plaintext = canonical-JSON {"v":1,"vaultId":"{vaultId}","vk":"{base64url(VK)}"})`.
     Sealed boxes carry no AD; context lives inside the payload, and the recipient MUST
-    verify the payload's `vaultId` matches the grant row it arrived on.
+    verify the payload's `v` is `1`, that its `vaultId` matches the grant row it arrived
+    on, and that the decoded `vk` is exactly 32 bytes — refusing the grant as a whole on
+    any of the three rather than adopting the key. Only a VK holder can seal a grant, so
+    a malformed payload is a buggy or foreign client, not a hostile server; the length
+    rule exists for uniformity: a client that adopts a wrong-length key fails one item at
+    a time later (every open under it fails) and shows an empty vault, where a refusal
+    here names the cause (audit H93). All three checks are graded by
+    `spec/test-vectors/sharedgrant.json` on every engine that opens grants.
   - A grant normally carries **exactly one** of `wrappedVk` / `sealedVk`; after an
     ownership transfer (spec 03 §11) the new owner's grant MAY carry both (`wrappedVk`
     current, `sealedVk` retained as fallback key material until vault purge).
@@ -566,17 +587,19 @@ cold start still enforces it.
 
 ## 9. Benchmarks (P0 gate)
 
-Measured 2026-07-05 on huginn (LXC 117 on E5-2640v4 @ 2.4 GHz — deliberately
-slow-core hardware; treat as the floor). Median of 5 after warm-up, `--bench` mode
-of tools/vector-gen (JVM) and node/V8 (WASM, Chrome-class engine):
+Measured 2026-07-05 on the reference build host — one 2.4 GHz E5-2640v4 core in a
+Linux container, deliberately slow-core hardware; treat the numbers as a floor, not
+a target. Median of 5 after warm-up, `--bench` mode of tools/vector-gen (JVM) and
+node/V8 (WASM, Chrome-class engine):
 
 | Platform | ops=3 m=64MiB | ops=2 m=64MiB | Notes |
 |---|---|---|---|
-| JVM native lazysodium (huginn) | **130 ms** | 101 ms | Android/desktop/server class |
-| V8 WASM sumo (huginn, node 22) | **~380–500 ms** | ~195 ms | browser class; modern phones/desktops ≥2× faster |
-| Android Chrome (phone, WASM) | pending | — | measure at P2 rollout; expected < huginn WASM |
+| JVM native lazysodium (reference host) | **130 ms** | 101 ms | Android/desktop/server class |
+| V8 WASM sumo (reference host, node 22) | **~380–500 ms** | ~195 ms | browser class; modern phones/desktops ≥2× faster |
+| Android Chrome (phone, WASM) | pending | — | measure at P2 rollout; expected < the reference host's WASM row |
 | Android app (native lazysodium) | pending | — | measure at P2; expected ≈ JVM row |
 
-**Decision (P0): keep the default `{ops:3, memBytes:64 MiB}`** — worst measured
-platform (huginn-class WASM) sits at ~0.5 s, well under the ~1.5 s ceiling; phone
-rows get confirmed at P2 before family rollout. Never go below 64 MiB memory.
+**Decision (P0): keep the default `{ops:3, memBytes:64 MiB}`** — the worst measured
+platform (WASM on that slow-core reference host) sits at ~0.5 s, well under the
+~1.5 s ceiling; phone rows get confirmed at P2 before family rollout. Never go below
+64 MiB memory.

@@ -23,8 +23,9 @@ green all three suites off the same vectors.
 
 ## System shape (informative)
 
-Zero-knowledge, hub-and-spoke, offline-first. Clients (Android, Windows desktop, web,
-MV3 browser extension) derive all encryption keys from the user's master password
+Zero-knowledge, hub-and-spoke, offline-first. Clients (Android, desktop — Windows `.msi`
+and Linux `.deb` from one Compose build — web, MV3 browser extension) derive all
+encryption keys from the user's master password
 on-device and sync opaque ciphertext through **one ktor server per instance**, reached
 at whatever origin its operator fronts it with — a reverse proxy, a tunnel, the bundled
 caddy overlay, or plain http on a trusted LAN (`docs/self-hosting.md`). Clients are

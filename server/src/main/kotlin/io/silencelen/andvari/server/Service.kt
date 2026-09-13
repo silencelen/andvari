@@ -1005,7 +1005,10 @@ class Service(
         // Caching it would freeze a parked edit that was denied during a vault's grace
         // window — after restore the client replays the SAME mutationId and must be allowed
         // to apply against the now-active grant, not served a stale cached `denied` forever.
-        if (result.status != "denied") {
+        // The same rule for `rejected` (H03): nothing was written, and a replay of the same
+        // mutationId must be re-evaluated against the live attachment rows — a client that
+        // re-uploads the missing attachment and re-sends the SAME put must be allowed to land.
+        if (result.status != "denied" && result.status != "rejected") {
             c.exec(
                 "INSERT INTO mutations(deviceId,mutationId,resultJson,createdAt) VALUES(?,?,?,?)",
                 principal.deviceId, m.mutationId, json.encodeToString(MutationResult.serializer(), result), now(),
@@ -1016,7 +1019,23 @@ class Service(
 
     private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, deniedMetas: MutableList<String>): MutationResult {
         val item = m.item ?: throw BadRequest("put_without_item")
-        validateAttachmentRefs(c, m.itemId, m.vaultId, item.attachmentIds)
+        // H03 (audit 2026-09-13, spec 03 §5 amendment): a put whose attachment refs no longer
+        // resolve is a PER-MUTATION `rejected` result, not a thrown 400. The throw failed the
+        // WHOLE batch and — because no fielded client dequeues on a thrown push — left the row
+        // at the head of the device's durable queue, where every later sync re-sent it, got the
+        // same 400 before its pull, and the device stopped receiving anything until a sign-out
+        // that also discarded every other queued edit. Three ordinary household flows produce
+        // exactly this row: a peer's delete drops the item's attachment rows while an offline
+        // edit of that item is queued; a new-item save whose uploads landed but whose put
+        // stayed queued past the 24 h orphan sweep; a history restore over a since-removed
+        // attachment. None is an intrusion (no push_denied audit — the member is a writer on
+        // the vault) and none can be cured by re-sending, so the client's drain drops the row
+        // and carries on. `serverItem` is the server's current row (a tombstone when a peer
+        // deleted the item) for the client's reconcile. The throw survives only where the
+        // request itself is malformed (put_without_item / bad_op / batch_too_large).
+        checkAttachmentRefs(c, m.itemId, m.vaultId, item.attachmentIds)?.let { reason ->
+            return MutationResult(m.mutationId, "rejected", serverItem = existing, reason = reason)
+        }
         affected.addAll(vaultMemberIds(c, m.vaultId))
         val t = now()
         if (existing == null) {
@@ -1068,16 +1087,32 @@ class Service(
         return MutationResult(m.mutationId, "applied", rev)
     }
 
-    /** Every referenced attachment must exist, be bound to this item+vault, and fit the per-item quota. */
-    private fun validateAttachmentRefs(c: Connection, itemId: String, vaultId: String, ids: List<String>) {
-        if (ids.isEmpty()) return
+    /**
+     * Every referenced attachment must exist, be bound to this item+vault, and fit the per-item
+     * quota. Returns the refusal reason (`unknown_attachment` / `attachment_mismatch` /
+     * `item_attachment_quota`) or null when the refs are good — the push path turns a reason
+     * into a per-mutation `rejected` (H03), the restore path into its thrown status.
+     */
+    private fun checkAttachmentRefs(c: Connection, itemId: String, vaultId: String, ids: List<String>): String? {
+        if (ids.isEmpty()) return null
         var total = 0L
         for (aid in ids.distinct()) {
-            val row = attachments.rowById(c, aid) ?: throw BadRequest("unknown_attachment")
-            if (row.itemId != itemId || row.vaultId != vaultId) throw BadRequest("attachment_mismatch")
+            val row = attachments.rowById(c, aid) ?: return "unknown_attachment"
+            if (row.itemId != itemId || row.vaultId != vaultId) return "attachment_mismatch"
             total += row.size
         }
-        if (total > attachments.maxCipherBytes(policy().itemAttachmentsMaxBytes)) throw PayloadTooLarge("item_attachment_quota")
+        if (total > attachments.maxCipherBytes(policy().itemAttachmentsMaxBytes)) return "item_attachment_quota"
+        return null
+    }
+
+    /** The thrown form of [checkAttachmentRefs] — POST /items/{id}/restore, a single direct
+     *  request with no queue behind it, keeps its 400/413 (spec 03 §8). */
+    private fun validateAttachmentRefs(c: Connection, itemId: String, vaultId: String, ids: List<String>) {
+        when (val reason = checkAttachmentRefs(c, itemId, vaultId, ids)) {
+            null -> return
+            "item_attachment_quota" -> throw PayloadTooLarge(reason)
+            else -> throw BadRequest(reason)
+        }
     }
 
     private fun vaultMemberIds(c: Connection, vaultId: String): Set<String> =

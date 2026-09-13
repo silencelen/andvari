@@ -982,7 +982,11 @@ class SyncEngineLifecycleTest {
             ),
         )
         s.engine.sync()
-        assertEquals("deleted", s.engine.notices().find { it.vaultId == s.vaultId }?.kind)
+        // H71: the live re-delivery above (a vault this device no longer held the key for)
+        // also minted the calm "added" notice first — the web F20 twin does the same — so
+        // look for the delete notice by kind rather than taking the vault's first notice.
+        assertEquals("added", s.engine.notices().first { it.vaultId == s.vaultId }.kind)
+        assertTrue(s.engine.notices().any { it.vaultId == s.vaultId && it.kind == "deleted" })
         assertNotNull(s.cache.getHeld(s.vaultId))
     }
 }

@@ -88,6 +88,43 @@ describe("export.json — container open (pinned bytes)", () => {
   }
 });
 
+// Schema v9 (audit H95, 2026-09-13): the corpus had been regenerated for neither `check` nor
+// `dupeAck`, and because both consumers decode payloadUtf8 SEMANTICALLY the stale corpus stayed
+// green while never grading the round-trip with those fields present. Pin the named case: its
+// pinned plaintext carries both fields populated (a regenerate that lost them fails here, not
+// silently), and they survive the container round-trip.
+describe("export.json — schema v9 check + dupeAck survive the container round-trip", () => {
+  const c = (v.container as { name: string }[]).find((x) => x.name === "schema-v9-check-and-dupeack") as {
+    name: string;
+    passphraseUtf8: string;
+    payloadUtf8: string;
+    containerB64: string;
+  };
+  it("the corpus carries the case with both fields populated", () => {
+    expect(c).toBeDefined();
+    const docs = (JSON.parse(c.payloadUtf8) as { items: { doc: ItemDoc }[] }).items.map((i) => i.doc);
+    expect(docs).toHaveLength(2);
+    for (const d of docs) {
+      expect(typeof d.dupeAck === "string" && d.dupeAck.length > 0, "pinned doc carries dupeAck").toBe(true);
+      expect(d.check && typeof d.check === "object", "pinned doc carries check").toBeTruthy();
+    }
+  });
+  it("opens to the typed fields", async () => {
+    const opened = await openBackup(c.passphraseUtf8, fromB64(c.containerB64));
+    const docs = opened.payload.items.map((i) => i.doc);
+    expect(docs[0]!.dupeAck).toBe("77777777-7777-4777-8777-777777777777|88888888-8888-4888-8888-888888888888");
+    expect(docs[1]!.dupeAck).toBe(docs[0]!.dupeAck);
+    // The carry-forward shape: a failing verdict that still remembers when it last worked. `until`
+    // rides as an explicit null from the Kotlin serializer (encodeDefaults=true) — the recorded
+    // null-vs-absent difference; the reader treats both as "no horizon".
+    expect(docs[0]!.check).toMatchObject({ at: 1751843000000, result: "bad", okAt: 1751800000000 });
+    expect(docs[0]!.check!.until ?? null).toBeNull();
+    // The snoozed shape: a verdict with a horizon.
+    expect(docs[1]!.check).toMatchObject({ at: 1751844000000, result: "blocked", until: 1754436000000 });
+    expect(docs[1]!.check!.okAt ?? null).toBeNull();
+  });
+});
+
 describe("export.json — reject", () => {
   for (const r of v.reject) {
     it(r.name, async () => {

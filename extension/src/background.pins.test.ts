@@ -124,3 +124,45 @@ test("H90 — the TOTP challenge stays MEMORY-ONLY: no part of it reaches the se
     assert.ok(!snap.includes(forbidden), `the session snapshot must never carry ${forbidden}`);
   }
 });
+
+
+// ---- H33 / H35 / H05: the usage-ledger seams (the leaf planFlush is behaviour-tested in usage.test.ts;
+// these pin that the SW CALLS it and that the teardown flush is awaited before the tokens go) ----
+
+test("H33 — doLock AWAITS the bounded usage flush BEFORE dropping the session and the tokens", () => {
+  const lock = spanOf(bg, "async function doLock(", "async function doSignOut(");
+  const flush = "await Promise.race([flushUsage(), delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);";
+  assert.ok(lock.includes(flush), "the lock-path flush must be awaited, bounded by TEARDOWN_FLUSH_TIMEOUT_MS");
+  // The old `void flushUsage()` dispatched the GET with a token and issued the PUT after
+  // api.setTokens(null, null) had emptied the header — 401, dropped, not re-armed. A bare `void`
+  // reintroduces exactly that race.
+  assert.ok(!/^\s*void flushUsage\(\);/m.test(lock), "the lock-path flush must not be fire-and-forget");
+  assert.ok(lock.indexOf(flush) < lock.indexOf("session = null;"), "flush before the session drops (flushUsage reads it)");
+  assert.ok(lock.indexOf(flush) < lock.indexOf("api.setTokens(null, null);"), "flush before the tokens the PUT rides on are forgotten");
+});
+
+test("H33 — doSignOut AWAITS the bounded usage flush BEFORE api.logout() revokes the session", () => {
+  const so = spanOf(bg, "async function doSignOut(", "/** Re-arm the policy idle lock");
+  const flush = "await Promise.race([flushUsage(), delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);";
+  assert.ok(so.includes(flush), "sign-out must flush the usage buffer, bounded");
+  assert.ok(so.indexOf(flush) < so.indexOf("await Promise.race([api.logout(), delay(5000)]);"), "the flush must land before logout() revokes the tokens it rides on");
+});
+
+test("H35 — flushUsage runs the prune round even with an EMPTY buffer when handed a live set", () => {
+  const fu = spanOf(bg, "async function flushUsage(", "function reveal(");
+  // The gate must let a live-set call through with nothing buffered; `length === 0) return;` on
+  // its own (the pre-fix gate) is exactly the dirty-gate that left the G04 prune inert here.
+  assert.ok(fu.includes("if (Object.keys(pendingUsage).length === 0 && !liveItemIds) return;"), "the empty-buffer gate must be conditioned on no live set");
+  assert.ok(!fu.includes("Object.keys(pendingUsage).length === 0) return;"), "an unconditional empty-buffer return re-inerts the post-sync prune");
+  // resync is still the ONLY caller that passes a set (G04).
+  assert.equal([...bg.matchAll(/flushUsage\(new Set\(/g)].length, 1, "exactly one prune caller — resync's post-full-snapshot point");
+});
+
+test("H05 — flushUsage decides through planFlush and re-arms (never PUTs) on an unreadable server copy", () => {
+  const fu = spanOf(bg, "async function flushUsage(", "function reveal(");
+  assert.ok(fu.includes("const put = planFlush(server, mine, liveItemIds);"), "the write decision must be the shared pure leaf");
+  assert.ok(fu.includes('server = { kind: "unreadable" };'), "a failed GET / unopenable blob must be classified unreadable, not empty");
+  assert.ok(fu.includes('if (server.kind === "unreadable" && session) pendingUsage = mergeUsage(mine, pendingUsage);'), "the skipped round must re-arm the buffer (session-gated)");
+  // The pre-fix shape: a merge seeded from `mine` that fell through to the PUT on any GET failure.
+  assert.ok(!fu.includes("let merged = mine;"), "the 'store ours on a read miss' seed must be gone");
+});

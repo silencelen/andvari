@@ -114,7 +114,7 @@ compromised admin session must not be able to open your front door):
 | `ANDVARI_OFFLINE_CACHE_ALLOWED` | Operator **floor** for client durable offline caches, ANDed with the admin-settable policy knob. **Monotonicity note:** clients treat the resulting field as *forbid-only* — `false` forbids and wipes their local copy for your origin; `true` alone never forces caching onto a device (web and desktop still require an explicit per-device opt-in; Android defaults on, by recorded design — spec 05 T3/R11). |
 | `ANDVARI_INSTANCE_NAME` | A display label. Decorative only — clients never render it as a verified identity; the raw origin is what users are asked to trust. |
 | `ANDVARI_SELFHOST_DOCS_URL` | Where clients link "run your own server". Defaults to `<canonical-origin>/selfhost` — this very page, served by your own instance. |
-| `ANDVARI_FORCE_HSTS` | `1` ⇒ send HSTS on every response. Set it once https works end-to-end. |
+| `ANDVARI_FORCE_HSTS` | `1` ⇒ send HSTS on every response. Set it once https works end-to-end; `bringup.sh --caddy` sets it for you (an explicit `0` is never overwritten). |
 | `ANDVARI_LOGIN_RATE_PER_MIN` | Per-IP login attempts/min (default 5, flat on every origin). An email-keyed exponential backoff after repeated failures is always on. |
 | `ANDVARI_STRICT_ENV` | `1` (bring-up default) ⇒ an unknown or invalid `ANDVARI_*` variable **kills boot** instead of logging a warning — typos fail loudly at the healthz wait. |
 | `ANDVARI_PUBLIC_HOSTNAME` | **Leave unset** (single-origin, the default). Setting it arms the opt-in dual-origin *break-glass* régime: requests arriving under that exact hostname get an emergency hardened origin (TOTP mandatory, no register/refresh, `signupMode=closed`). Only for deployments that deliberately keep a separate primary + emergency topology. |
@@ -208,9 +208,15 @@ cryptographically verified by clients.
   `docker run --rm -it --network none ghcr.io/silencelen/andvari:<ver> recovery-cli`.
 - **Members' self-service recovery** works out of the box (`/recovery/self/*`): each
   member gets a personal recovery phrase at enrollment. These endpoints are
-  internet-reachable on a single-origin instance — they are rate-limited per-IP with
-  per-email backoff, and the phrase is a full-entropy key (spec 05 R9/R10), so this
-  is a considered default, not an oversight.
+  internet-reachable on a single-origin instance — they are rate-limited **per-IP only
+  (5/min fixed window), deliberately with NO per-account backoff**, because a per-account
+  throttle on the last-resort recovery path is an easy way for an attacker to lock a victim
+  out of their own account with a handful of wrong guesses (spec 05 T11, design 2026-07-12
+  §F.8). What makes per-IP sufficient is the phrase itself: it is a full-entropy 256-bit key,
+  not a password (spec 05 R9/R10), so guessing it is not a rate problem. Note the contrast
+  with **login**, which does carry an email-keyed exponential backoff — a master password is
+  guessable and a recovery key is not. A considered default, not an oversight; earlier text
+  here claimed a per-email backoff the server has never had (audit H112).
 - **Moving hosts:** copy `./data` + `andvari.env` (+ `.env`), `docker compose up -d`
   on the new host, repoint DNS. The origin is the identity members' devices trust —
   keep it stable; changing it means every device re-consents via the server-switch

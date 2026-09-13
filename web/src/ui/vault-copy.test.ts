@@ -63,6 +63,33 @@ describe("Vault.tsx §11 replay-denied notice — the core HouseholdCopy twin", 
   });
 });
 
+/**
+ * Audit 2026-09-13 H03/H19: the "write-rejected" notice (queue rows the server definitively
+ * refused and the drain dropped instead of re-sending forever). Its LEAD + reason clauses are
+ * core HouseholdCopy.writeRejectedNotice, rendered directly by the natives; web appends a
+ * revert tail of its own (only web applies writes optimistically) but every canon literal must
+ * appear byte-equal — the lead as the interpolated template, each reason clause verbatim.
+ */
+describe("Vault.tsx write-rejected notice — the core HouseholdCopy twin", () => {
+  it("carries the lead (both counts) and every reason clause byte-equal to the canon", () => {
+    const fn = householdKt.match(/fun writeRejectedNotice\([\s\S]*?\n\n/);
+    expect(fn, "HouseholdCopy.writeRejectedNotice moved or was renamed — update the pin").not.toBeNull();
+    const literals = [...fn![0].matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    const leads = literals.filter((l) => l.includes("couldn't be applied"));
+    const clauses = literals.filter((l) => l.endsWith("."));
+    expect(leads, "one lead per count branch").toHaveLength(2);
+    expect(clauses, "two clauses per reason class: attachment gone / too large / other").toHaveLength(6);
+    for (const lead of leads) expect(vaultTsx).toContain(asTemplate(lead));
+    for (const clause of clauses) expect(vaultTsx).toContain(`"${clause}"`);
+  });
+
+  it("never re-uses the permission (write-refused) explanation for a rejected row", () => {
+    const branch = vaultTsx.match(/case "write-rejected": \{[\s\S]*?\n    \}/);
+    expect(branch).not.toBeNull();
+    expect(branch![0]).not.toContain("no longer have permission");
+  });
+});
+
 describe("Vault.tsx error copy — canon sentences, never wire text", () => {
   it("the editor's 413 shows core HouseholdCopy's 413 row, byte-equal", () => {
     expect(vaultTsx).toContain(`"${canonStatusRow(413)}"`);

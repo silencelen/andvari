@@ -1,6 +1,6 @@
 # Test vectors — provenance manifest
 
-These 24 files are the shared corpus every implementation is graded against: the Kotlin
+These 26 files are the shared corpus every implementation is graded against: the Kotlin
 reference (`core/`, jvmTest), the web TypeScript engine (`web/`, vitest), and the
 extension's @noble engine (`extension/`, `node --test`). `scripts/verify.sh` greens all
 three suites off *these* bytes, so a divergence in any engine reds that engine rather
@@ -8,7 +8,7 @@ than quietly forking the fleet.
 
 **The corpus has two provenances**, and an auditor should be able to tell them apart.
 `tools/vector-gen` emits 17 of the files from the Kotlin reference implementation — those
-are *derived* artifacts and are regenerated when the spec changes. The other 7 are
+are *derived* artifacts and are regenerated when the spec changes. The other 9 are
 **hand-authored**: they encode classification/parsing decisions and corpus-derived
 fixtures that no generator produces, so they are edited deliberately, by hand, as part of
 the change that needs them. Neither kind may be edited casually — a vector edit is a
@@ -35,45 +35,58 @@ reference implementation named in each row.
 > across only the file you intend to change. Rule 2 below ("generated files are rewritten
 > wholesale") states the danger; this states where it has already come true.
 >
-> Separately and benignly: `seal.json`, `secretstream.json`, `sharedgrant.json` and
-> `export.json` differ on **every** run by construction — sealing and secretstream headers
-> are randomized, and those vectors are verified in the DECRYPT direction rather than by
-> byte-comparison. A diff in those four is not drift.
+> Separately and benignly: `seal.json`, `secretstream.json` and `sharedgrant.json` differ on
+> **every** run by construction — sealing and secretstream headers are randomized, and those
+> vectors are verified in the DECRYPT direction rather than by byte-comparison. A diff in
+> those THREE is not drift. **`export.json` is NOT one of them** (audit H95, 2026-09-13): its
+> containers take a fixed salt and an injected nonce and are byte-exact by spec 07 §4, so a
+> diff there IS a behaviour change. This paragraph used to list it among the random four,
+> which hid the fact that the committed file had fallen behind schema v9 (`99fae40` added
+> `check`/`dupeAck` to the item document and the generator's payload, the corpus was never
+> regenerated, and both consumers decode the payload semantically so nothing reddened).
+> Regenerated 2026-09-13, with a third container case that carries both v9 fields populated.
+>
+> `sharedgrant.json`'s `rejectVkLength` case (H93) was added by regenerating to scratch and
+> splicing ONLY the new key into the committed file, so the frozen `sealedB64` bytes every
+> engine already opens stayed byte-identical. That is the procedure for adding a case to a
+> randomized file: never a wholesale regenerate, which would silently re-mint every seal.
 
 | file | covers | consuming suites |
 |---|---|---|
-| `kdf.json` | Argon2id derivation + the H1 policy floor (spec 01 §1) | core `VectorsTest`, web `crypto.vectors.test.ts` / `vectors.test.ts`, ext `crypto.vectors.test.ts` |
-| `wrap.json` | purpose-split key derivation + UVK/VK wrapping (spec 01 §2/§4/§6) | core `VectorsTest` / `MemberRecoveryVectorTest`, web `crypto.vectors.test.ts` / `vectors.test.ts`, ext `crypto.vectors.test.ts` |
-| `envelope.json` | the AEAD item envelope + AD binding (spec 02 §2) | core `VectorsTest` / `MemberRecoveryVectorTest`, web + ext vector suites |
-| `seal.json` | `crypto_box_seal` escrow/grant sealing (spec 04 §3) | core `VectorsTest`, web `crypto.vectors.test.ts` / `vectors.test.ts` |
-| `secretstream.json` | attachment secretstream chunking (spec 02 §6) | core `VectorsTest`, web `vectors.test.ts` |
-| `sharedgrant.json` | shared-vault member grants (spec 03 §10) | core `VectorsTest`, web `vectors.test.ts` |
-| `member-recovery.json` | the symmetric per-member recovery blob (spec 04 §6) | core `MemberRecoveryVectorTest`, web/ext `member-recovery.test.ts` |
-| `lifecycleproof.json` | vault-lifecycle proofs (spec 03 §11) | core `LifecycleProofVectorTest`, web `lifecycleproof.test.ts` |
-| `conflictcopy.json` | deterministic conflict-copy ids (spec 02 §7, spec 03 §5) | core `ClientDerivationVectorsTest`, web `derivations.test.ts` |
-| `strength.json` | master-password strength scoring (spec 01 §1) | core `ClientDerivationVectorsTest`, web `derivations.test.ts` |
-| `totp.json` | TOTP normalize + code derivation (spec 03 §2) | core `VectorsTest`, web `totp.vectors.test.ts` / `vectors.test.ts` |
-| `hibp.json` | HIBP k-anonymity range handling (spec 03 §8) | core `VectorsTest`, web `vectors.test.ts` |
-| `itemdoc.json` | ItemDoc round-trip incl. unknown-field overlay (spec 02 §3) | core `ItemDocVectorsTest` / `ItemDocRoundTripTest`, web `itemdoc.test.ts` |
-| `import.json` | the Chromium/Firefox CSV import column maps (spec 06) | core `ImportVectorsTest`, web `csv.test.ts` |
-| `export.json` | CSV export dialect + `.andvari` container (spec 07) | core `ExportVectorsTest`, web `export.test.ts` |
-| `urimatch.json` | URI matching + autofill field classification (spec 02 §3) | core `UriMatchVectorTest` / `CardClassifyVectorTest`, web + ext `urimatch` suites |
-| `vaulthealth.json` | vault-health rankings: strength/reuse rows, staleness buckets + ORDER, duplicate clusters + refusals (design 2026-08-23) | core `VaultHealthVectorsTest`, web `vaulthealth.vectors.test.ts` |
+| `kdf.json` | Argon2id derivation + the H1 policy floor (spec 01 §1); the `chain` block carries a **non-KiB-multiple `memBytes`** case whose mk must equal the KiB case's — every engine floors to KiB like libsodium (spec 01 §1, audit H16) | core `crypto/VectorsTest`, web `crypto/vectors.test.ts`, ext `crypto.vectors.test.ts` |
+| `wrap.json` | purpose-split key derivation + UVK/VK wrapping (spec 01 §2/§4/§6) | core `crypto/VectorsTest` / `MemberRecoveryVectorTest`, web `crypto/vectors.test.ts` / `member-recovery.test.ts`, ext `crypto.vectors.test.ts` |
+| `envelope.json` | the AEAD item envelope + AD binding (spec 02 §2) | core `crypto/VectorsTest` / `MemberRecoveryVectorTest`, web `crypto/vectors.test.ts` / `member-recovery.test.ts`, ext `crypto.vectors.test.ts` |
+| `seal.json` | `crypto_box_seal` escrow/grant sealing (spec 04 §3) | core `crypto/VectorsTest`, web `crypto/vectors.test.ts`, ext `crypto.vectors.test.ts` |
+| `secretstream.json` | attachment secretstream chunking (spec 02 §6) | core `crypto/VectorsTest`, web `crypto/vectors.test.ts` (the extension has no attachment path) |
+| `sharedgrant.json` | shared-vault member grants (spec 01 §6, spec 03 §10): payload contract, vaultId binding, and the 32-byte VK guard (`rejectVkLength`, audit H93) | core `crypto/VectorsTest`, web `crypto/vectors.test.ts`, ext `crypto.vectors.test.ts` (via the hoisted `openSharedGrant`) |
+| `member-recovery.json` | the symmetric per-member recovery blob (spec 04 §6) | core `MemberRecoveryVectorTest`, web `crypto/member-recovery.test.ts` (the extension has no recovery path and no twin) |
+| `lifecycleproof.json` | vault-lifecycle proofs (spec 03 §11) | core `LifecycleProofVectorTest`, web `crypto/lifecycleproof.test.ts` |
+| `conflictcopy.json` | deterministic conflict-copy ids (spec 02 §7, spec 03 §5) | core `ClientDerivationVectorsTest`, web `vault/derivations.test.ts`, ext `conflictcopy.test.ts` |
+| `strength.json` | master-password strength scoring (spec 01 §1) | core `ClientDerivationVectorsTest`, web `vault/derivations.test.ts` / `ui/strength.test.ts` |
+| `totp.json` | TOTP normalize + code derivation (spec 03 §2) | core `crypto/VectorsTest`, web `crypto/vectors.test.ts`, ext `totp.vectors.test.ts` |
+| `hibp.json` | HIBP k-anonymity range handling (spec 03 §8) | core `crypto/VectorsTest`, web `crypto/vectors.test.ts` |
+| `itemdoc.json` | ItemDoc round-trip incl. unknown-field overlay (spec 02 §3) | core `ItemDocVectorsTest` / `ItemDocRoundTripTest`, web `vault/itemdoc.test.ts` |
+| `import.json` | the Chromium/Firefox CSV import column maps (spec 06) | core `ImportVectorsTest` / `ImportForeignVectorsTest`, web `import/csv.test.ts` |
+| `export.json` | CSV export dialect + `.andvari` container (spec 07), incl. the schema-v9 `check`/`dupeAck` container case | core `ExportVectorsTest`, web `export/export.test.ts` |
+| `urimatch.json` | URI matching + autofill field classification (spec 02 §3) | core `autofill/UriMatchVectorTest` / `CardClassifyVectorTest` / `PslVectorTest` / `UriMatchIdnaVectorTest`, web `vault/urimatch.test.ts`, ext `urimatch.vectors.test.ts` |
+| `vaulthealth.json` | vault-health rankings: strength/reuse rows, staleness buckets + ORDER, duplicate clusters + refusals (design 2026-08-23); and since 2026-09-13 (audit H42) the **`writes` block** — what the engines WRITE: the composed merge doc, `planKeep` (passwordHistory's only writer), `planDismiss`, `planCheck` (okAt carry-forward, snooze horizon), `planUnsnooze`, every reader / cross-vault refusal verbatim under a real `roles` map. Its own item list, so the frozen derived keys kept their bytes. Docs are compared as canonical JSON — null-valued keys and empty arrays dropped on both sides (absent vs `null`/`[]` is one value to every reader and two encodings across the language boundary); everything else, array ORDER included, exact | core `VaultHealthVectorsTest`, web `ui/vaulthealth.vectors.test.ts` |
 
-## Hand-authored (7)
+## Hand-authored (9)
 
 No generator writes these. Each is edited by hand, in the same change that moves the
 behaviour it pins, and reviewed as a fleet-wide behaviour change.
 
 | file | covers | why it is not generated | consuming suites |
 |---|---|---|---|
-| `urimatch-etld1.json` | eTLD+1 / PSL registrable-domain matching (spec 02 §3) | pins a `snapshotHash` over the *vendored PSL artifacts*, which each runner recomputes at load — the fixture is about a third-party dataset, not about a derivation | core `PslVectorTest`, web/ext `urimatch.vectors.test.ts` |
-| `import-foreign.json` | Bitwarden / 1Password / LastPass CSV adapters (spec 06) | real exported-file fixtures from the foreign managers; there is nothing in the reference implementation to derive them *from* | core `ImportForeignVectorsTest`, web `csv.test.ts` |
-| `enrolllink.json` | the enroll-link encoding `<origin>/enroll#a1.<payload>` | a hand-picked adversarial corpus (malformed, mangled, over-long links) whose point is inputs the composer would never emit | core `EnrollLinkVectorTest`, web `enrolllink.test.ts` |
-| `card.json` | card number normalize + brand derivation | table-shaped expectations (digit stripping, brand ranges) authored against the card-brand specs | core `CardNormalizeVectorTest` / `CardFillTest`, ext `card.test.ts`, web `extension-pins.test.ts` |
-| `cardform.json` | card-form detection + field-kind refinement | synthetic form fixtures drawn from a real checkout corpus, including the negative cases (a login form that must stay a login form) | core `CardFormVectorTest` / `CardFillTest`, ext `detect.cards.test.ts` |
-| `cardfill.json` | card fill fidelity: expiry adaptation, select matching, brand synonyms | its `tables` block is the **normative** copy of the brand-synonym / contains-word / month tables that both engines deep-equal their compiled-in tables against — the vector is the source, not a derivative | core `CardFillVectorTest` / `CardFillTest`, ext `cardfill.test.ts` |
-| `usagekey.json` | the usage-ledger key derivation `usageKey = HKDF(VK(personal))` + its AD (spec 02 §8.2) | the expected value was computed by an **independent third implementation**, so it pins "correct", not merely "the engines agree" — two mirrored-but-equally-wrong impls would still match each other | core `UsageKeyVectorTest`, web `usage.test.ts`, ext `usage.test.ts` |
+| `urimatch-etld1.json` | eTLD+1 / PSL registrable-domain matching (spec 02 §3) | pins a `snapshotHash` over the *vendored PSL artifacts*, which each runner recomputes at load — the fixture is about a third-party dataset, not about a derivation | core `autofill/PslVectorTest` / `UriMatchIdnaVectorTest`, web `vault/urimatch.test.ts`, ext `urimatch.vectors.test.ts` |
+| `urimatch-idna.json` | IDN / A-label host canonicalization (spec 02 §3.1, 2026-09-13, audit H22): `normalize` pins normalizeHost's output, `match` the outcome with the real PSL resolver | expected A-labels were produced by an **independent oracle** (WHATWG `new URL().hostname`, non-transitional UTS46), so it pins "correct", not "the engines agree" | core `autofill/UriMatchIdnaVectorTest`, web `vault/urimatch.test.ts`, ext `urimatch.vectors.test.ts` |
+| `import-foreign.json` | Bitwarden / 1Password / LastPass CSV adapters (spec 06) | real exported-file fixtures from the foreign managers; there is nothing in the reference implementation to derive them *from* | core `ImportForeignVectorsTest`, web `import/csv.test.ts` |
+| `enrolllink.json` | the enroll-link encoding `<origin>/enroll#a1.<payload>` | a hand-picked adversarial corpus (malformed, mangled, over-long links) whose point is inputs the composer would never emit | core `EnrollLinkVectorTest`, web `enroll/enrolllink.test.ts` |
+| `card.json` | card number normalize + brand derivation | table-shaped expectations (digit stripping, brand ranges) authored against the card-brand specs | core `autofill/CardNormalizeVectorTest` / `CardFillTest`, web `vault/card.test.ts` / `extension-pins.test.ts`, ext `card.test.ts` |
+| `cardform.json` | card-form detection + field-kind refinement | synthetic form fixtures drawn from a real checkout corpus, including the negative cases (a login form that must stay a login form) | core `autofill/CardFormVectorTest` / `CardFillTest`, ext `detect.cards.test.ts` / `cardfill.test.ts` |
+| `cardfill.json` | card fill fidelity: expiry adaptation, select matching, brand synonyms | its `tables` block is the **normative** copy of the brand-synonym / contains-word / month tables that both engines deep-equal their compiled-in tables against — the vector is the source, not a derivative | core `autofill/CardFillVectorTest` / `CardFillTest`, ext `cardfill.test.ts` |
+| `usagekey.json` | the usage-ledger key derivation `usageKey = HKDF(VK(personal))` + its AD (spec 02 §8.2) | the expected value was computed by an **independent third implementation**, so it pins "correct", not merely "the engines agree" — two mirrored-but-equally-wrong impls would still match each other | core `UsageKeyVectorTest`, web `vault/usage.test.ts`, ext `usage.test.ts` |
+| `usageledger.json` | the usage ledger's parse / merge / record / prune / serialize rules (spec 02 §8.2, 2026-09-13, audit H92): string-typed numbers rejected, one malformed entry costs that entry and never the ledger, max-merge, backwards-clock clamp, the byte-exact wire shape | the parse-tolerance decisions are a contract three hand-mirrored suites had already drifted on while green; `expected` is written from the spec text, not derived from any engine. Integers only — fractional stamps/counts are a double-vs-long representational difference no writer emits and this file does not grade | core `UsageLedgerVectorsTest`, web `vault/usage.vectors.test.ts`, ext `usage.vectors.test.ts` |
 
 ## Rules
 
@@ -83,3 +96,12 @@ behaviour it pins, and reviewed as a fleet-wide behaviour change.
    are lost on the next run, silently.
 3. **Adding a vector** means adding its consumer in *every* engine that the behaviour
    touches, in the same change. A file only one engine reads is not a shared vector.
+4. **The "consuming suites" column is derived, not remembered.** It is regenerated from a
+   grep of each basename across `core/src`, `web/src` and `extension/src` (test files only);
+   audit H114 found it naming suites that did not exist and omitting one that did, because
+   it had been written from memory. The opt-in `web/src/crypto/noble-extension-poc.test.ts`
+   also reads `kdf.json` but is skipped in every default gate, so it is not listed as a
+   consumer of anything. `scripts/verify.sh` deliberately states no file counts of its own
+   and points here (audit H115) — this file is the single provenance manifest.
+5. **Adding a case to a randomized file** (`seal`, `secretstream`, `sharedgrant`): regenerate
+   to scratch and splice only the new key; the committed seals stay byte-identical.

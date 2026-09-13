@@ -66,6 +66,19 @@ data class HeldVaultRecord(
  * that persists its cursor MUST persist them too, or discard the cursor.
  */
 interface VaultCache {
+    /**
+     * Whether the outbound queue survives the process (audit 2026-09-13 H17/H18 — the web
+     * store's `cache.durable` twin). The SQLite impl answers true; the in-memory impl —
+     * desktop's consent-unanswered default and the org-forbid mode on both natives —
+     * answers false, and there a queued row is process memory that lock, quit or Android's
+     * lock-on-background frees. [SyncEngine.saveWithUploads] reads this to decide whether an
+     * offline save may honestly be reported as QUEUED: the "your save is queued and will
+     * finish when you're connected" sentence must NEVER be rendered over a queue that dies
+     * with the session, and a non-durable engine therefore surfaces the transport failure
+     * instead (the editor stays open; the user knows nothing was saved).
+     */
+    val durable: Boolean get() = false
+
     fun cursor(): Long
     fun setCursor(rev: Long)
 

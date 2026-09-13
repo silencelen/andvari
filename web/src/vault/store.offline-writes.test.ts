@@ -41,6 +41,10 @@ class FakeApi {
   failPushes = false;
   /** a push mutation whose vaultId is here comes back `denied` (a reader / an in-grace vault). */
   denyVaults = new Set<string>();
+  /** H03: a push mutation whose itemId is here comes back per-row `rejected` with this reason. */
+  rejectItems = new Map<string, string>();
+  /** H03 legacy shape: a batch containing any of these itemIds is refused WHOLE with a thrown 400. */
+  refuseBatchIfContains = new Set<string>();
   /** Gate the NEXT api.sync (pull): it parks at the gate until releaseSync(), and `gated`
    *  resolves the instant it is reached — so a test knows the pull is IN FLIGHT (flush done,
    *  pull-start counter already bumped). */
@@ -95,14 +99,17 @@ class FakeApi {
 
   async push(mutations: Mutation[]): Promise<PushResponse> {
     if (this.offline || this.failPushes) throw new TypeError("offline");
+    if (mutations.some((m) => this.refuseBatchIfContains.has(m.itemId))) throw new ApiError(400, "unknown_attachment", "bad attachment refs");
     this.pushes.push(mutations);
     return {
       rev: ++this.rev,
-      results: mutations.map((m) =>
-        this.denyVaults.has(m.vaultId)
+      results: mutations.map((m) => {
+        const reason = this.rejectItems.get(m.itemId);
+        if (reason) return { mutationId: m.mutationId, status: "rejected" as const, reason };
+        return this.denyVaults.has(m.vaultId)
           ? { mutationId: m.mutationId, status: "denied" as const }
-          : { mutationId: m.mutationId, status: "applied" as const, newItemRev: 1 },
-      ),
+          : { mutationId: m.mutationId, status: "applied" as const, newItemRev: 1 };
+      }),
     };
   }
 
@@ -850,5 +857,134 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     expect(notice?.parkedCount).toBe(1);
     expect(notice?.revertedCount).toBe(0);
     expect(notice?.removedCount).toBe(0);
+  });
+});
+
+/**
+ * Audit 2026-09-13 H03/H19 (core SyncEngineQueueDrainTest twin): a queue row the server can
+ * never accept — a put whose attachment refs a peer's delete had swept, a batch over the body
+ * cap — used to be a thrown 400/413 that no engine dequeued, so every later sync threw at the
+ * same batch BEFORE its pull and the tab stopped receiving anything. Now: a per-row `rejected`
+ * (spec 03 §5) and a bisected whole-batch refusal both drop exactly the poison row, revert its
+ * optimistic apply, mint the "write-rejected" notice, and let the drain and the pull proceed.
+ * H38: a bell that rings during an in-flight pull re-pulls once instead of being discarded.
+ */
+describe("VaultStore poison rows (H03/H19) and the in-flight bell (H38)", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  beforeEach(() => {
+    g.indexedDB = new FakeIDBFactory() as unknown as IDBFactory;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a `rejected` row is dropped and reverted, its sibling lands, and the pull still runs", async () => {
+    const { api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    api.offline = true;
+    await store.save(null, { type: "note", name: "healthy" });
+    await store.save(null, { type: "note", name: "poison" });
+    const queued = await cache.pending();
+    expect(queued).toHaveLength(2);
+    const poisonId = queued.find((m) => m.mutationId === queued[1]!.mutationId)!.itemId;
+    api.rejectItems.set(poisonId, "unknown_attachment");
+    api.offline = false;
+    const pullsBefore = api.sinceLog.length;
+
+    await store.sync();
+
+    expect(api.pushes.flat().map((m) => m.itemId)).toEqual(queued.map((m) => m.itemId)); // one batch, both rows
+    expect(await cache.pending()).toHaveLength(0); // the poison row is dropped, not left at the head
+    expect(api.sinceLog.length).toBeGreaterThan(pullsBefore); // the drain proceeded to the pull
+    expect(store.list().some((i) => i.doc.name === "healthy")).toBe(true);
+    expect(store.list().some((i) => i.doc.name === "poison")).toBe(false); // optimistic apply reverted
+    expect(store.hasPendingSync(poisonId)).toBe(false);
+    const n = store.notices().find((x) => x.kind === "write-rejected");
+    expect(n).toBeDefined();
+    expect(n!.reason).toBe("unknown_attachment");
+    expect(n!.parkedCount).toBe(1);
+    expect(n!.revertedCount).toBe(1);
+    // Not wedged: the next cycle sends nothing and pulls again.
+    const pushesAfter = api.pushes.length;
+    await store.sync();
+    expect(api.pushes.length).toBe(pushesAfter);
+  });
+
+  it("a direct save whose row is rejected throws the server's reason and reverts the edit", async () => {
+    const { s, api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    api.rejectItems.set(s.itemId, "attachment_mismatch");
+
+    await expect(store.save(s.itemId, { ...DOC, name: "stale ref" })).rejects.toMatchObject({ status: 400, code: "attachment_mismatch" });
+
+    expect(store.get(s.itemId)?.doc.name).toBe(DOC.name); // pre-edit value restored
+    expect(await cache.pending()).toHaveLength(0);
+    expect(store.notices().some((x) => x.kind === "write-rejected")).toBe(true);
+  });
+
+  it("a legacy whole-batch 400 is bisected down to the poison row; every healthy sibling lands", async () => {
+    const { api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    api.offline = true;
+    for (const name of ["one", "two", "three", "four", "five"]) await store.save(null, { type: "note", name });
+    const queued = await cache.pending();
+    expect(queued).toHaveLength(5);
+    const poisonId = queued[2]!.itemId;
+    api.refuseBatchIfContains.add(poisonId);
+    api.offline = false;
+
+    await store.sync();
+
+    expect(await cache.pending()).toHaveLength(0);
+    const landed = new Set(api.pushes.flat().map((m) => m.itemId));
+    expect(landed).toEqual(new Set(queued.filter((m) => m.itemId !== poisonId).map((m) => m.itemId)));
+    expect(api.pushes.flat()).toHaveLength(4); // each healthy row applied exactly once
+    expect(store.list().some((i) => i.doc.name === "three")).toBe(false);
+    const n = store.notices().find((x) => x.kind === "write-rejected");
+    expect(n?.parkedCount).toBe(1);
+    expect(n?.reason).toBe("unknown_attachment");
+  });
+
+  it("transient failures still keep the rows queued (the poison path never widens)", async () => {
+    const { api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    api.offline = true;
+    await store.save(null, { type: "note", name: "keep me" });
+    api.offline = false;
+    api.failPushes = true; // transport, not a verdict
+    await expect(store.sync()).rejects.toThrow();
+    expect(await cache.pending()).toHaveLength(1);
+    api.failPushes = false;
+    await store.sync();
+    expect(await cache.pending()).toHaveLength(0);
+  });
+
+  it("a bell that rings during an in-flight pull re-pulls once (H38) — without it the rev is discarded", async () => {
+    const { api, store } = await seeded("writer");
+    stubPersisted(true);
+    // Control: a bell that arrives AFTER the pull settles needs no extra pull (cursor ≥ rev).
+    const baseline = api.sinceLog.length;
+    await store.sync();
+    expect(api.sinceLog.length).toBe(baseline + 1);
+
+    // The race: the in-flight pull's GET was computed BEFORE a peer's commit (canned at rev 5),
+    // and the bell for that commit (rev 9) lands while the pull is still applying.
+    api.queue.push({ rev: 5, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
+    api.gateNextSync = true;
+    const first = store.sync();
+    await api.gated; // the pull is in flight
+    api.rev = 9; // the peer's change committed server-side
+    store.noteRev(9); // Vault.tsx onRev
+    const joined = store.sync(); // the bell's own syncNow — joins the in-flight pull
+    api.releaseSync();
+    await Promise.all([first, joined]);
+
+    // The joined cycle pulled again with since=5 and moved the cursor to 9 — the next cycle
+    // asks since=9, so the peer's change is not stranded until an unrelated bell.
+    expect(api.sinceLog.slice(baseline + 1)).toEqual([5, 5]);
+    await store.sync();
+    expect(api.sinceLog.at(-1)).toBe(9);
   });
 });

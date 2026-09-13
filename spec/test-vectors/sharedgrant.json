@@ -11,5 +11,10 @@
     "rejectVaultMismatch": {
         "expectedVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "sealedB64": "NiHTbbwxdqPCROwgHtcdpadRky4O5OAkqYn0zi83h0cH9kdao8YiZLOL6aSs7t5pdCxtBIlOh0tBzW3fYst6yxqBDLACIapZElYxdd7UApy28onKDmng29vMke80GLCH191A2saomJVo1_zEOlTX0EmtC8aozWA45HIwSV8bwneSlX8zNPwXmo5-vsiPxl0bSKM-Y7DINlqzAqs"
+    },
+    "rejectVkLength": {
+        "expectedVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "vkLen": 31,
+        "sealedB64": "assaTt7W5AcKsth_L9E5IOMfUkBExPsvcGSQK4p7TTjK528yukeoreDAoF__GPHaDrW8poZdQcWVt98RfzWW5I1pq-ZPJBOJmaT71Z3zS8xB-pAK3Ij-NI-oxlzCk50RG5R63nc8nlooVwF0teJD0zE0yqwSi7xBWwU4lvatn6OpxZjydtVriEQxMv2Ja_OqgtyKJGLxbkQhJA"
     }
 }

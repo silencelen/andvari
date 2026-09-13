@@ -319,7 +319,13 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   // The returned close fn is the effect cleanup — no socket leaks across lock/unlock cycles.
   useEffect(() => {
     const close = client.events(
-      () => void syncNow(), // dirty bell
+      (rev) => {
+        // H38: remember the bell's rev BEFORE syncing — if this sync joins a pull already in
+        // flight (single-flight), that pull's GET predates the bell's commit and would leave
+        // the change invisible; store.sync() re-pulls once when the bell is still ahead.
+        store.noteRev(rev);
+        void syncNow(); // dirty bell
+      },
       (kind) => onRevoked(kind), // session died server-side — full sign-out (F26)
       () => {
         setWsUp(true);
@@ -331,7 +337,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       () => setWsUp(false), // sustained drop (debounced)
     );
     return close;
-  }, [client, syncNow, onRevoked]);
+  }, [client, store, syncNow, onRevoked]);
 
   // F29: with the socket down (WS-stripping proxy, blocked ticket mint) the bell can't
   // ring — and a bell-pull that FAILED with the socket healthy would otherwise never
@@ -891,6 +897,38 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
           : "Some items couldn't be restored here and may be out of date until the vault next refreshes.";
       }
       return { warn: true, body: `${lead} ${tail}` };
+    }
+    case "write-rejected": {
+      // H03/H19: queued rows the server DEFINITIVELY refused (dangling attachment refs, over
+      // cap) and the drain dropped as poison rows instead of re-sending forever. The LEAD is
+      // core HouseholdCopy.writeRejectedNotice, byte-equal (pinned by vault-copy.test.ts —
+      // the natives render the Kotlin function directly); the revert TAIL is web-only because
+      // only web applies writes optimistically. NOT the write-refused (permission) sentence:
+      // nothing about the member's access changed — the write could never apply as sent.
+      const count = n.parkedCount ?? 0;
+      const one = count === 1;
+      const lead = one ? `An offline change to “${name}” couldn't be applied` : `${count} offline changes to “${name}” couldn't be applied`;
+      let why: string;
+      if (n.reason === "unknown_attachment" || n.reason === "attachment_mismatch") {
+        why = one ? "an attachment it referenced no longer exists there." : "attachments they referenced no longer exist there.";
+      } else if (n.reason === "item_attachment_quota" || n.reason === "body_too_large") {
+        why = one ? "it was too large for the server to accept." : "they were too large for the server to accept.";
+      } else {
+        why = one ? "the server refused it." : "the server refused them.";
+      }
+      let tail: string;
+      if (count > 0 && (n.revertedCount ?? 0) === count) {
+        tail = one ? "The item was restored to its last synced value." : "The items were restored to their last synced values.";
+      } else if (count > 0 && (n.removedCount ?? 0) === count) {
+        tail = one
+          ? "That item was already deleted by someone else in your household, so it stays removed."
+          : "Those items were already deleted by someone else in your household, so they stay removed.";
+      } else {
+        tail = one
+          ? "The item couldn't be restored here and may be out of date until the vault next refreshes."
+          : "Some items couldn't be restored here and may be out of date until the vault next refreshes.";
+      }
+      return { warn: true, body: `${lead} — ${why} ${tail}` };
     }
     case "added":
       return { warn: false, body: `You were added to “${name}”.` };
@@ -1510,7 +1548,12 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
     setRestoringRev(v.rev);
     setErr("");
     try {
-      await store.save(item.itemId, v.doc); // an ordinary put over the live item
+      // H03: strip every attachment ref the LIVE item no longer carries — a version is verbatim
+      // ciphertext from its day, and a ref to a since-removed (server-swept) attachment would make
+      // this put a `rejected` row (core SyncEngine.versionDocForRestore twin).
+      const liveIds = new Set((item.doc.attachments ?? []).map((a) => a.id));
+      const doc: ItemDoc = { ...v.doc, attachments: v.doc.attachments?.filter((a) => liveIds.has(a.id)) };
+      await store.save(item.itemId, doc); // an ordinary put over the live item
       onRestored(); // back to the vault; the live item now holds the restored version
     } catch {
       setErr("Restore failed — nothing changed. Try again.");

@@ -293,9 +293,14 @@ export interface Mutation {
 
 export interface MutationResult {
   mutationId: string;
-  status: "applied" | "conflict" | "duplicate" | "denied";
+  /** `rejected` (spec 03 §5, audit 2026-09-13 H03): a put the server can never apply as
+   *  sent — its attachment refs no longer resolve, or it is over the per-item quota. A
+   *  POISON row for the drain: dropped durably, never retried (core MutationResult twin). */
+  status: "applied" | "conflict" | "duplicate" | "denied" | "rejected";
   newItemRev?: number;
   serverItem?: WireItem;
+  /** `rejected` only: `unknown_attachment` | `attachment_mismatch` | `item_attachment_quota`. */
+  reason?: string;
 }
 
 export interface PushResponse {

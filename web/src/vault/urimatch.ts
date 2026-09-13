@@ -11,6 +11,110 @@ export interface FillTarget {
   packageName: string;
 }
 
+// ---- H22 (2026-09-13 audit): A-label (punycode) canonicalization ----
+//
+// Every browser reports a page host in ASCII (`location.hostname`, `sender.origin`, Android's
+// getWebDomain() all carry `xn--bcher-kva.de`), while the household TYPES the Unicode form the
+// omnibox shows. normalizeHost compared the two byte-wise, so an IDN login never filled on any
+// client, silently — and the PSL resolver treats non-ASCII as unknown, so not even the suffix
+// fallback could bridge it. Both sides now canonicalize to the A-label.
+//
+// Hand-rolled on purpose, NOT `new URL()`: the Kotlin twin cannot use the browser's UTS46 and
+// `java.net.IDN` is IDNA2003 (transitional: `ß` → `ss`, which browsers abandoned in 2023), so one
+// verbatim algorithm in all three engines is the only way the shared vectors can pin them. It is
+// deliberately MINIMAL and matches what a modern browser reports for real-world hosts: the host is
+// already lowercased; each label is NFC-normalized and a label with any non-ASCII code point
+// becomes `xn--` + RFC 3492 punycode. No UTS46 mapping table (full-width forms, `ẞ` → `ss`,
+// ligatures) and no bidi/joiner validity — such spellings still canonicalize deterministically on
+// every client, they just do not match the browser's spelling: an under-match, never a
+// cross-origin fill (fail-closed). The one runtime failure — arithmetic overflow on an absurd
+// label — returns null, which matches nothing. Twin of core Idna.kt / Punycode.
+
+const PUNY_BASE = 36;
+const PUNY_T_MIN = 1;
+const PUNY_T_MAX = 26;
+const PUNY_SKEW = 38;
+const PUNY_DAMP = 700;
+const PUNY_INITIAL_BIAS = 72;
+const PUNY_INITIAL_N = 128;
+const PUNY_MAX_INT = 0x7fffffff;
+
+function punyAdapt(deltaIn: number, numPoints: number, firstTime: boolean): number {
+  let delta = firstTime ? Math.floor(deltaIn / PUNY_DAMP) : Math.floor(deltaIn / 2);
+  delta += Math.floor(delta / numPoints);
+  let k = 0;
+  while (delta > Math.floor(((PUNY_BASE - PUNY_T_MIN) * PUNY_T_MAX) / 2)) {
+    delta = Math.floor(delta / (PUNY_BASE - PUNY_T_MIN));
+    k += PUNY_BASE;
+  }
+  return k + Math.floor(((PUNY_BASE - PUNY_T_MIN + 1) * delta) / (delta + PUNY_SKEW));
+}
+
+function punyDigit(d: number): string {
+  return d < 26 ? String.fromCharCode(97 + d) : String.fromCharCode(48 + (d - 26));
+}
+
+/** RFC 3492 §6.3 encoder — the encoded label WITHOUT `xn--`, or null on overflow (§6.4). */
+export function punycodeEncode(label: string): string | null {
+  const input = Array.from(label, (ch) => ch.codePointAt(0) as number);
+  let out = "";
+  for (const cp of input) if (cp < PUNY_INITIAL_N) out += String.fromCharCode(cp);
+  const basicCount = out.length;
+  let handled = basicCount;
+  if (basicCount > 0) out += "-";
+  let n = PUNY_INITIAL_N;
+  let delta = 0;
+  let bias = PUNY_INITIAL_BIAS;
+  while (handled < input.length) {
+    let m = PUNY_MAX_INT;
+    for (const cp of input) if (cp >= n && cp < m) m = cp;
+    if (m - n > Math.floor((PUNY_MAX_INT - delta) / (handled + 1))) return null;
+    delta += (m - n) * (handled + 1);
+    n = m;
+    for (const cp of input) {
+      if (cp < n) {
+        delta++;
+        if (delta > PUNY_MAX_INT) return null;
+      }
+      if (cp === n) {
+        let q = delta;
+        for (let k = PUNY_BASE; ; k += PUNY_BASE) {
+          const t = k <= bias ? PUNY_T_MIN : k >= bias + PUNY_T_MAX ? PUNY_T_MAX : k - bias;
+          if (q < t) break;
+          out += punyDigit(t + ((q - t) % (PUNY_BASE - t)));
+          q = Math.floor((q - t) / (PUNY_BASE - t));
+        }
+        out += punyDigit(q);
+        bias = punyAdapt(delta, handled + 1, handled === basicCount);
+        delta = 0;
+        handled++;
+      }
+    }
+    delta++;
+    n++;
+  }
+  return out;
+}
+
+// eslint-disable-next-line no-control-regex
+const ASCII_ONLY = /^[\x00-\x7f]*$/;
+
+/** An already-normalized host → its A-label form; ASCII passes through unchanged (idempotent). */
+export function idnaToAscii(host: string): string | null {
+  if (ASCII_ONLY.test(host)) return host;
+  const out: string[] = [];
+  for (const label of host.split(".")) {
+    if (ASCII_ONLY.test(label)) {
+      out.push(label);
+    } else {
+      const encoded = punycodeEncode(label.normalize("NFC"));
+      if (encoded === null) return null;
+      out.push("xn--" + encoded);
+    }
+  }
+  return out.join(".");
+}
+
 export function normalizeHost(raw: string): string | null {
   let s = raw.trim();
   if (!s) return null;
@@ -41,7 +145,10 @@ export function normalizeHost(raw: string): string | null {
   // ANYTHING — the eTLD+1 resolver would otherwise resolve it to its rightmost real family
   // and quietly grant it the new equality rule. (IPv6 hosts have no dots between groups.)
   if (s.split(".").some((l) => !l)) return null;
-  return s;
+  // H22: canonicalize to the A-label LAST, after every ASCII rule has run. Symmetric (matches()
+  // normalizes the page host through here too), idempotent (ASCII in → unchanged), fail-closed
+  // (encoder overflow → null → matches nothing). Core UriMatch.kt parity.
+  return idnaToAscii(s);
 }
 
 export function parseSavedUri(raw: string): SavedUri | null {

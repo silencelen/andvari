@@ -12,6 +12,8 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+import kotlin.test.assertNotEquals
 
 /**
  * Consumes spec/test-vectors (path via -Dandvari.vectors.dir, wired in
@@ -58,6 +60,10 @@ class VectorsTest {
             assertContentEquals(case.b("authKeyB64"), Keys.authKey(crypto, mk))
             assertContentEquals(case.b("wrapKeyB64"), Keys.wrapKey(crypto, mk))
         }
+        // spec 01 §1 (H16): a memBytes that is not a KiB multiple floors to KiB in every engine —
+        // libsodium does it inside crypto_pwhash (memlimit / 1024U), the extension's @noble twin by
+        // hand. The corpus must keep carrying that case or the loop above grades nobody on it.
+        assertTrue(v.arr("chain").any { it.params("kdfParams").memBytes % 1024 != 0L }, "a non-KiB-multiple chain case")
     }
 
     @Test
@@ -160,6 +166,14 @@ class VectorsTest {
         assertFailsWith<CryptoException> {
             SharedGrant.open(crypto, kp.publicKey, kp.privateKey, reject.s("expectedVaultId"), reject.b("sealedB64"))
         }
+        // A seal whose payload carries a non-32-byte "vk" under the RIGHT vaultId must be refused
+        // (H93 — the guard all three twins now share; the extension had shipped without it).
+        val shortVk = v.getValue("rejectVkLength").jsonObject
+        assertNotEquals(32, shortVk.i("vkLen"))
+        val e = assertFailsWith<CryptoException> {
+            SharedGrant.open(crypto, kp.publicKey, kp.privateKey, shortVk.s("expectedVaultId"), shortVk.b("sealedB64"))
+        }
+        assertTrue(e.message!!.contains("32 bytes"), e.message)
         // Round-trip this impl's own (nondeterministic) seal.
         val ownSeal = SharedGrant.seal(crypto, kp.publicKey, vaultId, v.b("vkB64"))
         assertContentEquals(v.b("vkB64"), SharedGrant.open(crypto, kp.publicKey, kp.privateKey, vaultId, ownSeal))

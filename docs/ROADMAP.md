@@ -68,6 +68,17 @@ the direction-level record of what they closed.
 > (`~/.andvari/manifest-archive/seq12-20260905T230007Z/`) is the only primary record and every file
 > in it re-hashes to its bundle.json. Detail + the watcher fix: `docs/runbooks/release-signing-keys.md`
 > § Status. Owner step: redeploy the watcher to `/usr/local/bin`.
+>
+> **Web, server and Android were deliberately NOT rebuilt for 0.26.3** and remain deployed at
+> 0.26.2 (the reference instance's served bundle and `andvari-server.jar`; the phone on the 0.26.2
+> build). 0.26.3 is a desktop-only fix — the jlink runtime missing `jdk.zipfs` and libsodium
+> extraction under a spaced install path — so nothing in the web, server or Android artifacts
+> changed and rebuilding them would have shipped three unverified binaries to fix a fourth. Written
+> down here (audit H110/release-integrity) because the tree previously recorded this only in the
+> maintainer's private notes, which made a perfectly deliberate version skew look like a half-done
+> release to anyone reading the repo. In-tree source version literals (`CLIENT_VERSION`,
+> `ANDVARI_CLIENT_VERSION`) are at 0.26.3 as the fleet number; the *deployed* artifacts lag by
+> design until the next release that actually touches them.
 
 ## 0.26.0 + 0.26.1 — Android vault health (**COMPLETE ON EVERY CHANNEL 2026-08-24**)
 
@@ -319,7 +330,8 @@ A 14-lens recon (168 raw → 84 deduped findings) drove eight reviewed batches, 
 same-day (each: gates → high-effort adversarial review → fix → deploy): web vault-chrome +
 honest connectivity dot (owner gripe 4); the nightly-backup hotfix (silently dead since
 night 2, verified fixed on CT122); **Android autofill resurrected** (four kill switches +
-the Autofill Status diagnostic screen; owner protocol `docs/autofill-fold-debugging.md`);
+the Autofill Status diagnostic screen; the bring-up protocol became the general guide
+`docs/autofill-fold-debugging.md`);
 web error-truthfulness; release/update-version truth (MSI rebuild now safe); the sole-admin
 lockout guard + ZK-table/spec truth + vector-pinned derivations; **session & sync
 integrity** (single-flight refresh — the device-revoking `refresh_reuse` race — lock

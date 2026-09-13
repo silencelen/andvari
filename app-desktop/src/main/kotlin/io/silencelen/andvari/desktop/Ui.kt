@@ -1447,7 +1447,7 @@ private fun Vault(state: DesktopState) {
                         }
                     } else {
                         items(filtered, key = { it.itemId }) { item ->
-                            Row(item, vaultBadges[item.vaultId]) { detailId = item.itemId }
+                            Row(item, vaultBadges[item.vaultId], pendingSync = item.itemId in state.pendingSyncIds) { detailId = item.itemId }
                             Spacer(Modifier.height(8.dp))
                         }
                     }
@@ -1685,7 +1685,7 @@ private fun rowErrorLine(e: CsvImport.RowError, ordinals: Map<Int, Int>): String
 }
 
 @Composable
-private fun Row(item: VaultItem, vaultBadge: String? = null, onClick: () -> Unit) {
+private fun Row(item: VaultItem, vaultBadge: String? = null, pendingSync: Boolean = false, onClick: () -> Unit) {
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         androidx.compose.foundation.layout.Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Text((item.doc.name.firstOrNull() ?: '?').uppercase(), color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Serif, modifier = Modifier.padding(end = 12.dp))
@@ -1700,6 +1700,13 @@ private fun Row(item: VaultItem, vaultBadge: String? = null, onClick: () -> Unit
                     },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
                 )
+            }
+            // H18 (web Vault.tsx "pending sync" tag twin): the row is a QUEUED offline save the
+            // engine projects from its durable queue — visible, so the user neither re-creates
+            // nor re-saves it; the mark clears when the row flushes.
+            if (pendingSync) {
+                Text("pending sync", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary,
+                    maxLines = 1, modifier = Modifier.padding(end = 8.dp))
             }
             // F81: shared-vault badge — the decrypted vault name in gold (primary = treasury
             // gold), the same labelSmall tag style as the type tag beside it. Personal = none.
@@ -1833,6 +1840,11 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
         // interpolates, and the one every surface hand-wrote — it had drifted three ways from web.
         // Canon now; web carries the byte-equal template and is pinned to the Kotlin source.
         "replay-denied" -> Pair(HouseholdCopy.replayDeniedNotice(n.parkedCount ?: 0, name), false)
+        // H71 (web F20 twin): a genuinely new non-owner grant — calm, informational.
+        "added" -> Pair("You were added to “$name”.", false)
+        // H03/H19: queued changes the server definitively refused and the drain dropped —
+        // the canon lead sentence (web appends its revert tail; core has no optimistic apply).
+        "write-rejected" -> Pair(HouseholdCopy.writeRejectedNotice(n.parkedCount ?: 0, name, n.reason), true)
         else -> Pair( // "anomaly"
             "The server says you lost access to “$name”, but this couldn’t be verified as a real owner action. " +
                 "A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). " +
@@ -2459,7 +2471,7 @@ private fun ItemHistorySection(state: DesktopState, item: VaultItem, readOnly: B
             onDismissRequest = { confirmRestore = null },
             title = { Text("Restore this version?") },
             text = { Text("The item's current version will be replaced by the one from ${java.time.Instant.ofEpochMilli(v.archivedAt).toString().take(10)}. The replaced version stays in history.") },
-            confirmButton = { TextButton(onClick = { confirmRestore = null; state.saveItem(item.itemId, v.doc) { onRestored() } }) { Text("Restore") } },
+            confirmButton = { TextButton(onClick = { confirmRestore = null; state.restoreVersion(item.itemId, v.doc) { onRestored() } }) { Text("Restore") } },
             dismissButton = { TextButton(onClick = { confirmRestore = null }) { Text("Cancel") } },
         )
     }

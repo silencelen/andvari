@@ -11,6 +11,7 @@ import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.HouseholdCopy
+import io.silencelen.andvari.core.client.SaveOutcome
 import io.silencelen.andvari.core.client.ItemChangedException
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
 import io.silencelen.andvari.core.client.KdfUpgrade
@@ -394,6 +395,10 @@ class DesktopState(
     var screen by mutableStateOf<DesktopScreen>(DesktopScreen.Loading)
         private set
     var items by mutableStateOf<List<VaultItem>>(emptyList())
+        private set
+    /** H18: itemIds with a QUEUED (unflushed) offline save/delete — the list's "pending sync"
+     *  mark (web's pendingSyncItemIds twin). `items` already projects the queued doc. */
+    var pendingSyncIds by mutableStateOf<Set<String>>(emptySet())
         private set
     // Held envelopes newer than this build can decrypt (fail-closed) — the vault list
     // shows them as a one-line "N items need an app update" banner instead of nothing.
@@ -800,8 +805,9 @@ class DesktopState(
     }
 
     /** Flush AND prune against a COMPLETE live item set (audit G04) — the only caller is
-     *  [syncNow]'s successful-sync completion, where `engine.items()` is authoritative; never a
-     *  teardown view, which can be pre-sync. */
+     *  [syncNow]'s successful-sync completion, handing in `engine.liveItemIds()` (every live
+     *  envelope, readable or not — audit H36; never `items()`); never a teardown view, which can
+     *  be pre-sync. */
     private fun flushUsageWithPrune(s: UsageSession, liveItemIds: Set<String>) = usage.flushWithPrune(s, liveItemIds)
 
     /** Drop the buffer wherever vault material is dropped — behavioural records about a user's
@@ -1960,9 +1966,10 @@ class DesktopState(
     ) {
         saveError = null
         if (itemId == null && draftItemId == null) draftItemId = account?.newItemId()
+        val outcome: SaveOutcome
         try {
             // Named: a trailing lambda binds to the LAST parameter (the runGesture rule).
-            withTimeoutOrNull(uploadsTimeoutMs(uploads)) {
+            outcome = withTimeoutOrNull(uploadsTimeoutMs(uploads)) {
                 engine!!.saveWithUploads(
                     itemId, doc, uploads, vaultId,
                     onProgress = { done, total -> saveProgress = done to total },
@@ -1985,6 +1992,12 @@ class DesktopState(
         draftItemId = null
         refreshItems()
         onSaved()
+        // H18 (G23 finished): QUEUED means the row sits in the DURABLE SQLite queue and the list
+        // already shows it with its "pending sync" mark — the editor closed exactly like the
+        // online path, so the only thing left to say is the calm queued sentence. Under the
+        // consent-unanswered InMemoryVaultCache the engine THROWS instead (H17): forSaveError
+        // renders the honest "couldn't be saved" line above and the editor stays open.
+        if (outcome == SaveOutcome.QUEUED) notice = HouseholdCopy.SAVE_OFFLINE
     }
 
     /** Item history (feature): load + decrypt the currently-viewed item's archived versions. */
@@ -1995,7 +2008,16 @@ class DesktopState(
     }
 
     fun clearItemVersions() { itemVersions = null }
-    fun deleteItem(itemId: String) = op { engine!!.remove(itemId); refreshItems() }
+    /** Item history restore (H03): an ordinary save of the archived doc with every attachment
+     *  ref the live item no longer carries stripped — see [SyncEngine.versionDocForRestore]. */
+    fun restoreVersion(itemId: String, version: ItemDoc, onSaved: () -> Unit = {}) =
+        saveItem(itemId, engine?.versionDocForRestore(itemId, version) ?: version, onSaved = onSaved)
+
+    fun deleteItem(itemId: String) = op {
+        val outcome = engine!!.remove(itemId)
+        refreshItems()
+        if (outcome == SaveOutcome.QUEUED) notice = HouseholdCopy.SAVE_OFFLINE // H18: queued delete, row already hidden
+    }
     /** Cut O (v2 #17): the toolbar's manual Refresh — the SAME single-flighted sync path as the
      *  poll (it used to run under op{}/busy with no overlap guard, so repeat clicks stacked
      *  concurrent syncs), but `manual = true` so an offline blip answers with an honest notice
@@ -2341,9 +2363,10 @@ class DesktopState(
     /**
      * Lock if the inactivity window elapsed (policy `autoLockSeconds`; persisted last-known
      * value when the live policy hasn't loaded; 0 disables). Never yanks the engine under an
-     * in-flight op ([busy]/import) — the durable queue would survive it, but the op would
-     * surface a spurious error; the next 1 s tick re-checks, so the lock is deferred, not
-     * skipped.
+     * in-flight op ([busy]/import) — a SQLite-backed queue would survive it (the consent-off
+     * InMemoryVaultCache queue would NOT, which is why the engine never reports a save over
+     * that cache as queued — H17), but the op would surface a spurious error either way; the
+     * next 1 s tick re-checks, so the lock is deferred, not skipped.
      *
      * (v2 #15) pre-lock protection — the idle lock used to destroy in-progress work SILENTLY:
      *  - An open editor (typed fields + picked attachments are remember-scoped, unmounted by the
@@ -3379,14 +3402,18 @@ class DesktopState(
     private suspend fun syncNow(e: SyncEngine) {
         e.sync()
         store.lastSyncAt = System.currentTimeMillis()
-        // G04: a completed sync is the ONLY moment `e.items()` is provably the complete live set,
-        // so it is the only safe place to prune the ever-growing usage blob (pruning a pre-sync
-        // view would drop other devices' entries). Guard on the session still owning THIS engine
-        // — a mid-sync lock/rebind must not prune one account's ids against another's blob. The
-        // flush stays batched; the prune only writes when it drops something.
+        // G04: a completed sync is the ONLY moment the engine's envelope set is provably the
+        // complete live set, so it is the only safe place to prune the ever-growing usage blob
+        // (pruning a pre-sync view would drop other devices' entries). Guard on the session still
+        // owning THIS engine — a mid-sync lock/rebind must not prune one account's ids against
+        // another's blob. The flush stays batched; the prune only writes when it drops something.
+        // H36: the keep-set is `liveItemIds()` — every live ENVELOPE, readable or not — never
+        // `items()`, the decrypted working set: that omits newer-formatVersion envelopes and
+        // vaults whose key has not arrived, so pruning against it erased those live items' usage
+        // on every poll of this device (web and the extension already fold those ids in).
         val a = api; val acct = account
         if (engine === e && a != null && acct != null) {
-            flushUsageWithPrune(UsageSession(a, acct), e.items().mapTo(HashSet()) { it.itemId })
+            flushUsageWithPrune(UsageSession(a, acct), e.liveItemIds())
         }
     }
 
@@ -3397,6 +3424,7 @@ class DesktopState(
 
     private fun refreshItems() {
         items = engine?.items() ?: emptyList()
+        pendingSyncIds = engine?.pendingSyncItemIds() ?: emptySet()
         needsUpdateCount = engine?.needsUpdateCount() ?: 0
         busy = false; error = null
         refreshLifecycle() // A-funnel: every item refresh re-reads the cheap lifecycle surfaces
@@ -3405,6 +3433,7 @@ class DesktopState(
     private fun toVault() {
         screen = DesktopScreen.Vault
         items = engine?.items() ?: emptyList()
+        pendingSyncIds = engine?.pendingSyncItemIds() ?: emptySet()
         needsUpdateCount = engine?.needsUpdateCount() ?: 0
         lockReason = null // §6: successful unlock / sign-in — the line must never carry stale
         recoveryPhrase = null // §F.7: the shown-once display form must not survive landing

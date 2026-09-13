@@ -7,7 +7,7 @@ import { fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
 import { initSodium } from "../crypto/sodium";
 import { usageKey } from "../crypto/usagekey";
 import type { Account } from "./account";
-import { UsageTracker, type UsageMap, mergeUsage, parseUsage, pruneUsage, recordUse, serializeUsage } from "./usage";
+import { UsageTracker, type UsageMap, mergeUsage, parseUsage, planFlush, pruneUsage, recordUse, serializeUsage } from "./usage";
 
 /**
  * Usage ledger pins (spec 02 §8.2, design 2026-08-22-login-health). The network half is a thin
@@ -79,32 +79,105 @@ describe("pruneUsage", () => {
   });
 });
 
+// planFlush (spec 02 §8.2 — audits H05 / H35). The SAME cases are pinned in extension/src/usage.test.ts
+// and core's UsageLedgerTest, so the three flush engines cannot drift in WHEN they write.
+describe("planFlush (must stay identical to the extension and core twins)", () => {
+  const mine: UsageMap = { local: { lastUsedAt: T + 1000, useCount: 1 } };
+
+  // THE H05 rule: a server copy this client could not fetch or open is never overwritten, buffered
+  // uses or not. A PUT here would replace the household's ledger with one session's handful of
+  // entries — the endpoint has no server-side merge to save it.
+  it("never writes over an UNREADABLE server copy", () => {
+    expect(planFlush({ kind: "unreadable" }, mine)).toBeNull();
+    expect(planFlush({ kind: "unreadable" }, mine, new Set(["local"]))).toBeNull();
+    expect(planFlush({ kind: "unreadable" }, {}, new Set(["x"]))).toBeNull();
+  });
+
+  // `sealedUsage: null` is the ONE case a merge-less write is a first write, not an overwrite.
+  it("writes the buffer as a FIRST ledger when the server has none", () => {
+    expect(planFlush({ kind: "absent" }, mine)).toEqual(mine);
+    expect(planFlush({ kind: "absent" }, mine, new Set(["other"]))).toEqual(mine);
+    expect(planFlush({ kind: "absent" }, {})).toBeNull();
+    expect(planFlush({ kind: "absent" }, {}, new Set(["x"]))).toBeNull();
+  });
+
+  it("merges the buffer over a readable server copy", () => {
+    const put = planFlush({ kind: "present", map: { "other-device-item": { lastUsedAt: T, useCount: 2 } } }, mine);
+    expect(Object.keys(put!).sort()).toEqual(["local", "other-device-item"]);
+  });
+
+  // H35: a prune request with an EMPTY buffer must still drop a deleted item's entry — the
+  // post-sync prune is the growth bound, and a sync almost never lands inside the debounce window.
+  it("prunes with an EMPTY buffer", () => {
+    const server: UsageMap = { alive: { lastUsedAt: T, useCount: 3 }, deleted: { lastUsedAt: T, useCount: 9 } };
+    const put = planFlush({ kind: "present", map: server }, {}, new Set(["alive"]));
+    expect(put).toEqual({ alive: { lastUsedAt: T, useCount: 3 } });
+  });
+
+  // Batched, never spurious (spec 03 §3): a quiet prune that drops nothing and has nothing buffered
+  // must not write — no `updatedAt` bump on every poll.
+  it("does not write when a prune changes nothing", () => {
+    const server: UsageMap = { alive: { lastUsedAt: T, useCount: 1 } };
+    expect(planFlush({ kind: "present", map: server }, {}, new Set(["alive"]))).toBeNull();
+    expect(planFlush({ kind: "present", map: server }, {})).toBeNull();
+  });
+
+  it("keeps a buffered use the live-set snapshot does not know — under-prune, never drop a live entry", () => {
+    const put = planFlush({ kind: "present", map: { alive: { lastUsedAt: T, useCount: 1 } } }, { fresh: { lastUsedAt: T + 1000, useCount: 1 } }, new Set(["alive"]));
+    expect(Object.keys(put!).sort()).toEqual(["alive", "fresh"]);
+  });
+});
+
 // G04 (2026-08-30 audit): the flush prunes ONLY when it is handed a live set, and the only caller
 // that passes one is the successful-full-sync completion point (Vault.tsx syncNow) — where the
 // store's item list is provably complete. The pagehide/unmount/debounce flushes call bare flush()
-// so a partial view can never silently drop an item's usage. These pin BOTH halves of that wiring.
-describe("UsageTracker.flush pruning", () => {
+// so a partial view can never silently drop an item's usage. These pin BOTH halves of that wiring,
+// plus the shell rules the 2026-09-13 audit added: H35 (the prune runs with an empty buffer), H05
+// (an unreadable server copy is never overwritten), H34 (a rejected PUT re-arms) and H79 (a bare
+// flush sends the BUFFER, not the display map).
+describe("UsageTracker.flush", () => {
   // Minimal duck-typed doubles: the tracker touches only these four methods, and the seal is made
   // an identity round-trip (openUsage(sealUsage(x)) === x) so the test reads back what was stored.
-  function makeTracker() {
-    let stored: string | null = null;
+  function makeTracker(seed: UsageMap | null = null) {
+    let stored: string | null = seed === null ? null : serializeUsage(seed);
+    const knobs = { failGet: false, failOpen: false, rejectPut: false, puts: 0, gets: 0 };
     const client = {
-      getUsage: async () => ({ sealedUsage: stored, updatedAt: 0 }),
+      getUsage: async () => {
+        knobs.gets++;
+        if (knobs.failGet) throw new Error("GET /usage failed");
+        return { sealedUsage: stored, updatedAt: 0 };
+      },
       putUsage: async (sealedUsage: string) => {
+        // H34: putUsage REJECTS on a non-2xx (it rides text()); a refused write must throw here.
+        if (knobs.rejectPut) throw new Error("400 bad_usage_blob");
+        knobs.puts++;
         stored = sealedUsage;
       },
     } as unknown as ApiClient;
     const account = {
       sealUsage: async (b: Uint8Array) => fromUtf8(b),
-      openUsage: async (s: string) => utf8(s),
+      openUsage: async (s: string) => {
+        if (knobs.failOpen) throw new Error("AEAD open failed");
+        return utf8(s);
+      },
     } as unknown as Account;
-    return { tracker: new UsageTracker(client, account), stored: () => (stored === null ? null : parseUsage(stored)) };
+    return {
+      tracker: new UsageTracker(client, account),
+      knobs,
+      stored: () => (stored === null ? null : parseUsage(stored)),
+      /** Another device's write landing server-side between this tracker's calls. */
+      setStored: (m: UsageMap) => {
+        stored = serializeUsage(m);
+      },
+    };
   }
 
+  // Seeded server-side, not recorded here: a use buffered in THIS session is inherently live (you
+  // cannot copy a deleted item's secret) and survives the prune on every twin — the earlier shape
+  // of this pin, which recorded "deleted" and expected it gone, pinned a web/core divergence.
   it("prunes a deleted item when flush is handed the complete live set (the post-sync point)", async () => {
-    const { tracker, stored } = makeTracker();
+    const { tracker, stored } = makeTracker({ deleted: { lastUsedAt: T, useCount: 1 } });
     tracker.record("alive", T);
-    tracker.record("deleted", T);
     await tracker.flush(new Set(["alive"]));
     expect(Object.keys(stored()!)).toEqual(["alive"]);
     tracker.dispose();
@@ -116,6 +189,90 @@ describe("UsageTracker.flush pruning", () => {
     tracker.record("deleted", T);
     await tracker.flush();
     expect(Object.keys(stored()!).sort()).toEqual(["alive", "deleted"]);
+    tracker.dispose();
+  });
+
+  // H35: the sync-time state is "nothing buffered" (the debounce already flushed), and the prune
+  // must still run then — it used to return at a dirty gate before ever reading the server.
+  it("H35 — prunes a deleted item with NOTHING buffered", async () => {
+    const { tracker, stored, knobs } = makeTracker({ alive: { lastUsedAt: T, useCount: 3 }, deleted: { lastUsedAt: T, useCount: 9 } });
+    await tracker.flush(new Set(["alive"]));
+    expect(knobs.gets).toBe(1);
+    expect(stored()).toEqual({ alive: { lastUsedAt: T, useCount: 3 } });
+    tracker.dispose();
+  });
+
+  it("H35 — a quiet post-sync flush with nothing to drop does not PUT (one GET, no updatedAt bump)", async () => {
+    const { tracker, knobs } = makeTracker({ alive: { lastUsedAt: T, useCount: 1 } });
+    await tracker.flush(new Set(["alive"]));
+    expect(knobs.gets).toBe(1);
+    expect(knobs.puts).toBe(0);
+    tracker.dispose();
+  });
+
+  // H05: spec 02 §8.2 — a GET that fails is NOT an empty ledger to overwrite.
+  it("H05 — a GET failure leaves the server ledger untouched and keeps the buffer for the next flush", async () => {
+    const { tracker, stored, knobs } = makeTracker({ "other-device-item": { lastUsedAt: T, useCount: 2 } });
+    tracker.record("local", T + 1000);
+    knobs.failGet = true;
+    await tracker.flush();
+    expect(knobs.puts).toBe(0);
+    expect(stored()).toEqual({ "other-device-item": { lastUsedAt: T, useCount: 2 } });
+    // The next flush, once the server answers, lands the retained use merged over the copy.
+    knobs.failGet = false;
+    await tracker.flush();
+    expect(Object.keys(stored()!).sort()).toEqual(["local", "other-device-item"]);
+    tracker.dispose();
+  });
+
+  it("H05 — a blob that will not open is left untouched, and the buffer kept", async () => {
+    const { tracker, stored, knobs } = makeTracker({ "other-device-item": { lastUsedAt: T, useCount: 2 } });
+    tracker.record("local", T + 1000);
+    knobs.failOpen = true;
+    await tracker.flush(new Set(["local", "other-device-item"]));
+    expect(knobs.puts).toBe(0);
+    expect(stored()).toEqual({ "other-device-item": { lastUsedAt: T, useCount: 2 } });
+    knobs.failOpen = false;
+    await tracker.flush();
+    expect(Object.keys(stored()!).sort()).toEqual(["local", "other-device-item"]);
+    tracker.dispose();
+  });
+
+  it("H05 — a genuinely absent ledger is created from the buffer (the one merge-less write)", async () => {
+    const { tracker, stored, knobs } = makeTracker(null);
+    tracker.record("local", T + 1000);
+    await tracker.flush();
+    expect(knobs.puts).toBe(1);
+    expect(stored()).toEqual({ local: { lastUsedAt: T + 1000, useCount: 1 } });
+    tracker.dispose();
+  });
+
+  // H34: the re-arm catch is reachable for a server refusal only because putUsage now rejects.
+  it("H34 — a rejected PUT leaves the tracker armed and the next flush re-sends the uses", async () => {
+    const { tracker, stored, knobs } = makeTracker({});
+    tracker.record("local", T + 1000);
+    knobs.rejectPut = true;
+    await tracker.flush();
+    expect(stored()).toEqual({});
+    knobs.rejectPut = false;
+    await tracker.flush();
+    expect(stored()).toEqual({ local: { lastUsedAt: T + 1000, useCount: 1 } });
+    tracker.dispose();
+  });
+
+  // H79: the flush payload is the BUFFER. An entry another device pruned from the server copy
+  // must not be resurrected by this tab's next bare flush just because its display map still
+  // holds it from unlock time.
+  it("H79 — a bare flush after another device pruned an entry does not re-add it", async () => {
+    const { tracker, stored, setStored } = makeTracker({ "pruned-elsewhere": { lastUsedAt: T, useCount: 4 } });
+    await tracker.load(); // the display map now holds the unlock-time copy
+    expect(tracker.lastUsedAt("pruned-elsewhere")).toBe(T);
+    setStored({}); // another device's post-sync prune removed it server-side
+    tracker.record("local", T + 1000);
+    await tracker.flush();
+    expect(stored()).toEqual({ local: { lastUsedAt: T + 1000, useCount: 1 } });
+    // …and the display follows what is stored, so the entry does not linger to be re-sent later.
+    expect(tracker.lastUsedAt("pruned-elsewhere")).toBeUndefined();
     tracker.dispose();
   });
 });

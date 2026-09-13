@@ -33,7 +33,8 @@ import java.time.LocalDate
  *   canary make <pubkeyB64>             seal the fixed canary blob (store server-side)
  *   canary verify <sealedB64>           open the canary with the printed seed (proves the sheet works)
  *   verify <seedFile> <dumpJson>        fleet canary: unseal EVERY escrow blob from a sqlite dump,
- *                                       PASS/FAIL per user, exit 1 on any FAIL (docs/drills/escrow-canary-drill.md)
+ *                                       PASS/FAIL per user, exit 1 on any FAIL (the drill is
+ *                                       docs/drills/escrow-canary-drill.md — recorded elsewhere)
  *   recover <sealedBlobB64>             unseal a user's UVK and emit an admin recovery upload bundle
  */
 
@@ -168,7 +169,11 @@ private fun canaryVerify(sealedB64: String) {
 }
 
 /**
- * Fleet escrow canary (spec 04; docs/drills/escrow-canary-drill.md): open every escrowed
+ * Fleet escrow canary (spec 04; the drill procedure is docs/drills/escrow-canary-drill.md,
+ * which is RECORDED ELSEWHERE — `docs/drills/` was never in this repository, it is the
+ * reference instance's private, out-of-tree operational area; the same note stands at the
+ * top of CHANGELOG.md, and it is repeated here because a stranger reading this public file
+ * would otherwise see a dangling path): open every escrowed
  * blob with the printed seed and prove the accounts are recoverable. The seed comes from
  * a FILE (typed/scanned from the sheet onto the air-gapped box, or the USB copy) so the
  * drill is scriptable; the dump is `sqlite3 -json` output of the server's escrow table.

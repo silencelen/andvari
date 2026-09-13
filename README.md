@@ -101,7 +101,7 @@ instance also serves at `<your-origin>/selfhost` alongside downloadable copies o
 | `tools/vector-gen` | Emits most of `spec/test-vectors/*.json` from the Kotlin reference implementation (six are hand-authored — see below) |
 | `tools/recovery-cli` / `tools/backup-cli` | Offline escrow ceremony/recovery + offline `.andvari` backup reader (verify/dump/extract) |
 | `tools/update-signer` | Signs the `/downloads` update manifest the extension's update channel verifies |
-| `scripts/` | `verify.sh` (the every-ship gate — see Build), `build.sh`, `e2e.sh`, `publish-image.sh`, `publish-extension.sh`, and the Windows release ceremony (`build-windows.ps1`, `prestige-release.ps1`, `signandvari.ps1`) |
+| `scripts/` | `verify.sh` (the every-ship gate — see Build), `build.sh`, `e2e.sh`, `publish-image.sh`, `publish-extension.sh`, `gh-release.sh` (assembles the GitHub release: served names, generated + signed `SHA256SUMS`), and the Windows release ceremony (`build-windows.ps1`, `prestige-release.ps1`, `signandvari.ps1`) |
 
 Six vector files — `card`, `cardfill`, `cardform`, `enrolllink`, `import-foreign`,
 `urimatch-etld1` — are hand-authored fixtures rather than `vector-gen` output. Both

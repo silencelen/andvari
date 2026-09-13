@@ -56,7 +56,8 @@ object KdfUpgrade {
      * (AndvariApi), NEVER inside Keys.masterKey: the cross-impl test vectors and the deliberately
      * separate backup-KDF window (spec 07 §2.3) legitimately derive below this floor. Inclusive
      * bounds — at-floor DEFAULT (64 MiB / t=3) passes (mirrors [shouldUpgrade]'s strict `<`/`>`).
-     * The fence numbers are pinned by KdfBoundsTest against the web + extension copies (spec 01 §9).
+     * The fence numbers are pinned against the web + extension copies by
+     * AndvariApiFenceTest.fenceConstantsPinnedToWebAndExtension (spec 01 §9).
      */
     fun requireServerKdfParams(p: KdfParams) {
         if (p.memBytes < MIN_MEM_BYTES || p.ops < MIN_OPS) throw KdfPolicyViolationException("kdf_below_floor", p)

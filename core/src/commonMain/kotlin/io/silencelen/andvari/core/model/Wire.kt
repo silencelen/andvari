@@ -434,12 +434,28 @@ data class Mutation(
 @Serializable
 data class PushRequest(val mutations: List<Mutation>)
 
+/**
+ * One per-mutation push verdict (spec 03 §5). `rejected` (audit 2026-09-13 H03) is the
+ * server's answer to a structurally-unapplicable SINGLE mutation — today a put whose
+ * `attachmentIds` no longer resolve (peer delete swept the rows, the 24 h orphan GC, a
+ * history restore over a since-removed attachment) or over-quota. It used to be a thrown
+ * 400 that rolled the WHOLE batch back and left the row at the head of every client's
+ * durable queue forever (no client dequeues on a thrown push). A per-row status is what
+ * lets the drain drop exactly that row and carry on to the pull. [reason] names the
+ * refusal (`unknown_attachment` / `attachment_mismatch` / `item_attachment_quota`) so the
+ * client can say WHY; [serverItem] carries the server's current row (a tombstone if a
+ * peer deleted the item) purely as information for the client's reconcile. Fielded
+ * pre-H03 clients treat any status they do not know as "definitive — dequeue", so the new
+ * status is wire-safe for them too (that is why it is a status, not a new error).
+ */
 @Serializable
 data class MutationResult(
     val mutationId: String,
-    val status: String, // applied | conflict | duplicate | denied
+    val status: String, // applied | conflict | duplicate | denied | rejected
     val newItemRev: Long? = null,
     val serverItem: WireItem? = null,
+    /** `rejected` only: the server's refusal reason code (see spec 03 §5). */
+    val reason: String? = null,
 )
 
 @Serializable

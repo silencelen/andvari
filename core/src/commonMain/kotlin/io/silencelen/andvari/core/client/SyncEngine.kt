@@ -18,9 +18,22 @@ import io.silencelen.andvari.core.model.WireVault
 import io.silencelen.andvari.core.model.WireGrant
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.io.IOException
 
 /** A newly attached file awaiting upload: the doc's AttachmentRef + plaintext bytes. */
 class PendingUpload(val ref: AttachmentRef, val data: ByteArray)
+
+/**
+ * How a save/remove ended (audit 2026-09-13 H18 — the web store's success-as-QUEUED twin).
+ * [APPLIED]: the server answered and the reconcile pull ran (or the write landed and only
+ * the reconcile pull failed — a later sync trues up; the write itself is safe). [QUEUED]: the
+ * server was unreachable, the mutation sits in a DURABLE queue ([VaultCache.durable]) and
+ * [SyncEngine.items] already projects it, so the editor may close exactly like the online
+ * path — the user must not be left with an open editor and a sentence that says "queued"
+ * while the list shows nothing (re-saving lands duplicates: G23's half-landed state). A
+ * non-durable engine never returns QUEUED: it throws the transport failure instead.
+ */
+enum class SaveOutcome { APPLIED, QUEUED }
 
 /** A vault we hold the key for — for pickers, badges, and the sharing screens. */
 data class VaultInfo(
@@ -39,11 +52,22 @@ data class LifecycleNotice(
     val id: String,
     val vaultId: String,
     val vaultName: String,
-    val kind: String, // deleted | removed | left | anomaly | restored | transfer-complete | transfer-anomaly
+    /** deleted | removed | left | anomaly | restored | added | transfer-complete |
+     *  transfer-anomaly | replay-denied | write-rejected. `added` (H71) and `write-rejected`
+     *  (H03/H19) are the web store's twins: "You were added to X" for a genuinely new
+     *  non-owner grant, and "N offline changes to X couldn't be applied — <reason>" for
+     *  queue rows the server definitively refused and the drain durably dropped. */
+    val kind: String,
     /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
     val purgeAt: Long? = null,
-    /** verified delete: N of the member's edits parked for replay on restore (F21). */
+    /** verified delete: N of the member's edits parked for replay on restore (F21).
+     *  Doubles as the count for "replay-denied" and "write-rejected". */
     val parkedCount: Int? = null,
+    /** write-rejected: the server's refusal reason for the (first) dropped row —
+     *  `unknown_attachment` / `attachment_mismatch` (the referenced attachment is gone),
+     *  `item_attachment_quota` / `body_too_large` (too large), else unspecified. Picks the
+     *  explanation clause in [HouseholdCopy.writeRejectedNotice]. */
+    val reason: String? = null,
     /** transfer-complete/-anomaly: who now owns the vault, and whether that is us. */
     val newOwnerUserId: String? = null,
     val becameMine: Boolean = false,
@@ -129,8 +153,21 @@ class SyncEngine(
      *  that wires nothing behaves exactly as before. */
     private val log: CoreLog = CoreLog.Silent,
 ) {
-    private companion object {
+    companion object {
         const val SERVER_BATCH_MAX = 200 // server rejects a push batch larger than this (Service.push)
+        /**
+         * H19 (audit 2026-09-13): the server refuses a POST /sync/push body over 8 MiB
+         * (App.kt BODY_CAP_PUSH_BYTES) with a pre-handler 413 — nothing in the batch is
+         * applied, and before this bound a durably-queued 200-row import chunk whose
+         * ciphertext summed past the cap was re-sent by EVERY later sync until sign-out.
+         * The drain now also bounds a batch by its approximate encoded size: rows are added
+         * while the running total stays under this (well below the server's cap — base64
+         * blobs plus JSON framing are counted, the rest of the envelope is small), and a
+         * single row is always sent alone. A lone row that STILL exceeds the cap is the
+         * one poison shape that remains, and [flushQueue]'s whole-batch-refusal path drops
+         * it durably with a notice instead of wedging the queue.
+         */
+        const val PUSH_BODY_SOFT_CAP_BYTES = 6L * 1024 * 1024
         const val DAY_MS = 86_400_000L
         /** The name every surface shows when a vault's own name is unavailable (undecryptable
          *  meta, or a row we hold no VK for). Web twin: the same literal in store.ts, which
@@ -189,8 +226,74 @@ class SyncEngine(
      *  mid-run failure reuses the SAME gestureId/newItemId/fileKeys (design §8). */
     private val bulkGestures = mutableMapOf<String, MoveGesture>()
 
-    fun items(): List<VaultItem> = cache.allItems().sortedBy { it.doc.name.lowercase() }
-    fun item(itemId: String): VaultItem? = cache.getItem(itemId)
+    /** H71: vaults an "added" notice already fired for — once per engine lifetime, so an
+     *  idempotent re-delivery of the same grant never re-announces (web `addedNoticed`). */
+    private val addedNoticed = mutableSetOf<String>()
+    /** H71: "added" notices minted INSIDE the pull tx, emitted only after it commits. */
+    private val pendingAddedNotices = mutableListOf<LifecycleNotice>()
+
+    /** H03/H19: queue rows the server DEFINITIVELY refused this drain (per-row `rejected`,
+     *  or a whole-batch 400/413 isolated to one row by bisection) — durably dropped in
+     *  [flushQueue]; keyed by mutationId → reason so a direct save can learn its own
+     *  fate and throw the honest editor error, and grouped per vault for the notice. */
+    private val rejectedMutationIds = mutableMapOf<String, String>()
+    private val rejectedByVault = mutableMapOf<String, MutableList<String>>()
+
+    /** H18: decrypted view of a QUEUED put, keyed by mutationId — memoized because
+     *  [items] is a hot read and the queue's ciphertext would otherwise be re-opened on
+     *  every list refresh. Pruned to the live queue on each read; never persisted. */
+    private val pendingDocCache = mutableMapOf<String, VaultItem?>()
+
+    /**
+     * The live working set: the cache's server-confirmed items OVERLAID with the outbound
+     * queue (H18, audit 2026-09-13 — the web store's optimistic apply + `pendingSyncItemIds`
+     * twin). Before this the natives fed their list from the cache alone, so an offline save
+     * the copy called "queued" was invisible until it flushed: the user re-created the entry
+     * or re-tapped Save, and the queue then landed both. A queued put replaces (or adds) the
+     * row with the queued doc; a queued delete hides the row. Rows are keyed by itemId, later
+     * queue entries win (FIFO ⇒ the newest edit of an item is what the user last saved).
+     * The overlay reads the cache's own rev/updatedAt for an edited item (the reconcile
+     * pull trues them up), and rev 0 for a brand-new one. Never fed to [saveWithUploads]'s
+     * base-rev read — that deliberately consults the cache so LWW stays server-relative.
+     */
+    fun items(): List<VaultItem> = overlayPending(cache.allItems()).sortedBy { it.doc.name.lowercase() }
+    fun item(itemId: String): VaultItem? {
+        val base = cache.getItem(itemId)
+        val overlay = overlayPending(listOfNotNull(base), only = itemId)
+        return overlay.firstOrNull()
+    }
+
+    /** H18: itemIds with a queued (unflushed) put or delete — the list's "pending sync" mark. */
+    fun pendingSyncItemIds(): Set<String> = cache.pending().mapTo(LinkedHashSet()) { it.itemId }
+    fun hasPendingSync(itemId: String): Boolean = cache.pending().any { it.itemId == itemId }
+
+    private fun overlayPending(base: List<VaultItem>, only: String? = null): List<VaultItem> {
+        val pending = cache.pending()
+        if (pending.isEmpty()) { pendingDocCache.clear(); return base }
+        val live = pending.mapTo(HashSet()) { it.mutationId }
+        pendingDocCache.keys.retainAll(live)
+        val byId = LinkedHashMap<String, VaultItem>(base.size)
+        for (it in base) byId[it.itemId] = it
+        for (m in pending) {
+            if (only != null && m.itemId != only) continue
+            when (m.op) {
+                "delete" -> byId.remove(m.itemId)
+                "put" -> {
+                    val decrypted = pendingDocCache.getOrPut(m.mutationId) {
+                        val up = m.item ?: return@getOrPut null
+                        if (!account.hasVault(m.vaultId)) return@getOrPut null
+                        val prior = byId[m.itemId] ?: cache.getItem(m.itemId)
+                        runCatching {
+                            val wire = WireItem(m.itemId, m.vaultId, prior?.rev ?: 0, 0, prior?.updatedAt ?: 0, false, false, up.formatVersion, up.attachmentIds, up.blob)
+                            VaultItem(m.itemId, m.vaultId, wire.rev, wire.updatedAt, account.decryptItem(wire))
+                        }.getOrNull()
+                    }
+                    if (decrypted != null) byId[m.itemId] = decrypted
+                }
+            }
+        }
+        return byId.values.toList()
+    }
 
     // ---- read-only cache pass-throughs (F82) ----
     // The spec 07 export planner and the F20 undecryptable-grant count enumerate raw wire
@@ -199,6 +302,17 @@ class SyncEngine(
 
     /** Persisted item envelopes (ciphertext rows), tombstones included. */
     fun envelopes(): List<WireItem> = cache.envelopes()
+
+    /**
+     * The usage-ledger prune keep-set after a landed full sync (audit G04, corrected by H36):
+     * every live envelope's id, DECRYPTABLE OR NOT. Built from [envelopes], never from [items] —
+     * [items] is the working set and silently omits a newer-formatVersion envelope and every
+     * item in a vault whose key has not arrived; pruning against it erased those live items'
+     * usage on every sync of the older device. The rule and its twins are on
+     * [UsageLedger.liveItemIds]; this is the engine-level accessor the natives hand to
+     * `UsageRecorderCore.flushWithPrune`.
+     */
+    fun liveItemIds(): Set<String> = UsageLedger.liveItemIds(cache.envelopes())
 
     /** Persisted vault rows as delivered — [vaultInfos] is the decrypted/filtered view. */
     fun vaultRows(): List<WireVault> = cache.vaults()
@@ -229,6 +343,22 @@ class SyncEngine(
      * under a superseded VK after a rotation — are dropped (bounded history, resets at VK rotation;
      * see the design doc). Restore a chosen version with [save] — an ordinary put over the live item.
      */
+    /**
+     * H03 (audit 2026-09-13): the doc to put when the user restores an archived [version] of
+     * [itemId] — every attachment ref the LIVE item no longer carries is stripped. A history
+     * version is verbatim ciphertext from its day; an attachment removed since (and swept
+     * server-side) makes a verbatim put a `rejected` row (spec 03 §5) — and, on a pre-H03
+     * server, the batch-wide 400 that wedged the queue. The Trash restore already strips ALL
+     * refs (the delete dropped the rows); history keeps the ones that still exist. Web twin:
+     * Vault.tsx History.restore. Falls back to the version as-is when the live item is gone
+     * (the save guard reports that case itself).
+     */
+    fun versionDocForRestore(itemId: String, version: ItemDoc): ItemDoc {
+        val live = item(itemId)?.doc ?: return version
+        val liveIds = live.attachments.mapTo(HashSet()) { it.id }
+        return version.copy(attachments = version.attachments.filter { it.id in liveIds })
+    }
+
     suspend fun itemVersions(itemId: String, vaultId: String): List<DecryptedItemVersion> =
         api.itemVersions(itemId).mapNotNull { v ->
             runCatching { DecryptedItemVersion(v.rev, v.archivedAt, account.decryptItemVersion(vaultId, itemId, v)) }.getOrNull()
@@ -300,6 +430,7 @@ class SyncEngine(
      */
     suspend fun sync() = syncMutex.withLock {
         pruneHolding()
+        rejectedMutationIds.clear() // H03: per-row verdicts are consumed by the save that sent them; a background cycle starts clean
         flushQueue()
         pull()
         surfaceStagedDenials()
@@ -396,10 +527,17 @@ class SyncEngine(
             // durable rows so the live session matches disk (data is intact; the next sync
             // re-applies the delta since the cursor also rolled back).
             runCatching { cache.evictDecrypted(); hydrate() }
+            pendingAddedNotices.clear() // H71: nothing this tx minted is true after the rollback
             throw t
         }
 
         if (myStart > freshestCompletedPullStart) freshestCompletedPullStart = myStart
+
+        // H71: "You were added to X" — minted inside the tx (the name decrypts under the
+        // freshly-opened key there), surfaced only now that the tx committed, so a rolled-
+        // back pull never announces a grant the cache does not hold.
+        for (n in pendingAddedNotices) pushNotice(n)
+        pendingAddedNotices.clear()
 
         // Reinstate replay (spec 03 §11 / #3): the parked mutations were durably
         // RE-ENQUEUED inside the pull tx (crash-safe — death here replays them on the next
@@ -443,15 +581,18 @@ class SyncEngine(
             // A LIVE grant re-arriving for a vault in the holding area is a reinstate
             // signal (restore / owner re-add) — collected here, acted on after items apply.
             val reinstatedIds = mutableSetOf<String>()
+            val newlyAdded = mutableSetOf<String>() // H71: grants for vaults not held before this pull
             for (grant in resp.grants) {
                 // Persist UNCONDITIONALLY (ciphertext rows; deltas never re-send) — the
                 // in-memory key-open below may fail/skip, hydrate() retries from disk.
                 cache.upsertGrant(grant)
+                val heldBefore = account.hasVault(grant.vaultId) // BEFORE addGrant opens the key
                 // addGrant applies role changes even when the VK is already held (a role
                 // change re-delivers the grant precisely for this).
                 runCatching {
                     account.addGrant(grant)
                     if (cache.getHeld(grant.vaultId) != null) reinstatedIds.add(grant.vaultId)
+                    else if (!heldBefore && since > 0 && !resyncing) newlyAdded.add(grant.vaultId) // a genuine add
                 }
             }
             for (delivered in resp.vaults) {
@@ -479,6 +620,26 @@ class SyncEngine(
                 runCatching {
                     applyTransferState(vault, noticeable = prePullNames.containsKey(vault.vaultId) && since > 0 && !resyncing)
                 }
+            }
+            // H71 (web F20 twin, store.ts newlyAdded): a calm "you were added to <vault>" notice
+            // for each vault whose key we did NOT hold before this pull but now do. Never on a
+            // since=0 / resync pull (newlyAdded is empty then — notices fire only for verifiable
+            // NEW state), never for a reinstated (restored / re-added held) vault (that path
+            // emits "restored"), never for a personal vault, never for a vault we OWN (an owner
+            // grant is our OWN wrappedVk, so a second device of this account sees a vault it just
+            // created as a brand-new grant — "you were added" would be a lie there; ownership
+            // handed TO us arrives on a vault we already held and emits transfer-complete), and
+            // once per vault for the engine's lifetime. Computed AFTER vaults apply so the name
+            // decrypts under the freshly-opened key. Transparency for honest servers only — a
+            // lying server can equally omit the grant; this is not an F16 defense.
+            for (vaultId in newlyAdded) {
+                if (vaultId in reinstatedIds || vaultId in addedNoticed) continue
+                val v = cache.vaults().find { it.vaultId == vaultId } ?: continue
+                if (v.type == "personal" || !account.hasVault(vaultId)) continue
+                if (account.roleFor(vaultId) == "owner") continue
+                addedNoticed.add(vaultId)
+                val name = account.decryptVaultName(vaultId, v.metaBlob) ?: VAULT_NAME_FALLBACK
+                pendingAddedNotices.add(LifecycleNotice(account.newItemId(), vaultId, name, "added"))
             }
             for (item in resp.items) {
                 if (item.deleted) {
@@ -1192,20 +1353,28 @@ class SyncEngine(
         vaultId: String? = null,
         onProgress: ((done: Int, total: Int) -> Unit)? = null,
         newItemId: String? = null,
-    ) {
+    ): SaveOutcome {
         // [newItemId] (F71 review): a RETRY of a failed NEW-item save must reuse the id the
         // first attempt minted — attachments committed by that attempt are bound to it, and
         // a fresh mint would trip the push's attachment_mismatch validation forever. Used
         // only when [itemId] is null (an edit's identity is the itemId); callers keep one
         // draft id per editor session and clear it on success/cancel.
         val existing = itemId?.let { cache.getItem(it) }
+        // H18: an edit to an item that exists ONLY as a queued, never-sent put (an offline
+        // new-item save the list now projects). It is still the SAME new item: the server has
+        // never seen it, so the newer doc simply supersedes the queued one — the older queued
+        // put is dropped before this one is enqueued (else the drain would land both and
+        // the second, at base rev 0 against the first's fresh rev, would spawn a conflict
+        // copy of the user's own draft). Only a never-sent NEW item coalesces; an edit over a
+        // server-confirmed row keeps every queued put (that ordering question is H37).
+        val queuedOnly = if (itemId != null && existing == null) item(itemId) else null
         // Save guard (design §6): an edit to an itemId we no longer hold must NOT silently
         // teleport into the personal vault — the item's vault may have been deleted or its
         // grant revoked mid-edit. Fail loudly; the server-side skeletal fence is the belt.
-        if (itemId != null && existing == null) {
+        if (itemId != null && existing == null && queuedOnly == null) {
             throw ApiException(409, "vault_state_changed", "This item is no longer here — it may have been removed or its vault deleted.")
         }
-        val effectiveVault = existing?.vaultId ?: vaultId ?: account.personalVaultId
+        val effectiveVault = existing?.vaultId ?: queuedOnly?.vaultId ?: vaultId ?: account.personalVaultId
         val id = itemId ?: newItemId ?: account.newItemId()
         if (uploads.isNotEmpty()) {
             var done = 0
@@ -1226,11 +1395,73 @@ class SyncEngine(
                 onProgress?.invoke(++done, uploads.size)
             }
         }
-        syncMutex.withLock {
-            push(listOf(putMutation(id, effectiveVault, doc, existing?.rev ?: 0)))
+        return syncMutex.withLock {
+            if (queuedOnly != null) coalesceQueuedNewItem(id)
+            val m = putMutation(id, effectiveVault, doc, existing?.rev ?: 0)
+            sendOrQueue(m)?.let { return@withLock it }
+            reconcileAfterWrite(m)
+        }
+    }
+
+    /** H18: drop every queued put of a never-sent NEW item (see [saveWithUploads]). Under
+     *  [syncMutex] — a drain cannot be sending them meanwhile. */
+    private fun coalesceQueuedNewItem(itemId: String) {
+        for (q in cache.pending()) {
+            if (q.itemId == itemId && q.op == "put") {
+                cache.dequeue(q.mutationId)
+                pendingDocCache.remove(q.mutationId)
+            }
+        }
+    }
+
+    /**
+     * H18 (audit 2026-09-13): the ONE offline verdict for a save/remove. Enqueue [m] and
+     * drain. A transport failure ([IOException]) from the drain means the server never
+     * answered — on a DURABLE cache the row is safely queued and already projected by
+     * [items], so the write is reported as [SaveOutcome.QUEUED] and the caller closes the
+     * editor exactly like the online path (the web store's success-as-QUEUED). On a
+     * NON-durable cache (H17: desktop before cache consent, org-forbid mode on both
+     * natives) the queue is process memory that the next lock, quit or background-lock
+     * frees, so "queued" would be a false safety claim: the row is dequeued (no ghost
+     * that a later same-session flush could land AFTER the user re-saved it by hand) and
+     * the failure propagates for [HouseholdCopy.forSaveError]'s honest "couldn't be saved"
+     * line. A server ANSWER ([ApiException]) is never an offline verdict and propagates
+     * as before. Returns the outcome when the write is queued, null when it was sent.
+     */
+    private suspend fun sendOrQueue(m: Mutation): SaveOutcome? {
+        try {
+            push(listOf(m))
+        } catch (e: IOException) {
+            if (cache.durable && cache.pending().any { it.mutationId == m.mutationId }) return SaveOutcome.QUEUED
+            cache.dequeue(m.mutationId)
+            throw e
+        }
+        return null
+    }
+
+    /**
+     * After a SENT write: the reconcile pull + denial classification, then the H03 verdict
+     * for this very mutation. A transport failure of the reconcile pull is swallowed (web
+     * twin: "save committed but the reconcile pull failed — local apply kept") — the write
+     * landed or is staged/queued, and reporting it as "couldn't be saved" would invite the
+     * duplicate re-save G23 exists to prevent; the next sync trues up. A server answer
+     * from the pull (409 rev_regression, 401, …) still propagates. If the server REJECTED
+     * this mutation (dangling attachment ref / over cap — dropped durably by the drain,
+     * notice minted), the editor must learn it: rethrown as an [ApiException] carrying the
+     * server's reason code, AFTER the pull so the list already shows the server's truth.
+     */
+    private suspend fun reconcileAfterWrite(m: Mutation): SaveOutcome {
+        try {
             pull()
             surfaceStagedDenials()
+        } catch (e: IOException) {
+            // The write itself is settled; only the reconcile is missing. Never fail the save.
         }
+        rejectedMutationIds.remove(m.mutationId)?.let { reason ->
+            val status = if (reason == "item_attachment_quota" || reason == "body_too_large") 413 else 400
+            throw ApiException(status, reason, "the server refused this write: $reason")
+        }
+        return SaveOutcome.APPLIED
     }
 
     /**
@@ -1276,12 +1507,20 @@ class SyncEngine(
         )
     }
 
-    suspend fun remove(itemId: String) {
-        val existing = cache.getItem(itemId) ?: return
-        syncMutex.withLock {
-            push(listOf(deleteMutation(itemId, existing.vaultId, existing.rev)))
-            pull()
-            surfaceStagedDenials()
+    /** Delete an item, then reconcile — [saveWithUploads]'s twin, same offline verdict
+     *  (H18: QUEUED on a durable cache, [items] already hides the row). */
+    suspend fun remove(itemId: String): SaveOutcome {
+        val existing = cache.getItem(itemId)
+        if (existing == null) {
+            // H18: a queued, never-sent NEW item — the server has nothing to delete; dropping
+            // the queued put(s) is the whole removal (and the projected row disappears).
+            if (item(itemId) != null) syncMutex.withLock { coalesceQueuedNewItem(itemId) }
+            return SaveOutcome.APPLIED
+        }
+        return syncMutex.withLock {
+            val m = deleteMutation(itemId, existing.vaultId, existing.rev)
+            sendOrQueue(m)?.let { return@withLock it }
+            reconcileAfterWrite(m)
         }
     }
 
@@ -1290,6 +1529,41 @@ class SyncEngine(
         mutations.forEach { cache.enqueue(it) }
         flushQueue()
     }
+
+    /**
+     * H19: the next batch to send — at most [SERVER_BATCH_MAX] rows AND, past the first row,
+     * at most [PUSH_BODY_SOFT_CAP_BYTES] of approximate encoded size (a put's base64 blob plus
+     * framing; a delete is framing only). The first row is always taken, so a lone over-cap
+     * row is sent alone and refused alone — where [flushQueue] can drop exactly it.
+     */
+    private fun nextBatch(pending: List<Mutation>): List<Mutation> {
+        val out = ArrayList<Mutation>()
+        var bytes = 0L
+        for (m in pending) {
+            if (out.size >= SERVER_BATCH_MAX) break
+            val size = approxEncodedBytes(m)
+            if (out.isNotEmpty() && bytes + size > PUSH_BODY_SOFT_CAP_BYTES) break
+            out.add(m)
+            bytes += size
+        }
+        return out
+    }
+
+    private fun approxEncodedBytes(m: Mutation): Long =
+        (m.item?.blob?.length?.toLong() ?: 0L) + (m.item?.attachmentIds?.size ?: 0) * 40L + 256L
+
+    /**
+     * H03/H19: is this thrown push answer a DEFINITIVE refusal of the batch as a whole — one
+     * that re-sending identically can never cure? 400 (`bad_request` shapes the client itself
+     * minted; on a pre-H03 server also `unknown_attachment` / `attachment_mismatch`, which
+     * that server still throws batch-wide) and 413 (`body_too_large` — fired BEFORE the
+     * handler, so nothing in the batch was applied; on a pre-H03 server also
+     * `item_attachment_quota`). Everything else is transient or session-level and keeps the
+     * rows queued: transport, 401/426 (the session/version gate), 403/409/410, 429, 5xx.
+     * Both listed statuses roll back or never start the batch, so re-sending the halves is
+     * safe and the server's dedup window makes it idempotent.
+     */
+    private fun isWholeBatchRefusal(e: ApiException): Boolean = e.status == 400 || e.status == 413
 
     /**
      * Drain the queue in server-cap-sized batches. A `denied` mutation is durably marked
@@ -1305,50 +1579,125 @@ class SyncEngine(
         var deniedCount = 0
         val displaced = mutableListOf<Pair<WireItem, Long>>() // PDD-1: (losing serverItem, winner newRev)
         while (true) {
-            val chunk = cache.pending().take(SERVER_BATCH_MAX)
+            val chunk = nextBatch(cache.pending()) // H19: count- AND byte-bounded
             if (chunk.isEmpty()) break
-            val resp = api.push(PushRequest(chunk))
-            val byId = resp.results.associateBy { it.mutationId }
-            var progressed = false
-            for (m in chunk) {
-                val r = byId[m.mutationId] ?: continue
-                val wasReplay = replayedMutationIds.remove(m.mutationId)
-                if (r.status == "denied") {
-                    deniedCount++
-                    // LC-1 (P2, data loss): a REPLAYED edit used to be dequeued right here, on the
-                    // assumption that a denial could only mean "the vault is live again and my role
-                    // changed". But a denial equally means "the vault went in-grace AGAIN" — an
-                    // owner re-deleting during (or just after) the restore. Dropping it then
-                    // destroyed the member's parked offline edit and defeated the very F21
-                    // protection the replay exists to provide. Every denial — replayed or not —
-                    // now stages and lets surfaceStagedDenials decide against the vault's ACTUAL
-                    // fate after a fresh pull: held → re-park (survives the next restore);
-                    // live → durable drop (calm notice for a replay, thrown denial otherwise).
-                    cache.markStagedDenied(m.mutationId)
-                    preParkedByVault.getOrPut(m.vaultId) { mutableListOf() }.add(StagedDenial(m, pullStartCounter, wasReplay))
-                } else {
-                    // PDD-1: on a conflicting PUT the server keeps OUR value live (LWW) and
-                    // returns the DISPLACED (losing) version as serverItem. Capture it and
-                    // materialize the conflict copy from THAT after the drain (spec 03 §5) — the
-                    // pull side sees only the winner and would copy the wrong (surviving) value.
-                    // Guard on op=="put": a DELETE that loses to a newer edit (edit-beats-delete)
-                    // ALSO returns conflict+serverItem, but there serverItem is the SURVIVING
-                    // winner, not a losing value — materializing it would spawn a spurious copy.
-                    val si = r.serverItem
-                    val nr = r.newItemRev
-                    if (r.status == "conflict" && m.op == "put" && si != null && nr != null) displaced += si to nr
-                    // Any other definitive outcome removes it (idempotent replay returns
-                    // the original result).
-                    cache.dequeue(m.mutationId)
-                }
-                progressed = true
-            }
-            if (!progressed) break // defensive: no results matched (server returns one per mutation)
+            val outcome = pushBatch(chunk, displaced)
+            deniedCount += outcome.denied
+            if (!outcome.progressed) break // defensive: no results matched (server returns one per mutation)
         }
+        mintRejectedNotices()
         // Materialize AFTER draining — a re-entrant push here recurses into flushQueue; each
         // copy is a fresh item (baseRev 0) that applies cleanly, so the recursion is bounded.
         for ((losing, winnerRev) in displaced) materializeConflictFromServerItem(losing, winnerRev)
         return deniedCount
+    }
+
+    private class BatchOutcome(var denied: Int = 0, var progressed: Boolean = false)
+
+    /**
+     * Send ONE batch and settle each row's queue fate. H03/H19 (audit 2026-09-13): a
+     * DEFINITIVE whole-batch refusal ([isWholeBatchRefusal]) is no longer allowed to leave
+     * the batch at the head of the queue — before this, one row the server could never
+     * accept (a put whose attachment rows a peer's delete had dropped; a 200-row import
+     * chunk over the 8 MiB body cap) made every later sync throw at the same batch BEFORE
+     * its pull, so the device stopped receiving anything until a sign-out that also wiped
+     * every other queued edit. The batch is BISECTED instead: each half is re-sent (nothing
+     * of a refused batch was applied, and the dedup window makes re-sends idempotent), so
+     * healthy rows land in ≤ log2(n) extra requests and the refusal narrows to single rows,
+     * each of which is dropped durably via [rejectRow]. A per-row `rejected` status (the
+     * H03 server amendment, spec 03 §5) takes the same drop path with no bisection at all.
+     */
+    private suspend fun pushBatch(chunk: List<Mutation>, displaced: MutableList<Pair<WireItem, Long>>): BatchOutcome {
+        val out = BatchOutcome()
+        val resp = try {
+            api.push(PushRequest(chunk))
+        } catch (e: ApiException) {
+            if (!isWholeBatchRefusal(e)) throw e
+            if (chunk.size == 1) {
+                rejectRow(chunk[0], e.code)
+                out.progressed = true
+                return out
+            }
+            val mid = chunk.size / 2
+            val a = pushBatch(chunk.subList(0, mid), displaced)
+            val b = pushBatch(chunk.subList(mid, chunk.size), displaced)
+            out.denied = a.denied + b.denied
+            out.progressed = a.progressed || b.progressed
+            return out
+        }
+        val byId = resp.results.associateBy { it.mutationId }
+        for (m in chunk) {
+            val r = byId[m.mutationId] ?: continue
+            val wasReplay = replayedMutationIds.remove(m.mutationId)
+            if (r.status == "rejected") {
+                // H03: the server answered for THIS row alone — it can never apply as sent
+                // (its attachment refs are gone, or it is over quota). Drop it durably, tell
+                // the user via the notice; the sibling rows and the pull proceed.
+                rejectRow(m, r.reason ?: "rejected")
+                out.progressed = true
+                continue
+            }
+            if (r.status == "denied") {
+                out.denied++
+                // LC-1 (P2, data loss): a REPLAYED edit used to be dequeued right here, on the
+                // assumption that a denial could only mean "the vault is live again and my role
+                // changed". But a denial equally means "the vault went in-grace AGAIN" — an
+                // owner re-deleting during (or just after) the restore. Dropping it then
+                // destroyed the member's parked offline edit and defeated the very F21
+                // protection the replay exists to provide. Every denial — replayed or not —
+                // now stages and lets surfaceStagedDenials decide against the vault's ACTUAL
+                // fate after a fresh pull: held → re-park (survives the next restore);
+                // live → durable drop (calm notice for a replay, thrown denial otherwise).
+                cache.markStagedDenied(m.mutationId)
+                preParkedByVault.getOrPut(m.vaultId) { mutableListOf() }.add(StagedDenial(m, pullStartCounter, wasReplay))
+            } else {
+                // PDD-1: on a conflicting PUT the server keeps OUR value live (LWW) and
+                // returns the DISPLACED (losing) version as serverItem. Capture it and
+                // materialize the conflict copy from THAT after the drain (spec 03 §5) — the
+                // pull side sees only the winner and would copy the wrong (surviving) value.
+                // Guard on op=="put": a DELETE that loses to a newer edit (edit-beats-delete)
+                // ALSO returns conflict+serverItem, but there serverItem is the SURVIVING
+                // winner, not a losing value — materializing it would spawn a spurious copy.
+                val si = r.serverItem
+                val nr = r.newItemRev
+                if (r.status == "conflict" && m.op == "put" && si != null && nr != null) displaced += si to nr
+                // Any other definitive outcome removes it (idempotent replay returns
+                // the original result).
+                cache.dequeue(m.mutationId)
+                pendingDocCache.remove(m.mutationId)
+            }
+            out.progressed = true
+        }
+        return out
+    }
+
+    /**
+     * H03/H19: durably drop ONE definitively-refused queue row. Recorded per vault for the
+     * "write-rejected" notice ([mintRejectedNotices]) and per mutationId so a direct save
+     * can throw the honest editor error for its own row ([reconcileAfterWrite]). There is
+     * no local revert to do here — unlike the web store, core applies nothing optimistically
+     * (the [items] overlay reads the queue, so dropping the row IS the revert), and the
+     * pull that follows the drain delivers the server's truth for the item.
+     */
+    private fun rejectRow(m: Mutation, reason: String) {
+        cache.dequeue(m.mutationId)
+        replayedMutationIds.remove(m.mutationId)
+        pendingDocCache.remove(m.mutationId)
+        rejectedMutationIds[m.mutationId] = reason
+        rejectedByVault.getOrPut(m.vaultId) { mutableListOf() }.add(reason)
+    }
+
+    /** One "write-rejected" notice per vault for the rows [rejectRow] dropped this drain —
+     *  the durable user-facing surface: the throw a direct save raises is often swallowed
+     *  by a background sync, and a background drain has no editor to throw into. */
+    private fun mintRejectedNotices() {
+        if (rejectedByVault.isEmpty()) return
+        for ((vid, reasons) in rejectedByVault) {
+            val name = cache.vaults().find { it.vaultId == vid }
+                ?.let { account.decryptVaultName(vid, it.metaBlob) } ?: VAULT_NAME_FALLBACK
+            pushNotice(LifecycleNotice(account.newItemId(), vid, name, "write-rejected", parkedCount = reasons.size, reason = reasons.first()))
+        }
+        rejectedByVault.clear()
     }
 
     /**

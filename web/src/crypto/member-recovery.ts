@@ -6,8 +6,8 @@ import { randomBytes } from "./provider";
 
 /**
  * spec 04 §per-member / design 2026-07-12 §F.6 — the per-member SELF-SERVICE recovery piece.
- * One of four byte-parity twins (core MemberRecovery.kt, this, MV3 ext, server), pinned to
- * spec/test-vectors/member-recovery.json.
+ * One of three byte-parity twins (core MemberRecovery.kt, this, server), pinned to
+ * spec/test-vectors/member-recovery.json. The MV3 extension has no recovery path and no twin.
  *
  * The symmetric counterpart to org escrow: the member holds ONE high-entropy secret at both
  * seal-time (enroll) and open-time (recovery), so there is no org PUBLIC key a hostile server

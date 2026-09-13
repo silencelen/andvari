@@ -15,7 +15,7 @@ import {
   fromB64,
   open,
   seal,
-  sealOpen,
+  openSharedGrant,
   toB64,
   usageKey,
   wrapKey,
@@ -48,12 +48,13 @@ import { currentCode, isValidTotp, normalizeTotp } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor, stepUsernameFor, type StepUsername } from "./savetarget";
+import { capturedSiteUri } from "./siteurl";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
 import { armGate, withRedeemInFlight } from "./locksequence";
 import { conflictCopyId, conflictCopyName } from "./conflictcopy";
-import { FLUSH_DEBOUNCE_MS, mergeUsage, parseUsage, pruneUsage, recordUse, serializeUsage, type UsageMap } from "./usage";
+import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, recordUse, serializeUsage, type ServerLedger, type UsageMap } from "./usage";
 import { applyServerSwitch, purgeServerDataFor } from "./serverswitch";
 
 /**
@@ -310,7 +311,7 @@ interface TabState {
    *  locked re-offers to one per REOFFER_MIN_GAP_MS (knownlogins.ts reofferDecision owns the
    *  ordering). All three are cleared when the unlock re-offer hands the pending to a live
    *  session, and none ride publicPending. */
-  pending?: (PendingSave & { password: string; frameId: number; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number }) | undefined;
+  pending?: (PendingSave & { password: string; frameId: number; uri?: string; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number }) | undefined;
   /** S3 per-frame card-form registry: frameId → { the frame's browser-set origin, ALL its card
    *  forms' kinds in document order (Tier 2 §2) }. METADATA ONLY (never card values). `origin` is
    *  `sender.origin` ([A2]); every card offer/redemption re-derives the tab's top origin and
@@ -1328,7 +1329,15 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   events?.close(); // live socket + all its timers die FIRST — locked means no bell traffic at all
   events = null;
   const secondsAtLock = autoLockSeconds; // capture before the reset below (web App.tsx:209 parity)
-  void flushUsage(); // best-effort: store what this session recorded before the keys go
+  // Audit G03 → H33: store what this session recorded BEFORE the keys and the tokens go — AWAITED,
+  // bounded. The old `void flushUsage()` dispatched the GET with a live token, but its PUT was
+  // issued after that round trip, by which time the chrome.storage awaits below had run and
+  // `api.setTokens(null, null)` had emptied the header: 401 → tryRefresh with a null refresh
+  // token → thrown, and the re-arm catch found `session` already null, so the last 15 s of fills
+  // were dropped on every manual/idle lock. Same shape and bound as the natives' lock path
+  // (UsageRecorderCore.flushForSession): the lock is delayed by at most TEARDOWN_FLUSH_TIMEOUT_MS,
+  // and a flush that outlives the bound is abandoned exactly as before, never awaited further.
+  await Promise.race([flushUsage(), delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);
   session = null; // in-memory vault material — INCLUDING the memory-only uvk (breaker B1) — is dropped
   clearPendingUsage(); // behavioral records must not outlive the session that produced them
   clearPendingTotp(); // and any in-flight TOTP challenge (covers sign-out; a normal lock has none)
@@ -1413,12 +1422,18 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
  *  never the armed-retaining lock (breaker A3⊕B2). Routed here from onRevoked, the popup "Sign out"
  *  action, and every definitive-401 during a quick-unlock redeem. */
 async function doSignOut(): Promise<void> {
-  // Server-session revocation FIRST, while api still holds the tokens (Android/desktop parity:
-  // both AWAIT a bounded api.logout() with the same 5 s ceiling — without it "Sign out" leaves
+  // Server-session revocation BEFORE the local teardown, while api still holds the tokens
+  // (Android/desktop parity: both AWAIT a bounded api.logout() with the same 5 s ceiling — without it "Sign out" leaves
   // the refresh token valid server-side for ~30 days). Best-effort + bounded: an offline sign-out
   // must never hang the wipe, and on the already-revoked routes (onRevoked, definitive-401) the
   // POST is a harmless no-op. Sign-out ONLY — doLock deliberately keeps the session so quick
   // unlock can re-arm.
+  // Audit G03 → H33: the usage flush gets the awaited-logout treatment too, and it goes FIRST —
+  // logout() revokes the very session the flush's GET+PUT ride on, so doLock's flush below would
+  // otherwise run against a revoked pair (401, dropped, not re-armed). Desktop/Android sign-out
+  // is the sibling shape: bounded usage flush, then bounded logout, then the local teardown.
+  // doLock("signout") still calls flushUsage(), finds an empty buffer, and returns at once.
+  await Promise.race([flushUsage(), delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);
   await Promise.race([api.logout(), delay(5000)]);
   void clearBioCred(); // 0.17.0: explicit sign-out tears down the amendment-4 reuse record too
   return doLock("signout");
@@ -1968,12 +1983,12 @@ function buildVaultKeys(
     try {
       let vk: Uint8Array;
       if (g.sealedVk) {
-        // Member grant: crypto_box_seal to our identity key; payload {v,vaultId,vk} bound to the row.
-        const p = JSON.parse(
-          new TextDecoder().decode(sealOpen(identity.publicKey, identity.privateKey, fromB64(g.sealedVk))),
-        ) as { v: number; vaultId: string; vk: string };
-        if (p.v !== 1 || p.vaultId !== g.vaultId) continue; // reject a reseated/forged grant
-        vk = fromB64(p.vk);
+        // Member grant: crypto_box_seal to our identity key; payload {v,vaultId,vk} bound to the
+        // row. openSharedGrant (crypto.ts) is the vector-graded twin of core/web and THROWS on a
+        // reseated/forged grant or a non-32-byte VK (H93) — the catch below skips the grant, so a
+        // malformed one is refused here rather than accepted into vaultKeys and surfacing later
+        // as an empty vault.
+        vk = openSharedGrant(identity.publicKey, identity.privateKey, g.vaultId, fromB64(g.sealedVk));
       } else if (g.wrappedVk) {
         vk = open(uvk, fromB64(g.wrappedVk), adVk(g.vaultId, userId)); // owner / personal
       } else {
@@ -2075,7 +2090,7 @@ const approvedCommitsInFlight = new Set<number>();
 async function commitApprovedSave(
   tabId: number,
   st: TabState,
-  pending: PendingSave & { password: string; frameId: number; approvedAt?: number },
+  pending: PendingSave & { password: string; frameId: number; uri?: string; approvedAt?: number },
 ): Promise<void> {
   if (approvedCommitsInFlight.has(tabId)) return;
   approvedCommitsInFlight.add(tabId);
@@ -2694,15 +2709,26 @@ function recordUsage(itemId: string): void {
 }
 
 /**
- * Merge against the server copy, then store. The re-read is what stops last-writer-wins from
- * meaning last-writer-DESTROYS — the phone's and the laptop's entries survive our flush even
- * though the endpoint has no merge semantics of its own.
+ * Read the server copy, decide with planFlush (usage.ts — the pure leaf `node --test` pins), then
+ * store. The re-read is what stops last-writer-wins from meaning last-writer-DESTROYS — the
+ * phone's and the laptop's entries survive our flush even though the endpoint has no merge
+ * semantics of its own.
+ *
+ * With `liveItemIds` (resync's post-full-snapshot point, the ONLY caller allowed to prune) the
+ * round runs even with NOTHING buffered (audit H35): the prune is the ledger's growth bound, and
+ * a resync almost never lands inside the 15 s debounce window after a fill, so gating it behind a
+ * non-empty buffer left it inert on this client. planFlush keeps a quiet resync write-free.
+ *
+ * The three server outcomes stay DISTINCT (audit H05): a GET that failed or a blob that would not
+ * open is NOT an empty ledger to overwrite — no PUT, the buffer is re-armed, the next flush
+ * retries. Only a genuinely absent blob (`sealedUsage: null`) is written without a merge.
  *
  * Every failure path is silent: this is a ranking hint and must never surface an error, break a
  * fill, or retry hard enough to be noticed.
  */
 async function flushUsage(liveItemIds?: ReadonlySet<string>): Promise<void> {
-  if (!session || Object.keys(pendingUsage).length === 0) return;
+  if (!session) return;
+  if (Object.keys(pendingUsage).length === 0 && !liveItemIds) return;
   // Keyed from the PERSONAL VK, which a snapshot-restored session still holds — the whole reason
   // this client can participate at all (the UVK would be absent here; breaker B1).
   const vk = session.vaultKeys.get(session.personalVaultId);
@@ -2712,20 +2738,28 @@ async function flushUsage(liveItemIds?: ReadonlySet<string>): Promise<void> {
   try {
     const key = usageKey(vk);
     const adu = adUsage(session.userId);
-    let merged = mine;
+    let server: ServerLedger;
     try {
       const res = await api.getUsage();
-      if (res.sealedUsage) {
-        merged = mergeUsage(parseUsage(new TextDecoder().decode(open(key, fromB64(res.sealedUsage), adu))), mine);
-      }
+      server = res.sealedUsage
+        ? { kind: "present", map: parseUsage(new TextDecoder().decode(open(key, fromB64(res.sealedUsage), adu))) }
+        : { kind: "absent" };
     } catch {
-      /* could not read the remote copy — store ours rather than lose this session's uses */
+      // Offline / HTTP failure on the GET, or a present blob that would not open under our key —
+      // the two cases spec 02 §8.2's MUST is about. NOT "no ledger yet": that is the null branch.
+      server = { kind: "unreadable" };
     }
-    // G04: prune ONLY when handed a provably-complete live set (resync's post-full-snapshot point).
-    // The debounce and lock-path flushes pass nothing — pruning against a partial view would drop
-    // entries for items this session just hasn't learned yet (undecryptable / unarrived grant).
-    if (liveItemIds) merged = pruneUsage(merged, liveItemIds);
-    await api.putUsage(toB64(seal(key, new TextEncoder().encode(serializeUsage(merged)), adu)));
+    // G04: the prune runs ONLY when handed a provably-complete live set (resync's post-full-
+    // snapshot point). The debounce and lock-path flushes pass nothing — pruning against a partial
+    // view would drop entries for items this session just hasn't learned yet.
+    const put = planFlush(server, mine, liveItemIds);
+    if (put === null) {
+      // Skipped the write on purpose — keep the fills for the next round (session-gated, see the
+      // catch below). A null plan on a READABLE copy means there was nothing to write.
+      if (server.kind === "unreadable" && session) pendingUsage = mergeUsage(mine, pendingUsage);
+      return;
+    }
+    await api.putUsage(toB64(seal(key, new TextEncoder().encode(serializeUsage(put)), adu)));
   } catch {
     // Re-arm rather than drop — but ONLY while the session still stands. This catch runs after an
     // await, so on the lock path it can resume AFTER clearPendingUsage() has run; re-arming
@@ -3393,7 +3427,7 @@ async function capturedCredential(
   // nothing to save), but it can never be the UPDATE target — the server denies a reader's push —
   // so the banner offers Save-new (a fresh personal item) instead of a doomed Update.
   const updatable = existing !== undefined && writableItem(existing) ? existing : undefined;
-  const pending: PendingSave & { password: string; frameId: number; lockedAt?: number; quiet?: boolean; offeredAt?: number } = {
+  const pending: PendingSave & { password: string; frameId: number; uri: string; lockedAt?: number; quiet?: boolean; offeredAt?: number } = {
     host,
     username,
     updatesItemId: updatable?.itemId ?? null,
@@ -3401,6 +3435,10 @@ async function capturedCredential(
     updatesItemUsername: updatable?.doc.login?.username ?? null,
     password: msg.password,
     frameId,
+    // H124: the uri a NEW item will store — `http://…` when the page was plain http (loopback /
+    // intranet), else the classic `https://<host>`. Decided at capture, where the page url is
+    // known; SW-side only (publicPending never carries it — the banner shows `host`).
+    uri: capturedSiteUri(msg.url, host),
   };
   // Locked-capture posture (owner decisions 2026-08-18). A pending minted while locked holds a
   // plaintext page password in storage.session, so it carries a TTL stamp (LOCKED_PENDING_TTL_MS,
@@ -3486,7 +3524,7 @@ async function resolvePendingSave(
 async function commitPendingSave(
   tabId: number,
   st: TabState,
-  pending: PendingSave & { password: string; frameId: number; approvedAt?: number },
+  pending: PendingSave & { password: string; frameId: number; uri?: string; approvedAt?: number },
 ): Promise<{ res: Res<"resolvePendingSave">; wrote: boolean }> {
   if (!session || !session.personalVaultId) return { res: { ok: false, code: "locked", error: "locked" }, wrote: false };
   // Re-decide save-vs-update NOW (the capture-time decision is stale if the vault was LOCKED then —
@@ -3521,7 +3559,8 @@ async function commitPendingSave(
     result = await putExisting(decision.target, doc);
   } else {
     // New login — the frozen/username target vanished, or a locked-2b / 2c ambiguity (recoverable New).
-    result = await putNewLogin(pending.host, pending.username, pending.password);
+    // H124: a pending persisted by a pre-H124 SW has no `uri` — fall back to the old spelling.
+    result = await putNewLogin(pending.host, pending.username, pending.password, pending.uri ?? `https://${pending.host}`);
   }
   if (result.ok) {
     st.pending = undefined;
@@ -3750,10 +3789,11 @@ async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: b
   return { ok: true };
 }
 
-async function putNewLogin(host: string, username: string, password: string): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
+/** `uri` is the stored site uri (H124: `capturedSiteUri` — http stays http); `host` names the item. */
+async function putNewLogin(host: string, username: string, password: string, uri: string): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
   if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked or no personal vault" };
   const itemId = crypto.randomUUID();
-  const doc: ItemDoc = { type: "login", name: host, login: { username, password, uris: [`https://${host}`] } };
+  const doc: ItemDoc = { type: "login", name: host, login: { username, password, uris: [uri] } };
   // NEW logins seal at the login doc floor (format.ts). G2 added card creation via a SEPARATE
   // card-aware seal (CARD_FORMAT_VERSION); this path is logins-only.
   const r = await putItem(itemId, session.personalVaultId, doc, 0, LOGIN_FORMAT_VERSION);
@@ -3911,6 +3951,10 @@ async function linkUri(msg: Extract<Req, { type: "linkUri" }>, sender: chrome.ru
   // G21: a reader grant can't take the append — refuse here instead of pushing a write the server
   // will deny (the offer banner renders its honest "Could not link." line).
   if (!writableItem(it)) return { ok: false, error: "read-only vault" };
-  const doc: ItemDoc = { ...it.doc, login: { ...it.doc.login, uris: [...kept, `https://${webHost}`] } };
+  // H124: a link offered on a plain-http page stores the http origin the user is actually on; the
+  // browser-set `sender.origin` is the only source (a page-supplied url could not be trusted for
+  // the [A2] host check either). A popup sender has no origin → the classic `https://<host>`.
+  const uri = capturedSiteUri(sender.tab !== undefined && typeof sender.origin === "string" ? sender.origin : "", webHost);
+  const doc: ItemDoc = { ...it.doc, login: { ...it.doc.login, uris: [...kept, uri] } };
   return putExisting(it, doc);
 }

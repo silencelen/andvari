@@ -30,6 +30,7 @@ import io.silencelen.andvari.core.client.Duplicates
 import io.silencelen.andvari.core.client.ExportPlanner
 import io.silencelen.andvari.core.client.ExportVault
 import io.silencelen.andvari.core.client.HouseholdCopy
+import io.silencelen.andvari.core.client.SaveOutcome
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
 import io.silencelen.andvari.core.client.PlannedAttachment
 import io.silencelen.andvari.core.client.CsvImport
@@ -190,6 +191,9 @@ sealed interface Screen {
 data class UiState(
     val screen: Screen = Screen.Loading,
     val items: List<VaultItem> = emptyList(),
+    /** H18: itemIds with a QUEUED (unflushed) offline save/delete — the list's "pending sync"
+     *  mark (web's pendingSyncItemIds twin). `items` already projects the queued doc. */
+    val pendingSyncIds: Set<String> = emptySet(),
     // ---- vault health (design 2026-08-23) ----
     /** Which half of the Health screen is showing: "passwords" | "duplicates" | "staleness". */
     val healthTab: String = "passwords",
@@ -2276,15 +2280,27 @@ class AndvariViewModel(
         // as the SAME item instead of a duplicate (desktop's draftItemId pattern).
         if (itemId == null && draftItemId == null) draftItemId = account?.newItemId()
         // Named: a trailing lambda binds to the LAST parameter (the runGesture rule).
-        engine!!.saveWithUploads(itemId, doc, uploads, vaultId, newItemId = if (itemId == null) draftItemId else null)
+        val outcome = engine!!.saveWithUploads(itemId, doc, uploads, vaultId, newItemId = if (itemId == null) draftItemId else null)
         draftItemId = null
         refreshItems()
         onSaved()
+        // H18 (G23 finished): QUEUED means the row sits in the DURABLE queue and the list
+        // already shows it with its "pending sync" mark — the editor closed exactly like the
+        // online path, so the only thing left to say is the calm queued sentence. An offline
+        // save on a NON-durable cache never gets here: the engine throws, forSaveError renders
+        // the honest "couldn't be saved" line (H17) and the editor stays open.
+        if (outcome == SaveOutcome.QUEUED) _ui.value = _ui.value.copy(notice = HouseholdCopy.SAVE_OFFLINE)
     }
 
+    /** Item history restore (H03): an ordinary save of the archived doc with every attachment
+     *  ref the live item no longer carries stripped — see [SyncEngine.versionDocForRestore]. */
+    fun restoreVersion(itemId: String, version: ItemDoc, onSaved: () -> Unit = {}) =
+        saveItem(itemId, engine?.versionDocForRestore(itemId, version) ?: version, onSaved = onSaved)
+
     fun deleteItem(itemId: String) = op {
-        engine!!.remove(itemId)
+        val outcome = engine!!.remove(itemId)
         refreshItems()
+        if (outcome == SaveOutcome.QUEUED) _ui.value = _ui.value.copy(notice = HouseholdCopy.SAVE_OFFLINE)
     }
 
     /** Manual sync (the top-bar refresh icon). #24: lands a brief "Synced." notice — the
@@ -3270,6 +3286,15 @@ class AndvariViewModel(
         val current = VaultSession.get()
         _ui.value = _ui.value.copy(busy = true, error = null)
         viewModelScope.launch {
+            // Audit G03 → H33: the usage flush gets the awaited-logout treatment too — AWAIT it
+            // (bounded) BEFORE the revocation. logout() revokes the very session the flush's
+            // GET+PUT ride on, and VaultSession.lock()'s teardown flush below used to run against
+            // that revoked pair: 401, dropped, and nothing re-armed (the catch is session-gated),
+            // so the last debounce window of uses — the copy made right before "Sign out" — was
+            // lost every time. The desktop is the sibling that had this right (DesktopState.signOut);
+            // this is its exact shape and bound. lock()'s flush still runs afterwards, finds an
+            // empty buffer, and only closes the transport.
+            if (current != null) runCatching { withTimeoutOrNull(UsageRecorder.LOCK_FLUSH_TIMEOUT_MS) { UsageRecorder.flush() } }
             // AWAIT the server-side revocation (bounded) BEFORE tearing the session down.
             // The old fire-and-forget launch raced VaultSession.lock() → api.close(), which
             // cancelled the in-flight logout and left the refresh token valid for ~30 days.
@@ -3857,18 +3882,22 @@ class AndvariViewModel(
     private suspend fun syncNow(e: SyncEngine) {
         e.sync()
         store.lastSyncAt = System.currentTimeMillis()
-        // G04: a completed sync is the ONLY moment `e.items()` is provably the complete live
-        // set, so it is the only safe place to prune the ever-growing usage blob (pruning a
-        // pre-sync view would drop other devices' entries). Guard on the session still owning
-        // THIS engine — a mid-sync lock/rebind must not prune one account's ids against
+        // G04: a completed sync is the ONLY moment the engine's envelope set is provably the
+        // complete live set, so it is the only safe place to prune the ever-growing usage blob
+        // (pruning a pre-sync view would drop other devices' entries). Guard on the session still
+        // owning THIS engine — a mid-sync lock/rebind must not prune one account's ids against
         // another's blob. Flush stays batched; the prune only writes when it drops something.
+        // H36: the keep-set is `liveItemIds()` — every live ENVELOPE, readable or not — never
+        // `items()`, the decrypted working set: that omits newer-formatVersion envelopes and
+        // vaults whose key has not arrived, so pruning against it erased those live items' usage
+        // on every poll of this device (web and the extension already fold those ids in).
         VaultSession.get()?.let { s ->
-            if (s.engine === e) UsageRecorder.flushWithPrune(s, e.items().mapTo(HashSet()) { it.itemId })
+            if (s.engine === e) UsageRecorder.flushWithPrune(s, e.liveItemIds())
         }
     }
 
     private fun refreshItems() {
-        _ui.value = _ui.value.copy(items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null)
+        _ui.value = _ui.value.copy(items = engine?.items() ?: emptyList(), pendingSyncIds = engine?.pendingSyncItemIds() ?: emptySet(), needsUpdateCount = needsUpdate(), busy = false, error = null)
         refreshLifecycle()
     }
 
@@ -3877,7 +3906,7 @@ class AndvariViewModel(
         // unlock, and enroll (F26: the explanation must not outlive the event it explains).
         // §F.9 gate state clears with it (recoveryPhrase always did; the capture error and the
         // replaced-phrase notice are meaningless once the vault is open).
-        _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), busy = false, error = null, loginTotpRequired = false, quickUnlockMessage = null, lockReason = null, recoveryPhrase = null, recoveryCaptureError = null, recoveryReplacedNotice = false)
+        _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), pendingSyncIds = engine?.pendingSyncItemIds() ?: emptySet(), needsUpdateCount = needsUpdate(), busy = false, error = null, loginTotpRequired = false, quickUnlockMessage = null, lockReason = null, recoveryPhrase = null, recoveryCaptureError = null, recoveryReplacedNotice = false)
         refreshLifecycle()
         refreshQuickUnlockState() // may surface the one-time enrollment offer card
     }

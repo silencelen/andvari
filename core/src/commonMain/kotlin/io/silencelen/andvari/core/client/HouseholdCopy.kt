@@ -175,11 +175,26 @@ object HouseholdCopy {
      *  match — try again." (the authenticator hint is the actionable half). */
     const val BAD_TOTP_CODE = "That code isn't right — check your authenticator and try again."
 
-    /** NATIVE-PINNED: SaveConfirmActivity's IOException sentence (autofill save offline).
-     *  G23: the push queue is durable — an IO failure leaves the save QUEUED, and it applies
-     *  on the next sync. So this must not claim failure or invite a re-save: a followed
-     *  retry of a new-item save mints a fresh itemId and the item lands twice. */
+    /** NATIVE-PINNED: the offline-save SUCCESS sentence (G23; audit 2026-09-13 H17/H18).
+     *  Rendered by the natives ONLY when [SyncEngine.saveWithUploads]/[SyncEngine.remove]
+     *  return [SaveOutcome.QUEUED] — i.e. the row sits in a DURABLE queue and the list already
+     *  shows it — so it must not claim failure or invite a re-save (a retry of a new-item
+     *  save mints a fresh itemId and the item lands twice). It is NEVER the mapping of a
+     *  thrown IOException any more: a throw now means the write was NOT queued — the
+     *  in-memory cache (desktop before consent, org-forbid mode) frees its queue at the
+     *  next lock, and an upload that died offline never enqueued anything — and rendering
+     *  "queued" over that was a false safety claim. See [SAVE_FAILED_OFFLINE]. */
     const val SAVE_OFFLINE = "Offline — your save is queued and will finish when you're connected."
+
+    /** H17: the honest offline-save FAILURE line — [forSaveError]'s IOException row. The
+     *  editor stays open with the typed fields; nothing was queued. TWIN in spirit of web's
+     *  "Save failed — nothing was changed." on a NullCache (store.ts mayQueue=false). */
+    const val SAVE_FAILED_OFFLINE = "Offline — this couldn't be saved. Try again when you're connected."
+
+    /** H03: the server's per-row `rejected` verdict for a put whose attachment refs no longer
+     *  resolve (`unknown_attachment` / `attachment_mismatch`). A permanent refusal — never
+     *  "try again": the same put fails identically forever. The fix is in the user's hands. */
+    const val SAVE_REJECTED_ATTACHMENT = "The server refused this save — an attachment it references is no longer there. Remove that attachment, then save again."
 
     /** TWIN of extension saveErrorCopy("failed") — retryable, no jargon. */
     const val SAVE_FAILED = "Could not save — try again."
@@ -258,6 +273,35 @@ object HouseholdCopy {
             "$count recovered edits to “$vaultName” couldn't be applied — your access may have changed while the vault was deleted."
         }
 
+    /**
+     * TWIN of web Vault.tsx noticeBody's "write-rejected" LEAD sentence (audit 2026-09-13
+     * H03/H19; android SharingScreen + desktop Ui render it verbatim, web appends its own
+     * revert tail because only web applies writes optimistically). Fired when the queue drain
+     * durably DROPPED rows the server definitively refused — the poison-row class that used to
+     * wedge the whole queue. It is deliberately NOT the "write-refused" (permission) sentence:
+     * nothing about the member's access changed, the write itself could never apply. The
+     * reason clause names the cause, because a bare "couldn't be applied" reads as data loss:
+     *  - `unknown_attachment` / `attachment_mismatch` — an attachment the edit referenced no
+     *    longer exists on the server (a peer deleted the item, the 24 h orphan sweep, or a
+     *    history restore over a since-removed file);
+     *  - `item_attachment_quota` / `body_too_large` — too large for the server to accept;
+     *  - anything else (a client-minted request the server called malformed) — "the server
+     *    refused it", with no false specificity.
+     * [count] is the notice's `parkedCount` (null → 0); the article idiom matches its banner
+     * neighbours ("An offline change …"); web pins every literal here byte-equal.
+     */
+    fun writeRejectedNotice(count: Int, vaultName: String, reason: String?): String {
+        val lead = if (count == 1) "An offline change to “$vaultName” couldn't be applied" else "$count offline changes to “$vaultName” couldn't be applied"
+        val why = when (reason) {
+            "unknown_attachment", "attachment_mismatch" ->
+                if (count == 1) "an attachment it referenced no longer exists there." else "attachments they referenced no longer exist there."
+            "item_attachment_quota", "body_too_large" ->
+                if (count == 1) "it was too large for the server to accept." else "they were too large for the server to accept."
+            else -> if (count == 1) "the server refused it." else "the server refused them."
+        }
+        return "$lead — $why"
+    }
+
     // ---- general mapper ----
 
     /**
@@ -329,11 +373,14 @@ object HouseholdCopy {
     }
 
     /**
-     * Save/edit an item (editor save, autofill save-confirm). IO → [SAVE_OFFLINE] (the
-     * vault will retry when connected — kinder than VPN instructions mid-save); server
-     * refusals route through the shared code map (409/conflict → "changed somewhere
-     * else", 401 → session expired, lifecycle rows); a crypto throw on the save-time
-     * re-auth path is wrong-password; anything else → [SAVE_FAILED].
+     * Save/edit an item (editor save, autofill save-confirm). IO → [SAVE_FAILED_OFFLINE]
+     * (H17: a THROWN transport failure means the write was NOT queued — a durable engine
+     * returns [SaveOutcome.QUEUED] instead of throwing, and the natives render
+     * [SAVE_OFFLINE] on that return, never on this ladder); server refusals route through
+     * the shared code map (409/conflict → "changed somewhere else", 401 → session expired,
+     * lifecycle rows, H03's `unknown_attachment`/`attachment_mismatch` → the attachment
+     * sentence); a crypto throw on the save-time re-auth path is wrong-password; anything
+     * else → [SAVE_FAILED].
      */
     fun forSaveError(t: Throwable): String = when {
         t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE
@@ -341,7 +388,7 @@ object HouseholdCopy {
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
         t is CryptoException -> WRONG_MASTER_PASSWORD
         t is ApiException -> apiCopy(t)
-        t is IOException -> SAVE_OFFLINE
+        t is IOException -> SAVE_FAILED_OFFLINE
         else -> SAVE_FAILED
     }
 
@@ -450,6 +497,10 @@ object HouseholdCopy {
         // per-member recovery block was absent or malformed. Every client always sends one, so
         // this is an app fault, never something the user did — say so without blaming them.
         "recovery_required" -> "andvari couldn't finish setting up your recovery phrase — start the setup again, and update andvari if it keeps happening."
+        // H03 (audit 2026-09-13): the server's per-mutation `rejected` verdict (spec 03 §5),
+        // re-thrown by SyncEngine for the save that sent it. Permanent — the generic 400
+        // "try again" row below would repeat identically; the user has to drop the attachment.
+        "unknown_attachment", "attachment_mismatch" -> SAVE_REJECTED_ATTACHMENT
         // Named specifics.
         "bad_totp_code" -> BAD_TOTP_CODE
         "recovery_piece_stale" -> "Your recovery phrase was replaced from another device — set up recovery again from Settings."

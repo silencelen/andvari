@@ -88,6 +88,33 @@ class ExportVectorsTest {
         }
     }
 
+    /**
+     * Schema v9 (audit H95, 2026-09-13): the corpus had been regenerated for neither `check` nor
+     * `dupeAck`, and because both consumers decode payloadUtf8 SEMANTICALLY the stale corpus stayed
+     * green while never grading the round-trip with those fields present. This pins that the named
+     * case exists, that its pinned plaintext carries both fields populated (a regenerate that lost
+     * them would fail here, not silently pass), and that they survive the container round-trip
+     * typed — the same assertion `container_open_pinnedBytes` makes structurally, made by name.
+     */
+    @Test
+    fun container_v9_checkAndDupeAck_surviveTheRoundTrip() {
+        val case = v.arr("container").first { it.s("name") == "schema-v9-check-and-dupeack" }
+        val pinned = Json.parseToJsonElement(case.s("payloadUtf8")).jsonObject.getValue("items").jsonArray.map { it.jsonObject.getValue("doc").jsonObject }
+        for (d in pinned) {
+            assertEquals(true, d["dupeAck"]?.jsonPrimitive?.content?.isNotEmpty(), "pinned doc carries dupeAck")
+            assertEquals(true, d["check"] is JsonObject, "pinned doc carries check")
+        }
+        val opened = Backup.open(crypto, case.s("passphraseUtf8"), case.b("containerB64"))
+        val docs = opened.payload.items.map { it.doc }
+        assertEquals(2, docs.size)
+        assertEquals("77777777-7777-4777-8777-777777777777|88888888-8888-4888-8888-888888888888", docs[0].dupeAck)
+        assertEquals(docs[0].dupeAck, docs[1].dupeAck)
+        // The carry-forward shape: a failing verdict that still remembers when it last worked.
+        assertEquals(ItemCheck(at = 1751843000000, result = "bad", okAt = 1751800000000), docs[0].check)
+        // The snoozed shape: a verdict with a horizon.
+        assertEquals(ItemCheck(at = 1751844000000, result = "blocked", until = 1754436000000), docs[1].check)
+    }
+
     @Test
     fun rejects() {
         for (r in v.arr("reject")) {

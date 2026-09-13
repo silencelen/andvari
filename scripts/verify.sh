@@ -37,6 +37,38 @@ if [ "$CORE_VER" != "$AND_VER" ] || [ "$CORE_VER" != "$DESK_VER" ] || [ "$CORE_V
   exit 1
 fi
 
+# ...and the lockfiles carry the SAME number twice more (root `version` and `packages[""].version`,
+# both written by npm from package.json on every install). `npm ci` never reads either, so nothing
+# in the build ever notices when they rot — which is exactly what happened: web/package-lock.json
+# sat at 0.24.0 through three fleet bumps while web/package.json said 0.26.3 (audit H87). That is
+# the same "a version literal nobody checks is how the other four drifted" shape the block above
+# was written for, one file away from it, so the two lock roots join the gate.
+#
+# Read with node (already a hard prerequisite; no jq dependency) rather than grep, so we compare
+# the parsed values and can also catch the rarer half-refresh where the root and the packages[""]
+# copy disagree with each other.
+lockver() {
+  local label="$1" file="$2" out=""
+  [ -f "$file" ] || { echo "    VERSION GATE: missing ${file#"$REPO_DIR"/}" >&2; exit 1; }
+  out=$(node -p '
+    const p = require(process.argv[1]);
+    const root = p.version ?? "";
+    const self = ((p.packages || {})[""] || {}).version ?? "";
+    root === self ? root : "SELF-SKEW:" + root + "/" + self;
+  ' "$file" 2>/dev/null) || true
+  case "${out:-}" in
+    "")            echo "    VERSION GATE: could not parse a root version out of ${file#"$REPO_DIR"/}" >&2; exit 1 ;;
+    SELF-SKEW:*)   echo "    VERSION GATE: ${file#"$REPO_DIR"/} disagrees with itself ($label ${out#SELF-SKEW:}) — regenerate it." >&2; exit 1 ;;
+  esac
+  printf '%s' "$out"
+}
+WEB_LOCK_VER=$(lockver 'root/packages[""]' "$REPO_DIR/web/package-lock.json")
+if [ "$WEB_LOCK_VER" != "$PKG_VER" ]; then
+  echo "    LOCKFILE VERSION SKEW: web/package-lock.json says $WEB_LOCK_VER but web/package.json says $PKG_VER." >&2
+  echo "    Refresh it without touching the dependency tree:  (cd web && npm install --include=dev --package-lock-only)" >&2
+  exit 1
+fi
+
 # The CHANGELOG heading is release paperwork, and paperwork is what gets skipped: assert the top
 # `## <ver>` matches the fleet the tree actually builds, so a bump without an entry (or an entry
 # without a bump) fails here instead of at publish time.
@@ -45,12 +77,23 @@ if [ "$CHANGELOG_VER" != "$CORE_VER" ]; then
   echo "    CHANGELOG SKEW: top heading is '${CHANGELOG_VER:-<none>}' but the fleet is $CORE_VER — add/retitle the entry." >&2
   exit 1
 fi
-echo "    all clients report $CORE_VER (CHANGELOG heading agrees)"
+echo "    all clients report $CORE_VER (CHANGELOG heading agrees; web/package-lock.json root agrees)"
 
 # The extension rides its OWN version track (separate store review cadence), so it is never equated
 # with the fleet. Its three hand-edited literals are held in lockstep by extension/src/version.test.ts,
 # which the extension leg below runs — no need to re-assert that here.
 EXT_VER=$(lit '"version"' "$REPO_DIR/extension/manifest.json" '"version"[[:space:]]*:[[:space:]]*"[^"]+"')
+
+# extension/package-lock.json is the FOURTH copy of that number and the one version.test.ts does
+# not hold (it pins manifest.json / manifest.firefox.json / package.json). It happened to be in
+# sync at 0.26.0 when H87 was written — the web lock, the same file one directory over, was three
+# bumps stale — so it joins here to stay that way.
+EXT_LOCK_VER=$(lockver 'root/packages[""]' "$REPO_DIR/extension/package-lock.json")
+if [ "$EXT_LOCK_VER" != "$EXT_VER" ]; then
+  echo "    LOCKFILE VERSION SKEW: extension/package-lock.json says $EXT_LOCK_VER but extension/manifest.json is $EXT_VER." >&2
+  echo "    Refresh it without touching the dependency tree:  (cd extension && npm install --include=dev --package-lock-only)" >&2
+  exit 1
+fi
 
 # ...but merely PRINTING it is what let the paperwork rot (audit F41): the 0.21.0 heading still read
 # "extension 0.20.0" after the extension had shipped 0.20.1 and 0.21.0 into that very section, because
@@ -68,46 +111,51 @@ if [ "$CHANGELOG_EXT" != "$EXT_VER" ]; then
   echo "    '· extension unchanged at $EXT_VER' when it did not. A version nobody asserts is the one that goes stale." >&2
   exit 1
 fi
-echo "    extension track at $EXT_VER (CHANGELOG heading agrees; its 3 literals in lockstep per extension/src/version.test.ts)"
+echo "    extension track at $EXT_VER (CHANGELOG heading agrees; its 3 literals in lockstep per extension/src/version.test.ts; lock root agrees)"
 
-echo "==> §5.5 endpoint-agnostic docs (no reference-instance hostname in current-facing docs)"
-# Published clients bake no tailnet hostname (§5.5 of docs/design/2026-07-15-multi-tenant-endpoints.md,
-# "Baked-default swap + tailnet-leak removal"). The client halves of that gate are
-# pinned — web/src/ui/Devices.test.ts, extension/src/serverurl.test.ts — but prose had no gate at
-# all, which is how a checked-in user guide came to tell strangers the product needs a private
-# Tailscale network and hardcoded two of the reference instance's tailnet hosts (audit F30). Docs
-# are the surface a stranger reads FIRST, so they are held to the same rule as the clients.
-# Scope is the current-facing prose surface: docs/** PLUS the root-level and module prose a
-# stranger actually reads first (README, SECURITY, CONTRIBUTING, LICENSING, extension/README) —
-# a gate whose rationale names that surface has to scan it, not assume it. Exactly three
-# exemptions, each for a stated reason:
-#   docs/design/**  — dated point-in-time design records. They describe the pre-pivot tailnet
-#                     topology because that is what was true on their date; "fixing" them would
-#                     make the history wrong.
-#   wave4-endpoint-promotion.md — the tailnet front IS the subject of that migration runbook.
-#   CHANGELOG.md    — dated historical entries; a 0.3.x entry legitimately names the pre-pivot
-#                     tailnet because that is what shipped then. Exempting the file beats
-#                     teaching the gate to date-parse it.
-# The guide that triggered this gate is NOT exempt: it was rewritten instance-neutral in the same
-# change, and the point of a gate is to hold the file that already got this wrong once.
-DOC_LEAKS=$(cd "$REPO_DIR" && grep -rlE 'taila2dff2|\.ts\.net|192\.168\.2\.122' \
-    docs README.md SECURITY.md CONTRIBUTING.md LICENSING.md extension/README.md --include='*.md' \
-  | grep -vE '^docs/design/|^docs/runbooks/wave4-endpoint-promotion\.md$') || true
-if [ -n "$DOC_LEAKS" ]; then
-  echo "    §5.5 DOC LEAK: reference-instance hostname baked into current-facing docs:" >&2
-  printf '%s\n' "$DOC_LEAKS" | sed 's/^/      /' >&2
-  echo "    name the instance generically, or use example.com — docs outlive an endpoint." >&2
-  exit 1
-fi
-echo "    docs + root/module prose carry no reference-instance hostname (3 stated exemptions)"
+echo "==> §5.5 endpoint-agnostic docs (no reference-instance address or private host in current-facing prose)"
+# The rule, its scope, its exemptions and its rationale now live in scripts/ci/doc-leak-scan.sh —
+# moved out of this file (audit H109) so the pattern can have a self-test. It had been three
+# literals over docs/ plus five root files while a release note called it "the whole public tree",
+# and the normative spec — never in scope — named the operator's private hosts in MUST-level text.
+# It now reads spec/ too, and matches address CLASSES (RFC1918, CGNAT/tailnet) and machine names
+# rather than the handful of strings that had already leaked once.
+(cd "$REPO_DIR" && bash scripts/ci/doc-leak-scan.sh)
+echo "    spec + docs + root/module prose carry no reference-instance address or private host name"
 
-echo "==> CI tripwires: CodeQL Kotlin-emptiness tripwire self-test + live workflows"
+echo "==> CI tripwires: CodeQL Kotlin-emptiness + doc-leak scanner self-tests (fixtures + live tree)"
 # The G18 tripwire's first version recognised exactly one YAML spelling of the empty Kotlin leg and
 # passed four others green (audit H40) — a gate that reports more than it ran. Its fixtures now
 # assert the coverage: every fail-* shape must trip, the live workflows must pass. Runs here so a
 # narrowing of the tripwire fails the release gate on the box that made the change, not the next
 # audit. (CI runs the same two commands from .github/workflows/codeql-tripwire.yml.)
 (cd "$REPO_DIR" && bash scripts/ci/codeql-kotlin-tripwire.test.sh)
+# Same argument for the §5.5 scanner one section up: its fixtures assert that the widened pattern
+# still trips on every leak class and still lets the ratified instance labels through, so a
+# narrowing fails here rather than in the next audit.
+(cd "$REPO_DIR" && bash scripts/ci/doc-leak-scan.test.sh)
+
+echo "==> Native-crypto coordinates come from the version catalog, never a literal"
+# One adapter file in :core compiles against BOTH lazysodium artifacts (JVM + Android), so the two
+# have to move together — and they were pinned as bare string literals beside a libs.versions.toml
+# that already declared them (audit H101). A literal version here is not a style problem: the JVM
+# and Android halves silently drifting apart is a crypto-behaviour difference between two clients
+# that must derive the same key. Anything but "${libs.versions...}" in the coordinate is refused.
+if grep -rnE '"(com\.goterl|net\.java\.dev\.jna):[^"]*:[^"]*[0-9]' --include='*.gradle.kts' "$REPO_DIR" \
+     | grep -v 'libs\.versions' ; then
+  echo "    NATIVE-CRYPTO PIN: a lazysodium/JNA coordinate above carries a hard-coded version." >&2
+  echo "    Declare it in gradle/libs.versions.toml and interpolate \${libs.versions.<name>.get()}." >&2
+  exit 1
+fi
+echo "    lazysodium + JNA coordinates interpolate the catalog"
+
+echo "==> Release PowerShell: parse + the signandvari post-publish read-back invariants"
+# The three .ps1 release scripts are edited here and run once per release on the signing
+# workstation, by hand, with the key unlocked — so nothing used to catch a Linux-side typo until
+# the worst possible moment. This parses them and asserts signandvari.ps1 still reads the published
+# channel back after the drop (audit H110: two ceremonies ended green on the signing box while
+# /downloads still named the previous release, and prose was the only tripwire both times).
+(cd "$REPO_DIR" && bash scripts/ci/powershell-gate.sh)
 
 echo "==> Kotlin: :core + :server + :app-desktop + the tools/ CLIs (RFC pins, vectors, full server integration)"
 # :app-desktop:test was missing until 0.20.x — the desktop suites (endpoint-switch token isolation,
@@ -124,8 +172,10 @@ echo "==> Kotlin: :core + :server + :app-desktop + the tools/ CLIs (RFC pins, ve
 # Ed25519 release-signing root. The harm had already materialized: backup-cli's TestBackups.kt was
 # edited 2026-07-16 and had never once been through a compiler in this clone.
 #
-# :tools:vector-gen ships no suite, so it joins by `classes` — it authors 16 of the 22 shared
-# vector files, and a generator that no longer compiles is a generator nobody can regenerate from.
+# :tools:vector-gen ships no suite, so it joins by `classes` — it authors the generated majority of
+# the shared vector corpus (the per-file provenance and the counts live in ONE place,
+# spec/test-vectors/README.md — audit H115 found this comment restating them a release behind), and
+# a generator that no longer compiles is a generator nobody can regenerate from.
 (cd "$REPO_DIR" && flock "$LOCK" ./gradlew :core:jvmTest :server:test :app-desktop:test \
   :tools:recovery-cli:test :tools:backup-cli:test :tools:update-signer:test :tools:vector-gen:classes \
   --console=plain -q)

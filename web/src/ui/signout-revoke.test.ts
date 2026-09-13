@@ -41,6 +41,34 @@ describe("App.signOut — revokes before the local teardown, and only for a USER
   });
 });
 
+/**
+ * Audit H33 named a web sign-out seam where the usage flush would run after the revocation. At
+ * HEAD there is no such seam: Vault exposes NO sign-out control — its only App.signOut route is
+ * `onRevoked` (a session already dead server-side, where no flush can land) — so a USER sign-out
+ * is reachable only from the Unlock card, AFTER a lock has unmounted Vault and its unmount flush
+ * has run with the tokens still held (a lock keeps them, spec 05 T3). The ledger's teardown flush
+ * therefore always precedes the revocation on web without any sign-out hook. Pinned so that the
+ * day someone adds a "Sign out" control to Vault, this test names the flush-before-revoke rule
+ * (the G03/H33 shape on the natives and the extension) as the thing that control must honour.
+ */
+describe("App.signOut — the usage-ledger flush cannot be revoked out from under it (H33)", () => {
+  const vaultTsx = readFileSync(here("./Vault.tsx"), "utf8");
+
+  it("Vault has no sign-out seam — its Props expose onLock and onRevoked only", () => {
+    const props = vaultTsx.slice(vaultTsx.indexOf("interface Props {"), vaultTsx.indexOf("export function Vault("));
+    expect(props).toContain("onLock: () => void;");
+    expect(props).toContain("onRevoked: (kind: SessionEndKind) => void;");
+    expect(props).not.toMatch(/onSignOut|onForget/);
+  });
+
+  it("the Vault unmount flushes the usage buffer BEFORE dispose, on a lock that keeps the tokens", () => {
+    expect(vaultTsx).toContain("void usage.flush().finally(() => usage.dispose());");
+    // App's lock keeps the persisted session + tokens (the "never revokes" pins below), so this
+    // unmount flush rides a live pair; the user sign-out on the Unlock card comes after it.
+    expect(closure(appTsx, "lockLocal", "lock")).not.toContain("setTokens(null)");
+  });
+});
+
 describe("App lock — never revokes", () => {
   it("the lock path keeps the session server-side (spec 05 T3)", () => {
     // Locking drops this tab's KEYS only; the persisted session and its tokens survive so the

@@ -3,6 +3,7 @@
 #   signandvari 0.24.0            # build + sign + assemble + ordered drop
 #   signandvari 0.24.0 -DryRun    # preflight, seq arithmetic and manifest preview only
 #   signandvari 0.24.0 -SkipDrop  # produce the bundle, deliver it by hand
+#   signandvari 0.24.0 -SkipReadBack  # ... and do not assert the channel afterwards (rare)
 #
 # WHY THIS EXISTS. scripts\prestige-release.ps1 already does the signing correctly. What it does
 # NOT do is the handling around it: fetching tags, checking out the ref it then asserts you are on,
@@ -38,7 +39,12 @@ param(
     [switch]$DryRun,
 
     # Produce the bundle but do not deliver it. Use when the drop will be done by hand.
-    [switch]$SkipDrop
+    [switch]$SkipDrop,
+
+    # Skip the post-publish read-back (step 9). Only for a run whose channel effect is
+    # deliberately not being asserted - a re-drop of an already-published seq, or a network
+    # that cannot reach the public origin from this box. A normal ceremony always reads back.
+    [switch]$SkipReadBack
 )
 
 $ErrorActionPreference = 'Stop'
@@ -340,6 +346,9 @@ Write-Info ("sha256 {0}" -f $MsiSha)
 if ($SkipDrop) {
     Write-Step 'Drop skipped (-SkipDrop)'
     Write-Info "deliver by hand: the four payload files first, then $SigName ALONE, last."
+    Write-Info 'then read the channel back yourself - this run cannot do it for you:'
+    Write-Info ("  curl -s '{0}/downloads/manifest.json?cb=1' | jq '{{seq,signedAt,linux:.linux.version,windows:.windows.version,ext:.browserExtension.version}}'" -f $BaseUrl)
+    Write-Info ("  expect  seq {0}  linux {1}  windows {1}" -f $NewSeq, $Version)
     Write-Host ''
     return
 }
@@ -405,7 +414,118 @@ Confirm-Remote -Name $SigName
 
 Write-Ok 'drop complete, in payload-then-signature order'
 
-# ============================================================ 9. SUMMARY ========================
+# ============================================================ 9. PUBLISH READ-BACK ==============
+#
+# WHY THIS EXISTS (audit H110, and the two releases before it).
+#
+# Signing is not publishing. This script hands a bundle to the build host and a watcher there
+# verifies the signature and copies it into /downloads. Everything after the drop is somebody
+# else's machine, so a ceremony could - and twice did - end with every green check on this box
+# while the fielded channel still named an older version:
+#
+#   * 0.25.0 was signed and delivered; the channel sat a release behind until someone read the
+#     manifest by hand and noticed.
+#   * 0.26.0 was tagged, released, and published to devstore and the server - and NEVER signed.
+#     0.26.1 superseded it before the ceremony ran. The manifest went seq 8 -> 9 with exactly one
+#     signing, and again the only detection was a human re-reading prose.
+#
+# Both times the runbook's channel-state paragraph was the sole tripwire, and a hand-typed
+# paragraph is stale the moment the next ceremony runs. This is that tripwire in code: after the
+# drop, poll the PUBLIC origin (the same URL a client reads, cache-busted) until the watcher has
+# published, then assert the served manifest names THIS seq and THIS version. A mismatch is a
+# hard failure with the observed values printed, because "the release is out" is exactly the
+# belief that must not survive an unpublished manifest.
+#
+# It asserts what this run is responsible for and nothing more: seq, the platform versions, and
+# the MSI digest this box just produced. It does NOT re-verify the Ed25519 signature - the watcher
+# does that before it publishes, and re-implementing the check here would give the ceremony two
+# disagreeing verifiers instead of one.
+
+if ($SkipReadBack) {
+    Write-Step 'Publish read-back SKIPPED (-SkipReadBack)'
+    Write-Warn2 'nothing has asserted that the served channel names this release. Read it back by hand:'
+    Write-Info ("  curl -s '{0}/downloads/manifest.json?cb=1' | jq '{{seq,signedAt,linux:.linux.version,windows:.windows.version,ext:.browserExtension.version}}'" -f $BaseUrl)
+    Write-Info ("  expect  seq {0}  linux {1}  windows {1}" -f $NewSeq, $Version)
+}
+else {
+    Write-Step 'Publish read-back'
+
+    # The watcher publishes "within ~5 minutes". Twelve gives it two cron ticks plus a slow copy
+    # before this run calls it a failure; each poll is cheap and the loop prints what it sees, so
+    # an operator watching the console can tell "not yet" from "wrong".
+    $ReadBackDeadline = (Get-Date).AddMinutes(12)
+    $attempt   = 0
+    $servedRaw = $null
+
+    Write-Info ("polling {0}/downloads/manifest.json for seq {1} (up to 12 min)" -f $BaseUrl, $NewSeq)
+
+    while ($true) {
+        $attempt++
+        # Cache-busted every attempt: a CDN-cached copy of the OLD manifest would otherwise make a
+        # successful publish look like a timeout, and a cached copy of the new one could mask a
+        # rollback at the origin.
+        $rbUrl = "$BaseUrl/downloads/manifest.json?cb=$([guid]::NewGuid().ToString('N'))"
+        $raw   = $null
+        try { $raw = (Invoke-WebRequest -Uri $rbUrl -UseBasicParsing -TimeoutSec 30).Content }
+        catch { Write-Info ("attempt {0}: fetch failed - {1}" -f $attempt, $_.Exception.Message) }
+
+        if ($raw) {
+            # seq out of the raw bytes, same discipline as step 5.
+            $servedSeq = if ($raw -match '"seq"\s*:\s*(\d+)') { [int]$matches[1] } else { -1 }
+            if ($servedSeq -eq $NewSeq) { $servedRaw = $raw; break }
+            if ($servedSeq -gt $NewSeq) {
+                # Someone else published past us while this ceremony ran. Do not keep polling for a
+                # seq that can never come back: the fielded clients refuse a seq <= lastAccepted, so
+                # this bundle is now unpublishable and the operator has to know immediately.
+                Die ("the channel is at seq {0}, PAST the {1} this run minted - another publish overtook this ceremony. This bundle can no longer be published (clients refuse a non-increasing seq). Investigate before re-signing." -f $servedSeq, $NewSeq)
+            }
+            Write-Info ("attempt {0}: channel still at seq {1}, waiting for {2}" -f $attempt, $servedSeq, $NewSeq)
+        }
+
+        if ((Get-Date) -gt $ReadBackDeadline) {
+            Die ("the channel never reached seq {0} within 12 minutes of the drop (last seen seq {1}). The bundle is delivered and signed; the watcher on the build host has not published it. Check the watcher log there BEFORE re-signing anything - a fresh signature burns a new signedAt for no reason." -f $NewSeq, $servedSeq)
+        }
+        Start-Sleep -Seconds 20
+    }
+
+    Write-Ok ("channel reached seq {0}" -f $NewSeq)
+
+    # Versions and digests through ConvertFrom-Json: these are plain strings, so the [DateTime]
+    # coercion that forced the raw-bytes reads above does not apply to them.
+    $served  = $servedRaw | ConvertFrom-Json
+    $rbFail  = @()
+
+    foreach ($plat in @('linux', 'windows')) {
+        $node = $served.$plat
+        if (-not $node -or -not $node.version) {
+            Write-Warn2 ("the served manifest names no '{0}' version - that platform reads as unpublished in every client's downloads hub." -f $plat)
+            continue
+        }
+        if ($node.version -ne $Version) {
+            $rbFail += ("{0}.version is {1}, expected {2}" -f $plat, $node.version, $Version)
+        }
+    }
+
+    # The MSI is the artifact this box produced and signed; if the served digest is not the one
+    # step 7 hashed, the published channel points at different bytes than the ones just signed.
+    if ($served.windows -and $served.windows.sha256 -and ($served.windows.sha256.ToLowerInvariant() -ne $MsiSha)) {
+        $rbFail += ("windows.sha256 is {0}, expected {1}" -f $served.windows.sha256.ToLowerInvariant(), $MsiSha)
+    }
+
+    if ($rbFail.Count -gt 0) {
+        Write-Host ''
+        foreach ($f in $rbFail) { Write-Host "   MISMATCH  $f" -ForegroundColor Red }
+        Die 'the served manifest carries this run''s seq but does NOT describe this release. The channel is now serving something other than what was just signed - stop and reconcile /downloads on the build host.'
+    }
+
+    $servedSignedAt = if ($servedRaw -match '"signedAt"\s*:\s*"([^"]+)"') { $matches[1] } else { '(unreadable)' }
+    Write-Ok ("served manifest names {0} on linux + windows, signedAt {1}" -f $Version, $servedSignedAt)
+    if ($served.browserExtension -and $served.browserExtension.version) {
+        Write-Info ("browserExtension stays at {0} (this ceremony does not move it)" -f $served.browserExtension.version)
+    }
+}
+
+# ============================================================ 10. SUMMARY ========================
 
 Write-Step 'Done'
 
@@ -420,8 +540,15 @@ Write-Host ("     signedAt   {0}" -f $SignedAt)
 Write-Host ("     bundle     {0}" -f $BundleDir)
 Write-Host ("     dropped to {0}" -f $DropTarget)
 Write-Host ''
-Write-Host '   The watcher on the build host verifies the signature against the pinned key and'
-Write-Host '   publishes within ~5 minutes, then sends a Telegram. Do not publish from this machine.'
+if ($SkipReadBack) {
+    Write-Host '   The watcher on the build host verifies the signature against the pinned key and'
+    Write-Host '   publishes within ~5 minutes, then sends a Telegram. Do not publish from this machine.'
+    Write-Host '   NOTHING here has confirmed that it did (-SkipReadBack) - read the channel back.' -ForegroundColor Yellow
+}
+else {
+    Write-Host '   The watcher on the build host published it; step 9 read the served manifest back and'
+    Write-Host '   confirmed it names this seq and this version. Do not publish from this machine.'
+}
 Write-Host ''
 Write-Host "   The repo is left detached at $Tag - 'git checkout main' when you are done." -ForegroundColor DarkGray
 Write-Host ''

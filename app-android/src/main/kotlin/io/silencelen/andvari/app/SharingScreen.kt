@@ -89,6 +89,11 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
         // interpolates, and the one every surface hand-wrote — it had drifted three ways from web.
         // Canon now; web carries the byte-equal template and is pinned to the Kotlin source.
         "replay-denied" -> Pair(HouseholdCopy.replayDeniedNotice(n.parkedCount ?: 0, name), false)
+        // H71 (web F20 twin): a genuinely new non-owner grant — calm, informational.
+        "added" -> Pair("You were added to “$name”.", false)
+        // H03/H19: queued changes the server definitively refused and the drain dropped —
+        // the canon lead sentence (web appends its revert tail; core has no optimistic apply).
+        "write-rejected" -> Pair(HouseholdCopy.writeRejectedNotice(n.parkedCount ?: 0, name, n.reason), true)
         else -> Pair( // "anomaly"
             "The server says you lost access to “$name”, but this couldn’t be verified as a real owner action. " +
                 "A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). " +

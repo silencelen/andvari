@@ -39,7 +39,11 @@ object UriMatch {
         return SavedUri.Web(host)
     }
 
-    /** Extract + normalize the host of a web URI (mirrors CsvImport.nameFallback host logic). */
+    /**
+     * Extract + normalize the host of a web URI (mirrors CsvImport.nameFallback host logic).
+     * The result is always ASCII: a Unicode (U-label) host comes back as its punycode A-label,
+     * so a saved `bücher.de` and the browser-reported `xn--bcher-kva.de` are one string (H22).
+     */
     fun normalizeHost(raw: String): String? {
         var s = raw.trim()
         if (s.isEmpty()) return null
@@ -71,7 +75,13 @@ object UriMatch {
         // real family and quietly grant it the new equality rule. (IPv6 hosts contain no
         // dots between hex groups, so this cannot reject them.)
         if (s.split('.').any { it.isEmpty() }) return null
-        return s
+        // H22 (2026-09-13 audit): canonicalize to the A-label LAST, after every ASCII rule has run.
+        // Browsers report `xn--bcher-kva.de`; the household saves `bücher.de` — without this the
+        // two never met and IDN logins silently never filled. Symmetric (matches() normalizes
+        // the page host through here too), idempotent (ASCII in → unchanged), and fail-closed
+        // (an encoder overflow yields null, which matches nothing). See Idna.kt for why the
+        // encoder is hand-rolled rather than java.net.IDN.
+        return Idna.toAscii(s)
     }
 
     private fun isIpLiteral(host: String): Boolean {

@@ -178,10 +178,33 @@ otpauth URI overrides.
 `login.uris` entries are either web URIs (scheme optional, default `https`) or the
 native-app convention **`androidapp://<packageName>`** (Bitwarden-compatible).
 
-**Normalization** (both impls, identical): lowercase the host; strip one leading
+**Normalization** (all impls, identical): lowercase the host; strip every leading
 `www.`; strip a trailing dot; **path, query, fragment, userinfo, and port are ignored
 for matching** (Android's `ViewNode.getWebDomain()` exposes only the domain — two
-services on one host are indistinguishable, so give services distinct hostnames).
+services on one host are indistinguishable, so give services distinct hostnames);
+then — **amended 2026-09-13 (audit H22)** — **canonicalize to the A-label**: each label
+containing a non-ASCII code point is NFC-normalized and Punycode-encoded (RFC 3492) with
+the `xn--` prefix; ASCII labels pass through unchanged, so the step is idempotent. Both
+sides of every comparison run the same normalizer, so a saved `bücher.de` and the
+`xn--bcher-kva.de` every browser reports (`location.hostname`, the extension's
+`sender.origin`, Android's `getWebDomain()`) are one string, and the PSL walk below sees
+an ASCII host it can resolve. The algorithm is deliberately minimal and deterministic
+rather than a full UTS46: no mapping table (full-width forms, `ẞ`→`ss`, ligatures) and
+no bidi/joiner validity checks, and the four IDNA2008 deviation characters follow the
+NON-transitional form modern browsers report (`straße.de` → `xn--strae-oqa.de`, never
+`strasse.de` — which is why clients MUST NOT substitute a platform IDNA2003 converter such
+as `java.net.IDN`). A spelling outside that subset still canonicalizes identically on every
+client; it simply does not meet the browser's spelling — an under-match, never a
+cross-origin fill. Encoder overflow (an absurd label) yields "unparseable" (never matches).
+Vectors: `spec/test-vectors/urimatch-idna.json` (`normalize` pins the output bytes, `match`
+the outcome); the pre-existing vector files are byte-frozen and unchanged.
+
+**Captured scheme (client rule, 2026-09-13 audit H124).** A client that CREATES a uri from
+a page capture (extension auto-save / site-link, Android save) stores the scheme it actually
+observed: a plain-http page (loopback, intranet — the spec 05 F27 posture) stores `http://…`
+(the extension keeps the http origin's non-default port too, since it is the only address
+that reopens that server); everything else keeps `https://<host>`. Matching ignores the
+scheme either way; this governs only what the stored uri says, i.e. where "open site" points.
 
 **Match rules (normative; amended 2026-07-10 — one addition + two tightenings, design
 `docs/design/2026-07-10-etld1-psl-matching.md`).** Hosts with an **empty label** after
@@ -507,7 +530,17 @@ server-visible table — the property §8 states holds unchanged.
   and the server and a stolen locked device both hold opaque bytes. Spec 05 T3 is unchanged.
   An account with no personal vault simply has no ledger — clients MUST degrade to "—", not error.
 - **Contents.** `itemId -> { lastUsedAt, useCount }`, nothing more. No password material, no
-  document content, no URIs.
+  document content, no URIs. Both fields are JSON **numbers** (integers: epoch ms and a count).
+- **Reading is tolerant per ENTRY and strict per TYPE (2026-09-13, audit H92).** A reader MUST
+  treat any ledger that is not a JSON object as empty, and MUST skip — individually — any entry
+  that is not an object, whose `lastUsedAt` is not a finite JSON number (a string, boolean,
+  object, array or `1e999` is not a number, whatever it contains), while keeping every
+  well-formed entry beside it; a `useCount` that is missing or not a finite number reads as
+  `1`. One malformed entry MUST NOT empty the whole ledger: with the merge-then-store flush
+  above, "read as empty" on one client becomes "overwrite the household's ledger with this
+  session's few entries" — the H05 clobber by another route. Unknown entry keys are dropped, not
+  preserved (the blob is wholly rewritten by one writer at a time and carries no user-authored
+  content). The three twins are graded on all of this by `spec/test-vectors/usageledger.json`.
 - **Every unlocked client may write it**, which is the point: a fill on the phone
   counts on the laptop. A device-local ledger could not do this — the browser extension is a
   separate client with its own storage, and there is deliberately no cross-client channel
@@ -518,6 +551,43 @@ server-visible table — the property §8 states holds unchanged.
   > the exclusion rather than working around it. The standing rule, which outlives that particular
   > problem: **a client that cannot open the ledger MUST leave it untouched** rather than write a
   > partial one over another client's.
+- **The flush round, normatively (2026-09-13 amendment, audit H05 — the rule above was being
+  violated by all three engines).** Every flush first reads the server copy and then lands in
+  exactly one of three states; the three MUST be kept distinct, because collapsing the first two
+  into "empty" is how one device's handful of buffered uses replaced a whole household's ledger:
+  1. **Absent** — the GET succeeded and returned `sealedUsage: null`. The client writes its buffer
+     as a first ledger. This is the ONLY case in which a write without a merge is not an overwrite.
+  2. **Unreadable** — the GET failed (offline, 5xx, 401, timeout, rate-limit) OR a blob came back
+     that would not open under this client's key (wrong key, AD mismatch, a future encoding). The
+     client **MUST NOT PUT that round**, buffered uses or not. It re-buffers them and retries at
+     the next flush. The conservative direction loses at most one session's ranking hints on a
+     device that never reconnects; the other direction erased everyone's. The endpoint is
+     last-writer-wins with no server-side merge and no history, so there is nothing to recover
+     from after the wrong PUT.
+  3. **Present** — the blob opened. The client merges its buffer over it (per-item max, below),
+     prunes if and only if it is at a post-sync point (next bullet), and PUTs **only when something
+     changed** — buffered uses, or a prune that dropped an entry. A quiet round costs one GET and
+     no `updatedAt` bump.
+  A blob that opens but parses as garbage is a PRESENT, EMPTY ledger: it authenticated under this
+  user's key, so replacing it is the tolerant-parse posture ("a corrupt ledger costs one health
+  column"), not a cross-client overwrite. "Cannot open" means the AEAD open, not the parse.
+- **Prune (growth bound), normatively (2026-09-13 amendment, audits H35/H36).** The ledger is
+  pruned — entries dropped for items that no longer exist — at ONE point only: immediately after a
+  **successful full sync**, on every client, on every such sync, **regardless of whether any use
+  is buffered** (a prune gated behind a non-empty buffer fires only when a sync happens to land
+  inside the debounce window, i.e. effectively never). The keep-set MUST be the id of **every live
+  envelope the sync delivered — decryptable or not** (a newer-formatVersion envelope this build
+  fails closed on, an item in a vault whose key has not arrived) plus the ids buffered in this
+  session (a use recorded after the snapshot is inherently live). Tombstones are excluded; that is
+  what the prune is for. Never the decrypted working set: an item this device cannot read is live
+  on the server and readable on the user's other devices, and pruning its entry ranks it "unused"
+  everywhere. Never a lock / page-hide / teardown view, which can be pre-sync.
+- **Teardown flush ordering (2026-09-13 amendment, audit H33; the G03 rule generalised).** The
+  lock, sign-out and page-hide flushes MUST be given a chance to complete **before** the client
+  drops the session, forgets or revokes the tokens the PUT rides on, or closes the transport —
+  awaited, with a short bound (2 s on the natives and the extension), never fire-and-forget into
+  the teardown. A flush that outlives the bound is abandoned; the teardown is never delayed past
+  it. In particular the sign-out flush precedes the server-side session revocation.
 - **Writes are batched, never per-use.** A client accumulates in memory and flushes on a debounce
   (and on lock / sign-out / page-hide), so the blob's own `updatedAt` cannot be read as a
   keystroke-level activity trace. Clients MUST NOT flush synchronously on every fill.
