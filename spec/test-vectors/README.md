@@ -46,9 +46,10 @@ reference implementation named in each row.
 > regenerated, and both consumers decode the payload semantically so nothing reddened).
 > Regenerated 2026-09-13, with a third container case that carries both v9 fields populated.
 >
-> `sharedgrant.json`'s `rejectVkLength` case (H93) was added by regenerating to scratch and
-> splicing ONLY the new key into the committed file, so the frozen `sealedB64` bytes every
-> engine already opens stayed byte-identical. That is the procedure for adding a case to a
+> `sharedgrant.json`'s `rejectVkLength` case (H93) and `rejectVersion` case (recheck R48 —
+> the payload-version refusal, the third of spec 01 §6's recipient checks) were added by
+> regenerating to scratch and splicing ONLY the new key into the committed file, so the frozen
+> `sealedB64` bytes every engine already opens stayed byte-identical. That is the procedure for adding a case to a
 > randomized file: never a wholesale regenerate, which would silently re-mint every seal.
 
 | file | covers | consuming suites |

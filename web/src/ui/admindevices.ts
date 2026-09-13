@@ -23,3 +23,16 @@ export function adminDeviceState(d: Pick<AdminDeviceSummary, "revokedAt" | "live
   if (d.live === false) return "signed_out";
   return "live";
 }
+
+/**
+ * H25 → recheck R27: `deviceCount` is now LIVE-only (AdminService LIVE_DEVICE_COUNT_SQL) while the
+ * table the button opens still lists every row ever minted — so a bare "0 devices" opening onto
+ * five rows read as a bug. The label says what the number means: "N active" collapsed, and
+ * "N of M devices active" once the rows are loaded (M = every row, live or not). Pure so
+ * admindevices.test.ts pins the wording against the live/total split.
+ */
+export function deviceCountLabel(live: number, total: number | null): string {
+  const plural = (n: number) => (n === 1 ? "device" : "devices");
+  if (total === null) return `${live} active ${plural(live)}`;
+  return `${live} of ${total} ${plural(total)} active`;
+}

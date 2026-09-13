@@ -93,7 +93,10 @@ class HealthSurfaceTest {
     fun theRefreshActionReachesScreenReaderUsersOnEveryRow() {
         val row = mainCode.substringAfter("private fun VaultRow(").substringBefore("@Composable")
         assertTrue(row.contains("""CustomAccessibilityAction("Refresh") { onRefresh(); true }"""), "VaultRow must expose Refresh as a custom action")
-        assertTrue(mainCode.contains("VaultRow(item, vaultTags[item.vaultId], onRefresh = { vm.refresh() })"), "the vault list must pass the refresh to every row")
+        // A prefix match, not the whole call: H18 (audit 2026-09-13) added `pendingSync = …` after
+        // `onRefresh`, and a pin on the closing paren would have failed on that unrelated argument
+        // while still saying nothing about the property it guards (the list passes the refresh).
+        assertTrue(mainCode.contains("VaultRow(item, vaultTags[item.vaultId], onRefresh = { vm.refresh() }"), "the vault list must pass the refresh to every row")
         assertTrue(
             mainCode.contains("""Column(Modifier.semantics { customActions = listOf(CustomAccessibilityAction("Refresh") { vm.refresh(); true }) }) {"""),
             "…and the toolbar, the first node linear navigation reaches",
@@ -197,7 +200,8 @@ class HealthSurfaceTest {
         assertTrue(lockFromBackground.contains("deferredBackgroundLock.left()"), "ON_STOP must mark the app as backgrounded first")
         assertTrue(lockFromBackground.contains("{ deferredBackgroundLock.defer(); return }"), "the busy branch must record, not skip")
         assertTrue(vmCode.contains("if (deferredBackgroundLock.takeIfDue(inProgress)) lock(reason = REASON_BACKGROUND)"), "the op choke point must fire it")
-        assertTrue(vmCode.contains("fun onProcessStart() = deferredBackgroundLock.returned()"), "ON_START must void it")
+        // R12: an ON_START caused by an autofill overlay is not the user returning — H09's rule, on the start leg.
+        assertTrue(vmCode.contains("fun onProcessStart() = deferredBackgroundLock.returned(startedByOverlay = InProcessOverlays.lastStartWasOverlay())"), "ON_START must void it — unless an overlay woke the process")
         assertTrue(
             vmCode.indexOf("private val deferredBackgroundLock") < vmCode.indexOf("init {"),
             "declared before init — the collector runs on Main.immediate during construction",
@@ -326,12 +330,24 @@ class HealthSurfaceTest {
         val announcer = healthCode.substringAfter("private fun HealthAnnouncer(").substringBefore("@Composable")
         assertTrue(announcer.contains("liveRegion = LiveRegionMode.Polite"))
         assertTrue(announcer.contains("message ?: \"\","), "composed with empty text when there is no message — present in the tree from the first frame")
+        // R11: ONE region per message. NoticeBar is itself a polite live region, so the health
+        // call site renders it silent — the web Msg.tsx / Announcer split (the visible strip has
+        // no live role; the persistent announcer speaks).
+        assertTrue(healthCode.contains("NoticeBar(it, vm::dismissHealthMessage, announce = false)"), "the health notice bar must not announce beside the announcer")
+        assertTrue(mainCode.contains("internal fun NoticeBar(msg: String?, onDismiss: () -> Unit, announce: Boolean = true)"), "NoticeBar must carry the opt-out")
+        val bar = mainCode.substringAfter("internal fun NoticeBar(").substringBefore("// ---- auth ----")
+        assertTrue(bar.contains("if (announce) Modifier.semantics { liveRegion = LiveRegionMode.Polite } else Modifier"), "announce=false must drop the region, not just mute it")
     }
 
     /** H26: what the screen renders is the rev-checked map, never the raw scan result. */
     @Test
     fun theScreenRendersOnlyFreshBreachVerdicts() {
         assertTrue(health.contains("vm.freshBreachByItem()"))
+        // R09: the pending-write ids ride into the gate (a queued edit keeps the prior rev).
+        assertTrue(vmCode.contains("freshBreachVerdicts(u.breachByItem, u.breachScanRev, u.pendingSyncIds) { live[it] }"), "the gate must see the unflushed-write set")
+        // R08: a retired verdict is fed into the tile's non-verdict channel with the failed ranges.
+        assertTrue(healthCode.contains("val breachStale = breachVerdictsRetired(ui.breachByItem, breachByItem)"))
+        assertTrue(healthCode.contains("HealthTiles(summary, dupes, staleSummary, breachByItem, ui.breachScanIncomplete || breachStale, rows)"), "the Breached tile must go neutral when a verdict was retired")
         assertTrue(vm.contains("val breachScanRev: Map<String, Long> = emptyMap(),"))
         val cleared = vm.substringAfter("internal fun UiState.sessionCleared").substringBefore("\n)")
         assertTrue(cleared.contains("breachScanRev = emptyMap()"), "the rev map rides the wipe with the count map")
@@ -344,7 +360,7 @@ class HealthSurfaceTest {
      *  refusal becomes a mystery. The screen prints what core returned. */
     @Test
     fun refusalsReachTheScreenUnparaphrased() {
-        assertTrue(health.contains("ui.healthMessage?.let { NoticeBar(it, vm::dismissHealthMessage) }"))
+        assertTrue(health.contains("ui.healthMessage?.let { NoticeBar(it, vm::dismissHealthMessage, announce = false) }"))
         assertTrue(vm.contains("_ui.value.copy(healthMessage = plan.refusal)"))
         assertTrue(vm.contains("_ui.value.copy(healthMessage = plan.keepRefusal)"))
         assertTrue(vm.contains("_ui.value.copy(healthMessage = plan.dismissRefusal)"))

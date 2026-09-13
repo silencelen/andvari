@@ -574,6 +574,11 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     // Driveability is the whole test here, so it is passive; the user's save signal is the banner
     // click (`resolvePendingSave`), which stays out.
     expect(set, "capturedCredential is page-driveable (requestSubmit) ⇒ it must NOT re-arm the autolock").toContain('"capturedCredential"');
+    // 2026-09-13 audit (H01, recheck R02): `passwordReuse` rides a value-set plus a TRUSTED
+    // focusout a page can drive on its own signup field at will — the same driveability test as
+    // capturedCredential — so it is passive too; the H02 typed-gesture gate bounds the ORACLE,
+    // not the arm. Out of this set, a blur loop re-arms the idle alarm forever.
+    expect(set, "passwordReuse is page-driveable (value-set + trusted blur) ⇒ it must NOT re-arm the autolock").toContain('"passwordReuse"');
     // …while genuine user activity keeps re-arming: none of these may ever join the passive set
     // (each rides an isTrusted gesture in our closed-shadow UI, the popup, or a banner click).
     for (const active of ["reveal", "allItems", "resolvePendingSave", "generate", "linkUri"]) {
@@ -1367,6 +1372,25 @@ describe("2026-08-30 audit pins (extension lane) — KLKEY residency/wipe, pendi
         l.includes("const keys = [QKEY, KLKEY,"); // purgeOriginNamespace's single key list, below
       expect(approved, `KLKEY reached code this pin has not approved: ${l.trim()}`).toBe(true);
     }
+    // R07: the second half of the H91 sweep — the RAW KEY, not just the storage key name. A
+    // `chrome.storage.local.set({ k: toB64(knownLoginsKey) })` names no KLKEY and passed the loop
+    // above. Every code line that names the key must be one of the approved shapes, and none may
+    // touch a non-session area.
+    const keyLines = code.filter((l) => l.includes("knownLoginsKey"));
+    expect(keyLines.length, "the declaration, the guard, the mint, the digest build, the session set and the two wipes").toBeGreaterThanOrEqual(7);
+    for (const l of keyLines) {
+      const t = l.trim();
+      const approvedKey =
+        t === "let knownLoginsKey: Uint8Array | null = null;" || // the memory-only declaration
+        t === "knownLoginsKey = null;" || // the sign-out / untrusted-compartment wipe
+        t === "if (originKey === currentOriginKey) knownLoginsKey = null;" || // the per-origin purge wipe
+        t === "if (!knownLoginsKey) {" || // the rebuild's reuse-or-mint guard
+        t === "knownLoginsKey = rec?.key ? fromB64(rec.key) : crypto.getRandomValues(new Uint8Array(16));" || // the mint, from a SESSION get
+        t === "const digests = buildKnownLoginDigests(knownLoginsKey, session.items, pslResolve);" || // the digest build
+        t.startsWith("await chrome.storage.session.set({ [nsk(KLKEY)]: { key: toB64(knownLoginsKey), digests }"); // the single persist, session-only
+      expect(approvedKey, `knownLoginsKey reached code this pin has not approved: ${t}`).toBe(true);
+      expect(l, `knownLoginsKey must never be near a non-session storage area: ${t}`).not.toMatch(/chrome\.storage\.(?:local|sync)\b/);
+    }
     // The one non-session line is the purge list, and it is safe only because that path REMOVES
     // from both areas (the same list is swept from local and session on purpose, so a future
     // namespaced key cannot be erased from one area and forgotten in the other). A get or a set
@@ -1495,5 +1519,30 @@ describe("H122 — the weakened-KDF sentence is one sentence in all three canons
       expect(s.endsWith("contact your admin."), s).toBe(true);
     }
     expect(errorsTs).not.toContain("contact your administrator");
+  });
+});
+
+describe("H03 / R37 — the push MutationResult union is one union on every push client", () => {
+  // Three copies of the wire's per-mutation status: web/src/api/types.ts, extension/src/api.ts,
+  // and core's MutationResult. The extension IS a push client (background.ts putItem → POST
+  // /api/v1/sync/push with attachmentIds) and shipped H03 without the `rejected` status the server
+  // now answers — a permanent refusal rendered as the retryable "Could not save — try again."
+  const webTypes = readFileSync(fileURLToPath(new URL("./api/types.ts", import.meta.url)), "utf-8");
+  const extApi = readFileSync(extensionSrc + "api.ts", "utf-8");
+  const statusUnion = (src: string, what: string): string => {
+    const m = src.match(/status: ("applied"(?: \| "[a-z_]+")+);/);
+    expect(m, `${what}: MutationResult.status union not found`).not.toBeNull();
+    return m![1]!;
+  };
+  it("extension/src/api.ts carries the same status union as web/src/api/types.ts, `rejected` included", () => {
+    const web = statusUnion(webTypes, "web");
+    expect(web).toContain('"rejected"');
+    expect(statusUnion(extApi, "extension")).toBe(web);
+    expect(extApi, "the refusal reason rides beside the status on both").toContain("reason?: string;");
+  });
+  it("the extension's SaveErrorCode carries the permanent `rejected` rung in both twins", () => {
+    for (const f of ["messages.ts", "errors.ts"]) {
+      expect(readFileSync(extensionSrc + f, "utf-8"), f).toMatch(/type SaveErrorCode = "locked" \| "conflict" \| "rejected" \| "failed";/);
+    }
   });
 });

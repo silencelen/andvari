@@ -76,6 +76,11 @@ class RegisterValidationTest : P4TestSupport() {
         refusedOverHttp(good.copy(personalVault = good.personalVault.copy(vaultId = admin.personalVaultId)), "vault_id_taken")
         // Ciphertext fields: base64url alphabet and a byte bound, exactly the sibling's gates.
         refused(good.copy(personalVault = good.personalVault.copy(metaBlob = "not base64!!")), "bad_meta_blob")
+        // R26: the salt — echoed to an unauthenticated prelogin and asserted exactly 16 bytes by
+        // every client's KDF — gets the same alphabet + bound; junk here used to persist.
+        refused(good.copy(kdfSalt = "not base64!!"), "bad_kdf_salt")
+        refused(good.copy(kdfSalt = "A".repeat(200)), "bad_kdf_salt")
+        refused(good.copy(kdfSalt = ""), "bad_kdf_salt")
         refused(good.copy(personalVault = good.personalVault.copy(wrappedVk = "A".repeat(2000))), "bad_wrapped_vk")
         refused(good.copy(wrappedUvk = "x".repeat(2000)), "bad_wrapped_uvk")
         refused(good.copy(identityPub = "A".repeat(200)), "bad_identity_pub")

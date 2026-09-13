@@ -3,7 +3,10 @@ package io.silencelen.andvari.desktop
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.crypto.CryptoException
+import io.silencelen.andvari.core.crypto.CryptoUnavailableException
+import io.silencelen.andvari.core.crypto.NATIVE_SODIUM_PATH_PROPERTY
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import io.silencelen.andvari.core.crypto.nativeSodiumFallbackCause
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.file.Files
@@ -214,6 +217,28 @@ object DesktopDiagnostics {
         }
     }
 
+    /**
+     * H11 → recheck R16: the create-time modes only cover installs created AFTER this build.
+     * `mkdirsOwnerOnly` leaves an existing directory alone by design and `CREATE` never touches an
+     * existing file's mode, so every 0.26.3-created install kept `~/.andvari-desktop` at 0755 and
+     * `diagnostic.log` (home path, exception chains, stack traces) at 0644 forever. Run ONCE per
+     * launch, POSIX only (Windows uses ACLs; nothing to repair there): the store's own
+     * `writeTextOwnerOnly` chmod idiom, extended with the execute bit for the directory. Only
+     * this app's own directory and log — never a shared parent.
+     */
+    internal fun repairAtRestModes() {
+        runCatching {
+            if (!java.nio.file.FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) return
+            val f = logFile
+            f.parentFile?.takeIf { it.isDirectory }?.let { dir ->
+                java.nio.file.Files.setPosixFilePermissions(dir.toPath(), java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"))
+            }
+            for (log in listOf(f, File(f.parentFile, f.name + ".1"))) {
+                if (log.isFile) java.nio.file.Files.setPosixFilePermissions(log.toPath(), java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
+            }
+        }
+    }
+
     /** Rotate `diagnostic.log` → `diagnostic.log.1` (replacing any previous generation) when this
      *  append would push it past [MAX_LOG_BYTES]. Best-effort like everything else here: if the
      *  rename fails the append still happens, and the file is merely over its cap. */
@@ -238,6 +263,7 @@ object DesktopDiagnostics {
      * used to be. Never throws.
      */
     fun runStartupSelfCheck(): SelfCheck {
+        repairAtRestModes() // H11 (recheck R16): before the first append, so a 0.26.3 install is fixed too
         runCatching {
             log("---- startup self-check ----")
             log("os.name=${System.getProperty("os.name")} os.arch=${System.getProperty("os.arch")} java=${System.getProperty("java.version")}")
@@ -272,11 +298,20 @@ object DesktopDiagnostics {
                 System.getProperty(p)?.let { log("sysprop $p = $it") }
             }
         }
-        log("andvari.native.sodium.path = ${System.getProperty("andvari.native.sodium.path") ?: "(unset — using lazysodium's own loader)"}")
+        val sodiumPath = System.getProperty(NATIVE_SODIUM_PATH_PROPERTY)
+        log("$NATIVE_SODIUM_PATH_PROPERTY = ${sodiumPath ?: "(unset — using lazysodium's own loader)"}")
         return try {
             val provider = createCryptoProvider()
             val probe = provider.randomBytes(1)
             log("crypto self-check OK: provider=${provider::class.qualifiedName}, randomBytes=${probe.size}")
+            // H15/H89 (recheck R14/R20): the property being SET is no longer proof its path was used —
+            // core falls back to the bundled loader on a property-path failure. Record which loader
+            // actually served the process (the cause chain is allowlisted: a LinkageError).
+            val fallback = nativeSodiumFallbackCause()
+            when {
+                fallback != null -> logThrowable("native libsodium: the property path did NOT load — the bundled loader served this process", fallback)
+                sodiumPath != null -> log("native libsodium loaded via the property path")
+            }
             SelfCheck.Ok
         } catch (t: Throwable) {
             logThrowable("crypto self-check FAILED (native libsodium did not load)", t)
@@ -308,9 +343,20 @@ object DesktopDiagnostics {
  */
 internal fun isNativeCryptoLoadFailure(t: Throwable): Boolean =
     generateSequence(t as Throwable?) { it.cause }.any { link ->
-        link is UnsatisfiedLinkError ||
+        // Recheck R15: core now WRAPS every native load failure in CryptoUnavailableException
+        // (createCryptoProvider memoizes it for the life of the process) — that type is the
+        // signal, whatever it happens to wrap. The loader-type arms below stay as the belt for a
+        // failure that surfaces outside core's loader (a quarantined DLL on a later JNA touch).
+        link is CryptoUnavailableException ||
+            link is UnsatisfiedLinkError ||
             link is ExceptionInInitializerError ||
-            link is NoClassDefFoundError ||
+            // A bare NoClassDefFoundError is any missing class — an unrelated one must NOT strand
+            // the app on the "encryption library" screen; only the JNA/sodium shapes count.
+            (link is NoClassDefFoundError && NATIVE_CLASS_HINTS.any { (link.message ?: "").contains(it, ignoreCase = true) }) ||
             link is java.nio.file.FileSystemNotFoundException ||
             link::class.simpleName == "LibraryLoadingException"
     }
+
+/** The class-name fragments a native-load NoClassDefFoundError carries (JNA's Native, lazysodium's
+ *  Sodium*, the resource-loader) — the comment's own example is `com.sun.jna.Native`. */
+private val NATIVE_CLASS_HINTS = listOf("com.sun.jna", "lazysodium", "libsodium", "sodium", "resourceloader")

@@ -1,5 +1,7 @@
 package io.silencelen.andvari.app.autofill
 
+import io.silencelen.andvari.core.client.autofill.FieldClassifier
+
 /**
  * The one signal [io.silencelen.andvari.core.client.autofill.FieldClassifier] deliberately
  * discards: whether a PASSWORD field is the form's NEW password (a signup or change-password
@@ -27,20 +29,19 @@ package io.silencelen.andvari.app.autofill
  * Pure and value-blind: it reads only field metadata, never text.
  */
 object NewPasswordSignal {
-    private const val NEW_PASSWORD = "newpassword"
-
-    private fun normalize(token: String): String = token.lowercase().replace("_", "").replace("-", "")
-
     /**
      * @param hints the node's `autofillHints` (Android hints and/or Chrome-mapped autocomplete tokens)
      * @param autocompleteAttr the raw HTML `autocomplete` attribute, when the structure carries one
+     *
+     * R19: the hint test IS core's `FieldClassifier.hasNewPasswordHint` (one normalizer, the one
+     * classify() step 0 uses); this object only adds the raw-attribute belt.
      */
     fun isNewPassword(hints: List<String>, autocompleteAttr: String?): Boolean {
-        if (hints.any { normalize(it) == NEW_PASSWORD }) return true
+        if (FieldClassifier.hasNewPasswordHint(hints)) return true
         // `autocomplete="section-x shipping new-password"` — a space-separated token list; only
         // the exact token counts (a substring match would read "renew-password" as new).
         val attr = autocompleteAttr ?: return false
-        return attr.split(' ').any { it.isNotEmpty() && normalize(it) == NEW_PASSWORD }
+        return attr.split(' ').any { it.isNotEmpty() && FieldClassifier.hasNewPasswordHint(listOf(it)) }
     }
 
     /**
@@ -68,5 +69,5 @@ object NewPasswordSignal {
      * stored password expects.
      */
     fun <T> fillablePasswordFields(passwords: List<T>, isNew: (T) -> Boolean): List<T> =
-        if (passwords.any { !isNew(it) }) passwords.filterNot(isNew) else passwords
+        FieldClassifier.passwordFillTargetsBy(passwords, isNew) // R19: core owns the set rule
 }

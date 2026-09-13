@@ -60,6 +60,19 @@ class SaveConfirmLaunderTest {
         assertFalse("github.com" in saveSubject(laundered))
     }
 
+    /** R45: the THIRD domain-bearing field the launder's own KDoc foresaw — H124's `webScheme`
+     *  is an untrusted caller's claim too, and left standing it shapes the stored uri. */
+    @Test
+    fun anUntrustedCaptureDropsTheClaimedSchemeWithTheHost() {
+        val raw = capture("paypal.com", withCard = false, withLogin = true).copy(webScheme = "http")
+        val laundered = launderUntrustedCapture(raw, trusted = false)
+        assertNull(laundered.webScheme, "the scheme is the caller's claim, exactly like the host")
+        assertNull(laundered.webDomain)
+        assertEquals("androidapp://com.example.evil", laundered.uri())
+        // A trusted browser's scheme is real provenance and survives (the H124 http-stays-http rule).
+        assertEquals("http", launderUntrustedCapture(raw, trusted = true).webScheme)
+    }
+
     /** Both fields at once — the mixed checkout-with-login capture. */
     @Test
     fun aMixedCaptureLaundersBothHalves() {

@@ -2,6 +2,7 @@ package io.silencelen.andvari.desktop
 
 import com.sun.net.httpserver.HttpServer
 import io.silencelen.andvari.core.client.HouseholdCopy
+import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.AttachmentRef
 import kotlinx.coroutines.CoroutineScope
@@ -286,8 +287,9 @@ class DesktopAsyncFlowsTest {
         // Import: one flat window per pushed batch (never open-ended, never absurdly short for a big file).
         assertEquals(flat, DesktopState.importTimeoutMs(0))
         assertEquals(2 * flat, DesktopState.importTimeoutMs(1))
-        assertEquals(2 * flat, DesktopState.importTimeoutMs(DesktopState.IMPORT_BATCH_ROWS))
-        assertEquals(3 * flat, DesktopState.importTimeoutMs(DesktopState.IMPORT_BATCH_ROWS + 1))
+        // R18: sized off core's own (public) batch constant — no hand copy to drift.
+        assertEquals(2 * flat, DesktopState.importTimeoutMs(SyncEngine.SERVER_BATCH_MAX))
+        assertEquals(3 * flat, DesktopState.importTimeoutMs(SyncEngine.SERVER_BATCH_MAX + 1))
         assertEquals(51 * flat, DesktopState.importTimeoutMs(10_000))
     }
 

@@ -24,7 +24,7 @@ type UnlockCode =
   | "server_error"
   | "network"
   | "unknown";
-type SaveErrorCode = "locked" | "conflict" | "failed";
+type SaveErrorCode = "locked" | "conflict" | "rejected" | "failed";
 type TotpAddCode = "locked" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
 type RevealFailCode = "locked" | "not_allowed";
@@ -127,6 +127,12 @@ export function saveErrorCopy(code: SaveErrorCode | undefined): string {
       // version itself, so this rung is no longer produced by any put path; it keeps the code's
       // slot in the union with copy that is TRUE if a future path ever emits it.
       return "Saved — this login also changed elsewhere; both versions are in your vault.";
+    case "rejected":
+      // H03 (recheck R37): the server's per-row `rejected` verdict — a put whose attachment refs
+      // no longer resolve. PERMANENT: the same put fails identically forever, so the retryable
+      // default below would be a lie. Byte-twin of core HouseholdCopy.SAVE_REJECTED_ATTACHMENT
+      // (pinned in errors.test.ts) — the natives render the same sentence for the same verdict.
+      return "The server refused this save — an attachment it references is no longer there. Remove that attachment, then save again.";
     default:
       // "failed" and an absent code (SW unreachable) — retryable, no jargon.
       return "Could not save — try again.";

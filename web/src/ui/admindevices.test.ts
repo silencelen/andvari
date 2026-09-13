@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { adminDeviceState } from "./admindevices";
+import { adminDeviceState, deviceCountLabel } from "./admindevices";
 
 /**
  * H25 (audit 2026-09-13): the admin device list treated every signed-out device as live and
@@ -29,8 +29,30 @@ describe("adminDeviceState", () => {
   });
 });
 
+describe("deviceCountLabel — the count button says what the LIVE-only number means (R27)", () => {
+  it("collapsed: the live count, named as such", () => {
+    expect(deviceCountLabel(0, null)).toBe("0 active devices");
+    expect(deviceCountLabel(1, null)).toBe("1 active device");
+    expect(deviceCountLabel(3, null)).toBe("3 active devices");
+  });
+
+  it("expanded: live OF total, so '0 active' opening onto five rows is not a contradiction", () => {
+    expect(deviceCountLabel(0, 5)).toBe("0 of 5 devices active");
+    expect(deviceCountLabel(1, 1)).toBe("1 of 1 device active");
+  });
+
+  it("never renders the bare pre-fix 'N devices' shape", () => {
+    for (const s of [deviceCountLabel(2, null), deviceCountLabel(2, 4)]) expect(s).not.toMatch(/^\d+ devices?$/);
+  });
+});
+
 describe("Admin.tsx device rows render through adminDeviceState", () => {
   const adminTsx = readFileSync(fileURLToPath(new URL("./Admin.tsx", import.meta.url)), "utf8");
+
+  it("the count button renders deviceCountLabel with the loaded total only once expanded", () => {
+    expect(adminTsx).toContain("{deviceCountLabel(u.deviceCount, expanded ? devices.length : null)}");
+    expect(adminTsx).not.toContain('{u.deviceCount} device{u.deviceCount === 1 ? "" : "s"}');
+  });
 
   it("shows 'signed out' (muted, no button) for a session-less device and Revoke only for a live one", () => {
     const start = adminTsx.indexOf("const state = adminDeviceState(d);");

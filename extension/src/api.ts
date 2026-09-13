@@ -80,9 +80,14 @@ export interface Mutation {
  *  (a conflicted put answers 200 with status:"conflict" + the winning serverItem). */
 export interface MutationResult {
   mutationId: string;
-  status: "applied" | "conflict" | "duplicate" | "denied";
+  /** `rejected` (spec 03 §5, audit 2026-09-13 H03 / recheck R37): a put the server can NEVER
+   *  apply as sent — its attachment refs no longer resolve, or it is over the per-item quota.
+   *  Permanent, not retryable: the same put fails identically forever (web/core twins). */
+  status: "applied" | "conflict" | "duplicate" | "denied" | "rejected";
   newItemRev?: number;
   serverItem?: WireItem;
+  /** `rejected` only: `unknown_attachment` | `attachment_mismatch` | `item_attachment_quota`. */
+  reason?: string;
 }
 export interface PushResponse {
   rev: number;

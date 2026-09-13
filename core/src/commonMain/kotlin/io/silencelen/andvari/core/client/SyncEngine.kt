@@ -252,8 +252,9 @@ class SyncEngine(
      * or re-tapped Save, and the queue then landed both. A queued put replaces (or adds) the
      * row with the queued doc; a queued delete hides the row. Rows are keyed by itemId, later
      * queue entries win (FIFO ⇒ the newest edit of an item is what the user last saved).
-     * The overlay reads the cache's own rev/updatedAt for an edited item (the reconcile
-     * pull trues them up), and rev 0 for a brand-new one. Never fed to [saveWithUploads]'s
+     * The overlay reads the cache's own rev for an edited item (the reconcile pull trues it
+     * up), rev 0 for a brand-new one, and stamps updatedAt with the local clock (R36; web
+     * parity). Never fed to [saveWithUploads]'s
      * base-rev read — that deliberately consults the cache so LWW stays server-relative.
      */
     fun items(): List<VaultItem> = overlayPending(cache.allItems()).sortedBy { it.doc.name.lowercase() }
@@ -284,7 +285,14 @@ class SyncEngine(
                         if (!account.hasVault(m.vaultId)) return@getOrPut null
                         val prior = byId[m.itemId] ?: cache.getItem(m.itemId)
                         runCatching {
-                            val wire = WireItem(m.itemId, m.vaultId, prior?.rev ?: 0, 0, prior?.updatedAt ?: 0, false, false, up.formatVersion, up.attachmentIds, up.blob)
+                            // R36: updatedAt is the LOCAL clock at first projection (≈ the commit —
+                            // save() refreshes at once), the way web's queued write stamps it. The
+                            // old `prior?.updatedAt ?: 0` gave a brand-new offline item the epoch
+                            // ("last changed: 56 years ago", ranked worst-stale) and a queued edit
+                            // its pre-edit time. Cached per mutationId, so the stamp is stable until
+                            // the server's own time replaces it on the reconcile pull. `rev` stays
+                            // the prior rev: LWW must remain server-relative (pinned).
+                            val wire = WireItem(m.itemId, m.vaultId, prior?.rev ?: 0, 0, nowMs(), false, false, up.formatVersion, up.attachmentIds, up.blob)
                             VaultItem(m.itemId, m.vaultId, wire.rev, wire.updatedAt, account.decryptItem(wire))
                         }.getOrNull()
                     }

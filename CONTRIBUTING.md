@@ -71,8 +71,9 @@ grants, export, TOTP, URI matching, and more. A change that alters a byte breaks
 two languages, before it can ship.
 
 Most of those files are generated from the Kotlin reference implementation by `tools/vector-gen`;
-six (`card`, `cardfill`, `cardform`, `enrolllink`, `import-foreign`, `urimatch-etld1`) are
-hand-authored fixtures. Both engines consume all of them either way.
+the rest are hand-authored fixtures. `spec/test-vectors/README.md` is the provenance manifest —
+which file is which, and the counts — so it is not repeated here. Both engines consume all of
+them either way.
 
 Some safety-critical extension values are pinned from the **web** suite, in
 `web/src/extension-pins.test.ts`, because the extension has no cross-engine harness of its own.

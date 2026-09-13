@@ -83,7 +83,10 @@ fun HealthScreen(vm: AndvariViewModel, ui: UiState) {
     // H26: the breach map the screen renders drops every verdict whose item changed since the
     // scan (rev mismatch) — the row reads "—" and the tile stops counting it, never a stale
     // count in either tone. Keyed on items too: an applied sync can retire a verdict.
-    val breachByItem = remember(ui.items, ui.breachByItem, ui.breachScanRev) { vm.freshBreachByItem() }
+    val breachByItem = remember(ui.items, ui.breachByItem, ui.breachScanRev, ui.pendingSyncIds) { vm.freshBreachByItem() }
+    // R08: a retired verdict is a NON-verdict, and the tile must say so in words (H75) — the
+    // same "incomplete" channel a failed range uses — never a good-tone "0" over rows that read "—".
+    val breachStale = breachVerdictsRetired(ui.breachByItem, breachByItem)
 
     Scaffold(
         topBar = {
@@ -109,11 +112,14 @@ fun HealthScreen(vm: AndvariViewModel, ui: UiState) {
             NoticeBar(ui.notice, vm::clearNotice)
             // Refusals from the plan* functions render VERBATIM — they are the reason, and
             // paraphrasing one on the way to the screen is how a refusal becomes a mystery.
-            ui.healthMessage?.let { NoticeBar(it, vm::dismissHealthMessage) }
+            // R11: NoticeBar is itself a polite live region; here the persistent HealthAnnouncer
+            // below is the ONE region for this message (web Msg.tsx / Announcer split — the visible
+            // strip has no live role), so the bar renders silent rather than announcing twice.
+            ui.healthMessage?.let { NoticeBar(it, vm::dismissHealthMessage, announce = false) }
             HealthAnnouncer(ui.healthMessage)
             ui.healthOfferDelete?.let { GoneOfferRow(vm, ui, it) }
 
-            HealthTiles(summary, dupes, staleSummary, breachByItem, ui.breachScanIncomplete, rows)
+            HealthTiles(summary, dupes, staleSummary, breachByItem, ui.breachScanIncomplete || breachStale, rows)
 
             TabRow(selectedTabIndex = TABS.indexOfFirst { it.first == ui.healthTab }.coerceAtLeast(0)) {
                 for ((key, label) in TABS) {

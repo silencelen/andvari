@@ -33,8 +33,12 @@ MK = Argon2id_v1.3(password = UTF-8(master password, as typed — no normalizati
   make two conformant engines derive different master keys from the same password
   (audit H16: an admin policy of `100000000` — "100 MB" — enrolled every libsodium
   client and locked the extension out until its twin floored). Servers MUST reject a
-  policy or account `kdfParams` whose `memBytes % 1024 != 0` (`bad_request`); clients
-  MUST floor when converting to KiB, never round. The shared KDF vectors
+  policy or account `kdfParams` whose `memBytes % 1024 != 0` with
+  `400 kdf_mem_not_kib_multiple` (distinct from `kdf_too_weak`: the shape, not the
+  strength) on every path that sets it — the org policy, registration, password change,
+  self-recovery commit and the admin recovery upload — and MUST serve an already-persisted
+  non-KiB policy floored to whole KiB rather than refusing the clients that adopt it;
+  clients MUST floor when converting to KiB, never round. The shared KDF vectors
   (`spec/test-vectors/kdf.json`) carry a non-KiB-multiple case so every engine is graded on
   the floor.
 - **kdfParams v1 default: `{ "v": 1, "alg": "argon2id13", "ops": 3, "memBytes": 67108864 }`**
@@ -175,7 +179,8 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
     rule exists for uniformity: a client that adopts a wrong-length key fails one item at
     a time later (every open under it fails) and shows an empty vault, where a refusal
     here names the cause (audit H93). All three checks are graded by
-    `spec/test-vectors/sharedgrant.json` on every engine that opens grants.
+    `spec/test-vectors/sharedgrant.json` on every engine that opens grants
+    (`rejectVersion`, `rejectVaultMismatch`, `rejectVkLength`).
   - A grant normally carries **exactly one** of `wrappedVk` / `sealedVk`; after an
     ownership transfer (spec 03 §11) the new owner's grant MAY carry both (`wrappedVk`
     current, `sealedVk` retained as fallback key material until vault purge).

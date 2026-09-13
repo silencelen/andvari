@@ -162,7 +162,7 @@ an asset set before publishing.
 
 
 ## Status (2026-09-13)
-- **Channel state: signed manifest at seq 12** — linux **0.26.3**, windows **0.26.3**, browserExtension
+- **Publish record — seq 12 (0.26.3), signed 2026-09-05** (history, not a current claim — see (2) below): linux **0.26.3**, windows **0.26.3**, browserExtension
   0.26.0; `signedAt 2026-09-05T22:56:25Z`, bundle ref `v0.26.3` / commit `39bf5944`. Recorded here from
   the archive on huginn (`~/.andvari/manifest-archive/seq12-20260905T230007Z/`) and re-verified for the
   2026-09-13 audit, because the publish itself left **no line in the watcher log and no PUBLISHED

@@ -19,7 +19,7 @@ class InProcessOverlaysTest {
     /** THE BUG, fixed: an overlay's own finish() is the last stop before the process ON_STOP. */
     @Test
     fun anOverlayClosingIsNotLeavingTheApp() {
-        InProcessOverlays.noteStarted()
+        InProcessOverlays.noteStarted(isOverlay = false)
         InProcessOverlays.noteStopped(isOverlay = true)
         assertTrue(InProcessOverlays.lastStopWasOverlay(), "the ON_STOP this stop causes must be skipped")
     }
@@ -27,9 +27,9 @@ class InProcessOverlaysTest {
     /** The load-bearing 0.26.0 pin stands: MainActivity stopping still locks. */
     @Test
     fun mainActivityStoppingStillCountsAsLeaving() {
-        InProcessOverlays.noteStarted()
+        InProcessOverlays.noteStarted(isOverlay = false)
         InProcessOverlays.noteStopped(isOverlay = true)
-        InProcessOverlays.noteStarted() // MainActivity comes back…
+        InProcessOverlays.noteStarted(isOverlay = false) // MainActivity comes back…
         InProcessOverlays.noteStopped(isOverlay = false) // …and the user leaves it
         assertFalse(InProcessOverlays.lastStopWasOverlay())
     }
@@ -37,10 +37,28 @@ class InProcessOverlaysTest {
     /** Any start resets the verdict — a stale overlay stop must not exempt a later, unrelated stop. */
     @Test
     fun aLaterStartClearsTheOverlayVerdict() {
-        InProcessOverlays.noteStarted()
+        InProcessOverlays.noteStarted(isOverlay = false)
         InProcessOverlays.noteStopped(isOverlay = true)
-        InProcessOverlays.noteStarted()
+        InProcessOverlays.noteStarted(isOverlay = false)
         assertFalse(InProcessOverlays.lastStopWasOverlay())
+    }
+
+    /** R12: the start side — an overlay coming forward is a process ON_START that is NOT the user
+     *  returning to the app (the deferred background lock reads this). */
+    @Test
+    fun anOverlayStartingIsNotReturningToTheApp() {
+        InProcessOverlays.noteStarted(isOverlay = true)
+        assertTrue(InProcessOverlays.lastStartWasOverlay())
+        InProcessOverlays.noteStarted(isOverlay = false) // MainActivity comes forward
+        assertFalse(InProcessOverlays.lastStartWasOverlay())
+    }
+
+    /** …and the install seam feeds the same verdict on both legs. */
+    @Test
+    fun theInstallSeamReportsOverlayOnBothLegs() {
+        val src = sourceFile("src/main/kotlin/io/silencelen/andvari/app/InProcessOverlays.kt").readText()
+        assertTrue(src.contains("override fun onActivityStarted(activity: Activity) = noteStarted(isOverlay(activity))"))
+        assertTrue(src.contains("override fun onActivityStopped(activity: Activity) = noteStopped(isOverlay(activity))"))
     }
 
     /** The exemption names exactly the overlays the manifest declares — every translucent,

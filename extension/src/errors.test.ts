@@ -2,6 +2,7 @@
 // (E1-3/E1-5/E1-7) — these are VERBATIM ports of the web canon, so any edit here or there
 // is cross-client copy drift and must be a deliberate, twin-side change.
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   bioUnlockErrorCopy,
@@ -79,6 +80,19 @@ test("save banner: the three codes render copy, never SW-internal strings", () =
   assert.doesNotMatch(saveErrorCopy("conflict"), /could not|open it in the web vault/i);
   assert.equal(saveErrorCopy("failed"), "Could not save — try again.");
   assert.equal(saveErrorCopy(undefined), "Could not save — try again."); // SW unreachable
+});
+
+test("save banner: `rejected` (H03/R37) is the PERMANENT rung — core's sentence byte-equal, never the retryable default", () => {
+  // The server's per-row `rejected` verdict (an attachment ref that no longer resolves) fails
+  // identically on every retry, so "try again" would be a lie. The sentence is the natives'
+  // HouseholdCopy.SAVE_REJECTED_ATTACHMENT, pinned against the Kotlin source the token-lockstep
+  // way (web vault-copy.test.ts idiom) so a one-sided reword fails here instead of drifting.
+  const householdKt = readFileSync(new URL("../../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/HouseholdCopy.kt", import.meta.url), "utf-8");
+  const m = householdKt.match(/const val SAVE_REJECTED_ATTACHMENT = "([^"]+)"/);
+  assert.ok(m, "HouseholdCopy.SAVE_REJECTED_ATTACHMENT moved — update the pin");
+  assert.equal(saveErrorCopy("rejected"), m![1]);
+  assert.notEqual(saveErrorCopy("rejected"), saveErrorCopy("failed"));
+  assert.doesNotMatch(saveErrorCopy("rejected"), /try again\.$/);
 });
 
 test("TOTP add (2026-08-12): every code renders copy; exists routes to the web vault, never a retry", () => {

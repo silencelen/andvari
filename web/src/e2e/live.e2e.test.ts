@@ -197,8 +197,11 @@ describe.skipIf(!BASE)("live server e2e", () => {
     let wsOpen = false;
     const closeWs = clientB.events((rev) => { bellRev = rev; }, () => {}, () => { wsOpen = true; });
     // The ticket mint adds a REST round-trip before the upgrade — await the actual
-    // socket-open signal (a push that beats registration rings no bell; the notifier
-    // has no replay), instead of a blind settle window.
+    // socket-open signal instead of a blind settle window. onOpen now means REGISTERED
+    // (client.ts: it fires on the server's "pong" to the open-time "ping", and the echo
+    // loop starts after notifier.register()), because a push that beats registration
+    // rings no bell and the notifier has no replay — under load the gate lost exactly
+    // that race (push 3 ms after the 101, no bell in 10 s; wave-3 gate, 2026-09-13).
     const openDeadline = Date.now() + 5000;
     while (!wsOpen && Date.now() < openDeadline) await new Promise((r) => setTimeout(r, 25));
     expect(wsOpen, "client B's WebSocket opened (ticket mint + upgrade)").toBe(true);

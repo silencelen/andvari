@@ -171,6 +171,13 @@ class AuditHardeningTest : P4TestSupport() {
      * mutation in the same batch throws and rolls back (item restored, ciphertext gone). Push
      * [delete X, put Y-that-throws] as one batch; assert X stays live AND blob A survives.
      * (The successful-delete-drops-the-file path is already covered by AttachmentP4Test.)
+     *
+     * H03 (audit 2026-09-13, spec 03 §5 amendment): a dangling attachment ref is no longer the
+     * thrower — it is a per-mutation `rejected` that lets the rest of the batch COMMIT (so the
+     * delete of X would land and blob A would rightly go; PushRejectedAttachmentTest covers
+     * that). The batch-wide throw survives only for a malformed request, so this pin now rolls
+     * the batch with `put_without_item` (a put carrying no item), which is still a thrown 400.
+     * The property under test — nothing is unlinked unless the tx committed — is unchanged.
      */
     @Test
     fun rolledBackBatch_preservesTombstonedItemBlob() = testApplication {
@@ -191,15 +198,16 @@ class AuditHardeningTest : P4TestSupport() {
             .results[0].newItemRev!!
         assertTrue(store.file(attId).isFile)
 
-        // One batch: delete X (queues blob A for unlink), then a put that references an unknown
-        // attachment id → throws unknown_attachment → the WHOLE tx rolls back.
+        // One batch: delete X (queues blob A for unlink), then a malformed put with no item body
+        // → throws put_without_item → the WHOLE tx rolls back (spec 03 §5: a thrown validation
+        // failure is batch-wide; only a malformed request still throws after H03).
         val rolled = client.pushRaw(
             vc,
             Mutation(uuid(), "delete", itemX, vc.personalVaultId, revX, null),
-            putMutation(vc, vc.newItemId(), """{"type":"note","name":"boom"}""", 0, listOf(uuid())),
+            Mutation(uuid(), "put", vc.newItemId(), vc.personalVaultId, 0, null),
         )
         assertEquals(HttpStatusCode.BadRequest, rolled.status)
-        assertEquals("unknown_attachment", errorOf(rolled))
+        assertEquals("put_without_item", errorOf(rolled))
 
         // Rollback preserved both the item (still live, still referencing A) and the blob file.
         assertEquals(listOf(attId), client.sync(vc).items.single { it.itemId == itemX }.attachmentIds)

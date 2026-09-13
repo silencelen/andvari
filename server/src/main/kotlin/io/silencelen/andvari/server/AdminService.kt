@@ -170,6 +170,7 @@ class AdminService(private val repo: Repo, private val config: Config) {
         // brute-forceable verifier. recovery-cli emits KdfParams.DEFAULT (at-floor) so this is a no-op
         // for the honest producer; it fails closed only on a hand-edited sub-floor bundle.
         requireKdfFloor(req.tempKdfParams, config)
+        requireKdfSaltB64(req.tempKdfSalt) // R26: the bundle's salt is served to prelogin like any other
         val exists = c.queryOne("SELECT userId FROM users WHERE userId=?", req.userId) { it.getString(1) }
             ?: throw BadRequest("no_such_user")
         c.exec(

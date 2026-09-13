@@ -63,6 +63,7 @@ import java.io.File
 import java.io.IOException
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.CryptoException
+import io.silencelen.andvari.core.crypto.CryptoUnavailableException
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.MemberRecovery
@@ -141,15 +142,29 @@ internal fun recoverSecretIdleExpired(onRecoverScreen: Boolean, recoverVerified:
  * that read green "none" and was edited to a breached password stayed green until a rescan. Each
  * scan now records the item's `rev` beside its count; a verdict whose rev no longer matches the
  * live item is dropped here, so the row renders "—" (absent key, G35's branch) and the Breached
- * tile stops counting it. `rev` is the right key on this client: the cache only ever changes an
- * item's doc through a server-acknowledged put/pull that bumps it. Pure; pinned in
- * `HealthVerdictGatesTest`.
+ * tile stops counting it.
+ *
+ * `rev` alone is NOT a sufficient key (recheck R09): since H18 the engine's `items()` overlays
+ * unflushed queued puts, and the overlay deliberately carries the PRIOR rev (LWW stays
+ * server-relative) — so an offline password edit changes the doc while the rev the scan recorded
+ * still matches. Any item with a pending write ([UiState.pendingSyncIds]) is therefore retired
+ * too, until the server acks it and the rev moves. Pure; pinned in `HealthVerdictGatesTest`.
  */
 internal fun freshBreachVerdicts(
     byItem: Map<String, Long>?,
     scannedRev: Map<String, Long>,
+    pendingIds: Set<String>,
     liveRev: (String) -> Long?,
-): Map<String, Long>? = byItem?.filterKeys { id -> scannedRev[id] != null && scannedRev[id] == liveRev(id) }
+): Map<String, Long>? = byItem?.filterKeys { id -> id !in pendingIds && scannedRev[id] != null && scannedRev[id] == liveRev(id) }
+
+/**
+ * R08: did [freshBreachVerdicts] retire anything the scan had a verdict on? A retired verdict is a
+ * NON-verdict — the row renders "—" — and the Breached tile must say so the way it says
+ * "incomplete" for a failed range (H75: the state is text, never a good-tone "0"). Without this
+ * a vault whose only breached login was edited offline read as a clean bill.
+ */
+internal fun breachVerdictsRetired(scanned: Map<String, Long>?, fresh: Map<String, Long>?): Boolean =
+    scanned != null && fresh != null && scanned.keys.any { it !in fresh }
 
 sealed interface Screen {
     data object Loading : Screen
@@ -2243,6 +2258,9 @@ class AndvariViewModel(
      * interpolating anything near secret material (§F.7).
      */
     private fun recoverVerifyError(t: Throwable): String = when {
+        // H15 (recheck R21): a native-crypto load failure is permanent and local — never the
+        // "Please try again." terminal (the ladder used to bypass HouseholdCopy.forError's row).
+        t is CryptoUnavailableException -> HouseholdCopy.CRYPTO_UNAVAILABLE
         t is KdfPolicyViolationException -> HouseholdCopy.WEAK_KDF_ACTION // H1 (spec 05 T1)
         t is ApiException -> when {
             t.status == 401 -> "We couldn't verify that email and recovery phrase."
@@ -2259,6 +2277,7 @@ class AndvariViewModel(
      * consumed ticket is `invalid_ticket` (the server value, pinned by RecoveryTest.kt).
      */
     private fun recoverResetError(t: Throwable): String = when {
+        t is CryptoUnavailableException -> HouseholdCopy.CRYPTO_UNAVAILABLE // H15 / R21, as above
         t is KdfPolicyViolationException -> HouseholdCopy.WEAK_KDF_ACTION // H1 (spec 05 T1)
         t is CryptoException && t.message?.contains("identity key mismatch") == true -> HouseholdCopy.IDENTITY_MISMATCH
         t is ApiException -> when {
@@ -3415,8 +3434,11 @@ class AndvariViewModel(
         lock(reason = REASON_BACKGROUND)
     }
 
-    /** Process ON_START (H08): the user is back — a deferred background lock is void. */
-    fun onProcessStart() = deferredBackgroundLock.returned()
+    /** Process ON_START (H08): the user is back — a deferred background lock is void. Unless
+     *  (R12) the process was woken by one of the autofill OVERLAYS, which H09 already ruled is
+     *  not "the app": the user is in a browser, not back here, and the lock they earned by
+     *  leaving must still fire when the op ends. */
+    fun onProcessStart() = deferredBackgroundLock.returned(startedByOverlay = InProcessOverlays.lastStartWasOverlay())
 
     /**
      * The hosting activity is FINISHING — Back out of the vault list, a Recents swipe (H54).
@@ -3489,7 +3511,7 @@ class AndvariViewModel(
     fun freshBreachByItem(): Map<String, Long>? {
         val u = _ui.value
         val live = u.items.associate { it.itemId to it.rev }
-        return freshBreachVerdicts(u.breachByItem, u.breachScanRev) { live[it] }
+        return freshBreachVerdicts(u.breachByItem, u.breachScanRev, u.pendingSyncIds) { live[it] }
     }
 
     fun duplicateClusters(): List<Duplicates.DuplicateCluster> =

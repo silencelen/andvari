@@ -157,6 +157,11 @@ describe("sharedgrant.json", () => {
     expect(() =>
       openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVkLength.expectedVaultId, fromB64(v.rejectVkLength.sealedB64)),
     ).toThrow(/32 bytes/);
+    // R48: the third recipient check — a payload whose `v` is not 1 is refused on the version.
+    expect(v.rejectVersion.v).not.toBe(1);
+    expect(() =>
+      openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVersion.expectedVaultId, fromB64(v.rejectVersion.sealedB64)),
+    ).toThrow(/version/);
     // Round-trip this impl's own (nondeterministic) seal.
     const own = sealSharedGrant(kp.publicKey, v.vaultId, fromB64(v.vkB64));
     expect(toB64(openSharedGrant(kp.publicKey, kp.privateKey, v.vaultId, own))).toBe(v.vkB64);

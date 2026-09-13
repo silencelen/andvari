@@ -210,12 +210,26 @@ private fun recover(sealedBlobB64: String) {
     val tempPassword = humanTempPassword()
     val tempSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
     val params = KdfParams.DEFAULT
+    // ZEROIZATION (H80, recheck R22 — Account.enroll's shape): the temp MK lives only long enough
+    // to split into its two purposes; the wrapKey and the unsealed UVK die once the UVK is sealed.
     val mk = Keys.masterKey(crypto, tempPassword, tempSalt, params)
-    val tempAuthKey = Keys.authKey(crypto, mk)
-    val tempWrapKey = Keys.wrapKey(crypto, mk)
-    val tempWrappedUvk = Envelope.seal(crypto, tempWrapKey, uvk, Ad.uvk(userId))
+    val (tempAuthKey, tempWrapKey) = try {
+        Keys.authKey(crypto, mk) to Keys.wrapKey(crypto, mk)
+    } finally {
+        mk.fill(0)
+    }
+    val tempWrappedUvk = try {
+        Envelope.seal(crypto, tempWrapKey, uvk, Ad.uvk(userId))
+    } finally {
+        tempWrapKey.fill(0)
+        uvk.fill(0)
+    }
 
-    val bundle = recoveryBundle(userId, tempAuthKey, tempWrappedUvk, tempSalt, params)
+    val bundle = try {
+        recoveryBundle(userId, tempAuthKey, tempWrappedUvk, tempSalt, params)
+    } finally {
+        tempAuthKey.fill(0) // the bundle carries its base64 form; the raw bytes are done
+    }
     val bundleJson = json.encodeToString(RecoveryUpload.serializer(), bundle)
 
     println()

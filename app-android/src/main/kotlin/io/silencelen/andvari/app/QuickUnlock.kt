@@ -578,9 +578,15 @@ object KdfReKey {
             val crypto = createCryptoProvider()
             val newSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
             val newParams = policy.kdfParams
+            // ZEROIZATION (H80, recheck R22 — Account.enroll's shape): the new MK lives only long
+            // enough to split into its two purposes, and the new wrapKey dies once the UVK is
+            // sealed under it. authNew is only ever the base64 string the request carries.
             val mkNew = Keys.masterKey(crypto, password, newSalt, newParams)
-            val authNew = Bytes.toB64(Keys.authKey(crypto, mkNew))
-            val wrapNew = Keys.wrapKey(crypto, mkNew)
+            val (authNew, wrapNew) = try {
+                Bytes.toB64(Keys.authKey(crypto, mkNew)) to Keys.wrapKey(crypto, mkNew)
+            } finally {
+                mkNew.fill(0)
+            }
             // The UVK never changes across a KDF upgrade (spec 01 §4/§7) — re-wrap the SAME UVK
             // under the new wrapKey. Copy egress is zeroed whatever happens.
             val uvk = account.uvkCopyForPlatformWrap()
@@ -588,6 +594,7 @@ object KdfReKey {
                 Envelope.sealB64(crypto, wrapNew, uvk, Ad.uvk(userId))
             } finally {
                 uvk.fill(0)
+                wrapNew.fill(0)
             }
             val currentAuth = Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, crypto)
             api.changePassword(

@@ -1970,7 +1970,18 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { 
     } catch (err) {
       // ux-copy--2: the 413 sentence is the copy canon's 413 row (byte-twin of core
       // HouseholdCopy) — never the server's raw message/statusText interpolated.
-      setSaveErr(err instanceof ApiError && err.status === 413 ? "The server refused that upload — it may be too large, or storage may be full." : "Save failed — nothing was changed.");
+      // H03 → recheck R38: a per-row `rejected` (store.ts throwIfRejected → ApiError with the
+      // server's reason) is PERMANENT — the referenced attachment is gone, and the same save
+      // fails identically forever — so it gets core's SAVE_REJECTED_ATTACHMENT row (byte-twin,
+      // pinned in vault-copy.test.ts), never the generic "nothing was changed" retry shape.
+      const rejectedAttachment = err instanceof ApiError && (err.code === "unknown_attachment" || err.code === "attachment_mismatch");
+      setSaveErr(
+        rejectedAttachment
+          ? "The server refused this save — an attachment it references is no longer there. Remove that attachment, then save again."
+          : err instanceof ApiError && err.status === 413
+            ? "The server refused that upload — it may be too large, or storage may be full."
+            : "Save failed — nothing was changed.",
+      );
     } finally {
       setBusy(false);
       setProgress(null);

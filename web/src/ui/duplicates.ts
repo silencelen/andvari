@@ -1,7 +1,7 @@
 import type { ItemDoc } from "../api/types";
 import { pslResolve } from "../vault/psl";
 import type { VaultItem } from "../vault/store";
-import { parseSavedUri } from "../vault/urimatch";
+import { normalizeHostUnicode, parseSavedUri } from "../vault/urimatch";
 
 /**
  * Duplicate-entry detection + the guided-merge plan (owner-requested 2026-08-12; ROADMAP P6).
@@ -102,6 +102,39 @@ export function siteKeysOf(doc: ItemDoc): Set<string> {
     out.add(r.kind === "registrable" ? r.domain : saved.host);
   }
   return out;
+}
+
+/**
+ * R46: what the cluster DISPLAYS for each site key. The key is the A-label (H22 made `bücher.de`
+ * and `xn--bcher-kva.de` one key — the clustering win) but a member who typed `bücher.de` must
+ * not read punycode back: the label is the U-label form of the same registrable domain — the
+ * last N labels of the raw uri's Unicode host, N = the key's label count (the encoder maps
+ * label-for-label). ASCII keys label themselves. Core twin: Duplicates.siteLabelsOf. Display
+ * only — grouping still runs on siteKeysOf.
+ */
+export function siteLabelsOf(doc: ItemDoc): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const raw of doc.login?.uris ?? []) {
+    const saved = parseSavedUri(raw);
+    if (!saved) continue;
+    if (saved.kind === "app") {
+      if (!out.has(`app:${saved.pkg}`)) out.set(`app:${saved.pkg}`, `app:${saved.pkg}`);
+      continue;
+    }
+    const r = pslResolve(saved.host);
+    const key = r.kind === "registrable" ? r.domain : saved.host;
+    if (!out.has(key)) out.set(key, siteLabel(key, raw));
+  }
+  return out;
+}
+
+function siteLabel(key: string, raw: string): string {
+  if (!key.split(".").some((l) => l.startsWith("xn--"))) return key;
+  const unicode = normalizeHostUnicode(raw);
+  if (unicode === null) return key;
+  const n = key.split(".").length;
+  const labels = unicode.split(".");
+  return labels.length >= n ? labels.slice(-n).join(".") : key;
 }
 
 const normUser = (doc: ItemDoc): string => (doc.login?.username ?? "").trim().toLowerCase();
@@ -282,7 +315,7 @@ export function planDismiss(
 export function duplicateClusters(items: VaultItem[], roleFor: RoleFor): DuplicateCluster[] {
   const logins = items
     .filter((it) => it.doc.type === "login")
-    .map((it) => ({ it, sites: siteKeysOf(it.doc), user: normUser(it.doc) }))
+    .map((it) => ({ it, sites: siteKeysOf(it.doc), user: normUser(it.doc), labels: siteLabelsOf(it.doc) }))
     .filter((m) => m.sites.size > 0);
 
   // Union-find over shared (site, username) keys — transitive by design (see header).
@@ -311,7 +344,7 @@ export function duplicateClusters(items: VaultItem[], roleFor: RoleFor): Duplica
     }
   });
 
-  const groups = new Map<number, { it: VaultItem; sites: Set<string> }[]>();
+  const groups = new Map<number, { it: VaultItem; sites: Set<string>; labels: Map<string, string> }[]>();
   logins.forEach((m, i) => {
     const r = find(i);
     groups.set(r, [...(groups.get(r) ?? []), m]);
@@ -324,8 +357,17 @@ export function duplicateClusters(items: VaultItem[], roleFor: RoleFor): Duplica
     const passwords = new Set(sorted.map(({ it }) => it.doc.login?.password ?? ""));
     const kind: DuplicateCluster["kind"] = passwords.size === 1 ? "exact" : "differs";
     const signature = clusterSignature(members.map((m) => m.it.itemId));
+    // R46: ONE label per site key across the cluster — a member who typed the U-label names the
+    // site for everyone (a punycode-typed sibling must not add a second entry).
+    const labelByKey = new Map<string, string>();
+    for (const m of members) {
+      for (const [k, l] of m.labels) {
+        const cur = labelByKey.get(k);
+        if (cur === undefined || (cur.includes("xn--") && !l.includes("xn--"))) labelByKey.set(k, l);
+      }
+    }
     const cluster: DuplicateCluster = {
-      sites: [...new Set(members.flatMap((m) => [...m.sites]))].sort(),
+      sites: [...new Set([...new Set(members.flatMap((m) => [...m.sites]))].map((s) => labelByKey.get(s) ?? s))].sort(),
       members: sorted.map(({ it }) => ({
         itemId: it.itemId,
         vaultId: it.vaultId,

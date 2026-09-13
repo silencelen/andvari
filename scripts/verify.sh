@@ -121,7 +121,7 @@ echo "==> §5.5 endpoint-agnostic docs (no reference-instance address or private
 # It now reads spec/ too, and matches address CLASSES (RFC1918, CGNAT/tailnet) and machine names
 # rather than the handful of strings that had already leaked once.
 (cd "$REPO_DIR" && bash scripts/ci/doc-leak-scan.sh)
-echo "    spec + docs + root/module prose carry no reference-instance address or private host name"
+echo "    spec + docs + root/module prose carry no reference-instance address or private host name (7 stated exemptions — see EXEMPT in scripts/ci/doc-leak-scan.sh)"
 
 echo "==> CI tripwires: CodeQL Kotlin-emptiness + doc-leak scanner self-tests (fixtures + live tree)"
 # The G18 tripwire's first version recognised exactly one YAML spelling of the empty Kotlin leg and

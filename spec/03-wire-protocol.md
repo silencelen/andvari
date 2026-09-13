@@ -349,9 +349,10 @@ A ticket authenticates the account at mint time; if the session is revoked withi
 ticket's ≤30 s TTL, the already-minted ticket may still open the bell for that window
 (accepted: the socket carries only rev/revoked signalling, never vault data, and
 the session's access token is rejected on its next `/sync`).
-Server → client frames, **exhaustively**: `{"type":"rev","rev":N}` (something changed —
+Server → client JSON frames, **exhaustively**: `{"type":"rev","rev":N}` (something changed —
 pull if N > local) and `{"type":"revoked"}` (session killed — drop to lock screen).
-Nothing else rides the socket; it is a dirty-bell, not a data plane. Earlier versions of
+Nothing else rides the socket except the bare-text `pong` echo under **Liveness** below
+(a keepalive/registration proof, never a signal); it is a dirty-bell, not a data plane. Earlier versions of
 this section also listed `{"type":"policy"}`; no server has ever emitted it and the one
 client handler that existed for it was deleted as dead code, so it is struck rather than
 reserved (audit H111). A policy change reaches clients through the ordinary
@@ -360,7 +361,15 @@ design (backlog F54), not a promise this document already made.
 **Liveness:** browser clients reconnect a dropped bell with exponential backoff (1 s
 doubling to a 60 s cap, jittered), minting a fresh single-use ticket per attempt, and
 pull `/sync` on every (re)open to recover bells missed while down (the notifier has no
-replay); a tab becoming visible with a dead socket reconnects immediately, and a
+replay). **A text frame `ping` from the client is echoed as the text frame `pong`** — an
+app-level keepalive (the extension's service worker needs JS-visible traffic) that is
+also the **registration proof**: the server registers a socket with its notifier only
+when the route body runs, after the 101, so a change committed in that window rings
+no bell for that socket. The echo loop starts after registration, so a client that
+treats the FIRST `pong` — not the 101 — as "open" and pulls then, as the web client
+does, closes the window rather than narrowing it (`pong` is the one non-JSON frame
+the server sends; JSON-frame clients ignore it). A tab becoming visible with a dead
+socket reconnects immediately, and a
 401/403 at ticket mint (dead session) stops reconnection and drops to the lock screen.
 Clients without WS poll `/sync` + refresh `/client-policy`: Android on every
 foreground transition and every 5 min while foregrounded and unlocked; desktop on
@@ -442,11 +451,17 @@ strips them degrades every client to the poll path (correct, just slower).
 - `GET/PUT /admin/policy` — org policy JSON: `minVersion{platform}`, default
   kdfParams, autoLockSeconds, clipboardClearSeconds, offlineCacheAllowed, quotas,
   sessionTtls. `PUT` validates `kdfParams` against spec 01: in range (§7/§9 bounds) **and
-  `memBytes % 1024 == 0`** (spec 01 §1) — a non-KiB-multiple is rejected `400 bad_request`
-  rather than persisted, because it would fan out through the silent KDF upgrade into a
-  fleet where the engines disagree on the master key (audit H16). The same divisibility
-  check applies wherever the server accepts account `kdfParams` (register, password
-  change, recovery upload), alongside the existing `minKdfMemBytes` floor.
+  `memBytes % 1024 == 0`** (spec 01 §1) — a non-KiB-multiple is rejected
+  `400 kdf_mem_not_kib_multiple` rather than persisted, because it would fan out through
+  the silent KDF upgrade into a fleet where the engines disagree on the master key (audit
+  H16). The code is distinct from `kdf_too_weak` on purpose: it is the shape, not the
+  strength, being refused. The same divisibility check applies wherever the server
+  accepts account `kdfParams` — `POST /auth/register`, `PUT /account/password`,
+  `POST /recovery/self/commit` and `POST /admin/recovery` answer the same
+  `400 kdf_mem_not_kib_multiple` beside their existing `kdf_too_weak` floor. A policy
+  row persisted before this rule is served **floored** to whole KiB (`⌊memBytes/1024⌋·1024`
+  — byte-identical to what every libsodium client already derived under it), so an older
+  instance is healed rather than bricked; the stored row is replaced by the next `PUT`.
 - `GET /admin/status` — server version, break-glass tunnel state (read-only),
   storage stats.
 

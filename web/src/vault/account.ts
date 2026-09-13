@@ -118,58 +118,76 @@ export class Account {
     const userId = uuidv4();
     const personalVaultId = uuidv4();
     const kdfSalt = randomBytes(16);
+    // ZEROIZATION (audit H80, spec 01 §2; the TWIN of core Account.enroll): the MK lives only
+    // long enough to split into its two purposes, and authKey, wrapKey and the raw identity seed
+    // die once the request carries their encoded/sealed forms. Best-effort in a managed runtime,
+    // but it takes the buffers a whole account re-derives from off the heap the moment they are
+    // dead instead of leaving them to GC — the difference between a memory disclosure costing a
+    // session and costing the account. The UVK and VK are NOT wiped: the returned Account owns
+    // them for the session, and wiping them would be wiping the unlocked vault.
     const mk = masterKey(params.password, kdfSalt, params.kdfParams);
-    const authKey = await deriveAuthKey(mk);
-    const wrapKey = await deriveWrapKey(mk);
+    let authKey: Uint8Array;
+    let wrapKey: Uint8Array;
+    try {
+      authKey = await deriveAuthKey(mk);
+      wrapKey = await deriveWrapKey(mk);
+    } finally {
+      mk.fill(0);
+    }
 
     const uvk = randomBytes(32);
     const identitySeed = randomBytes(32);
-    const identity = boxKeypairFromSeed(identitySeed);
     const vk = randomBytes(32);
+    try {
+      const identity = boxKeypairFromSeed(identitySeed);
+      const wrappedUvk = seal(wrapKey, uvk, adUvk(userId));
+      const encryptedIdentitySeed = seal(uvk, identitySeed, adIdkey(userId));
+      const wrappedVk = seal(uvk, vk, adVk(personalVaultId, userId));
+      const metaBlob = seal(vk, utf8(JSON.stringify({ name: "Personal" })), adVaultMeta(personalVaultId));
 
-    const wrappedUvk = seal(wrapKey, uvk, adUvk(userId));
-    const encryptedIdentitySeed = seal(uvk, identitySeed, adIdkey(userId));
-    const wrappedVk = seal(uvk, vk, adVk(personalVaultId, userId));
-    const metaBlob = seal(vk, utf8(JSON.stringify({ name: "Personal" })), adVaultMeta(personalVaultId));
+      // Org escrow is CONDITIONAL (§F.4): sealed only for a `required` invite (org key present),
+      // preserving the verified-fingerprint discipline — refuse to seal the UVK to a key whose
+      // fingerprint the enrollee did not confirm out-of-band. Waived ⇒ no escrow blob (undefined
+      // ⇒ JSON.stringify omits the key, which the server requires when the invite is waived).
+      let escrow: EscrowUpload | undefined;
+      if (params.recoveryPublicKey != null) {
+        const fp = params.recoveryFingerprint;
+        if (fp == null) throw new CryptoError("recoveryFingerprint is required when sealing org escrow");
+        const computedFp = await recoveryFingerprint(params.recoveryPublicKey);
+        if (computedFp !== fp) throw new CryptoError("recovery public key does not match its fingerprint");
+        escrow = { sealed: toB64(await sealUvk(params.recoveryPublicKey, userId, uvk)), fingerprint: fp };
+      }
 
-    // Org escrow is CONDITIONAL (§F.4): sealed only for a `required` invite (org key present),
-    // preserving the verified-fingerprint discipline — refuse to seal the UVK to a key whose
-    // fingerprint the enrollee did not confirm out-of-band. Waived ⇒ no escrow blob (undefined
-    // ⇒ JSON.stringify omits the key, which the server requires when the invite is waived).
-    let escrow: EscrowUpload | undefined;
-    if (params.recoveryPublicKey != null) {
-      const fp = params.recoveryFingerprint;
-      if (fp == null) throw new CryptoError("recoveryFingerprint is required when sealing org escrow");
-      const computedFp = await recoveryFingerprint(params.recoveryPublicKey);
-      if (computedFp !== fp) throw new CryptoError("recovery public key does not match its fingerprint");
-      escrow = { sealed: toB64(await sealUvk(params.recoveryPublicKey, userId, uvk)), fingerprint: fp };
+      // Per-member self-service recovery piece — MANDATORY for every new account (§F.4). The 256-bit
+      // recoverySecret is GENERATED (never user input) and returned to be SHOWN ONCE.
+      const recovery = await generateMemberRecovery(userId, uvk);
+
+      const request: RegisterRequest = {
+        inviteToken: params.inviteToken,
+        userId,
+        email: params.email,
+        displayName: params.displayName,
+        kdfSalt: toB64(kdfSalt),
+        kdfParams: params.kdfParams,
+        authKey: toB64(authKey),
+        wrappedUvk: toB64(wrappedUvk),
+        identityPub: toB64(identity.publicKey),
+        encryptedIdentitySeed: toB64(encryptedIdentitySeed),
+        escrow,
+        memberRecovery: { recoveryWrappedUvk: recovery.recoveryWrappedUvk, recoveryAuthKey: recovery.recoveryAuthKey },
+        personalVault: { vaultId: personalVaultId, wrappedVk: toB64(wrappedVk), metaBlob: toB64(metaBlob) },
+        device: { platform: "web", name: deviceName(), installId: params.installId },
+      };
+
+      const vaultKeys = new Map([[personalVaultId, vk]]);
+      const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, personalVaultId, vaultKeys);
+      account.vaultRoles.set(personalVaultId, "owner");
+      return { request, account, recoverySecret: recovery.recoverySecret };
+    } finally {
+      authKey.fill(0);
+      wrapKey.fill(0);
+      identitySeed.fill(0);
     }
-
-    // Per-member self-service recovery piece — MANDATORY for every new account (§F.4). The 256-bit
-    // recoverySecret is GENERATED (never user input) and returned to be SHOWN ONCE.
-    const recovery = await generateMemberRecovery(userId, uvk);
-
-    const request: RegisterRequest = {
-      inviteToken: params.inviteToken,
-      userId,
-      email: params.email,
-      displayName: params.displayName,
-      kdfSalt: toB64(kdfSalt),
-      kdfParams: params.kdfParams,
-      authKey: toB64(authKey),
-      wrappedUvk: toB64(wrappedUvk),
-      identityPub: toB64(identity.publicKey),
-      encryptedIdentitySeed: toB64(encryptedIdentitySeed),
-      escrow,
-      memberRecovery: { recoveryWrappedUvk: recovery.recoveryWrappedUvk, recoveryAuthKey: recovery.recoveryAuthKey },
-      personalVault: { vaultId: personalVaultId, wrappedVk: toB64(wrappedVk), metaBlob: toB64(metaBlob) },
-      device: { platform: "web", name: deviceName(), installId: params.installId },
-    };
-
-    const vaultKeys = new Map([[personalVaultId, vk]]);
-    const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, personalVaultId, vaultKeys);
-    account.vaultRoles.set(personalVaultId, "owner");
-    return { request, account, recoverySecret: recovery.recoverySecret };
   }
 
   /**
@@ -203,23 +221,53 @@ export class Account {
       escrowFingerprint: "",
     });
     // 3. Derive fresh password material and re-wrap the SAME UVK (invariant).
+    // ZEROIZATION (audit H80, spec 01 §2; core Account.recover parity): the new MK, authKey and
+    // wrapKey die once the commit body carries their encoded forms — and so does the recovered
+    // UVK, because recover() returns a body, not a session (the commit revokes every session and
+    // the member signs in afresh, so no caller holds this copy; the step-2 probe Account shares
+    // the reference and is already unreachable).
     const newKdfSalt = randomBytes(16);
     const newMk = masterKey(params.newPassword, newKdfSalt, params.newKdfParams);
-    const newAuthKey = await deriveAuthKey(newMk);
-    const newWrapKey = await deriveWrapKey(newMk);
-    return {
-      recoveryTicket: params.verify.recoveryTicket,
-      newAuthKey: toB64(newAuthKey),
-      newKdfSalt: toB64(newKdfSalt),
-      newKdfParams: params.newKdfParams,
-      newWrappedUvk: toB64(seal(newWrapKey, uvk, adUvk(userId))),
-    };
+    let newAuthKey: Uint8Array;
+    let newWrapKey: Uint8Array;
+    try {
+      newAuthKey = await deriveAuthKey(newMk);
+      newWrapKey = await deriveWrapKey(newMk);
+    } finally {
+      newMk.fill(0);
+    }
+    try {
+      return {
+        recoveryTicket: params.verify.recoveryTicket,
+        newAuthKey: toB64(newAuthKey),
+        newKdfSalt: toB64(newKdfSalt),
+        newKdfParams: params.newKdfParams,
+        newWrappedUvk: toB64(seal(newWrapKey, uvk, adUvk(userId))),
+      };
+    } finally {
+      newAuthKey.fill(0);
+      newWrapKey.fill(0);
+      uvk.fill(0);
+    }
   }
 
-  /** Derive the login authKey from a password + the account's stored salt/params. */
+  /** Derive the login authKey from a password + the account's stored salt/params.
+   *  ZEROIZATION (audit H80, spec 01 §2 "MK never leaves the KDF step"): MK and the raw authKey
+   *  are dead the moment the base64 credential exists — the MK is what the UVK wrap key ALSO
+   *  re-derives from, so it never outlives this call. Every MK-derivation site in this class
+   *  does the same: {@link enroll}, {@link unlock}, {@link recover}, {@link buildPasswordChange}. */
   static async deriveAuthKey(password: string, kdfSalt: string, params: KdfParams): Promise<string> {
     const mk = masterKey(password, fromB64(kdfSalt), params);
-    return toB64(await deriveAuthKey(mk));
+    try {
+      const authKey = await deriveAuthKey(mk);
+      try {
+        return toB64(authKey);
+      } finally {
+        authKey.fill(0);
+      }
+    } finally {
+      mk.fill(0);
+    }
   }
 
   /**
@@ -227,13 +275,23 @@ export class Account {
    * Rebuilds UVK and identity; vault keys are added later from grants.
    */
   static async unlock(userId: string, password: string, keys: AccountKeys): Promise<Account> {
+    // ZEROIZATION (audit H80, spec 01 §2; core Account.unlock parity): after the wrappedUvk open
+    // the session needs only the UVK — MK and wrapKey are wiped on the way out, success or
+    // failure (a wrong password must not leave the MK it derived on the heap either).
     const mk = masterKey(password, fromB64(keys.kdfSalt), keys.kdfParams);
-    const wrapKey = await deriveWrapKey(mk);
+    let wrapKey: Uint8Array;
+    try {
+      wrapKey = await deriveWrapKey(mk);
+    } finally {
+      mk.fill(0);
+    }
     let uvk: Uint8Array;
     try {
       uvk = open(wrapKey, fromB64(keys.wrappedUvk), adUvk(userId));
     } catch {
       throw new CryptoError("wrong master password");
+    } finally {
+      wrapKey.fill(0);
     }
     // Password path validates the password by the wrappedUvk open above; from here the work is
     // identical to the recovery (UVK-in-hand) path — one shared tail, so the identity-pubkey
@@ -253,7 +311,14 @@ export class Account {
    */
   private static unlockFromUvk(userId: string, uvk: Uint8Array, keys: AccountKeys): Account {
     const identitySeed = open(uvk, fromB64(keys.encryptedIdentitySeed), adIdkey(userId));
-    const identity = boxKeypairFromSeed(identitySeed);
+    // ZEROIZATION (audit H80): the seed's only job is to derive the keypair the Account holds —
+    // a compromise of the seed IS a compromise of the identity key, so it gets the MK's care.
+    let identity: ReturnType<typeof boxKeypairFromSeed>;
+    try {
+      identity = boxKeypairFromSeed(identitySeed);
+    } finally {
+      identitySeed.fill(0);
+    }
     let serverIdentityPub: Uint8Array | null = null;
     try {
       serverIdentityPub = fromB64(keys.identityPub);
@@ -376,16 +441,29 @@ export class Account {
     params: KdfParams,
   ): Promise<{ newKdfSalt: string; newKdfParams: KdfParams; newAuthKey: string; newWrappedUvk: string }> {
     const newKdfSalt = randomBytes(16);
+    // ZEROIZATION (audit H80, spec 01 §2): same discipline as {@link deriveAuthKey} — the new
+    // MK, authKey and wrapKey are dead once the change request carries their encoded forms.
     const mk = masterKey(newPassword, newKdfSalt, params);
-    const newAuthKey = await deriveAuthKey(mk);
-    const newWrapKey = await deriveWrapKey(mk);
-    const newWrappedUvk = seal(newWrapKey, this.uvk, adUvk(this.userId));
-    return {
-      newKdfSalt: toB64(newKdfSalt),
-      newKdfParams: params,
-      newAuthKey: toB64(newAuthKey),
-      newWrappedUvk: toB64(newWrappedUvk),
-    };
+    let newAuthKey: Uint8Array;
+    let newWrapKey: Uint8Array;
+    try {
+      newAuthKey = await deriveAuthKey(mk);
+      newWrapKey = await deriveWrapKey(mk);
+    } finally {
+      mk.fill(0);
+    }
+    try {
+      const newWrappedUvk = seal(newWrapKey, this.uvk, adUvk(this.userId));
+      return {
+        newKdfSalt: toB64(newKdfSalt),
+        newKdfParams: params,
+        newAuthKey: toB64(newAuthKey),
+        newWrappedUvk: toB64(newWrappedUvk),
+      };
+    } finally {
+      newAuthKey.fill(0);
+      newWrapKey.fill(0);
+    }
   }
 
   /**

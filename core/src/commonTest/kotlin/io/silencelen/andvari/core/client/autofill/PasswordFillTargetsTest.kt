@@ -66,4 +66,18 @@ class PasswordFillTargetsTest {
     fun emptyInput_isEmptyOutput() {
         assertEquals(emptyList(), targets())
     }
+
+    /** R19: the hint-keyed entry is the predicate-keyed rule with hasNewPasswordHint plugged in —
+     *  Android's NewPasswordSignal delegates to the predicate form, so the two must agree. */
+    @Test
+    fun theHintEntryIsThePredicateRule() {
+        val fields = listOf(F("current", listOf("current-password")), F("new", listOf("new-password")), F("confirm", listOf("new-password")))
+        assertEquals(
+            FieldClassifier.passwordFillTargets(fields) { it.hints },
+            FieldClassifier.passwordFillTargetsBy(fields) { FieldClassifier.hasNewPasswordHint(it.hints) },
+        )
+        val allNew = listOf(F("a", listOf("new-password")), F("b", listOf("new-password")))
+        assertEquals(allNew, FieldClassifier.passwordFillTargetsBy(allNew) { true })
+        assertEquals(listOf(allNew[1]), FieldClassifier.passwordFillTargetsBy(allNew) { it.id == "a" })
+    }
 }

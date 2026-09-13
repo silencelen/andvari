@@ -24,11 +24,15 @@ export interface FillTarget {
 // verbatim algorithm in all three engines is the only way the shared vectors can pin them. It is
 // deliberately MINIMAL and matches what a modern browser reports for real-world hosts: the host is
 // already lowercased; each label is NFC-normalized and a label with any non-ASCII code point
-// becomes `xn--` + RFC 3492 punycode. No UTS46 mapping table (full-width forms, `ẞ` → `ss`,
-// ligatures) and no bidi/joiner validity — such spellings still canonicalize deterministically on
-// every client, they just do not match the browser's spelling: an under-match, never a
-// cross-origin fill (fail-closed). The one runtime failure — arithmetic overflow on an absurd
-// label — returns null, which matches nothing. Twin of core Idna.kt / Punycode.
+// becomes `xn--` + RFC 3492 punycode. No UTS46 mapping table (full-width forms, ligatures) and
+// no bidi/joiner validity — such spellings still canonicalize deterministically on every client,
+// they just do not match the browser's spelling, and encode to a label no registry can hold: an
+// under-match. The ONE omitted mapping that would NOT stay an under-match is `ẞ` (U+1E9E) → "ss":
+// the lowercase step turns it into `ß`, a deviation character browsers keep, so `straẞe.de` would
+// canonicalize to `xn--strae-oqa.de` (straße.de) — a real, different registrable domain from the
+// `strasse.de` the browser reports. normalizeHost therefore REJECTS a host carrying U+1E9E (R44,
+// graded by urimatch-idna.json). The one runtime failure — arithmetic overflow on an absurd label
+// — returns null, which matches nothing. Twin of core Idna.kt / Punycode.
 
 const PUNY_BASE = 36;
 const PUNY_T_MIN = 1;
@@ -116,6 +120,14 @@ export function idnaToAscii(host: string): string | null {
 }
 
 export function normalizeHost(raw: string): string | null {
+  const u = normalizeHostUnicode(raw);
+  return u === null ? null : idnaToAscii(u);
+}
+
+/** R46: the SAME normalizer stopped before the A-label step — every ASCII rule applied, the
+ *  U-label kept. DISPLAY only (the Health duplicate clusters show what the member typed); never
+ *  a matching input — normalizeHost's A-label is the only thing matches() compares. Core twin. */
+export function normalizeHostUnicode(raw: string): string | null {
   let s = raw.trim();
   if (!s) return null;
   s = s.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "");
@@ -135,6 +147,13 @@ export function normalizeHost(raw: string): string | null {
     const oneColon = colon >= 0 && s.indexOf(":") === colon;
     if (oneColon && colon < s.length - 1 && /^\d+$/.test(s.slice(colon + 1))) s = s.slice(0, colon);
   }
+  // R44 (H22 recheck): U+1E9E CAPITAL SHARP S is refused BEFORE the lowercase step, because
+  // toLowerCase() maps it to ß (U+00DF) while UTS46 — what every browser applies — maps it to
+  // "ss". A saved `straẞe.de` would otherwise canonicalize to `xn--strae-oqa.de` (straße.de), a
+  // DIFFERENT registrable domain from the `strasse.de` the browser reports: not an under-match
+  // but a cross-origin fill. Every other omitted UTS46 mapping encodes to a label no registry
+  // can hold (an under-match); this is the one that lands on a real one. Core UriMatch.kt twin.
+  if (s.includes("\u1E9E")) return null;
   s = s.trim().replace(/\.+$/, "").toLowerCase();
   // Strip EVERY leading "www." label (not just one) — normalizeHost must be idempotent,
   // and a single-strip made normalize(normalize("www.www.x")) != normalize("www.www.x"),
@@ -145,10 +164,10 @@ export function normalizeHost(raw: string): string | null {
   // ANYTHING — the eTLD+1 resolver would otherwise resolve it to its rightmost real family
   // and quietly grant it the new equality rule. (IPv6 hosts have no dots between groups.)
   if (s.split(".").some((l) => !l)) return null;
-  // H22: canonicalize to the A-label LAST, after every ASCII rule has run. Symmetric (matches()
-  // normalizes the page host through here too), idempotent (ASCII in → unchanged), fail-closed
-  // (encoder overflow → null → matches nothing). Core UriMatch.kt parity.
-  return idnaToAscii(s);
+  // H22: normalizeHost canonicalizes to the A-label LAST, after every ASCII rule above has run.
+  // Symmetric (matches() normalizes the page host through here too), idempotent (ASCII in →
+  // unchanged), fail-closed (encoder overflow → null → matches nothing). Core UriMatch.kt parity.
+  return s;
 }
 
 export function parseSavedUri(raw: string): SavedUri | null {

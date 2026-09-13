@@ -23,11 +23,15 @@ package io.silencelen.andvari.core.client.autofill
  * matches what a modern browser reports for every real-world host we have seen: the host is
  * already lowercased by normalizeHost; each label is NFC-normalized, and a label with any
  * non-ASCII code point becomes `xn--` + RFC 3492 punycode. No UTS46 mapping table is applied
- * (full-width forms, `ẞ` → `ss`, ligature decomposition) — a saved host using those spellings
- * still canonicalizes deterministically on every client, it just does not match the browser's
- * spelling. That is the fail-CLOSED corner: an under-match, never a cross-origin fill. Bidi and
- * joiner validity checks are likewise not applied: an invalid label is punycoded all the same
- * and matches only itself.
+ * (full-width forms, ligature decomposition) — a saved host using those spellings still
+ * canonicalizes deterministically on every client, it just does not match the browser's
+ * spelling, and the label it encodes to is one no registry can hold: an under-match. The ONE
+ * omitted mapping that does NOT stay an under-match is `ẞ` (U+1E9E) → "ss": the lowercase step
+ * turns it into `ß`, a deviation character browsers keep, so `straẞe.de` would canonicalize to
+ * `xn--strae-oqa.de` — a real, different registrable domain from the `strasse.de` the browser
+ * reports — and fill across origins. normalizeHost therefore REJECTS a host carrying U+1E9E
+ * outright (R44; graded by urimatch-idna.json). Bidi and joiner validity checks are likewise not
+ * applied: an invalid label is punycoded all the same and matches only itself.
  *
  * FAIL CLOSED. The only runtime failure the encoder can have is arithmetic overflow on an
  * absurd label; it returns null and normalizeHost returns null, which never matches anything.
