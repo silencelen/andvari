@@ -461,6 +461,51 @@ findings it raised, none was disputed by the closing agent.
 >   lockfile gates got fixtures; 0.26.2's fixes got the regression tests they shipped without. Full
 >   report: `docs/design/2026-09-13-full-surface-audit.md`.
 
+
+### 8a. Shipped as 0.27.0 (2026-09-14)
+
+**Tag `v0.27.0` = `798c2f8`, main pushed to the public repo. Every channel huginn can drive is live;
+the Windows MSI and the signed manifest (seq 12 → 13) are the owner's `signandvari 0.27.0` ceremony.**
+
+- **Owner-decision rows:** all 25 (§4) plus the three needs-verification rows landed first, as the
+  owner decided (`ca9352f`): 6 directory lanes + 6 clusters, 12 adversarial reviewers → 53 findings,
+  0 disputed, all applied; two fresh gates green (1130 Kotlin tests). Fleet and extension bumped to
+  0.27.0 in lockstep (`b19def6`); CHANGELOG entry written.
+- **Reference instance (CT122):** server + web deployed with three rollback points
+  (`*.pre-0.27.0-20260913-190800`; an earlier set `-185842` from the first attempt); healthz 200
+  through Cloudflare; bundle `index.zHjH-qh2.js`. **Deploy incident, recorded honestly:** the first
+  deploy extracted the web tarball one directory too deep, so `/` and the new bundle answered 404 for
+  about two minutes; fixed in place. Cloudflare then kept answering 404 for the bundle from its edge
+  cache — the server sent no `Cache-Control` on a missing-asset 404, so the edge applied its default
+  TTL. It expired on its own, and the defect is closed as **H140**: both 404 branches of the static
+  route now send `Cache-Control: no-store` (`798c2f8`, `StaticCachingTest`, red without / green with).
+- **/downloads:** `andvari-0.27.0.deb` + `.asc` (GPG good), the Chrome zip, the AMO-signed
+  `.xpi`, `firefox-updates.json` (→ 0.27.0) and `release-spec.json` (linux 0.27.0 + browserExtension
+  0.27.0, artifacts block stripped) — every one byte-verified through Cloudflare.
+- **Stores:** Chrome Web Store uploaded + submitted (review pending); AMO signed and published
+  (Firefox auto-updates through the update channel).
+- **GitHub release `v0.27.0`:** 10 assets — deb, `.asc`, APK, `latest.json`, both extension zips,
+  the signed `.xpi`, `firefox-updates.json`, and one combined `SHA256SUMS-0.27.0.txt` + its detached
+  signature (H104's "in the release and in SUMS, or in neither"). `scripts/gh-release.sh`'s first live
+  run created the release and then lost its uploads (gh invoked outside the checkout) — fixed the same
+  night by pinning `GH_REPO`; the assets were uploaded from the script's own staged set.
+- **Devstore:** current at versionCode 22124824 (`ship.sh --verify`), pulled from the release.
+- **Operator tooling deployed:** the manifest watcher (H47 log of record, H103 bundle-commit ==
+  tag) to `/usr/local/bin` with the previous copy kept; `devstore-sync.sh` (H105 marker) on devserv.
+- **GitHub housekeeping:** PR #56 closed as superseded, PR #57 closed per ROADMAP lane 4, alerts
+  #13–#15 dismissed with the citation, #11/#16 closed by the lock bump on push; the 0.26.2 SUMS asset
+  repaired with the `.xpi` digest (H104). New for the next cycle: alert #17 (adm-zip, devDependency).
+- **Not done, and why:** the container image (no Docker on the build host — H43/H99 remain owner /
+  other-host steps; the docs already say a login is required); H94's instrumented Android vector run
+  compiled but was not executed on a device before the APK shipped (no device on the build host; the
+  Android crypto actual is unchanged from 0.26.x, which is the mitigation) — owner runs it on the
+  Fold; the TalkBack smokes (H09/H31/H32) likewise; H110's `signandvari` read-back sees its first live
+  run in the owner's ceremony.
+- **Owner steps, in order:** `signandvari 0.27.0` on PRESTIGE from a clean `v0.27.0` checkout
+  (`-SignToolPath` as always) → the watcher publishes seq 13 → add the MSI to the GitHub release
+  (`scripts/gh-release.sh … --msi <file>` refuses to clobber real artifacts, so a re-cut gets a new
+  name) → flip the ghcr package public → the device smokes above.
+
 ## 9. What this audit says about the next one
 
 - Half-landed remediation — the fix's copy, gate or first leg shipped and its state machine, re-fire, remaining legs or pin did not: H08, H10, H17, H18, H33, H35, H36, H40, H41.
