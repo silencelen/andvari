@@ -42,6 +42,20 @@ class AttachmentStore(
 
     var orphanTtlMs = 24L * 3600 * 1000 // mutable so tests can force an immediate sweep
 
+    /**
+     * Test seams (H97). The two concurrency tests around this class used to order their threads
+     * with `delay(250)` — "the first store has probably taken its permit and entered the read loop
+     * by now". That is a guess: on a loaded build host the second upload can run first, and the
+     * test then reds over no regression (or passes having exercised the non-race path, which is
+     * worse). They now AWAIT the real condition through these accessors, so the wait is as long
+     * as the host needs and the assertion is about the cap, not about the scheduler.
+     */
+    internal fun activeUploads(userId: String): Int =
+        inFlight[userId]?.let { maxConcurrentUploadsPerUser - it.sem.availablePermits() } ?: 0
+
+    /** Streamed-but-uncommitted bytes currently counted against [userId]'s quota (see [activeUploads]). */
+    internal fun inFlightBytes(userId: String): Long = inFlight[userId]?.bytes?.get() ?: 0L
+
     fun file(attachmentId: String): File = File(dir, attachmentId)
 
     /** Ciphertext budget for a plaintext quota: per-chunk secretstream overhead, header excluded (stored in the row). */

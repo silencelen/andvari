@@ -263,6 +263,45 @@ the saved item, and a form mixing domains yields no fill rather than filling a
 credential into a foreign-origin field. (Client-side only; the spec 02 §5 server
 plaintext table is unchanged — matching reads the existing `login.uris` ciphertext.)
 
+**Field classification — one-time-code boxes (normative; amended 2026-09-13, audit H65).**
+A client classifies a fill target from its SIGNALS alone (autofill hints, the HTML
+`type`/`name`/`id`, Android `InputType`) and never from its value; the graded corpus is the
+`classify` / `classifyCard` / `classifyCardFreeRegression` sections of
+`spec/test-vectors/urimatch.json`, which every engine runs. The stored password **MUST NOT be
+offered into a one-time-code box.** Before this amendment that rule (F11) fired only on the
+page's own `autocomplete` token (`one-time-code` / `otpCode` / `smsOTPCode`), so a site that
+masks its 2FA entry as `<input type="password" name="otp">` and declares no `autocomplete`
+still got the account password offered into the code box — and on the extension, whose capture
+engine reads the fill target back on submit, six digits typed there could then overwrite the
+stored credential. **Amended rule: a NAME_NEGATIVE token in the field's own `name`/`id`
+(`search`, `otp`, `captcha`, `code`, `query`, `phone`), or one of the two-factor spellings
+`2fa` / `mfa` / `twofactor`, overrides `type="password"` and the field classifies NONE** — the
+same verdict the hinted box has always received. Three limits are deliberate and each is pinned
+by a vector:
+
+- **HTML type only.** A native Android `InputType` password field named `otp` (no HTML type at
+  all) keeps its frozen PASSWORD verdict. That is the recorded residual, not an oversight: the
+  hint path still covers the platform's own `oneTimeCode` hint, and the HTML shape is the one a
+  browser actually reports.
+- **After the CSC demotion, never before.** A masked CVV (`securityCode`, `cvv_code`,
+  `cardVerificationCode`) is still the card security code. The three-kind web/extension engines
+  have no card verdict to return and therefore keep `password` for that one shape, which is what
+  lets the extension's form-level CSC demotion reach a masked CVV; the carve-out matches only
+  whole tokens, so `cscode` / `mysecuritycode` fall through to NONE on every engine.
+- **The two-factor spellings are override-only.** They are NOT added to NAME_NEGATIVE, which also
+  gates the frozen USERNAME legs — `<input type="email" name="2fa_recovery_email">` is still a
+  username box. A separated `two_factor` is therefore not matched (in the wild it carries a
+  `code` token beside it, which is).
+
+The cost is accepted and one-directional: a genuine password box named like a code (`passcode`,
+`cv_code`) stops being OFFERED a fill — the member types it — and is never mis-filled the other
+way. The classifier already refused to read those names as login names on a text input, so the
+amendment makes the two halves agree. **One frozen vector moves with it:**
+`classifyCardFreeRegression`'s `<input type="password" name="cv_code">` goes PASSWORD → NONE;
+the hinted F11 cases are unchanged and stay pinned. Client-side only — no `formatVersion`, no
+wire change — and carried by the whole 0.27.0 fleet at once (core/Android/desktop, web,
+extension); an older client keeps the hinted-only rule.
+
 ## 4. Vaults
 
 ```
@@ -288,6 +327,33 @@ pendingOfferSetAt/lastTransferOfferId/lastTransferAcceptProof`. Roles are
 server rejects writes without writer role). Membership (which userId holds which role on
 which vaultId) is server-visible via the grants row; membership-management audit events
 record only ids and roles, never names or decrypted content.
+
+**`type` is a SERVER label, and it MUST NOT choose the personal vault on its own (2026-09-13
+amendment, audit H64).** `type` is plaintext in the vault row and is bound into no AD — the
+vaultMeta AD is `andvari/v1|vaultmeta|{vaultId}` and nothing else — so after enrollment nothing a
+client holds authenticates WHICH vault is its own: `personalVaultId` is rebuilt on every unlock
+from the first row the server labels `personal` whose key that client happens to hold. A client
+MUST therefore **refuse to adopt as its personal vault any vault whose VK arrived by MEMBER grant
+(`sealedVk`)**, whatever the server calls it. The asymmetry is the whole argument: a `sealedVk` is
+ANONYMOUS — anyone holding the member's public identity key can mint one — and the key inside it
+is by construction one that at least one other person already has; a `wrappedVk` opens only under
+that member's own UVK with AD `andvari/v1|vk|{vaultId}|{userId}`, which is unforgeable evidence
+that the client itself sealed that key for itself. A personal vault is always wrapped (minted
+locally at enrollment, re-wrapped and never re-sealed at password change), so the refusal costs an
+honest account nothing. Fail-closed: when every held candidate is member-granted the client keeps
+NO personal vault — §8.2's ledger then degrades to "—" (never an error) and a save with no
+explicit destination fails loudly rather than filing the user's item into somebody else's shared
+vault. Without the rule, a hostile server that withheld the real personal row and relabelled a
+shared vault would have moved the §8.2 usage key onto a VK every other member of that vault holds.
+
+> **Known residue, and why it is deferred rather than papered over.** This rule cannot tell an
+> OWNER-CREATED SHARED vault from a personal one — that grant is `wrappedVk` too. Closing the gap
+> means putting `"type":"personal"` inside the AUTHENTICATED vaultMeta plaintext at enrollment,
+> preferring that over the server row, and having owners rewrite legacy personal meta once on a
+> later unlock (`metaV` bump, unknown fields preserved, per the rename rule above). That is a wire
+> change to the meta plaintext and is **DEFERRED to a spec revision**; until it lands, `type`
+> stays a server-asserted hint everywhere it appears, and the refusal above is what stands between
+> that hint and the usage key.
 
 ## 5. Server-visible plaintext — the zero-knowledge contract
 
@@ -417,6 +483,37 @@ sweep → up-to-date cursor no-ops, stale cursor 410s then converges via `since=
   "(conflict copy)" item — new itemId, fresh envelope — then clears the flag with a
   normal push.
 
+### 7.1 Server durability — what `applied` promises (2026-09-13 amendment, audit H84)
+
+Normative: **a server MUST NOT answer a mutation `applied` until that transaction is durable
+against power loss.** With the reference SQLite server that means WAL plus
+**`PRAGMA synchronous=FULL`** — one fsync per commit.
+
+The rule exists because `applied` is load-bearing on the *client* side, and the client is the
+only copy left. A push writes the item row, its `changes` rev and the `mutations` idempotency
+row in one transaction, and the client drops that mutation from its outbox the moment it reads
+`applied` (spec 03 §5). Under `synchronous=NORMAL` a WAL commit is acknowledged before it is
+fsynced — SQLite documents that in WAL mode with NORMAL a committed transaction "might roll
+back following a power loss or system crash" — so a power cut inside the checkpoint window
+takes all three rows *together*. Nothing then asks the client to re-send: the dedup row that
+would have made a replay safe is gone too, but no client replays a mutation it saw acknowledged.
+The write survives only in that client's local cache (in the extension, memory only — already
+gone) until its next full resync, where a `since=0` pull replaces the cache with the server's
+copy and the item is silently lost. An application crash is not this case: the OS page cache
+survives it and NORMAL is sufficient there.
+
+**The trade, stated so an operator can choose with eyes open.** FULL costs one fsync per commit.
+At household write rates writes are the rare path (single-digit per minute; reads and no-op
+pulls take no fsync at all), so the throughput cost is not measurable in use — but it is real on
+slow storage, and an SD-card host will feel a bulk import. A deployment that wants NORMAL back
+for a large import MAY relax it **for that run**, never for the steady state, and MUST then treat
+every write in the window as un-acknowledged until the next checkpoint. Choosing NORMAL as a
+standing configuration means "saved" no longer means durable, which this spec does not permit a
+conforming server to promise.
+
+`data/andvari.db` is still the only copy of the household's ciphertext; durability is not backup
+(`docs/self-hosting.md` § Backup).
+
 ## 8. Client offline cache
 
 Native clients (Android/desktop) MAY persist, per account, in a local SQLite DB
@@ -538,6 +635,13 @@ server-visible table — the property §8 states holds unchanged.
   (§8 MUST NOT list, unchanged), so the ledger is still readable only in memory after an unlock,
   and the server and a stolen locked device both hold opaque bytes. Spec 05 T3 is unchanged.
   An account with no personal vault simply has no ledger — clients MUST degrade to "—", not error.
+  **WHICH vault that is comes from §4's rule, never from the server's label alone (2026-09-13
+  amendment, audit H64):** a client MUST NOT key the ledger from a vault whose VK arrived by
+  member grant (`sealedVk`), because that VK is held by every other member of the vault and
+  `andvari/v1|usage|{userId}` is public — a relabelled shared vault would hand a colluding
+  co-member the itemId → {lastUsedAt, useCount} log this whole single-blob design exists to keep
+  private. A held-but-refused candidate leaves the account with no personal vault, which is the
+  "—" degradation above and not an error.
 - **Contents.** `itemId -> { lastUsedAt, useCount }`, nothing more. No password material, no
   document content, no URIs. Both fields are JSON **numbers** (integers: epoch ms and a count).
 - **Reading is tolerant per ENTRY and strict per TYPE (2026-09-13, audit H92).** A reader MUST

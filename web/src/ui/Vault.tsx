@@ -32,12 +32,15 @@ import { fmtDay, fmtDayYear, humanSize } from "./format";
 import { applyListView, type SortMode, type TypeFilter } from "./listview";
 import { hashToView, viewToHash } from "./routes";
 import { safeSiteHref } from "./safeurl";
+import { BackLink, BACK_GLYPH } from "./BackLink";
+import { Busy } from "./Busy";
 import { Announcer, Msg } from "./Msg";
 import { Health } from "./Health";
 import { clampClipboardClearSeconds } from "./policyclamp";
 import { Settings } from "./Settings";
+import { BrandSigil } from "./Sigil";
 import { Sharing } from "./Sharing";
-import { EmptySigil } from "./Sigil";
+import { Empty } from "./Empty";
 import { estimateStrength } from "./strength";
 import { windowRange, type WindowRange } from "./virtual";
 
@@ -192,6 +195,9 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
   const [vaultFilter, setVaultFilter] = useState<string>("all");
   const [selected, setSelected] = useState<string | null>(null);
+  // H117: the next Editor mount should open with a freshly generated password (the verification
+  // run's post-"Wrong password" offer). Consumed by the Editor at mount and cleared with it.
+  const [editorGenerate, setEditorGenerate] = useState(false);
   const [editing, setEditing] = useState<ItemDoc | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [exportMode, setExportMode] = useState<ExportMode | null>(null);
@@ -428,6 +434,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
    */
   const closeLayers = useCallback(() => {
     setEditing(null);
+    setEditorGenerate(false);
     setImportOpen(false);
     setExportMode(null);
     setSelected(null);
@@ -453,6 +460,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   const save = async (doc: ItemDoc, newFiles: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => {
     await store.save(selected, doc, newFiles, onProgress, vaultId);
     refresh();
+    setEditorGenerate(false);
     setEditing(null);
     setSelected(null);
   };
@@ -463,10 +471,27 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     setSelected(null);
   };
 
-  const goToItem = (itemId: string) => {
+  /**
+   * Jump to an item from a health/staleness surface. `generate` (H117) is the verification run's
+   * post-"Wrong password" offer: the design's §4 table promises "bad → offers: open the item /
+   * generate a new password", and the second one is only honest if it lands the user IN the
+   * editor with a fresh password already in the field — an offer that merely opened the item
+   * would be the first offer twice. Nothing is written until the user presses Save, so this is
+   * still the human deciding; the Editor's own generate-confirm (which exists to stop a stray tap
+   * clobbering a real password) is deliberately not re-asked here, because the whole click the
+   * user just made WAS that consent.
+   */
+  const goToItem = (itemId: string, opts?: { generate?: boolean }) => {
     setView("vault");
     closeLayers();
     setSelected(itemId);
+    if (opts?.generate) {
+      const it = store.get(itemId);
+      if (it && it.doc.type === "login") {
+        setEditorGenerate(true);
+        setEditing(it.doc);
+      }
+    }
   };
 
   const navBtn = (v: View, label: string) => (
@@ -520,7 +545,22 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       <a className="skip-link" href={`#${MAIN_ID}`} onClick={(e) => { e.preventDefault(); document.getElementById(MAIN_ID)?.focus(); }}>Skip to content</a>
       <header className="appbar">
         <div className="row">
-          <span className="brand"><span className="a-mark">and</span>vari</span>
+          {/* H138 (audit 2026-09-13): the signed-in appbar was the one BROWSER-surface header
+              with no mark — the extension popup and options headers, and web's own Welcome/Recover
+              heroes, all pair the ᛅ sigil with the wordmark, so inside a browser the signed-in
+              vault alone read as a different product's chrome. Owner's call was to add it here
+              rather than strip it from the popup.
+
+              R51 corrected the scope of this note: the two NATIVE signed-in toolbars stay
+              deliberately Material-plain (desktop `Ui.kt` renders `Text("andvari", titleLarge)`,
+              and the phone's toolbar likewise) — a platform toolbar is not browser chrome, and
+              the phone's mark lives on its launcher icon where the OS shows it. So this is not
+              "one lockup fleet-wide"; it is one lockup on every surface a browser draws. This is the same lockup extension/popup.html ships (sigil, then the
+              wordmark, no whitespace between the spans — they are in inline flow, so a newline
+              from JSX formatting would render as a visible gap); .brand .sigil-sm in styles.css is
+              the literal twin of the popup.css rule. The sigil is aria-hidden inside BrandSigil:
+              the wordmark text beside it already names the app, so announcing it twice is noise. */}
+          <span className="brand"><span className="sigil-sm"><BrandSigil size={18} /></span><span className="a-mark">and</span>vari</span>
           <nav className="nav">
             {navBtn("vault", "Vault")}
             {navBtn("sharing", "Sharing")}
@@ -663,6 +703,8 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         ) : importOpen ? (
           <ImportPanel
             store={store}
+            /* R47: the destination is resolved by identity, not by the server's `type` label. */
+            personalVaultId={account.personalVaultId}
             onClose={() => setImportOpen(false)}
             onDone={() => { setImportOpen(false); refresh(); }}
           />
@@ -671,8 +713,9 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             initial={editing}
             policy={policy}
             vaultChoices={selected === null && hasWritableShared ? newItemVaultChoices : undefined}
+            generateOnOpen={editorGenerate}
             onSave={save}
-            onCancel={() => setEditing(null)}
+            onCancel={() => { setEditing(null); setEditorGenerate(false); }}
             backRef={editorBack}
           />
         ) : current ? (
@@ -754,10 +797,9 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
               </div>
             )}
             {filtered.length === 0 ? (
-              <div className="empty">
-                <div className="sigil"><EmptySigil /></div>
+              <Empty>
                 <p>{items.length === 0 ? "Your hoard is empty. Add your first secret." : query.trim() ? "Nothing matches that search." : "Nothing matches these filters."}</p>
-              </div>
+              </Empty>
             ) : filtered.length > VIRTUAL_THRESHOLD ? (
               <VirtualList items={filtered} renderRow={renderRow} />
             ) : (
@@ -1203,7 +1245,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           already-populated (silent), so announce it off this persistent region, named by
           which field was copied ("password copied", "code copied", …). */}
       <Announcer text={wipeStuck ? CLIPBOARD_NOT_CLEARED : copyErr ? CLIPBOARD_FAILED : flash ? `${flash} copied` : ""} />
-      <button className="link" onClick={onBack}>← back to vault</button>
+      <BackLink label="Back to vault" onClick={onBack} />
       {/* ux-error--2: the visible half of the copy-failure surface — same canon sentence the
           extension popup shows on its toClipboard catch. */}
       {copyErr && <Msg kind="err">{CLIPBOARD_FAILED}</Msg>}
@@ -1466,9 +1508,9 @@ function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor:
       </div>
       {err && <Msg kind="err">{err}</Msg>}
       {items === null ? (
-        <div className="muted">Loading…</div>
+        <div className="muted"><Busy>Loading…</Busy></div>
       ) : items.length === 0 ? (
-        <div className="muted">Nothing here — deleted items you can recover will show up in this list.</div>
+        <Empty><p>Nothing here — deleted items you can recover will show up in this list.</p></Empty>
       ) : (
         items.map((d) => {
           // G22: the deleted-items route is role-agnostic, so a reader's Trash lists shared-vault
@@ -1567,9 +1609,9 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
   return (
     <div className="field" style={{ marginTop: 18 }}>
       <label>Version history <span className="muted">· up to the last 10 saves</span></label>
-      {loading && <div className="muted">Loading…</div>}
+      {loading && <div className="muted"><Busy>Loading…</Busy></div>}
       {err && <Msg kind="err">{err}</Msg>}
-      {versions?.length === 0 && <div className="muted">No earlier versions yet — history starts from the next change.</div>}
+      {versions?.length === 0 && <Empty><p>No earlier versions yet — history starts from the next change.</p></Empty>}
       {versions?.map((v) => (
         <div key={v.rev} className="secret-row" style={{ alignItems: "center", marginTop: 6 }}>
           {/* bug-web--6 / ux-parity--6: same UTC-ISO substring as Trash, same fix.
@@ -1806,9 +1848,15 @@ function TotpView({ uri, pill, onCopy }: { uri: string; pill: ReactNode; onCopy:
 }
 
 function HealthLine({ password, client }: { password: string; client: ApiClient }) {
+  // R05 (H132's missed leg): the in-flight state is a real network wait — a k-anonymity range
+  // fetch to the relay — so it renders as the shared <Busy> dial in sentence case like every
+  // other wait in the app, not as a bare lower-case muted line. The VERDICTS below stay plain
+  // text: they are results, and a dial spinning beside a finished answer reads as still-working.
   const [status, setStatus] = useState<string>("");
+  const [checking, setChecking] = useState(false);
   const check = async () => {
-    setStatus("checking…");
+    setChecking(true);
+    setStatus("");
     try {
       const hash = await hibpSha1UpperHex(password);
       const body = await client.hibpRange(hibpPrefix(hash));
@@ -1816,6 +1864,8 @@ function HealthLine({ password, client }: { password: string; client: ApiClient 
       setStatus(count > 0 ? `⚠ found in ${count.toLocaleString()} breaches — change it` : "✓ not in any known breach");
     } catch {
       setStatus("breach check unavailable");
+    } finally {
+      setChecking(false);
     }
   };
   return (
@@ -1823,9 +1873,13 @@ function HealthLine({ password, client }: { password: string; client: ApiClient 
       {/* BL-1 (G25): the verdict is ASYNC info landing in a bare span — silent to AT. One
           persistent live region mounted from the start, the Detail/Staleness contract (a
           conditionally-mounted role=status is not announced). */}
-      <Announcer text={status} />
-      <button className="link" onClick={check}>Check breach exposure</button>
-      {status && <span className="muted" style={{ marginLeft: 10, color: status.startsWith("⚠") ? "var(--danger)" : "var(--ink-dim)" }}>{status}</span>}
+      <Announcer text={checking ? "Checking…" : status} />
+      <button className="link" onClick={check} disabled={checking}>Check breach exposure</button>
+      {checking ? (
+        <span style={{ marginLeft: 10 }}><Busy>Checking…</Busy></span>
+      ) : (
+        status && <span className="muted" style={{ marginLeft: 10, color: status.startsWith("⚠") ? "var(--danger)" : "var(--ink-dim)" }}>{status}</span>
+      )}
     </div>
   );
 }
@@ -1841,7 +1895,7 @@ function expiryYearChoices(stored: (string | undefined)[]): string[] {
   return ys;
 }
 
-function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { initial: ItemDoc; policy: ClientPolicy | null; vaultChoices?: VaultInfo[]; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => Promise<void>; onCancel: () => void; backRef?: React.MutableRefObject<(() => void) | null> }) {
+function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCancel, backRef }: { initial: ItemDoc; policy: ClientPolicy | null; vaultChoices?: VaultInfo[]; generateOnOpen?: boolean; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => Promise<void>; onCancel: () => void; backRef?: React.MutableRefObject<(() => void) | null> }) {
   const [doc, setDoc] = useState<ItemDoc>(structuredClone(initial));
   // New items only: which vault to create in (existing items never move vaults).
   const [vaultId, setVaultId] = useState<string | undefined>(vaultChoices?.[0]?.vaultId);
@@ -1876,6 +1930,21 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { 
     setShowPw(true);
     setConfirmGen(false);
   };
+
+  // H117: opened FROM the verification run's "Generate a new password" offer — the new password is
+  // in the field and revealed before the user's eyes land on it, and the notice says plainly that
+  // nothing is saved yet. Deliberately not routed through gen()'s confirm arm: the offer click IS
+  // the consent that arm exists to collect, and asking twice for one decision is the nag the
+  // house idiom avoids. Runs once per mount (empty deps) — a re-render must never re-roll a
+  // password the user is in the middle of reading or has already edited.
+  const [generated, setGenerated] = useState(false);
+  useEffect(() => {
+    if (!generateOnOpen || !isLogin) return;
+    setDoc((d) => ({ ...d, login: { ...(d.login ?? {}), password: generatePassword() } }));
+    setShowPw(true);
+    setGenerated(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Live editor signals off the typed number: decisive-prefix brand badge, and a Luhn check
   // that WARNS once a plausible PAN length is present — never blocks Save (store-what-the-
@@ -2023,7 +2092,9 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { 
     // Password fields ignore form-level "off", so the password input adds "new-password".
     <form className="sheet" autoComplete="off" onSubmit={submit}>
       <button type="button" className="link" onClick={cancel}>
-        {confirmCancel ? "Discard changes?" : "← cancel"}
+        {/* H133: the two-state twin of BackLink — same glyph and casing, but the label flips to
+            the armed discard confirm, so it composes BACK_GLYPH instead of taking the component. */}
+        {confirmCancel ? "Discard changes?" : `${BACK_GLYPH} Cancel`}
       </button>
       <h2 style={{ marginTop: 12 }}>{initial.name ? "Edit" : isLogin ? "New login" : isCard ? "New card" : "New note"}</h2>
       {vaultChoices && vaultChoices.length > 1 && (
@@ -2057,6 +2128,10 @@ function Editor({ initial, policy, vaultChoices, onSave, onCancel, backRef }: { 
               <button type="button" className="ghost" onClick={gen}>{confirmGen ? "Replace?" : "Generate"}</button>
             </div>
             {confirmGen && <span className="muted" style={{ color: "var(--gold-text)" }}>this replaces the current password — tap “Replace?” to confirm, or edit the field to cancel</span>}
+            {/* H117: arrived here from the verification run's "Generate a new password" offer.
+                Say what happened AND that it is not saved yet — the whole point of landing in the
+                editor rather than writing the password behind the user's back. */}
+            {generated && <span className="muted" style={{ color: "var(--gold-text)" }}>a new password is ready — change it on the site, then press Save to keep it here</span>}
             {login.password && <StrengthBar password={login.password} />}
           </div>
           <Field label="Website">
@@ -2442,7 +2517,7 @@ function ReportTiles({ report, done }: { report: ImportReport; done: boolean }) 
  * S2 invariant: `planned` pairs each plan with the vault whose projections produced it, and
  * the commit reads THAT vault — never the picker — so plan and importDocs cannot disagree.
  */
-function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: () => void; onDone: () => void }) {
+function ImportPanel({ store, personalVaultId, onClose, onDone }: { store: VaultStore; personalVaultId: string; onClose: () => void; onDone: () => void }) {
   const fileInput = useRef<HTMLInputElement | null>(null);
   /** The "How do I export from…?" help block — collapsed by default (design 2026-07-11). */
   const [helpOpen, setHelpOpen] = useState(false);
@@ -2495,7 +2570,16 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
       // never completed a sync, rather than silently planning against an empty vault
       // (which would quietly re-import everything as new). The personal-vault lookup shares
       // the gate: post-sync it always exists, pre-sync store.vaults() may be empty.
-      const personal = vaultChoices.find((v) => v.type === "personal");
+      // H64 / R47: resolve the destination BY IDENTITY (`account.personalVaultId`), never by the
+      // server's `type === "personal"` label. That column is server plaintext bound into no AD
+      // (spec 02 §4), which is the whole reason H64 made Account.setPersonalVault refuse a vault
+      // whose VK arrived by member grant. This call site never went through Account at all, so a
+      // hostile server that withheld the real personal row and relabelled a SHARED vault could
+      // redirect an ENTIRE imported CSV — every password in the file — into the housemates'
+      // vault, while the preview called it "your personal vault". Identity fails CLOSED: when
+      // `personalVaultId` is empty (H64's own fail-closed state, every candidate member-granted)
+      // no choice matches and the honest refusal below fires instead of a wrong default.
+      const personal = vaultChoices.find((v) => v.vaultId === personalVaultId);
       if (store.lastSyncAt === null || !personal) {
         setParseErr(
           "Your vault hasn't finished its first sync on this device, so the import can't check what you already have. Wait for the sync (or press Sync now in the top bar), then pick the file again.",
@@ -2591,7 +2675,7 @@ function ImportPanel({ store, onClose, onDone }: { store: VaultStore; onClose: (
               : ""
         }
       />
-      <button type="button" className="link" onClick={onClose}>← back to vault</button>
+      <BackLink label="Back to vault" onClick={onClose} />
       <h2 style={{ marginTop: 12 }}>Import passwords (CSV)</h2>
       <div className="muted" style={{ marginBottom: 18 }}>from a browser or another password manager · everything stays on this device</div>
 

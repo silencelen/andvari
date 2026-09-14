@@ -390,6 +390,18 @@ mechanism landed in `scripts/gh-release.sh`; re-uploading `SHA256SUMS-0.26.2.txt
 is an owner action on a published release); H109 and H126 (their last leg is a CHANGELOG sentence,
 carried into the next release's entry below).
 
+**H85's smaller pairs — deliberately out of scope, recorded so the next auditor is measuring
+against a decision (R46).** The row's fix text named three further native duplicate pairs beside
+the KDF re-key: `readBounded` (`MainActivity.kt` / `DesktopState.kt`), `looksHtmlMangled`
+(`AndvariViewModel.kt` / `DesktopState.kt`) and `humanSize` (`MainActivity.kt` /
+`DesktopState.kt`). The owner's approval was for the hoist of the **security routine** — "the G39
+class of refactor on a security routine" — and none of these three is one: a bounded read, an
+HTML-mangling heuristic and a byte formatter fail visibly and locally, which is the opposite of the
+argument that made the re-key worth hoisting. They stay duplicated for this cut. The one to carry
+forward is `humanSize`, which is **already divergent**: desktop formats up to TB, Android caps at
+GB, so a 2 TB attachment store reads as "2048.0 GB" on the phone and "2.0 TB" on the desktop. Both
+sites now say so in a comment; reconciling them is a follow-up row, not an oversight.
+
 **H139 — found by the fresh gate, not by any lane.** `scripts/e2e.sh` phase A failed under load: the
 web client reported the WebSocket "open" on the 101 upgrade, but the server registers the socket with
 its notifier only when the route body runs, so a bell for a change committed in that few-millisecond
@@ -402,7 +414,10 @@ CI test job (H39) in one paragraph.
 **Owner decisions (§4) are unchanged: 25 rows.** Operator steps before the next cut, in order:
 1. `cd web && NODE_ENV=development npm ci --ignore-scripts && npx vitest run && npm run build` — the
    only unverified change in the tree (R30, the browserslist/caniuse lock bump).
-2. Deploy the manifest watcher from its mirror of record (H47); close Dependabot PR #56 as superseded
+2. Deploy the manifest watcher from its mirror of record (H47); deploy the edited
+   `devstore-sync.sh` **and then stamp the already-published v0.26.3 body with
+   `android: none (deliberate)`** (H105/R31 — the marker is only written by future releases, so
+   without this second step the 15-minute warning the row was opened about keeps firing); close Dependabot PR #56 as superseded
    and confirm Scorecard alert #23 clears on the next run (H44); re-upload the 0.26.2 SUMS with the .xpi
    line (H104); flip the ghcr package public or stop calling it public (H43).
 3. On the phone: the TalkBack smokes for H09, H31, H32 (overlay unlock then a second fill; breach-scan

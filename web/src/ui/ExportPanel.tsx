@@ -26,6 +26,8 @@ import type { Account } from "../vault/account";
 import type { VaultStore } from "../vault/store";
 import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
+import { BackLink } from "./BackLink";
+import { Busy } from "./Busy";
 import { Announcer, Msg } from "./Msg";
 import { type BreachRangeSource, PasswordCautions, passwordAdvice, useBreachedPassword } from "./passwordadvice";
 import { BACKUP_FLOOR, estimateStrength } from "./strength";
@@ -275,7 +277,7 @@ export function ExportPanel({ mode, account, store, policy, client, onClose }: P
       {/* BL-1: the export result replaces the whole form, so its "saved" info would mount
           already-populated (silent) — announce it from this persistent region instead. */}
       <Announcer text={done ? (mode === "backup" ? `Backup saved as ${done.filename}.` : `Exported ${done.filename}.`) : ""} />
-      <button type="button" className="link" onClick={onClose} disabled={busy}>← back to vault</button>
+      <BackLink label="Back to vault" onClick={onClose} disabled={busy} />
       <h2 style={{ marginTop: 12 }}>{title}</h2>
       <div className="muted" style={{ marginBottom: 18 }}>
         {mode === "backup"
@@ -284,7 +286,7 @@ export function ExportPanel({ mode, account, store, policy, client, onClose }: P
       </div>
 
       {!syncDone ? (
-        <p className="muted">syncing your vault…</p>
+        <p className="muted"><Busy>Syncing your vault…</Busy></p>
       ) : done ? (
         <>
           <div className="msg info" style={{ display: "block" }}>

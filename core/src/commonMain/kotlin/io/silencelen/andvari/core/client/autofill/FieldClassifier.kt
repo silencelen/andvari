@@ -3,10 +3,11 @@ package io.silencelen.andvari.core.client.autofill
 /**
  * Autofill field classification — pure, vector-tested, mirrored in web. Sees only field
  * SIGNALS (autofill hints, InputType, HTML tag/attrs), never field values. Priority:
- * autofill hints → CSC demotion → the FULL legacy (0.6.x) login classifier → whole-token-run
- * card keywords. Card keywords run ONLY when the legacy verdict is NONE — every field the
- * 0.6.x classifier decided keeps its verdict, so login verdicts on card-free forms are
- * bit-identical to pre-0.7.0 — pinned by urimatch.json (classify + classifyCardFreeRegression).
+ * autofill hints → CSC demotion → the one-time-code override (H65) → the FULL legacy (0.6.x)
+ * login classifier → whole-token-run card keywords. Card keywords run ONLY when the legacy
+ * verdict is NONE — every field the 0.6.x classifier decided keeps its verdict, so login
+ * verdicts on card-free forms are bit-identical to pre-0.7.0 — pinned by urimatch.json
+ * (classify + classifyCardFreeRegression).
  */
 enum class FieldKind { USERNAME, PASSWORD, NONE, CC_NUMBER, CC_EXP_MONTH, CC_EXP_YEAR, CC_EXP, CC_NAME, CC_CSC, CC_TYPE, CC_POSTAL }
 
@@ -77,6 +78,17 @@ object FieldClassifier {
     private val NAME_POSITIVE_USER = listOf("user", "email", "login", "account", "userid")
     private val NAME_POSITIVE_PASS = listOf("pass", "pwd", "passwd")
     private val NAME_NEGATIVE = listOf("search", "otp", "captcha", "code", "query", "phone")
+    // H65 (spec 02 §3.1, 2026-09-13 amendment) — the two-factor name spellings that carry no
+    // `otp`/`code` token, consulted ONLY by classify()'s one-time-code override (step 2b) and by
+    // nothing else. Deliberately NOT folded into NAME_NEGATIVE: that list also gates the frozen
+    // USERNAME legs (html `email` type, the InputType email variations, the bare name/id
+    // fallbacks), so widening it would flip verdicts on fields this amendment never looked at —
+    // `<input type="email" name="2fa_recovery_email">` is still a username box. Substring-matched
+    // like NAME_NEGATIVE itself, so `2fa`, `login2FA`, `mfaChallenge` and `twoFactor` all hit.
+    // A separated `two_factor` does NOT (no token spans the underscore) — the residual is
+    // recorded in spec 02 §3.1 rather than papered over with a tokenizer the login steps have
+    // never used; in the wild that spelling nearly always carries a `code` token beside it.
+    private val TWO_FACTOR_NAMES = listOf("2fa", "mfa", "twofactor")
     // Card keywords — whole-token-run matched against the tokenized name/id/label (see
     // tokenMatch), never substring. "pan" is deliberately absent (hazard exceeds its value);
     // no bare "exp"/"expires" ([U4]: session_expires); no "cid" ([U3]: run-match makes it
@@ -189,6 +201,32 @@ object FieldClassifier {
         //    <input type=password name=field_7 id=cardCvc> would offer the vault password into
         //    the merchant's CVV box.
         if (htmlType == "password" && (CSC_DEMOTION.any { tokenMatch(toks, it) } || CSC_DEMOTION.any { tokenMatch(idToks, it) })) return FieldKind.CC_CSC
+
+        // 2b. ONE-TIME-CODE OVERRIDE — H65 (2026-09-13 audit), spec 02 §3.1 amendment. F11 kept the
+        //     vault password out of a one-time-code box only when the PAGE said so with an autofill
+        //     hint (step 1's NEGATIVE_HINTS). A site that masks its 2FA entry as
+        //     `<input type="password" name="otp">` and omits `autocomplete` fell straight through
+        //     to the legacy `htmlType == "password" -> PASSWORD` rule below, so the account password
+        //     was offered into the code box; on the extension a fill there is also what the capture
+        //     engine reads back on submit as "the password", i.e. the six digits could overwrite the
+        //     stored credential. A NAME_NEGATIVE token in the field's OWN name is the page telling
+        //     us exactly what the hint would have, so it now outranks the type. Scope is deliberate:
+        //       * `htmlType == "password"` ONLY. The Android InputType-password legs (a native app,
+        //         no HTML type at all) keep their frozen verdicts — urimatch.json pins
+        //         VARIATION_PASSWORD + `securityCode` as PASSWORD — and the HTML shape is the one
+        //         the audit found and the one a browser actually reports.
+        //       * AFTER the CSC demotion, never before: a masked CVV must stay CC_CSC (frozen by
+        //         classifyCard: password + `securityCode` == CC_CSC, and `securitycode` contains
+        //         the negative token `code`, so the order is what keeps that vector green).
+        //       * NAME_NEGATIVE verbatim, substring-matched, exactly as every other login step uses
+        //         it. The engine ALREADY refuses to read `passcode` / `cv_code` as a login name on a
+        //         text field; honouring the same list on the password type is what makes the two
+        //         halves of the classifier agree instead of contradicting each other. The accepted
+        //         cost is one-directional and fail-safe: a genuine password box named `…code` stops
+        //         being OFFERED a fill (the member types it), never the reverse.
+        //     NONE means "andvari has nothing to offer here" — the same verdict the hinted OTP box
+        //     has always received, which is why the fix is an amendment to F11 and not a new kind.
+        if (htmlType == "password" && (negativeName || TWO_FACTOR_NAMES.any { it in nameId })) return FieldKind.NONE
 
         // 3. The FULL legacy (0.6.x) classifier. Any verdict it produces STANDS — the bit-identity
         //    gate: adding card kinds can never flip a verdict 0.6.x already produced (passport_expiry

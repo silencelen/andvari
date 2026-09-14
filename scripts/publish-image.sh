@@ -5,9 +5,14 @@
 #   e.g. scripts/publish-image.sh 0.19.0 --latest
 #
 # DELIBERATELY NOT CI (design 2026-07-15 §8.1): hosted-runner minutes are not
-# available for this project, so the public image ghcr.io/silencelen/andvari is
-# built + pushed from a build host, exactly like the APK/deb releases. Do not
-# wire this into workflows.
+# available for this project, so the image ghcr.io/silencelen/andvari is built +
+# pushed from a build host, exactly like the APK/deb releases. Do not wire this
+# into workflows.
+#
+# "Published" is not yet "pullable by a stranger" — see the ONE-TIME OWNER STEP
+# below. Until that flip happens the docs must not call the image public, and
+# they do not (README + docs/self-hosting.md say it needs a login and give the
+# --build path instead; audit H43). When you do flip it, update both.
 #
 # Requirements on the build host:
 #   * docker with buildx (multi-arch) — --single-arch falls back to plain build/push

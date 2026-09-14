@@ -58,3 +58,49 @@ describe("H77 — the import size refusal happens BEFORE the file is read", () =
     expect(MAX_BYTES).toBe(10 * 1024 * 1024);
   });
 });
+
+/**
+ * H64 / R47 — the import destination is resolved by IDENTITY, on every client.
+ *
+ * H64 made `Account.setPersonalVault` refuse a vault whose VK arrived by member grant, because
+ * `type === "personal"` is a server plaintext column bound into no AD (spec 02 §4): a hostile
+ * server can withhold the real personal row and relabel a SHARED vault. The refusal was described
+ * as a choke point "so any future call site inherits it" — but web's CSV import never went through
+ * Account at all. It picked its destination with `vaultChoices.find(v => v.type === "personal")`,
+ * so the relabel H64 closes for the usage key still redirected an entire imported CSV — every
+ * password in the file — into the housemates' vault, and the preview called it the personal one.
+ * Both natives already read `acct.personalVaultId`; web was the outlier.
+ *
+ * Pinned on the source for the same reason the block above is: `onFile` is a closure with no seam.
+ */
+describe("H64/R47 — the import's default destination is the account's own personal vault", () => {
+  it("resolves by vaultId, never by the server's `type` label", () => {
+    expect(onFile).toContain("vaultChoices.find((v) => v.vaultId === personalVaultId)");
+    expect(onFile, "the server-labelled lookup is the defect — it must not come back").not.toContain(
+      'find((v) => v.type === "personal")',
+    );
+  });
+
+  it("the id comes from Account, threaded in as a prop — not re-derived inside the panel", () => {
+    expect(vaultTsx).toContain("personalVaultId: string;");
+    expect(vaultTsx).toContain("personalVaultId={account.personalVaultId}");
+  });
+
+  it("fails CLOSED: no match ⇒ the honest refusal, never a fallback vault", () => {
+    // H64's own fail-closed state is an EMPTY personalVaultId (every held candidate was
+    // member-granted). No choice can match "", so this lands on the refusal below rather than
+    // silently filing the whole file into someone else's vault.
+    const guard = onFile.slice(onFile.indexOf("const personal ="), onFile.indexOf("if (file.size"));
+    expect(guard).toContain("if (store.lastSyncAt === null || !personal)");
+    expect(guard).toContain("hasn't finished its first sync");
+    expect(guard, "no `?? something` fallback may soften the refusal").not.toMatch(/personal\s*(\?\?|\|\|)/);
+  });
+
+  it("the natives resolve the same way — this is a three-client rule, not a web preference", () => {
+    const android = readFileSync(here("../../../app-android/src/main/kotlin/io/silencelen/andvari/app/AndvariViewModel.kt"), "utf8");
+    const desktop = readFileSync(here("../../../app-desktop/src/main/kotlin/io/silencelen/andvari/desktop/DesktopState.kt"), "utf8");
+    for (const [name, src] of [["android", android], ["desktop", desktop]] as const) {
+      expect(src, `${name} must take the import destination from the account`).toContain("val dest = acct.personalVaultId");
+    }
+  });
+});

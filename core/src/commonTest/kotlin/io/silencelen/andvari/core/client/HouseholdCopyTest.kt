@@ -51,6 +51,9 @@ class HouseholdCopyTest {
         assertEquals("This andvari server requires a newer version of the app — update andvari, then try again.", HouseholdCopy.UPGRADE_REQUIRED)
         // TWIN: web account.ts IdentityMismatchError + extension "identity_mismatch".
         assertEquals("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.", HouseholdCopy.IDENTITY_MISMATCH)
+        // TWIN: web/src/vault/account.ts VAULT_KEYS_DAMAGED + extension unlockErrorCopy("keys_damaged")
+        // (audit H67 — ASCII apostrophe in "account's", no em dash).
+        assertEquals("This account's stored keys are damaged or from a newer version, so sign-in cannot continue. Contact your admin or restore from a backup.", HouseholdCopy.ACCOUNT_KEYS_DAMAGED)
         // TWIN: web crypto/keys.ts WEAK_KDF_MESSAGE (H1, spec 05 T1).
         assertEquals("This server sent weakened security settings for your master password. The action was blocked to protect you — contact your admin.", HouseholdCopy.WEAK_KDF_ACTION)
         // TWIN (H122): extension/src/errors.ts weakened-KDF row + both natives' H1 sentence — all
@@ -241,6 +244,8 @@ class HouseholdCopyTest {
             IOException("raw leak"), RuntimeException("raw leak"), CryptoException("raw leak"),
             // H15: its own message embeds the loader's — "raw leak" here — and must not surface.
             CryptoUnavailableException(IllegalStateException("raw leak")),
+            // H67: its message embeds the structural reason ("raw leak" here) — copy must not.
+            VaultKeyDamagedException("raw leak"),
         )
         val mappers = listOf<(Throwable) -> String>(
             HouseholdCopy::forError,
@@ -302,6 +307,36 @@ class HouseholdCopyTest {
         // Unknown Throwable: never blame the password for an arbitrary failure (unlike web,
         // whose unlock structure guarantees only crypto reaches its terminal).
         assertEquals("Couldn't unlock — please try again.", HouseholdCopy.forUnlockError(RuntimeException("raw leak")))
+    }
+
+    // ---- the account's stored key blob is unreadable (audit H67) ----
+
+    /**
+     * H67: a `wrappedUvk` that is not a well-formed envelope — undecodable base64url, too short,
+     * or an envelope version/alg this build does not know — was refused BEFORE the password's wrap
+     * key was applied, and then reported as "Wrong email or master password." on every client.
+     * No password could have made those checks pass, so that verdict is a lie with teeth: the
+     * member resets a working password, then burns their recovery secret when the reset does not
+     * help. Every ladder must say the honest, TERMINAL sentence instead — and, crucially, a wrong
+     * password must still say the password sentence (the split is the whole fix).
+     */
+    @Test
+    fun damagedAccountKeys_areNeverThePasswordAndNeverARetry() {
+        val t = VaultKeyDamagedException("wrappedUvk: unknown envelope version 2")
+        val expected = "This account's stored keys are damaged or from a newer version, so sign-in cannot continue. Contact your admin or restore from a backup."
+        assertEquals(expected, HouseholdCopy.forSignInError(t))
+        assertEquals(expected, HouseholdCopy.forSignInError(t, totpTried = true))
+        assertEquals(expected, HouseholdCopy.forUnlockError(t))
+        assertEquals(expected, HouseholdCopy.forEnrollError(t))
+        assertEquals(expected, HouseholdCopy.forError(t))
+        assertEquals(expected, HouseholdCopy.forSaveError(t))
+        assertEquals(expected, HouseholdCopy.forImportError(t))
+        assertEquals(expected, HouseholdCopy.forSyncError(t))
+        assertEquals(expected, HouseholdCopy.forTotpError(t))
+        // The collapsed verdicts, by name — reverting the exception split brings these back.
+        assertFalse(expected == "Wrong email or master password.")
+        assertEquals("Wrong email or master password.", HouseholdCopy.forSignInError(api(401, "unauthorized")))
+        assertEquals("Wrong master password.", HouseholdCopy.forUnlockError(CryptoException("aead open failed")))
     }
 
     // ---- native crypto did not load (audit H15) ----

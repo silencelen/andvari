@@ -1,8 +1,12 @@
 import "fake-indexeddb/auto"; // webCacheEnabled()'s idbSupported() gate needs a live indexedDB global
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { confirmQueueLoss, OfflineCopyBody, offlineCopyModel, type OfflineCopyModel } from "./Settings";
+
+const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
+import { OfflineCopyBody, offlineCopyModel, queueLossQuestion, type OfflineCopyModel } from "./Settings";
 import { OfflineCopyUnlockLine } from "./Welcome";
 
 /**
@@ -44,9 +48,18 @@ const model = (over: Partial<OfflineCopyModel> = {}): OfflineCopyModel => ({
   ...over,
 });
 
-const render = (m: OfflineCopyModel): string =>
+const render = (m: OfflineCopyModel, pendingConfirm: { question: string; verb: string } | null = null): string =>
   renderToStaticMarkup(
-    createElement(OfflineCopyBody, { model: m, busy: false, notice: "", onToggle: () => {}, onWipe: () => {} }),
+    createElement(OfflineCopyBody, {
+      model: m,
+      busy: false,
+      notice: "",
+      pendingConfirm,
+      onToggle: () => {},
+      onWipe: () => {},
+      onConfirm: () => {},
+      onCancelConfirm: () => {},
+    }),
   );
 
 describe("OfflineCopyBody — state rendering", () => {
@@ -183,42 +196,95 @@ describe("offlineCopyModel — assembly from the frozen store surface + navigato
   });
 });
 
-describe("confirmQueueLoss — the breaker-#9 gate re-reads the LIVE count (S5 review F2)", () => {
-  it("a queue that GREW after mount is respected — the confirm carries the live count and blocks on decline", async () => {
+describe("queueLossQuestion — the breaker-#9 gate re-reads the LIVE count (S5 review F2)", () => {
+  it("a queue that GREW after mount is respected — the question carries the live count", async () => {
     // Mount-time model said 0 (which alone would SKIP the confirm); a concurrent tab queued 3
     // edits since — the live store reads the shared per-account DB and must see them.
-    const ask = vi.fn(() => false);
-    const ok = await confirmQueueLoss({ queuedMutationCount: async () => 3 }, 0, ask);
-    expect(ask).toHaveBeenCalledWith(expect.stringContaining("3 unsynced changes"));
-    expect(ok).toBe(false); // declined ⇒ toggle/wipe abort, the queue survives
+    expect(await queueLossQuestion({ queuedMutationCount: async () => 3 }, 0)).toContain("3 unsynced changes");
   });
 
-  it("live count 0 proceeds without asking (edits synced since mount — nothing to lose)", async () => {
-    const ask = vi.fn(() => false);
-    expect(await confirmQueueLoss({ queuedMutationCount: async () => 0 }, 2, ask)).toBe(true);
-    expect(ask).not.toHaveBeenCalled();
+  it("live count 0 asks nothing (edits synced since mount — nothing to lose)", async () => {
+    expect(await queueLossQuestion({ queuedMutationCount: async () => 0 }, 2)).toBeNull();
   });
 
-  it("accepting the confirm proceeds — singular copy for one change", async () => {
-    const ask = vi.fn(() => true);
-    expect(await confirmQueueLoss({ queuedMutationCount: async () => 1 }, 0, ask)).toBe(true);
-    expect(ask).toHaveBeenCalledWith(expect.stringContaining("1 unsynced change on this device"));
+  it("singular copy for one change", async () => {
+    expect(await queueLossQuestion({ queuedMutationCount: async () => 1 }, 0)).toContain(
+      "1 unsynced change on this device",
+    );
   });
 
   it("a failing re-read falls back to the mount-time count (a stale confirm beats a skipped one)", async () => {
-    const ask = vi.fn(() => true);
     const failing = {
       queuedMutationCount: async (): Promise<number> => {
         throw new Error("closed handle");
       },
     };
-    expect(await confirmQueueLoss(failing, 2, ask)).toBe(true);
-    expect(ask).toHaveBeenCalledWith(expect.stringContaining("2 unsynced changes"));
+    expect(await queueLossQuestion(failing, 2)).toContain("2 unsynced changes");
+  });
+});
+
+/**
+ * H135: the wipe/turn-off confirm is the house INLINE two-step arm, not `window.confirm`. The
+ * native dialog was the only unthemed, tab-blocking, Announcer-less surface left in the app, and
+ * it sat on the one action that destroys unsynced work. These pin the replacement: the row exists,
+ * it names the loss, it offers a way out, and Settings.tsx raises no native dialog at all.
+ */
+/**
+ * H48 (audit 2026-09-13): both offline-copy surfaces promised "you can open it even when the
+ * server can't be reached" — which on WEB is true only inside a tab that is already loaded. The
+ * app ships no service-worker shell (design 2026-07-13-web-offline-cache D1; its F.4 defers the
+ * shell), so a cold tab opened during the outage the copy exists for gets the browser's own
+ * "site can't be reached" and andvari never renders to explain itself. The member most likely to
+ * be reading that sentence is the one about to lose their server. These pin the qualification on
+ * both surfaces; if the D1 shell ever ships, this is the test that says what to un-qualify.
+ */
+describe("H48 — the offline-copy promise is qualified to what the web client can do", () => {
+  it("the card promises a tab you already have open, and says a fresh tab still needs the server", () => {
+    const html = render(model({ enabled: true, durable: true }));
+    expect(html).toContain("in a tab you already have open");
+    expect(html).toContain("A fresh tab still needs the server");
+    // The unqualified promise is the defect — it must not come back.
+    expect(html).not.toMatch(/open it even when the server/);
+    // R04: while the web manifest declares `display: standalone`, an installed home-screen copy of
+    // THIS app is the same code with the same limitation — so the qualification must be stated by
+    // mechanism, not by form factor, or it reads as false to the member who installed it.
+    const manifest = JSON.parse(readFileSync(here("../../public/manifest.webmanifest"), "utf8")) as { display?: string };
+    if (manifest.display && manifest.display !== "browser") {
+      expect(html, "an installable web app must not be told a home-screen copy opens cold").toContain(
+        "a home-screen shortcut for this site included",
+      );
+      expect(html, "…and 'apps for your computer and phone' must name the INSTALLED natives").toContain(
+        "The andvari apps you install for your computer and phone do open offline from cold",
+      );
+    }
   });
 
-  it("confirm-less environments proceed (historical non-browser fall-through)", async () => {
-    // No `ask` injected and no window.confirm in the node env — must not throw, must not block.
-    expect(await confirmQueueLoss({ queuedMutationCount: async () => 5 }, 0)).toBe(true);
+  it("the unlock-time nudge carries the same qualification (one claim, two surfaces)", () => {
+    const app = readFileSync(here("./App.tsx"), "utf8");
+    const offer = app.slice(app.indexOf("const CACHE_NUDGE_OFFER"), app.indexOf("const CACHE_NUDGE_ACCEPTED"));
+    expect(offer).toContain("A tab you already have open");
+    expect(offer).not.toContain("You could open your vault even when");
+  });
+});
+
+describe("H135 — the offline-copy confirm is inline, not a native dialog", () => {
+  const armed = { question: "3 unsynced changes on this device will be permanently lost.", verb: "Remove it and lose them" };
+
+  it("renders the armed confirm row under the toggle, with the destructive verb and a way out", () => {
+    const html = render(model({ enabled: true, durable: true, queued: 3 }), armed);
+    expect(html).toContain("confirm-row");
+    expect(html).toContain("3 unsynced changes on this device will be permanently lost.");
+    expect(html).toContain("Remove it and lose them");
+    expect(html).toContain("Keep it");
+  });
+
+  it("nothing armed renders no confirm row (the card is not permanently shouting)", () => {
+    expect(render(model({ enabled: true, durable: true, queued: 3 }))).not.toContain("confirm-row");
+  });
+
+  it("Settings.tsx CALLS no window.confirm — house style, no native dialogs", () => {
+    // The prose above the code may name the retired dialog; only a call site fails this.
+    expect(readFileSync(here("./Settings.tsx"), "utf8")).not.toMatch(/window\.confirm\s*\(/);
   });
 });
 

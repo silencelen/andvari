@@ -1,7 +1,7 @@
 import { adIdkey, adItem, adUsage, adUvk, adVaultMeta, adVk } from "../crypto/ad";
 import { usageKey } from "../crypto/usagekey";
 import { ctEquals, fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
-import { open, seal } from "../crypto/envelope";
+import { open, seal, structuralRefusal } from "../crypto/envelope";
 import { fingerprint as recoveryFingerprint, sealUvk } from "../crypto/escrow";
 import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
 import { lifecycleKey } from "../crypto/lifecycleproof";
@@ -58,6 +58,43 @@ export class IdentityMismatchError extends Error {
   }
 }
 
+/**
+ * Audit H67 — the sentence, and the type that guarantees no ladder can relabel it. TWIN of core
+ * `HouseholdCopy.ACCOUNT_KEYS_DAMAGED` and the extension's `keys_damaged` unlock row; byte-identical
+ * on all three canons (ASCII apostrophe, no em dash), so a reword is a deliberate three-sided change.
+ */
+export const VAULT_KEYS_DAMAGED =
+  "This account's stored keys are damaged or from a newer version, so sign-in cannot continue. Contact your admin or restore from a backup.";
+
+/**
+ * spec 01 §4, spec 02 §2 (audit H67, core `VaultKeyDamagedException` parity): a server-supplied
+ * ACCOUNT-KEY blob — `wrappedUvk`, or (R38) its sibling `encryptedIdentitySeed` — is not a
+ * well-formed envelope AT ALL: not decodable base64url, or its public header says "too short" /
+ * an envelope version or AEAD alg this build does not know. (R42: the normative bullet is spec 01
+ * §4, not §5 — the twins' citations must point at the same section.)
+ *
+ * WHY THIS IS ITS OWN TYPE, at length, because the entire point is that it must never be relabelled:
+ * only the AEAD tag failure at the END of an envelope open is genuinely indistinguishable from a
+ * wrong master password — it is precisely what a wrong password produces. These refusals are decided
+ * from the blob's PUBLIC header, BEFORE the wrap key is applied, so no password could ever have made
+ * them pass. Folding them into "Wrong email or master password" (which every client did before this
+ * row) tells a household member whose account row was corrupted by a partial DB restore — or who is
+ * on an old build a newer server just fed a v2 envelope — to reset a password that works, and then to
+ * burn their recovery secret when the reset does not help. Deliberately NOT a CryptoError (the
+ * {@link IdentityMismatchError} precedent): every unlock ladder maps a CryptoError to "wrong master
+ * password", so living outside that type is what makes the collapse structurally impossible rather
+ * than merely un-coded-for today. TERMINAL, never retryable: the same blob fails identically forever.
+ */
+export class VaultKeyDamagedError extends Error {
+  constructor(detail: string, cause?: unknown) {
+    super(VAULT_KEYS_DAMAGED);
+    this.name = "VaultKeyDamagedError";
+    /** Debug detail only — the SENTENCE is `message`; surfaces render that, never this. */
+    (this as { detail?: string }).detail = detail;
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
+
 function uuidv4(): string {
   return crypto.randomUUID();
 }
@@ -70,6 +107,14 @@ function uuidv4(): string {
 export class Account {
   /** vaultId → role from the latest grant seen (spec 03 §10: role changes re-deliver the grant). */
   private readonly vaultRoles = new Map<string, string>();
+
+  /**
+   * Vaults whose VK arrived by MEMBER grant (`sealedVk`) rather than wrapped under our own
+   * UVK — see {@link keyArrivedByMemberGrant}. In-memory only, like the keys it annotates;
+   * the store rebuilds it by replaying the cached grant rows on every hydrate, so it cannot
+   * go stale across a reload. Kotlin twin: `Account.memberGrantedVaults`.
+   */
+  private readonly memberGrantedVaults = new Set<string>();
 
   /** itemId → highest formatVersion this session decrypted or sealed it at. Reseals take
    *  max(docFloor, this): the server enforces per-item monotonic fv, so an edit must never
@@ -285,11 +330,28 @@ export class Account {
     } finally {
       mk.fill(0);
     }
+    // H67 (core Account.unlock parity): STRUCTURE first, secret second. A blob that is not
+    // decodable base64url, or whose public header is too short / carries an envelope version or alg
+    // this build does not know, is refused BEFORE the wrap key is applied and surfaces as the
+    // distinct terminal VaultKeyDamagedError — those refusals cannot possibly mean "wrong password"
+    // (no password participates in them), and saying so sent members to reset a working password.
+    // Only what remains — the AEAD tag failure, the one genuinely ambiguous outcome — keeps the
+    // "wrong master password" relabel.
     let uvk: Uint8Array;
     try {
-      uvk = open(wrapKey, fromB64(keys.wrappedUvk), adUvk(userId));
-    } catch {
-      throw new CryptoError("wrong master password");
+      let envelope: Uint8Array;
+      try {
+        envelope = fromB64(keys.wrappedUvk);
+      } catch (e) {
+        throw new VaultKeyDamagedError("wrappedUvk is not valid base64url", e);
+      }
+      const refusal = structuralRefusal(envelope);
+      if (refusal !== null) throw new VaultKeyDamagedError(`wrappedUvk: ${refusal}`);
+      try {
+        uvk = open(wrapKey, envelope, adUvk(userId));
+      } catch {
+        throw new CryptoError("wrong master password");
+      }
     } finally {
       wrapKey.fill(0);
     }
@@ -308,9 +370,26 @@ export class Account {
    * when the field is MALFORMED — garbage where the identity key belongs is exactly the tampering
    * this check exists to name). Keeping it single-sourced is the invariant that stops the recovery
    * path from ever skipping the check.
+   *
+   * R38 (H67's missing leg, spec 01 §4 + §5): `encryptedIdentitySeed` carries the SAME
+   * public-header gate as `wrappedUvk` — it is the sibling account-key blob in the same row,
+   * damaged by the same events (a partial DB restore, a newer server serving an envelope version
+   * this build does not implement), and without the gate a structurally broken seed collapsed
+   * into "Wrong email or master password" one line after H67 stopped saying exactly that. Safe on
+   * the UVK-in-hand path too: a wrong or stale UVK can only produce an AEAD TAG failure, never a
+   * base64/version/alg refusal, so the "validation by consequence" signal that path relies on is
+   * untouched.
    */
   private static unlockFromUvk(userId: string, uvk: Uint8Array, keys: AccountKeys): Account {
-    const identitySeed = open(uvk, fromB64(keys.encryptedIdentitySeed), adIdkey(userId));
+    let seedEnvelope: Uint8Array;
+    try {
+      seedEnvelope = fromB64(keys.encryptedIdentitySeed);
+    } catch (e) {
+      throw new VaultKeyDamagedError("encryptedIdentitySeed is not valid base64url", e);
+    }
+    const seedRefusal = structuralRefusal(seedEnvelope);
+    if (seedRefusal !== null) throw new VaultKeyDamagedError(`encryptedIdentitySeed: ${seedRefusal}`);
+    const identitySeed = open(uvk, seedEnvelope, adIdkey(userId));
     // ZEROIZATION (audit H80): the seed's only job is to derive the keypair the Account holds —
     // a compromise of the seed IS a compromise of the identity key, so it gets the MK's care.
     let identity: ReturnType<typeof boxKeypairFromSeed>;
@@ -341,10 +420,33 @@ export class Account {
   addGrant(grant: WireGrant) {
     if (grant.role) this.vaultRoles.set(grant.vaultId, grant.role);
     if (this.vaultKeys.has(grant.vaultId)) return;
-    const vk = grant.sealedVk
-      ? openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk))
+    const arrivedByMemberGrant = !!grant.sealedVk;
+    const vk = arrivedByMemberGrant
+      ? openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk!))
       : open(this.uvk, fromB64(grant.wrappedVk), adVk(grant.vaultId, this.userId));
     this.vaultKeys.set(grant.vaultId, vk);
+    // Provenance of the KEY, recorded at the one moment it is knowable (audit H64). Never
+    // re-stamped by a later re-delivery — the early return above means the grant that actually
+    // opened the key is the one that says how it arrived, so a hostile server cannot launder a
+    // member-granted vault by re-sending it with a wrappedVk, and a post-transfer owner grant
+    // carrying BOTH forms (spec 02 §4) does not retroactively make a vault we joined as a
+    // member look like one we minted.
+    if (arrivedByMemberGrant) this.memberGrantedVaults.add(grant.vaultId);
+  }
+
+  /**
+   * True when this vault's VK reached us through a member grant (`sealedVk`,
+   * `crypto_box_seal` to our identity pubkey) rather than wrapped under our own UVK.
+   *
+   * WHY this is security-relevant and not bookkeeping: a `sealedVk` is ANONYMOUS — anybody
+   * holding our public identity key can mint one, and the VK inside it is by construction a
+   * key at least one other person already has. A `wrappedVk` opens only under our UVK with AD
+   * `andvari/v1|vk|{vaultId}|{userId}`, so it is unforgeable evidence that this client itself
+   * sealed that key for itself (enrollment, shared-vault creation, password-change re-wrap,
+   * transfer accept). "Which vault is mine alone" must rest on the second kind of evidence.
+   */
+  keyArrivedByMemberGrant(vaultId: string): boolean {
+    return this.memberGrantedVaults.has(vaultId);
   }
 
   /**
@@ -376,6 +478,7 @@ export class Account {
   removeVault(vaultId: string) {
     this.vaultKeys.delete(vaultId);
     this.vaultRoles.delete(vaultId);
+    this.memberGrantedVaults.delete(vaultId); // provenance dies with the key it describes (H64)
   }
 
   /**
@@ -416,8 +519,38 @@ export class Account {
     return shortIdentityFingerprint(this.identityPub);
   }
 
-  /** The store calls this when it sees the personal vault among synced vaults. */
+  /**
+   * The store calls this when it sees the personal vault among synced vaults. First writer
+   * wins; the value survives for the life of the unlocked account, and it is what
+   * {@link sealUsage} keys the usage ledger from and what save() defaults to.
+   *
+   * REFUSES a vault whose VK arrived by member grant (audit H64). `type === "personal"` is a
+   * server plaintext column (spec 02 §4) bound into no AD, and after enrollment nothing the
+   * client holds authenticates WHICH vault is its own: `personalVaultId` is rebuilt on every
+   * unlock from the first row the server labels personal whose key we happen to hold. A
+   * hostile server could therefore withhold the real personal row and relabel a SHARED vault
+   * the user is merely a member of; `usageKey = HKDF(VK, "andvari/v1|usage")` would then be
+   * computable by every other member of that vault, and `adUsage(userId)` is public — so a
+   * colluding co-member could read the victim's per-item behavioural log, the one thing the
+   * single-blob ledger design (spec 02 §8.2) exists to keep private.
+   *
+   * The refusal costs an honest account nothing: a personal vault is minted locally at
+   * enrollment and its grant is ALWAYS `wrappedVk` under our own UVK, so "arrived sealed" and
+   * "is my personal vault" are disjoint by construction.
+   *
+   * Fail-closed on purpose: when every held candidate is member-granted, `personalVaultId`
+   * stays empty rather than pick one. Empty means "no personal vault", which sealUsage/
+   * openUsage already surface as "no ledger" (render "—", never error) and which makes a save
+   * with no explicit vault fail loudly instead of silently filing new logins into somebody
+   * else's shared vault.
+   *
+   * Residue, deliberate: an OWNER-created SHARED vault's grant is also `wrappedVk`, so this
+   * rule cannot tell it from a personal one. Closing that needs `"type":"personal"` inside the
+   * authenticated vaultMeta plaintext — a spec 02 §4 wire change deferred to a spec revision.
+   * Kotlin twin: `Account.setPersonalVault`.
+   */
   setPersonalVault(vaultId: string) {
+    if (this.keyArrivedByMemberGrant(vaultId)) return;
     if (!this.personalVaultId) this.personalVaultId = vaultId;
   }
 

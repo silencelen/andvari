@@ -26,12 +26,9 @@ downloadable copies of `docker-compose.yml`, `andvari.env.template`, and `bringu
      DNS pointing at the host. `bringup.sh --caddy` arms it.
   2. **Your own front**: any reverse proxy, `cloudflared`, or `tailscale serve`
      pointed at `127.0.0.1:8080` (the app publishes on loopback only by default).
-     Set `ANDVARI_TRUSTED_IP_HEADERS` (e.g. `X-Forwarded-For`) in `andvari.env` so
-     rate limiting and the audit log see real client IPs — note the server honors
-     forwarded headers **only when the connection's direct peer is loopback**
-     (spec 03 §8). The caddy overlay satisfies that by sharing the app container's
-     network namespace; a proxy that reaches the container over the Docker bridge
-     does not, and per-client IP granularity degrades accordingly.
+     **Read the client-IP note below before you finish this one** — the default
+     topology works, but every caller shares one rate-limit bucket and one audit
+     IP until you tell the server which peer is your proxy.
   3. **Plain http on a trusted LAN — the desktop app only** (dev/home-lab): choose an
      `http://<private-ip>:8080` origin at bring-up; the app then binds `0.0.0.0`. Know
      what this costs before choosing it — **most clients cannot use such an instance
@@ -50,13 +47,69 @@ downloadable copies of `docker-compose.yml`, `andvari.env.template`, and `bringu
   produces. This is not optional decoration — it is the only way back into a lost
   account.
 
+### Client IPs behind your own front (option 2)
+
+Rate-limit keys and audit rows want the *caller's* IP, not your proxy's. The server
+will only believe a forwarded header (`X-Forwarded-For` and friends) when the
+request's **direct TCP peer** is one you have declared trustworthy — otherwise any
+LAN client could simply set the header and pick its own rate-limit bucket.
+
+Two variables, and they work together:
+
+- `ANDVARI_TRUSTED_PROXY_CIDRS` — **which peers may be believed.** Default
+  `127.0.0.0/8,::1/128` (loopback only).
+- `ANDVARI_TRUSTED_IP_HEADERS` — **which headers to read** from such a peer, in
+  priority order. **Default `X-Forwarded-For`** (spec 03 §8's sole default trusted
+  header); set it to override the list, or to an *empty* value to trust no forwarded
+  header at all. Only a peer inside `ANDVARI_TRUSTED_PROXY_CIDRS` is ever asked for one,
+  so the default is inert until you widen the CIDRs.
+
+The catch that makes this a real setting rather than paperwork: **inside the shipped
+container your host-side proxy is not loopback.** `docker-compose.yml` *publishes*
+`127.0.0.1:8080`, and a published port is a NAT hop — the peer address the app sees
+is the compose bridge gateway, never `127.0.0.1`. So with the defaults,
+a `cloudflared` / `tailscale serve` / nginx front on the host gets its forwarded
+headers ignored, every request keys the same bucket, and every audit row records the
+gateway. Nothing is insecure about that state; it is just coarse, and silently so.
+
+Pick one:
+
+| Topology | What to set | Result |
+|---|---|---|
+| **caddy overlay** (`--caddy`) | nothing | caddy shares the app's network namespace, so its hop really *is* loopback, and `X-Forwarded-For` is already the default header. |
+| **your own front on the host** | `ANDVARI_TRUSTED_PROXY_CIDRS=<the bridge gateway>/32` | per-caller keys and audit rows. The header list already defaults to `X-Forwarded-For`; name it explicitly only to read a different one. |
+| **`network_mode: host`** on the app service | nothing | the proxy's hop is genuinely loopback; no CIDR needed, and the default header applies. |
+
+`docker network inspect andvari_default -f '{{(index .IPAM.Config 0).Gateway}}'`
+prints the address to put there. Name **only** the peer(s) that are actually your
+proxy: widening the CIDR to a range real clients can reach from hands those clients
+their own header, and with it their own rate-limit key and their own audit row. The
+trust boundary is "this exact peer address is my proxy", nothing weaker — a `/32` is
+the right shape. `/metrics` is unaffected: it stays gated on the **raw** loopback peer
+and never consults this setting.
+
 ## Install
 
-The distribution channel is the public container image
-**`ghcr.io/silencelen/andvari`** — you **pull** it; building from source is optional.
-The source is public at <https://github.com/silencelen/andvari> (AGPLv3 server, GPLv3
-clients — see `LICENSING.md`), so you can read or build every byte you run; the image
-is simply the shorter path.
+The distribution channel is the container image **`ghcr.io/silencelen/andvari`**.
+**Today it needs a GitHub login** — the GHCR package is still private, so an anonymous
+`docker pull` is denied. Making it publicly pullable is a release step on the owner's
+side (`scripts/publish-image.sh` pushes it; the package's visibility is then flipped in
+GitHub → Packages), and this page will drop this paragraph when it is done. Two ways
+forward in the meantime, and the second needs nothing from anyone:
+
+- `docker login ghcr.io` with a GitHub account that has been granted read access to the
+  package, then follow the steps below unchanged; or
+- **build it yourself.** The source is public at
+  <https://github.com/silencelen/andvari> (AGPLv3 server, GPLv3 clients — see
+  `LICENSING.md`), so you can read and build every byte you run:
+  `git clone https://github.com/silencelen/andvari && ./andvari/deploy/bringup.sh --build`
+  builds the image locally (tag `:local`) from the top-level `Dockerfile` and is
+  otherwise the identical bring-up ceremony. `docker compose` then uses your local
+  image; `git pull` + re-run with `--build` is your update path instead of
+  `docker compose pull`.
+
+The steps below describe the pull path, which is the shorter one once the package is
+public.
 
 ```sh
 mkdir andvari && cd andvari
@@ -148,6 +201,18 @@ and `docker compose up -d`.
 
 Also part of your backup posture, but **never digital**: the printed recovery sheets
 from the ceremony, and members' own `.andvari` export files if they make them.
+
+**Durability, and what it costs you.** The server runs SQLite in WAL mode with
+`PRAGMA synchronous=FULL`: every committed write is fsynced before the client is told
+`applied` (spec 02 §7.1). That is deliberate, and it is the setting a password manager
+needs — a client drops a saved item from its outbox as soon as the server acknowledges
+it, so an acknowledgement that a power cut can undo would lose the newest saves with
+nothing left to re-send them. The price is one fsync per write. Household write rates
+make that invisible (reads and idle sync take no fsync at all), but on slow storage — an
+SD card, a cheap USB stick — a bulk import will feel it. If you hit that, the answer is
+faster storage for `./data`, not a laxer setting: `synchronous=NORMAL` buys throughput by
+making "saved" mean "probably saved". None of this replaces the backup above; fsync
+protects you from a power cut, not from a dead disk.
 
 ## Invites & email
 

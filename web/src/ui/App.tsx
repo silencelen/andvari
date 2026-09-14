@@ -28,7 +28,6 @@ import {
   loadSession,
   makeClient,
   migrateCacheConsentOnce,
-  offlineCopyStamp,
   pendingSyncCount,
   revokeSessionBestEffort,
   SESSION_STORAGE_KEY,
@@ -53,8 +52,12 @@ const LOCK_WARNING_NOTICE = "Still there? Locking soon — click, tap, or press 
 // B2-11 origin-move nudge copy (design 2026-07-15 §5.4.1). The offer stays up until answered
 // (no dismiss-X: an unanswered nudge simply re-fires at the next unlock; a marker is written
 // only by an actual answer, so it can never nag a device that has said yes or no).
+// H48: qualified to what the web client can actually deliver — see the long note on the
+// Offline-copy card in Settings.tsx. Without a service-worker shell (design 2026-07-13 D1) a
+// COLD tab cannot load the app at all while the server is unreachable, so the offer promises
+// only the thing that is true: a tab you already have open keeps working.
 const CACHE_NUDGE_OFFER =
-  "Keep an encrypted offline copy of your vault on this device? You could open your vault even when the server can't be reached.";
+  "Keep an encrypted offline copy of your vault on this device? A tab you already have open could then unlock even when the server can't be reached.";
 const CACHE_NUDGE_ACCEPTED = "Offline copy turned on — it will be created at your next unlock or sign-in.";
 
 export function App() {
@@ -173,30 +176,24 @@ export function App() {
   //
   // breaker #9 (§E.4) — the wipe destroys the whole outbound queue, so unsynced offline edits
   // are lost with it. `kind` decides how that loss is handled:
-  //  - "user"    (the Sign-out button): BLOCK on an explicit confirm carrying the count;
+  //  - "user"    (the Sign-out button): the CALLER has already confirmed — see below;
   //  - "expired" (definitive-401 / WS session-end): cannot be blocked (spec 02 §8), but the
   //               count is SURFACED in the notice so the loss is never silent;
   //  - "revoked" (server WS revoked frame): silent-drop (spec 03 §4 accepts it).
   const signOut = useCallback(async (notice?: string, kind: "user" | "expired" | "revoked" = "user") => {
     const uid = loadSession()?.userId ?? null;
     const unsynced = uid ? await pendingSyncCount(uid) : 0;
-    // Audit F07: the confirm used to fire ONLY on unsynced work, so a fully-synced device took
-    // the whole destructive path — session cleared, offline copy deleteDatabase'd — off one
-    // click of a control that reads like an account switcher ("Sign out / use a different
-    // account"). Offline, that leaves the member unable to open their vault at all until
-    // connectivity returns. A durable offline copy is itself a thing to lose, so it gates the
-    // confirm too; offlineCopyStamp is the same non-creating probe the Unlock card already runs.
-    // The sentence is the natives' verbatim (desktop Ui.kt / Android MainActivity) so all three
-    // clients say the same thing, with the unsynced count appended when there is one.
-    const durableCopy = uid ? (await offlineCopyStamp(uid)) !== null : false;
-    if (kind === "user" && (unsynced > 0 || durableCopy)) {
-      const question =
-        "Sign out of this device? This removes the vault copy and any unsynced changes from this device. You'll need your master password — and a connection to your server — to sign back in." +
-        (unsynced > 0 ? ` ${unsynced} unsynced ${unsynced === 1 ? "change" : "changes"} will be permanently lost.` : "");
-      const ok =
-        typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(question) : true;
-      if (!ok) return; // aborted — session, tokens, and cache are untouched
-    }
+    // Audit F07 kept the gate this comment describes — a fully-synced device still took the whole
+    // destructive path (session cleared, offline copy deleteDatabase'd) off one click of a control
+    // that reads like an account switcher — but implemented it as a native window.confirm right
+    // here. H135 moved the ASKING, not the gate, out to the control: SignOutLink (the Unlock card
+    // and the recovery-capture gate, the only two USER sign-out seams on web — signout-revoke.test
+    // pins that Vault has none) arms the house inline two-step confirm, reading the SAME two probes
+    // at click time (pendingSyncCount + the non-creating offlineCopyStamp) and carrying the same
+    // natives-verbatim sentence. This function is now the unconditional wipe choke point it always
+    // was for the other two kinds; anything that grows a new user sign-out control must arm through
+    // SignOutLink, or it will wipe without asking. `unsynced` is still read here — the "expired"
+    // notice below surfaces the count that could not be blocked.
     const lostCount =
       kind === "expired" && unsynced > 0
         ? `${notice ? notice + " " : ""}${unsynced} offline ${unsynced === 1 ? "change" : "changes"} could not be synced — this session expired before reconnecting.`
@@ -352,6 +349,9 @@ export function App() {
       <Announcer text={phaseNotice ?? ""} />
       <Announcer text={lockWarning ? LOCK_WARNING_NOTICE : ""} />
       <Announcer text={cacheNudgeText} />
+      {/* H137: print-only line (display:none on screen) — it explains the blanks a printed page
+          carries where a revealed password, one-time code, card number or health table was. */}
+      <p className="print-note">Secrets are hidden when printing — passwords, one-time codes, card numbers and the health tables do not appear on paper.</p>
       {upgradeStale && (
         <div className="banner">
           <span>{UPGRADE_NOTICE}</span>
@@ -393,7 +393,7 @@ export function App() {
           <div className="card-hero" style={{ marginBottom: 0 }}>
             <div className="sigil"><BrandSigil /></div>
             {/* UI-audit #24: the boot wait (sodium + policy fetch) visibly moves. */}
-            <p className="muted"><Busy>unsealing…</Busy></p>
+            <p className="muted"><Busy>Unsealing…</Busy></p>
           </div>
         </div>
       </div>

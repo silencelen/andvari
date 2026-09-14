@@ -1,6 +1,10 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 import {
   coerceManifest,
   DevicesCard,
@@ -257,11 +261,47 @@ describe("DevicesCard — endpoint-agnostic (design 2026-07-15 §5.4.4: no origi
   // pin here asserted the OPPOSITE ("Android" must not appear) because the only Android pointer
   // the card ever had was the retired tailnet devstore URL — a phone user therefore got no row,
   // no link and no statement, which reads as "not supported" rather than "not published here".
-  it("renders an Android row, and with no artifact it says so in the same words as the others", () => {
+  it("renders an Android row", () => {
     const html = renderToStaticMarkup(createElement(DevicesCard, { origin: PUBLIC }));
     expect(html).toContain("Android");
     // Static markup runs no effects → manifest null → every platform row is "Checking…".
     expect(html).toContain("Checking…");
+  });
+
+  /**
+   * H106 (audit 2026-09-13): the Android row shared the desktop rows' "isn't published yet"
+   * sentence, which on the reference instance is simply false — the phone build is handed out by
+   * the household's own app store, out of band, and the signing watcher's pinned key allow-list
+   * means the reference manifest can never carry an `android` entry to fix it. A member reading
+   * "isn't published yet" installs nothing and asks nobody. The replacement claims nothing about
+   * the product, names no host and (R08) invents no institution — only a person to ask — so it is
+   * true on every instance; an instance that DOES list an android build still gets the ordinary
+   * download link.
+   */
+  it("with no android artifact, the row points at the household instead of claiming there is no app", () => {
+    const html = renderToStaticMarkup(
+      createElement(PlatformRowView, { state: { kind: "unpublished" } as const, noun: "Android app (.apk)",
+        unpublished: "Ask your household admin for the Android app — this server doesn’t hand out the phone build." }),
+    );
+    // R08: names a PERSON, not an institution — an app store is true of the reference instance
+    // and false of a one-family self-host, and inventing one sends that reader hunting for a
+    // thing that does not exist. "Ask your household admin" is true wherever andvari is installed.
+    expect(html).toContain("Ask your household admin for the Android app");
+    expect(html, "no invented institution").not.toMatch(/app store/i);
+    expect(html).not.toContain("isn’t published yet");
+    // Instance-agnostic: no baked hostname, no store name (§5.5).
+    expect(html).not.toMatch(/devserv|ts\.net|Play|F-Droid/);
+  });
+
+  it("the card passes that copy to the Android row and NOT to the desktop rows", () => {
+    // Source pin: the card's fetch effect can't run under static markup, so the WIRING is what
+    // there is to check (H86's rule — no test-only prop on a production component to make a
+    // render possible).
+    const src = readFileSync(here("./Devices.tsx"), "utf8");
+    const android = src.slice(src.indexOf('<label>Android</label>'), src.indexOf('<label>Windows</label>'));
+    expect(android).toContain('unpublished="Ask your household admin for the Android app — this server doesn’t hand out the phone build."');
+    const desktop = src.slice(src.indexOf('<label>Windows</label>'), src.indexOf('<label>Browser extension</label>'));
+    expect(desktop, "the desktop rows keep the honest 'not published' sentence").not.toContain("unpublished=");
   });
 });
 

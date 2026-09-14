@@ -201,6 +201,7 @@ export type UnlockCode =
   | "aborted" // a server switch / lock landed mid-sign-in — the popup silently re-renders, no error
   | "upgrade_required"
   | "identity_mismatch"
+  | "keys_damaged" // H67: the account's stored wrappedUvk isn't a readable envelope — terminal, not credentials
   | "kdf_policy"
   | "server_error"
   | "network"

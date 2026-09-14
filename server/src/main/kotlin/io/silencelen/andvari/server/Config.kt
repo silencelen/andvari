@@ -25,10 +25,19 @@ class Config(
     // fast-param integration tests are unaffected; fromEnv() sets the production floor.
     val minKdfMemBytes: Long = 0,
     val minKdfOps: Long = 0,
-    // Forwarded-IP headers trusted for rate keys + audit ip ONLY when the direct peer is
-    // loopback (tailscale serve / cloudflared both terminate on 127.0.0.1); raw XFF from
-    // a non-loopback peer is never trusted (spec 03 §8).
+    // Forwarded-IP headers trusted for rate keys + audit ip ONLY when the direct peer is a
+    // declared trusted proxy ([trustedProxyCidrs]); raw XFF from any other peer is never
+    // trusted (spec 03 §8).
     val trustedIpHeaders: List<String> = DEFAULT_TRUSTED_IP_HEADERS,
+    // WHICH direct peers may speak for a client (H14, audit 2026-09-13). Loopback only by
+    // default — the reference tailscale-serve/cloudflared topologies and today's behaviour
+    // verbatim. A self-hoster whose proxy reaches the server across a Docker bridge (the
+    // published-port topology docs/self-hosting.md prescribes: the peer is the bridge gateway,
+    // NOT 127.0.0.1) declares that gateway or subnet here, and only then are forwarded headers
+    // honoured. Deliberately an operator DECLARATION, never inference: whatever is inside these
+    // CIDRs can name its own client IP, so widening it is a security decision the operator makes
+    // knowingly. /metrics stays on raw loopback and is untouched by this (Auth.peerIsLoopback).
+    val trustedProxyCidrs: List<String> = DEFAULT_TRUSTED_PROXY_CIDRS,
     // Cap on concurrent streaming uploads per user; in-flight .part bytes also count
     // toward the user quota mid-stream (LOW-6).
     val uploadMaxConcurrentPerUser: Int = 4,
@@ -112,6 +121,14 @@ class Config(
     val selfHostDocsUrl: String? = selfHostDocsUrl ?: (canonicalOrigin ?: inviteBaseUrl)?.let { "$it/selfhost" }
 
     val escrowConfigured: Boolean get() = recoveryPublicKey.size == 32 && recoveryFingerprint.isNotEmpty()
+
+    /**
+     * [trustedProxyCidrs] parsed ONCE (H14) — the trust gate is on the hottest request path and
+     * must not re-parse strings per call. Malformed entries are dropped rather than thrown on:
+     * a typo can then only shrink the trusted set (fail closed), and [envLint] is the loud channel
+     * that names it at boot (a strict boot refuses).
+     */
+    internal val trustedProxyNets: List<CidrBlock> by lazy { trustedProxyCidrs.mapNotNull { CidrBlock.parse(it) } }
 
     val smtpConfigured: Boolean
         get() = !smtpHost.isNullOrBlank() && !smtpUser.isNullOrBlank() && !smtpPass.isNullOrBlank() && !smtpFrom.isNullOrBlank()
@@ -203,7 +220,7 @@ class Config(
             "ANDVARI_HOST", "ANDVARI_PORT", "ANDVARI_DB", "ANDVARI_BLOB_DIR", "ANDVARI_WEB_DIR",
             "ANDVARI_DOWNLOADS_DIR", "ANDVARI_RECOVERY_PUBKEY", "ANDVARI_RECOVERY_FINGERPRINT",
             "ANDVARI_ENUM_SECRET", "ANDVARI_PUBLIC_HOSTNAME", "ANDVARI_BOOTSTRAP_TOKEN",
-            "ANDVARI_MIN_KDF_MEM", "ANDVARI_MIN_KDF_OPS", "ANDVARI_TRUSTED_IP_HEADERS",
+            "ANDVARI_MIN_KDF_MEM", "ANDVARI_MIN_KDF_OPS", "ANDVARI_TRUSTED_IP_HEADERS", "ANDVARI_TRUSTED_PROXY_CIDRS",
             "ANDVARI_UPLOAD_MAX_CONCURRENT", "ANDVARI_REQUEST_READ_TIMEOUT_S", "ANDVARI_RESPONSE_WRITE_TIMEOUT_S",
             "ANDVARI_VAULT_GRACE_DAYS", "ANDVARI_TRANSFER_TTL_DAYS", "ANDVARI_JANITOR_DRYRUN",
             "ANDVARI_SMTP_HOST", "ANDVARI_SMTP_PORT", "ANDVARI_SMTP_USER", "ANDVARI_SMTP_PASS", "ANDVARI_SMTP_FROM",
@@ -283,6 +300,21 @@ class Config(
                     else -> problems += "invalid ANDVARI_SIGNUP_MODE: '$raw' is not one of closed|invite-only|landing|open"
                 }
             }
+            // H14: a trusted-proxy entry that does not parse is silently DROPPED by
+            // Config.trustedProxyNets (fail closed), which would leave the operator staring at
+            // an instance that still collapses every client into one rate-limit key with no
+            // explanation. Name each bad entry here — strict boot then refuses outright.
+            env["ANDVARI_TRUSTED_PROXY_CIDRS"]?.let { raw ->
+                val entries = raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                for (e in entries) {
+                    if (CidrBlock.parse(e) == null) {
+                        problems += "invalid ANDVARI_TRUSTED_PROXY_CIDRS entry '$e' (want an IP literal or literal/prefix, e.g. 127.0.0.0/8, 172.18.0.1, ::1/128)"
+                    }
+                }
+                if (entries.isEmpty()) {
+                    notes += "ANDVARI_TRUSTED_PROXY_CIDRS is set but empty — NO peer is a trusted proxy, so forwarded IP headers are never honored (unset it for the loopback default)"
+                }
+            }
             if (env["ANDVARI_CANONICAL_ORIGIN"] == null && env["ANDVARI_INVITE_BASE_URL"] != null) {
                 notes += "ANDVARI_INVITE_BASE_URL is deprecated — set ANDVARI_CANONICAL_ORIGIN (the old var is honored as a fallback alias)"
             }
@@ -301,6 +333,15 @@ class Config(
         // edge-observed IP), and pickClientIp already takes the rightmost — so XFF is un-forgeable on
         // both paths while CF-Connecting-Ip is not. An all-CF deployment can re-add it via env.
         val DEFAULT_TRUSTED_IP_HEADERS = listOf("X-Forwarded-For")
+
+        /**
+         * H14: loopback only. Both reference front-ends terminate on 127.0.0.1, so this is exactly
+         * the old `peerIsLoopback()` rule — every existing deployment is bit-for-bit unchanged, and
+         * an operator whose proxy arrives from somewhere else (the Docker-bridge gateway of the
+         * published-port self-host) has to say so. `::1/128` is listed explicitly rather than
+         * relying on the v4 block: the families never cross-match (see [CidrBlock.contains]).
+         */
+        val DEFAULT_TRUSTED_PROXY_CIDRS = listOf("127.0.0.0/8", "::1/128")
 
         /** The ONE reader for every var in [NUM_ENV_RANGES]. FORGIVING, like the §2.1 vars below:
          *  a non-numeric or out-of-range value degrades to [default] rather than crashing the boot,
@@ -337,6 +378,12 @@ class Config(
                 trustedIpHeaders = env("ANDVARI_TRUSTED_IP_HEADERS")
                     ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
                     ?: DEFAULT_TRUSTED_IP_HEADERS,
+                // H14. An EMPTY/blank value is not "unset": it means the operator declared NO
+                // trusted proxy, so no forwarded header is ever honoured. Only an absent var
+                // falls back to the loopback default.
+                trustedProxyCidrs = env("ANDVARI_TRUSTED_PROXY_CIDRS")
+                    ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
+                    ?: DEFAULT_TRUSTED_PROXY_CIDRS,
                 uploadMaxConcurrentPerUser = numEnv(env, "ANDVARI_UPLOAD_MAX_CONCURRENT", 4).toInt(),
                 requestReadTimeoutSeconds = numEnv(env, "ANDVARI_REQUEST_READ_TIMEOUT_S", 0L).toInt(),
                 responseWriteTimeoutSeconds = numEnv(env, "ANDVARI_RESPONSE_WRITE_TIMEOUT_S", 0L).toInt(),

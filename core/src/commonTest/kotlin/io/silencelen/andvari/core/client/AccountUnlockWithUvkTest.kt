@@ -167,6 +167,116 @@ class AccountUnlockWithUvkTest {
     }
 
     /**
+     * Audit H67 — the structural/secret split on the password path. A `wrappedUvk` the server
+     * hands back that is not a well-formed envelope (undecodable base64url, too short, an
+     * envelope version or AEAD alg this build does not know) is refused from its PUBLIC header
+     * alone, before the wrap key is applied — so no password could ever have made it pass, and
+     * calling it "wrong master password" (which this code did until H67) sends a member with a
+     * half-restored account row to reset a password that works and then to spend their recovery
+     * secret. Each refusal must raise the distinct, terminal [VaultKeyDamagedException]; a
+     * genuinely wrong password — the ONE ambiguous outcome, an AEAD tag failure — must still
+     * raise the plain "wrong master password" [CryptoException]. Reverting either half fails here.
+     */
+    @Test
+    fun structurallyDamagedWrappedUvkIsNotAWrongPassword() {
+        val e = enroll("damaged@example.com")
+        val good = Bytes.fromB64(e.keys.wrappedUvk)
+
+        // 1. not base64url at all (a truncated/garbled DB column).
+        assertFailsWith<VaultKeyDamagedException> {
+            Account.unlock(e.reg.userId, password, e.keys.copy(wrappedUvk = "!!! not base64 !!!"), crypto)
+        }
+        // 2. too short to even be an envelope.
+        assertFailsWith<VaultKeyDamagedException> {
+            Account.unlock(e.reg.userId, password, e.keys.copy(wrappedUvk = Bytes.toB64(good.copyOf(8))), crypto)
+        }
+        // 3. an envelope version this build does not know (a newer server, an older client).
+        val futureVersion = good.copyOf().also { it[0] = 0x02 }
+        assertFailsWith<VaultKeyDamagedException> {
+            Account.unlock(e.reg.userId, password, e.keys.copy(wrappedUvk = Bytes.toB64(futureVersion)), crypto)
+        }
+        // 4. an AEAD alg this build does not know.
+        val futureAlg = good.copyOf().also { it[1] = 0x02 }
+        assertFailsWith<VaultKeyDamagedException> {
+            Account.unlock(e.reg.userId, password, e.keys.copy(wrappedUvk = Bytes.toB64(futureAlg)), crypto)
+        }
+
+        // …and the split's other half: a WRONG PASSWORD against an intact blob still fails the
+        // AEAD tag and still says so. (VaultKeyDamagedException is not a CryptoException, so this
+        // assertion also proves the two verdicts can never be confused by type.)
+        val ex = assertFailsWith<CryptoException> {
+            Account.unlock(e.reg.userId, "not the password", e.keys, crypto)
+        }
+        assertEquals("wrong master password", ex.message)
+
+        // The honest, terminal sentence — not the credentials one — on both native ladders.
+        val damaged = assertFailsWith<VaultKeyDamagedException> {
+            Account.unlock(e.reg.userId, password, e.keys.copy(wrappedUvk = Bytes.toB64(futureVersion)), crypto)
+        }
+        assertEquals(HouseholdCopy.ACCOUNT_KEYS_DAMAGED, HouseholdCopy.forSignInError(damaged))
+        assertEquals(HouseholdCopy.ACCOUNT_KEYS_DAMAGED, HouseholdCopy.forUnlockError(damaged))
+        assertNotEquals(HouseholdCopy.WRONG_EMAIL_OR_PASSWORD, HouseholdCopy.forSignInError(damaged))
+        assertNotEquals(HouseholdCopy.WRONG_MASTER_PASSWORD, HouseholdCopy.forUnlockError(damaged))
+    }
+
+    /**
+     * R38 — H67's missing leg: the SIBLING account-key blob. `encryptedIdentitySeed` sits in the
+     * same account row as `wrappedUvk` and is damaged by the same events (a partial DB restore, a
+     * newer server serving an envelope version this build does not implement), but its open in
+     * the shared tail was left un-caught — so on the PASSWORD path a structurally broken seed
+     * collapsed into "Wrong master password" one line after the fix above stopped saying exactly
+     * that, about the same damaged row.
+     *
+     * The quick-unlock (UVK) path keeps its "validation by consequence" signal, and that is the
+     * reason the gate is safe in the shared tail: a wrong or stale UVK can only ever fail the
+     * AEAD TAG, never the public header, so it still raises the plain CryptoException the callers
+     * wipe the quick-unlock blob on. Asserted here, in both directions.
+     */
+    @Test
+    fun structurallyDamagedIdentitySeedIsNotAWrongPassword() {
+        val e = enroll("damagedseed@example.com")
+        val good = Bytes.fromB64(e.keys.encryptedIdentitySeed)
+        val futureVersion = good.copyOf().also { it[0] = 0x02 }
+
+        for (broken in listOf(
+            "!!! not base64 !!!",
+            Bytes.toB64(good.copyOf(8)),
+            Bytes.toB64(futureVersion),
+            Bytes.toB64(good.copyOf().also { it[1] = 0x02 }),
+        )) {
+            assertFailsWith<VaultKeyDamagedException>("seed blob $broken must be the damaged terminal") {
+                Account.unlock(e.reg.userId, password, e.keys.copy(encryptedIdentitySeed = broken), crypto)
+            }
+        }
+
+        // Same on the quick-unlock path — the tail is shared, so the verdict must be too.
+        assertFailsWith<VaultKeyDamagedException> {
+            Account.unlockWithUvk(
+                e.reg.userId,
+                e.account.uvkCopyForPlatformWrap(),
+                e.keys.copy(encryptedIdentitySeed = Bytes.toB64(futureVersion)),
+                crypto,
+            )
+        }
+
+        // …and the signal the UVK path relies on is UNCHANGED: a wrong UVK against an INTACT seed
+        // still fails the AEAD tag as a plain CryptoException (never the damaged terminal), which
+        // is what tells the caller to wipe the quick-unlock blob rather than declare the account
+        // unreadable.
+        // VaultKeyDamagedException is NOT a CryptoException, so assertFailsWith<CryptoException>
+        // alone proves the verdict is the bad-secret one and not the damaged terminal — the two
+        // types are disjoint by design, which is the property that makes them unconfusable.
+        val wrongUvk = ByteArray(32) { 0x11 }
+        assertFailsWith<CryptoException> { Account.unlockWithUvk(e.reg.userId, wrongUvk, e.keys, crypto) }
+
+        val damagedSeed = assertFailsWith<VaultKeyDamagedException> {
+            Account.unlock(e.reg.userId, password, e.keys.copy(encryptedIdentitySeed = Bytes.toB64(futureVersion)), crypto)
+        }
+        assertEquals(HouseholdCopy.ACCOUNT_KEYS_DAMAGED, HouseholdCopy.forSignInError(damagedSeed))
+        assertEquals(HouseholdCopy.ACCOUNT_KEYS_DAMAGED, HouseholdCopy.forUnlockError(damagedSeed))
+    }
+
+    /**
      * Audit F32: [Account.addGrant]'s two branches disagreed about what a vault key is.
      * `SharedGrant.open` has always asserted 32 bytes; the wrappedVk branch installed whatever
      * length the envelope produced, so a wrong-length VK entered the key map and only surfaced

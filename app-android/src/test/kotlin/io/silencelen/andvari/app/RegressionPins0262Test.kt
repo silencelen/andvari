@@ -97,7 +97,10 @@ class RegressionPins0262Test {
     fun g23_theNewItemDraftIdIsMintedOncePerEditorSessionAndThreadedIntoTheSave() {
         assertTrue(vmCode.contains("if (itemId == null && draftItemId == null) draftItemId = account?.newItemId()"), "minted once, only for a NEW item")
         assertTrue(vmCode.contains("newItemId = if (itemId == null) draftItemId else null"), "…and handed to the engine by name")
-        val open = vmCode.substringAfter("fun openEditor(itemId: String?, newType: String = \"login\") {").substringBefore("\n    }")
+        // R15 added a third parameter (`generate`); anchor on the name so the span stays honest
+        // if the signature grows again, and assert the anchor really matched.
+        assertTrue(vmCode.contains("fun openEditor(itemId: String?, newType: String = \"login\", generate: Boolean = false) {"), "openEditor's signature moved — update this pin deliberately")
+        val open = vmCode.substringAfter("fun openEditor(").substringBefore("\n    }")
         assertTrue(open.contains("draftItemId = null"), "a fresh editor session never inherits a draft id (reusing one would OVERWRITE that item)")
         val close = vmCode.substringAfter("fun closeEditor() {").substringBefore("\n    }")
         assertTrue(close.contains("draftItemId = null"), "cancel or success ends the draft")

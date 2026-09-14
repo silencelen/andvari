@@ -325,6 +325,24 @@ the refusal isolates to single rows, which are dropped durably with the same
 below the cap) as well as by count, so only a lone row that is itself over the cap can
 ever draw the 413 (H19).
 
+**Queue coalescing (client duty, audit 2026-09-13 H37):** `baseItemRev` is compared
+against a **globally** monotonic rev (§4 — every write by any member advances it), so a
+queue holding two or more `put`s for the SAME item can never have them all apply
+cleanly: the first lands at a fresh global rev and every later one is stale by
+construction, drawing a `conflict` whose displaced version is the pusher's own earlier
+draft. A client MUST therefore, when enqueueing a `put` for an item that already has an
+UNSENT `put` queued, drop the older row(s) and send the newest doc **with the OLDEST
+dropped row's `baseItemRev`** under a **fresh `mutationId`**. Three parts, each load-bearing:
+the oldest base rev (a fresher one — the client's optimistic counter, or a rev a PEER's
+delivered edit installed — would let the write apply "cleanly" over a change nobody
+copied); the fresh mutationId (replaying a dropped row's id lets the dedup window return
+that row's stored result verbatim, reporting `applied` for content never sent); and
+`put`-only, never across a queued `delete` for the same item, whose ordering the drain
+must keep as written. Rows the server already denied (staged for §11 replay) are not
+coalescable. The unavoidable residue is the lost-response window — a row that landed but
+whose result was never seen is re-sent at the old base and draws exactly the conflict
+copy this rule removes elsewhere; that is a degradation, never a loss.
+
 **Conflict-copy materialization (client duty):** on seeing `conflict=true` with a
 decryptable displaced version, create a new item `{name: "<name> (conflict
 YYYY-MM-DD)"}` carrying the losing content, then push it plus a flag-clearing rewrite of
@@ -513,9 +531,17 @@ strips them degrades every client to the poll path (correct, just slower).
   oracle instead. They stay **hard-refused on the break-glass twin origin** (`403`) but
   are internet-reachable on single-origin instances (posture: spec 05 R10, T11).
 - Client IP (rate keys + audit rows): the **rightmost** `X-Forwarded-For` entry — the
-  **sole default trusted header** — and **only when the direct TCP peer is loopback**
-  (a supported front-end terminates there). Any other peer uses the socket address and
-  forwarded headers are ignored entirely (spoof-proof). `CF-Connecting-IP` is
+  **sole default trusted header** — and **only when the direct TCP peer falls inside the
+  operator-declared trusted-proxy set** (`ANDVARI_TRUSTED_PROXY_CIDRS`, default
+  `127.0.0.0/8,::1/128` — loopback only, i.e. the pre-2026-09-13 rule verbatim, so every
+  existing deployment is bit-for-bit unchanged; a supported front-end terminates there).
+  A peer OUTSIDE that set uses the socket address and forwarded headers are ignored
+  entirely (spoof-proof). Widening the set is an explicit **operator act**, never
+  something the server infers from the peer it happens to see: anything inside a declared
+  CIDR can name its own client IP, so a wide value trades spoof-proofing for reachability
+  through a proxy that does not terminate on loopback (the Docker-bridge gateway is the
+  motivating case). *(Amended 2026-09-13, audit H14 — this paragraph previously said
+  "loopback", hard-coded; the default still is.)* `CF-Connecting-IP` is
   **deliberately NOT trusted by default**: only a genuine Cloudflare tunnel sets it,
   whereas other front-ends (plain reverse proxies, mesh/tunnel fronts) leave it unset and
   pass a *client-supplied* one straight through — making it forgeable on those paths, so a

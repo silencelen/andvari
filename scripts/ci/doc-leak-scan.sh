@@ -81,6 +81,33 @@ if [ "${#present[@]}" -eq 0 ]; then
 fi
 
 HITS=$(cd "$ROOT" && grep -rnE "$LEAK_RE" "${present[@]}" --include='*.md' 2>/dev/null | grep -vE "$EXEMPT") || true
+
+# ---- second pass: ADDRESSES in shipped scripts (R29) ----------------------------------------
+# The prose scope above could not have caught what R29 found: `scripts/prune-artifacts.sh` shipped
+# `ssh root@192.168.7.131 pct exec 122 --` as a DEFAULT — the first host-specific literal in
+# scripts/, in a public repo, in an executable rather than a document. Scripts are prose a stranger
+# reads too, and an address baked into one is worse than an address in a doc: it does not merely
+# mislead, it dials.
+#
+# Deliberately ADDRESSES ONLY (the IPv4 classes and the tailnet nets), not the host-NAME class: the
+# release ceremony scripts are correctly named for the machine they run on (`signandvari.ps1`,
+# `prestige-release.ps1` — PRESTIGE is the Windows workstation the ceremony physically requires),
+# and a gate that flagged those would be teaching the next author to rename a correct thing. The
+# gate's own source is exempt for the reason its header already gives: it must quote the literals
+# it matches.
+SCRIPT_ADDR_RE="$IPV4|$NETS"
+SCRIPT_EXEMPT='^scripts/ci/doc-leak-scan\.sh:|^scripts/ci/fixtures/'
+if [ -d "$ROOT/scripts" ]; then
+  SCRIPT_HITS=$(cd "$ROOT" && grep -rnE "$SCRIPT_ADDR_RE" scripts --include='*.sh' --include='*.ps1' 2>/dev/null | grep -vE "$SCRIPT_EXEMPT") || true
+  if [ -n "$SCRIPT_HITS" ]; then
+    echo "    §5.5 SCRIPT LEAK: a private/reference-instance address is baked into a shipped script:" >&2
+    printf '%s\n' "$SCRIPT_HITS" | sed 's/^/      /' >&2
+    echo "    Take it from an environment variable and fail with guidance when it is unset — the" >&2
+    echo "    signandvari.ps1 / prestige-release.ps1 pattern. This repo is public." >&2
+    exit 1
+  fi
+fi
+
 if [ -n "$HITS" ]; then
   echo "    §5.5 DOC LEAK: reference-instance address or private host name in current-facing prose:" >&2
   printf '%s\n' "$HITS" | sed 's/^/      /' >&2

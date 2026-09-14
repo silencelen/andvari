@@ -2,10 +2,12 @@ package io.silencelen.andvari.server
 
 import io.silencelen.andvari.core.model.ClientPolicy
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * The policy read-through cache (quality-perf--7) vs a concurrent admin update — polish review
@@ -36,16 +38,27 @@ class PolicyCacheRaceTest : P4TestSupport() {
             // Seed the slow row and leave the cache cold (setPolicy invalidates).
             service.setPolicy(slowToDecode(autoLockSeconds = 111))
 
-            val readerEntered = CountDownLatch(1)
+            // H97: the interleaving is SIGNALLED, not slept for. The probe fires inside the
+            // read-through once the stored row has been read and before the decoded value is
+            // published — the exact poisoning window. The old `Thread.sleep(50)` only guessed the
+            // reader had got that far; on a loaded host the writer could win the start instead,
+            // and the witness assertion below then failed a correct server.
+            val readerInWindow = CountDownLatch(1)
+            service.policyReadThroughProbe = {
+                // Signal ONLY. This runs holding the Db lock, so waiting for the writer here
+                // would deadlock — the writer is meant to QUEUE on that lock, which is the
+                // property under test.
+                readerInWindow.countDown()
+            }
             val readerSaw = AtomicLong(-1)
             val reader = thread(name = "policy-reader") {
-                readerEntered.countDown()
                 readerSaw.set(service.policy().autoLockSeconds.toLong())
             }
-            readerEntered.await()
+            assertTrue(readerInWindow.await(30, TimeUnit.SECONDS), "the reader never entered the read-through window")
             // The reader is now inside the read-through: mid-decode if the publish is unguarded,
             // holding the Db lock if it is guarded. Either way the update below is the racer.
-            Thread.sleep(50)
+            // The deliberately slow decode keeps that window tens of ms wide, so an unguarded
+            // publish reliably loses the race and this test still fails if the guard is reverted.
             service.setPolicy(ClientPolicy(autoLockSeconds = 222))
             reader.join(30_000)
 

@@ -6,7 +6,7 @@ import { fingerprint, shortFingerprint, shortFormMatches } from "../crypto/escro
 import { confirmMatches, displayForm } from "../crypto/member-recovery";
 import { clearPendingEnroll, enrollPrefillFor, peekPendingEnroll, type EnrollPayload } from "../enroll/enrolllink";
 import { enrollPosture, escrowGate, type EnrollPosture } from "../enroll/enrollposture";
-import { Account, IdentityMismatchError, deviceName } from "../vault/account";
+import { Account, IdentityMismatchError, VaultKeyDamagedError, deviceName } from "../vault/account";
 import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import { maybeKdfUpgrade } from "../vault/kdfupgrade";
 import { VaultStore } from "../vault/store";
@@ -16,6 +16,7 @@ import { scheduleClipboardClear, writeClipboard } from "./clipboard";
 import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
 import { safeHttpUrl } from "./safeurl";
 import { Busy } from "./Busy";
+import { SignOutLink } from "./SignOutLink";
 import { Field } from "./Field";
 import { fmtDate } from "./format";
 import { Announcer, Msg } from "./Msg";
@@ -227,9 +228,9 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
           <input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
         </Field>
         <button className="primary" disabled={busy || !password}>{busy ? <Busy>Unsealing…</Busy> : "Unlock"}</button>
-        <div style={{ textAlign: "center", marginTop: 16 }}>
-          <button type="button" className="link" onClick={() => onForget()}>Sign out / use a different account</button>
-        </div>
+        {/* H135: the destructive sign-out arms INLINE here (SignOutLink), the house idiom —
+            App.signOut no longer raises a native dialog, so this component IS the confirm. */}
+        <SignOutLink userId={session.userId} onSignOut={() => onForget()} />
       </form>
     </div>
   );
@@ -549,6 +550,13 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
         // F31/spec 01 §5: the password DID check out (login succeeded) — the server sent
         // an identity key our sealed seed does not derive. Never blame the password.
         setErr(e.message);
+      } else if (e instanceof VaultKeyDamagedError) {
+        // H67: the login succeeded and then the account's stored wrappedUvk turned out not to be a
+        // well-formed envelope (bad base64url, too short, a version/alg this build doesn't know) —
+        // refused from its public header, before the password's wrap key was applied. Never
+        // "Wrong email or master password" (the password is proven by the 200), and never
+        // "try again": the same row fails identically forever. Its `message` IS the canon sentence.
+        setErr(e.message);
       } else if (e instanceof NetworkError) {
         setErr(UNREACHABLE);
       } else if (e instanceof ApiError && e.status === 401) {
@@ -867,7 +875,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   if (ready && settling) {
     return withBreachAdvisory(
       <div>
-        <p className="muted">Saving your confirmation…</p>
+        <p className="muted"><Busy>Saving your confirmation…</Busy></p>
       </div>,
     );
   }
@@ -1169,8 +1177,10 @@ function RecoveryReveal({
             block with no control in it. */}
         <div className="field-head">Your recovery phrase</div>
         {/* Rendered as TEXT (never type=password); never written to storage (§F.7). */}
+        {/* H137: `print-keep` is the ONE exception to the print blanking — this phrase is shown
+            once, is never stored, and printing it is a way the design expects a user to save it. */}
         <div
-          className="mono"
+          className="mono print-keep"
           style={{ userSelect: "all", wordBreak: "break-all", padding: "10px 12px", border: "1px solid rgba(128,128,128,0.35)", borderRadius: 8 }}
         >
           {grouped}
@@ -1360,7 +1370,7 @@ function RecoveryCaptureGate({
         <button type="button" className="primary" onClick={() => void run()}>Try again</button>
       </div>
     ) : (
-      <p className="muted">{stage === "confirming" ? "Saving your confirmation…" : "Preparing your recovery phrase…"}</p>
+      <p className="muted"><Busy>{stage === "confirming" ? "Saving your confirmation…" : "Preparing your recovery phrase…"}</Busy></p>
     );
 
   return (
@@ -1370,9 +1380,7 @@ function RecoveryCaptureGate({
       {/* A.5: the un-skippable gate still needs an escape that isn't "close the tab" — the same
           affordance as the Unlock card. Safe: recoveryConfirmed stays false, so the gate re-fires
           at the next sign-in (an un-captured phrase is replaced by the next run's fresh one). */}
-      <div style={{ textAlign: "center", marginTop: 16 }}>
-        <button type="button" className="link" onClick={onSignOut}>Sign out / use a different account</button>
-      </div>
+      <SignOutLink userId={account.userId} onSignOut={onSignOut} />
     </div>
   );
 }

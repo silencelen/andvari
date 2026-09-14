@@ -22,7 +22,19 @@ const html = readFileSync(fileURLToPath(new URL("../../index.html", import.meta.
 describe("the pre-hydration boot shell", () => {
   it("still paints the placeholder React sweeps away", () => {
     expect(html).toContain('<div id="root">');
-    expect(html).toContain("unsealing…");
+    expect(html).toContain("Unsealing…");
+  });
+
+  it("R06 — the placeholder's wait label is byte-identical to App's, casing included", () => {
+    // The comment above the placeholder claims it "mirrors App's loading phase"; H132 recased
+    // App's label to "Unsealing…" and left the placeholder lower case, so a cold load painted
+    // "unsealing…" and then flipped it in place. Derive the expectation from App rather than
+    // re-typing it, so the mirror cannot be broken from either side.
+    const app = readFileSync(fileURLToPath(new URL("./App.tsx", import.meta.url)), "utf8");
+    const labels = [...app.matchAll(/<Busy>([^<{]*…)<\/Busy>/g)].map((m) => m[1]!);
+    const boot = labels.find((l) => /unsealing/i.test(l));
+    expect(boot, "App must still render a <Busy> unseal label for the boot phase").toBeTruthy();
+    expect(html, "index.html's placeholder must spell it exactly as App does").toContain(`<span>${boot}</span>`);
   });
 
   it("offers the reload after a delay, in the household voice — no internals, one action", () => {

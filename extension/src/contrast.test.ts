@@ -28,6 +28,21 @@ function ratio(fg: string, bg: string): number {
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
 
+/** Alpha-composite `fg` at `a` over opaque `bg` (sRGB, as a browser paints it). This is what
+ *  `color-mix(in oklab, var(--tok) N%, transparent)` resolves to: mixing with `transparent`
+ *  premultiplies, so the result is simply the token at N% alpha over whatever is behind it. */
+function composite(fg: string, a: number, bg: string): string {
+  const b = bg.replace("#", "");
+  const f = fg.replace("#", "");
+  return (
+    "#" +
+    [0, 2, 4]
+      .map((i) => Math.round(parseInt(f.slice(i, i + 2), 16) * a + parseInt(b.slice(i, i + 2), 16) * (1 - a)))
+      .map((c) => c.toString(16).padStart(2, "0"))
+      .join("")
+  );
+}
+
 const css = readFileSync(fileURLToPath(new URL("../popup.css", import.meta.url)), "utf-8");
 
 /** Slice a `{ … }` block starting at the first `{` after `marker`, brace-matched. */
@@ -122,18 +137,91 @@ for (const [theme, blk] of [
   });
 }
 
-test("CutA dark: --danger clears AA on the composited .msg.err plate (hardcoded rgba literal)", () => {
-  const dangerDark = token(dark, "danger");
-  // Non-greedy: the FIRST rgba in the rule is the background plate (0.12), not the border's 0.3.
-  const m = /\.msg\.err\s*\{[^}]*?rgba\((\d+),\s*(\d+),\s*(\d+),\s*(0?\.\d+)\)/.exec(css);
-  assert.ok(m, ".msg.err plate rgba literal not found");
-  const a = Number(m![4]);
-  const base = token(dark, "bg-raised").replace("#", "");
-  const bc = [0, 2, 4].map((i) => parseInt(base.slice(i, i + 2), 16));
-  const plate = "#" + [Number(m![1]), Number(m![2]), Number(m![3])]
-    .map((c, i) => Math.round(c * a + bc[i]! * (1 - a)).toString(16).padStart(2, "0")).join("");
-  assert.ok(ratio(dangerDark, plate) >= AA, `--danger on plate = ${ratio(dangerDark, plate).toFixed(2)}`);
-  assert.equal(dangerDark, "#d97f6f", "dark --danger pinned to the lifted value (web lockstep)");
+// --- H134 (audit 2026-09-13): the tinted PLATES. This block used to parse the ONE hardcoded rgba
+// literal out of .msg.err and composite it — "hardcoded rgba literal" was in its own name, because
+// the literal did not track --danger. That was the bug, not a quirk of the test: the literals were
+// frozen copies of the DARK palette (the .err pair was still the pre-Cut-A #cf6b5a, retired when
+// --danger was lifted to #d97f6f / light #b3402c), so light mode got a pink-salmon wash around
+// brick-red text and the gold plates carried the dark gold. The rules now mix the plate from the
+// same token the text uses, and this composites THAT — so the gate follows the palette instead of a
+// snapshot of it, in both themes.
+//
+// What is and is not gated, honestly:
+//  · dark, both surfaces: full AA. That is the gate this file has always had, extended to .info/.ok.
+//  · light: the WASH invariant (below) plus the 3:1 non-text floor, NOT AA — because the light
+//    palette is already at its own ceiling before any plate exists. Bare --ok on light --bg is
+//    4.38:1 and bare --danger 4.97:1; a 12% wash of the text's own hue costs ~15% of any ratio, so
+//    no plate percentage can make light --ok reach AA. That is a PALETTE matter, owned by the
+//    five-way token lockstep in web/src/ui/token-lockstep.test.ts, and gating it here would be
+//    gating someone else's file through this one.
+// The wash invariant is what a tint plate must actually satisfy: tinting a surface with the text's
+// own hue always drags the surface toward the text, so the plate may READ as coloured but may not
+// cost more than a fifth of the bare surface's contrast. Every plate lands at ~83-90% today.
+// R11: ALL EIGHT converted plates, not the four the first pass listed. The other four
+// (.host-grant-cta, .update-banner, .qu-offer, .totp-chip) were converted in the same diff and
+// mentioned by no test in the tree, so re-freezing any of them as an rgba() literal shipped with
+// the whole suite green — which is precisely the regression this block exists to make impossible.
+// `borderPct: null` means the rule's BORDER is a token (--edge / --edge-strong), not a mix, so the
+// structural pin expects one declared mix rather than two.
+const PLATES = [
+  { rule: ".msg.err", text: "danger", tint: "danger", bgPct: 12, borderPct: 30 },
+  { rule: ".msg.info", text: "gold-bright", tint: "gold", bgPct: 10, borderPct: 25 },
+  { rule: ".msg.ok", text: "ok", tint: "ok", bgPct: 12, borderPct: 40 },
+  { rule: ".must-change-strip", text: "danger", tint: "danger", bgPct: 12, borderPct: 30 },
+  // Firefox first-run route strip: gold wash, --edge border.
+  { rule: ".host-grant-cta", text: "gold-text", tint: "gold", bgPct: 12, borderPct: null },
+  { rule: ".update-banner", text: "gold-bright", tint: "gold", bgPct: 10, borderPct: 25 },
+  // The quick-unlock offer card paints its body text with --ink, not the tint's own hue.
+  { rule: ".qu-offer", text: "ink", tint: "gold", bgPct: 10, borderPct: 32 },
+  // Live TOTP chip: gold wash, --edge-strong border. The FULL selector, because a bare
+  // `.totp-chip` matches the one-line `.detail .totp-chip { align-self }` rule 9 lines earlier
+  // and would silently read an empty mix list — a pin that passes for the wrong reason.
+  { rule: ".item .totp-chip, .detail .totp-chip", text: "gold-bright", tint: "gold", bgPct: 8, borderPct: null },
+] as const;
+const WASH_KEEP = 0.8; // the plate must keep ≥80% of the bare surface's contrast
+
+/** The `color-mix(in oklab, var(--tok) N%, transparent)` percentages declared in one rule.
+ *  Two hits per plate rule: the background wash first, then the border. */
+function plateMixes(rule: string): Array<{ tok: string; pct: number }> {
+  const esc = rule.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = new RegExp(`${esc}\\s*\\{([^}]*)\\}`).exec(css);
+  assert.ok(m, `${rule} rule not found`);
+  return [...m![1]!.matchAll(/color-mix\(in oklab,\s*var\(--([a-z-]+)\)\s*(\d+)%,\s*transparent\)/g)]
+    .map((x) => ({ tok: x[1]!, pct: Number(x[2]!) }));
+}
+
+for (const plate of PLATES) {
+  // Structural: the H134 pin. Re-freezing either wash as an rgba() literal fails here even if the
+  // dark composite happens to land in the same place — which is exactly how the drift shipped.
+  test(`H134: ${plate.rule} mixes its plate from var(--${plate.tint}), not a frozen literal`, () => {
+    const mixes = plateMixes(plate.rule);
+    const expected: Array<{ tok: string; pct: number }> = [{ tok: plate.tint, pct: plate.bgPct }];
+    if (plate.borderPct !== null) expected.push({ tok: plate.tint, pct: plate.borderPct });
+    assert.deepEqual(mixes, expected,
+      `${plate.rule} must declare ${expected.length === 2 ? "background then border" : "its background"} as color-mix of --${plate.tint}`);
+  });
+
+  for (const [theme, blk] of [["dark", dark], ["light", light]] as const) {
+    const text = token(blk, plate.text);
+    const tint = token(blk, plate.tint);
+    // Both grounds a plate can land on: the popup body (--bg, where #msg and the strip live) and a
+    // raised card (--bg-raised, the options page's .section).
+    for (const surface of ["bg", "bg-raised"] as const) {
+      const base = token(blk, surface);
+      const composited = composite(tint, plate.bgPct / 100, base);
+      const bare = ratio(text, base);
+      const got = ratio(text, composited);
+      test(`H134 ${theme}: ${plate.rule} on --${surface} keeps ≥${WASH_KEEP * 100}% of the bare ${bare.toFixed(2)}:1`, () => {
+        assert.ok(got / bare >= WASH_KEEP, `${got.toFixed(2)} / ${bare.toFixed(2)} = ${((got / bare) * 100).toFixed(1)}%`);
+        assert.ok(got >= UI_MIN, `--${plate.text} on the plate = ${got.toFixed(2)} (< ${UI_MIN})`);
+        if (theme === "dark") assert.ok(got >= AA, `--${plate.text} on the plate = ${got.toFixed(2)} (< ${AA})`);
+      });
+    }
+  }
+}
+
+test("CutA: dark --danger is still the Cut A lifted value (web lockstep)", () => {
+  assert.equal(token(dark, "danger"), "#d97f6f", "dark --danger pinned to the lifted value (web lockstep)");
 });
 
 // --- Overlay (content-script) tokens: a THIRD independent copy of the palette (content-ui.ts's

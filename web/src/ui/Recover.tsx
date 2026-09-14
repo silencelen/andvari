@@ -6,6 +6,7 @@ import { deriveAuthKey as deriveRecoveryAuthKey, parseSecret } from "../crypto/m
 import { Account, IdentityMismatchError } from "../vault/account";
 import { NetworkError, UNREACHABLE, net } from "./errors";
 import { Field } from "./Field";
+import { Busy } from "./Busy";
 import { Announcer, Msg } from "./Msg";
 import { BrandSigil } from "./Sigil";
 import { MasterPasswordHint } from "./passwordadvice";
@@ -170,7 +171,7 @@ export function Recover({
                 placeholder="your saved recovery phrase"
               />
             </Field>
-            <button className="primary" disabled={busy || !email.trim() || !phrase.trim()}>{busy ? "Checking…" : "Continue"}</button>
+            <button className="primary" disabled={busy || !email.trim() || !phrase.trim()}>{busy ? <Busy>Checking…</Busy> : "Continue"}</button>
             <div style={{ textAlign: "center", marginTop: 12 }}>
               <button type="button" className="link" onClick={onCancel}>Back to sign in</button>
             </div>

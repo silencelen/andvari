@@ -3,9 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>andvari — Options</title>
+    <!-- H133: one title scheme across the product — "<Surface> · andvari", sentence-cased, with the
+         root surface (the toolbar popup, web Vault) titled bare "andvari" (web Vault.tsx VIEW_TITLES). -->
+    <title>Options · andvari</title>
     <!-- Reuse the popup's treasury theme tokens + component classes (.field/.primary/.ghost/.link). -->
     <link rel="stylesheet" href="popup.css" />
+    <!-- H134: pre-paint theme stamp. Classic + render-blocking on purpose — the page bundles are
+         deferred ES modules, so applying the forced theme there flashes the other palette first
+         (the MV3 CSP bars inline JS, hence a file). See theme-boot.js. -->
+    <script src="theme-boot.js"></script>
     <style>
       /* Options opens in a full tab, not the 360px popup — undo the popup's fixed width and center a
          readable column. (CSP allows inline <style>; only scripts are locked to 'self'.) */
@@ -134,36 +140,50 @@
         width: auto;
         flex: 1;
       }
-      .msg {
-        margin-top: 14px;
-        font-size: 12.5px;
-        line-height: 1.45;
-        padding: 9px 11px;
-        border-radius: var(--radius);
-      }
-      .msg[hidden] {
-        display: none;
-      }
-      .msg.ok {
-        color: var(--ok);
-        background: rgba(127, 168, 106, 0.12);
-        border: 1px solid rgba(127, 168, 106, 0.4);
-      }
-      .msg.err {
-        color: var(--danger);
-        background: rgba(207, 107, 90, 0.12);
-        border: 1px solid rgba(207, 107, 90, 0.4);
-      }
-      .msg.info {
-        color: var(--ink-dim);
-        background: var(--bg-input);
-        border: 1px solid var(--edge);
-      }
+      /* H134 (audit 2026-09-13): this page's private .msg block is GONE — popup.css owns the one
+         .msg vocabulary (.ok/.err/.info), now mixed from --ok/--danger/--gold instead of frozen
+         dark-palette rgba(). It mattered beyond tidiness: the override defined .msg.info as NEUTRAL
+         ink-dim on --bg-input while popup.css paints the same class gold, so one extension showed
+         one class two ways — and options.ts's declined-grant message ("Browser access … was
+         declined") is exactly an .msg.info. The only thing lost is 4px of margin and 1px of padding.
+         .msg[hidden] went too: popup.css's global [hidden] rule already wins. */
       .danger-zone {
-        border-color: rgba(207, 107, 90, 0.4);
+        border-color: color-mix(in oklab, var(--danger) 40%, transparent);
       }
       .danger-zone h2 {
         color: var(--danger);
+      }
+      /* H134 Appearance row: a segmented Auto/Light/Dark group. Restates the popup's button
+         vocabulary (gold gradient + --btn-ink for the chosen one, ghost-dim for the rest) rather
+         than inventing a third control language; the pressed state is carried by aria-pressed, so
+         the styling and the accessibility name can never disagree. */
+      .seg {
+        display: inline-flex;
+        border: 1px solid var(--edge);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+      .seg button {
+        font: inherit;
+        font-size: 12.5px;
+        color: var(--ink-dim);
+        background: transparent;
+        border: 0;
+        border-right: 1px solid var(--edge);
+        padding: 8px 14px;
+        cursor: pointer;
+        transition: 0.15s;
+      }
+      .seg button:last-child {
+        border-right: 0;
+      }
+      .seg button:hover {
+        color: var(--ink);
+      }
+      .seg button[aria-pressed="true"] {
+        font-weight: 600;
+        color: var(--btn-ink);
+        background: linear-gradient(180deg, var(--gold-hi), var(--gold-lo));
       }
       .anti-phish {
         margin: 12px 0 0;
@@ -229,6 +249,26 @@
           andvari never asks for your master password or PIN on a web page — only in this options tab
           and the toolbar popup. The address above is the exact origin this browser will connect to.
         </p>
+      </section>
+
+      <!-- H134 (audit 2026-09-13): the extension's own Appearance choice. The web vault has had
+           one since UI-audit #26, and its copy promises the pick "keeps andvari that way in this
+           browser" — but the extension is a separate origin that cannot read the web app's
+           localStorage, so the promise stopped at the tab edge and a forced-Light user still got a
+           dark popup beside it. Same mechanism (theme.ts / theme-boot.js stamp <html data-theme>),
+           its own store, so the two surfaces agree by choice rather than by accident. -->
+      <section class="section" aria-labelledby="appearance-h">
+        <h2 id="appearance-h">Appearance</h2>
+        <p class="lede">
+          "Match my device" follows your device's light/dark setting. Picking Light or Dark keeps the
+          andvari extension that way in this browser — the popup, this page and the quick-unlock
+          window. The web vault keeps its own setting.
+        </p>
+        <div id="theme-choices" class="seg" role="group" aria-label="Theme">
+          <button type="button" data-theme-pref="auto" aria-pressed="false">Match my device</button>
+          <button type="button" data-theme-pref="light" aria-pressed="false">Light</button>
+          <button type="button" data-theme-pref="dark" aria-pressed="false">Dark</button>
+        </div>
       </section>
 
       <section class="section danger-zone" aria-labelledby="danger-h">

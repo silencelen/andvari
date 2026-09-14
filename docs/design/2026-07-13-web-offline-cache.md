@@ -74,6 +74,25 @@ byte-for-byte the native posture ("the DB file gets no extra encryption in v1", 
   with cold HTTP cache while offline fails to load the SPA at all. v1 ships **without** an SW
   (an SW interacts with the 426 min-version pin and is its own update-security design); flagged as
   a follow-up decision, §F.4.
+
+  > **Correction to the shipped copy — ratified 2026-09-13 (audit H48).** D1 was recorded here
+  > accurately and then contradicted by the UI built on top of it: the Offline-copy card and the
+  > B2-11 nudge both told the user they "can open it even when the server can't be reached", full
+  > stop. What the IndexedDB cache actually buys is an unlock that needs no server — but reaching
+  > the Unlock card at all still needs `index.html` and the hashed bundle, which exist only if the
+  > browser happens to still have them. A fresh tab, or an evicted HTTP cache, gets the browser's
+  > own "site can't be reached" page: the app never renders, so it cannot even explain itself.
+  > Option (a) is ratified — **qualify the copy on both surfaces** rather than ship the shell.
+  > Both strings must carry the "in a tab you already have open" / "once the app has loaded"
+  > qualification, and the Offline-copy card additionally states the cold-start limit in one line
+  > so the promise and its boundary are read together. The natives keep the unqualified promise:
+  > for them it is simply true.
+  >
+  > **(b) is not withdrawn, only deferred**: shipping the D1 service-worker shell (with the 426
+  > min-version-pin interplay designed, §F.4) plus a `manifest.webmanifest` so the offline shell is
+  > installable would make the original sentence honest, and is the only thing that will. Until
+  > then, copy that promises cold-start offline on web is a bug, and this note is what a future
+  > lane should be measured against.
 - **D2 — OS backup exclusion.** Natives exclude the cache from cloud/OS backup
   (`noBackupFilesDir` / `dataExtractionRules`). Web **cannot** exclude the browser profile from OS
   backup (Time Machine etc.). Accepted delta: backups then hold ciphertext ⊆ T7's already-accepted

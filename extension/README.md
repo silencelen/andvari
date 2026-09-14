@@ -32,7 +32,7 @@ work the usage ledger and the signup reuse alert come out of
 ```bash
 cd extension
 npm ci --ignore-scripts   # exactly the committed lockfile, and no dependency install hooks (.npmrc sets it too)
-npm run build        # → dist/ dev build (readable, sourcemaps; esbuild — 0 wasm, 0 eval; copies popup.html/popup.css/icons/INSTALL.txt)
+npm run build        # → dist/ dev build (readable, sourcemaps; esbuild — 0 wasm, 0 eval; copies the pages, popup.css, theme-boot.js, icons, INSTALL.txt)
 npm run typecheck    # tsc --noEmit
 npm run test         # node --test over src/**/*.test.ts
 npm run package      # → artifacts/andvari-extension-{chrome,firefox}-<ver>.zip (minified release)
@@ -111,6 +111,11 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
   - `src/popup.ts` + `popup.html` + `popup.css` — the **functional, treasury-themed vault surface**:
     current-site matches + search-all, per-row copy username/password + live TOTP, a password
     generator, open-web-vault, Lock. The unlock form shows the "Unsealing…" KDF state.
+  - `src/theme.ts` + `theme-boot.js` + the `:root[data-theme=…]` blocks in `popup.css` — the
+    **Auto / Light / Dark override** (Options → Appearance), the twin of the web vault's UI-audit #26
+    mechanism. `theme-boot.js` is deliberately unbundled and classic: the page bundles are deferred
+    modules, so stamping the theme there flashes the OS palette first every time the popup opens.
+    The extension is its own origin and keeps its own preference — same mechanism, separate store.
   - `src/content.ts` + `src/detect.ts` + `src/content-ui.ts` — the **detection engine + in-page UI**:
     delegated focusin + a MutationObserver re-scan catch SPA/late-rendered/multi-step forms; fill uses
     the native value setter (React/Vue-safe); a fill dropdown (matches / search-all / strong-password)
@@ -198,8 +203,10 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     runs **only** against the shipped default origin (the pinned key signs that instance's
     `/downloads` alone). A custom origin gets no fetch at all. Per-instance keys are later work.
 - **Manifests (both):** branded icons (`icons/icon{16,32,48,128}.png` — the dark-background ᛅ brand
-  mark shared with the desktop, phone and web surfaces; `app-desktop/icons/andvari.svg` is the
-  source the PNGs are rendered from),
+  mark shared with the desktop, phone and web surfaces. The source is
+  **`assets/brand/andvari-mark.svg`** and `scripts/gen-brand-icons.sh` is the only way to produce
+  these PNGs; never hand-edit one. `app-desktop/icons/andvari.svg` is a COPY of that source, not
+  the source — it was the source before H138 gave the fleet one mark),
   extension-page CSP without `'wasm-unsafe-eval'` (nothing loads wasm). The autofill content script
   is **registered dynamically by the service worker** (`chrome.scripting.registerContentScripts`,
   all frames, `document_idle`) — there is deliberately **no static `content_scripts` entry**: a

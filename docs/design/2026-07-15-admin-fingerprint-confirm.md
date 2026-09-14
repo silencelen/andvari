@@ -62,9 +62,21 @@ kind:
 - **Natives don't even read `isAdmin`.** `SessionResponse.isAdmin`
   (`core/.../model/Wire.kt:107`) is consumed by web (`Welcome.tsx:587,594`) and ignored
   by both native state holders (grep: zero hits in `app-android/` and `app-desktop/`).
-- **Android has no enroll-link channel at all** — the invite token is typed, so
+- ~~**Android has no enroll-link channel at all** — the invite token is typed, so
   `linkRfp` is always null and the rfp/required-affirm posture is unreachable
-  (`MainActivity.kt:523-529`, `enrollReady` note at :652-655).
+  (`MainActivity.kt:523-529`, `enrollReady` note at :652-655).~~ **Struck 2026-09-13
+  (audit H66):** Android has parsed enroll links since Wave 3 — the invite field is
+  "Invite code or link" and every edit runs `EnrollLink.parse` — so the channel exists.
+  What is true is the desktop rule, now stated once for both natives: **Android parses a
+  pasted enroll LINK but DISCARDS its `rfp`**, by provenance rather than by absence
+  (`InviteProvenance.Typed` / `affirmableRfp`, `MainActivity.kt:903-904`,
+  `AndvariViewModel.kt:701-702`), so `enrollPosture` sees `linkRfp = null` on every paste
+  path and the enrollment lands on `required-typed` (member declares a printed sheet) or
+  `waived`. The `required-affirm` posture stays unreachable from a paste on BOTH natives —
+  which is what row (c) needs — but it is unreachable *because the posture is anchored on
+  a human act*, not because a native cannot receive a link. Full reasoning, and the
+  channels that restore the leg (an in-app QR scan, or an OS-verified `/enroll` app-link):
+  `2026-07-15-multi-tenant-endpoints.md` §4.1 rule 4 and §4.4's correction block.
 - **Desktop deliberately IGNORES a pasted link's `rfp`** — "a paste has no provenance"
   (`DesktopState.kt:108-120`, `Ui.kt:414-416`) — so it fails safe to typed-sheet/waived.
   A `required`-QR invite pasted into desktop without the sheet dies server-side with
@@ -215,8 +227,13 @@ without the confirm.
    (`spec/04:24-27`), and refuses a `required` register without escrow
    (`recovery_required`, `spec/04:173`).
 4. Fail-safe polarity is pinned: **missing `rfp` ⇒ typed-sheet fallback (or waived),
-   NEVER server auto-trust** (`spec/04:225-231`); android can't receive an rfp at all,
-   desktop ignores pasted rfp (§1.3).
+   NEVER server auto-trust** (`spec/04:225-231`); ~~android can't receive an rfp at all,
+   desktop ignores pasted rfp~~ — **corrected 2026-09-13 (audit H66): no client honours a
+   PASTED rfp.** A link-borne `rfp` reaches `enrollPosture` only from a channel that
+   carries provenance (web's own navigation today; an in-app QR scan or an OS-verified
+   app-link on a native, neither shipped), so on both natives this link of the chain rests
+   on the ratified provenance rule rather than on a missing parser (§1.3,
+   `2026-07-15-multi-tenant-endpoints.md` §4.1 rule 4 and §4.4's correction block).
 
 Consequence of an admin **typo** that still passes the 16-hex shape check: every invite
 minted in that session fails at step 1 on the invitee's device — an availability

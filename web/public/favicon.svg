@@ -1,7 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="andvari">
-  <rect width="24" height="24" rx="5" fill="#14120e"/>
-  <g fill="none" stroke="#d0a94a" stroke-width="1.8" stroke-linecap="round">
-    <path d="M12 5v14"/>
-    <path d="M6.5 9.2l11 5"/>
+  <!-- THE brand mark. H138 (audit 2026-09-13): every tile icon in the fleet is rendered from
+       THIS file by scripts/gen-brand-icons.sh — do not hand-edit a derivative. The geometry is
+       the wordmark's, byte-for-byte: web/src/ui/Sigil.tsx BrandSigil (stave M12 3v18 + falling
+       stroke M5.5 8.5l13 6, round caps, stroke 1.8) and app-android ic_launcher_foreground.xml
+       already draw it, so tab, toolbar, taskbar, launcher and every in-app header now show one
+       glyph at one stroke-to-height ratio (1.8/18) instead of the two that shipped in 0.26.3. -->
+  <rect width="24" height="24" rx="5" fill="#14120E"/>
+  <g fill="none" stroke="#D0A94A" stroke-width="1.8" stroke-linecap="round">
+    <path d="M12 3v18"/>
+    <path d="M5.5 8.5l13 6"/>
   </g>
 </svg>

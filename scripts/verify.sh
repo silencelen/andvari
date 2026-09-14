@@ -134,6 +134,29 @@ echo "==> CI tripwires: CodeQL Kotlin-emptiness + doc-leak scanner self-tests (f
 # still trips on every leak class and still lets the ratified instance labels through, so a
 # narrowing fails here rather than in the next audit.
 (cd "$REPO_DIR" && bash scripts/ci/doc-leak-scan.test.sh)
+# prune-artifacts.sh --downloads DELETES from a public directory on the instance (audit H107), and
+# its retention rule is a handful of regexes plus a keep-set. This drives the whole mode against a
+# fake /downloads on tmpfs (via the mode's test-harness env knobs) and asserts the three rules that
+# matter: a live-referenced file is never removed even when it is old, a release is kept or dropped
+# whole, and operator manifest backups are MOVED out of the web root rather than deleted. Runs here
+# so a narrowing fails on the box that made the change, not on the served directory.
+(cd "$REPO_DIR" && bash scripts/ci/prune-downloads.test.sh)
+
+echo "==> Brand icons match a fresh render of the source mark"
+# H138 / R49: every tile in the fleet is derived from assets/brand/andvari-mark.svg by
+# scripts/gen-brand-icons.sh, and the web brand-assets test can only assert that each derivative
+# EXISTS and is non-empty — a raster's bytes are not derivable in JS. So the exact failure the
+# single-source rule exists to prevent (the geometry changes and nobody re-runs the script; or a
+# raster is hand-edited) shipped green. `--check` renders into a scratch tree and diffs, which
+# makes the renderer the oracle. Skipped, loudly, where librsvg/ImageMagick are absent: this is a
+# staleness check on committed artifacts, not a correctness gate on the code under test, and
+# failing a release on a missing apt package would teach the next operator to skip the gate.
+if command -v rsvg-convert >/dev/null && command -v convert >/dev/null; then
+  (cd "$REPO_DIR" && bash scripts/gen-brand-icons.sh --check)
+  echo "    every generated icon matches a fresh render of assets/brand/andvari-mark.svg"
+else
+  echo "    SKIPPED — rsvg-convert/convert not installed (apt install librsvg2-bin imagemagick)" >&2
+fi
 
 echo "==> Native-crypto coordinates come from the version catalog, never a literal"
 # One adapter file in :core compiles against BOTH lazysodium artifacts (JVM + Android), so the two

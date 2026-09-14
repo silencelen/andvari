@@ -27,9 +27,10 @@ reference implementation named in each row.
 > - `itemdoc.json` — committed **11** cases, the generator emits **7**. The four it drops
 >   include the card round-trip and the `check`-carrying cases added by `99fae40` (the
 >   check/usage ledger + schema v9), which extended the file without extending the generator.
-> - `urimatch.json` — the committed file carries `classifyCard` (65 cases) and
+> - `urimatch.json` — the committed file carries `classifyCard` (67 cases) and
 >   `classifyCardFreeRegression` (28 cases); **the generator emits neither key at all**, and
->   20 of 22 `classify` cases. Those arrived by hand with the card-autofill tiers.
+>   20 of 32 `classify` cases. Those arrived by hand with the card-autofill tiers and, for the
+>   last ten, with the 2026-09-13 H65 one-time-code amendment (spec 02 §3.1).
 >
 > Until `vector-gen` is taught those cases, regenerate to a **scratch directory** and copy
 > across only the file you intend to change. Rule 2 below ("generated files are rewritten
@@ -69,7 +70,7 @@ reference implementation named in each row.
 | `itemdoc.json` | ItemDoc round-trip incl. unknown-field overlay (spec 02 §3) | core `ItemDocVectorsTest` / `ItemDocRoundTripTest`, web `vault/itemdoc.test.ts` |
 | `import.json` | the Chromium/Firefox CSV import column maps (spec 06) | core `ImportVectorsTest` / `ImportForeignVectorsTest`, web `import/csv.test.ts` |
 | `export.json` | CSV export dialect + `.andvari` container (spec 07), incl. the schema-v9 `check`/`dupeAck` container case | core `ExportVectorsTest`, web `export/export.test.ts` |
-| `urimatch.json` | URI matching + autofill field classification (spec 02 §3) | core `autofill/UriMatchVectorTest` / `CardClassifyVectorTest` / `PslVectorTest` / `UriMatchIdnaVectorTest`, web `vault/urimatch.test.ts`, ext `urimatch.vectors.test.ts` |
+| `urimatch.json` | URI matching + autofill field classification (spec 02 §3), incl. the H65 one-time-code override (hintless `<input type=password name=otp>` → NONE) | core `autofill/UriMatchVectorTest` / `CardClassifyVectorTest` / `PslVectorTest` / `UriMatchIdnaVectorTest`, web `vault/urimatch.test.ts`, ext `urimatch.vectors.test.ts` |
 | `vaulthealth.json` | vault-health rankings: strength/reuse rows, staleness buckets + ORDER, duplicate clusters + refusals (design 2026-08-23); and since 2026-09-13 (audit H42) the **`writes` block** — what the engines WRITE: the composed merge doc, `planKeep` (passwordHistory's only writer), `planDismiss`, `planCheck` (okAt carry-forward, snooze horizon), `planUnsnooze`, every reader / cross-vault refusal verbatim under a real `roles` map. Its own item list, so the frozen derived keys kept their bytes. Docs are compared as canonical JSON — null-valued keys and empty arrays dropped on both sides (absent vs `null`/`[]` is one value to every reader and two encodings across the language boundary); everything else, array ORDER included, exact | core `VaultHealthVectorsTest`, web `ui/vaulthealth.vectors.test.ts` |
 
 ## Hand-authored (9)

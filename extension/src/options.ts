@@ -12,6 +12,7 @@ import { BROAD_ORIGIN_PATTERN, requestServerGrants } from "./grantflow";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send } from "./messages";
 import { canonicalizeServerUrl, getServerUrl, originMatchPattern, setServerUrl } from "./serverurl";
+import { readThemePref, setThemePref, type ThemePref } from "./theme";
 import { trustGateView } from "./trustgate";
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
@@ -35,6 +36,7 @@ const serverMsg = el("server-msg");
 const purgeBtn = el<HTMLButtonElement>("purge");
 const purgeMsg = el("purge-msg");
 const autofillStatus = el("autofill-status");
+const themeChoices = el("theme-choices");
 
 /** The canonical origin the Trust Gate is currently offering — set at Continue, read at Connect. The
  *  Connect handler MUST compute its permission pattern from this WITHOUT an intervening await, so the
@@ -170,6 +172,24 @@ async function purge(): Promise<void> {
   }
 }
 
+/** H134 Appearance row (theme.ts). The document is already stamped by theme-boot.js before first
+ *  paint; this only reflects the stored pick into the button group and re-stamps on a click, so the
+ *  change is instant on this page and lands for the popup the next time it opens. aria-pressed is
+ *  the single source of the selected state — the CSS keys on it, so what a screen reader announces
+ *  and what the eye sees cannot drift apart. */
+function renderTheme(pref: ThemePref): void {
+  for (const b of themeChoices.querySelectorAll<HTMLButtonElement>("button[data-theme-pref]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.themePref === pref));
+  }
+}
+themeChoices.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>("button[data-theme-pref]");
+  const pref = btn?.dataset.themePref;
+  if (pref !== "auto" && pref !== "light" && pref !== "dark") return;
+  setThemePref(pref);
+  renderTheme(pref);
+});
+
 continueBtn.addEventListener("click", openGate);
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
@@ -191,5 +211,6 @@ purgeBtn.addEventListener("blur", () => {
   }
 });
 
+renderTheme(readThemePref());
 void renderCurrent();
 void renderAutofillStatus();

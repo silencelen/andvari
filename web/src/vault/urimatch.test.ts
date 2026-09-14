@@ -94,3 +94,50 @@ describe("urimatch.json — classification", () => {
     }
   });
 });
+
+// H65 (2026-09-13 audit, spec 02 §3.1 amendment). The shared classify vectors grade the
+// one-time-code override itself in all three engines; these pin the parts that CANNOT live in a
+// card-free shared section, because core answers them with a CARD kind the 3-kind engines have
+// no word for.
+//
+// R37 — which of these is a revert detector, stated honestly, because the previous sentence
+// claimed all of them were: the shared classify vectors plus the mid-token and 2FA blocks below
+// go red if the override is reverted, widened or reordered. The masked-CVV block does NOT and
+// must not: with the override reverted, `case "password": return "password"` answers those four
+// assertions correctly by accident. That block is a NON-regression pin — it guards against the
+// carve-out being WIDENED away or lost, and it must stay green with or without the override.
+describe("H65 — the one-time-code override's edges (3-kind engine)", () => {
+  it("leaves a masked CVV on `password` so detect.ts's form-level demoteCsc can still reach it", () => {
+    // Core returns CC_CSC here (its step-2 CSC demotion runs BEFORE the override). This engine has
+    // no card verdict, so it must keep today's `password` instead: dropping these to `none` would
+    // delete the field from the extension's collect() and silently break masked-CVV card fill.
+    expect(classify({ htmlType: "password", htmlNameOrId: "securityCode" })).toBe("password");
+    expect(classify({ htmlType: "password", htmlNameOrId: "security_code" })).toBe("password");
+    expect(classify({ htmlType: "password", htmlNameOrId: "cvv_code" })).toBe("password");
+    expect(classify({ htmlType: "password", htmlNameOrId: "card_verification_code" })).toBe("password");
+  });
+
+  it("R35: camelCase CSC spellings too — core tokenizes on the case boundary, so this must as well", () => {
+    // The regression this exists to prevent: the carve-out was tested against the LOWER-CASED
+    // name, which destroys the very boundary core's tokenizer splits on. `cardSecurityCode` —
+    // the ordinary JS/React spelling — therefore found no separator, failed the carve-out, and
+    // was demoted to "none" by its `code` token while core returned CC_CSC for the same field.
+    // On the extension that means collect() drops the field and masked-CVV fill silently breaks.
+    for (const name of ["cardSecurityCode", "cvvCode", "cvcCode", "cardVerificationCode", "creditCardSecurityCode", "CVVCode"]) {
+      expect(classify({ htmlType: "password", htmlNameOrId: name }), name).toBe("password");
+    }
+  });
+
+  it("refuses the carve-out mid-token, exactly as core's whole-token-run CSC matcher does", () => {
+    expect(classify({ htmlType: "password", htmlNameOrId: "cscode" })).toBe("none");
+    expect(classify({ htmlType: "password", htmlNameOrId: "mysecuritycode" })).toBe("none");
+    expect(classify({ htmlType: "password", htmlNameOrId: "cvvcode" })).toBe("none");
+  });
+
+  it("does not widen NAME_NEGATIVE: the two-factor names are password-override-only", () => {
+    // Folding "2fa"/"mfa" into NAME_NEGATIVE would flip these frozen USERNAME verdicts.
+    expect(classify({ htmlType: "email", htmlNameOrId: "2fa_recovery_email" })).toBe("username");
+    expect(classify({ htmlType: "text", htmlNameOrId: "mfa_username" })).toBe("username");
+    expect(classify({ htmlType: "password", htmlNameOrId: "mfa" })).toBe("none");
+  });
+});

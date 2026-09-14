@@ -4,6 +4,10 @@
     <meta charset="utf-8" />
     <title>andvari</title>
     <link rel="stylesheet" href="popup.css" />
+    <!-- H134: pre-paint theme stamp. Classic + render-blocking on purpose — the page bundles are
+         deferred ES modules, so applying the forced theme there flashes the other palette first
+         (the MV3 CSP bars inline JS, hence a file). See theme-boot.js. -->
+    <script src="theme-boot.js"></script>
   </head>
   <body>
     <header class="pop-head">
@@ -209,7 +213,13 @@
          the active tab (which fails on any non-fillable page). Fill is an explicit action. -->
     <section id="detail" class="detail" hidden>
       <div class="detail-head">
-        <button id="detail-back" class="ghost detail-back" title="Back to the list">‹ Back</button>
+        <!-- R13: the label is the DESTINATION, not the gesture — the rule H133 wrote for the
+             fleet's one back affordance (web/src/ui/BackLink.tsx). "‹ Back" was the last place
+             that said the gesture, and it was also the one the copy pin froze, so the exception
+             would have outlived the rule. The item name beside it ellipsizes, so the extra ~55px
+             costs nothing that was readable anyway; `title` is dropped because it now only
+             restates the visible label. -->
+        <button id="detail-back" class="ghost detail-back">‹ Back to the list</button>
         <span id="detail-name" class="detail-name"></span>
       </div>
       <div id="detail-body" class="detail-body"></div>

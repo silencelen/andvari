@@ -377,6 +377,23 @@ class AuditHardeningTest : P4TestSupport() {
     // ---- LOW-6: per-user in-flight upload cap + quota accounting (drives store() directly:
     // testApplication cannot hold a request body open) ----
 
+    /**
+     * Wait for a real happens-before condition instead of guessing at one with a fixed delay
+     * (H97, audit 2026-09-13). The two upload-concurrency tests below used to `delay(250)` to
+     * "let the first store acquire its permit and enter the read loop"; on a contended build host
+     * that ordering is not guaranteed, so the test could red over a server that was behaving
+     * perfectly — or pass having quietly exercised the non-race path. This polls the condition the
+     * test actually depends on, so it waits exactly as long as the host needs and fails only if
+     * the condition NEVER holds (then it says which one).
+     */
+    private suspend fun awaitCondition(what: String, timeoutMs: Long = 30_000, cond: () -> Boolean) {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        while (!cond()) {
+            assertTrue(System.nanoTime() < deadline, "timed out after ${timeoutMs}ms waiting for: $what")
+            delay(1)
+        }
+    }
+
     private fun bareStore(maxConcurrent: Int): Triple<AttachmentStore, Repo, File> {
         val repo = Repo(Db(File(tmpDir, "inflight-${System.nanoTime()}.db").absolutePath))
         val dir = File(tmpDir, "inflight-blobs-${System.nanoTime()}")
@@ -406,7 +423,11 @@ class AuditHardeningTest : P4TestSupport() {
             val ch1 = ByteChannel(autoFlush = true)
             val first = async(Dispatchers.IO) { runCatching { store.store("user-1", uuid(), uuid(), v1, ch1, policy) } }
             ch1.writeFully(ByteArray(Attachments.HEADER_BYTES + 100) { 1 }) // header + some ciphertext, then HOLD open
-            delay(250) // let the first store acquire its permit and enter the read loop
+            // The first store holds its permit AND has consumed body bytes once its in-flight
+            // accounting is non-zero — the precondition the assertions below rest on.
+            awaitCondition("the first upload to hold user-1's permit and enter the read loop") {
+                store.activeUploads("user-1") == 1 && store.inFlightBytes("user-1") > 0
+            }
 
             // Same user, concurrent → semaphore full → 429. The failed acquire must NOT
             // release a permit it never took (over-release would corrupt the cap).
@@ -561,7 +582,11 @@ class AuditHardeningTest : P4TestSupport() {
             val ch1 = ByteChannel(autoFlush = true)
             val first = async(Dispatchers.IO) { runCatching { store.store("user-q", uuid(), uuid(), v1, ch1, policy) } }
             ch1.writeFully(ByteArray(Attachments.HEADER_BYTES + 3072) { 1 })
-            delay(250)
+            // All 3072 streamed bytes must be counted against the user BEFORE the second upload
+            // starts, or the mid-stream bound below is not the thing being tested.
+            awaitCondition("user-q's first upload to count its 3072 streamed bytes in flight") {
+                store.inFlightBytes("user-q") >= 3072
+            }
 
             // Second upload crosses committed+in-flight mid-stream → 413 BEFORE any commit.
             val attId2 = uuid()

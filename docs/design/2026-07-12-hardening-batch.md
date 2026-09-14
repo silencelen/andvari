@@ -164,6 +164,31 @@ new clients) and deserves its own design + breaker + focused review — bundling
 batch and dilute the review. Android already implements it; the gap is convergence-only (a policy KDF
 bump reaches Android-unlocking accounts today), no data risk in deferring.
 
+> **Correction — ratified 2026-09-13 (audit H85).** The deferral was discharged: the desktop
+> shipped the re-key, and the sentence above ("Android's `KdfReKey` is app-android-only, takes
+> `SessionStore`") stopped being true twice over. First it shipped as a hand-copy — the desktop
+> inlined the same ~40 lines in `DesktopState`, under a comment that cited exactly this
+> app-android-only reasoning even after the G39 hoist had removed it. It is now one implementation,
+> core `KdfReKeyCore` in `core/src/jvmShared` (which compiles into both the JVM and Android
+> targets), with each native a thin adapter supplying only its own offline-cache gate and thread
+> confinement; behaviour is unchanged and `core`'s `KdfReKeyCoreTest` is the first test the routine
+> has ever had. The `SessionStore` coupling named above is what the adapter seam removes — core
+> takes a `persist` callback and knows nothing about either platform's store.
+>
+> **Web is NOT outside this** *(corrected 2026-09-13 by R38's sibling review — the first cut of
+> this block replaced one false sentence with another)*. Web shipped its own re-key:
+> `web/src/vault/kdfupgrade.ts` carries `shouldUpgrade` (documented as "a verbatim TS replica of
+> core `KdfUpgrade.shouldUpgrade`") and `maybeKdfUpgrade`, which derives the auth key under the new
+> params, re-wraps the SAME UVK and `PUT`s `/account/password`; it is driven from the sign-in path
+> at `Welcome.tsx` — detached, best-effort, gated on a fresh policy and on `!mustChangePassword` —
+> and re-caches the account keys on success (CR-07). So the F61 deferral is discharged on **all
+> three** clients, and a policy KDF bump reaches every account that signs in anywhere.
+>
+> What remains true, and is the thing to know: web's driver is an INDEPENDENT TS implementation of
+> the same routine, deliberately outside the `jvmShared` hoist, because core is Kotlin and the web
+> bundle cannot call it. Two implementations, one contract — so a change to the routine has two
+> landing sites, and `KdfReKeyCore`'s KDoc says so at the other end.
+
 ## Breaker seeds
 
 1. spec03-01: the exempt predicate — can a non-attachment route with a huge legit body exist (sync

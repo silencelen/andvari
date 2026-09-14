@@ -10,6 +10,7 @@ import type {
 } from "../api/types";
 import { composeEnrollLink } from "../enroll/enrolllink";
 import { Busy } from "./Busy";
+import { Empty } from "./Empty";
 import { writeClipboard } from "./clipboard";
 import { CLIPBOARD_FAILED, UNREACHABLE } from "./errors";
 import { Field } from "./Field";
@@ -128,7 +129,7 @@ function UsersTab({ client, signupMode }: { client: ApiClient; signupMode: strin
       {err && <Msg kind="err">{err}</Msg>}
       <InviteForm client={client} signupMode={signupMode} onInvited={load} />
       {!users ? (
-        <p className="muted"><Busy>loading…</Busy></p>
+        <p className="muted"><Busy>Loading…</Busy></p>
       ) : (
         <div className="table-scroll">
           <table className="table">
@@ -772,21 +773,23 @@ function AuditTab({ client }: { client: ApiClient }) {
         <button className="ghost" disabled={busy}>Filter</button>
       </form>
       {!events ? (
-        <p className="muted"><Busy>loading…</Busy></p>
+        <p className="muted"><Busy>Loading…</Busy></p>
       ) : events.length === 0 ? (
-        <div className="empty"><p>No audit events{typeFilter ? " of that type" : ""}.</p></div>
+        <Empty><p>No audit events{typeFilter ? " of that type" : ""}.</p></Empty>
       ) : (
         <>
           <div className="table-scroll">
             <table className="table">
               <thead>
                 <tr>
-                  <th>Id</th>
+                  {/* H133: initialisms, not words — the sibling headers are all real words,
+                      which made "Id"/"Ip" read as a typo in the one table an admin audits from. */}
+                  <th>ID</th>
                   <th>When</th>
                   <th>Type</th>
                   <th>User</th>
                   <th>Device</th>
-                  <th>Ip</th>
+                  <th>IP</th>
                   <th>Meta</th>
                 </tr>
               </thead>
@@ -831,7 +834,7 @@ function PolicyTab({ client }: { client: ApiClient }) {
     client.adminPolicy().then(setPolicy).catch((e) => setErr(errText(e)));
   }, [client]);
 
-  if (!policy) return err ? <Msg kind="err">{err}</Msg> : <p className="muted"><Busy>loading…</Busy></p>;
+  if (!policy) return err ? <Msg kind="err">{err}</Msg> : <p className="muted"><Busy>Loading…</Busy></p>;
 
   const patch = (p: Partial<ClientPolicy>) => setPolicy({ ...policy, ...p });
   const patchMin = (platform: string, v: string) => patch({ minVersion: { ...policy.minVersion, [platform]: v } });
@@ -922,7 +925,7 @@ function StatusTab({ client }: { client: ApiClient }) {
   }, [client]);
 
   if (err) return <Msg kind="err">{err}</Msg>;
-  if (!status) return <p className="muted"><Busy>loading…</Busy></p>;
+  if (!status) return <p className="muted"><Busy>Loading…</Busy></p>;
 
   const yes = (b: boolean) => (b ? <span className="tone-good">yes</span> : <span className="tone-bad">no</span>);
 

@@ -20,6 +20,7 @@ type UnlockCode =
   | "aborted"
   | "upgrade_required"
   | "identity_mismatch"
+  | "keys_damaged"
   | "kdf_policy"
   | "server_error"
   | "network"
@@ -74,6 +75,8 @@ export const UNREACHABLE = "Can't reach the andvari server — check your connec
  *    actually PUBLISHED, so the copy must not hard-promise the link (AM5).
  *  - identity_mismatch: web IdentityMismatchError's exact sentence — a hard security
  *    fault that must NEVER soften into wrong-password.
+ *  - keys_damaged (H67): the stored wrappedUvk isn't a readable envelope — terminal copy, never
+ *    wrong-password and never "try again"; byte-identical to core + web.
  */
 export function unlockErrorCopy(code: UnlockCode | undefined): string {
   switch (code) {
@@ -96,6 +99,13 @@ export function unlockErrorCopy(code: UnlockCode | undefined): string {
       return "Your server requires a newer extension — get the update from the web vault or the link above.";
     case "identity_mismatch":
       return "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.";
+    case "keys_damaged":
+      // H67: the account's server-stored key blob (wrappedUvk) isn't a readable envelope — bad
+      // base64url, too short, or an envelope version/alg this build doesn't know. Refused from its
+      // PUBLIC header, before the password's wrap key was applied, so it is NOT a credentials
+      // verdict and no retry can fix it: the same row fails identically forever. Byte-identical to
+      // core HouseholdCopy.ACCOUNT_KEYS_DAMAGED and web account.ts VAULT_KEYS_DAMAGED.
+      return "This account's stored keys are damaged or from a newer version, so sign-in cannot continue. Contact your admin or restore from a backup.";
     case "kdf_policy":
       // H1 (spec 05 T1): the server sent weakened master-password security settings — a hard block,
       // never softened into wrong-password.

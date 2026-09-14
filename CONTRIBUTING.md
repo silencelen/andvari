@@ -28,6 +28,14 @@ You need **JDK 17**, **Node ≥ 22**, and — because `verify.sh` includes the A
 **Android SDK**, found via `ANDROID_HOME` or an `sdk.dir` line in `local.properties`. Without one,
 run the suites individually and skip the `:app-android` line; everything else stands alone.
 
+**What runs when you open a PR, and what does not** (the full record is docs/ROADMAP.md's
+"CI posture" section). `.github/workflows/verify-js.yml` runs the two JS/TS suites plus both
+typecheck legs — web and extension — on every pull request. **The Kotlin half of the gate is not
+run in CI at all**: `:core`, `:server`, `:app-desktop`, `:app-android` and `tools/` want ~8-12 GB
+and do not fit a GitHub-hosted runner. So a green check on a PR touching `core/`, `server/`,
+`app-*/` or `tools/` proves the JS half only; such a PR still needs a local `scripts/verify.sh`
+before merge, and nothing enforces that but the release gate.
+
 `scripts/verify.sh` is the gate every release goes through. In order, it:
 
 1. **Release-version consistency** — core, Android, desktop, and web must all report the same
@@ -91,6 +99,18 @@ first, deliberately.
   length, especially around anything security-relevant.
 - Gradle is tuned for a small build host; serialize concurrent invocations with
   `flock /tmp/andvari-gradle.lock`.
+- **The brand mark has one source: `assets/brand/andvari-mark.svg`.** Every tile icon in the tree
+  (web favicon + manifest icons, `extension/icons/*`, `app-desktop/icons/*`) is rendered from it by
+  `scripts/gen-brand-icons.sh` — never hand-edit a derivative, re-run the script
+  (`scripts/gen-brand-icons.sh --check`, which the release gate runs, fails when a committed
+  raster no longer matches a fresh render). **Eight** files cannot be generated and re-draw the
+  same geometry by hand, because they are code rather than assets: `web/src/ui/Sigil.tsx`
+  BrandSigil, the Android adaptive foreground drawable, the extension popup and options headers
+  (inline SVG), `extension/src/popup.ts` and `extension/src/content-ui.ts` (programmatic paths),
+  `app-android/.../Theme.kt` (a Compose ImageVector) and `app-desktop/.../Ui.kt` (a Canvas draw).
+  Change the geometry and you change ALL of them in the same commit.
+  `web/src/ui/brand-assets.test.ts` reads every one and fails when they drift apart, which is how
+  the fleet ended up carrying two subtly different runes before 0.27.0.
 
 ## Reporting a vulnerability
 

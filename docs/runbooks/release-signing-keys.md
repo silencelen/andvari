@@ -34,6 +34,77 @@ signature, so a torn drop can never be published.
 `signedAt`. Verify the produced bundle against its `bundle.json`, confirm the published channel's
 `seq` is unchanged, and deliver by hand in payload → sig order.
 
+## 0.1 Before the ceremony — the pre-cut checks `verify.sh` cannot make
+
+`scripts/verify.sh` is the gate for everything that runs on the build host. Two things do not,
+and they are the two that have historically shipped broken. Both are **blocking**: do not tag,
+do not sign, do not upload until they have passed for the exact commit being released.
+
+1. **Android crypto, graded on a real device (audit H94) — blocks the APK.** Every byte-locked
+   vector suite (`VectorsTest`, `MemberRecoveryVectorTest`, `UsageKeyVectorTest`,
+   `LifecycleProofVectorTest`) lives in `jvmTest` and links **lazysodium-java**. The phone links
+   **lazysodium-android**, a different artifact with a different bundled libsodium and a different
+   loader, and no test in the tree executes it. Byte-identity is expected by construction — same
+   algorithms, same parameters — so what this catches is not a maths error but the class of defect
+   that actually happens: an ABI/loader mismatch, a stale or missing `.so`, a `jna` packaging
+   change, a `lazysodium-android` bump. That class is not theoretical here; it is exactly how the
+   0.26.3 desktop libsodium loader defect surfaced, and the only detector was a user who could not
+   sign in.
+
+   Run the instrumented vector suite on a physical device or an emulator image
+   (`./gradlew :app-android:connectedDebugAndroidTest`) and require it green **with a non-zero
+   test count** — an empty `androidTest` source set makes that task succeed having run nothing,
+   so read the count, not the exit code. It drives the same `spec/test-vectors` through
+   `createCryptoProvider()` on-device — at minimum the `kdf.json` chain, `wrap.json`, `seal.json`
+   and `usagekey.json`. **A JVM-suite pass is not a substitute**: it grades a different native
+   binary. This lives in the release checklist rather than the PR gate because CI has no emulator
+   (see docs/ROADMAP.md "CI posture").
+
+   The suite is
+   `app-android/src/androidTest/kotlin/io/silencelen/andvari/app/crypto/AndroidCryptoVectorsTest.kt`
+   (added for this audit); it reads the shared `spec/test-vectors` files rather than carrying
+   copies, so it cannot drift from the JVM and web suites. It needs a connected device or a running
+   emulator — nothing on the build host can stand in for it.
+
+   > **If no device is available for a cut**, the honest options are to ship no APK and say so
+   > (`scripts/gh-release.sh --no-android`, which also stops devstore warning about it) or to record
+   > in the release notes that the phone's crypto was graded only by proxy this time. "Assume it is
+   > fine" is not one of them — it is what shipped the 0.26.3 desktop loader defect.
+
+2. **The manual on-device smoke** the P5 design records: sign in, airplane mode, force-stop,
+   relaunch → the cached vault unlocks offline; create an item offline → relaunch → network on →
+   it syncs. Desktop equivalent under `~/.andvari-desktop`.
+
+## 0.2 Provenance — what ties a shipped installer to a commit (audit H103)
+
+**The artifact hashes are not reproducible.** Rebuilding `v0.26.3` on another box, or on this box
+next week, does not reproduce the MSI's or the deb's sha256: the jar embeds timestamps and entry
+order, jlink/jpackage bake in the JDK and host layout, and the MSI wraps all of it with its own
+timestamps. Nothing about that is wrong, but it has a consequence people keep re-deriving the hard
+way — **a hash mismatch between two builds of the same tag proves nothing**, and on 2026-09-01 a
+day went into reading exactly that as "different code". Do not treat a rebuild as a verification
+step, and do not ask anyone else to.
+
+So the provenance chain is deliberately made of things that *are* checkable:
+
+1. **`bundle.json`** — written by the ceremony next to the artifacts, recording `version`, `seq`,
+   `ref`, the `commit` that was checked out, and every file's sha256 and size. This is the only
+   statement of what was built from where.
+2. **The signed manifest** — `manifest.json` + `manifest.json.sig` over the exact published bytes,
+   verified against the pinned key by every armed client (§1).
+3. **The tag check, enforced.** The build-host watcher (netplan
+   `scripts/active/andvari-manifest-watch.sh`, CHECK 2b) refuses to publish unless
+   `bundle.json.commit` equals the commit of `v<version>` in huginn's own checkout, and unless
+   `bundle.json.version` is the version the dropped manifest names. A mismatch **quarantines** the
+   bundle with `off-tag-build` and telegrams; nothing reaches `/downloads`. **There is no off-tag
+   flag, by design** — a build from a branch is precisely the artifact nobody can audit later. If
+   you need to ship a fix, tag the commit you built and re-drop. A tag huginn's clone has not
+   fetched yet is a *transient* stop, not a rejection: `git fetch --tags origin` and the next tick
+   proceeds.
+
+Which is why `-Ref v<version>` in the ceremony (§Signing-box preflight item 2) is not a
+convenience: it is now the difference between a publish and a quarantine.
+
 ## 1. Update-manifest signing — Ed25519 (H2 §F / core `UpdateVerify.PINNED`)
 - **Public key (base64url):** `e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI`
 - **ARMED 2026-07-18**, pinned in `core/.../client/UpdateVerify.kt` `PINNED` + the extension's
@@ -160,6 +231,52 @@ What it guarantees, and why each one is here:
 `--dry-run` stages, hashes and prints the plan without gpg, `gh` or any network — use it to check
 an asset set before publishing.
 
+
+## 5. `/downloads` retention — what stays reachable (audit H107)
+
+`/downloads` is a **public directory with guessable filenames**, and until 2026-09-13 nothing ever
+removed anything from it: every publish step only added. It had reached 4.6 GB on a 16 GB rootfs,
+holding every deb since 0.6.0 (including unsigned pre-0.19.1 ones), the known-broken 0.26.2 MSI,
+two still-valid signed manifest pairs from seq 3-4, and `manifest.json.*` backups made in place.
+Nothing forced a cleanup because the signed-update clients are immune to the clutter — fixed paths
+plus anti-rollback floors — which is exactly why it needed a written rule instead of a habit.
+
+**The rule.** Everything the LIVE `manifest.json` and `firefox-updates.json` reference is
+untouchable, and beyond that the **current and previous release's installers stay reachable**;
+older ones are pruned. Fleet artifacts (`andvari-<ver>.deb/.msi/.apk` and their `.asc`) and
+extension artifacts (`andvari-extension-*-<ver>.zip/.xpi`) are counted on **separate tracks** — the
+extension version legitimately sits several fleet releases back, and one shared count would prune
+the live extension. A release is kept or dropped **whole**, so the directory can never offer a deb
+without its signature. Anything not matching a known artifact name is reported and left alone.
+
+**Manifest backups leave the web root.** `manifest.json.<anything>` / `manifest.json.sig.<anything>`
+are *moved* to `/opt/andvari/manifest-backups` (not served), never deleted — the durable archive is
+`~/.andvari/manifest-archive` on huginn, and an older but still validly-signed manifest pair sitting
+publicly beside the live one is not something this directory should offer.
+
+**How it reaches the instance: `ANDVARI_DOWNLOADS_EXEC`, and there is no default** (R29). The
+prefix names one household's host, and this repo is public, so `--downloads` refuses to run until
+you export it — the same shape as `signandvari.ps1`'s `$env:ANDVARI_RELEASE_DROP`. This runbook is
+the place that may name the real one, because it is the exempt operator document that already
+names the machines the ceremony runs on:
+
+```
+export ANDVARI_DOWNLOADS_EXEC='ssh -o BatchMode=yes -o ConnectTimeout=15 root@192.168.7.131 pct exec 122 --'
+```
+
+(The generic shapes, for any other instance: `ssh you@host docker exec -i andvari`, or
+`ssh you@host pct exec <ctid> --`.)
+
+```
+scripts/prune-artifacts.sh --downloads                 # dry run: prints the plan, touches nothing
+scripts/prune-artifacts.sh --downloads --apply         # move the backups, delete the old installers
+scripts/prune-artifacts.sh --downloads --keep-releases 3 --apply
+```
+
+It reads the live manifest from the container and **aborts rather than guessing** if it cannot: a
+directory whose live references are unknown does not get pruned. `scripts/ci/prune-downloads.test.sh`
+(run by `verify.sh`) exercises the whole rule against a fake `/downloads`, including the case that
+would hurt most — an old `.xpi` that `firefox-updates.json` still points at must survive.
 
 ## Status (2026-09-13)
 - **Publish record — seq 12 (0.26.3), signed 2026-09-05** (history, not a current claim — see (2) below): linux **0.26.3**, windows **0.26.3**, browserExtension

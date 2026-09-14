@@ -46,6 +46,7 @@ import kotlinx.io.IOException
  *  - [WRONG_MASTER_PASSWORD]          ← web Welcome.tsx unlock-gate terminal
  *  - [PUBLIC_LOGIN_REQUIRES_TOTP]     ← web Welcome.tsx sign-in "public_login_requires_totp"
  *  - [IDENTITY_MISMATCH]              ← web account.ts IdentityMismatchError message + extension unlockErrorCopy("identity_mismatch")
+ *  - [ACCOUNT_KEYS_DAMAGED]           ← web account.ts VAULT_KEYS_DAMAGED + extension unlockErrorCopy("keys_damaged")
  *  - [WEAK_KDF_ACTION]                ← web crypto/keys.ts WEAK_KDF_MESSAGE
  *  - [WEAK_KDF_SIGN_IN]               ← extension/src/errors.ts weakened-KDF row (unlock/sign-in/enroll ladders)
  *  - [SERVER_PROBLEM]                 ← web Recover.tsx verifyErrorMessage/resetErrorMessage ApiError branch
@@ -111,6 +112,22 @@ object HouseholdCopy {
     /** TWIN of web account.ts IdentityMismatchError + extension "identity_mismatch": a
      *  tampering signal (spec 01 §5) — NEVER softened into wrong-password or retry copy. */
     const val IDENTITY_MISMATCH = "Server identity key mismatch — possible tampering. Do not proceed; contact your admin."
+
+    /**
+     * TWIN of web `vault/account.ts` VAULT_KEYS_DAMAGED (rendered by web's sign-in + unlock ladders)
+     * and of the extension's `keys_damaged` unlock row — byte-identical on all three canons.
+     *
+     * Audit H67: [VaultKeyDamagedException] — the account's server-stored `wrappedUvk` is not a
+     * well-formed envelope (undecodable base64url, too short, or an envelope version/AEAD alg this
+     * build does not know). Structurally refused BEFORE the password's wrap key is applied, so it is
+     * NOT a credentials verdict: a partial DB restore, or a newer server serving a v2 envelope to an
+     * old client, used to read as "Wrong email or master password" on every device — the household
+     * member then resets a working password and reaches for their recovery secret. The sentence
+     * therefore (a) names the real cause, (b) says sign-in cannot continue — this is TERMINAL, the
+     * same blob fails identically forever, so it must not invite a retry — and (c) points at the only
+     * two things that help. It never softens, exactly like [IDENTITY_MISMATCH] two rows up.
+     */
+    const val ACCOUNT_KEYS_DAMAGED = "This account's stored keys are damaged or from a newer version, so sign-in cannot continue. Contact your admin or restore from a backup."
 
     /** TWIN of web crypto/keys.ts WEAK_KDF_MESSAGE (H1, spec 05 T1) — the general-context
      *  variant ("The action was blocked"): password change, sync, any non-sign-in surface.
@@ -318,6 +335,7 @@ object HouseholdCopy {
         t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE
         t is KdfPolicyViolationException -> WEAK_KDF_ACTION
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
+        t is VaultKeyDamagedException -> ACCOUNT_KEYS_DAMAGED // H67: never the password, never a retry
         t is ApiException -> apiCopy(t)
         t is IOException -> UNREACHABLE
         else -> SOMETHING_WENT_WRONG
@@ -331,12 +349,15 @@ object HouseholdCopy {
      * Welcome.tsx's sign-in catch ladder / extension unlockErrorCopy. [totpTried] widens
      * the 401 sentence to include the one-time code, exactly like web's `totpNeeded`.
      * A non-API, non-transport throw is "Sign-in failed." (web parity): after a 200 login
-     * the password is proven, so a late crypto throw must not read as wrong-password.
+     * the password is proven, so a late crypto throw must not read as wrong-password. H67's
+     * [VaultKeyDamagedException] is the one late throw with a name: it says WHY sign-in stopped
+     * instead of inviting a retry that can never succeed.
      */
     fun forSignInError(t: Throwable, totpTried: Boolean = false): String = when {
         t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE // H15: never "Sign-in failed. Please try again."
         t is KdfPolicyViolationException -> WEAK_KDF_SIGN_IN
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
+        t is VaultKeyDamagedException -> ACCOUNT_KEYS_DAMAGED // H67: never the password, never a retry
         t is ApiException -> when {
             t is UpgradeRequiredException || t.code == "upgrade_required" || t.status == 426 -> UPGRADE_REQUIRED
             t.code == "totp_required" -> TOTP_CODE_NEEDED
@@ -353,7 +374,9 @@ object HouseholdCopy {
      * Unlock (master password against known account keys) — web Welcome.tsx unlock-gate +
      * AutofillUnlockActivity territory. Here (and only here + [forSaveError]'s re-auth
      * path) a plain [CryptoException] IS "wrong master password" — the sole un-wrapped
-     * crypto step — EXCEPT the identity-mismatch signal, which never softens. The android
+     * crypto step — EXCEPT the identity-mismatch signal, which never softens, and EXCEPT
+     * [VaultKeyDamagedException] (H67), which is not a CryptoException at all precisely so
+     * that this row can never claim a structurally unreadable key blob was a typo. The android
      * autofill lane may pre-map IO → [UNLOCK_OFFLINE_NO_KEYS] and 401 →
      * [SESSION_EXPIRED_AUTOFILL] when its context applies, then delegate the rest.
      */
@@ -361,6 +384,7 @@ object HouseholdCopy {
         t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE // H15: never "Couldn't unlock — please try again."
         t is KdfPolicyViolationException -> WEAK_KDF_SIGN_IN
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
+        t is VaultKeyDamagedException -> ACCOUNT_KEYS_DAMAGED // H67: never the password, never a retry
         t is CryptoException -> WRONG_MASTER_PASSWORD
         t is ApiException -> when {
             t is UpgradeRequiredException || t.code == "upgrade_required" || t.status == 426 -> UPGRADE_REQUIRED
@@ -386,6 +410,7 @@ object HouseholdCopy {
         t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE
         t is KdfPolicyViolationException -> WEAK_KDF_ACTION
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
+        t is VaultKeyDamagedException -> ACCOUNT_KEYS_DAMAGED // H67: never the password, never a retry
         t is CryptoException -> WRONG_MASTER_PASSWORD
         t is ApiException -> apiCopy(t)
         t is IOException -> SAVE_FAILED_OFFLINE
@@ -403,6 +428,7 @@ object HouseholdCopy {
         t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE
         t is KdfPolicyViolationException -> WEAK_KDF_ACTION
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
+        t is VaultKeyDamagedException -> ACCOUNT_KEYS_DAMAGED // H67: never the password, never a retry
         t is ApiException -> apiCopy(t)
         else -> FILE_READ_FAILED
     }
@@ -416,6 +442,7 @@ object HouseholdCopy {
         t is CryptoUnavailableException -> CRYPTO_UNAVAILABLE
         t is KdfPolicyViolationException -> WEAK_KDF_ACTION
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
+        t is VaultKeyDamagedException -> ACCOUNT_KEYS_DAMAGED // H67: never the password, never a retry
         t is ApiException -> apiCopy(t)
         t is IOException -> SYNC_OFFLINE
         else -> SYNC_FAILED

@@ -243,14 +243,11 @@ class SurfaceCopyPinsTest {
     }
 
     // ---- H80 (recheck R22): the KDF-upgrade re-wrap zeroizes MK / wrapKey ----
-
-    /** The one MK derivation outside Account.kt on this client. Account.enroll's shape: MK lives
-     *  only long enough to split, the new wrapKey dies with the seal. */
-    @Test
-    fun theKdfUpgradeRewrapWipesTheNewMasterAndWrapKeys() {
-        val qu = sourceFile("src/main/kotlin/io/silencelen/andvari/app/QuickUnlock.kt").readText()
-        val site = qu.substringAfter("val mkNew = Keys.masterKey(crypto, password, newSalt, newParams)").substringBefore("val currentAuth =")
-        assertTrue(site.contains("val (authNew, wrapNew) = try {\n                Bytes.toB64(Keys.authKey(crypto, mkNew)) to Keys.wrapKey(crypto, mkNew)\n            } finally {\n                mkNew.fill(0)\n            }"), "MK must be wiped the moment it has been split")
-        assertTrue(site.contains("uvk.fill(0)\n                wrapNew.fill(0)"), "the new wrapKey must die with the UVK egress copy once the seal is done")
-    }
+    //
+    // This WAS a source pin on QuickUnlock's inline re-key ("assert the fill(0)s are written where
+    // Account.enroll writes them"). Audit H85 hoisted that routine into core KdfReKeyCore — the one
+    // MK derivation outside Account.kt is no longer on this client at all — and the pin went with
+    // it, as a STRONGER one: core's KdfReKeyCoreTest records the live arrays through a
+    // CryptoProvider and asserts they really are zero afterwards. The phone's remaining duty is the
+    // wiring, pinned in KdfReKeyAdapterTest.
 }

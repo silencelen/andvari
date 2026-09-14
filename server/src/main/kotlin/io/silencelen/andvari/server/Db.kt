@@ -21,7 +21,29 @@ class Db(path: String) : AutoCloseable {
             st.execute("PRAGMA journal_mode=WAL")
             st.execute("PRAGMA foreign_keys=ON")
             st.execute("PRAGMA busy_timeout=5000")
-            st.execute("PRAGMA synchronous=NORMAL")
+            // H84 (audit 2026-09-13) — DURABILITY OVER THROUGHPUT, deliberately.
+            //
+            // Under WAL, synchronous=NORMAL acknowledges a COMMIT as soon as the WAL write returns;
+            // the WAL is fsynced only at checkpoint. SQLite's own documented semantics: in WAL mode
+            // with NORMAL "a transaction committed ... might roll back following a power loss or
+            // system crash" (an application crash is still safe — the OS page cache survives it).
+            //
+            // That window is not survivable for THIS server. A push commits the item row, its
+            // `changes` rev and the `mutations` idempotency row in ONE tx and only then answers
+            // `applied`; the client, having seen `applied`, drops that mutation from its outbox.
+            // A power cut inside the checkpoint window takes all three rows together, so nothing
+            // asks the client to re-send: the newest saves survive only in the saving client's
+            // local cache (memory-only in the extension: already gone) until its next full resync,
+            // where a `since=0` pull replaces the cache with the server's copy and the item is
+            // silently lost. In a password manager "saved" must mean durable, and the plausible
+            // household host is a Pi on an SD card with no UPS — exactly the crash this covers.
+            //
+            // The cost is one fsync per commit. At household write rates that is the rare path
+            // (the F56 perf addendum measured no-op pulls in µs; writes are single-digit per
+            // minute), and reads take no fsync at all. Pinned by DbDurabilityTest — if this ever
+            // has to be relaxed for a large importer run, relax it FOR THAT RUN, not for the
+            // steady state, and amend spec 02 §7.
+            st.execute("PRAGMA synchronous=FULL")
         }
         migrate()
     }

@@ -341,6 +341,86 @@
             "htmlType": null,
             "htmlNameOrId": null,
             "expected": "username"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "otp",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "totp",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "2fa",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "verification_code",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "captcha",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "passcode",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "password",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 128,
+            "htmlType": null,
+            "htmlNameOrId": "otp",
+            "expected": "password"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "cscode",
+            "expected": "none"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "mysecuritycode",
+            "expected": "none"
         }
     ],
     "classifyCard": [
@@ -542,6 +622,22 @@
             "inputTypeVariation": 0,
             "htmlType": "password",
             "htmlNameOrId": "cardVerificationValue",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "cardSecurityCode",
+            "expected": "cc-csc"
+        },
+        {
+            "hints": [],
+            "inputTypeClass": 1,
+            "inputTypeVariation": 0,
+            "htmlType": "password",
+            "htmlNameOrId": "cvvCode",
             "expected": "cc-csc"
         },
         {
@@ -1048,7 +1144,7 @@
             "inputTypeVariation": 0,
             "htmlType": "password",
             "htmlNameOrId": "cv_code",
-            "expected": "password"
+            "expected": "none"
         },
         {
             "hints": [],

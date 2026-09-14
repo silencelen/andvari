@@ -8,6 +8,7 @@ import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "../../extension/s
 import { chooseCardTarget } from "../../extension/src/messages";
 import type { ItemDoc } from "./api/types";
 import { WEAK_KDF_MESSAGE } from "./crypto/keys";
+import { VAULT_KEYS_DAMAGED } from "./vault/account";
 import {
   brand as webBrand,
   cardSubtitle as webCardSubtitle,
@@ -1519,6 +1520,20 @@ describe("H122 — the weakened-KDF sentence is one sentence in all three canons
       expect(s.endsWith("contact your admin."), s).toBe(true);
     }
     expect(errorsTs).not.toContain("contact your administrator");
+  });
+
+  /**
+   * R40 — the SAME hole, one row later. H67's damaged-keys sentence is declared three times
+   * (core HouseholdCopy.ACCOUNT_KEYS_DAMAGED, web VAULT_KEYS_DAMAGED, extension errors.ts) and
+   * was pinned three times, each canon against its OWN copy of the literal. Nothing compared
+   * them, so a reword done the natural way — edit the Kotlin plus the assertEquals two files
+   * away, both of which say "TWIN: web … + extension …" — would leave web and the extension
+   * saying the old sentence with every suite green. Two lines, the same two H122 already uses.
+   */
+  it("H67 — the damaged-account-keys sentence is byte-equal across all three canons", () => {
+    const canon = kotlinConst("ACCOUNT_KEYS_DAMAGED");
+    expect(VAULT_KEYS_DAMAGED, "web's copy has drifted from core's").toBe(canon);
+    expect(errorsTs, "the extension's copy has drifted from core's").toContain(JSON.stringify(canon));
   });
 });
 

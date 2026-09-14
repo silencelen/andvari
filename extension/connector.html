@@ -3,10 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>andvari — quick unlock</title>
+    <!-- H133: "<Surface> · andvari" (see options.html) — was "andvari — quick unlock". -->
+    <title>Quick unlock · andvari</title>
     <!-- Themed with the popup's treasury stylesheet; only inline STYLE is allowed under the
          extension-pages CSP (script-src 'self'), so the logic loads from connector.js. -->
     <link rel="stylesheet" href="popup.css" />
+    <!-- H134: pre-paint theme stamp. Classic + render-blocking on purpose — the page bundles are
+         deferred ES modules, so applying the forced theme there flashes the other palette first
+         (the MV3 CSP bars inline JS, hence a file). See theme-boot.js. -->
+    <script src="theme-boot.js"></script>
     <style>
       body {
         width: auto;

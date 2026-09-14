@@ -118,19 +118,75 @@ describe("Cut A tokens (focus / gold-text / danger-on-plate / button gradient)",
     });
   }
 
-  it("dark --danger ≥ 4.5:1 on the composited .msg.err plate", () => {
-    // The plate is a HARDCODED literal in styles.css (rgba(207,107,90,0.12) over --bg-raised)
-    // — it does not track --danger, so composite exactly what the rule ships.
-    // Non-greedy scan: the FIRST rgba in the rule is the background plate (0.12); the
-    // greedy form skips ahead and captures the border's 0.3.
-    const m = /\.msg\.err\s*\{[^}]*?rgba\((\d+),\s*(\d+),\s*(\d+),\s*(0?\.\d+)\)/.exec(css);
-    expect(m, ".msg.err plate rgba literal").toBeTruthy();
-    const [r, g, b, a] = [Number(m![1]), Number(m![2]), Number(m![3]), Number(m![4])];
-    const base = dark["--bg-raised"]!.replace("#", "");
-    const bc = [0, 2, 4].map((i) => parseInt(base.slice(i, i + 2), 16));
-    const plate = "#" + bc.map((c, i) => Math.round([r, g, b][i]! * a + c * (1 - a)).toString(16).padStart(2, "0")).join("");
-    expect(ratio(dark["--danger"]!, plate)).toBeGreaterThanOrEqual(AA);
-  });
+  /* H134 web half (R09). This block used to parse the ONE hardcoded rgba literal out of .msg.err
+     and composite it — "it does not track --danger" was written into the test as if it were a
+     property of the plate rather than the defect. It WAS the defect: the literals were frozen
+     copies of the DARK palette (the .err pair still the pre-Cut-A #cf6b5a, retired when --danger
+     was lifted to #d97f6f / light #b3402c), so light mode got a pink-salmon wash around brick-red
+     text and the gold plates carried the dark gold. The rules now mix each plate from the same
+     token its text uses, and this composites THAT — the gate follows the palette instead of a
+     snapshot of it, in both themes. Byte-for-byte the same gate the extension twin runs against
+     popup.css (extension/src/contrast.test.ts), because the two stylesheets are one design.
+
+     What is and is not gated, honestly:
+      · dark, both surfaces: full AA — the gate this file has always had, extended to every plate.
+      · light: the WASH invariant plus the 3:1 non-text floor, NOT AA — the light palette is at its
+        own ceiling before any plate exists (bare --danger on light --bg is already near AA), and a
+        12% wash of the text's own hue costs ~15% of any ratio, so no plate percentage could get it
+        there. That is a PALETTE matter, owned by token-lockstep.test.ts; gating it here would be
+        gating another file's decision through this one.
+     The wash invariant is what a tint plate must actually satisfy: tinting a surface with the
+     text's own hue always drags the surface toward the text, so a plate may READ as coloured but
+     may not cost more than a fifth of the bare surface's contrast. */
+  const PLATES = [
+    { rule: ".msg.err", text: "--danger", tint: "--danger", bgPct: 12, borderPct: 30 },
+    { rule: ".msg.info", text: "--gold-bright", tint: "--gold", bgPct: 10, borderPct: 25 },
+    { rule: ".banner", text: "--gold-bright", tint: "--gold", bgPct: 12, borderPct: 30 },
+    // The invite token plate has a TOKEN border (--gold-deep, dashed), so only the wash is a mix.
+    { rule: ".token-box", text: "--gold-bright", tint: "--gold", bgPct: 8, borderPct: null },
+  ] as const;
+  const WASH_KEEP = 0.8; // a plate must keep ≥80% of the bare surface's contrast
+
+  /** The `color-mix(in oklab, var(--tok) N%, transparent)` percentages declared in one rule. */
+  function plateMixes(rule: string): Array<{ tok: string; pct: number }> {
+    const esc = rule.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const m = new RegExp(`${esc}\\s*\\{([^}]*)\\}`).exec(css);
+    expect(m, `${rule} rule not found`).toBeTruthy();
+    return [...m![1]!.matchAll(/color-mix\(in oklab,\s*var\((--[a-z-]+)\)\s*(\d+)%,\s*transparent\)/g)]
+      .map((x) => ({ tok: x[1]!, pct: Number(x[2]!) }));
+  }
+
+  /** `tint` at `alpha` over an opaque `base` — what color-mix(…, transparent) premultiplies to. */
+  function composite(tint: string, alpha: number, base: string): string {
+    const px = (h: string) => [0, 2, 4].map((i) => parseInt(h.replace("#", "").slice(i, i + 2), 16));
+    const [tr, tg, tb] = px(tint);
+    const bc = px(base);
+    return "#" + [tr!, tg!, tb!].map((c, i) => Math.round(c * alpha + bc[i]! * (1 - alpha)).toString(16).padStart(2, "0")).join("");
+  }
+
+  for (const plate of PLATES) {
+    // Structural: the H134 pin. Re-freezing either wash as an rgba() literal fails here even if the
+    // dark composite happens to land in the same place — which is exactly how the drift shipped.
+    it(`H134: ${plate.rule} mixes its plate from var(${plate.tint}), not a frozen literal`, () => {
+      const expected = [{ tok: plate.tint as string, pct: plate.bgPct as number }];
+      if (plate.borderPct !== null) expected.push({ tok: plate.tint as string, pct: plate.borderPct as number });
+      expect(plateMixes(plate.rule)).toEqual(expected);
+    });
+
+    for (const [theme, map] of [["dark", dark], ["light", light]] as const) {
+      for (const surface of ["--bg", "--bg-raised"] as const) {
+        const base = map[surface]!;
+        const composited = composite(map[plate.tint]!, plate.bgPct / 100, base);
+        const bare = ratio(map[plate.text]!, base);
+        const got = ratio(map[plate.text]!, composited);
+        it(`H134 ${theme}: ${plate.rule} on ${surface} keeps ≥${WASH_KEEP * 100}% of the bare ${bare.toFixed(2)}:1`, () => {
+          expect(got / bare, `${got.toFixed(2)} / ${bare.toFixed(2)}`).toBeGreaterThanOrEqual(WASH_KEEP);
+          expect(got, `${plate.text} on the plate`).toBeGreaterThanOrEqual(UI_MIN);
+          if (theme === "dark") expect(got, `${plate.text} on the plate`).toBeGreaterThanOrEqual(AA);
+        });
+      }
+    }
+  }
 
   it("pins the Cut A hex values", () => {
     expect(dark["--danger"]).toBe("#d97f6f");

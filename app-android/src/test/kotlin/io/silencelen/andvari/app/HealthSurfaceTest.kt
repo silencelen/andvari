@@ -174,14 +174,31 @@ class HealthSurfaceTest {
         assertFalse(lockOnExit.contains("deferredBackgroundLock"), "nor deferred behind an op that is about to be cancelled")
     }
 
-    /** The arm is a ONE-SHOT. A launch that never happens must not leave the app unlockable. */
+    /** The arm is a ONE-SHOT. A launch that never happens must not leave the app unlockable.
+     *  H57: it is also self-expiring — [ExternalExcursionTtlTest] pins the window's behaviour;
+     *  this keeps pinning the seams that wire the one-shot into the lifecycle. */
     @Test
     fun theExcursionArmIsConsumedAndCleared() {
         val ex = src("ExternalExcursion.kt")
         assertTrue(ex.contains("fun consume(): Boolean"))
-        assertTrue(ex.contains("armed = false"))
+        assertTrue(ex.contains("armedAtMs = null"), "consume/clear must drop the arm")
         assertTrue(vm.contains("if (ExternalExcursion.consume()) return"))
         assertTrue(main.contains("Lifecycle.Event.ON_START -> { ExternalExcursion.clear(); vm.onProcessStart() }"))
+        // R17: the ACTIVITY-resumed clear, the complement the TTL alone cannot replace. The
+        // process ON_START above only fires after a process ON_STOP, and H57's OEM case — the
+        // autofill picker drawn as a dialog over a still-STARTED activity — fires neither, so an
+        // unconsumed arm rode the full five-minute window and could exempt the user's NEXT
+        // genuine backgrounding. Pinned on the RESUMED block because that is the one hook that
+        // fires on the dialog path.
+        val resumed = mainCode.substringAfter("repeatOnLifecycle(Lifecycle.State.RESUMED)").substringBefore("setContent")
+        assertTrue(
+            resumed.contains("ExternalExcursion.clear()"),
+            "an unused arm must be dropped when the ACTIVITY resumes, not only when the PROCESS restarts",
+        )
+        assertTrue(
+            resumed.indexOf("ExternalExcursion.clear()") < resumed.indexOf("while (true)"),
+            "…on entry to the resumed block, before the sync loop, so it runs exactly once per return",
+        )
     }
 
     // ---- audit 2026-09-13: the lock-on-background legs that never landed ----
@@ -287,6 +304,60 @@ class HealthSurfaceTest {
         assertFalse(healthCode.contains("vm.deleteItem("), "the offer must go through removeGoneItem, which clears the offer and states the outcome")
     }
 
+    /**
+     * H117 (design 2026-08-22 §4: "Wrong password → bad → offers: open the item / generate a new
+     * password"). The design ratified FOUR verdicts on the stated grounds that each maps to a
+     * different next action; "bad" mapped to none on any client, so a member who declared a
+     * password broken was advanced to the next login with no path back to it. The offer is now
+     * built, in [GoneOfferRow]'s shape and with web's words — and it must stay an OFFER: neither
+     * button may rotate a credential by itself.
+     */
+    @Test
+    fun aWrongPasswordVerdictOffersTheTwoRepairsByName() {
+        val record = vmCode.substringAfter("fun recordCheck(").substringBefore("fun removeGoneItem(")
+        assertTrue(
+            record.contains("""healthOfferBad = if (result == "bad") itemId else null"""),
+            "the offer is set once the save lands, and withdrawn by any other verdict",
+        )
+        assertTrue(
+            record.contains("""healthOfferDelete = if (result == "gone") itemId else null"""),
+            "…alongside the gone-offer: one verdict, one standing offer",
+        )
+        // R14: BYTE-IDENTICAL to web's Staleness.tsx `badSentence`. The two lanes each wrote this
+        // sentence from the feature description and shipped two spellings behind three identical
+        // button labels; web is the declared source of truth for this row.
+        assertTrue(health.contains("“\$name” is marked as having the wrong password. Change it?"), "the sentence NAMES the login, in web's exact words")
+        assertTrue(health.contains("""Text("Open the item")"""), "design §4's first offer")
+        assertTrue(health.contains("""Text("Generate a new password")"""), "design §4's second offer")
+        assertTrue(health.contains("""Text("Not now")"""), "…and a way to decline, like the gone-offer's Keep it")
+        // Both offers are rendered in BOTH places the gone-offer is: the screen AND inside the
+        // modal run dialog, which hides the screen underneath it.
+        assertEquals(2, Regex("ui\\.healthOfferBad\\?\\.let \\{ BadOfferRow").findAll(healthCode).count())
+        // The repair NAVIGATES; it never writes. A generate-and-save here would strand the member
+        // on a password no login page has ever accepted.
+        val repair = vmCode.substringAfter("fun repairBadItem(").substringBefore("fun keepBadOffer()")
+        assertTrue(repair.contains("stopVerifyRun()"), "the run ends — the user is leaving to fix the item")
+        assertTrue(repair.contains("pendingDetailId = itemId"), "…landing on the item that was just declared broken")
+        // R15: the editor must open WITH the generated password already in the field (web's
+        // `generateOnOpen`), or "Generate a new password" generates nothing on the phone and one
+        // label carries two behaviours across the twins.
+        assertTrue(repair.contains("if (edit) openEditor(itemId, generate = true)"), "the editor opens pre-generated, as on web")
+        assertFalse(repair.contains("saveItem(") || repair.contains("PasswordGenerator"), "the offer must never change a password for the user")
+        // …and the flag is a real editor-session flag, cleared like every other one: an ordinary
+        // edit opened right after must not inherit a generate.
+        assertTrue(vmCode.contains("fun openEditor(itemId: String?, newType: String = \"login\", generate: Boolean = false)"), "openEditor carries the flag")
+        val open = vmCode.substringAfter("fun openEditor(").substringBefore("fun closeEditor()")
+        assertTrue(open.contains("editorGenerateOnOpen = generate"), "…set per session")
+        val close = vmCode.substringAfter("fun closeEditor()").substringBefore("fun editorTargetVanished()")
+        assertTrue(close.contains("editorGenerateOnOpen = false"), "…and cleared with the session, like editorPendingUploads")
+        // The editor actually acts on it, once, and says so in web's words.
+        assertTrue(main.contains("if (vm.editorGenerateOnOpen && isLogin)"), "the editor fills a generated password at open")
+        assertTrue(
+            mainCode.contains("a new password is ready — change it on the site, then press Save to keep it here"),
+            "…with web's notice: generated, revealed, and NOT saved yet",
+        )
+    }
+
     /** H28: the run card has Copy username / Copy password, on the shared clipboard window, and
      *  the password copy records a use (web's :262 rule). `healthClipboardSeconds()` finally
      *  has the caller it was written for. */
@@ -352,6 +423,7 @@ class HealthSurfaceTest {
         val cleared = vm.substringAfter("internal fun UiState.sessionCleared").substringBefore("\n)")
         assertTrue(cleared.contains("breachScanRev = emptyMap()"), "the rev map rides the wipe with the count map")
         assertTrue(cleared.contains("healthOfferDelete = null"), "and so does the gone-offer")
+        assertTrue(cleared.contains("healthOfferBad = null"), "…and the H117 wrong-password offer, which names an item")
         val tab = healthCode.substringAfter("private fun PasswordsTab(").substringBefore("private fun DuplicatesTab(")
         assertFalse(tab.contains("ui.breachByItem?.get("), "rows must read the fresh map, not the raw one")
     }

@@ -204,6 +204,14 @@ body {
   color: var(--ink);
 }
 .brand .a-mark { color: var(--gold); }
+/* H138: the appbar lockup (sigil + wordmark). A literal twin of extension/popup.css
+   `.brand .sigil-sm` — the two headers sit centimetres apart on the same screen, so the
+   inline-flow offset and the gold glow have to be the same numbers, not merely similar.
+   vertical-align nudges the 24-unit viewBox's optical centre onto the serif baseline;
+   the drop-shadow is the glow the popup and the hero sigils already carry (a text-shadow
+   does nothing to an <svg>, hence the filter). */
+.brand .sigil-sm { color: var(--gold); margin-right: 6px; }
+.brand .sigil-sm svg { vertical-align: -0.12em; filter: drop-shadow(0 1px 10px rgba(208, 169, 74, 0.35)); }
 
 /* ---- centered auth card ---- */
 .auth-shell {
@@ -326,8 +334,20 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.6; cursor: not-a
 
 .row { display: flex; gap: 10px; align-items: center; }
 .msg { font-size: 13px; padding: 10px 12px; border-radius: var(--radius); margin-bottom: 16px; }
-.msg.err { background: rgba(207, 107, 90, 0.12); color: var(--danger); border: 1px solid rgba(207,107,90,0.3); }
-.msg.info { background: rgba(208, 169, 74, 0.1); color: var(--gold-bright); border: 1px solid rgba(208,169,74,0.25); }
+/* H134 (audit 2026-09-13; web half landed by R09): every tinted PLATE below is mixed from the
+   palette token it belongs to, not from a frozen rgba() of the DARK palette. The literals these
+   replace were written before the tokens existed and never re-derived, so they survived Cut A's
+   danger lift (#cf6b5a → dark #d97f6f / light #b3402c) and painted BOTH themes with the retired
+   dark hue: in light mode the error plate was a pink-salmon wash and border around brick-red text,
+   and the gold plates carried the dark gold instead of the light one. `color-mix(… <token> N%,
+   transparent)` premultiplies, so it yields exactly "token at N% alpha" — the same composite the
+   literals were hand-computed for in dark mode, and the RIGHT one in light. Deliberately NOT
+   converted: the decorative warm glows (the body vignette, the sigil text/drop shadows, the focus
+   box-shadow wash) — a fixed light-catching-gold effect rather than a semantic surface, reading the
+   same in both themes. contrast.test.ts composites these from the tokens and gates them in both
+   themes; the extension twin is popup.css's identical block. */
+.msg.err { background: color-mix(in oklab, var(--danger) 12%, transparent); color: var(--danger); border: 1px solid color-mix(in oklab, var(--danger) 30%, transparent); }
+.msg.info { background: color-mix(in oklab, var(--gold) 10%, transparent); color: var(--gold-bright); border: 1px solid color-mix(in oklab, var(--gold) 25%, transparent); }
 
 .check { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; color: var(--ink-dim); margin-bottom: 18px; }
 .check input { width: auto; margin-top: 3px; }
@@ -485,8 +505,8 @@ label.prompt { font-size: 13px; color: var(--ink-dim); }
 .banner {
   display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap;
   padding: 10px 20px; font-size: 14px;
-  color: var(--gold-bright); background: rgba(208, 169, 74, 0.12);
-  border-bottom: 1px solid rgba(208, 169, 74, 0.3);
+  color: var(--gold-bright); background: color-mix(in oklab, var(--gold) 12%, transparent);
+  border-bottom: 1px solid color-mix(in oklab, var(--gold) 30%, transparent);
 }
 
 .view-title { font-family: var(--serif); font-weight: 600; font-size: 22px; margin: 0; }
@@ -558,7 +578,7 @@ label.prompt { font-size: 13px; color: var(--ink-dim); }
 /* ---- one-time invite token ---- */
 .token-box {
   margin-top: 16px; padding: 14px;
-  background: rgba(208, 169, 74, 0.08); border: 1px dashed var(--gold-deep); border-radius: var(--radius);
+  background: color-mix(in oklab, var(--gold) 8%, transparent); border: 1px dashed var(--gold-deep); border-radius: var(--radius);
 }
 input.token { font-size: 15px; color: var(--gold-bright); }
 
@@ -653,3 +673,61 @@ input.token { font-size: 15px; color: var(--gold-bright); }
 /* H24: the Admin row's recovery-bundle upload (F59 step 3) — a paste box + file picker inside
    a table cell needs a floor width or the cell squeezes the textarea to a slit. */
 .recovery-apply { margin-top: 8px; min-width: 320px; }
+
+/* ---- print (H137, audit 2026-09-13) ---- */
+/* There was no print stylesheet at all, so Ctrl+P on the item detail put a revealed password,
+   the live one-time code and a card number on paper — and Ctrl+P on Vault health printed the
+   whole table of logins with their strength, reuse and breach verdicts, which is a target list.
+   A print job is not a screenshot: it goes to a queue on a machine andvari knows nothing about,
+   often a shared or networked one, and the PDF path lands the same plaintext in a file the vault
+   never sees again. A password manager's default has to be that paper gets nothing.
+
+   `visibility: hidden`, not `display: none`, on purpose: the layout survives, so the printed page
+   shows the labelled field with an obvious blank where the secret was, rather than silently
+   re-flowing into something that looks complete. Every rule here is a paint decision — nothing
+   about the DOM or the clipboard changes, and the screen is untouched.
+
+   The one exception is the recovery phrase (`.print-keep`): it is shown exactly once, andvari
+   deliberately refuses to store it, and printing it is one of the two ways the design expects a
+   user to save it. Hiding that would break the feature rather than protect it. Marked
+   class-by-class at the reveal, never by a blanket selector — an exception that grew implicitly
+   would eventually cover something it shouldn't. */
+/* Screen: the print notice is invisible — it explains the blanks on paper, and on screen there
+   are no blanks to explain. This rule MUST sit ABOVE the print block below: a media query
+   adds no specificity, so both `.print-note` rules match at (0,1,0) in the print medium and the
+   LAST one in source order wins. Declared after the block, `display: none` silently beat the
+   print override and the "secrets are hidden when printing" notice never printed at all — the
+   one line on the page that explains the blanks. Order is the whole mechanism here; the pin in
+   print-styles.test.ts asserts the order, not merely the presence. */
+.print-note { display: none; }
+
+@media print {
+  /* Revealed passwords, card numbers, security codes (`.secret-row` covers detail, editor and
+     version history), the live TOTP digits, secure-note bodies, and every data table — Vault
+     health, staleness, the admin user and audit lists.
+
+     `.qr-card` is here because a QR code is a MACHINE-READABLE copy of the same secret: the TOTP
+     enrollment QR (Settings) encodes the otpauth URI with its base32 seed, and the admin enroll QR
+     encodes a live invite token. Blanking their text rows while leaving the picture on the page
+     hands a scanner the whole secret — worse than printing it, because nobody reading the sheet
+     can tell it is there. QrSvg owns this wrapper, so one selector covers every present and future
+     call site; the pin in print-styles.test.ts asserts exactly that (no `<QrSvg` outside it). */
+  .secret-row input,
+  .secret-row textarea,
+  textarea,
+  .totp,
+  .table,
+  .qr-card {
+    visibility: hidden;
+  }
+  .print-keep,
+  .print-keep * {
+    visibility: visible;
+  }
+  .print-note {
+    display: block;
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: var(--ink-dim);
+  }
+}
