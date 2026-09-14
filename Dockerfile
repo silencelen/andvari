@@ -40,7 +40,7 @@ COPY spec/test-vectors/ /src/spec/test-vectors/
 RUN npm run build   # → dist/
 
 # ---------- server + recovery-cli shadowJars ----------
-FROM --platform=$BUILDPLATFORM eclipse-temurin:17-jdk-jammy@sha256:723151f3fc88ca2060153ee08ab8dbbea7983d6ed6f2622fe440acf178737c94 AS jars
+FROM --platform=$BUILDPLATFORM eclipse-temurin:25-jdk-jammy@sha256:02eecc58b9c7cb20e55765c7bcdcdee0c6d210440aca1b0a1fbd81ecfe8e772e AS jars
 # Android SDK: needed only so AGP can configure :core's androidTarget. No
 # Android compile task runs. Licenses are accepted so AGP may fetch any extra
 # component it wants at configuration time.
@@ -81,7 +81,7 @@ RUN sed -i -e '/":app-android"/d' -e '/":app-desktop"/d' \
     && ./gradlew --no-daemon :server:shadowJar :tools:recovery-cli:shadowJar
 
 # ---------- runtime ----------
-FROM eclipse-temurin:17-jre-jammy@sha256:475d8e96b4b2bfe08999e5e854755c773af1581acdf959a4545d88f0696a2339
+FROM eclipse-temurin:25-jre-jammy@sha256:20a695e74d47fb29cda1cbad5d9ee6cfad4ac6e88a8e048ed6265cede1e71f5e
 LABEL org.opencontainers.image.source="https://github.com/silencelen/andvari" \
       org.opencontainers.image.description="andvari — zero-knowledge household password manager (server + web UI + offline recovery-cli)" \
       org.opencontainers.image.licenses="UNLICENSED"
