@@ -3,7 +3,13 @@
      web wordmark ships (web/src/ui/Sigil.tsx BrandSigil: stave M12 3v18 + falling stroke
      M5.5 8.5l13 6, round caps), in the house gold (web CSS var "gold", #d0a94a). The group
      scales the 24-unit path into the adaptive-icon safe zone (108dp canvas), keeping the
-     web stroke-to-height ratio (1.8/18) so the mark reads identically at both sizes. -->
+     web stroke-to-height ratio (1.8/18) so the mark reads identically at both sizes.
+     H138 (audit 2026-09-13): this file was the sibling that was right — the tile icons drew a
+     different, bolder stave until they were regenerated from assets/brand/andvari-mark.svg,
+     which now carries exactly the geometry below. It stays hand-maintained (a vector drawable
+     scaled into the 108dp safe zone, no raster step) rather than generated, so if the shared
+     source ever changes, change this file in the same commit; web brand-assets.test.ts reads
+     both and fails when they disagree. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"

@@ -5,9 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <!-- Self-contained brand favicon (the ᛅ sigil) + per-scheme chrome tint. Same-origin assets,
-         so the strict self-only CSP is satisfied; no external requests. -->
+         so the strict self-only CSP is satisfied; no external requests. H138: favicon.svg is a
+         verbatim copy of assets/brand/andvari-mark.svg and every raster below is rendered from
+         it by scripts/gen-brand-icons.sh — never hand-edit one of them. -->
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- H136 (audit 2026-09-13): iOS was covered by the touch icon above, but Chromium's install
+         path keys on a manifest, and there was none — so "Add to Home screen" on Android gave a
+         household member a generic letter icon named after the URL, opening in a browser tab.
+         The manifest is same-origin, so `manifest-src` falls back to the SPA route's
+         `default-src 'self'` and no CSP change is needed; Ktor already maps .webmanifest to
+         application/manifest+json. No service worker is implied or required — installability
+         signals improve without one, and the offline-shell call (H48) stays a separate decision.
+         theme_color inside the manifest can only be one value, so it is the dark shell's #14120e
+         (which is also the icon field); the two metas below keep the per-scheme browser chrome. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#14120e" media="(prefers-color-scheme: dark)" />
     <meta name="theme-color" content="#f4efe4" media="(prefers-color-scheme: light)" />
     <meta name="description" content="andvari — your household's zero-knowledge password manager." />
@@ -47,9 +59,12 @@
     </noscript>
     <div id="root">
       <!-- Boot placeholder over the blank first paint; createRoot clears the container,
-           so React's first render sweeps this away. Copy mirrors App's loading phase. -->
+           so React's first render sweeps this away. Copy mirrors App's loading phase EXACTLY,
+           casing included (R06): the two paint in the same spot one after the other, so a
+           lower-case placeholder followed by App's sentence-case <Busy> flickers a re-spelling
+           at the reader on every cold load. boot-shell.test.ts pins the pair, not the string. -->
       <div class="boot">
-        <span>unsealing…</span>
+        <span>Unsealing…</span>
         <span class="boot-stuck">Still on this screen? Reload the page — that clears it.</span>
       </div>
     </div>

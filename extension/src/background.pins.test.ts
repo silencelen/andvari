@@ -249,3 +249,57 @@ test("H03 — saveFailure maps the server's `rejected` verdict to its own rung, 
   assert.match(api, /status: "applied" \| "conflict" \| "duplicate" \| "denied" \| "rejected";/, "api.ts MutationResult must carry the rejected status the server answers");
   assert.ok(api.includes("reason?: string;"), "and the refusal reason beside it");
 });
+
+// ---- H64: the personal vault (and so the usage key) never follows a server label alone ----
+
+test("H64 — both session builds pick the personal vault through pickPersonalVaultId, which skips member grants", () => {
+  // Behaviour, not decoration: `Vault.type` is server plaintext bound into no AD (spec 02 §4), so
+  // a hostile server can relabel a SHARED vault the user only holds by member grant. The extension
+  // keys the usage ledger from VK(personalVault) (crypto.ts usageKey), so adopting a relabelled
+  // vault would seal the user's per-item behavioural log under a key every OTHER member of that
+  // vault already holds. Core (Account.setPersonalVault) and web (account.ts) refuse the same way;
+  // this file is where a revert in the SW would otherwise stay green.
+  assert.match(
+    bg,
+    /function pickPersonalVaultId\([\s\S]*?v\.type === "personal" && vaultKeys\.has\(v\.vaultId\) && !memberGranted\.has\(v\.vaultId\)/,
+    "pickPersonalVaultId must exclude member-granted vaults",
+  );
+  assert.match(bg, /memberGranted\.add\(g\.vaultId\)/, "buildVaultKeys must record sealedVk provenance");
+  // Both session builds — the full password unlock and the quick redeem — go through it, and
+  // NEITHER re-derives the id inline (an inline `.find(... type === "personal" ...)` is exactly the
+  // shape that carried the bug).
+  const inline = bg.match(/vaults\.find\(\(v\) => v\.type === "personal"/g) ?? [];
+  assert.equal(inline.length, 1, `only pickPersonalVaultId may scan for type="personal" (found ${inline.length})`);
+  assert.equal((bg.match(/pickPersonalVaultId\(sync, vaultKeys, memberGranted\)/g) ?? []).length, 2, "hydrateSession and the redeem path must both call it");
+});
+
+// ---- H67 / R38 / R39: the damaged-account-keys terminal, wired in the SW ----
+
+// R39: the extension's entire H67 production wiring could be deleted with the whole extension gate
+// green — `keys_damaged` appears only in errors.ts (the copy string) and errors.unions.test.ts (a
+// length assertion), and neither reads background.ts. Deleting the structure-first gate and the
+// mapper row left 399/399 passing and tsc clean, on the one client where the SW is the only place
+// the gate can live. Same idiom as the H90 pins above: a leaf test is not a call-site test.
+test("H67/R38 — hydrateSession refuses a structurally broken account-key blob BEFORE using the secret", () => {
+  const hydrate = spanOf(bg, "async function hydrateSession(", "const sync = await api.sync(0)");
+  // wrappedUvk: structure first, secret second.
+  assert.ok(hydrate.includes("envelopeStructuralRefusal(wrapped)"), "wrappedUvk must be header-checked");
+  assert.ok(hydrate.includes("new VaultKeyDamagedError"), "…and refused with the damaged-keys terminal");
+  assert.ok(
+    hydrate.indexOf("envelopeStructuralRefusal(wrapped)") < hydrate.indexOf("open(wk, wrapped, adUvk("),
+    "the header check must run BEFORE the wrap key is applied — that ordering IS the rule",
+  );
+  // R38: the sibling account-key blob in the same row gets the same gate, one line later.
+  assert.ok(hydrate.includes("envelopeStructuralRefusal(seedEnvelope)"), "encryptedIdentitySeed must be header-checked too");
+  assert.ok(
+    hydrate.indexOf("envelopeStructuralRefusal(seedEnvelope)") < hydrate.indexOf("boxKeypairFromSeed(open(uvk, seedEnvelope"),
+    "…before the UVK is applied to it",
+  );
+});
+
+test("H67/R39 — the mapper turns that terminal into `keys_damaged`, never a credentials verdict", () => {
+  const mapper = spanOf(bg, "function mapUnlockError(", "if (e instanceof ApiError)");
+  assert.ok(mapper.includes('VaultKeyDamagedError) return "keys_damaged"'), "the damaged-keys row must precede the ApiError ladder");
+  // The whole point of H67: a damaged row must never come back as the wrong-password sentence.
+  assert.ok(!mapper.includes("bad_credentials"), "no credentials verdict may be reachable before the damaged-keys row");
+});

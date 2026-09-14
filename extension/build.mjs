@@ -36,6 +36,7 @@ cpSync(firefox ? "manifest.firefox.json" : "manifest.json", "dist/manifest.json"
 cpSync("popup.html", "dist/popup.html");
 cpSync("options.html", "dist/options.html"); // wave-3 options_ui page; <link>s popup.css for the theme
 cpSync("popup.css", "dist/popup.css"); // the ported treasury theme; popup.html + options.html <link> it
+cpSync("theme-boot.js", "dist/theme-boot.js"); // H134 pre-paint theme stamp; <script>d by popup/options/connector (classic, not bundled — a deferred module flashes the wrong palette)
 cpSync("offscreen.html", "dist/offscreen.html"); // Chrome clipboard-clear backstop (E1-4); loads dist/offscreen.js
 cpSync("connector.html", "dist/connector.html"); // 0.17.0 biometric ceremony window; loads dist/connector.js + popup.css
 cpSync("icons", "dist/icons", { recursive: true }); // both manifests reference icons/icon{16,32,48,128}.png

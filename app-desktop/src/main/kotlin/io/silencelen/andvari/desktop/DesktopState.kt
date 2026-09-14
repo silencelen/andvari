@@ -14,6 +14,7 @@ import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.SaveOutcome
 import io.silencelen.andvari.core.client.ItemChangedException
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
+import io.silencelen.andvari.core.client.KdfReKeyCore
 import io.silencelen.andvari.core.client.KdfUpgrade
 import io.silencelen.andvari.core.client.MoveGesture
 import io.silencelen.andvari.core.client.VaultInfo
@@ -50,18 +51,14 @@ import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultItem
-import io.silencelen.andvari.core.crypto.Ad
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.CryptoException
-import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
-import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
-import io.silencelen.andvari.core.model.PasswordChangeRequest
 import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.TotpSetupResponse
@@ -112,12 +109,20 @@ sealed interface DesktopScreen {
 
 /**
  * §F.1 enrollment posture — the desktop mirror of web `enrollposture.ts` (deliberately LOCAL, not
- * :core: the decision is surface-specific). Web's rule: an in-person-QR `rfp` ⇒ required-affirm;
- * no rfp ⇒ WAIVED by default (frictionless, no admin backstop), or REQUIRED-TYPED when the member
- * declares they were handed a printed recovery SHEET. A desktop PASTE has no provenance (see the
- * Enroll invite-field note in Ui.kt — a pasted link's rfp is deliberately ignored), so the
- * rfp/required-affirm leg is unreachable here and only the two sheet-driven postures exist. The one
- * rule the model rests on holds regardless: a missing sheet NEVER auto-trusts the server key.
+ * :core: the INPUTS are surface-specific even though the rule is not). Web's rule: an in-person-QR
+ * `rfp` ⇒ required-affirm; no rfp ⇒ WAIVED by default (frictionless, no admin backstop), or
+ * REQUIRED-TYPED when the member declares they were handed a printed recovery SHEET.
+ *
+ * This function takes NO rfp parameter, and that absence is the ratified rule (audit H66), which is
+ * provenance-gated rather than surface-gated: an `rfp` may raise the ceremony only when the channel
+ * that delivered it is itself evidence of in-person handover (web's same-origin QR navigation is the
+ * only such channel). Desktop receives invites solely by paste/typing, which proves nothing about
+ * where the link came from, so the rfp is dropped at the invite field and the required-affirm leg is
+ * unreachable here — leaving exactly the two sheet-driven postures. The full statement of the rule is
+ * the DESIGN (R22): `docs/design/2026-07-15-multi-tenant-endpoints.md` §4.4's correction block and
+ * §4.1 rule 4; the Enroll invite-field note in Ui.kt walks through it for this surface. Keep this signature
+ * rfp-free: taking one would silently re-open the leg the rule closes. The polarity the whole model
+ * rests on holds either way: a missing sheet NEVER auto-trusts the server key.
  */
 enum class EnrollPosture { Waived, RequiredTyped }
 
@@ -3308,17 +3313,22 @@ class DesktopState(
     }
 
     /**
-     * F61 KDF upgrade (spec 01 §7, design 2026-07-10 §4) — the desktop mirror of Android's
-     * AndvariViewModel.runKdfUpgrade + KdfReKey.maybeUpgrade (app-android is not shared, so the
-     * best-effort re-key is inlined here over the core [KdfUpgrade.shouldUpgrade] gate + core crypto).
+     * F61 KDF upgrade (spec 01 §7, design 2026-07-10 §4) — the DESKTOP ADAPTER over core
+     * [KdfReKeyCore.maybeUpgrade], the same routine Android's `KdfReKey` adapts (audit H85). The
+     * body used to be inlined here, justified by a comment reading "app-android is not shared" —
+     * a reason the G39 hoist had already removed: `core/src/jvmShared` compiles into both the JVM
+     * and Android targets, so the re-key of the MASTER KEY is now written once and cannot drift
+     * one-sidedly.
+     *
      * After a full-master-password unlock WITH server connectivity, if the org policy raised the
      * Argon2id cost, transparently re-key with the password the client just verified (the SAME UVK,
      * new KDF params). DETACHED on [Dispatchers.Default] (two Argon2id derivations — never the UI
-     * thread) and best-effort: ANY failure is swallowed, the check re-runs at the next online
-     * full-password unlock. ZK-preserving — only the derived authKey + re-wrapped UVK cross the wire,
-     * via the existing `PUT /account/password`. Callers MUST have excluded the offline case and the
-     * pending recovery-capture gate; [mustChangePassword] (A5), a missing live policy, and the
-     * [KdfUpgrade.shouldUpgrade] fence are re-checked here. NEVER on quick-unlock (desktop has none).
+     * thread) and best-effort: ANY failure is swallowed by core, the check re-runs at the next
+     * online full-password unlock. ZK-preserving — only the derived authKey + re-wrapped UVK cross
+     * the wire, via the existing `PUT /account/password`. Callers MUST have excluded the offline
+     * case and the pending recovery-capture gate; [mustChangePassword] (A5), a missing live policy,
+     * and the [KdfUpgrade.shouldUpgrade] fence are re-checked here. NEVER on quick-unlock (desktop
+     * has none).
      */
     private fun runKdfUpgrade(userId: String, password: String, keys: io.silencelen.andvari.core.model.AccountKeys) {
         // A5: never silently re-key a live admin recovery temp password — the server's changePassword
@@ -3329,49 +3339,17 @@ class DesktopState(
         val pol = policy ?: return // live-fetch-only ([applyPolicy]) — never a stale persisted value
         val a = api ?: return
         val acct = account ?: return
+        // Core re-checks this — it is the SOLE gate and no adapter may be trusted to remember it.
+        // Kept here too purely so the overwhelmingly common no-upgrade case does not spawn a
+        // coroutine to do nothing; it is a call to the same pure function, so it cannot diverge.
         if (!KdfUpgrade.shouldUpgrade(keys.kdfParams, pol.kdfParams)) return
         scope.launch(Dispatchers.Default) {
-            runCatching {
-                val crypto = createCryptoProvider()
-                val newSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
-                val newParams = pol.kdfParams
-                // ZEROIZATION (H80, recheck R22 — Account.enroll's shape): the new MK lives only
-                // long enough to split into its two purposes, and the new wrapKey dies once the
-                // UVK is sealed under it. authNew is only ever the base64 string the request carries.
-                val mkNew = Keys.masterKey(crypto, password, newSalt, newParams)
-                val (authNew, wrapNew) = try {
-                    Bytes.toB64(Keys.authKey(crypto, mkNew)) to Keys.wrapKey(crypto, mkNew)
-                } finally {
-                    mkNew.fill(0)
-                }
-                // The UVK never changes across a KDF upgrade (spec 01 §4/§7) — re-wrap the SAME UVK
-                // under the new wrapKey. The egress copy is zeroed whatever happens.
-                val uvk = acct.uvkCopyForPlatformWrap()
-                val wrappedUvkNew = try {
-                    Envelope.sealB64(crypto, wrapNew, uvk, Ad.uvk(userId))
-                } finally {
-                    uvk.fill(0)
-                    wrapNew.fill(0)
-                }
-                val currentAuth = Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, crypto)
-                a.changePassword(
-                    PasswordChangeRequest(
-                        currentAuthKey = currentAuth,
-                        newAuthKey = authNew,
-                        newKdfSalt = Bytes.toB64(newSalt),
-                        newKdfParams = newParams,
-                        newWrappedUvk = wrappedUvkNew,
-                    ),
-                )
-                // design §4 step 3: keep the offline cache in step, or the next offline unlock derives
-                // with stale params and fails. Same gate as persistAccountKeys (org allowance AND
-                // per-device consent, §5.3) and the same per-origin home (§4.2).
-                if (durableCacheEnabled()) {
-                    store.saveAccountKeys(
-                        originKey(baseUrl), userId,
-                        keys.copy(kdfSalt = Bytes.toB64(newSalt), kdfParams = newParams, wrappedUvk = wrappedUvkNew),
-                    )
-                }
+            KdfReKeyCore.maybeUpgrade(a, userId, password, keys, pol, acct) { updated ->
+                // design §4 step 3: keep the offline cache in step, or the next offline unlock
+                // derives with stale params and fails. Same gate as persistAccountKeys (org
+                // allowance AND per-device consent, §5.3) and the same per-origin home (§4.2) —
+                // the desktop-side pieces core deliberately does not know about.
+                if (durableCacheEnabled()) store.saveAccountKeys(originKey(baseUrl), userId, updated)
             }
         }
     }

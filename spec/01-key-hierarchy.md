@@ -135,9 +135,36 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
   ad = "andvari/v1|uvk|{userId}")` (envelope format: spec 02 §2), alongside a copy of
   the kdfParams used, so `{kdfSalt, kdfParams, wrappedUvk}` is sufficient to unlock
   offline from a client cache.
+- **Unlock failure classification (NORMATIVE; audit H67, extended 2026-09-13 by R38 to the
+  sibling account-key blob).** A client unlocking with a password MUST separate the two ways
+  an ACCOUNT-KEY envelope open can fail. This applies to **both** server-supplied account-key
+  blobs — `wrappedUvk` (this section) and `encryptedIdentitySeed` (§5) — because they live in
+  the same account row and are damaged by the same events (a partial DB restore, a newer
+  server serving an envelope version an older client does not implement):
+  - **Structural refusals** — the value is not decodable base64url, or the decoded
+    envelope is shorter than the minimum, or carries an envelope version or AEAD alg the
+    client does not implement (spec 02 §2). These are decided from the blob's public
+    header **before** the wrap key is applied, so no password can affect them. A client
+    MUST NOT report them as wrong credentials, and MUST NOT invite a retry (the same
+    stored value fails identically forever); it MUST surface a distinct terminal
+    condition meaning "this account's stored key material is unreadable by this client".
+  - **AEAD tag failure** — the only outcome that is genuinely indistinguishable from a
+    wrong master password, and the only one a client may report as such.
+  Rationale: a corrupt account row (a partial DB restore) or a future envelope version
+  served to an older client otherwise reads as a forgotten password on every device, and
+  the member resets a working password and then spends their recovery secret.
+
+  On the **quick-unlock / UVK** path the same split holds and costs nothing: a wrong or
+  stale UVK can only ever produce the AEAD tag failure, which those clients already treat
+  as "this quick-unlock secret is invalid" (§8.1's failure table) — a structural refusal
+  there is likewise a damaged row, never a bad secret, and MUST be reported as such.
 
 ## 5. Identity keypair (X25519)
 
+- The `encryptedIdentitySeed` envelope is an account-key blob: §4's **unlock failure
+  classification** rule applies to it verbatim (structural refusal ⇒ the damaged-keys
+  terminal, never "wrong master password"; AEAD tag failure ⇒ the ordinary bad-secret
+  outcome).
 - `identitySeed` = 32 random bytes at enrollment;
   `(identityPub, identityPriv) = crypto_box_seed_keypair(identitySeed)`.
 - Server stores `identityPub` in plaintext (it is public) and

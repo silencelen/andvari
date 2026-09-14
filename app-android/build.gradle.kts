@@ -28,6 +28,19 @@ android {
         versionName = "0.26.3"
         // lazysodium-android bundles native .so — limit to the phone's ABI.
         ndk { abiFilters += "arm64-v8a" }
+        // H94: the instrumented vector run (src/androidTest) needs a runner. Nothing else in the
+        // module uses instrumentation, and declaring it costs the app APK nothing — the runner and
+        // the test classes live in the SEPARATE androidTest APK.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    sourceSets {
+        // H94: the instrumented crypto test is graded against spec/test-vectors — the SAME files
+        // core's jvmTest, web's vitest and the extension's node suite read. They are mounted as
+        // the TEST apk's assets straight out of the spec directory rather than copied in: a copy
+        // is a second corpus that drifts, and the whole point of the corpus is that every
+        // implementation answers to one set of bytes.
+        getByName("androidTest") { assets.srcDir(rootProject.file("spec/test-vectors")) }
     }
 
     signingConfigs {
@@ -90,4 +103,17 @@ dependencies {
     // testDebugUnitTest. Explicit JUnit4 provider: this is the first AGP module with unit tests,
     // and AGP's testDebugUnitTest runs JUnit4 natively (no useJUnitPlatform wiring needed).
     testImplementation(kotlin("test-junit"))
+    // H94 — the INSTRUMENTED vector run: the phone's crypto actual is lazysodium-android with its
+    // own bundled libsodium .so, and until this existed no test ever executed it; the JVM suites
+    // grade lazysodium-java over a different native binary and were standing in for it by
+    // assumption. Versions are literals here rather than catalog refs because gradle/libs.versions
+    // .toml is outside this module's remit in the 0.27.0 remediation — fold them in with H101's
+    // catalog read of the lazysodium-android coordinate.
+    androidTestImplementation(project(":core"))
+    androidTestImplementation(kotlin("test-junit"))
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    // The androidTest graph is smaller than the app's and would otherwise settle androidx.core a
+    // patch LOWER (1.13.0) than the app resolves (1.13.1) — two versions of the same library
+    // across the two APKs, for no reason anyone chose. Pin it to what the app actually ships.
+    androidTestImplementation("androidx.core:core:1.13.1")
 }

@@ -10,6 +10,7 @@ import { test } from "node:test";
 import { pslResolve, PSL_SNAPSHOT_HASH } from "./psl.ts";
 import { PSL_RULES_JOINED } from "./pslData.ts";
 import { classify, matches, normalizeHost, parseSavedUri, RESOLVE_UNKNOWN, type FieldKind } from "./urimatch.ts";
+import { isCvvNameOrId } from "./detect.ts";
 
 const vectorsDir = fileURLToPath(new URL("../../spec/test-vectors/", import.meta.url));
 const v = JSON.parse(readFileSync(vectorsDir + "urimatch.json", "utf-8"));
@@ -82,4 +83,47 @@ test("urimatch-idna.json match vectors — Unicode saved host ↔ punycode page 
     const actual = saved !== null && matches(saved, { webHost: c.webHost ?? null, packageName: c.packageName }, pslResolve);
     assert.equal(actual, c.expected, `${c.savedUri} @ ${c.webHost}`);
   }
+});
+
+// H65 (2026-09-13 audit, spec 02 §3.1 amendment) — twin of the web block in
+// web/src/vault/urimatch.test.ts. The shared classify vectors grade the one-time-code override
+// itself; these pin the edges that cannot live in a card-free shared section because core answers
+// them with a CARD kind this 3-kind engine has no word for. (R37: the masked-CVV blocks are
+// NON-regression pins — they stay green with the override reverted, by design; the shared vectors
+// and the mid-token/2FA blocks are the revert detectors.) On THIS engine the carve-out is
+// load-bearing: classify() is what collect() gates on, so a masked CVV dropping to "none" would
+// vanish from the field list before buildCardForm's demoteCsc ever saw it.
+test("H65: a masked CVV stays `password` so the form-level demoteCsc can still reach it", () => {
+  assert.equal(classify({ htmlType: "password", htmlNameOrId: "securityCode" }), "password");
+  assert.equal(classify({ htmlType: "password", htmlNameOrId: "security_code" }), "password");
+  assert.equal(classify({ htmlType: "password", htmlNameOrId: "cvv_code" }), "password");
+  assert.equal(classify({ htmlType: "password", htmlNameOrId: "card_verification_code" }), "password");
+});
+
+// R35: camelCase spellings — the case the lower-cased probe could not see. Cross-asserted
+// against detect.ts's own CVV recogniser, which tokenizes exactly as core does: wherever
+// isCvvNameOrId() says a name is a CSC, a password-typed field of that name must survive
+// classify() as "password", or collect() drops it and the form-level demoteCsc never sees it.
+// That is the invariant, rather than a hand-list of spellings that goes stale the moment
+// someone adds a keyword to one side.
+test("H65/R35: every name detect.ts reads as a CVV survives classify() on a password input", () => {
+  for (const name of [
+    "cardSecurityCode", "cvvCode", "cvcCode", "cardVerificationCode", "creditCardSecurityCode",
+    "CVVCode", "securityCode", "security_code", "cvv_code", "card_verification_code", "cvv", "cvv2",
+  ]) {
+    assert.equal(isCvvNameOrId(name), true, `detect.ts must read ${name} as a CVV`);
+    assert.equal(classify({ htmlType: "password", htmlNameOrId: name }), "password", name);
+  }
+});
+
+test("H65: the carve-out refuses mid-token hits, as core's whole-token-run CSC matcher does", () => {
+  assert.equal(classify({ htmlType: "password", htmlNameOrId: "cscode" }), "none");
+  assert.equal(classify({ htmlType: "password", htmlNameOrId: "mysecuritycode" }), "none");
+  assert.equal(classify({ htmlType: "password", htmlNameOrId: "cvvcode" }), "none");
+});
+
+test("H65: the two-factor names are override-only — NAME_NEGATIVE is not widened", () => {
+  assert.equal(classify({ htmlType: "email", htmlNameOrId: "2fa_recovery_email" }), "username");
+  assert.equal(classify({ htmlType: "text", htmlNameOrId: "mfa_username" }), "username");
+  assert.equal(classify({ htmlType: "password", htmlNameOrId: "mfa" }), "none");
 });

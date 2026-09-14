@@ -256,6 +256,46 @@ const NEGATIVE_HINTS = new Set(["smsotpcode", "otpcode", "onetimecode", "cardnum
 const NAME_POSITIVE_USER = ["user", "email", "login", "account", "userid"];
 const NAME_POSITIVE_PASS = ["pass", "pwd", "passwd"];
 const NAME_NEGATIVE = ["search", "otp", "captcha", "code", "query", "phone"];
+// H65 (spec 02 §3.1, 2026-09-13 amendment) — two-factor name spellings that carry no otp/code
+// token, read ONLY by the one-time-code override in classify() below. Deliberately NOT folded
+// into NAME_NEGATIVE, which also gates the frozen USERNAME legs (an `email` type, the InputType
+// email variations, the bare name/id fallbacks): widening that list would flip verdicts on
+// fields this amendment never looked at. Core FieldClassifier.TWO_FACTOR_NAMES twin.
+const TWO_FACTOR_NAMES = ["2fa", "mfa", "twofactor"];
+// H65 — the ONE exception to the override: a masked CVV box. Core resolves this by ORDER (its
+// step-2 CSC demotion runs before the override and returns CC_CSC); this 3-kind engine has no
+// card verdict to return, so it must instead LEAVE the field on "password", which is exactly
+// what keeps detect.ts's form-level demoteCsc able to reach a `<input type=password
+// name=securityCode>` on a checkout — dropping it to "none" would delete the field from
+// collect() and silently break masked-CVV card fill. The regex mirrors core's whole-token-RUN
+// CSC_DEMOTION over the only spellings that can also carry a NAME_NEGATIVE token: a leading
+// boundary and a trailing non-letter keep `cscode`/`cvvcode`/`mysecuritycode` OUT (core's
+// tokenMatch refuses those mid-token hits too, so both engines send them to "none"). Web has no
+// card path of its own; it carries the rule verbatim because the two urimatch.ts copies are
+// behaviour twins.
+//
+// R32-class correction (R35): the regex is tested against a CAMEL-AWARE probe, never against the
+// lower-cased name. Lowercasing destroys exactly the boundary core's tokenizer splits on, so
+// `cardSecurityCode`, `cvvCode` and `cardVerificationCode` — the ordinary JS/React spellings —
+// found no separator, failed the carve-out, and were demoted to "none" by the `code` token while
+// core returned CC_CSC for the same field. collect() then dropped the field and masked-CVV card
+// fill silently broke on those checkouts, in direct contradiction of the spec text this override
+// shipped with. [cscProbe] re-inserts the boundaries (camelCase both ways, plus the letter↔digit
+// split core also makes) so the two engines agree token-for-token; the mid-token refusals above
+// are untouched, because a name with no boundary to restore comes back unchanged.
+const CSC_NAME_RX = /(^|[^a-z0-9])(cvv|cvc|csc|security[^a-z0-9]?code|card[^a-z0-9]?verification)([^a-z]|$)/;
+
+/** The raw name with core's tokenizer boundaries re-inserted as spaces, then lower-cased —
+ *  "cardSecurityCode" → "card security code", "CVVCode" → "cvv code", "cvv2" → "cvv 2". Feed
+ *  this to [CSC_NAME_RX], never the already-lower-cased nameId (R35). */
+function cscProbe(raw: string): string {
+  return raw
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2") // fooBar
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2") // CVVCode
+    .replace(/([a-zA-Z])([0-9])/g, "$1 $2") // cvv2
+    .replace(/([0-9])([a-zA-Z])/g, "$1 $2") // 3dsecure
+    .toLowerCase();
+}
 
 export function classify(s: FieldSignal): FieldKind {
   const hints = (s.hints ?? []).map((h) => h.toLowerCase().replace(/[_-]/g, ""));
@@ -268,6 +308,19 @@ export function classify(s: FieldSignal): FieldKind {
 
   switch ((s.htmlType ?? "").toLowerCase()) {
     case "password":
+      // H65 (2026-09-13 audit; spec 02 §3.1 amendment) — the one-time-code override. F11 kept the
+      // vault password out of a one-time-code box only when the page said so with an autofill
+      // hint (NEGATIVE_HINTS above). A site that masks its 2FA entry as
+      // `<input type="password" name="otp">` and omits `autocomplete` fell through to this rule,
+      // so the account password was offered into the code box — and because the extension's
+      // capture engine reads back whatever the fill target holds on submit, six digits could
+      // then overwrite the stored credential. The field's own name carrying a NAME_NEGATIVE
+      // token is the page saying what the hint would have said, so it outranks the type. Same
+      // scope and the same NONE verdict as the hinted box, in lockstep with core's step 2b and
+      // pinned by the urimatch.json classify vectors. Accepted, one-directional cost: a genuine
+      // password box named `…code` (`passcode`) stops being OFFERED a fill — never the reverse —
+      // and the engine already refused to read that name as a login field on a text input.
+      if ((negativeName || TWO_FACTOR_NAMES.some((k) => nameId.includes(k))) && !CSC_NAME_RX.test(cscProbe(s.htmlNameOrId ?? ""))) return "none";
       return "password";
     case "email":
       if (!negativeName) return "username";

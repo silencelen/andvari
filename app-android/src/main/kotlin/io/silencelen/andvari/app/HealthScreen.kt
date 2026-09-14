@@ -118,6 +118,7 @@ fun HealthScreen(vm: AndvariViewModel, ui: UiState) {
             ui.healthMessage?.let { NoticeBar(it, vm::dismissHealthMessage, announce = false) }
             HealthAnnouncer(ui.healthMessage)
             ui.healthOfferDelete?.let { GoneOfferRow(vm, ui, it) }
+            ui.healthOfferBad?.let { BadOfferRow(vm, ui, it) }
 
             HealthTiles(summary, dupes, staleSummary, breachByItem, ui.breachScanIncomplete || breachStale, rows)
 
@@ -182,6 +183,42 @@ private fun GoneOfferRow(vm: AndvariViewModel, ui: UiState, itemId: String) {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = { vm.removeGoneItem(itemId) }, enabled = !ui.busy) { Text("Move to Deleted items") }
                 TextButton(onClick = vm::keepGoneItem) { Text("Keep it") }
+            }
+        }
+    }
+}
+
+/**
+ * H117 (design 2026-08-22 §4: "Wrong password → bad → offers: open the item / generate a new
+ * password") — the follow-up the four-verdict table was ratified for and no client ever built.
+ *
+ * A member who answered "Refused" was advanced to the next login with nothing offered: the design
+ * promised each verdict maps to a different next action, and this one mapped to none. Same shape
+ * as [GoneOfferRow] and the same rules — it NAMES the login (the run has already moved on, so "it"
+ * would point at whatever is now on screen), and it is an offer, never an action taken for the
+ * user.
+ *
+ * **Neither button changes a password.** "Generate a new password" opens the item's EDITOR with a
+ * freshly generated, revealed password sitting in an UNSAVED field — web's `generateOnOpen` twin
+ * (R15: the same label used to mean two different things across the clients). A client that
+ * quietly rotated a credential off the back of a verdict would be doing the one thing this whole
+ * surface refuses to do (it cannot know the site accepted the new value, and it would strand the
+ * member on a password no login page has), so the value stays behind the editor's own Save. The
+ * words are web's and the design's; the destination is the phone's.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BadOfferRow(vm: AndvariViewModel, ui: UiState, itemId: String) {
+    val name = vm.item(itemId)?.doc?.name?.takeIf { it.isNotBlank() } ?: "(untitled)"
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            // H117 (R14): byte-identical to the web twin (Staleness.tsx `badSentence`). Web is the
+            // source of truth this row declared; the three button labels below already match.
+            Text("“$name” is marked as having the wrong password. Change it?", style = MaterialTheme.typography.bodySmall)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = { vm.repairBadItem(itemId, edit = false) }, enabled = !ui.busy) { Text("Open the item") }
+                TextButton(onClick = { vm.repairBadItem(itemId, edit = true) }, enabled = !ui.busy) { Text("Generate a new password") }
+                TextButton(onClick = vm::keepBadOffer) { Text("Not now") }
             }
         }
     }
@@ -634,6 +671,7 @@ private fun VerifyRunDialog(vm: AndvariViewModel, ui: UiState) {
                 // H27: the offer must be visible HERE too — this dialog is modal and the run has
                 // already moved on, so the Scaffold copy underneath is hidden until the run ends.
                 ui.healthOfferDelete?.let { GoneOfferRow(vm, ui, it) }
+                ui.healthOfferBad?.let { BadOfferRow(vm, ui, it) }
                 Text(row.name, style = MaterialTheme.typography.titleSmall)
                 Text(
                     row.username.ifEmpty { "(no username)" },

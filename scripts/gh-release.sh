@@ -2,7 +2,7 @@
 # Assemble and publish the GitHub release for one andvari version.
 #
 #   scripts/gh-release.sh --version 0.26.3 --ext-version 0.26.0 \
-#       [--stage DIR] [--msi FILE] [--apk FILE] [--extra FILE]… \
+#       [--stage DIR] [--msi FILE] [--apk FILE | --no-android] [--extra FILE]… \
 #       [--notes-file FILE] [--draft] [--dry-run]
 #
 # Why this exists
@@ -41,6 +41,23 @@
 #     asset set and its detached signature carries a timestamp, so it is re-uploaded (clobbered)
 #     on every run; only real artifacts get the byte-identity refusal.
 #
+# --no-android: saying "no APK this time" OUT LOUD (audit H105)
+# --------------------------------------------------------------
+# devstore (the phone's installer) pulls the newest release matching the app's tagPrefix and
+# hard-requires a `latest.json` asset. A release that deliberately ships no Android build — 0.26.3
+# was a desktop-only fix — therefore trips the same "no latest.json — SKIPPING" warning that exists
+# to catch a FORGOTTEN latest.json, every 15 minutes, forever. An alarm that fires for a correct
+# state is not an alarm any more: the one failure mode that can silently strand a release becomes
+# indistinguishable from routine noise.
+#
+# So the release says which one it is. --no-android writes the marker line
+#
+#     android: none (deliberate)
+#
+# into the release body, and devstore-sync (netplan scripts/active/devstore-sync.sh) reads it: the
+# app is left at its current APK with an INFO line and no warning. Without the marker the warning
+# stands, which is the point — the flag is an assertion by a human, not a default.
+#
 # What it does NOT do: build anything, sign the deb, sign the update manifest, or touch
 # /downloads. Those have their own scripts and, for the Windows half, their own host.
 #
@@ -50,8 +67,12 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-VERSION="" EXT_VERSION="" STAGE="" MSI="" APK="" NOTES="" DRY=0 DRAFT=0
+VERSION="" EXT_VERSION="" STAGE="" MSI="" APK="" NOTES="" DRY=0 DRAFT=0 NO_ANDROID=0
 EXTRA=()
+
+# The exact line devstore-sync greps for. Both sides must agree on it literally; if it ever
+# changes, change it in netplan scripts/active/devstore-sync.sh in the same commit.
+ANDROID_NONE_MARKER='android: none (deliberate)'
 
 usage() { awk 'NR>1 && /^#/{sub(/^# ?/,"");print;next} NR>1{exit}' "$0"; }
 die() { echo "gh-release: ERROR: $*" >&2; exit 1; }
@@ -64,6 +85,7 @@ while [ $# -gt 0 ]; do
     --stage)           STAGE="${2:?--stage needs a value}"; shift 2 ;;
     --msi)             MSI="${2:?--msi needs a value}"; shift 2 ;;
     --apk)             APK="${2:?--apk needs a value}"; shift 2 ;;
+    --no-android)      NO_ANDROID=1; shift ;;
     --extra)           EXTRA+=("${2:?--extra needs a value}"); shift 2 ;;
     --notes-file)      NOTES="${2:?--notes-file needs a value}"; shift 2 ;;
     --draft)           DRAFT=1; shift ;;
@@ -74,6 +96,9 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$VERSION" ] || die "--version <fleet version, e.g. 0.26.3> is required"
+# The two are contradictory assertions about the same release, and the marker would outlive the
+# APK in the body. Refuse rather than pick one.
+[ -n "$APK" ] && [ "$NO_ANDROID" = 1 ] && die "--apk and --no-android are mutually exclusive — this release either ships an Android build or deliberately does not"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 TAG="v$VERSION"
 STAGE="${STAGE:-$REPO_DIR/build/gh-release/$VERSION}"
@@ -154,6 +179,14 @@ fi
 
 for f in ${EXTRA+"${EXTRA[@]}"}; do add "$(stage "$f" "$(basename "$f")")"; done
 
+# Neither an APK nor a deliberate opt-out: this is the ambiguous case the marker exists to remove.
+# Not fatal — plenty of releases are cut before the APK is built — but say it here, where it can
+# still be answered, rather than leaving devstore to warn about it every 15 minutes.
+if [ -z "$APK" ] && [ "$NO_ANDROID" != 1 ]; then
+  note "WARNING: no --apk and no --no-android. devstore will keep warning that $TAG has no latest.json,"
+  note "         which is the alarm for a FORGOTTEN Android build. If that is deliberate, pass --no-android."
+fi
+
 # ---------------------------------------------------------------------------
 # 2. SHA256SUMS over exactly the asset set — then sign it
 # ---------------------------------------------------------------------------
@@ -182,6 +215,7 @@ fi
 if [ "$DRY" = 1 ]; then
   note "--dry-run: staged and hashed, nothing signed, nothing uploaded. Planned $TAG assets:"
   (cd "$STAGE" && printf '  %s\n' "${ASSETS[@]}" "$SUMS" "$SUMS.asc") >&2
+  [ "$NO_ANDROID" = 1 ] && note "--dry-run: would append to the $TAG release body: $ANDROID_NONE_MARKER"
   exit 0
 fi
 
@@ -222,6 +256,29 @@ else
   [ "$DRAFT" = 1 ] && create_args+=(--draft)
   if [ -n "$NOTES" ]; then create_args+=(--notes-file "$NOTES"); else create_args+=(--generate-notes); fi
   gh "${create_args[@]}"
+fi
+
+# The marker goes in as soon as the release exists, not after the upload: an upload that fails
+# half-way still leaves a published release, and one without the marker is one devstore warns about.
+# Idempotent — a re-run finds the line already there and leaves the body alone (so the operator's
+# own notes are never rewritten twice).
+if [ "$NO_ANDROID" = 1 ]; then
+  body="$(gh release view "$TAG" --json body --jq '.body // ""')" || die "could not read the $TAG release body"
+  # Anchored, case-insensitive, whole-line: the marker is a machine token, and matching it loosely
+  # would let a sentence *about* the marker in someone's release notes count as the marker itself.
+  # [[:space:]] covers the CR of GitHub's CRLF bodies.
+  if printf '%s\n' "$body" | grep -qiE '^[[:space:]]*android:[[:space:]]*none[[:space:]]*\(deliberate\)[[:space:]]*$'; then
+    note "release body already carries: $ANDROID_NONE_MARKER"
+  else
+    if [ -n "$body" ]; then
+      printf '%s\n\n%s\n' "$body" "$ANDROID_NONE_MARKER" > "$STAGE/.release-body.md"
+    else
+      printf '%s\n' "$ANDROID_NONE_MARKER" > "$STAGE/.release-body.md"
+    fi
+    gh release edit "$TAG" --notes-file "$STAGE/.release-body.md" >/dev/null \
+      || die "could not write the Android marker into the $TAG release body — devstore will warn about this release until it is there"
+    note "release body now carries: $ANDROID_NONE_MARKER"
+  fi
 fi
 
 (cd "$STAGE" && gh release upload "$TAG" "${ASSETS[@]}" --clobber)

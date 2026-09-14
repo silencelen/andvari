@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { SIGN_OUT_QUESTION, signOutQuestion } from "./SignOutLink";
 
 /**
  * bug-web--0 (polish audit 2026-07-27): the revocation HELPER is unit-tested in session.test.ts,
@@ -103,29 +104,67 @@ describe("Welcome's two sign-out teardowns — the paths App.signOut cannot reac
  * click of "Sign out / use a different account", a control that reads like an account switcher.
  * Offline (train, outage, server down) that leaves the member unable to open their vault at all,
  * with no dialog and no warning. Both natives already confirmed unconditionally and named the
- * cost; the web is the twin that didn't, so it now reuses their sentence verbatim.
+ * cost; the web is the twin that didn't, so it reuses their sentence verbatim.
+ *
+ * H135 (audit 2026-09-13) kept that gate and moved the ASKING out of App.signOut into the control
+ * itself: `window.confirm` was the last native dialog in an app whose every other destructive
+ * action arms an inline two-step confirm (the Editor's own comment: "house style — no native
+ * dialogs"), it is unthemed and tab-blocking, and it cannot reach the persistent Announcer a
+ * screen-reader user is listening to. So the gate now lives in SignOutLink, which BOTH user
+ * sign-out seams (the Unlock card and the recovery-capture gate) render; App.signOut is the
+ * unconditional wipe choke point. These pin all three legs — the probes, the sentence, and the
+ * fact that nothing raises a dialog any more.
  */
-describe("App.signOut — a durable offline copy is itself a thing to lose", () => {
-  const signOut = closure(appTsx, "signOut", "lockChannelRef");
+describe("H135 — the sign-out confirm is the inline arm, and App.signOut raises no dialog", () => {
+  const signOutLink = readFileSync(here("./SignOutLink.tsx"), "utf8");
 
-  it("confirms on unsynced work OR a standing offline copy, not on unsynced work alone", () => {
-    expect(signOut).toContain("const durableCopy = uid ? (await offlineCopyStamp(uid)) !== null : false;");
-    expect(signOut).toContain('if (kind === "user" && (unsynced > 0 || durableCopy))');
-    expect(signOut, "the unsynced-only gate is the audited defect").not.toContain('if (kind === "user" && unsynced > 0)');
+  it("App.tsx CALLS no window.confirm (prose may still name the retired dialog)", () => {
+    expect(appTsx).not.toMatch(/window\.confirm\s*\(/);
+  });
+
+  it("both user sign-out seams go through SignOutLink — nothing calls onForget()/onSignOut raw", () => {
+    expect(welcomeTsx).toContain("<SignOutLink userId={session.userId} onSignOut={() => onForget()} />");
+    expect(welcomeTsx).toContain("<SignOutLink userId={account.userId} onSignOut={onSignOut} />");
+    // The old bare links are gone: a raw link would wipe with no confirm at all now.
+    expect(welcomeTsx).not.toMatch(/className="link" onClick=\{\(\) => onForget\(\)\}/);
+    expect(welcomeTsx).not.toMatch(/className="link" onClick=\{onSignOut\}/);
+  });
+
+  it("the armed label is the extension popup's, so both browser surfaces read identically", () => {
+    expect(signOutLink).toContain('"Sign out? Click again to confirm"');
+  });
+
+  it("confirms on unsynced work OR a standing offline copy, not on unsynced work alone", async () => {
+    // No queue, but a durable copy on the device: still a thing to lose ⇒ still asks.
+    expect(await signOutQuestion("u1", { queued: async () => 0, durable: async () => true })).toBe(SIGN_OUT_QUESTION);
+    // Neither ⇒ one click, no confirm (the pre-F07 behaviour, kept for the device with nothing at stake).
+    expect(await signOutQuestion("u1", { queued: async () => 0, durable: async () => false })).toBeNull();
   });
 
   it("uses the natives' sentence, so all three clients state the same cost", () => {
-    expect(signOut).toContain(
+    expect(SIGN_OUT_QUESTION).toBe(
       "Sign out of this device? This removes the vault copy and any unsynced changes from this device. You'll need your master password — and a connection to your server — to sign back in.",
     );
   });
 
-  it("still names the unsynced count when there is one (breaker #9 — the queue dies with the cache)", () => {
-    expect(signOut).toContain('unsynced > 0 ? ` ${unsynced} unsynced ${unsynced === 1 ? "change" : "changes"} will be permanently lost.` : ""');
+  it("still names the unsynced count when there is one (breaker #9 — the queue dies with the cache)", async () => {
+    expect(await signOutQuestion("u1", { queued: async () => 1, durable: async () => false })).toContain(
+      "1 unsynced change will be permanently lost.",
+    );
+    expect(await signOutQuestion("u1", { queued: async () => 4, durable: async () => true })).toContain(
+      "4 unsynced changes will be permanently lost.",
+    );
   });
 
-  it("only a USER sign-out can be blocked — expired/revoked cannot ask (spec 02 §8)", () => {
-    expect(signOut).toContain('kind === "user" &&');
-    expect(signOut).toContain("if (!ok) return;");
+  it("a FAILED probe asks rather than wipes — not knowing is a reason to confirm", async () => {
+    const boom = async (): Promise<never> => {
+      throw new Error("idb closed");
+    };
+    expect(await signOutQuestion("u1", { queued: boom, durable: async () => false })).toBe(SIGN_OUT_QUESTION);
+    expect(await signOutQuestion("u1", { queued: async () => 0, durable: boom })).toBe(SIGN_OUT_QUESTION);
+  });
+
+  it("no session id ⇒ nothing persisted to lose ⇒ no question", async () => {
+    expect(await signOutQuestion(null)).toBeNull();
   });
 });

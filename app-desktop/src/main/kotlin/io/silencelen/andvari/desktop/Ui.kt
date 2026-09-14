@@ -244,15 +244,17 @@ fun DesktopApp(state: DesktopState) {
                     Spacer(Modifier.height(16.dp))
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                 }
-                is DesktopScreen.Welcome -> Welcome(state)
-                is DesktopScreen.Unlock -> Unlock(state, s.email)
+                // H129/R18: the pre-unlock family is capped at AUTH_MAX_WIDTH; the list
+                // surfaces below keep the full Cut I 760dp, which they genuinely use.
+                is DesktopScreen.Welcome -> AuthPane { Welcome(state) }
+                is DesktopScreen.Unlock -> AuthPane { Unlock(state, s.email) }
                 is DesktopScreen.Vault -> Vault(state)
                 is DesktopScreen.Sharing -> SharingScreen(state)
                 is DesktopScreen.Settings -> SettingsScreen(state)
                 is DesktopScreen.Trash -> TrashScreen(state)
-                is DesktopScreen.RecoverySetup -> RecoverySetupScreen(state)
-                is DesktopScreen.RecoveryCapture -> RecoveryCaptureScreen(state)
-                is DesktopScreen.Recover -> RecoverScreen(state)
+                is DesktopScreen.RecoverySetup -> AuthPane { RecoverySetupScreen(state) }
+                is DesktopScreen.RecoveryCapture -> AuthPane { RecoveryCaptureScreen(state) }
+                is DesktopScreen.Recover -> AuthPane { RecoverScreen(state) }
             }
         }
     }
@@ -376,6 +378,36 @@ private fun CacheConsentDialog(state: DesktopState) {
 @Composable
 private fun Center(content: @Composable ColumnScope.() -> Unit) =
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally, content = content)
+
+/**
+ * The width the PRE-UNLOCK family is allowed to grow to (audit 2026-09-13 H129; desktop half
+ * landed by R18).
+ *
+ * **480dp is the house cap for the auth family, and it is ONE number across the natives** — the
+ * same literal Android declares at `MainActivity.AUTH_MAX_WIDTH`, cross-pinned by
+ * `SurfacePinsTest` so the two cannot drift into "the desktop number" and "the phone number". Web
+ * caps its auth card at 440px: deliberately the same design intent in a medium whose text fields
+ * carry less chrome than a Compose `OutlinedTextField`, not a third opinion.
+ *
+ * The Cut I column above already bounds the whole tree at 760dp (the web `.wrap`), which is right
+ * for the LIST surfaces — the vault, sharing, settings, trash all use the width. It is far too
+ * wide for a sign-in: a maximized window rendered the email, master-password and recovery-phrase
+ * fields as ~760dp lines of input with a button under them, and the recovery type-back — already
+ * a transcription task — as one very long line to track across. Same complaint, same fix, same
+ * number as the phone.
+ *
+ * Applied at the screen-dispatch site rather than inside each screen, so a new pre-unlock screen
+ * inherits the cap by being routed, not by remembering to opt in.
+ */
+private val AUTH_MAX_WIDTH = 480.dp
+
+/** Centring shell for the pre-unlock family (H129/R18): caps the pane at [AUTH_MAX_WIDTH] inside
+ *  the Cut I 760dp column and keeps it top-centred, matching Android's `AuthColumn`. */
+@Composable
+private fun AuthPane(content: @Composable () -> Unit) =
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        Box(Modifier.widthIn(max = AUTH_MAX_WIDTH).fillMaxSize()) { content() }
+    }
 
 /**
  * UI-audit #25: the brand (ᛅ) and empty-hoard (ᛝ) marks as PATH GEOMETRY (the web Sigil.tsx
@@ -601,8 +633,9 @@ private fun Enroll(state: DesktopState) {
     var shortFp by remember { mutableStateOf("") }
     // §F.1 posture (the waived toggle, [enrollPosture] — web Enroll parity): no sheet ⇒ WAIVED by
     // default (per-member piece only, no admin backstop), sheet declared ⇒ the typed-sheet
-    // ceremony seals org escrow. Desktop has no rfp channel (a paste has no provenance — see the
-    // invite-field note below), so web's required-affirm leg doesn't exist here.
+    // ceremony seals org escrow. Desktop reaches an invite only by paste/typing, and under the
+    // provenance-gated rfp rule (H66 — stated in full at the invite field below) a paste can never
+    // carry provenance, so web's required-affirm leg is unreachable here by construction.
     var hasSheet by remember { mutableStateOf(false) }
     var waivedAck by remember { mutableStateOf(false) }
     val posture = enrollPosture(hasSheet)
@@ -663,10 +696,36 @@ private fun Enroll(state: DesktopState) {
         // anywhere it likes and still can't pass enrollment without the printed sheet matching that
         // server's recovery key.
         //
-        // payload.rfp is deliberately IGNORED here: a present rfp is honored ONLY via the
-        // in-person QR affirmation (design §F.1 — web gates it on the page origin; a
-        // server-composed emailed link is contractually rfp-free), and a desktop PASTE has no
-        // provenance — so this path always falls back to the fail-safe typed-sheet ceremony.
+        // payload.rfp is deliberately DROPPED here — EnrollLink.parse returns it and this call
+        // site reads only t/e/o. This is the ratified cross-surface rule (audit H66), and it is
+        // PROVENANCE-GATED, not surface-gated:
+        //
+        //   An enroll link's `rfp` may raise the ceremony to required-affirm ONLY when the CHANNEL
+        //   that delivered it is itself evidence of in-person handover. Web has exactly one such
+        //   channel: the admin's QR scanned off their screen, which lands as a navigation to web's
+        //   OWN origin (design §F.1 gates it on the page origin, and a server-composed emailed
+        //   invite link is contractually rfp-free, so nothing else can reach that leg). A pasted or
+        //   typed link carries NO provenance whatsoever — it may have arrived by chat, mail, or a
+        //   forwarded screenshot — so every paste-fed invite field MUST drop the rfp and fall back
+        //   to the fail-safe sheet postures. That is this field, and it is equally the Android
+        //   invite field (MainActivity's `InviteProvenance.Typed` / `affirmableRfp`), which
+        //   applies the identical rule to the identical input.
+        //
+        // R22: the STATEMENT OF RECORD is the design, not this comment — design
+        // 2026-07-15-multi-tenant-endpoints §4.4's correction block (ratified 2026-09-13) and
+        // §4.1 rule 4, echoed in 2026-07-15-admin-fingerprint-confirm §1.3. This note used to
+        // claim the Android twin cited it; no such citation was ever written, so the pin below
+        // was protecting a cross-reference that did not exist. Both clients now point at the
+        // doc, which is the one place a rule binding on every surface can actually live.
+        //
+        // Two reasons it is the safe polarity and not merely the conservative one. (1) Dropping the
+        // rfp can only ever ADD friction: the fallback is the typed-sheet ceremony (or the explicit
+        // no-backstop waiver), and a missing rfp never auto-trusts the server's recovery key —
+        // Account.enroll re-checks the served key against whatever the member affirmed. Honoring a
+        // pasted rfp, by contrast, would let a hostile link choose its own ceremony. (2) The affirm
+        // copy asserts a fact the app would not have: it tells the member this code came from the
+        // invite they scanned in person. A paste cannot know that, so honoring it makes the UI lie
+        // to the one person whose in-person memory is the whole security argument.
         Field("Invite code or link", invite, { raw ->
             val p = EnrollLink.parse(raw)
             if (p != null) {
@@ -3751,6 +3810,11 @@ private fun Primary(text: String, enabled: Boolean, busy: Boolean, onClick: () -
     }
 }
 
+/** Byte formatter. KNOWN DIVERGENCE from the Android twin (`MainActivity.kt` humanSize), recorded
+ *  by R46 and deliberately left for this cut: this table runs to TB, Android's caps at GB, so a
+ *  2 TB total reads "2.0 TB" here and "2048.0 GB" there. Out of H85's scope by the same argument
+ *  the hoist rested on — that row was about a MASTER-KEY routine whose one-sided edit is invisible
+ *  until it locks someone out; a byte formatter fails visibly. See the audit's §8 closure. */
 private fun humanSize(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"
     val units = arrayOf("KB", "MB", "GB", "TB")

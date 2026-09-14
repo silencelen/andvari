@@ -9,7 +9,7 @@ import { clampClipboardClearSeconds } from "./policyclamp";
 import { safeSiteHref } from "./safeurl";
 import { Staleness } from "./Staleness";
 import { stalenessRows, stalenessSummary } from "./staleness";
-import { EmptySigil } from "./Sigil";
+import { Empty } from "./Empty";
 import { STRENGTH_LABELS, estimateStrength } from "./strength";
 import { ViewHeader } from "./ViewHeader";
 
@@ -32,7 +32,9 @@ interface Props {
   client: ApiClient;
   /** CR-08: keys the in-session breach cache per-account so a shared browser never cross-contaminates. */
   userId: string;
-  onOpenItem: (itemId: string) => void;
+  /** Jump to an item; `generate` (H117) opens its editor with a fresh password — the Staleness
+   *  run's post-"Wrong password" offer, threaded through to Vault.goToItem. */
+  onOpenItem: (itemId: string, opts?: { generate?: boolean }) => void;
   /** Duplicate merge (2026-08-12): the guided merge writes through the store… */
   store: VaultStore;
   /** …and this is Vault's refresh() — re-derives `items` after the merge lands (TrashView's
@@ -288,16 +290,14 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
         dupes.length > 0 ? (
           <Duplicates clusters={dupes} items={items} roleFor={roleFor} store={store} vaultNameById={vaultNameById} onOpenItem={onOpenItem} onChanged={onChanged} />
         ) : (
-          <div className="empty">
-            <div className="sigil"><EmptySigil /></div>
+          <Empty>
             <p>No duplicate entries — every account is saved exactly once.</p>
-          </div>
+          </Empty>
         )
       ) : rows.length === 0 ? (
-        <div className="empty">
-          <div className="sigil"><EmptySigil /></div>
+        <Empty>
           <p>No logins with passwords yet — nothing to assess.</p>
-        </div>
+        </Empty>
       ) : (
         <div className="table-scroll">
           <table className="table">
@@ -403,7 +403,7 @@ export function clearBreachCache(): void {
  *  the confirm names both the vault kept and the vault emptied — a merge moves real items out of
  *  a real place, and this screen used to name neither. Cross-vault and view-only clusters carry
  *  a refusal from planMerge instead of a Merge button. */
-function Duplicates({ clusters, items, roleFor, store, vaultNameById, onOpenItem, onChanged }: { clusters: DuplicateCluster[]; items: VaultItem[]; roleFor: RoleFor; store: VaultStore; vaultNameById: Map<string, string>; onOpenItem: (itemId: string) => void; onChanged: () => void }) {
+function Duplicates({ clusters, items, roleFor, store, vaultNameById, onOpenItem, onChanged }: { clusters: DuplicateCluster[]; items: VaultItem[]; roleFor: RoleFor; store: VaultStore; vaultNameById: Map<string, string>; onOpenItem: (itemId: string, opts?: { generate?: boolean }) => void; onChanged: () => void }) {
   const [confirmId, setConfirmId] = useState<string | null>(null); // survivorId of the open confirm
   const [mergingId, setMergingId] = useState<string | null>(null);
   // The differs-resolution confirm: which cluster (by signature) and which member the user

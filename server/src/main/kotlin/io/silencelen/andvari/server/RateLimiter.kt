@@ -5,15 +5,21 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Minimal fixed-window limiter for the auth endpoints (spec 03 §8). Not distributed
  * — one process, one server; that's the whole deployment.
+ *
+ * [clock] is the time source, defaulting to the real one. It exists so a test can pin
+ * window expiry to an EXPLICIT advance instead of a wall-clock sleep (H97): the old
+ * "four calls must land inside one 50 ms window" shape went red on a JIT-cold or loaded
+ * host — a false red over no regression at all, which is how a manual gate gets re-run
+ * until it passes. Production passes nothing and gets [now] verbatim.
  */
-class RateLimiter {
+class RateLimiter(private val clock: () -> Long = ::now) {
     private class Window(var windowStart: Long, var count: Int, val windowMs: Long)
     private val windows = ConcurrentHashMap<String, Window>()
     private val callsSincePrune = java.util.concurrent.atomic.AtomicInteger()
 
     fun allow(key: String, limit: Int, windowMs: Long): Boolean {
         prune()
-        val now = now()
+        val now = clock()
         val w = windows.compute(key) { _, existing ->
             if (existing == null || now - existing.windowStart >= windowMs) Window(now, 0, windowMs) else existing
         }!!
@@ -37,7 +43,7 @@ class RateLimiter {
     private fun prune() {
         if (callsSincePrune.incrementAndGet() < PRUNE_EVERY) return
         callsSincePrune.set(0)
-        val now = now()
+        val now = clock()
         windows.entries.removeIf { now - it.value.windowStart >= it.value.windowMs }
     }
 
@@ -63,12 +69,25 @@ class EmailBackoff(private val threshold: Int = 5, private val capMs: Long = 900
     private val states = ConcurrentHashMap<String, State>()
     private val failsSincePrune = java.util.concurrent.atomic.AtomicInteger()
 
+    /**
+     * The time source. A settable seam rather than a constructor arg because the instance a test
+     * needs to steer is the one [Service] built for itself, reached through `services.service
+     * .loginBackoff` — the same "mutable so tests can force it" shape [AttachmentStore.orphanTtlMs]
+     * already uses.
+     *
+     * Why it exists (H97): the endpoint test for the 5th-failure lock used to `Thread.sleep(1200)`
+     * past a real 1 s lock — a 200 ms margin over wall clock, which a GC pause or a loaded build
+     * host can eat, turning a correct server red. A test now ADVANCES this instead and the
+     * assertion is about the lock, not about the scheduler. Never set in production.
+     */
+    @Volatile internal var clock: () -> Long = ::now
+
     private fun key(email: String) = email.trim().lowercase()
 
     /** True while the key is locked out — check BEFORE any verifier work (it's the cheap gate). */
     fun blocked(email: String): Boolean {
         val s = states[key(email)] ?: return false
-        synchronized(s) { return now() < s.lockedUntil }
+        synchronized(s) { return clock() < s.lockedUntil }
     }
 
     /** Record a failed attempt; from the [threshold]th consecutive failure on, arm/extend the lock. */
@@ -77,10 +96,10 @@ class EmailBackoff(private val threshold: Int = 5, private val capMs: Long = 900
         val s = states.computeIfAbsent(key(email)) { State() }
         synchronized(s) {
             s.failures++
-            s.touchedAt = now()
+            s.touchedAt = clock()
             if (s.failures >= threshold) {
                 val exp = (s.failures - threshold).coerceAtMost(20) // 2^20 s already ≫ the cap
-                s.lockedUntil = now() + (1000L shl exp).coerceAtMost(capMs)
+                s.lockedUntil = clock() + (1000L shl exp).coerceAtMost(capMs)
             }
         }
     }
@@ -97,15 +116,15 @@ class EmailBackoff(private val threshold: Int = 5, private val capMs: Long = 900
     private fun prune() {
         if (states.size < PRUNE_AT || failsSincePrune.incrementAndGet() < PRUNE_EVERY) return
         failsSincePrune.set(0)
-        val cutoff = now() - capMs
-        states.entries.removeIf { e -> synchronized(e.value) { e.value.touchedAt < cutoff && now() >= e.value.lockedUntil } }
+        val cutoff = clock() - capMs
+        states.entries.removeIf { e -> synchronized(e.value) { e.value.touchedAt < cutoff && clock() >= e.value.lockedUntil } }
         // Hard ceiling (review 2026-07-16 D2): the idle-sweep above only evicts idle-AND-unlocked
         // entries, so a sustained flood of UNIQUE fresh emails (every entry recent) could still grow the
         // map unbounded. Above HARD_CAP, evict the OLDEST-touched UNLOCKED entries — NEVER a currently
         // locked (actively-attacked) victim, so eviction can never become a lock-bypass. Amortized with
         // the sweep; the upstream per-IP 5/min + Argon2 dummy-verify cost already throttle the fill rate.
         if (states.size <= HARD_CAP) return
-        val n = now()
+        val n = clock()
         states.entries
             .mapNotNull { e -> synchronized(e.value) { if (n >= e.value.lockedUntil) e.key to e.value.touchedAt else null } }
             .sortedBy { it.second }

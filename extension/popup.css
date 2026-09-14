@@ -69,6 +69,67 @@
   }
 }
 
+/* H134 (audit 2026-09-13): user theme override, the twin of web styles.css's UI-audit #26 blocks.
+   theme-boot.js / theme.ts stamp <html data-theme="light|dark"> from the persisted per-browser
+   preference (Options → Appearance); no attribute = Auto and the two scheme blocks above rule.
+   Each block is a BYTE-TWIN of its source block above — theme.test.ts asserts both, so a one-sided
+   palette edit can never ship a forced theme that has drifted from Auto — and both must stay BELOW
+   those two, because every parser over this file (contrast.test.ts here, token-lockstep.test.ts in
+   the web tree) keys on the FIRST `:root` and the FIRST light-scheme media block. Specificity
+   (0,2,0) beats the (0,1,0) scheme blocks in either OS mode, so a forced theme wins with no
+   !important. `color-scheme` rides along (the popup's scheme blocks carry it) — theme-boot also
+   pins it inline, this keeps the CSS honest on its own. */
+:root[data-theme="light"] {
+  --bg: #f4efe4;
+  --bg-raised: #fbf8f1;
+  --bg-input: #fff;
+  --edge: #e0d8c5;
+  --edge-strong: #c9bfa2;
+  --ink: #2c2517;
+  --ink-dim: #6b6047;
+  --ink-faint: #786c50;
+  --gold: #9a7420;
+  --gold-bright: #7d5e14;
+  --gold-deep: #c9a94a;
+  --link: #7d5e14;
+  --gold-text: #7d5e14;
+  --focus: #7d5e14;
+  --gold-hi: #8f6b16;
+  --gold-lo: #7d5e14;
+  --danger: #b3402c;
+  --ok: #4f7a3a;
+  --btn-ink: #fdf9f0;
+  --glyph-hi: #e9d9a6;
+  --glyph-lo: #d8bd7a;
+  --shadow: 0 18px 50px -24px rgba(70, 55, 20, 0.35);
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg: #14120e;
+  --bg-raised: #1e1b15;
+  --bg-input: #262119;
+  --edge: #38311f;
+  --edge-strong: #4a3f28;
+  --ink: #ede4d0;
+  --ink-dim: #a79c85;
+  --ink-faint: #8d8370;
+  --gold: #d0a94a;
+  --gold-bright: #e8c66a;
+  --gold-deep: #8a6d28;
+  --link: #d0a94a;
+  --gold-text: #d0a94a;
+  --focus: #d0a94a;
+  --gold-hi: #e8c66a;
+  --gold-lo: #d0a94a;
+  --danger: #d97f6f;
+  --ok: #7fa86a;
+  --btn-ink: #1a1509;
+  --glyph-hi: #8a6d28;
+  --glyph-lo: #2a2110;
+  --shadow: 0 18px 50px -20px rgba(0, 0, 0, 0.7);
+  color-scheme: dark;
+}
+
 * { box-sizing: border-box; }
 
 /* The views toggle via the hidden attribute; without this, any rule that sets
@@ -137,10 +198,10 @@ body {
 .host-grant-cta {
   display: block; width: 100%; text-align: left; font: inherit; font-size: 12.5px; font-weight: 600;
   color: var(--gold-text); cursor: pointer;
-  background: rgba(208, 169, 74, 0.12); border: 0; border-bottom: 1px solid var(--edge);
+  background: color-mix(in oklab, var(--gold) 12%, transparent); border: 0; border-bottom: 1px solid var(--edge);
   padding: 10px 16px;
 }
-.host-grant-cta:hover { background: rgba(208, 169, 74, 0.2); }
+.host-grant-cta:hover { background: color-mix(in oklab, var(--gold) 20%, transparent); }
 
 /* ---- locked view: mini auth card (web card-hero idiom) ---- */
 .locked { padding: 20px 16px 16px; }
@@ -195,9 +256,25 @@ button.ghost:disabled:hover { color: var(--ink-dim); border-color: var(--edge); 
 .item .fill-btn:disabled:hover, .detail .fill-btn:disabled:hover { color: var(--link); background: transparent; border-color: var(--edge-strong); }
 input:disabled { opacity: 0.6; cursor: not-allowed; }
 
+/* H134 (audit 2026-09-13): every tinted PLATE in this file is now mixed from the palette token it
+   belongs to, not from a frozen rgba() of the DARK palette. The literals these replace were written
+   before the tokens existed and never re-derived, so they survived Cut A's danger lift (#cf6b5a →
+   dark #d97f6f / light #b3402c) and painted BOTH themes with the retired dark hue: in light mode the
+   error plate was a pink-salmon wash and border around brick-red text, and the info plates carried
+   the dark gold instead of the light one. `color-mix(… <token> N%, transparent)` premultiplies, so
+   it yields exactly "token at N% alpha" — the same composite the literals were hand-computed for in
+   dark mode, and the RIGHT one in light. Deliberately NOT converted: the decorative warm glows (the
+   body vignette, the sigil text/drop shadows, the focus box-shadow wash) — those are a fixed light-
+   catching-gold effect rather than a semantic surface, and they read the same in both themes.
+   contrast.test.ts composites these plates from the tokens and gates them at AA in BOTH themes. */
 .msg { font-size: 12.5px; padding: 8px 10px; border-radius: var(--radius); margin-top: 10px; }
-.msg.err { background: rgba(207, 107, 90, 0.12); color: var(--danger); border: 1px solid rgba(207, 107, 90, 0.3); }
-.msg.info { background: rgba(208, 169, 74, 0.1); color: var(--gold-bright); border: 1px solid rgba(208, 169, 74, 0.25); }
+.msg.err { background: color-mix(in oklab, var(--danger) 12%, transparent); color: var(--danger); border: 1px solid color-mix(in oklab, var(--danger) 30%, transparent); }
+.msg.info { background: color-mix(in oklab, var(--gold) 10%, transparent); color: var(--gold-bright); border: 1px solid color-mix(in oklab, var(--gold) 25%, transparent); }
+/* Moved here from options.html's inline <style> (H134): the options page had its OWN .msg block —
+   a success plate the popup lacked, and an .msg.info that was neutral ink-dim on --bg-input while
+   this file's .msg.info is gold, i.e. one class with two looks inside one extension. One .msg
+   vocabulary now, shared by the popup, the options page and the connector window. */
+.msg.ok { background: color-mix(in oklab, var(--ok) 12%, transparent); color: var(--ok); border: 1px solid color-mix(in oklab, var(--ok) 40%, transparent); }
 /* The message strip is shared by both views (unlock errors, ping results, copy failures). */
 #msg { margin: 2px 16px 12px; }
 
@@ -206,7 +283,7 @@ input:disabled { opacity: 0.6; cursor: not-allowed; }
 .update-banner {
   margin: 10px 16px 0; padding: 8px 10px; border-radius: var(--radius);
   font-size: 12.5px; color: var(--gold-bright);
-  background: rgba(208, 169, 74, 0.1); border: 1px solid rgba(208, 169, 74, 0.25);
+  background: color-mix(in oklab, var(--gold) 10%, transparent); border: 1px solid color-mix(in oklab, var(--gold) 25%, transparent);
 }
 .update-link { color: var(--gold-bright); font-weight: 600; text-decoration: underline; white-space: nowrap; }
 .update-link:hover { color: var(--link); }
@@ -224,9 +301,9 @@ input:disabled { opacity: 0.6; cursor: not-allowed; }
   margin: 10px 16px 0; padding: 8px 10px; border-radius: var(--radius);
   font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; transition: 0.15s;
   color: var(--danger);
-  background: rgba(207, 107, 90, 0.12); border: 1px solid rgba(207, 107, 90, 0.3);
+  background: color-mix(in oklab, var(--danger) 12%, transparent); border: 1px solid color-mix(in oklab, var(--danger) 30%, transparent);
 }
-.must-change-strip:hover { background: rgba(207, 107, 90, 0.18); border-color: var(--danger); }
+.must-change-strip:hover { background: color-mix(in oklab, var(--danger) 18%, transparent); border-color: var(--danger); }
 
 /* ---- "Unsealing…" — honest KDF progress (the ~6 s Argon2id), indeterminate gold sweep ---- */
 .kdf { margin-top: 12px; }
@@ -331,7 +408,7 @@ input:disabled { opacity: 0.6; cursor: not-allowed; }
 .item .totp-chip, .detail .totp-chip {
   flex: none; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
   font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.05em; color: var(--gold-bright);
-  background: rgba(208, 169, 74, 0.08); border: 1px solid var(--edge-strong);
+  background: color-mix(in oklab, var(--gold) 8%, transparent); border: 1px solid var(--edge-strong);
   /* a11y-webext--9 (WCAG 2.5.8): 3px padding left this ~23px tall. The pill keeps its shape;
      only the vertical padding grows, so the chip reads identically and clears 24px. */
   border-radius: 999px; padding: 4px 8px; min-height: 24px; transition: 0.14s;
@@ -398,7 +475,7 @@ input:disabled { opacity: 0.6; cursor: not-allowed; }
 /* One-time post-unlock offer — a soft gold card, distinct from the red must-change strip. */
 .qu-offer {
   margin: 0 0 12px; padding: 10px 12px; border-radius: var(--radius);
-  background: rgba(208, 169, 74, 0.1); border: 1px solid rgba(208, 169, 74, 0.32);
+  background: color-mix(in oklab, var(--gold) 10%, transparent); border: 1px solid color-mix(in oklab, var(--gold) 32%, transparent);
 }
 .qu-offer p { margin: 0 0 8px; font-size: 12.5px; line-height: 1.4; color: var(--ink); }
 .qu-acts { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -406,3 +483,20 @@ input:disabled { opacity: 0.6; cursor: not-allowed; }
 /* Settings on/off row lives in the footer; the toggle is a plain gold link. */
 .qu-settings { justify-content: space-between; }
 .qu-settings #qu-settings-state { font-size: 12px; }
+
+/* H134 (audit 2026-09-13): the global reduced-motion honour, the twin of web styles.css's block.
+   The popup only froze the ONE keyframe animation it owns (the KDF sweep, above) — every
+   TRANSITION kept running: the row hover, the fill-pill gradient swap, the hover-revealed copy
+   actions, the input focus ring, the primary button. A user who has asked their OS for less motion
+   still got all of it in the popup while the web app honoured them, and the popup is the surface
+   they open dozens of times a day. 0.01ms rather than 0: the transition still FIRES, so
+   transitionend listeners and any state that rides one keep working — it just cannot be seen.
+   The .kdf rule above stays: it does something this cannot, parking the indeterminate sweep at a
+   visible resting position instead of leaving an empty bar during the ~6 s unlock. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

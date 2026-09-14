@@ -117,6 +117,10 @@ fun AutofillStatusScreen(vm: AndvariViewModel, ui: UiState) {
                                 // fires — arm the lock-on-background exemption or enabling
                                 // autofill returns the user to a locked app with this flow
                                 // gone (the openSite idiom, HealthScreen).
+                                // H57: on the OEMs where it is a DIALOG instead, no lifecycle
+                                // event fires and nothing here can consume or clear the arm —
+                                // which is why the arm self-expires (ExternalExcursion.ARM_TTL_MS)
+                                // rather than waiting for a stop that never comes.
                                 ExternalExcursion.begin()
                                 val ok = runCatching {
                                     ctx.startActivity(

@@ -12,6 +12,7 @@ import {
   KdfPolicyError,
   boxKeypairFromSeed,
   deriveMasterKey,
+  envelopeStructuralRefusal,
   fromB64,
   open,
   seal,
@@ -192,6 +193,22 @@ class IdentityMismatchError extends Error {
   constructor() {
     super("Server identity key mismatch — possible tampering. Do not proceed; contact your admin.");
     this.name = "IdentityMismatchError";
+  }
+}
+
+/** Local sentinel for audit H67 (core `VaultKeyDamagedException` / web `VaultKeyDamagedError`
+ *  parity): the server-stored `wrappedUvk` is not a well-formed envelope at all — undecodable
+ *  base64url, too short, or an envelope version/AEAD alg this build does not know. Those refusals
+ *  are decided from the blob's PUBLIC header, BEFORE the wrap key is applied, so no password could
+ *  have made them pass; mapping them to "bad_credentials" (or the "unknown" retry terminal, which
+ *  is where they landed before H67) tells a member with a corrupt or newer-version account row to
+ *  reset a password that works. A distinct class so the mapper can carry it to the popup as
+ *  "keys_damaged" — terminal copy, never wrong-password and never "try again". The message is
+ *  debug-only detail; the popup renders the canonical sentence from errors.ts. */
+class VaultKeyDamagedError extends Error {
+  constructor(detail: string) {
+    super(`account key material is unreadable: ${detail}`);
+    this.name = "VaultKeyDamagedError";
   }
 }
 
@@ -1981,9 +1998,13 @@ function buildVaultKeys(
   uvk: Uint8Array,
   identity: { publicKey: Uint8Array; privateKey: Uint8Array },
   userId: string,
-): { vaultKeys: Map<string, Uint8Array>; vaultRoles: Map<string, string> } {
+): { vaultKeys: Map<string, Uint8Array>; vaultRoles: Map<string, string>; memberGranted: Set<string> } {
   const vaultKeys = new Map<string, Uint8Array>();
   const vaultRoles = new Map<string, string>();
+  // H64: which VKs arrived by MEMBER grant. See pickPersonalVaultId — a sealedVk is anonymous
+  // (anyone with our identity pubkey can mint one) and the key inside it is by construction one
+  // somebody else already holds, so it can never be evidence that a vault is ours alone.
+  const memberGranted = new Set<string>();
   for (const g of sync.grants) {
     try {
       let vk: Uint8Array;
@@ -2000,6 +2021,7 @@ function buildVaultKeys(
         continue;
       }
       vaultKeys.set(g.vaultId, vk);
+      if (g.sealedVk) memberGranted.add(g.vaultId);
       // G21: record the grant's role beside the key — "reader" means the server denies every push
       // to this vault, so the write paths must never target its items.
       vaultRoles.set(g.vaultId, g.role);
@@ -2007,7 +2029,28 @@ function buildVaultKeys(
       /* wrong key / not ours — skip */
     }
   }
-  return { vaultKeys, vaultRoles };
+  return { vaultKeys, vaultRoles, memberGranted };
+}
+
+/**
+ * The personal vault (save target, and the VK the usage ledger is keyed from — crypto.ts
+ * `usageKey`). Core/web parity, including the H64 refusal:
+ *
+ * `Vault.type` is a SERVER plaintext column bound into no AD (spec 02 §4), and nothing else the
+ * client holds says which vault is its own. A hostile server could withhold the real personal row
+ * and relabel a SHARED vault the user is merely a member of; `usageKey = HKDF(VK,
+ * "andvari/v1|usage")` would then be computable by every other member of that vault, and the AD
+ * `andvari/v1|usage|{userId}` is public — so a colluding housemate could read the user's per-item
+ * behavioural log, exactly what the single-blob ledger design (spec 02 §8.2) exists to prevent.
+ * A personal vault is always wrapped under our own UVK, never delivered as a member grant, so
+ * skipping member-granted candidates costs an honest account nothing.
+ *
+ * Fail-closed: "" means no personal vault, which the ledger paths already treat as "no ledger"
+ * and which makes a save with no explicit vault fail loudly rather than file the user's new
+ * logins into somebody else's shared vault. Core twin: `Account.setPersonalVault`.
+ */
+function pickPersonalVaultId(sync: SyncResponse, vaultKeys: Map<string, Uint8Array>, memberGranted: Set<string>): string {
+  return sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId) && !memberGranted.has(v.vaultId))?.vaultId ?? "";
 }
 
 /** Policy fetch — a failed fetch must never mean "no idle lock at all" (web resolveAutoLockSeconds
@@ -2153,9 +2196,32 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
   if (gen !== redeemGen || session) return { ok: false, code: "aborted" }; // superseded before we touched `api`
   api.setTokens(s.accessToken, s.refreshToken);
   try {
-    const uvk = open(wk, fromB64(s.accountKeys.wrappedUvk), adUvk(s.userId));
-    // Identity keypair — for member (shared-vault) grants sealed to us.
-    const identity = boxKeypairFromSeed(open(uvk, fromB64(s.accountKeys.encryptedIdentitySeed), adIdkey(s.userId)));
+    // H67: STRUCTURE first, secret second — a wrappedUvk that isn't a well-formed envelope is a
+    // damaged/foreign account row, not a credentials failure (see VaultKeyDamagedError).
+    let wrapped: Uint8Array;
+    try {
+      wrapped = fromB64(s.accountKeys.wrappedUvk);
+    } catch {
+      throw new VaultKeyDamagedError("wrappedUvk is not valid base64url");
+    }
+    const wrappedRefusal = envelopeStructuralRefusal(wrapped);
+    if (wrappedRefusal !== null) throw new VaultKeyDamagedError(`wrappedUvk: ${wrappedRefusal}`);
+    const uvk = open(wk, wrapped, adUvk(s.userId));
+    // Identity keypair — for member (shared-vault) grants sealed to us. R38: the seed blob gets
+    // the SAME structure-first gate as wrappedUvk above — it is the sibling account-key blob in
+    // the same row, damaged by the same partial restore or the same too-new envelope version, and
+    // an ungated failure here would have landed on the wrong-credentials sentence one line after
+    // H67 stopped saying it. A wrong wk cannot reach this line, and a wrong UVK could only fail
+    // the AEAD tag, never the public header — so nothing but a damaged row trips it.
+    let seedEnvelope: Uint8Array;
+    try {
+      seedEnvelope = fromB64(s.accountKeys.encryptedIdentitySeed);
+    } catch {
+      throw new VaultKeyDamagedError("encryptedIdentitySeed is not valid base64url");
+    }
+    const seedRefusal = envelopeStructuralRefusal(seedEnvelope);
+    if (seedRefusal !== null) throw new VaultKeyDamagedError(`encryptedIdentitySeed: ${seedRefusal}`);
+    const identity = boxKeypairFromSeed(open(uvk, seedEnvelope, adIdkey(s.userId)));
     verifyServerIdentity(identity.publicKey, s.accountKeys.identityPub); // before ANY vault material is synced/persisted
 
     const sync = await api.sync(0);
@@ -2163,10 +2229,9 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
       api.setTokens(null, null); // a switch/lock landed during sync — drop the tokens, install nothing
       return { ok: false, code: "aborted" };
     }
-    const { vaultKeys, vaultRoles } = buildVaultKeys(sync, uvk, identity, s.userId);
+    const { vaultKeys, vaultRoles, memberGranted } = buildVaultKeys(sync, uvk, identity, s.userId);
     const items = decryptItems(sync, vaultKeys);
-    // The personal vault (save target) = the type="personal" vault we hold a key for (web store.ts parity).
-    const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
+    const personalVaultId = pickPersonalVaultId(sync, vaultKeys, memberGranted);
     // uvk RETAINED in memory (breaker B1) so enroll can wrap it; provenance PASSWORD + a fresh
     // lastFullUnlockAt stamp — the only place that mints `now` (breaker A4).
     session = {
@@ -2258,6 +2323,7 @@ async function unlockWithMapping(email: string, password: string): Promise<Res<"
 function mapUnlockError(e: unknown): UnlockCode {
   if (e instanceof KdfPolicyError) return "kdf_policy"; // H1 (spec 05 T1): server tried to weaken/DoS the KDF
   if (e instanceof IdentityMismatchError) return "identity_mismatch";
+  if (e instanceof VaultKeyDamagedError) return "keys_damaged"; // H67: damaged/foreign key blob — terminal, never wrong-password
   if (e instanceof ApiError) {
     if (e.code === "upgrade_required") return "upgrade_required"; // 426 min-version pin (any status)
     // Restricted session (server §2.6 row 4): a totpRequired instance let an un-enrolled user's
@@ -2409,9 +2475,9 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
           const sync = await api.sync(0);
           await fetchPolicyInto(); // breaker B6: re-fetch autoLockSeconds — done BEFORE the final owns-check so
           if (gen !== redeemGen) return { ok: false, code: "aborted" }; // no network await follows the session build
-          const { vaultKeys, vaultRoles } = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
+          const { vaultKeys, vaultRoles, memberGranted } = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
           const items = decryptItems(sync, vaultKeys);
-          const personalVaultId = sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId))?.vaultId ?? "";
+          const personalVaultId = pickPersonalVaultId(sync, vaultKeys, memberGranted);
           // Provenance QUICK + the COPIED stamp (breaker A4). mustChangePassword is false by construction —
           // a rescue would have revoked the session and the forced refresh above would have 401'd (breaker B6).
           session = {

@@ -153,6 +153,19 @@ class MainActivity : FragmentActivity() {
         // WorkManager, no schedule outlives the foreground.
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                // H57 / R17: drop any unused excursion arm the moment this ACTIVITY is resumed
+                // again. The process-level ON_START clear below only fires after a process
+                // ON_STOP, and the OEM case H57 is about — the autofill-service picker rendered
+                // as a dialog over a still-STARTED activity — fires neither, so an unconsumed arm
+                // survived on the TTL alone. At the owner's five-minute window that is long
+                // enough to reach the user's next genuine backgrounding (Home, app switch, screen
+                // off) and exempt it: a single-shot defeat of lock-on-background that nothing in
+                // the app can observe. This is the complementary clear, not a replacement for the
+                // TTL: it is a NO-OP for every excursion that really stopped the process (ON_STOP
+                // already consumed the arm) and drops exactly the leaked ones. Ordering is safe
+                // because begin() is only ever called from an already-RESUMED click handler, so
+                // this block cannot re-enter between the arm and the intent leaving.
+                ExternalExcursion.clear()
                 while (true) {
                     vm.onForeground()
                     delay(FOREGROUND_SYNC_MS)
@@ -485,6 +498,56 @@ private fun UnopenableVaultWarning(count: Int) {
     }
 }
 
+/**
+ * The width the pre-unlock family is allowed to grow to (audit 2026-09-13 H129).
+ *
+ * Web caps its auth card at 440px inside a centring shell and desktop bounds its whole tree at
+ * 760dp (its Cut I note: "a maximized window stretched every field … edge-to-edge"). Android had
+ * no cap at all: every screen before the vault opens was a `fillMaxSize().padding(24.dp)` column
+ * of `fillMaxWidth` fields, and the manifest handles the fold posture in-process, so the SAME
+ * composable renders on a 6.2" cover screen and a ~7.6" inner display. Unfolded, the sign-in and
+ * master-password fields became a single ~800dp line of input with the button under it, and the
+ * recovery-phrase type-back — already a transcription task — became one very long line to track
+ * across. Legible, but visibly un-designed beside the web card, on the owner's own device.
+ *
+ * 480dp (owner decision), a little wider than web's 440px because a Compose text field carries its
+ * own inset and the phrase field wants the room. Applied to the PRE-UNLOCK family only: the vault
+ * list, health and settings are list surfaces that genuinely use a tablet's width.
+ *
+ * **This is the house cap for BOTH natives** (R18): desktop declares the same 480dp literal at
+ * `Ui.kt`'s `AUTH_MAX_WIDTH` and applies it with the same top-centred shell, and
+ * `app-desktop`'s `SurfacePinsTest` reads THIS declaration to keep the two numbers identical.
+ * Changing it here without changing desktop turns "the auth cap" back into two opinions.
+ */
+private val AUTH_MAX_WIDTH = 480.dp
+
+/**
+ * The shared shell for that family (H129) — a full-bleed, scrollable, top-CENTRED column capped at
+ * [AUTH_MAX_WIDTH].
+ *
+ * Scrollable is not optional here and predates the cap (Cut F, v2 #5): a centred fixed column left
+ * the Unlock button unreachable with the IME open in landscape, split-screen and half-fold. The
+ * min-height constraint survives the scroll modifier, which is what still lets
+ * [verticalArrangement] centre a short form vertically inside the viewport.
+ */
+@Composable
+private fun AuthColumn(
+    verticalArrangement: Arrangement.Vertical = Arrangement.Top,
+    horizontalAlignment: Alignment.Horizontal = Alignment.Start,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        Column(
+            Modifier.widthIn(max = AUTH_MAX_WIDTH).fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+            verticalArrangement = verticalArrangement,
+            horizontalAlignment = horizontalAlignment,
+            content = content,
+        )
+    }
+}
+
 @Composable
 private fun Centered(content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally, content = content)
@@ -601,7 +664,7 @@ fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
     // Pending ⇒ force the enroll surface (sign-in is locked out); a remembered Enroll selection
     // can't outlive a closed flip.
     val effTab = if (pending != null) 1 else if (showEnroll) tab else 0
-    Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
+    AuthColumn(horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(40.dp))
         Sigil()
         Spacer(Modifier.height(24.dp))
@@ -725,10 +788,7 @@ private fun PendingSwitchNotice(vm: AndvariViewModel, pending: PendingSwitchUi) 
  */
 @Composable
 private fun PendingReconcileScreen(vm: AndvariViewModel, ui: UiState, marker: PendingServer) {
-    Column(
-        Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
+    AuthColumn(horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(40.dp))
         Sigil()
         Spacer(Modifier.height(24.dp))
@@ -839,9 +899,13 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
     // (first 16 of a served fingerprint), so rememberSaveable is fold-safe AND safe.
     var shortFp by rememberSaveable { mutableStateOf("") }
     // §F.1 posture (client-derived, web parity): WAIVED by default (frictionless, no admin
-    // backstop), required-typed when the member declares a printed sheet, and — new in Wave-3
-    // (design §4.4) — required-affirm when a pasted enroll LINK carries an in-person-QR rfp. All
-    // flags are non-secret and fold-safe.
+    // backstop), required-typed when the member declares a printed sheet. required-affirm is
+    // NOT reachable from this field: a pasted link's rfp is discarded (see the H66 note below;
+    // design 2026-07-15-multi-tenant-endpoints §4.4's correction block, ratified 2026-09-13).
+    // The posture is anchored on a human act, so the affirm leg lights up only from a channel
+    // that carries provenance — an OS-verified /enroll app-link or an in-app QR scan, neither
+    // shipped. R19 corrected this comment, which still described the Wave-3 rule the same cut
+    // reversed fifteen lines below. All flags are non-secret and fold-safe.
     var hasSheet by rememberSaveable { mutableStateOf(false) }
     var waivedAck by rememberSaveable { mutableStateOf(false) }
     var affirmed by rememberSaveable { mutableStateOf(false) }
@@ -850,7 +914,18 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
     // never mutated, so a foreign→pending flip re-parses the same text as same-origin).
     val parsed = parseInviteField(invite, ui.baseUrl)
     val effToken = parsed.token
-    val linkRfp = (parsed as? InviteFieldParse.Link)?.rfp
+    // H66 (owner decision: align Android with desktop). The invite field is written by exactly one
+    // channel today — the keyboard and the clipboard — and a paste has no provenance, so a pasted
+    // link's rfp is IGNORED and enrollment falls back to the typed-sheet / waived ceremony, which
+    // is desktop's rule verbatim. It is not the rfp that is distrusted (the server re-asserts it
+    // anyway) but the sentence the affirm leg puts on screen: "you scanned this in person" is a
+    // claim about how a link reached a human, and a text field cannot know it. When an /enroll app
+    // link or an in-app QR scanner lands, THAT channel sets [InviteProvenance] and the affirm leg
+    // lights up for real. Statement of record (R22): design 2026-07-15-multi-tenant-endpoints
+    // §4.4's correction block + §4.1 rule 4; the desktop twin walks the same rule at Ui.kt's
+    // Enroll invite-field note.
+    val inviteProvenance = InviteProvenance.Typed
+    val linkRfp = affirmableRfp((parsed as? InviteFieldParse.Link)?.rfp, inviteProvenance)
     val linkEmail = (parsed as? InviteFieldParse.Link)?.email
     // A link whose origin differs from the current server must clear the Trust Gate BEFORE enrolling.
     val foreign = (parsed as? InviteFieldParse.Link)?.takeIf { it.gate }
@@ -912,11 +987,21 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
             // rfp + a one-tap eyeball affirmation; waived renders the stark no-backstop ack;
             // required-typed keeps the N2 §3/B4 four honest states, in web's pinned order.
             when {
-                // (−1) required-affirm (§4.4): a pasted link carried an in-person-QR rfp. Display it
-                // grouped and take a one-tap affirmation — no typing (the scanned QR is the anchor).
+                // (−1) required-affirm (§4.4): an enroll link arrived through a channel that
+                // CARRIES PROVENANCE and stamped an in-person-QR rfp. Display it grouped and take
+                // a one-tap affirmation — no typing (the scanned QR is the anchor). Unreachable
+                // today: the invite field is the only intake and its provenance is Typed, so
+                // affirmableRfp() returns null (R19 — this comment used to say "a pasted link",
+                // the exact rule H66 reversed). Kept, and kept correct, because the app-link /
+                // QR-scan channel restores it without touching this branch.
                 posture == EnrollPosture.RequiredAffirm -> {
                     Spacer(Modifier.height(8.dp))
-                    Text("Recovery check — this code came from the invite you scanned in person. Confirm it matches the fingerprint on your admin's screen.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    // H66: the app states what it KNOWS (a code came with the invite) and asks the
+                    // human for the part only they can know (where it came from). The old sentence
+                    // asserted "the invite you scanned in person" on the app's own authority —
+                    // false for any invite that arrived by chat, and this leg is unreachable from
+                    // a typed field now precisely because that assertion could not be made good.
+                    Text("Recovery check — this code came with your invite. Only confirm it if you scanned it in person from your admin's screen; if the invite reached you any other way, stop and ask your admin.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(groupHex(linkRfp ?: ""), style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.secondary)
                     if (fp.isNotEmpty() && !affirmMatches) {
                         Text("doesn't match this server's recovery key — if you scanned it correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
@@ -1127,7 +1212,7 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
     // write-it-down. Visual only: displayForm's contract says confirmMatches strips
     // whitespace, so a grouped type-back still passes; Copy carries the bare phrase.
     val grouped = remember(phrase) { phrase.chunked(4).joinToString(" ") }
-    Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState())) {
+    AuthColumn {
         Text("Save your recovery phrase", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
         if (ui.recoveryReplacedNotice) {
@@ -1208,7 +1293,7 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
  */
 @Composable
 private fun RecoveryCaptureScreen(vm: AndvariViewModel, ui: UiState) {
-    Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState())) {
+    AuthColumn {
         Text("Finish protecting your account", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
         Text(
@@ -1323,10 +1408,7 @@ fun UnlockScreen(vm: AndvariViewModel, ui: UiState, email: String) {
     }
     // Cut F (v2 #5): scrollable — a centered fixed column left the Unlock button unreachable
     // with the IME open in landscape / split-screen / half-fold.
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
-        verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
+    AuthColumn(verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Sigil()
         Spacer(Modifier.height(8.dp))
         Text(email, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1427,10 +1509,7 @@ private fun RecoverScreen(vm: AndvariViewModel, ui: UiState, sessionEmail: Strin
     val commit = {
         if (Strength.meetsMasterPasswordFloor(password) && password == confirm && !ui.busy) vm.recoverCommit(password)
     }
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
-        verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
+    AuthColumn(verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         SigilMark(BrandSigil, 46.dp)
         Spacer(Modifier.height(4.dp))
         Text("Recover your account", style = MaterialTheme.typography.titleLarge)
@@ -2249,6 +2328,23 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     val crypto = remember { createCryptoProvider() }
     val scope = rememberCoroutineScope()
 
+    // H117 (R15): arrived from the verification run's "Generate a new password" offer — fill and
+    // reveal a generated password ONCE, at open. Web's twin does exactly this (Vault.tsx's
+    // `generateOnOpen` effect with empty deps) and the two clients ship the same button label, so
+    // they must ship the same behaviour. `remember`-scoped, keyed on Unit: a recomposition must
+    // never re-roll a password the user is in the middle of reading or has already edited, and the
+    // arm-then-confirm guard on the Generate button below is deliberately bypassed here because
+    // the user's tap on the OFFER already is the confirmation. Nothing is saved: `generated`
+    // renders web's notice saying the value is not kept until Save.
+    var generated by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (vm.editorGenerateOnOpen && isLogin) {
+            password = PasswordGenerator.generate(crypto, GeneratorOptions(length = 20))
+            passwordRevealed.value = true
+            generated = true
+        }
+    }
+
     // Process death (not rotation) loses the ViewModel's pending bytes while the saved
     // attachment refs restore: drop any NEW ref whose bytes we no longer hold — saving it
     // would write a dangling attachment pointer.
@@ -2338,6 +2434,16 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
                 if (confirmGen) {
                     Text(
                         "this replaces the current password — tap “Replace?” to confirm, or edit the field to cancel",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
+                // H117 (R15): byte-identical to web's post-offer notice (Vault.tsx). Say what
+                // happened AND that it is not saved yet — landing in the editor rather than
+                // writing the password behind the user's back is the point of the offer.
+                if (generated) {
+                    Text(
+                        "a new password is ready — change it on the site, then press Save to keep it here",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary,
                         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     )
@@ -3603,6 +3709,12 @@ private fun needsUpdateLine(n: Int): String =
 
 private fun groupHex(hex: String): String = hex.chunked(4).joinToString(" ")
 
+/** Byte formatter. KNOWN DIVERGENCE from the desktop twin (`Ui.kt` humanSize), recorded by R46
+ *  and deliberately left for this cut: desktop's unit table runs to TB, this one caps at GB, so a
+ *  2 TB total reads "2048.0 GB" here and "2.0 TB" there. H85 hoisted the KDF re-key because a
+ *  silent one-sided edit to a MASTER-KEY routine reaches the household as "I forgot my password";
+ *  a byte formatter fails visibly and locally, which is why it was out of that row's scope.
+ *  Reconciling the two is a follow-up row — see the audit's §8 closure. */
 private fun humanSize(bytes: Long): String = when {
     bytes >= 1024L * 1024 * 1024 -> "%.1f GB".format(bytes / (1024.0 * 1024 * 1024))
     bytes >= 1024L * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024))

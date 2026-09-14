@@ -91,7 +91,11 @@ class Wave3EndpointSwitchTest {
         val p = parseInviteField(link, currentBaseUrl = A)
         assertIs<InviteFieldParse.Link>(p)
         assertEquals(RFP, p.rfp)
-        // the brief's pin: an rfp on the link ⇒ required-affirm (Android gains the posture)
+        // The pure port's rule, unchanged: an rfp ⇒ required-affirm. What CHANGED in H66 is which
+        // rfp the form is allowed to hand it — a pasted link's is filtered out by `affirmableRfp`
+        // before it ever reaches here (EnrollRfpProvenanceTest), so on Android today this posture
+        // is reachable only from a provenance-bearing channel. Keep both pins: this one guards the
+        // web twin's logic, that one guards the Android ceremony.
         assertEquals(EnrollPosture.RequiredAffirm, enrollPosture(linkRfp = p.rfp, memberHasSheet = false))
         assertEquals(EnrollPosture.RequiredAffirm, enrollPosture(linkRfp = p.rfp, memberHasSheet = true), "rfp wins over a sheet declaration")
         // no rfp ⇒ posture stays waived/required-typed as before (no regression)

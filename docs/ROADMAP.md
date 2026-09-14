@@ -15,6 +15,45 @@ disagree, the commit wins. This is the SSOT for *direction* only.
 > one instance's host labels, not part of the product; andvari is endpoint-agnostic and every client
 > works with any server (spec 00 "System shape", `docs/self-hosting.md`).
 
+## CI posture — what runs pre-merge, and what deliberately does not (2026-09-13)
+
+Ratified at the third full-surface audit (H39). Until then **no** test job ran on a pull request:
+`scripts/verify.sh` was the gate and nothing invoked it for a PR, so a Dependabot bump — the
+contributor that opens most PRs here and the one that swaps crypto dependencies — could go green
+in the PR UI with zero tests run and be discovered only when the next human ran the gate locally.
+
+- **`.github/workflows/verify-js.yml` (new)** runs the two JS/TS suites on `pull_request` and on
+  pushes to `main`: web (`npm ci --ignore-scripts`, `tsc --noEmit`, `vitest run`) and extension
+  (`npm ci --ignore-scripts`, `npm run typecheck`, `node --test` behind the same ≥20-files /
+  ≥200-tests collected-nothing floors `verify.sh` uses, because `node --test` exits 0 over an
+  empty glob). Both suites are byte-locked against `spec/test-vectors`, so a vector-visible crypto
+  regression from a dependency bump does fail the check. Least-privilege (`contents: read`),
+  actions SHA-pinned, no `setup-node` (the runner's Node is asserted against a floor instead of
+  installing another pinned third-party action).
+- **The Kotlin legs stay LOCAL, on purpose.** `:core`, `:server`, `:app-desktop`, `:app-android`
+  and the `tools/` CLIs are not run in Actions: the full Gradle build wants ~8-12 GB and does not
+  fit a GitHub-hosted runner — the same constraint that keeps CodeQL's Kotlin leg retired (lane 6
+  below, `codeql.yml`'s NOTE). They run in `scripts/verify.sh` on the build host before the tag.
+  **Consequence, stated so nobody has to infer it: a green check on a PR that touches `core/`,
+  `server/`, `app-*/` or `tools/` proves the JS half only.** Such a PR needs a local `verify.sh`
+  before merge, and the release gate is where that becomes unavoidable.
+- The remaining pre-merge signals are unchanged: CodeQL (JS/TS only), its emptiness tripwire,
+  Scorecard, and gradle-wrapper validation.
+- **The workflow's Node floor is 22**, the same number `CONTRIBUTING.md` states as the
+  requirement. It asserted 20 for its first cut, which meant the project had two stated Node
+  requirements and the looser one was the enforced one.
+- **Considered and DEFERRED: a "verify marker" gate on `scripts/release-spec.sh`** (the
+  tests-gate-2 half of H39) — `verify.sh` would drop a stamp naming the tree it passed on, and
+  `release-spec.sh` would refuse to emit a spec without a fresh one, making the local Kotlin run
+  mechanically unskippable rather than a matter of discipline. Not built, for a stated reason: on
+  a single-operator build host it protects against forgetting rather than against anyone, and a
+  stale-marker rule (which commit? how fresh?) is its own small state machine to get wrong —
+  where a self-hosted runner would make the whole question moot by running the Kotlin legs where
+  they belong. Recorded here so the next reader can tell a decision from an oversight.
+
+Making the Kotlin half real needs a self-hosted or larger runner and is the same decision lane 6
+is gated behind; it is an open owner decision, not an oversight.
+
 ## Releases 0.22.0 → 0.25.0 — 2026-08-13 to 2026-08-23
 
 Four releases landed after the 2026-07-27 reconcile. Per-release prose is `CHANGELOG.md`; this is
@@ -79,6 +118,32 @@ the direction-level record of what they closed.
 > release to anyone reading the repo. In-tree source version literals (`CLIENT_VERSION`,
 > `ANDVARI_CLIENT_VERSION`) are at 0.26.3 as the fleet number; the *deployed* artifacts lag by
 > design until the next release that actually touches them.
+>
+> **No Android build was cut for 0.26.3, and that is the deliberate state** (audit H105). The
+> phone stays on **0.26.2 (versionCode 20997112)**, which is the newest APK devstore has and the
+> newest one there is. Recorded here because the absence had exactly one signal in the world:
+> devstore-sync's `no 'latest.json' asset — SKIPPING` warning, every 15 minutes, which exists to
+> catch the *forgotten* `latest.json` — "the single thing that can silently strand a release". A
+> standing warning for a deliberate choice is a broken alarm, so the choice is now explicit on
+> both sides: `scripts/gh-release.sh --no-android` writes the marker line
+> `android: none (deliberate)` into the release body, and devstore-sync honours that marker by
+> leaving the app at its current APK with an INFO line and no warning. The unmarked case still
+> warns, which is the point.
+>
+> **The marker is written by a FUTURE release, so v0.26.3's alarm does not stop on its own**
+> (R31). devstore-sync reads the marker out of the published release BODY on every tick, and
+> v0.26.3's body — already published — has none. Deploying the edited devstore-sync therefore
+> changes nothing about the 15-minute warning that opened this row. Two operator steps, not one:
+> deploy the script, **then** stamp the existing release —
+>
+> ```
+> gh release view v0.26.3 --json body --jq .body > /tmp/b.md
+> printf '\nandroid: none (deliberate)\n' >> /tmp/b.md
+> gh release edit v0.26.3 --notes-file /tmp/b.md
+> ```
+>
+> — or leave it and accept that the warning stands until 0.27.0 supersedes v0.26.3 as the newest
+> release. Either is fine; silently doing neither and calling the alarm fixed is not.
 
 ## 0.26.0 + 0.26.1 — Android vault health (**COMPLETE ON EVERY CHANNEL 2026-08-24**)
 

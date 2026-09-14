@@ -11,11 +11,15 @@
 # automatically when you choose an http:// origin).
 #
 # NOTE on client IPs (rate-limit keys + audit rows): the server trusts
-# forwarded-IP headers only when the direct TCP peer is loopback (spec 03 §8).
-# A proxy reaching the container over the docker bridge is NOT loopback — use
-# the caddy overlay (which shares the app's network namespace, so its upstream
-# hop IS loopback) or run your proxy on the host pointing at 127.0.0.1:8080
-# with the understanding that per-client IPs then need the loopback topology.
+# forwarded-IP headers only from a direct TCP peer inside
+# ANDVARI_TRUSTED_PROXY_CIDRS, which defaults to loopback (spec 03 §8).
+# Publishing a port is a NAT hop, so a proxy on the HOST reaching
+# 127.0.0.1:8080 arrives as the compose bridge gateway (172.x.0.1) and is NOT
+# loopback: with the defaults its X-Forwarded-For is ignored and every caller
+# shares one bucket. Three ways out — the caddy overlay (shares the app's
+# network namespace, so its hop really is loopback), network_mode: host, or
+# naming the gateway in ANDVARI_TRUSTED_PROXY_CIDRS. See andvari.env.template
+# and docs/self-hosting.md "Client IPs behind your own front".
 
 name: andvari
 

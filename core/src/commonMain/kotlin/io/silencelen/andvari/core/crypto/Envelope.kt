@@ -28,10 +28,30 @@ object Envelope {
     fun seal(crypto: CryptoProvider, key: ByteArray, plaintext: ByteArray, ad: ByteArray): ByteArray =
         sealWithNonce(crypto, key, crypto.randomBytes(NONCE_BYTES), plaintext, ad)
 
+    /**
+     * The three STRUCTURAL refusals [open] makes before any key is used — length, version, alg —
+     * as a reason string (null = the header is well-formed), single-sourced here so a caller that
+     * must tell "this blob is damaged/foreign" apart from "this key is wrong" never re-implements
+     * (and drifts from) the checks below.
+     *
+     * WHY the distinction is security-relevant (audit H67): only the AEAD tag failure at the end of
+     * [open] is genuinely ambiguous — it is what a wrong password looks like. These three depend
+     * solely on the blob's PUBLIC header and are decided before the key matters, so folding them
+     * into a "wrong password" verdict tells a member with a corrupt or newer-version account row to
+     * go and reset a password that was never wrong. Callers holding an ACCOUNT-KEY blob
+     * (Account.unlock's wrappedUvk) consult this first; every other caller keeps the plain
+     * [CryptoException] fail-closed behaviour, because for an item blob "damaged" and "not for this
+     * key" are equally unactionable to the user.
+     */
+    fun structuralRefusal(envelope: ByteArray): String? = when {
+        envelope.size < MIN_BYTES -> "envelope too short"
+        envelope[0] != VERSION -> "unknown envelope version ${envelope[0]}"
+        envelope[1] != ALG_XCHACHA20POLY1305_IETF -> "unknown envelope alg ${envelope[1]}"
+        else -> null
+    }
+
     fun open(crypto: CryptoProvider, key: ByteArray, envelope: ByteArray, ad: ByteArray): ByteArray {
-        if (envelope.size < MIN_BYTES) throw CryptoException("envelope too short")
-        if (envelope[0] != VERSION) throw CryptoException("unknown envelope version ${envelope[0]}")
-        if (envelope[1] != ALG_XCHACHA20POLY1305_IETF) throw CryptoException("unknown envelope alg ${envelope[1]}")
+        structuralRefusal(envelope)?.let { throw CryptoException(it) }
         val nonce = envelope.copyOfRange(2, HEADER_BYTES)
         val ct = envelope.copyOfRange(HEADER_BYTES, envelope.size)
         return crypto.aeadDecrypt(key, nonce, ct, ad)

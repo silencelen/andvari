@@ -168,6 +168,20 @@ class Service(
     // push tx (attachment quota) — are both fine.
     @Volatile private var cachedStoredPolicy: ClientPolicy? = null
 
+    /**
+     * Test seam (H97): invoked inside the read-through AFTER the stored row has been read and
+     * BEFORE the decoded value is published — i.e. exactly inside the poisoning window
+     * PolicyCacheRaceTest races against. It replaces that test's `Thread.sleep(50)` "the reader
+     * is probably mid-decode by now" guess with a real happens-before signal, so the race is
+     * driven, not hoped for: under load the old sleep could let the WRITER go first, and the
+     * test's own witness assertion then failed a server that was behaving correctly.
+     *
+     * The probe runs while this thread HOLDS the Db lock, so it must only signal and return —
+     * anything that waits on a Db write from in here deadlocks by construction. Null in
+     * production; nothing but a test ever sets it.
+     */
+    @Volatile internal var policyReadThroughProbe: (() -> Unit)? = null
+
     fun policy(publicOrigin: Boolean = false): ClientPolicy {
         // Fast path: a published hit needs no lock at all (that IS the perf win). It can only ever
         // return a value that was current when the call began — the write that races it is not yet
@@ -175,9 +189,12 @@ class Service(
         val stored = cachedStoredPolicy ?: repo.db.read { c ->
             // Re-check under the lock: a writer may have invalidated, or another reader published,
             // while this thread queued for it.
-            cachedStoredPolicy
-                ?: (repo.policyJsonOn(c)?.let { healKdfMemKib(json.decodeFromString(ClientPolicy.serializer(), it)) } ?: ClientPolicy())
+            cachedStoredPolicy ?: run {
+                val raw = repo.policyJsonOn(c)
+                policyReadThroughProbe?.invoke() // H97 seam: row read, not yet published
+                (raw?.let { healKdfMemKib(json.decodeFromString(ClientPolicy.serializer(), it)) } ?: ClientPolicy())
                     .also { cachedStoredPolicy = it }
+            }
         }
         return stored.copy(
             recoveryFingerprint = config.recoveryFingerprint,

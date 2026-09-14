@@ -80,7 +80,13 @@ against the vectors.
 
 ## Self-hosting
 
-The distribution channel is the public container image **`ghcr.io/silencelen/andvari`**.
+The distribution channel is the container image **`ghcr.io/silencelen/andvari`**. **It is not
+anonymously pullable yet** — the GHCR package is still private, so a `docker pull` without a
+GitHub login fails. Until the owner flips it public (a release step, `scripts/publish-image.sh`),
+build it yourself: clone the repo and run `./deploy/bringup.sh --build`, which builds the image
+locally from the top-level `Dockerfile` and is otherwise the identical bring-up. Nothing else
+about self-hosting depends on the registry.
+
 The full walkthrough — TLS options, the escrow ceremony, the policy variables, backup and
 updates — is **[`docs/self-hosting.md`](docs/self-hosting.md)**, which every running
 instance also serves at `<your-origin>/selfhost` alongside downloadable copies of

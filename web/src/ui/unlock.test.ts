@@ -3,12 +3,12 @@ import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type ApiClient } from "../api/client";
 import type { AccountKeys, Mutation, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
-import { toB64 } from "../crypto/bytes";
+import { fromB64, toB64 } from "../crypto/bytes";
 import { fingerprint } from "../crypto/escrow";
 import { KdfPolicyError, WEAK_KDF_MESSAGE, type KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
-import { Account, IdentityMismatchError } from "../vault/account";
+import { Account, IdentityMismatchError, VAULT_KEYS_DAMAGED } from "../vault/account";
 import { NullCache, openVaultCache, type VaultCache } from "../vault/idbcache";
 import { SyncIntegrityError, VaultStore } from "../vault/store";
 import { UNREACHABLE } from "./errors";
@@ -272,6 +272,44 @@ describe("unlockExistingSession — offline fallback (§C.1 step 2, NetworkError
     if (r.kind !== "error") return;
     expect(r.message).toBe(new IdentityMismatchError().message);
     expect(r.message).not.toMatch(/wrong master password/i);
+  });
+
+  it("H67 — a structurally damaged cached wrappedUvk is the terminal damaged-keys sentence, not the password", async () => {
+    // A partial restore (or a newer server's v2 envelope reaching this build) leaves a wrappedUvk
+    // whose PUBLIC header this client cannot read — refused before the wrap key is applied, so it
+    // is not a credentials verdict and no retry can fix it. Until H67 this rung said "Wrong master
+    // password." and sent the member to a reset, then to their recovery secret.
+    const good = fromB64(confirmed().wrappedUvk);
+    await plantKeys({ ...confirmed(), wrappedUvk: toB64(Uint8Array.of(0x02, ...good.subarray(1))) });
+    const client = fakeClient({ accountKeys: async () => { throw new TypeError("offline"); }, sync: offlineSync });
+    const r = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password);
+    expect(r).toEqual({ kind: "error", message: VAULT_KEYS_DAMAGED });
+    if (r.kind !== "error") return;
+    expect(r.message).not.toMatch(/wrong master password/i);
+    expect(r.message).not.toMatch(/try again/i);
+
+    // R41: the poison was the CACHED payload, so it is evicted on the way out — otherwise the
+    // stale blob answers every later attempt with the same terminal and the member can never
+    // reach the one remedy that works (going online, where a healthy server row re-caches). The
+    // queue and the envelopes are NOT touched: a bad key blob does not implicate unsent edits.
+    const after = await openVaultCache(base.userId);
+    expect(await after.accountKeys(), "the damaged cached keys must be dropped").toBeNull();
+    after.close();
+  });
+
+  it("R41 — the eviction is scoped: an ONLINE damaged verdict leaves the cache alone", async () => {
+    // Symmetry check. When the damaged blob came from the SERVER, the cached copy is not the
+    // thing at fault and dropping it would cost the member their offline copy over someone
+    // else's corruption.
+    await plantKeys(confirmed());
+    const good = fromB64(confirmed().wrappedUvk);
+    const damagedFromServer = { ...confirmed(), wrappedUvk: toB64(Uint8Array.of(0x02, ...good.subarray(1))) };
+    const client = fakeClient({ accountKeys: async () => damagedFromServer, sync: offlineSync });
+    const r = await unlockExistingSession(client, { userId: base.userId, isAdmin: false }, base.password);
+    expect(r).toEqual({ kind: "error", message: VAULT_KEYS_DAMAGED });
+    const after = await openVaultCache(base.userId);
+    expect(await after.accountKeys(), "an online damaged verdict must not evict the cache").not.toBeNull();
+    after.close();
   });
 
   it("a wrong password on the offline path is 'wrong master password' (UVK unwrap fails)", async () => {

@@ -58,9 +58,11 @@ export async function wipeVaultCache(userId: string): Promise<void> {
 
 /**
  * §E.4 / breaker #9: how many UNSYNCED offline edits (pending + staged-denied queue rows) a
- * wipe of this account's cache would destroy. App.signOut reads it to BLOCK a user sign-out
- * on a confirm ("N unsynced changes will be lost") and to surface the count on a definitive-
- * 401 wipe it cannot block. Opens read-only then closes; 0 on a NullCache / unsupported IDB /
+ * wipe of this account's cache would destroy. Two callers, two jobs (H135 split them, R07
+ * corrected this note): SignOutLink reads it at click time to arm the inline confirm that
+ * BLOCKS a user sign-out ("N unsynced changes will be lost"), and App.signOut — the
+ * unconditional wipe choke point — reads it to SURFACE the count on a definitive-401 wipe it
+ * cannot block. Opens read-only then closes; 0 on a NullCache / unsupported IDB /
  * any error (a count failure must never wedge sign-out). The store owns the live count while a
  * vault is open (VaultStore.queuedMutationCount); this is the choke-point path where it is not.
  */

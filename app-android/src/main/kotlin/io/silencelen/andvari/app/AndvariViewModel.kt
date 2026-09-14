@@ -252,6 +252,13 @@ data class UiState(
      *  landed. The run has already advanced, so the offer row names the item; never automatic —
      *  a deletion the user did not ask for is the one outcome the health view exists to avoid. */
     val healthOfferDelete: String? = null,
+    /** H117 (design 2026-08-22 §4 "Wrong password → bad → offers: open the item / generate a new
+     *  password"): the itemId whose "Refused" verdict just landed. The design ratified four
+     *  verdicts precisely BECAUSE each maps to a different next action, and this was the one
+     *  follow-up no client ever built — a member who answered "Refused" was advanced to the next
+     *  login with no path to the password they had just declared broken. Same shape as
+     *  [healthOfferDelete] and mutually exclusive with it: one verdict, one offer. */
+    val healthOfferBad: String? = null,
     /** The verification run: the ordered itemIds still to visit, and where we are in them. */
     val verifyQueue: List<String> = emptyList(),
     val verifyIndex: Int = 0,
@@ -497,7 +504,7 @@ internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     // re-reads the ledger and the next scan re-derives the map — neither is persisted anywhere.
     usage = emptyMap(), breachByItem = null, breachScanRev = emptyMap(), breachScanning = false, breachProgress = 0 to 0,
     breachScanIncomplete = false,
-    healthMessage = null, healthOfferDelete = null, verifyQueue = emptyList(), verifyIndex = 0, verifyRunning = false,
+    healthMessage = null, healthOfferDelete = null, healthOfferBad = null, verifyQueue = emptyList(), verifyIndex = 0, verifyRunning = false,
     healthTab = "passwords", showSnoozed = false, pendingDetailId = null,
     // N2 §3/§6 (review MED): clear the probe-failure flag only when a policy is LOADED — then
     // it's stale noise. With policy == null the failure is CURRENT (nothing re-probes on the
@@ -529,8 +536,10 @@ internal enum class EnrollPosture { Waived, RequiredAffirm, RequiredTyped }
  * web's unit-pinned pure function (web/src/enroll/enrollposture.ts `enrollPosture`; keep in
  * lockstep — core is frozen this wave, so the port lives app-side):
  *  - [linkRfp]: an rfp on an enroll link ⇒ the invitee scanned an IN-PERSON QR off the admin's
- *    screen ⇒ one-tap eyeball affirmation. Android has no enroll-link channel today (the invite
- *    token is typed), so callers pass null — the parameter keeps the port faithful.
+ *    screen ⇒ one-tap eyeball affirmation. **Only an rfp with PROVENANCE may be passed here** —
+ *    see [affirmableRfp], which is what the Android form feeds in. Android's invite field is
+ *    keyboard/clipboard-only today, so in practice callers still pass null; the parameter keeps
+ *    the port faithful and lights up the moment a provenance-bearing channel lands.
  *  - [memberHasSheet]: no rfp — default WAIVED (frictionless, no admin backstop); a member who was
  *    handed a printed recovery SHEET declares it ⇒ the typed-sheet ceremony (the pre-rfp channel).
  * Either "required" branch anchors on a human value; a missing rfp NEVER auto-trusts the server key.
@@ -651,6 +660,46 @@ internal fun parseInviteField(raw: String, currentBaseUrl: String): InviteFieldP
     val gate = OriginNamespace.canonicalOrigin(p.o) != OriginNamespace.canonicalOrigin(currentBaseUrl)
     return InviteFieldParse.Link(token = p.t, origin = p.o, email = p.e, rfp = p.rfp, gate = gate)
 }
+
+/**
+ * HOW the enroll link reached this device — the only thing that can make a link's `rfp` mean
+ * anything (audit 2026-09-13 H66; owner decision: align Android with desktop).
+ *
+ * §F.1's required-affirm posture is not "a fingerprint arrived", it is "a human scanned this
+ * fingerprint off their admin's screen, in person". Web can claim that because its rfp arrives by
+ * NAVIGATION to its own origin — the QR the admin displayed. Desktop refuses the claim outright
+ * ("a desktop PASTE has no provenance", `Ui.kt` Enroll / `DesktopState.kt` enrollPosture) and has
+ * no affirm leg at all. Android shipped the third answer: it parsed a link out of a text field
+ * that only the keyboard and the clipboard write to, and then told the member the code "came from
+ * the invite you scanned in person" — a provenance the app cannot know, on a link that may well
+ * have been forwarded through chat. Two natives, opposite postures, identical input.
+ *
+ * So provenance is now explicit and the fail-safe direction is the default: [Typed] yields no
+ * affirmable rfp, and enrollment falls back to the typed-sheet / waived ceremony exactly as
+ * desktop does. The fail-closed chain is unchanged either way — a missing rfp never auto-trusts a
+ * server key, and `Account.enroll` re-checks the served key against whatever was affirmed — but
+ * the household now gets ONE ceremony per QR instead of one per native.
+ */
+internal enum class InviteProvenance {
+    /** The member typed or pasted the field's contents. The only channel Android has today: the
+     *  manifest carries MAIN/LAUNCHER only (no `/enroll` app link) and there is no in-app scanner. */
+    Typed,
+
+    /** An `/enroll` app link the OS verified against the server's origin and handed us directly —
+     *  the invitee opened the admin's link on this device, not a forward of its text. */
+    AppLink,
+
+    /** An in-app camera scan of the QR on the admin's screen — the anchor §F.1 actually describes. */
+    ScannedQr,
+}
+
+/**
+ * The rfp the form may ACT on: a link's rfp, but only when [provenance] says something other than
+ * a human retyping text into a box (H66). Pure and total so the rule is unit-pinned rather than
+ * living inside a composable — the shape [enrollPosture] expects for its `linkRfp` argument.
+ */
+internal fun affirmableRfp(rfp: String?, provenance: InviteProvenance): String? =
+    if (provenance == InviteProvenance.Typed) null else rfp?.takeIf { it.isNotEmpty() }
 
 /**
  * The anti-phishing Trust Gate's render decision (design 2026-07-15 §4.3) — pure so the IDN /
@@ -1096,11 +1145,29 @@ class AndvariViewModel(
      *  first id. Cleared on success and with the editor session, never by a failed save. */
     private var draftItemId: String? = null
 
-    fun openEditor(itemId: String?, newType: String = "login") {
+    /**
+     * H117 (R15): this editor session was opened by the verification run's "Generate a new
+     * password" offer and should land on a freshly generated, revealed password — the web twin's
+     * `generateOnOpen` (Vault.tsx). The two offer buttons carry the SAME labels on both clients,
+     * so they have to carry the same behaviour: without this flag "Generate a new password"
+     * opened an ordinary editor on Android and the member still had to find the generator, which
+     * made one label mean two different things across the twins.
+     *
+     * Part of the editor SESSION, exactly like [editorItemId]/[editorNewType]: cleared by
+     * [openEditor] on every fresh session (so an ordinary edit never inherits it) and by
+     * [closeEditor]. Deliberately NOT rememberSaveable-equivalent — after an Activity
+     * recreation the password has already been generated into the editor's own saved state, and
+     * re-firing would roll a SECOND password over the one the user is reading.
+     */
+    var editorGenerateOnOpen by mutableStateOf(false)
+        private set
+
+    fun openEditor(itemId: String?, newType: String = "login", generate: Boolean = false) {
         editorPendingUploads.clear() // a fresh editor session never inherits stale picks
         draftItemId = null // …nor a previous session's draft id (reusing one would OVERWRITE that item)
         editorItemId = itemId
         editorNewType = newType
+        editorGenerateOnOpen = generate
         editorOpen = true
     }
 
@@ -1108,6 +1175,7 @@ class AndvariViewModel(
         editorOpen = false
         editorItemId = null
         editorPendingUploads.clear()
+        editorGenerateOnOpen = false
         draftItemId = null // cancel or success: the next editor session starts a fresh draft
     }
 
@@ -3476,6 +3544,7 @@ class AndvariViewModel(
             screen = Screen.Vault,
             healthMessage = null,
             healthOfferDelete = null,
+            healthOfferBad = null,
             verifyRunning = false,
             verifyQueue = emptyList(),
             verifyIndex = 0,
@@ -3655,7 +3724,13 @@ class AndvariViewModel(
         saveItem(write.itemId, write.doc) {
             // H27 (web Staleness.tsx:137 twin): "gone" records the verdict and then OFFERS a
             // delete, once the save has landed; any other verdict withdraws a standing offer.
-            _ui.value = _ui.value.copy(healthOfferDelete = if (result == "gone") itemId else null)
+            // H117 (design §4's verdict→follow-up table, the other half): "bad" offers the two
+            // repairs the design names, exactly as "gone" offers the delete. Every other verdict
+            // withdraws BOTH — one verdict, one standing offer, never a stale one from two logins ago.
+            _ui.value = _ui.value.copy(
+                healthOfferDelete = if (result == "gone") itemId else null,
+                healthOfferBad = if (result == "bad") itemId else null,
+            )
             onDone()
         }
     }
@@ -3672,6 +3747,34 @@ class AndvariViewModel(
 
     /** H27: "Keep it" — the verdict stays recorded; only the offer goes away. */
     fun keepGoneItem() { _ui.value = _ui.value.copy(healthOfferDelete = null) }
+
+    /**
+     * H117: the post-"bad" offer, accepted — leave health for the item itself. The run ENDS here
+     * rather than waiting in the background: the offer's whole point is that the user is going to
+     * change a password now, and a run that silently resumed over a vault list the user has since
+     * edited would put them back in a queue they had left. The verdict is already written; nothing
+     * about this navigation records or un-records anything.
+     *
+     * [edit] opens the editor with a freshly generated, revealed password ([openEditor]'s
+     * `generate` flag, web's `generateOnOpen` twin) instead of the read-only detail. Nothing is
+     * saved and nothing is changed on the site: the value sits in an unsaved field behind the
+     * editor's own Save, which is the whole reason the offer lands the user HERE rather than
+     * rotating a credential off the back of a verdict.
+     */
+    fun repairBadItem(itemId: String, edit: Boolean) {
+        stopVerifyRun()
+        _ui.value = _ui.value.copy(
+            screen = Screen.Vault,
+            pendingDetailId = itemId,
+            healthMessage = null,
+            healthOfferBad = null,
+            healthOfferDelete = null,
+        )
+        if (edit) openEditor(itemId, generate = true)
+    }
+
+    /** H117: "Not now" — the verdict stays recorded; only the offer goes away (keepGoneItem's twin). */
+    fun keepBadOffer() { _ui.value = _ui.value.copy(healthOfferBad = null) }
 
     fun unsnooze(itemId: String) {
         val plan = Staleness.planUnsnooze(_ui.value.items, itemId, ::roleFor)
@@ -3695,7 +3798,7 @@ class AndvariViewModel(
      *  gone-offer (web's startRun clears offerDelete). */
     fun startVerifyRun(queue: List<String> = stalenessRows().map { it.itemId }) {
         if (queue.isEmpty()) return
-        _ui.value = _ui.value.copy(verifyQueue = queue, verifyIndex = 0, verifyRunning = true, healthMessage = null, healthOfferDelete = null)
+        _ui.value = _ui.value.copy(verifyQueue = queue, verifyIndex = 0, verifyRunning = true, healthMessage = null, healthOfferDelete = null, healthOfferBad = null)
     }
 
     fun stopVerifyRun() {

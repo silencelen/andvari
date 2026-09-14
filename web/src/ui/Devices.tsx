@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Busy } from "./Busy";
 import { safeHttpHref } from "./safeurl";
 
 /**
@@ -114,8 +115,8 @@ export function extensionRowState(manifest: DownloadsManifest | null | "error"):
   return { kind: "unpublished" };
 }
 
-export function PlatformRowView({ state, noun }: { state: PlatformRow; noun: string }) {
-  if (state.kind === "loading") return <p className="muted">Checking…</p>;
+export function PlatformRowView({ state, noun, unpublished }: { state: PlatformRow; noun: string; unpublished?: string }) {
+  if (state.kind === "loading") return <p className="muted"><Busy>Checking…</Busy></p>;
   if (state.kind === "available") {
     return (
       <p className="muted">
@@ -125,11 +126,11 @@ export function PlatformRowView({ state, noun }: { state: PlatformRow; noun: str
       </p>
     );
   }
-  return <p className="muted">The {noun} isn’t published yet — it will appear here when it is.</p>;
+  return <p className="muted">{unpublished ?? `The ${noun} isn’t published yet — it will appear here when it is.`}</p>;
 }
 
 export function ExtensionRowView({ state }: { state: ExtensionRow }) {
-  if (state.kind === "loading") return <p className="muted">Checking…</p>;
+  if (state.kind === "loading") return <p className="muted"><Busy>Checking…</Busy></p>;
   if (state.kind === "unpublished") {
     return <p className="muted">The browser extension isn’t published yet — it will appear here when it is.</p>;
   }
@@ -231,9 +232,26 @@ export function DevicesCard({ origin, canonicalOrigin }: { origin?: string; cano
           and until then a phone user gets the SAME honest "isn't published yet" every other
           platform gets — instead of no row at all, which reads as "not supported".
           (Wave 3 keeps the manifest-driven artifact list + install QR from design §5.4.4.) */}
+      {/* H106: the Android row's no-artifact sentence is NOT the other platforms' "isn't published
+          yet". That sentence is a claim about the PRODUCT, and on any instance whose phone builds
+          are handed out out-of-band — the reference instance's own app store is exactly that — it
+          is simply false: there is an Android app, this server just doesn't serve the APK. A member
+          reading "isn't published yet" installs nothing and asks nobody. The replacement says only
+          what is true on EVERY instance — there is a person to ask, and this server is not the
+          place to get it — and stays instance-agnostic: no hostname, no store name, no baked
+          pointer (design 2026-07-15 §5.5 removed the last one). R08 removed an invented one: the
+          first replacement named "your household's app store", which the reference instance has
+          (devstore) and a one-family self-host does not, sending that reader looking for something
+          that does not exist — the same shape of untrue claim H106 was raised about, pointed the
+          other way. An instance that DOES list an `android` build still renders the ordinary
+          download row above — this copy is the empty state, not a policy. */}
       <div className="field">
         <label>Android</label>
-        <PlatformRowView state={platformRowState(manifest, "android")} noun="Android app (.apk)" />
+        <PlatformRowView
+          state={platformRowState(manifest, "android")}
+          noun="Android app (.apk)"
+          unpublished="Ask your household admin for the Android app — this server doesn’t hand out the phone build."
+        />
       </div>
 
       <div className="field">

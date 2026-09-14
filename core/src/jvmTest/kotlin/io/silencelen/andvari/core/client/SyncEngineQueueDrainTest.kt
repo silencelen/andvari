@@ -84,6 +84,36 @@ class SyncEngineQueueDrainTest {
 
         fun applied(): Set<String> = pushes.flatten().map { it.itemId }.filter { it !in rejectItems && it !in refuseBatchIfContains }.toSet()
 
+        /**
+         * H37: the server's ITEM rows, so a push is graded the way Service.applyPut grades it
+         * rather than by a canned "applied". Two properties matter and only the real shape has
+         * them: [rev] is GLOBAL (Repo.nextRev = the rowid of the `changes` table — every write
+         * by anyone advances it), and the conflict test is `m.baseItemRev < existing.rev`
+         * against that global value. A per-item counter would let a second queued put "match"
+         * and hide exactly the defect H37 is about. `serverItem` is the DISPLACED row, complete
+         * with its real blob, so the client can actually decrypt and materialize the copy.
+         */
+        val itemRows = mutableMapOf<String, WireItem>()
+
+        private fun applyMutation(m: Mutation): MutationResult {
+            val existing = itemRows[m.itemId]
+            val newRev = ++rev
+            if (m.op == "delete") {
+                if (existing == null || existing.deleted) return MutationResult(m.mutationId, "applied")
+                if (m.baseItemRev < existing.rev) return MutationResult(m.mutationId, "conflict", existing.rev, serverItem = existing)
+                itemRows[m.itemId] = existing.copy(rev = newRev, deleted = true, blob = null, attachmentIds = emptyList())
+                return MutationResult(m.mutationId, "applied", newRev)
+            }
+            val up = m.item ?: return MutationResult(m.mutationId, "applied", newRev)
+            val conflict = existing != null && (m.baseItemRev < existing.rev || existing.deleted)
+            itemRows[m.itemId] = WireItem(
+                m.itemId, m.vaultId, newRev, existing?.createdAt ?: 0, newRev, false, conflict,
+                up.formatVersion, up.attachmentIds, up.blob,
+            )
+            return if (conflict) MutationResult(m.mutationId, "conflict", newRev, serverItem = existing)
+            else MutationResult(m.mutationId, "applied", newRev)
+        }
+
         fun api(): AndvariApi {
             val engine = MockEngine { req ->
                 if (offline) throw IOException("offline")
@@ -116,7 +146,7 @@ class SyncEngineQueueDrainTest {
                                 val results = body.mutations.map { m ->
                                     val reason = rejectItems[m.itemId]
                                     if (reason != null) MutationResult(m.mutationId, "rejected", reason = reason)
-                                    else MutationResult(m.mutationId, "applied", ++rev)
+                                    else applyMutation(m)
                                 }
                                 ok(json.encodeToString(PushResponse.serializer(), PushResponse(rev, results)))
                             }
@@ -343,6 +373,93 @@ class SyncEngineQueueDrainTest {
         assertEquals(SaveOutcome.QUEUED, s.engine.remove(id))
         assertNull(s.engine.item(id), "a queued delete hides the row")
         assertTrue(s.engine.items().none { it.itemId == id })
+    }
+
+    // ==== H37: two offline edits of ONE item are ONE put, not a junk copy of the draft ====
+
+    /** Seed one server-confirmed item at global rev 6, on BOTH sides (server row + client cache). */
+    private fun Seed.seedItem(id: String, name: String = "Router", rev: Long = 6): WireItem {
+        val up = account.encryptItem(account.personalVaultId, id, doc.copy(name = name))
+        val row = WireItem(id, account.personalVaultId, rev, 0, 0, false, false, up.formatVersion, emptyList(), up.blob)
+        server.itemRows[id] = row
+        server.queue.add(SyncResponse(rev, false, emptyList(), emptyList(), listOf(row), emptyList()))
+        runBlocking { engine.sync() }
+        return row
+    }
+
+    /** The plaintext name inside a pushed put — what actually reached the server. */
+    private fun Seed.pushedName(m: Mutation): String {
+        val up = m.item!!
+        return account.decryptItem(WireItem(m.itemId, m.vaultId, 1, 0, 0, false, false, up.formatVersion, up.attachmentIds, up.blob)).name
+    }
+
+    @Test
+    fun twoOfflineEditsOfOneItem_drainAsASinglePut_atTheOriginalBaseRev() = runBlocking<Unit> {
+        // The train-ride case. Pre-H37 BOTH queued puts carried baseItemRev 6; the drain landed
+        // the first at a fresh GLOBAL rev, the second was stale by construction, and the server
+        // handed our own intermediate draft back as the displaced value — which the client then
+        // materialized as "Router (conflict YYYY-MM-DD)". One item, two edits, two rows.
+        val s = seeded(DurableFakeCache())
+        val id = s.account.newItemId()
+        s.seedItem(id)
+        assertEquals("Router", s.engine.item(id)?.doc?.name)
+        val pushesBefore = s.server.pushes.size
+
+        s.server.offline = true
+        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 1")))
+        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 2")))
+        assertEquals(1, s.cache.pending().size, "the two queued puts of one item coalesce into one")
+        assertEquals("draft 2", s.engine.item(id)?.doc?.name, "the list shows the LATEST draft")
+
+        s.server.offline = false
+        s.engine.sync()
+
+        val sent = s.server.pushes.drop(pushesBefore).flatten()
+        assertEquals(1, sent.size, "exactly one put reached the server")
+        assertEquals(6L, sent.single().baseItemRev, "sent at the base the burst was minted against, not a bumped one")
+        assertEquals("draft 2", s.pushedName(sent.single()), "and it carries the newest draft")
+        assertFalse(s.server.itemRows.getValue(id).conflict, "the server graded it a clean write")
+        // The server's own row set is the honest surface here: a materialized conflict copy is a
+        // second PUSHED item (the pull side only learns of it later), so pre-H37 this is 2.
+        assertEquals(setOf(id), s.server.itemRows.keys, "no junk copy of the user's own draft was created")
+        assertTrue(sent.none { s.pushedName(it).contains("(conflict") })
+        assertTrue(s.cache.pending().isEmpty())
+    }
+
+    @Test
+    fun coalescingKeepsTheOriginalBaseRev_soAPeersEditStillConflicts() = runBlocking<Unit> {
+        // The other half of the rule: coalescing must NOT re-base onto whatever the cache now
+        // holds. Between the two offline saves a PEER's edit lands in the cache (rev 9). Taking
+        // the cache's rev would make our put "clean" and silently bury the peer's change with no
+        // copy at all — strictly worse than the bug H37 fixes. The ORIGINAL base keeps the
+        // genuine conflict (peer vs. us) while the false one (us vs. us) is gone.
+        val s = seeded(DurableFakeCache())
+        val id = s.account.newItemId()
+        s.seedItem(id)
+
+        s.server.offline = true
+        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 1")))
+        // Stand in for a pull that succeeded while the push leg stayed down: the peer's row is
+        // now the cache's truth AND the server's, but our queued put still carries base 6.
+        val peerUp = s.account.encryptItem(s.account.personalVaultId, id, doc.copy(name = "peer edit"))
+        val peerRow = WireItem(id, s.account.personalVaultId, 9, 0, 0, false, false, peerUp.formatVersion, emptyList(), peerUp.blob)
+        s.cache.upsertItem(peerRow, VaultItem(id, s.account.personalVaultId, 9, 0, doc.copy(name = "peer edit")))
+        s.server.itemRows[id] = peerRow
+        s.server.rev = 9
+
+        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 2")))
+        assertEquals(1, s.cache.pending().size)
+        assertEquals(6L, s.cache.pending().single().baseItemRev, "the burst's original base, NOT the peer's rev 9")
+
+        s.server.offline = false
+        s.engine.sync()
+
+        assertTrue(s.server.itemRows.getValue(id).conflict, "the server saw a genuine cross-device conflict")
+        val copyMut = s.server.pushes.flatten().find { it.itemId != id && it.op == "put" }
+        assertNotNull(copyMut, "the peer's displaced edit is preserved as a conflict copy")
+        val copyName = s.pushedName(copyMut)
+        assertTrue(copyName.startsWith("peer edit"), "the copy carries the PEER's value, not our draft: $copyName")
+        assertTrue(copyName.contains("(conflict "))
     }
 
     @Test

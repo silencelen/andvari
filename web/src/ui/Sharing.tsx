@@ -8,6 +8,8 @@ import type { DeletedVaultInfo, IncomingTransfer, VaultInfo, VaultStore } from "
 import { UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDay } from "./format";
+import { BackLink } from "./BackLink";
+import { Busy } from "./Busy";
 import { Announcer, Msg } from "./Msg";
 import { settingsContentFor, showSettingsButton } from "./sharing-settings";
 import { ViewHeader } from "./ViewHeader";
@@ -130,7 +132,7 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
               too, via Vault's closeTop (A1). The doubled vault name (this header + the panel's
               own H2) is the one accepted cosmetic drift (A10). */}
           <div className="sheet">
-            <button type="button" className="link" onClick={onCloseSettings}>‹ Back to vaults</button>
+            <BackLink label="Back to vaults" onClick={onCloseSettings} />
             <h2 style={{ marginTop: 12, marginBottom: 0 }}>{settingsVault.name}</h2>
           </div>
           {settingsContent === "owner" ? (
@@ -392,7 +394,7 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
       {err && <Msg kind="err">{err}</Msg>}
 
       {!members ? (
-        <p className="muted">loading…</p>
+        <p className="muted"><Busy>Loading…</Busy></p>
       ) : (
         <div className="attach-list">
           {members.map((m) => (
@@ -488,7 +490,7 @@ function MemberRosterPanel({ vault, client }: { vault: VaultInfo; client: ApiCli
       </p>
       {err && <Msg kind="err">{err}</Msg>}
       {!members ? (
-        <p className="muted">loading…</p>
+        <p className="muted"><Busy>Loading…</Busy></p>
       ) : (
         <div className="attach-list">
           {members.map((m) => (

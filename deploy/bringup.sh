@@ -221,7 +221,14 @@ if [ -z "$(get_env ANDVARI_RECOVERY_PUBKEY)" ] || [ -z "$(get_env ANDVARI_RECOVE
   say "==> escrow ceremony: generating the org recovery key (recovery-cli keygen)"
   say "    The container runs with --network none; the private seed exists only in"
   say "    the sheet printed below — it is NOT written to disk by this script."
-  [ "$DO_BUILD" = 1 ] || docker pull "$IMAGE" >/dev/null || die "could not pull $IMAGE"
+  # The pull is the step a stranger hits first, and the GHCR package is not anonymously
+  # pullable yet (audit H43), so say what to do instead of just failing. Docker's own error
+  # for "denied" and for "no such host" look alike to someone meeting this for the first time.
+  [ "$DO_BUILD" = 1 ] || docker pull "$IMAGE" >/dev/null || die "could not pull $IMAGE
+  The image is not anonymously pullable yet. Either 'docker login ghcr.io' with an account
+  that can read the package, or build it locally instead: clone the repo and re-run this
+  script from the checkout as './deploy/bringup.sh --build' (identical in every other way).
+  See docs/self-hosting.md > Install."
   SHEET="$(docker run --rm --network none "$IMAGE" recovery-cli keygen)" || die "recovery-cli keygen failed"
   printf '\n%s\n\n' "$SHEET"
   PUBKEY="$(printf '%s\n' "$SHEET"  | sed -n 's/^[[:space:]]*ANDVARI_RECOVERY_PUBKEY=//p'      | head -1)"
@@ -332,6 +339,25 @@ case "$ORIGIN" in
       say "   * TLS: put your own front (proxy/cloudflared/tailscale serve) in front of"
       say "     127.0.0.1:8080 for $(host_of "$ORIGIN"), or re-run with --caddy;"
       say "     set ANDVARI_FORCE_HSTS=1 in $ENV_FILE once https works end-to-end"
+      # Client IPs (audit H14). Say this HERE, on the own-front branch, because it is the one
+      # branch where the shipped topology quietly degrades: the app is reached through a
+      # PUBLISHED port, which is a NAT hop, so the peer address the server sees is the compose
+      # bridge gateway and never 127.0.0.1. Forwarded headers are therefore not honoured, every
+      # caller shares one rate-limit bucket and one audit IP, and nothing about that state is
+      # visible from outside. The --caddy branch above is exempt (it shares the app's network
+      # namespace, so its hop genuinely IS loopback) and the plain-http LAN branch has no proxy
+      # to speak of. Nothing here can be auto-configured: only the operator knows which peer
+      # is their proxy, and guessing a CIDR wider than that would hand real clients the ability
+      # to pick their own rate-limit key.
+      say "   * CLIENT IPs: a front on the HOST reaches the container through a published port,"
+      say "     so its hop is the docker bridge gateway, NOT loopback. Until you say otherwise,"
+      say "     rate limiting and the audit log see ONE address for every caller. To fix it, set"
+      say "     BOTH in $ENV_FILE (see the template's 'Behind your own proxy' section):"
+      say "       ANDVARI_TRUSTED_PROXY_CIDRS=<your proxy's peer, e.g. 172.18.0.1/32>"
+      say "       ANDVARI_TRUSTED_IP_HEADERS=X-Forwarded-For"
+      say "     (docker network inspect andvari_default prints the gateway. Name only the proxy:"
+      say "      a wider CIDR lets real clients choose their own rate-limit key. /metrics is"
+      say "      unaffected — it stays raw-loopback-only.)"
     fi ;;
 esac
 say " Updates: docker compose pull && docker compose up -d"

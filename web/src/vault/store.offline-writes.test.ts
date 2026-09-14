@@ -68,6 +68,13 @@ class FakeApi {
     if (!cur || row.rev >= cur.rev) map.set(key, row);
   }
 
+  /** H37: stand in for a PEER's write landing on the server while our push leg was down —
+   *  the row (and the global rev) move on without this client having sent anything. */
+  seedItemRow(row: WireItem): void {
+    this.itemRows.set(row.itemId, row);
+    this.rev = Math.max(this.rev, row.rev);
+  }
+
   async sync(since: number): Promise<SyncResponse> {
     if (this.offline) throw new TypeError("offline");
     this.sinceLog.push(since);
@@ -109,11 +116,50 @@ class FakeApi {
       results: mutations.map((m) => {
         const reason = this.rejectItems.get(m.itemId);
         if (reason) return { mutationId: m.mutationId, status: "rejected" as const, reason };
-        return this.denyVaults.has(m.vaultId)
-          ? { mutationId: m.mutationId, status: "denied" as const }
-          : { mutationId: m.mutationId, status: "applied" as const, newItemRev: 1 };
+        if (this.denyVaults.has(m.vaultId)) return { mutationId: m.mutationId, status: "denied" as const };
+        return this.applyMutation(m);
       }),
     };
+  }
+
+  /**
+   * H37: grade a push the way Service.applyPut does, against the fake's own item rows —
+   * because the two properties that produce the defect only exist in the real shape. `rev` is
+   * GLOBAL (Repo.nextRev = the rowid of the `changes` table; every write by anyone advances
+   * it) and the conflict test is `m.baseItemRev < existing.rev` against THAT. The old canned
+   * `newItemRev: 1` was a per-item constant, so the C3 "no spurious copy" assertion below
+   * could never have failed no matter what the client queued — the fake had the bug's premise
+   * designed out of it. `serverItem` is the DISPLACED row with its real blob, so a client that
+   * does materialize a copy actually can.
+   */
+  private applyMutation(m: Mutation): PushResponse["results"][number] {
+    const existing = this.itemRows.get(m.itemId);
+    const newRev = ++this.rev;
+    if (m.op === "delete") {
+      if (!existing || existing.deleted) return { mutationId: m.mutationId, status: "applied" as const };
+      if (m.baseItemRev < existing.rev) {
+        return { mutationId: m.mutationId, status: "conflict" as const, newItemRev: existing.rev, serverItem: existing };
+      }
+      this.itemRows.set(m.itemId, { ...existing, rev: newRev, deleted: true, blob: null, attachmentIds: [] });
+      return { mutationId: m.mutationId, status: "applied" as const, newItemRev: newRev };
+    }
+    const up = m.item!;
+    const conflict = !!existing && (m.baseItemRev < existing.rev || existing.deleted);
+    this.itemRows.set(m.itemId, {
+      itemId: m.itemId,
+      vaultId: m.vaultId,
+      rev: newRev,
+      createdAt: existing?.createdAt ?? 0,
+      updatedAt: newRev,
+      deleted: false,
+      conflict,
+      formatVersion: up.formatVersion,
+      attachmentIds: up.attachmentIds,
+      blob: up.blob,
+    });
+    return conflict
+      ? { mutationId: m.mutationId, status: "conflict" as const, newItemRev: newRev, serverItem: existing }
+      : { mutationId: m.mutationId, status: "applied" as const, newItemRev: newRev };
   }
 
   async uploadAttachment(): Promise<void> {
@@ -682,26 +728,140 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     expect(await cache.stagedDenied()).toEqual([]);
   });
 
-  it("C3: an offline backlog e1,e2 then an online save e3 of the same item flushes in FIFO order — one drain, e3 last (the live value)", async () => {
+  it("C3/H37: an offline backlog e1,e2 then an online save e3 of the SAME item drains as ONE put at the original base rev — no '(conflict)' copy of the user's own draft", async () => {
+    // The train-ride case. Pre-H37 all three puts went to the server, each minted against a
+    // rev the first one immediately invalidated (the server's rev is GLOBAL — see the fake's
+    // applyMutation): e2 and e3 came back `conflict`, and the client materialized the user's
+    // OWN intermediate drafts as "Shared login (conflict YYYY-MM-DD)" duplicates. Note this
+    // assertion could not fail before the fake modelled revs — it answered a canned
+    // `newItemRev: 1` and never once said `conflict`.
     const { s, api, cache, store } = await seeded("writer");
     stubPersisted(true);
     api.offline = true;
     await store.save(s.itemId, { ...DOC, name: "draft 1" });
-    const e1 = (await cache.pending())[0]!.mutationId;
+    expect(await cache.pending()).toHaveLength(1);
     await store.save(s.itemId, { ...DOC, name: "draft 2" });
-    const e2 = (await cache.pending())[1]!.mutationId;
+    const queued = await cache.pending();
+    expect(queued).toHaveLength(1); // coalesced — one row, the newest draft
+    expect(queued[0]!.baseItemRev).toBe(4); // the rev the burst was minted against
     expect(api.pushes).toHaveLength(0); // nothing sent while offline
 
-    // Online save e3 of the SAME item: the send must ride the queue drain — e1, e2 flush
-    // BEFORE e3, so LWW leaves e3 (the user's NEWEST edit) as the live value instead of
-    // enthroning a stale draft and demoting e3 to a conflict copy (the pre-fix direct send).
+    // Online save e3 of the SAME item folds the backlog in too: one put, the newest doc, still
+    // at base 4 — which is what the server actually holds, so it applies CLEANLY.
     api.offline = false;
     await store.save(s.itemId, { ...DOC, name: "final" });
-    expect(api.pushes[0]!.map((m) => m.mutationId)).toEqual([e1, e2, expect.any(String)]); // ONE FIFO batch
-    expect(api.pushes[0]![2]!.mutationId).not.toBe(e1);
+    expect(api.pushes.flat()).toHaveLength(1);
+    expect(api.pushes[0]![0]!.baseItemRev).toBe(4);
     expect(store.get(s.itemId)?.doc.name).toBe("final"); // the newest edit is the live value
     expect(store.list().some((i) => i.doc.name.includes("(conflict"))).toBe(false); // no spurious copy
+    expect(store.list()).toHaveLength(1);
     expect(await cache.pending()).toEqual([]);
+  });
+
+  it("C3b: coalescing is PER ITEM — an unrelated item's queued edit still flushes FIFO, ahead of the online save's own row", async () => {
+    // The FIFO property C3 used to pin, kept honest now that same-item rows fold: rows for
+    // OTHER items are untouched by the fold and still lead the one drain.
+    const { s, api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    api.offline = true;
+    await store.save(null, { ...DOC, name: "other item" }, [], undefined, s.vaultId);
+    const other = (await cache.pending())[0]!;
+    await store.save(s.itemId, { ...DOC, name: "draft 1" });
+    expect(await cache.pending()).toHaveLength(2);
+
+    api.offline = false;
+    await store.save(s.itemId, { ...DOC, name: "final" });
+    const sent = api.pushes[0]!;
+    expect(sent).toHaveLength(2); // the other item's row + the folded edit — ONE FIFO batch
+    expect(sent[0]!.mutationId).toBe(other.mutationId);
+    expect(sent[1]!.itemId).toBe(s.itemId);
+    expect(sent[1]!.baseItemRev).toBe(4);
+    expect(store.list().some((i) => i.doc.name.includes("(conflict"))).toBe(false);
+    expect(await cache.pending()).toEqual([]);
+  });
+
+  it("R33/H37: the folded burst's ORIGINAL pre-edit is what a genuine denial reverts to — not the intermediate draft", async () => {
+    // The deliberate second half of the fold (store.ts's C2 snapshot: `folded ? folded.pre :
+    // existing`) had no test at all — the three H37 cases pin queue length, base rev and the
+    // conflict copy, none of which move if the fold reverts to the wrong value. It matters
+    // because `existing` at fold time is a draft the user never confirmed: reverting a refused
+    // write to "draft 1" would leave half of the refused edit standing and call it the truth.
+    const { s, api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    api.offline = true;
+    await store.save(s.itemId, { ...DOC, name: "draft 1" });
+    await store.save(s.itemId, { ...DOC, name: "draft 2" }); // folds draft 1 away
+    expect(await cache.pending()).toHaveLength(1);
+
+    // Back online, and the vault now refuses our writes (a grant revoked while we were away).
+    api.offline = false;
+    api.denyVaults.add(s.vaultId);
+    const res = await store.save(s.itemId, { ...DOC, name: "draft 3" }).then(() => "ok", (e) => e);
+    expect(res).toBeInstanceOf(ApiError);
+    expect((res as ApiError).code).toBe("denied");
+    // The SEEDED value, not "draft 1" and not "draft 2".
+    expect(store.get(s.itemId)?.doc.name).toBe(DOC.name);
+    const fresh = await relock(s.member);
+    const store2 = new VaultStore(new FakeApi().asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    await store2.hydrate();
+    expect(store2.get(s.itemId)?.doc.name, "…on disk too, so a restart agrees").toBe(DOC.name);
+  });
+
+  it("R32/H37: a definitive server error on the folding save puts the offline backlog BACK — it does not destroy it", async () => {
+    // The fold dequeues the item's unsent rows permanently, which is sound only while the row
+    // that folded them survives to carry them. On save()'s definitive-error path it does not:
+    // that path drops the new row and reverts. Pre-R32 the member's whole offline backlog for
+    // the item went with it — rows that, before H37 existed, would simply have stayed queued and
+    // flushed on the next attempt. A 5xx is the everyday trigger: edit on the train, reconnect,
+    // save, server hiccups.
+    const { s, api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    api.offline = true;
+    await store.save(s.itemId, { ...DOC, name: "draft 1" });
+    await store.save(s.itemId, { ...DOC, name: "draft 2" });
+    expect(await cache.pending()).toHaveLength(1);
+
+    api.offline = false;
+    api.refuseWithStatus = { status: 503, code: "unavailable" }; // TRANSIENT — a verdict on nothing
+    const res = await store.save(s.itemId, { ...DOC, name: "draft 3" }).then(() => "ok", (e) => e);
+    expect(res).toBeInstanceOf(ApiError);
+
+    // The backlog is still queued and still sendable — one row, the folded draft, at the base
+    // rev the burst was minted against.
+    const left = await cache.pending();
+    expect(left, "the folded rows must be restored, not destroyed").toHaveLength(1);
+    expect(left[0]!.baseItemRev).toBe(4);
+
+    // …and it really flushes once the server comes back: the user's offline work survives.
+    api.refuseWithStatus = null;
+    await store.sync();
+    expect(api.pushes.flat().length).toBeGreaterThan(0);
+    expect(store.get(s.itemId)?.doc.name).toBe("draft 2");
+    expect(await cache.pending()).toEqual([]);
+  });
+
+  it("H37: folding keeps the ORIGINAL base rev, so a peer's edit still lands as a genuine conflict copy", async () => {
+    // The other half of the rule: folding must NOT re-base onto whatever the client now holds
+    // (its own optimistic rev, or a peer's). Taking a fresher base would make this put "clean"
+    // and bury the peer's change with no copy at all — strictly worse than the bug H37 fixes.
+    const { s, api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    api.offline = true;
+    await store.save(s.itemId, { ...DOC, name: "draft 1" });
+
+    // A peer's edit is now the server's truth at global rev 9 (our push leg was down for it).
+    const peerBlob = s.owner.account.encryptItem(s.vaultId, s.itemId, { ...DOC, name: "peer edit" }).blob;
+    api.seedItemRow({ ...s.item, rev: 9, blob: peerBlob });
+
+    await store.save(s.itemId, { ...DOC, name: "draft 2" });
+    expect((await cache.pending())[0]!.baseItemRev).toBe(4); // NOT bumped to 5, and not the peer's 9
+
+    api.offline = false;
+    await store.sync();
+    const copy = store.list().find((i) => i.doc.name.includes("(conflict"));
+    expect(copy).toBeDefined();
+    expect(copy!.doc.name.startsWith("peer edit")).toBe(true); // the PEER's displaced value, not our draft
+    expect(store.get(s.itemId)?.doc.name).toBe("draft 2"); // LWW: our newest edit stays live
   });
 
   it("C4: a row staged after moveToHolding's fold-read but before the commit is NOT collaterally erased", async () => {

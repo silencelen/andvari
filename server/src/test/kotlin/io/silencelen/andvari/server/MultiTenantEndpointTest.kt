@@ -479,7 +479,9 @@ class MultiTenantEndpointTest : P4TestSupport() {
      */
     @Test
     fun emailBackoff_locksAfterFiveFailures_identicallyForRealAndGhostEmails() = testApplication {
-        application { andvariModule(buildServices(tenantConfig(), Notifier())) }
+        // Held so the test can ADVANCE the backoff clock rather than sleep past the lock (H97).
+        val services = buildServices(tenantConfig(), Notifier())
+        application { andvariModule(services) }
         val client = jsonClient(this)
         val vc = VirtualClient("real@backoff.test", "real backoff account password")
         client.register(vc, bootstrapToken)
@@ -498,8 +500,15 @@ class MultiTenantEndpointTest : P4TestSupport() {
             assertEquals("rate_limited", errorOf(blocked))
         }
 
-        // The 5th-failure lock is 2^0 = 1 s; a blocked attempt does not extend it.
-        Thread.sleep(1200)
+        // The 5th-failure lock is 2^0 = 1 s; a blocked attempt does not extend it. Advance the
+        // backoff's clock past it instead of sleeping 1200 ms (H97): the old 200 ms margin over a
+        // real-time lock was one GC pause away from a false red, and this asserts the SAME thing —
+        // that the lock lapses and does not get extended by the blocked attempt above — while
+        // taking no wall-clock time and being immune to host load. Deliberately +1500 ms: past the
+        // 1 s lock, still far short of any longer lock a REGRESSION (a wrong exponent, or a blocked
+        // attempt extending the lock to 2 s) would arm, so this stays a test that can fail.
+        val realClock = services.service.loginBackoff.clock
+        services.service.loginBackoff.clock = { realClock() + 1_500 }
         val ok = client.loginRaw(vc.email, vc.authKey, ip = nextIp())
         assertEquals(HttpStatusCode.OK, ok.status, "after the lock lapses the correct password logs in: ${ok.bodyAsText()}")
         // Success RESET the consecutive-failure count: one new failure is a 401, not a re-lock.

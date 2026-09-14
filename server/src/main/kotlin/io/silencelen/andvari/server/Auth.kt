@@ -84,19 +84,100 @@ fun ApplicationCall.declaredClientVersion(): String? {
 }
 
 /**
- * Client IP for rate keys + audit rows (spec 03 §8). Both front-ends (tailscale serve,
+ * Client IP for rate keys + audit rows (spec 03 §8). Both reference front-ends (tailscale serve,
  * cloudflared) terminate TLS on loopback, so the raw peer address would collapse every
- * remote caller to 127.0.0.1. Forwarded-IP headers are trusted ONLY when the direct
- * peer is loopback; a non-loopback peer (LAN client) can never spoof via XFF.
- * The /metrics loopback gate deliberately does NOT use this (raw peer only).
+ * remote caller to one address. Forwarded-IP headers are trusted ONLY when the direct
+ * peer is a TRUSTED PROXY — the operator-declared `ANDVARI_TRUSTED_PROXY_CIDRS`, loopback-only
+ * by default; a peer outside that set (a LAN client) can never spoof via XFF.
+ * The /metrics gate deliberately does NOT use this (raw loopback peer only).
  */
 /**
- * True when the DIRECT TCP peer is a loopback address (both front-ends terminate on
- * 127.0.0.1). The single authority for "is this a local proxy?" — shared by clientIp()'s
- * forwarded-header trust gate and the /metrics access gate so the two can never drift.
+ * True when the DIRECT TCP peer is a loopback address. RAW loopback, never the operator's
+ * trusted-proxy set: the /metrics gate is the one caller, and widening it to a declared CIDR
+ * would hand the whole scrape (every metric name and value on the instance) to anything that can
+ * reach the port from inside that CIDR. Kept distinct from [peerIsTrustedProxy] for exactly that
+ * reason — H14 split the two so the forwarded-header trust decision can be widened by the
+ * operator while metrics access cannot.
  */
 fun ApplicationCall.peerIsLoopback(): Boolean =
     runCatching { java.net.InetAddress.getByName(peerAddress()).isLoopbackAddress }.getOrDefault(false)
+
+/**
+ * One CIDR block from [Config.trustedProxyCidrs], parsed once at boot. Prefix-bit comparison on
+ * the raw address bytes: no string prefixes (which would make `10.0.0.0/8` match `100.1.2.3`),
+ * and the address FAMILY must match, so an IPv4 block never admits an IPv6 peer or vice versa.
+ */
+internal class CidrBlock(private val base: ByteArray, private val prefixBits: Int) {
+    fun contains(addr: java.net.InetAddress): Boolean {
+        val bytes = addr.address
+        if (bytes.size != base.size) return false // different family — never a match
+        var bits = prefixBits
+        var i = 0
+        while (bits >= 8) {
+            if (bytes[i] != base[i]) return false
+            i++; bits -= 8
+        }
+        if (bits == 0) return true
+        val mask = (0xFF shl (8 - bits)) and 0xFF
+        return (bytes[i].toInt() and mask) == (base[i].toInt() and mask)
+    }
+
+    companion object {
+        /**
+         * `a.b.c.d/len`, `[v6]/len`, or a bare literal (treated as a single host: /32 or /128).
+         * Returns null for anything malformed — a hostname, a bad prefix length, junk — so a
+         * typo'd env entry can only ever make the trusted set SMALLER, never wider.
+         * [Config.envLint] is the loud channel that names the dropped entry.
+         */
+        fun parse(raw: String): CidrBlock? {
+            val s = raw.trim()
+            if (s.isEmpty()) return null
+            val slash = s.lastIndexOf('/')
+            val host = if (slash < 0) s else s.substring(0, slash)
+            // IP LITERAL only — getByName would happily DNS-resolve a hostname, which would make
+            // the trusted-proxy set depend on a resolver an attacker may influence.
+            if (!isIpLiteral(host)) return null
+            val addr = runCatching { java.net.InetAddress.getByName(host) }.getOrNull() ?: return null
+            val bytes = addr.address
+            val maxBits = bytes.size * 8
+            val prefix = if (slash < 0) maxBits else (s.substring(slash + 1).toIntOrNull() ?: return null)
+            if (prefix !in 0..maxBits) return null
+            return CidrBlock(bytes, prefix)
+        }
+    }
+}
+
+/**
+ * True when [peer] (a socket-address literal) falls inside one of [nets]. Pure, so the trust
+ * decision this whole header story rests on is unit-testable without a socket (H14).
+ * An unparseable peer is NOT trusted — fail closed.
+ */
+internal fun isTrustedProxyPeer(peer: String, nets: List<CidrBlock>): Boolean {
+    val addr = runCatching { java.net.InetAddress.getByName(peer) }.getOrNull() ?: return false
+    return nets.any { it.contains(addr) }
+}
+
+/**
+ * True when the DIRECT TCP peer is an operator-declared trusted reverse proxy — the gate on
+ * honouring forwarded-IP headers (H14, audit 2026-09-13).
+ *
+ * This used to be [peerIsLoopback] alone, on the premise that a front-end always terminates on
+ * 127.0.0.1. That premise is false for the topology docs/self-hosting.md actually prescribes: a
+ * host-side proxy (nginx, cloudflared, `tailscale serve`) pointed at the container's PUBLISHED
+ * `127.0.0.1:8080` reaches the JVM through docker-proxy or the bridge DNAT, so the peer the
+ * server sees is the compose bridge GATEWAY (172.x.0.1) — never loopback. Every request then
+ * shared one rate-limit key (one stranger's failed logins 429'd the whole household) and one
+ * audit `ip`, and setting ANDVARI_TRUSTED_IP_HEADERS could not help, because the header was
+ * never consulted at all.
+ *
+ * The operator now DECLARES which peers are their proxy. Default is loopback only, so every
+ * existing deployment keeps byte-identical behaviour; a bridge self-host adds its gateway (or
+ * the bridge subnet) and gets real per-client keys. Declaring a wide CIDR is a real decision —
+ * anything inside it can name its own client IP — which is why it is an explicit operator act
+ * and not something the server infers from the peer it happens to see.
+ */
+fun ApplicationCall.peerIsTrustedProxy(config: Config): Boolean =
+    isTrustedProxyPeer(peerAddress(), config.trustedProxyNets)
 
 /**
  * The direct TCP peer's SOCKET ADDRESS as a literal — the one accessor both [peerIsLoopback] and
@@ -139,21 +220,21 @@ fun ApplicationCall.hasForwardedHeader(extraTrusted: List<String> = emptyList())
     (FORWARDED_HEADER_NAMES + extraTrusted).any { request.header(it) != null }
 
 fun ApplicationCall.clientIp(config: Config): String =
-    pickClientIp(peerIsLoopback(), { request.header(it) }, config.trustedIpHeaders, peerAddress())
+    pickClientIp(peerIsTrustedProxy(config), { request.header(it) }, config.trustedIpHeaders, peerAddress())
 
 /**
  * Pure header selection: the first trusted header bearing a non-loopback IP LITERAL wins.
  * X-Forwarded-For contributes only its RIGHTMOST entry (the one appended by the trusted
- * loopback proxy — deeper entries are client-forgeable). Literal-only because
+ * proxy — deeper entries are client-forgeable). Literal-only because
  * InetAddress.getByName would DNS-resolve hostnames.
  */
 internal fun pickClientIp(
-    peerIsLoopback: Boolean,
+    peerIsTrustedProxy: Boolean,
     header: (String) -> String?,
     trustedHeaders: List<String>,
     fallback: String,
 ): String {
-    if (!peerIsLoopback) return fallback
+    if (!peerIsTrustedProxy) return fallback
     for (name in trustedHeaders) {
         val raw = header(name) ?: continue
         val candidate = (if (name.equals("X-Forwarded-For", ignoreCase = true)) raw.substringAfterLast(',') else raw).trim()

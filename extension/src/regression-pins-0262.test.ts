@@ -53,7 +53,11 @@ test("G21 — buildVaultKeys records each opened grant's role beside its key", (
   const keySet = at(build, "vaultKeys.set(g.vaultId, vk);", "the key record");
   const roleSet = at(build, "vaultRoles.set(g.vaultId, g.role);", "the role record");
   assert.ok(keySet < roleSet, "the role is recorded for exactly the vaults whose key opened");
-  assert.ok(build.includes("return { vaultKeys, vaultRoles };"), "both maps leave the builder together");
+  // H64 added a third member of the same triple (`memberGranted`, the sealedVk provenance the
+  // personal-vault choice refuses on); the pin still says what it always said — everything
+  // buildVaultKeys learns about a grant leaves it together, so no caller can see the keys
+  // without the role.
+  assert.ok(build.includes("return { vaultKeys, vaultRoles, memberGranted };"), "all three maps leave the builder together");
 });
 
 test("G21 — writableItem is the one gate, and it reads the recorded role", () => {

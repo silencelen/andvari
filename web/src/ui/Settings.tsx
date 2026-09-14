@@ -6,6 +6,7 @@ import { backupNudge, readLastExportAt } from "../export/plan";
 import { qrModules } from "../vendor/qrcode-generator";
 import { Account } from "../vault/account";
 import type { VaultStore } from "../vault/store";
+import { BackLink } from "./BackLink";
 import { Busy } from "./Busy";
 import { scheduleClipboardClear, writeClipboard } from "./clipboard";
 import { DevicesCard } from "./Devices";
@@ -50,7 +51,7 @@ export function Settings({ client, account, store, policy, onPasswordChanged, on
   if (sub === "devices") {
     return (
       <div>
-        <ViewHeader title="Your devices" actions={<button type="button" className="link" onClick={() => setSub("main")}>‹ Back to settings</button>} />
+        <ViewHeader title="Your devices" actions={<BackLink label="Back to settings" onClick={() => setSub("main")} />} />
         <DevicesCard canonicalOrigin={policy?.canonicalOrigin} />
       </div>
     );
@@ -173,26 +174,56 @@ export function OfflineCopyBody({
   model,
   busy,
   notice,
+  pendingConfirm,
   onToggle,
   onWipe,
+  onConfirm,
+  onCancelConfirm,
 }: {
   model: OfflineCopyModel;
   busy: boolean;
   notice: string;
+  /** H135: the armed destructive confirm — the inline row that replaced `window.confirm`.
+   *  null = nothing armed. `verb` labels the button that actually does the destroying. */
+  pendingConfirm: { question: string; verb: string } | null;
   onToggle: (enabled: boolean) => void;
   onWipe: () => void;
+  onConfirm: () => void;
+  onCancelConfirm: () => void;
 }) {
   return (
     <div className="sheet">
       <h2>Offline copy</h2>
+      {/* H48: the promise is QUALIFIED to what this client can actually keep. The offline copy is
+          an IndexedDB envelope cache the unlock path reads without the server — but reaching the
+          unlock card at all still needs index.html and the hashed bundle, and the web app ships no
+          service-worker shell (design 2026-07-13-web-offline-cache D1, whose F.4 defers it). So a
+          FRESH tab opened while the server is down gets the browser's own "site can't be reached"
+          and never renders andvari at all. Promising more than that is the worst kind of untrue:
+          the member turns the toggle on FOR the outage, and the failure mode gives them no hint
+          that their vault copy is intact. The natives (Android/desktop) genuinely open cold offline
+          and keep their own, stronger sentence — this qualification is the web's alone.
+
+          R04: the sentence names the MECHANISM ("a fresh tab", "loads from nothing"), not the form
+          factor, because web/public/manifest.webmanifest ships `display: standalone` — a member can
+          install this browser copy to an Android home screen, where it looks exactly like the phone
+          app the old wording said DID open cold. Same code, same limitation: no service-worker
+          shell means the launcher icon gets the browser's error page too. "The andvari apps you
+          install" is the honest boundary until D1 ships. */}
       <p className="muted" style={{ marginTop: 0 }}>
-        An encrypted copy of your vault kept in this browser, so you can open it even when the
-        server can't be reached. Everything in it stays sealed — only your master password can
-        open it, and your password itself is never stored.
+        An encrypted copy of your vault kept in this browser, so you can open it in a tab you
+        already have open, even when the server can't be reached. Everything in it stays sealed —
+        only your master password can open it, and your password itself is never stored.
+      </p>
+      <p className="muted">
+        A fresh tab still needs the server: this copy keeps a tab that is already open working, it
+        doesn't load the app from nothing — a home-screen shortcut for this site included. The
+        andvari apps you install for your computer and phone do open offline from cold.
       </p>
       {notice && <Msg kind="info">{notice}</Msg>}
-      {/* BL-1 idiom: toggle/wipe results are async info — announce off a persistent region. */}
-      <Announcer text={notice} />
+      {/* BL-1 idiom: toggle/wipe results AND the armed confirm are async info — announce both
+          off this one persistent region (an armed confirm the SR user never hears is no confirm). */}
+      <Announcer text={pendingConfirm ? pendingConfirm.question : notice} />
       {model.orgDisallowed ? (
         <p className="muted">
           Offline copies are turned off by your household's policy — this device keeps none.
@@ -208,6 +239,28 @@ export function OfflineCopyBody({
             />
             <span>Keep an offline copy on this device</span>
           </label>
+          {/* H135: destroying the copy destroys the QUEUE with it, so the loss is confirmed — but
+              in the house inline idiom (Vault's Delete forever, Sharing's Leave/Delete vault),
+              not the native dialog F07 shipped. It sits directly under the control it guards, so
+              the sentence and the thing it is about are in the same place; the persistent
+              Announcer carries it to AT, which a native dialog never could. */}
+          {pendingConfirm && (
+            <div className="confirm-row">
+              <span>{pendingConfirm.question}</span>
+              <button
+                type="button"
+                className="ghost"
+                style={{ color: "var(--danger)" }}
+                disabled={busy}
+                onClick={onConfirm}
+              >
+                {pendingConfirm.verb}
+              </button>
+              <button type="button" className="ghost" disabled={busy} onClick={onCancelConfirm}>
+                Keep it
+              </button>
+            </div>
+          )}
           {model.demoted && (
             <Msg kind="err">
               Offline copy unavailable — storage error. This browser couldn't keep the copy up to
@@ -268,39 +321,40 @@ export function OfflineCopyBody({
 
 /**
  * breaker #9 posture: destroying the cache destroys the QUEUE — a user erasing their own unsynced
- * edits gets a blocking confirm (same styling contract as App.signOut). The count is RE-READ at
- * click time from the live store — it reads the SHARED per-account DB, so edits another tab queued
- * after this card mounted are counted too. Gating on the mount-time model would stale-zero those
- * and skip the confirm, silently destroying that tab's unsynced edits (S5 review F2 — App.signOut
- * already re-reads pendingSyncCount at click time; this is its in-vault twin). A failing re-read
- * falls back to the mount-time count: a stale confirm beats a skipped one, and a count failure
- * must never wedge the control. Exported for tests; `ask` defaults to window.confirm, and
- * confirm-less environments proceed (the historical non-browser fall-through).
+ * edits must be told before it happens. This returns the SENTENCE that confirm has to carry, or
+ * null when there is nothing to lose and the action should just run.
+ *
+ * H135 changed the shape, not the gate: it used to call `window.confirm` itself and answer
+ * yes/no. It now hands the question back so the card can arm the house's inline two-step confirm
+ * (no native dialogs — the Editor's rule), which is themable, non-blocking, and reachable by the
+ * persistent Announcer. The count is still RE-READ at click time from the live store — it reads
+ * the SHARED per-account DB, so edits another tab queued after this card mounted are counted too.
+ * Gating on the mount-time model would stale-zero those and skip the confirm, silently destroying
+ * that tab's unsynced edits (S5 review F2 — App.signOut's twin gate re-reads the same way). A
+ * failing re-read falls back to the mount-time count: a stale confirm beats a skipped one, and a
+ * count failure must never wedge the control.
  */
-export async function confirmQueueLoss(
+export async function queueLossQuestion(
   store: Pick<VaultStore, "queuedMutationCount">,
   mountCount: number,
-  ask?: (message: string) => boolean,
-): Promise<boolean> {
+): Promise<string | null> {
   let queued = mountCount;
   try {
     queued = await store.queuedMutationCount();
   } catch {
     /* count unreadable — the mount-time count still gates */
   }
-  if (queued === 0) return true;
-  const confirm =
-    ask ?? (typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm.bind(window) : null);
-  if (!confirm) return true;
-  return confirm(
-    `${queued} unsynced ${queued === 1 ? "change" : "changes"} on this device will be permanently lost. Continue?`,
-  );
+  if (queued === 0) return null;
+  return `${queued} unsynced ${queued === 1 ? "change" : "changes"} on this device will be permanently lost.`;
 }
 
 function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string }) {
   const [model, setModel] = useState<OfflineCopyModel | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  // H135: the armed inline confirm. `run` is the destructive action the second click performs —
+  // held here (not re-derived) so the confirm and the deed can never drift apart.
+  const [pendingConfirm, setPendingConfirm] = useState<{ question: string; verb: string; run: () => Promise<void> } | null>(null);
 
   // (Re-)assemble the model; guarded so a slow probe never lands state on an unmounted card.
   useEffect(() => {
@@ -317,8 +371,7 @@ function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string 
 
   const refresh = async () => setModel(await offlineCopyModel(store, userId));
 
-  const toggle = async (enabled: boolean) => {
-    if (!enabled && !(await confirmQueueLoss(store, model.queued))) return;
+  const toggleNow = async (enabled: boolean) => {
     setBusy(true);
     setNotice("");
     try {
@@ -338,8 +391,7 @@ function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string 
     }
   };
 
-  const wipe = async () => {
-    if (!(await confirmQueueLoss(store, model.queued))) return;
+  const wipeNow = async () => {
     setBusy(true);
     setNotice("");
     try {
@@ -357,13 +409,33 @@ function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string 
     }
   };
 
+  /** Arm the inline confirm when there is queued work to lose; otherwise just do it. */
+  const guard = async (verb: string, run: () => Promise<void>) => {
+    setNotice("");
+    const question = await queueLossQuestion(store, model.queued);
+    if (!question) return run();
+    setPendingConfirm({ question, verb, run });
+  };
+
   return (
     <OfflineCopyBody
       model={model}
       busy={busy}
       notice={notice}
-      onToggle={(e) => void toggle(e)}
-      onWipe={() => void wipe()}
+      pendingConfirm={pendingConfirm}
+      onToggle={(enabled) => {
+        setPendingConfirm(null);
+        // Turning it ON destroys nothing; only the OFF direction is gated.
+        if (enabled) void toggleNow(true);
+        else void guard("Turn it off and lose them", () => toggleNow(false));
+      }}
+      onWipe={() => void guard("Remove it and lose them", wipeNow)}
+      onConfirm={() => {
+        const armed = pendingConfirm;
+        setPendingConfirm(null);
+        if (armed) void armed.run();
+      }}
+      onCancelConfirm={() => setPendingConfirm(null)}
     />
   );
 }
@@ -534,7 +606,7 @@ function TotpCard({ client, policy }: Pick<Props, "client" | "policy">) {
       <Announcer text={msg} />
 
       {!status ? (
-        <p className="muted"><Busy>loading…</Busy></p>
+        <p className="muted"><Busy>Loading…</Busy></p>
       ) : status.enrolled ? (
         <>
           <div className="msg info">On ✓ — every sign-in asks for your authenticator code.</div>
@@ -691,9 +763,16 @@ function AppearanceCard() {
   return (
     <div className="sheet">
       <h2>Appearance</h2>
+      {/* R10: says "the andvari web app", not "andvari". H134 gave the browser extension its own
+          Appearance choice on its own origin (extension/options.html — a separate store this page
+          cannot reach), so forcing Light here leaves the popup dark until it is set there too. The
+          old sentence claimed the whole product and was the promise H134 was raised against; the
+          honest version names the two surfaces and points at the other one. Pinned against the
+          extension's sentence in vault-copy.test.ts so the pair cannot drift apart again. */}
       <p className="muted" style={{ marginTop: 0 }}>
-        "Match my device" follows your device's light/dark setting. Picking one keeps
-        andvari that way in this browser only — your other devices choose for themselves.
+        "Match my device" follows your device's light/dark setting. Picking one keeps the andvari
+        web app that way in this browser only — the browser extension has its own Appearance
+        setting, and your other devices choose for themselves.
       </p>
       <div className="tabs" role="group" aria-label="Theme" style={{ maxWidth: 400, marginBottom: 0 }}>
         {THEME_CHOICES.map(({ value, label }) => (

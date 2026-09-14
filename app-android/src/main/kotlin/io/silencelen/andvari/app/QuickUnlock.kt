@@ -10,16 +10,10 @@ import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
+import io.silencelen.andvari.core.client.KdfReKeyCore
 import io.silencelen.andvari.core.client.KdfUpgrade
-import io.silencelen.andvari.core.crypto.Ad
-import io.silencelen.andvari.core.crypto.Bytes
-import io.silencelen.andvari.core.crypto.Envelope
-import io.silencelen.andvari.core.crypto.KdfParams
-import io.silencelen.andvari.core.crypto.Keys
-import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ClientPolicy
-import io.silencelen.andvari.core.model.PasswordChangeRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -551,18 +545,22 @@ object OfflineData {
 }
 
 /**
- * F61 KDF upgrade (spec 01 §7, design §4). Silent re-key with the password the client just
- * verified, when the org policy raised the Argon2id cost. Shared by the main app (inline) and the
- * autofill overlay (detached, A6). ZK-preserving: only the derived authKey and the re-wrapped UVK
- * cross the wire, via the existing `PUT /account/password`.
+ * F61 KDF upgrade (spec 01 §7, design §4) — the ANDROID ADAPTER. Silent re-key with the password
+ * the client just verified, when the org policy raised the Argon2id cost. Used by the main app
+ * (AndvariViewModel.runKdfUpgrade) and the autofill overlay (detached, A6).
+ *
+ * The routine itself lives in core [KdfReKeyCore] (audit H85, the F37/G39 pattern): it was
+ * hand-duplicated here and in the desktop's DesktopState until `core/src/jvmShared` — which
+ * compiles into both `jvmMain` and `androidMain` — made one copy reach both apps. This object
+ * keeps its own name and signature so the two call sites are unchanged, and supplies the ONE
+ * genuinely Android-side piece: the [SessionStore] cache gate the persisted keys pass through.
  */
 object KdfReKey {
     /**
-     * Re-key iff [KdfUpgrade.shouldUpgrade] approves the move (policy ≥ account on both cost axes,
-     * inside sanity bounds — never sideways/down/absurd, so a hostile server can't weaken the KDF).
-     * Best-effort: ANY failure is swallowed (the unlock already succeeded; the check re-runs next
-     * online full-password unlock). Callers MUST have already excluded `mustChangePassword` (A5)
-     * and the offline case, and run this off the main thread (two Argon2id derivations).
+     * Delegates to [KdfReKeyCore.maybeUpgrade], which owns the [KdfUpgrade.shouldUpgrade] fence
+     * (never sideways/down/absurd, so a hostile server can't weaken the KDF) and swallows every
+     * failure. Callers MUST have already excluded `mustChangePassword` (A5) and the offline case,
+     * and run this off the main thread (two Argon2id derivations).
      */
     suspend fun maybeUpgrade(
         api: AndvariApi,
@@ -572,47 +570,10 @@ object KdfReKey {
         keys: AccountKeys,
         policy: ClientPolicy,
         account: Account,
-    ) {
-        if (!KdfUpgrade.shouldUpgrade(keys.kdfParams, policy.kdfParams)) return
-        runCatching {
-            val crypto = createCryptoProvider()
-            val newSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
-            val newParams = policy.kdfParams
-            // ZEROIZATION (H80, recheck R22 — Account.enroll's shape): the new MK lives only long
-            // enough to split into its two purposes, and the new wrapKey dies once the UVK is
-            // sealed under it. authNew is only ever the base64 string the request carries.
-            val mkNew = Keys.masterKey(crypto, password, newSalt, newParams)
-            val (authNew, wrapNew) = try {
-                Bytes.toB64(Keys.authKey(crypto, mkNew)) to Keys.wrapKey(crypto, mkNew)
-            } finally {
-                mkNew.fill(0)
-            }
-            // The UVK never changes across a KDF upgrade (spec 01 §4/§7) — re-wrap the SAME UVK
-            // under the new wrapKey. Copy egress is zeroed whatever happens.
-            val uvk = account.uvkCopyForPlatformWrap()
-            val wrappedUvkNew = try {
-                Envelope.sealB64(crypto, wrapNew, uvk, Ad.uvk(userId))
-            } finally {
-                uvk.fill(0)
-                wrapNew.fill(0)
-            }
-            val currentAuth = Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, crypto)
-            api.changePassword(
-                PasswordChangeRequest(
-                    currentAuthKey = currentAuth,
-                    newAuthKey = authNew,
-                    newKdfSalt = Bytes.toB64(newSalt),
-                    newKdfParams = newParams,
-                    newWrappedUvk = wrappedUvkNew,
-                ),
-            )
-            // design §4 step 3: the offline cache MUST hold the new salt/params/wrappedUvk or the
-            // next offline unlock derives with stale params and fails. Only when the cache is allowed.
-            if (store.cacheAllowed) {
-                store.saveAccountKeys(
-                    keys.copy(kdfSalt = Bytes.toB64(newSalt), kdfParams = newParams, wrappedUvk = wrappedUvkNew),
-                )
-            }
-        }
+    ) = KdfReKeyCore.maybeUpgrade(api, userId, password, keys, policy, account) { updated ->
+        // design §4 step 3: keep the offline cache in step, or the next offline unlock derives with
+        // stale params and fails. Only when the cache is allowed — the phone's own gate, which is
+        // why it lives in the adapter and not in core.
+        if (store.cacheAllowed) store.saveAccountKeys(updated)
     }
 }

@@ -257,6 +257,14 @@ export interface VaultCache {
   accountKeys(): Promise<AccountKeys | null>;
   /** §D.2c keep-old-on-bad-write — resolves true iff the payload was written. */
   setAccountKeys(keys: AccountKeys): Promise<boolean>;
+  /** R41 (audit H67): drop the cached accountKeys row and NOTHING else — the offline queue,
+   *  envelopes and holding all survive. Called on exactly one verdict: the cached payload is
+   *  STRUCTURALLY damaged (not decodable base64url / an envelope version this build does not
+   *  implement), which is unusable by construction and unusable identically forever, so keeping
+   *  it only guarantees the same terminal on every later attempt. Dropping it forces the next
+   *  unlock online, where a healthy server row self-heals the cache. Deliberately NOT a wipe:
+   *  the member's unsent offline edits are not implicated by a bad key blob. */
+  clearAccountKeys(): Promise<void>;
   policy(): Promise<CachePolicy | null>;
   setPolicy(policy: CachePolicy): Promise<void>;
 
@@ -880,6 +888,13 @@ export class IdbVaultCache implements VaultCache {
     return written && !this.closed;
   }
 
+  async clearAccountKeys(): Promise<void> {
+    if (this.closed) return;
+    await this.write([STORE_KV], async (tx) => {
+      tx.objectStore(STORE_KV).delete("accountKeys");
+    });
+  }
+
   policy(): Promise<CachePolicy | null> {
     return this.read([STORE_KV], null, async (tx) => {
       const v = kvValue(await req(tx.objectStore(STORE_KV).get("policy")));
@@ -1020,6 +1035,7 @@ export class NullCache implements VaultCache {
   async setAccountKeys(_keys: AccountKeys): Promise<boolean> {
     return false; // nothing persisted — honest
   }
+  async clearAccountKeys(): Promise<void> {} // nothing cached to clear
   async policy(): Promise<CachePolicy | null> {
     return null;
   }

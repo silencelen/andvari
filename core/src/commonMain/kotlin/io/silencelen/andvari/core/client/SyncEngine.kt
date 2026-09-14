@@ -254,8 +254,9 @@ class SyncEngine(
      * queue entries win (FIFO ⇒ the newest edit of an item is what the user last saved).
      * The overlay reads the cache's own rev for an edited item (the reconcile pull trues it
      * up), rev 0 for a brand-new one, and stamps updatedAt with the local clock (R36; web
-     * parity). Never fed to [saveWithUploads]'s
-     * base-rev read — that deliberately consults the cache so LWW stays server-relative.
+     * parity). Never fed to [saveWithUploads]'s base-rev read — that consults the cache, or
+     * (H37) the base the item's own queued burst was minted against, so LWW stays
+     * server-relative and a projected rev can never masquerade as one the server issued.
      */
     fun items(): List<VaultItem> = overlayPending(cache.allItems()).sortedBy { it.doc.name.lowercase() }
     fun item(itemId: String): VaultItem? {
@@ -456,6 +457,10 @@ class SyncEngine(
             runCatching { account.addGrant(g) } // role applies unconditionally; key opens if missing
         }
         for (v in cache.vaults()) {
+            // `type` is a SERVER plaintext column bound into no AD, so this is a hint, not
+            // evidence; [Account.setPersonalVault] refuses a candidate whose VK arrived by
+            // member grant (audit H64). Grants are replayed above this loop precisely so the
+            // provenance is known by the time a candidate is offered.
             if (v.type == "personal" && account.hasVault(v.vaultId)) account.setPersonalVault(v.vaultId)
         }
         for (w in cache.envelopes()) {
@@ -608,6 +613,8 @@ class SyncEngine(
                 // regressed keeps the newer local blob (rev/lifecycle fields still apply).
                 val vault = keepNewerMeta(delivered)
                 cache.upsertVault(vault)
+                // Server-asserted label, unauthenticated (spec 02 §4): setPersonalVault refuses a
+                // member-granted vault so a hostile relabel cannot move the usage key (audit H64).
                 if (vault.type == "personal" && account.hasVault(vault.vaultId)) account.setPersonalVault(vault.vaultId)
                 // Consumed-deleteId marker (spec 03 §11): a live vault that WAS restored
                 // carries restoreProof over the deleteId it undid. Verifying it durably
@@ -1370,11 +1377,8 @@ class SyncEngine(
         val existing = itemId?.let { cache.getItem(it) }
         // H18: an edit to an item that exists ONLY as a queued, never-sent put (an offline
         // new-item save the list now projects). It is still the SAME new item: the server has
-        // never seen it, so the newer doc simply supersedes the queued one — the older queued
-        // put is dropped before this one is enqueued (else the drain would land both and
-        // the second, at base rev 0 against the first's fresh rev, would spawn a conflict
-        // copy of the user's own draft). Only a never-sent NEW item coalesces; an edit over a
-        // server-confirmed row keeps every queued put (that ordering question is H37).
+        // never seen it, so the newer doc simply supersedes the queued one. H37 generalizes
+        // that to EVERY item with unsent queued puts — see [coalesceQueuedPuts].
         val queuedOnly = if (itemId != null && existing == null) item(itemId) else null
         // Save guard (design §6): an edit to an itemId we no longer hold must NOT silently
         // teleport into the personal vault — the item's vault may have been deleted or its
@@ -1404,22 +1408,62 @@ class SyncEngine(
             }
         }
         return syncMutex.withLock {
-            if (queuedOnly != null) coalesceQueuedNewItem(id)
-            val m = putMutation(id, effectiveVault, doc, existing?.rev ?: 0)
+            // H37: the queued burst's ORIGINAL base rev wins over the cache's — see below.
+            val coalescedBase = coalesceQueuedPuts(id)
+            val m = putMutation(id, effectiveVault, doc, coalescedBase ?: existing?.rev ?: 0)
             sendOrQueue(m)?.let { return@withLock it }
             reconcileAfterWrite(m)
         }
     }
 
-    /** H18: drop every queued put of a never-sent NEW item (see [saveWithUploads]). Under
-     *  [syncMutex] — a drain cannot be sending them meanwhile. */
-    private fun coalesceQueuedNewItem(itemId: String) {
-        for (q in cache.pending()) {
-            if (q.itemId == itemId && q.op == "put") {
-                cache.dequeue(q.mutationId)
-                pendingDocCache.remove(q.mutationId)
-            }
+    /**
+     * H18 + H37 (audit 2026-09-13, spec 03 §5 "Queue coalescing"): fold this item's UNSENT
+     * queued puts into the one the caller is about to enqueue, and answer the base rev that
+     * one must carry. Web twin: store.ts coalesceQueuedPuts.
+     *
+     * WHY (H37, the bug this exists to kill). The server's conflict test is
+     * `baseItemRev < existing.rev` (Service.applyPut) against a GLOBALLY monotonic rev —
+     * `nextRev` is the rowid of the `changes` table, not a per-item counter. So when two
+     * puts for one item sit in the queue, both minted against the same pre-offline rev r,
+     * the drain lands the first at some fresh global rev G ≫ r and the second is stale BY
+     * CONSTRUCTION: the server answers `conflict` and hands back the displaced value — which
+     * is the user's OWN intermediate draft — and the client dutifully materializes it as
+     * "<name> (conflict YYYY-MM-DD)". Editing one login twice on a train ride, or creating an
+     * entry and fixing a typo before reconnecting, therefore came back as a duplicate that
+     * reads to the user as a corrupt vault, and then fed Vault Health's duplicates cluster.
+     * Nothing was lost — but nothing was in conflict either. Coalescing removes the false
+     * premise instead of teaching the client to recognize its own drafts.
+     *
+     * The base rev deliberately comes from the OLDEST dropped row, NOT from the cache. If a
+     * PEER's edit landed in the cache between the two offline saves, the cache's rev is that
+     * peer's — sending at it would silently overwrite their change with no copy at all. The
+     * original base preserves the genuine conflict (peer vs. us) while dropping the false one
+     * (us vs. us).
+     *
+     * A fresh mutationId, never the dropped row's: reusing it would let the server's dedup
+     * window replay the OLD stored result verbatim (spec 03 §5) and report `applied` for
+     * content we never sent — trading a junk copy for silent loss of the newest draft.
+     *
+     * Scope. Only `put` rows, and only when NO queued `delete` for the same item is in the
+     * way — a delete between two puts is an ordering the drain must keep as written. Staged-
+     * denied rows are invisible to [VaultCache.pending] and so are never folded away: their
+     * fate is F21's to decide. The residual window is the crash/lost-response one — a row
+     * that actually landed but whose response we never saw is dropped here and re-sent at the
+     * old base, which degrades to exactly today's conflict copy, never to loss. Called under
+     * [syncMutex], so a drain cannot be sending these rows meanwhile.
+     *
+     * @return the oldest folded row's baseItemRev, or null when nothing was folded.
+     */
+    private fun coalesceQueuedPuts(itemId: String): Long? {
+        val rows = cache.pending().filter { it.itemId == itemId }
+        if (rows.isEmpty()) return null
+        if (rows.any { it.op != "put" }) return null // a queued delete — never reorder around it
+        val base = rows.first().baseItemRev
+        for (q in rows) {
+            cache.dequeue(q.mutationId)
+            pendingDocCache.remove(q.mutationId)
         }
+        return base
     }
 
     /**
@@ -1522,7 +1566,7 @@ class SyncEngine(
         if (existing == null) {
             // H18: a queued, never-sent NEW item — the server has nothing to delete; dropping
             // the queued put(s) is the whole removal (and the projected row disappears).
-            if (item(itemId) != null) syncMutex.withLock { coalesceQueuedNewItem(itemId) }
+            if (item(itemId) != null) syncMutex.withLock { coalesceQueuedPuts(itemId) }
             return SaveOutcome.APPLIED
         }
         return syncMutex.withLock {

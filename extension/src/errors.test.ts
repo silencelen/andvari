@@ -44,6 +44,16 @@ test("unlock ladder: every code renders the exact copy", () => {
   assert.equal(unlockErrorCopy("upgrade_required"), "Your server requires a newer extension — get the update from the web vault or the link above.");
   // web IdentityMismatchError's message, byte-equal — never rendered as wrong-password.
   assert.equal(unlockErrorCopy("identity_mismatch"), "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.");
+  // H67: a wrappedUvk that isn't a readable envelope (bad base64url, too short, an unknown
+  // version/alg) is refused before the password's wrap key is applied — so this rung must be the
+  // terminal damaged-keys sentence, byte-equal to core HouseholdCopy.ACCOUNT_KEYS_DAMAGED and web
+  // account.ts VAULT_KEYS_DAMAGED, and must never read as bad credentials or invite a retry.
+  assert.equal(
+    unlockErrorCopy("keys_damaged"),
+    "This account's stored keys are damaged or from a newer version, so sign-in cannot continue. Contact your admin or restore from a backup.",
+  );
+  assert.notEqual(unlockErrorCopy("keys_damaged"), unlockErrorCopy("bad_credentials"));
+  assert.notEqual(unlockErrorCopy("keys_damaged"), unlockErrorCopy(undefined)); // not the "try again" terminal
   // H122 (2026-09-13 audit): pinned to the LITERAL, not merely to its siblings. The PIN and bio
   // ladders below assert equality with THIS call, so with no literal anywhere all three could be
   // reworded together and stay green — which is how the weakened-KDF sentence came to end

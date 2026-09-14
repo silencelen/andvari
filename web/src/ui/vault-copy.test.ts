@@ -119,3 +119,29 @@ describe("Vault.tsx error copy — canon sentences, never wire text", () => {
     expect(vaultTsx).not.toContain('e.message : "re-seal failed');
   });
 });
+
+/**
+ * R10 (H134's web half): H134 gave the browser EXTENSION its own Appearance choice because the
+ * web app's sentence promised a pick that "keeps andvari that way in this browser" and the popup
+ * — a separate origin with its own store — ignored it. Adding the extension row does not make the
+ * web sentence true on its own: forcing Light here still leaves the popup dark until it is set
+ * over there too. So the two sentences are one claim split across two surfaces, and each must
+ * scope itself to its own surface and point at the other. Pinned as a pair, here, because a
+ * reword of either side alone is exactly how the promise broke the first time.
+ */
+describe("R10 — the Appearance promise is scoped, on both surfaces", () => {
+  const settingsTsx = readFileSync(here("./Settings.tsx"), "utf8");
+  const optionsHtml = readFileSync(here("../../../extension/options.html"), "utf8");
+
+  it("the web app scopes its pick to the web app and names the extension's own setting", () => {
+    expect(settingsTsx).toContain("keeps the andvari\n        web app that way in this browser only");
+    expect(settingsTsx).toContain("the browser extension has its own Appearance\n        setting");
+    // The unscoped claim is the defect — it must not come back.
+    expect(settingsTsx).not.toContain("Picking one keeps\n        andvari that way in this browser only");
+  });
+
+  it("the extension scopes its pick to the extension and names the web vault's own setting", () => {
+    expect(optionsHtml).toContain("keeps the\n          andvari extension that way in this browser");
+    expect(optionsHtml).toContain("The web vault keeps its own setting.");
+  });
+});

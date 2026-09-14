@@ -27,6 +27,20 @@ import type { ImportProjections } from "../import/csv";
 import { ITEM_FORMAT_VERSION, type Account } from "./account";
 import { type HeldVaultRecord, NullCache, type PullBatch, type QueuedPreEdit, type VaultCache } from "./idbcache";
 
+/**
+ * H37's fold, and (R32) everything needed to UNDO it.
+ *
+ * `baseItemRev`/`pre` are what the folded put rides: the oldest folded row's base rev, and the
+ * burst's original pre-edit value. `rows` is the fold itself — the dequeued mutations with their
+ * durable pre-edit blobs, in their original FIFO order — kept so the one path that throws the
+ * folding save away can put the member's offline backlog back instead of destroying it.
+ */
+type FoldedPuts = {
+  baseItemRev: number;
+  pre: VaultItem | null;
+  rows: Array<{ mutation: Mutation; preEdit?: QueuedPreEdit }>;
+};
+
 export interface VaultItem {
   itemId: string;
   vaultId: string;
@@ -417,8 +431,10 @@ export class VaultStore {
   }
 
   /** §E.4 (breaker #9): total unsynced queue rows (pending + staged-denied) this wipe would
-   *  destroy — App.signOut BLOCKS on a confirm carrying this count before a user sign-out,
-   *  and surfaces it on a definitive-401 wipe it cannot block. */
+   *  destroy. Post-H135 the ASKING and the wiping are two seams: SignOutLink arms the inline
+   *  confirm carrying this count before a USER sign-out, and App.signOut is the unconditional
+   *  wipe choke point that surfaces the count on a definitive-401 it cannot block. (Corrected
+   *  by R07: this comment still described App.signOut raising a confirm it no longer raises.) */
   async queuedMutationCount(): Promise<number> {
     const [pending, staged] = await Promise.all([this.cache.pending(), this.cache.stagedDenied()]);
     return pending.length + staged.length;
@@ -701,7 +717,11 @@ export class VaultStore {
       const vault = this.keepNewerMeta(delivered);
       this.vaultsById.set(vault.vaultId, vault);
       ops.push((b) => b.upsertVault(vault)); // the merged keepNewerMeta row — disk mirrors memory
-      // Discover the personal vault so save()/encrypt default to it.
+      // Discover the personal vault so save()/encrypt default to it. `type` is a SERVER
+      // plaintext column bound into no AD, so this is a hint, not evidence: setPersonalVault
+      // refuses a candidate whose VK arrived by member grant, which is what stops a hostile
+      // relabel from moving the usage key (audit H64). Grants are applied above this loop
+      // precisely so the provenance is known by the time a candidate is offered.
       if (vault.type === "personal" && this.account.hasVault(vault.vaultId)) {
         this.account.setPersonalVault(vault.vaultId);
       }
@@ -1236,7 +1256,9 @@ export class VaultStore {
     }
     for (const vault of await this.cache.vaults()) {
       this.vaultsById.set(vault.vaultId, vault);
-      // Discover the personal vault so save()/encrypt default to it (pull parity).
+      // Discover the personal vault so save()/encrypt default to it (pull parity — including
+      // the H64 member-grant refusal inside setPersonalVault; the grant replay above rebuilds
+      // the provenance this cold-start path depends on).
       if (vault.type === "personal" && this.account.hasVault(vault.vaultId)) {
         this.account.setPersonalVault(vault.vaultId);
       }
@@ -1828,6 +1850,113 @@ export class VaultStore {
     this.noticeList.push(n);
   }
 
+  /**
+   * H37 (audit 2026-09-13, spec 03 §5 "Queue coalescing"; core SyncEngine.coalesceQueuedPuts
+   * twin): fold this item's UNSENT queued puts into the one save() is about to enqueue, and
+   * answer the base rev — and the pre-edit truth — that one must carry.
+   *
+   * WHY. The server's conflict test is `baseItemRev < existing.rev` (Service.applyPut) against
+   * a GLOBALLY monotonic rev: `nextRev` is the rowid of the `changes` table, so EVERY write by
+   * anyone advances it. Two queued puts for one item therefore cannot both be clean — the
+   * drain lands the first at a fresh global rev G, and the second (minted while offline, at
+   * the pre-offline rev, or at our local optimistic counter which only ever equals G by
+   * coincidence) is stale BY CONSTRUCTION. The server answers `conflict` and returns the
+   * displaced value, which is the user's OWN intermediate draft, and the client dutifully
+   * materializes "<name> (conflict YYYY-MM-DD)". Editing one login twice on a plane, or
+   * creating an entry and fixing a typo before reconnecting, came back as a duplicate that
+   * reads as a corrupt vault and then feeds Vault Health's duplicates cluster. Nothing was
+   * lost — but nothing was in conflict either, and the client cannot tell its own draft from a
+   * peer's edit. Coalescing removes the false premise rather than teaching it to guess.
+   *
+   * The base rev comes from the OLDEST folded row, never from `itemsById`: that map holds our
+   * own optimistic rev, and if a PEER's edit arrived in between it holds the peer's — sending
+   * at either would let this put apply "cleanly" over a change nobody displaced-copied.
+   * The original base keeps a genuine cross-device conflict genuine.
+   *
+   * A FRESH mutationId, never a folded row's: replaying a folded id would let the server's
+   * dedup window return that row's ORIGINAL stored result verbatim (spec 03 §5) and report
+   * `applied` for content we never sent — trading a junk copy for silent loss of the newest
+   * draft.
+   *
+   * Scope and the residual window. Only `put` rows, and only when no queued `delete` for the
+   * same item stands in the way (an ordering the drain must keep as written). Staged-denied
+   * rows are invisible to cache.pending() and so are never folded — their fate is F21's.
+   * Unlike core (whose saveWithUploads holds syncMutex) this runs outside the drain's lock, so
+   * a row already on the wire can be folded away; that degrades to exactly today's conflict
+   * copy — never to loss, since the sent row still applies server-side and the new put simply
+   * conflicts against it.
+   */
+  private async coalesceQueuedPuts(itemId: string): Promise<FoldedPuts | null> {
+    if (!this.cache.durable) return null; // NullCache: enqueue is a no-op, nothing to fold
+    let pending: Mutation[];
+    try {
+      pending = (await this.cache.pending()).filter((q) => q.itemId === itemId);
+    } catch {
+      return null; // a cache read failure must never fail a save — fall back to today's shape
+    }
+    if (pending.length === 0) return null;
+    if (pending.some((q) => q.op !== "put")) return null; // a queued delete — never reorder around it
+    const oldest = pending[0]!;
+    // The burst's original pre-edit value. A row with NO snapshot (pre-M2, or one whose sealed
+    // twin would not open at hydrate) falls back to today's shape — the live row — rather than
+    // to null, which a revert would read as "this item never existed" and delete.
+    const snap = this.preEditByMutation.get(oldest.mutationId);
+    const pre = snap ? snap.pre : (this.itemsById.get(itemId) ?? null);
+    // R32: read the DURABLE pre-edit blobs BEFORE dequeuing, so the fold can be undone. The fold
+    // is only safe because the new put supersedes these rows — and it does, right up until the
+    // save that folded them is itself thrown away. See the catch in save(): on a definitive
+    // server error that path drops the new row and reverts, and without these the user's whole
+    // offline backlog for this item would go with it (rows that, before H37, would simply have
+    // stayed queued and flushed later). A cache read failure here is not fatal: it costs the
+    // undo, not the fold, so it degrades to the shape this row shipped with rather than failing
+    // a save.
+    let blobs: Map<string, QueuedPreEdit>;
+    try {
+      blobs = new Map((await this.cache.queuedPreEdits()).map((r) => [r.mutationId, r.preEdit]));
+    } catch {
+      blobs = new Map();
+    }
+    const rows: Array<{ mutation: Mutation; preEdit?: QueuedPreEdit }> = pending.map((q) => ({
+      mutation: q,
+      preEdit: blobs.get(q.mutationId),
+    }));
+    for (const q of pending) {
+      await this.cache.dequeue(q.mutationId);
+      this.preEditByMutation.delete(q.mutationId);
+      this.rejectedMutationIds.delete(q.mutationId);
+    }
+    return { baseItemRev: oldest.baseItemRev, pre, rows };
+  }
+
+  /**
+   * R32: put the folded rows back, in their original FIFO order, when the save that folded them
+   * is being thrown away. Called from exactly one place — save()'s definitive-error path — and
+   * deliberately best-effort: it runs while an error is already propagating, so a cache that
+   * refuses the re-enqueue must not replace the caller's real error with a cache error. The
+   * worst case of a failure here is the pre-R32 behaviour (the backlog is gone), which is what
+   * the caller was about to do anyway.
+   *
+   * NOT a core twin, deliberately: core's sendOrQueue leaves the folding mutation QUEUED on an
+   * ApiException (only an IOException on a non-durable cache dequeues it), so the newest doc
+   * still carries the burst and nothing is lost there. Web's refuse-not-degrade path is the one
+   * that drops its own row, which is what makes the fold destructive here and only here.
+   *
+   * Re-enqueue puts each row back at the TAIL, so the group keeps its own relative order and
+   * lands after anything queued in the meantime. That is the right order: these rows are older
+   * than the rest of the queue by content but their send has not happened, and FIFO over the
+   * whole queue is what the drain guarantees — not FIFO by authorship time.
+   */
+  private async restoreFoldedPuts(folded: FoldedPuts): Promise<void> {
+    for (const r of folded.rows) {
+      try {
+        await this.cache.enqueue(r.mutation, r.preEdit);
+      } catch {
+        // keep going: a partial restore is strictly better than none, and the caller is
+        // already throwing the error the user will actually see.
+      }
+    }
+  }
+
   putMutation(itemId: string, vaultId: string, doc: ItemDoc, baseItemRev: number): Mutation {
     // The wire fv is read back from the upload — ONE encryptItem computes it (per-doc floor,
     // monotonic reseal) and binds it into the AD, so the two can never diverge.
@@ -2077,11 +2206,20 @@ export class VaultStore {
       onUploadProgress?.(++done, newFiles.length);
     }
 
-    const m = this.putMutation(id, targetVaultId, doc, existing?.rev ?? 0);
+    // H37: fold this item's own unsent queued puts into THIS one first — the folded base rev
+    // (and the folded pre-edit truth) then ride the mutation below. See coalesceQueuedPuts.
+    const folded = await this.coalesceQueuedPuts(id);
+    const m = this.putMutation(id, targetVaultId, doc, folded ? folded.baseItemRev : (existing?.rev ?? 0));
     let mayQueue = newFiles.length === 0 && (await this.offlineQueueAllowed());
 
     const committedAt = Date.now();
     const optimisticRev = (existing?.rev ?? 0) + 1; // the reconcile pull trues the rev up
+    // C2 snapshot: the value to restore if THIS write is later refused. When puts were folded
+    // that is the burst's ORIGINAL pre-edit value, not the intermediate draft `existing` now
+    // holds — reverting to a draft the user never confirmed would leave the refused edit half
+    // standing. (optimisticRev / optimisticUpdatedAt stay THIS save's: they are the guard that
+    // the live row is still ours to revert.)
+    const preEdit = folded ? folded.pre : (existing ?? null);
     // Enqueue durably BEFORE the send (D4: a retry converges on server dedup — the fresh-
     // mutationId non-idempotent retry is gone). On NullCache this is a no-op (mayQueue already
     // false there), so the direct flushChunk branch below sends m instead. M2: the pre-edit
@@ -2092,7 +2230,7 @@ export class VaultStore {
     // (§D.2a) — so an unverified enqueue would black-hole this save yet flushQueue would drain an
     // empty queue and report SUCCESS. When the row did NOT land, demote the dead handle and refuse
     // the queue so the send below routes to the REAL flushChunk (refuse-not-degrade), never silent.
-    const enqueued = await this.cache.enqueue(m, this.durablePreEdit(existing ?? null, "put", optimisticRev, committedAt));
+    const enqueued = await this.cache.enqueue(m, this.durablePreEdit(preEdit, "put", optimisticRev, committedAt));
     if (!enqueued) {
       this.demoteCache(); // no-op if already cache-less; else sever the dead handle
       mayQueue = false; // this write can't be durably queued — do the real send or refuse
@@ -2102,16 +2240,19 @@ export class VaultStore {
     // C2 (a): the pre-edit truth, keyed by mutationId — if this write is later classified a
     // GENUINE denial, surfaceStagedDenials restores exactly this (memory + disk) so the
     // refused value cannot outlive its refusal.
-    this.preEditByMutation.set(m.mutationId, { pre: existing ?? null, op: "put", optimisticRev, optimisticUpdatedAt: committedAt });
+    this.preEditByMutation.set(m.mutationId, { pre: preEdit, op: "put", optimisticRev, optimisticUpdatedAt: committedAt });
     this.itemsById.set(id, { itemId: id, vaultId: targetVaultId, rev: optimisticRev, updatedAt: committedAt, formatVersion: m.item!.formatVersion, doc });
     this.undecryptableById.delete(id); // it decrypts by construction — we wrote it
     this.pendingSyncItemIds.add(id);
     await this.persistEnvelope(id, targetVaultId, committedAt, optimisticRev, m);
 
     // SEND m (breaker #3 ONE denial path; C3 FIFO): on a DURABLE cache the send goes through
-    // flushQueue itself — the drain is FIFO over the WHOLE queue (older offline edits of the
-    // same item flush BEFORE m, so LWW can never enthrone a stale draft and demote this
-    // newest edit to a conflict copy), single-flighted, and §D.5 lock-wrapped. Only the
+    // flushQueue itself — the drain is FIFO over the WHOLE queue, single-flighted, and §D.5
+    // lock-wrapped. R34: rows for OTHER items still flush before m in one FIFO batch (pinned by
+    // C3b); this item's OWN older rows no longer exist to race it, because coalesceQueuedPuts
+    // folded them into m eleven lines above — so there is no stale draft left for LWW to
+    // enthrone. (The clause this replaced still promised same-item FIFO draining, a state H37
+    // had just made impossible.) Only the
     // NullCache path (enqueue is a no-op) sends m directly via flushChunk. Either way a
     // `denied` result is STAGED (not thrown) and an OFFLINE reject propagates.
     const displaced: { item: WireItem; winnerRev: number }[] = [];
@@ -2127,9 +2268,17 @@ export class VaultStore {
       // granted AND this is transport (never an ApiError — the server ANSWERED for those);
       // otherwise refuse-not-degrade → drop the row, undo the optimistic apply, rethrow.
       if (mayQueue && !(e instanceof ApiError)) return; // the item keeps its optimistic apply + pending-sync mark
+      // R32: this save is being thrown away, so UNDO the fold before dropping it. H37 folds the
+      // item's unsent queued puts into this one and dequeues them permanently — sound while the
+      // fold's row survives to carry them, and destructive here, where it does not. Without the
+      // restore, a member who edited offline for an hour and then hit a 429/5xx on the first save
+      // after reconnecting lost the entire durable backlog for that item, back to the pre-burst
+      // value, from rows that would simply have stayed queued before H37. Restore FIRST, so a
+      // dequeue/revert failure below cannot leave the queue emptied.
+      if (folded) await this.restoreFoldedPuts(folded);
       await this.cache.dequeue(m.mutationId);
       this.preEditByMutation.delete(m.mutationId);
-      await this.revertOptimisticSave(id, existing);
+      await this.revertOptimisticSave(id, preEdit ?? undefined); // H37: the burst's original value, not the folded draft
       throw e;
     }
     for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);

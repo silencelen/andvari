@@ -212,11 +212,31 @@ export function seal(key: Uint8Array, plaintext: Uint8Array, ad: Uint8Array): Ui
   return out;
 }
 
+/**
+ * The three STRUCTURAL refusals {@link open} makes before any key is used — length, version, alg —
+ * as a reason string (null = the header is well-formed). TWIN of core Envelope.structuralRefusal
+ * and web crypto/envelope.ts structuralRefusal.
+ *
+ * Single-sourced here (open() calls it) so a caller that must tell "this blob is damaged/foreign"
+ * apart from "this key is wrong" never re-implements — and drifts from — the checks below. WHY that
+ * matters (audit H67): only the AEAD tag failure at the end of open() is genuinely ambiguous — it is
+ * exactly what a wrong password produces. These three are decided from the blob's PUBLIC header,
+ * before the key matters, so reporting them as bad credentials sends a member whose account row is
+ * corrupt (or whose build is older than the envelope the server stored) to reset a working password.
+ * The account-key caller (hydrateSession's wrappedUvk) consults this first; every other caller keeps
+ * the plain throw, because for an item blob "damaged" and "not for this key" are equally unactionable.
+ */
+export function envelopeStructuralRefusal(envelope: Uint8Array): string | null {
+  if (envelope.length < 2 + NONCE_BYTES + 16) return "envelope too short";
+  if (envelope[0] !== ENVELOPE_VERSION) return `unknown envelope version ${envelope[0]}`;
+  if (envelope[1] !== ENVELOPE_ALG_XCHACHA20POLY1305_IETF) return `unknown envelope alg ${envelope[1]}`;
+  return null;
+}
+
 /** Open a sealed envelope; throws on tamper / wrong key (AEAD auth) or an unknown version/alg. */
 export function open(key: Uint8Array, envelope: Uint8Array, ad: Uint8Array): Uint8Array {
-  if (envelope.length < 2 + NONCE_BYTES + 16) throw new Error("envelope too short");
-  if (envelope[0] !== ENVELOPE_VERSION) throw new Error(`unknown envelope version ${envelope[0]}`);
-  if (envelope[1] !== ENVELOPE_ALG_XCHACHA20POLY1305_IETF) throw new Error(`unknown envelope alg ${envelope[1]}`);
+  const refusal = envelopeStructuralRefusal(envelope);
+  if (refusal !== null) throw new Error(refusal);
   const nonce = envelope.subarray(2, 2 + NONCE_BYTES);
   const ct = envelope.subarray(2 + NONCE_BYTES);
   return xchacha20poly1305(key, nonce, ad).decrypt(ct);

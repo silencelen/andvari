@@ -289,7 +289,7 @@ async function loadUnlocked(): Promise<void> {
     siteLabel.textContent = `This site — ${host}`;
     const r = await ask({ type: "matches", host });
     if (!r || r.locked) return relocked();
-    renderList(siteList, r.matches, `No login saved for ${host}`, true);
+    renderList(siteList, r.matches, `No login saved for ${host}.`, true);
   } else {
     // No usable page URL (chrome://, new tab, detached popup) — nothing to match against.
     siteLabel.hidden = true;
@@ -299,7 +299,7 @@ async function loadUnlocked(): Promise<void> {
   if (!all || all.locked) return relocked();
   const n = all.items.length;
   el("count").textContent = `${n} login${n === 1 ? "" : "s"} in the hoard`;
-  renderList(el("all-list"), all.items, "The hoard is empty");
+  renderList(el("all-list"), all.items, "The hoard is empty.");
   const cards = await ask({ type: "cardItems" });
   if (!cards || cards.locked) return relocked();
   // S3: may we offer in-page card fill for this tab? (popup-only query; the SW derives the
@@ -365,6 +365,10 @@ function sigilSvg(mark: "brand" | "empty", size: number): SVGSVGElement {
   return svg;
 }
 
+/** H133 (audit 2026-09-13): `emptyText` is a SENTENCE — the web empties ("Your hoard is empty.
+ *  Add your first secret.", "Nothing matches that search.") all carry terminal punctuation and the
+ *  popup's three dropped it, which is the drift a reader notices when they use both surfaces in the
+ *  same session. copy.test.ts fails if a caller passes an unpunctuated empty back in. */
 function renderList(list: HTMLElement, items: MatchItem[], emptyText: string, slim = false): void {
   list.replaceChildren();
   if (items.length === 0) {
@@ -963,7 +967,7 @@ async function runSearch(): Promise<void> {
   const [r, c] = await Promise.all([ask({ type: "allItems", query }), ask({ type: "cardItems", query })]);
   if (seq !== searchSeq) return; // a newer query superseded this response
   if (!r || r.locked) return relocked();
-  renderList(el("all-list"), r.items, q ? `Nothing in the hoard matches “${q}”` : "The hoard is empty");
+  renderList(el("all-list"), r.items, q ? `Nothing in the hoard matches “${q}”.` : "The hoard is empty.");
   renderCards(c && !c.locked ? c.items : []);
 }
 

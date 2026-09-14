@@ -5,7 +5,7 @@ import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED } from "./errors";
 import { Announcer, Msg } from "./Msg";
 import { useCopy } from "./usecopy";
 import { safeSiteHref } from "./safeurl";
-import { EmptySigil } from "./Sigil";
+import { Empty } from "./Empty";
 import { type RoleFor, SNOOZE_MS, type StalenessRow, planCheck, planUnsnooze, stalenessRows } from "./staleness";
 
 /**
@@ -32,7 +32,9 @@ interface Props {
   items: VaultItem[];
   roleFor: RoleFor;
   store: VaultStore;
-  onOpenItem: (itemId: string) => void;
+  /** Jump to an item. `generate` (H117) additionally opens its editor with a freshly generated
+   *  password — the design §4 "bad → offers: … generate a new password" leg. */
+  onOpenItem: (itemId: string, opts?: { generate?: boolean }) => void;
   /** Vault's refresh() — re-derives `items` so a recorded verdict leaves the list immediately. */
   onChanged: () => void;
   /** The clipboard auto-clear window; the shared useCopy hook owns the clamp and the timer, so
@@ -88,6 +90,11 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
   // "Account is gone" records the verdict and then OFFERS a delete. Never automatic: a deletion
   // the user did not ask for is the one outcome this whole view exists to avoid.
   const [offerDelete, setOfferDelete] = useState<string | null>(null);
+  // H117: "Wrong password" records the verdict and then OFFERS the two follow-ups the design's §4
+  // table has promised since the feature was ratified — open the item, or open it with a new
+  // password generated. Neither is automatic and neither writes: a client that changed a password
+  // on its own would be changing it on ANDVARI only, while the site still holds the old one.
+  const [offerBad, setOfferBad] = useState<string | null>(null);
 
   const now = Date.now();
   // bug-web--1: keyed on `items` (whose identity changes on every applied sync), never on
@@ -134,6 +141,7 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
     if (queue.length === 0) return;
     setMsg(null);
     setOfferDelete(null);
+    setOfferBad(null);
     setRun({ queue, index: 0 });
   };
 
@@ -148,8 +156,10 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
     setMsg(null);
     try {
       await store.save(plan.write.itemId, plan.write.doc);
-      if (result === "gone") setOfferDelete(itemId);
-      else setOfferDelete(null);
+      // One offer at a time: each verdict's follow-up replaces the previous one, so the card
+      // never stacks two "what now?" rows for two different logins.
+      setOfferDelete(result === "gone" ? itemId : null);
+      setOfferBad(result === "bad" ? itemId : null);
       advance();
     } catch {
       // Offline writes queue, so the honest failure here is "it didn't land", not "it was lost".
@@ -198,8 +208,14 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
   // G27: by the time the offer renders, the run card has already advanced to the NEXT login, so
   // the sentence must NAME the item — a bare "it" points at whatever is now on screen. The same
   // sentence feeds the persistent Announcer below (a conditionally-mounted row is silent to AT).
-  const offerName = offerDelete ? items.find((it) => it.itemId === offerDelete)?.doc.name || "(untitled)" : null;
+  const nameOf = (itemId: string | null) =>
+    itemId ? items.find((it) => it.itemId === itemId)?.doc.name || "(untitled)" : null;
+  const offerName = nameOf(offerDelete);
   const offerSentence = offerName ? `“${offerName}” is marked as gone. Remove it from the vault?` : "";
+  // H117: the same G27 rule for the bad-password offer — by the time it renders the card has
+  // advanced to the NEXT login, so the sentence must NAME the item it is about.
+  const badName = nameOf(offerBad);
+  const badSentence = badName ? `“${badName}” is marked as having the wrong password. Change it?` : "";
 
   if (rows.length === 0 && !showSnoozed) {
     // Two states land here and need different sentences: zero saved logins, or every login
@@ -209,8 +225,7 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
     // up to 30 days.
     const snoozedCount = stalenessRows(items, { lastUsedAt, includeSnoozed: true, now }).length;
     return (
-      <div className="empty">
-        <div className="sigil"><EmptySigil /></div>
+      <Empty>
         {snoozedCount > 0 ? (
           <>
             {/* H123: ONE sentence with the Android twin (HealthScreen.kt's all-snoozed Empty),
@@ -229,7 +244,7 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
         ) : (
           <p>No logins to rank yet — staleness needs saved logins.</p>
         )}
-      </div>
+      </Empty>
     );
   }
 
@@ -251,7 +266,7 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
           persistent live region, matching Detail's contract (a .msg mounting already-populated is
           not announced). */}
       <Announcer
-        text={wipeStuck ? CLIPBOARD_NOT_CLEARED : copyErr ? CLIPBOARD_FAILED : flash ? `${flash} copied` : offerSentence ? offerSentence : msg && msg.kind === "info" ? msg.text : ""}
+        text={wipeStuck ? CLIPBOARD_NOT_CLEARED : copyErr ? CLIPBOARD_FAILED : flash ? `${flash} copied` : offerSentence ? offerSentence : badSentence ? badSentence : msg && msg.kind === "info" ? msg.text : ""}
       />
       {/* H30: the run's position, on its own persistent region (see the note at runNotice). */}
       <Announcer text={runNotice} />
@@ -267,6 +282,26 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
             Move to Deleted items
           </button>
           <button type="button" className="ghost" onClick={() => setOfferDelete(null)}>Keep it</button>
+        </div>
+      )}
+
+      {/* H117: the post-"Wrong password" offers the design's §4 verdict table promises. Until now
+          the four verdicts each claimed "a different next action" and only `gone` and `blocked`
+          had one, so a user who told andvari the saved password was refused was moved straight on
+          to the next login with no path to the item they had just found broken. Same shape as the
+          gone offer beside it (a .confirm-row naming the item), same doctrine as the rest of this
+          view: the client opens things and gets out of the way — it never changes a password on
+          the site, and it never saves one here without a Save. */}
+      {offerBad && (
+        <div className="confirm-row">
+          <span>{badSentence}</span>
+          <button type="button" className="ghost" disabled={busy} onClick={() => onOpenItem(offerBad)}>
+            Open the item
+          </button>
+          <button type="button" className="ghost" disabled={busy} onClick={() => onOpenItem(offerBad, { generate: true })}>
+            Generate a new password
+          </button>
+          <button type="button" className="ghost" onClick={() => setOfferBad(null)}>Not now</button>
         </div>
       )}
 

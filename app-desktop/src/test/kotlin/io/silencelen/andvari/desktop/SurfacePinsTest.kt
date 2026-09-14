@@ -35,6 +35,9 @@ class SurfacePinsTest {
     private val ui by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/desktop/Ui.kt").readText() }
     private val state by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/desktop/DesktopState.kt").readText() }
     private val main by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/desktop/Main.kt").readText() }
+    // H130: the packaging metadata is source too — the only place the shipped .deb/.msi fields are
+    // decided, and (unlike the composables above) nothing else in the suite ever reads it.
+    private val buildScript by lazy { sourceFile("build.gradle.kts").readText() }
 
     // ---- F04 ----
 
@@ -187,13 +190,12 @@ class SurfacePinsTest {
     }
 
     // ---- H80 (recheck R22): the KDF-upgrade re-wrap zeroizes MK / wrapKey ----
-
-    @Test
-    fun theKdfUpgradeRewrapWipesTheNewMasterAndWrapKeys() {
-        val site = state.substringAfter("val mkNew = Keys.masterKey(crypto, password, newSalt, newParams)").substringBefore("val currentAuth =")
-        assertTrue(site.contains("val (authNew, wrapNew) = try {\n                    Bytes.toB64(Keys.authKey(crypto, mkNew)) to Keys.wrapKey(crypto, mkNew)\n                } finally {\n                    mkNew.fill(0)\n                }"), "MK must be wiped the moment it has been split (Account.enroll's shape)")
-        assertTrue(site.contains("uvk.fill(0)\n                    wrapNew.fill(0)"), "the new wrapKey must die with the UVK egress copy once the seal is done")
-    }
+    //
+    // This WAS a source pin on the desktop's inline re-key ("assert the fill(0)s are written where
+    // Account.enroll writes them"). Audit H85 hoisted that routine into core KdfReKeyCore, and the
+    // pin went with it — as a STRONGER one: core's KdfReKeyCoreTest records the live arrays through
+    // a CryptoProvider and asserts they are actually zero afterwards, which no amount of reading
+    // this module's text could prove. What is left for this file is the wiring, below.
 
     // ---- audit H23 (spec 07 intro — both artifacts get the per-vault opt-out) ----
 
@@ -266,5 +268,167 @@ class SurfacePinsTest {
             dialog.contains("Text(\"Discard — stay on \${state.baseUrl}\")"),
             "the discard label must name the server the user ends up on (android's 'Discard — return to …')",
         )
+    }
+
+    // ---- audit H130 (the shipped package metadata is real, not jpackage's "Unknown" defaults) ----
+
+    @Test
+    fun theNativePackageMetadataIsRealAndNotJpackagesDefaults() {
+        // jpackage substitutes literal defaults for every field the build leaves unset, so the
+        // 0.26.3 .deb shipped `Maintainer: silencelen <Unknown>`, `Categories=Unknown` and a
+        // copyright file reading `License: Unknown` for a GPL-3.0-or-later program. There is no
+        // cheap runtime assertion for this — building a .deb takes minutes and needs jpackage — so
+        // the pin is on the DSL that produces it.
+        val nd = buildScript.substringAfter("nativeDistributions {")
+        assertTrue(
+            nd.contains("""copyright = "Copyright (c) 2026 silencelen""""),
+            "the deb/msi copyright line must be the owner's wording, verbatim",
+        )
+        assertTrue(
+            nd.contains("""licenseFile.set(rootProject.file("LICENSE"))"""),
+            "the GPLv3 text must be wired for BOTH targets (deb copyright body + the MSI licence page)",
+        )
+        // …and the file that line names has to exist, or the packaging task dies at the cut.
+        assertTrue(
+            listOf(File("../LICENSE"), File("LICENSE")).any { it.isFile },
+            "licenseFile points at the repo-root LICENSE — it must be there",
+        )
+
+        val linux = nd.substringAfter("linux {").substringBefore("\n            }")
+        assertTrue(
+            linux.contains("""debMaintainer = "silencelen@users.noreply.github.com""""),
+            "the deb needs a real maintainer address (SECURITY.md publishes no mailbox — this is the owner's fallback)",
+        )
+        // jpackage writes `Maintainer: <vendor> <<debMaintainer>>`. A display name here nests twice
+        // and lintian still flags maintainer-address-malformed, so the field is address-ONLY.
+        val maintainer = linux.substringAfter("debMaintainer = \"").substringBefore("\"")
+        assertFalse(maintainer.contains("<"), "debMaintainer carries the bare address, never \"Name <addr>\": $maintainer")
+        // DEPLOY_BUNDLE_CATEGORY → the freedesktop Categories= list, semicolon-TERMINATED.
+        // R21: `Utility;` and nothing else. Registration was never the problem — the PAIRING was:
+        // `Security` is an Additional Category whose Related Categories are `Settings;System`, so
+        // `Utility;Security;` still trips desktop-file-validate. Pin the exact value, not a
+        // substring, so re-adding an unpaired additional category goes red here.
+        assertEquals(
+            "Utility;",
+            linux.substringAfter("menuGroup = \"").substringBefore("\""),
+            "the .desktop entry must declare a registered, correctly PAIRED freedesktop category (not jpackage's Unknown, and not an Additional Category without its Related main one)",
+        )
+        // …and no VALUE may re-introduce the literal default (the comments above quote "Unknown"
+        // on purpose, so strip the comment lines before looking).
+        assertFalse(
+            buildScript.replace(Regex("""(?m)^\s*//.*$"""), "").contains("Unknown"),
+            "no packaging field may re-introduce the literal jpackage default",
+        )
+    }
+
+    // ---- audit H129 (the pre-unlock width cap, desktop half — R18) ----
+
+    /**
+     * H129 shipped on the phone (`AuthWidthCapTest`) and its desktop half was assigned to a lane
+     * that never ran, so the row was closed with a maximized window still rendering the sign-in,
+     * master-password and recovery-phrase fields as ~760dp lines of input. This pins the cap AND
+     * its number: 480dp is the ONE house cap for the auth family across the natives, read out of
+     * Android's own source rather than re-typed, so the two can never drift into "the desktop
+     * number" and "the phone number".
+     */
+    @Test
+    fun thePreUnlockFamilyIsCappedAtTheHouseAuthWidth() {
+        assertTrue(ui.contains("private val AUTH_MAX_WIDTH = 480.dp"), "the house 480dp auth cap")
+        // Cross-canon: the same literal, taken from Android's declaration.
+        val android = listOf(
+            File("../app-android/src/main/kotlin/io/silencelen/andvari/app/MainActivity.kt"),
+            File("app-android/src/main/kotlin/io/silencelen/andvari/app/MainActivity.kt"),
+        ).firstOrNull { it.isFile }?.readText()
+        if (android != null) {
+            val phone = Regex("""private val AUTH_MAX_WIDTH = (\d+)\.dp""").find(android)?.groupValues?.get(1)
+            assertEquals("480", phone, "Android's auth cap moved — the natives must settle on ONE number")
+        }
+        // Applied, not merely declared, and centred inside the Cut I column.
+        assertTrue(ui.contains("Box(Modifier.widthIn(max = AUTH_MAX_WIDTH).fillMaxSize())"), "the cap must be applied")
+        assertTrue(ui.contains("Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter)"), "centred, not left-hugged")
+        // Every pre-unlock screen is routed through it — at the DISPATCH site, so a new one
+        // inherits the cap by being routed rather than by remembering to opt in.
+        for (screen in listOf(
+            "is DesktopScreen.Welcome -> AuthPane { Welcome(state) }",
+            "is DesktopScreen.Unlock -> AuthPane { Unlock(state, s.email) }",
+            "is DesktopScreen.RecoverySetup -> AuthPane { RecoverySetupScreen(state) }",
+            "is DesktopScreen.RecoveryCapture -> AuthPane { RecoveryCaptureScreen(state) }",
+            "is DesktopScreen.Recover -> AuthPane { RecoverScreen(state) }",
+        )) {
+            assertTrue(ui.contains(screen), "pre-unlock screen not capped: $screen")
+        }
+        // …and the LIST surfaces are deliberately NOT capped: they use a wide window.
+        for (list in listOf("is DesktopScreen.Vault -> Vault(state)", "is DesktopScreen.Settings -> SettingsScreen(state)")) {
+            assertTrue(ui.contains(list), "the list surfaces must keep the full 760dp column: $list")
+        }
+    }
+
+    // ---- audit H66 (the provenance-gated rfp rule, desktop half) ----
+
+    @Test
+    fun aPastedEnrollLinksRfpNeverReachesTheEnrollmentPosture() {
+        // The rule: an enroll link's rfp may raise the ceremony to required-affirm ONLY when the
+        // channel that delivered it proves in-person handover (web's same-origin QR navigation).
+        // Desktop takes invites by paste/typing only, so the rfp is dropped — this pin is what
+        // makes "dropped" mechanical rather than a promise in a comment. EnrollLink.parse DOES
+        // return an rfp, so a one-line "improvement" here would silently re-open the leg.
+        assertEquals(
+            0,
+            Regex("""\brfp\b""").findAll(ui.replace(Regex("""(?m)^\s*//.*$"""), "")).count(),
+            "no non-comment line in the desktop UI may read a link's rfp",
+        )
+        // The posture function is rfp-free BY SIGNATURE — the strongest form of the pin.
+        assertTrue(
+            state.contains("fun enrollPosture(memberHasSheet: Boolean): EnrollPosture"),
+            "enrollPosture must take the sheet declaration and nothing else",
+        )
+        assertEquals(
+            2,
+            Regex("""enrollPosture\(hasSheet\)""").findAll(ui).count(),
+            "both call sites (the button visual and the submit re-check) pass only the sheet flag",
+        )
+        // The rule's statement at the invite field is load-bearing: it is the walk-through a
+        // reader of THIS surface needs, and both it and DesktopState's KDoc now point at the
+        // statement of record — design 2026-07-15-multi-tenant-endpoints §4.4's correction block
+        // (R22: they used to claim an Android citation that was never written).
+        assertTrue(ui.contains("PROVENANCE-GATED, not surface-gated"), "the ratified rule must stay stated at the invite field")
+        assertTrue(ui.contains("every paste-fed invite field MUST drop the rfp"), "…including the clause that binds the Android twin's field too")
+        // R22: and the pointer to the statement of record, on both desktop canons — a rule binding
+        // on every surface belongs in the design, not in whichever client's comment is longest.
+        assertTrue(ui.contains("2026-07-15-multi-tenant-endpoints"), "the invite-field note must cite the ratified design")
+        assertTrue(state.contains("2026-07-15-multi-tenant-endpoints"), "…and so must enrollPosture's KDoc")
+    }
+
+    // ---- audit H85 (the F61 re-key hoist, desktop half) ----
+
+    @Test
+    fun theKdfReKeyIsDelegatedToCoreAndNotInlinedHere() {
+        // The routine that derives a new master key, re-wraps the UVK and calls
+        // `PUT /account/password` lived here as a hand-copy of Android's, under a comment
+        // justifying itself with "app-android is not shared" — a reason the G39 hoist had already
+        // removed. It now lives once in core KdfReKeyCore (core/src/jvmShared compiles into both
+        // the JVM and Android targets) and is exercised by core's KdfReKeyCoreTest; this pin is
+        // the wiring that suite cannot see.
+        assertTrue(state.contains("KdfReKeyCore.maybeUpgrade("), "runKdfUpgrade must delegate to core")
+        for (marker in listOf("Keys.masterKey(", "Keys.wrapKey(", "Envelope.sealB64(", "PasswordChangeRequest(")) {
+            assertTrue(
+                !state.contains(marker),
+                "$marker belongs to core KdfReKeyCore — the desktop must not carry a second re-key",
+            )
+        }
+        // The desktop-side pieces core deliberately does not know about, in the persist lambda:
+        // the §5.3 cache gate and the §4.2 per-origin namespace. Losing the gate would write
+        // vault-derived material to a device that opted out of a durable cache; losing the write
+        // would make the next OFFLINE unlock derive with stale params and fail as a wrong password.
+        val adapter = state.substring(state.indexOf("KdfReKeyCore.maybeUpgrade(")).take(800)
+        assertTrue(adapter.contains("durableCacheEnabled()"), "the persist lambda must keep the cache gate")
+        assertTrue(
+            adapter.contains("store.saveAccountKeys(originKey(baseUrl), userId, updated)"),
+            "an allowed cache must be updated in THIS origin's namespace",
+        )
+        // A5 stays caller-side (core cannot know about the F58 flag): a live admin recovery temp
+        // password must never be silently re-keyed away.
+        val gate = state.substringBefore("KdfReKeyCore.maybeUpgrade(").takeLast(1200)
+        assertTrue(gate.contains("if (mustChangePassword) return"), "A5: the desktop must refuse on a temp password")
     }
 }

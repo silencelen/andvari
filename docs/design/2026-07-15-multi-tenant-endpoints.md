@@ -174,6 +174,7 @@ The enroll link (`<origin>/enroll#a1.<b64url({v,o,t,e,rfp?})>`; twin composers `
 1. **No token replay (B1-5 — hard MUST).** Any `serverUrl` change drops access+refresh tokens and in-memory session state and rebuilds the client BEFORE the first request to the new origin. Today's code violates this — `DesktopState.updateServer` (`DesktopState.kt:572-596`) and `AndvariViewModel.setBaseUrl` (`:654-681`) clear stale policy but not tokens, and the shipping desktop enroll auto-repoint (`Ui.kt:456`) reaches `updateServer`; web `makeClient(session, baseUrl)` (`session.ts:363-372`) would hand tokens to any baseUrl. **Regression test on all four clients: a header-capturing fake server asserts no `Authorization` header crosses a baseUrl change.**
 2. **Namespace isolation (§4.2).** A switch never reads, mints, or wipes another origin's namespace.
 3. **Enrollment-scoped switch.** An invite-driven repoint is PENDING until enrollment succeeds; it commits as the persisted default only on success, reverts on cancel/failure/reconcile-discard. Manual repoints commit at the gate (the gate is the gesture).
+4. **Link-borne `rfp` needs provenance (added 2026-09-13, audit H66 — binding, test-gated).** A link the user PASTED is parsed for its origin (rule 3 above still applies) but its `rfp` is DISCARDED: `enrollPosture` sees `linkRfp = null`, so a paste can never reach the `required-affirm` posture on any client. The posture is anchored on a human act — a QR scanned in person, or a fingerprint typed off a printed sheet — and a paste is neither. Web's URL-navigation path is not a paste and is unaffected; an in-app QR scan or a verified `/enroll` app-link restores the `rfp` leg on natives when either ships. Full reasoning: §4.4's correction block.
 
 ### 4.2 (origin, userId) namespacing — the missing section (B2-3, B2-7; owners: android/desktop/ext lanes)
 
@@ -204,7 +205,39 @@ Shown before **every** `serverUrl` change (sole exception: the §6 constant→co
 
 **Desktop** — today's silent auto-repoint (`Ui.kt:451-461`, esp. `:456 state.updateServer(p.o)`) becomes: parse → hold `pendingServer` → Trust Gate (enrollment variant) inline in the enroll pane → on Connect, probe `p.o`'s policy, render the escrow fingerprint ceremony against that server (`Ui.kt:442-445`, unchanged — it remains the cryptographic anchor); commit `prefs.baseUrl` on enroll success only; Cancel/failure reverts and re-probes the prior server. Manual `ServerField` (`Ui.kt:348`) gets the gate too, commit-on-confirm.
 
-**Android** — closes the "no enroll-link channel" gap (`MainActivity.kt:523-529`): the invite field becomes "Invite code or link", every edit runs `EnrollLink.parse` (core, multiplatform); on a link with `p.o != store.baseUrl` → Trust Gate → pending repoint (commit-on-enroll-success). `enrollPosture(linkRfp = p.rfp, …)` finally receives a real `linkRfp` — Android gains desktop's `required-affirm` posture. Camera-QR intake reuses the identical path later; field paste is the MVP.
+**Android** — closes the "no enroll-link channel" gap (`MainActivity.kt:523-529`): the invite field becomes "Invite code or link", every edit runs `EnrollLink.parse` (core, multiplatform); on a link with `p.o != store.baseUrl` → Trust Gate → pending repoint (commit-on-enroll-success). Camera-QR intake reuses the identical path later; field paste is the MVP. ~~`enrollPosture(linkRfp = p.rfp, …)` finally receives a real `linkRfp` — Android gains desktop's `required-affirm` posture.~~ **Struck 2026-09-13 — see the correction below; a pasted link's `rfp` is ignored, so the paste channel reaches only the `waived` / `required-typed` postures, exactly as desktop's does.**
+
+> **Correction — the pasted-`rfp` rule, ratified 2026-09-13 (audit H66).** This paragraph was
+> wrong in the one way that matters, and the tree shipped both halves of the contradiction: Wave 3
+> wired Android's pasted `p.rfp` straight into `required-affirm`, while desktop's port of the same
+> feature deliberately ignored it (`DesktopState.kt:117` — "a desktop PASTE has no provenance"),
+> and neither comment knew about the other. Two surfaces claimed opposite postures were the safe
+> one for identical input. (This record made it worse by implying Android could not receive an
+> `rfp` at all.)
+>
+> **The rule, binding on every client: a link the human PASTED carries no provenance, so its `rfp`
+> is IGNORED.** `enrollPosture` is called with `linkRfp = null` on any paste path; the enrollment
+> then lands on `required-typed` if the member declares a printed sheet, else `waived`. Nothing is
+> lost that was ever real: `required-affirm` exists because the invitee *scanned a QR off the
+> admin's screen, in person* (§F.1, design 2026-07-12) — that human act is the anchor. A string in
+> a paste buffer arrived by some channel nobody can name, which is precisely the channel an
+> attacker uses, and honouring its `rfp` lets an attacker-chosen fingerprint become the value the
+> invitee is asked to affirm.
+>
+> **Web is not an exception, it is the shape of the exception.** Web's `linkRfp` comes from the
+> URL the browser actually navigated to (`Welcome.tsx:660` off `location.hash`) — opening the link
+> lands on the issuing origin and the SPA is served by that server. Provenance there is the
+> navigation, not a paste; web has no paste-an-invite-link path, and must not grow one that feeds
+> `linkRfp`.
+>
+> **The `rfp` leg comes back on a native only with a channel that carries provenance**: an in-app
+> QR scan (camera → parse → posture, the intake this paragraph anticipated) or an `/enroll`
+> app-link/deep-link the OS verified against the origin. Either one restores `required-affirm`
+> honestly; until one ships, no native surface may pass a link-borne `rfp` to `enrollPosture`.
+> The one rule underneath is untouched and is why this is safe to tighten: **a missing sheet never
+> auto-trusts the server key** — dropping to `waived`/`required-typed` never seals escrow against a
+> server-sourced fingerprint. Pinned by tests on both natives (a parsed link carrying an `rfp`
+> must not reach `required-affirm`) so the wiring cannot come back by accident.
 
 **Extension** — account enrollment stays a non-goal (`messages.ts:161-163`); it inherits endpoint-agnosticism via the options page (§5.1).
 

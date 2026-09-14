@@ -2,7 +2,7 @@ import { ApiClient, ApiError } from "../api/client";
 import type { AccountKeys } from "../api/types";
 import { assertServerKdfParams, KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import { CryptoError } from "../crypto/sodium";
-import { Account, IdentityMismatchError } from "../vault/account";
+import { Account, IdentityMismatchError, VaultKeyDamagedError } from "../vault/account";
 import { NullCache, openVaultCache, type VaultCache } from "../vault/idbcache";
 import { SyncIntegrityError, VaultStore } from "../vault/store";
 import { NetworkError, UNREACHABLE, net } from "./errors";
@@ -99,6 +99,9 @@ export async function unlockExistingSession(
     if (cache.durable) ensureCachePersistenceRequested();
     let keys: AccountKeys;
     let offline: boolean;
+    /** R41: the keys came from the offline CACHE, so a structural-damage verdict indicts the
+     *  cached payload rather than the live server row — see the VaultKeyDamagedError branch. */
+    let cachedKeysInUse = false;
     if (onlineKeys) {
       // §D.2c online-unlock re-cache write point (setAccountKeys keep-old-on-bad-write is the belt;
       // C3's read-time assert below is the suspenders). S3-4b/§B.4(iii): a runtime cache-WRITE failure
@@ -129,6 +132,7 @@ export async function unlockExistingSession(
       }
       keys = cached;
       offline = true;
+      cachedKeysInUse = true;
     }
 
     // §C.4 — the SAME Account.unlock → unlockFromUvk tail: the identity hard-fail fires against
@@ -137,8 +141,24 @@ export async function unlockExistingSession(
     try {
       account = await Account.unlock(userId, password, keys);
     } catch (e) {
+      // R41: the eviction must happen BEFORE close() — a closed handle no-ops every write (§D.2a),
+      // which would have made the clear silently do nothing.
+      if (e instanceof VaultKeyDamagedError && cachedKeysInUse) await cache.clearAccountKeys();
       cache.close();
       if (e instanceof IdentityMismatchError) return { kind: "error", message: e.message };
+      // H67: the account's stored key blob is not a well-formed envelope (bad base64url, too short,
+      // an envelope version/alg this build doesn't know) — refused before the wrap key was applied,
+      // so it is NOT the password and NOT retryable. Its `message` IS the canon sentence.
+      //
+      // R41: when the blob came from the OFFLINE CACHE, drop the cached copy on the way out. The
+      // sentence is a three-canon byte-twin and must not change, but on this path it names the
+      // server row ("contact your admin or restore from a backup") when the poison is a local
+      // one, and it offers the one remedy the member cannot reach while the stale payload keeps
+      // answering. Evicting costs nothing that worked — a structurally damaged payload is
+      // unusable identically forever — and forces the next attempt online, where a healthy
+      // server row rewrites the cache and the member simply signs in. The queue, envelopes and
+      // holding are untouched: unsent offline edits are not implicated by a bad key blob.
+      if (e instanceof VaultKeyDamagedError) return { kind: "error", message: e.message };
       // Audit F06: only a CRYPTO failure means "wrong password" — Account.unlock raises
       // CryptoError("wrong master password") when the wrappedUvk refuses to open. Anything else
       // reaching here is a broken device, not a typo: a TypeError from an absent crypto.subtle

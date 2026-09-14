@@ -96,7 +96,9 @@ Privacy policy: https://monahanhosting.com/andvari/privacy/
 
 - **Store icon (128×128):** upload `extension/icons/icon128.png` — the **dark-background ᛅ brand
   mark**, the same one the desktop, phone and web surfaces carry, rendered from
-  `app-desktop/icons/andvari.svg`. (0.26.3 replaced the older treasury-coin artwork this line
+  `assets/brand/andvari-mark.svg` by `scripts/gen-brand-icons.sh` (H138 moved the source there and
+  onto the wordmark geometry; `app-desktop/icons/andvari.svg` is now a copy of it, not the source,
+  and no icon in the tree is hand-edited — re-run the script instead). (0.26.3 replaced the older treasury-coin artwork this line
   used to describe; a maintainer who uploads what the doc *says* rather than the file it names
   puts a different mark on the store listing than the one in the browser toolbar — audit H120.
   Look at the PNG before you upload it; the path is the authority, not this sentence.)

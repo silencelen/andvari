@@ -1,0 +1,114 @@
+# The JS/TS half of scripts/verify.sh, run on every PR — the only pre-merge test signal there is.
+#
+# WHY THIS EXISTS (audit H39). verify.sh is the release gate, but until this file nothing ran it for
+# a pull request: CONTRIBUTING asks contributors to run it, and Dependabot — which opens most of the
+# PRs on this repository and is the one contributor that swaps crypto dependencies — never does. A
+# @noble/hashes or esbuild bump that broke a byte-locked spec/test-vectors case went green in the PR
+# UI and was discovered by the next human to run the gate locally, i.e. after merge.
+#
+# WHAT IS DELIBERATELY NOT HERE: the Kotlin legs (:core, :server, :app-desktop, :app-android, the
+# tools/ CLIs). The full Gradle build needs ~8-12 GB and does not fit a GitHub-hosted runner — the
+# same constraint that keeps CodeQL's Kotlin leg retired (see codeql.yml's NOTE and ROADMAP lane 6).
+# So Kotlin stays a LOCAL gate: scripts/verify.sh on the build host, before the tag. That is a
+# recorded decision, not an omission — docs/ROADMAP.md "CI posture" carries the reason, and it is
+# the reason a green check here is NOT sufficient to merge a change that touches core/ or server/.
+#
+# The two suites here are byte-locked against the SAME spec/test-vectors the Kotlin ones consume,
+# so a vector-visible crypto regression from a dependency bump does fail this workflow.
+name: verify (JS/TS)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege: this workflow reads the tree and reports a check. It never writes to the repo,
+# never uploads a SARIF, and must never need a token that could.
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: web — vitest + tsc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # No actions/setup-node on purpose: the ubuntu-latest image ships a current Node LTS, and
+      # every third-party action added here is another SHA to keep pinned and to trust with the
+      # job. What the suites actually require is a floor (node --test's glob semantics and the
+      # vitest/vite majors both assume 22+, and CONTRIBUTING.md states 22 as the requirement), so
+      # assert the floor instead of installing a version. R30: this said 20 while CONTRIBUTING said
+      # 22 — two stated requirements for one project, and the looser one was the enforced one.
+      # If a specific version ever becomes load-bearing, add setup-node WITH a full-SHA pin, the
+      # same way every other action in .github/workflows is pinned.
+      - name: Node floor
+        run: |
+          node --version
+          node -e 'const m=+process.versions.node.split(".")[0]; if (m < 22) { console.error(`node ${process.versions.node} is below the floor of 22 (CONTRIBUTING.md)`); process.exit(1); }'
+
+      # --ignore-scripts: a PR (including a Dependabot one) must never be able to run an arbitrary
+      # dependency's install hook on a runner holding this job's token. Neither package tree needs
+      # a lifecycle script to build or test — verified by this job passing.
+      - name: Install (locked, no install scripts)
+        working-directory: web
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        working-directory: web
+        run: npx tsc --noEmit
+
+      # vitest FAILS when it collects nothing ("No test files found"), so unlike the extension leg
+      # below this needs no count floor of its own.
+      - name: Tests
+        working-directory: web
+        run: npx vitest run
+
+  extension:
+    name: extension — node --test + tsc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Node floor
+        run: |
+          node --version
+          node -e 'const m=+process.versions.node.split(".")[0]; if (m < 22) { console.error(`node ${process.versions.node} is below the floor of 22 (CONTRIBUTING.md)`); process.exit(1); }'
+
+      - name: Install (locked, no install scripts)
+        working-directory: extension
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        working-directory: extension
+        run: npm run typecheck
+
+      # `node --test` EXITS 0 WHEN IT COLLECTED NOTHING — it prints `1..0` and reports success for a
+      # glob that matches no file. That is the failure mode verify.sh:190-212 exists to catch, and a
+      # CI job that only checks the exit code would report green over an extension suite that had
+      # moved directories or been renamed off *.test.ts, including the extension's ONLY cross-engine
+      # crypto proof (crypto.vectors.test.ts) and its entire signed-update suite. Mirror the gate's
+      # two floors here, set well under the current counts so they catch a suite that VANISHED, not
+      # one that was pruned. Keep these in step with scripts/verify.sh when either moves.
+      - name: Tests (with the collected-nothing floors verify.sh uses)
+        working-directory: extension
+        run: |
+          files=$(find src -maxdepth 1 -name '*.test.ts' | wc -l)
+          if [ "$files" -lt 20 ]; then
+            echo "EXT SUITE MISSING: $files *.test.ts files under extension/src, expected 20+ — did the suites move?" >&2
+            exit 1
+          fi
+          out=$(npm test 2>&1) || { printf '%s\n' "$out"; exit 1; }
+          printf '%s\n' "$out"
+          pass=$(printf '%s\n' "$out" | grep -m1 -oE '^# pass [0-9]+' | grep -oE '[0-9]+') || true
+          if [ "${pass:-0}" -lt 200 ]; then
+            echo "EXT SUITE NOT COLLECTED: node --test reported ${pass:-0} passing tests over $files files, expected 200+ — the glob found (nearly) nothing." >&2
+            exit 1
+          fi
+          echo "$pass tests passed across $files files"
