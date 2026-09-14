@@ -501,7 +501,18 @@ the Windows MSI and the signed manifest (seq 12 → 13) are the owner's `signand
   Android crypto actual is unchanged from 0.26.x, which is the mitigation) — owner runs it on the
   Fold; the TalkBack smokes (H09/H31/H32) likewise; H110's `signandvari` read-back sees its first live
   run in the owner's ceremony.
-- **Owner steps, in order:** `signandvari 0.27.0` on PRESTIGE from a clean `v0.27.0` checkout
+- **Ceremony done (2026-09-14 23:47Z):** `signandvari 0.27.0` on PRESTIGE built and Authenticode-
+  signed `andvari-0.27.0.msi` (117,362,688 B, sha256 `5f099955…`), minted **manifest seq 13** over the
+  live seq 12 base, and dropped the bundle in payload-then-signature order; the watcher passed all six
+  checks — including the new bundle-commit-equals-tag check (H103, its first live run) — published
+  the MSI and the manifest pair to `/downloads`, byte-verified them through Cloudflare, confirmed the
+  served pair verifies against the pinned key, and archived the bundle
+  (`manifest-archive/seq13-20260914T235037Z`). H110's read-back ran live for the first time without
+  incident. The MSI was then added to the GitHub release: **11 assets**, SUMS regenerated over all
+  nine artifacts and re-signed. **Every armed desktop is offered 0.27.0; every channel is complete.**
+- **Owner steps still open:** flip the ghcr package public (H43); the TalkBack smokes (H09/H31/H32)
+  and the instrumented Android vector run (H94) on the Fold; watch the Chrome Web Store review.
+- ~~**Owner steps, in order:** `signandvari 0.27.0` on PRESTIGE from a clean `v0.27.0` checkout
   (`-SignToolPath` as always) → the watcher publishes seq 13 → add the MSI to the GitHub release
   (`scripts/gh-release.sh … --msi <file>` refuses to clobber real artifacts, so a re-cut gets a new
   name) → flip the ghcr package public → the device smokes above.
