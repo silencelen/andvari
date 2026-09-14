@@ -25,7 +25,7 @@ android {
         minSdk = 29
         targetSdk = 35
         versionCode = (System.getenv("ANDVARI_VERSIONCODE") ?: "1").toInt()
-        versionName = "0.26.3"
+        versionName = "0.27.0"
         // lazysodium-android bundles native .so — limit to the phone's ABI.
         ndk { abiFilters += "arm64-v8a" }
         // H94: the instrumented vector run (src/androidTest) needs a runner. Nothing else in the

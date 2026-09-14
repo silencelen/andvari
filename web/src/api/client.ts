@@ -44,7 +44,7 @@ import type {
 } from "./types";
 import { assertServerKdfParams } from "../crypto/keys";
 
-export const CLIENT_VERSION = "0.26.3";
+export const CLIENT_VERSION = "0.27.0";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
 
 /** A request body that is ALREADY JSON text and must not be re-serialized (see adminRecovery). */

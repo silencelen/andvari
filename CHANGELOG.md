@@ -4,6 +4,63 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.27.0 (2026-09-14) — the third audit, closed on every platform · fleet 0.27.0, extension 0.27.0
+
+*A full audit of every platform — the third — found no crypto defect and a long list of the same
+shape as last time: a fix that shipped its first leg and not its last. The serious ones: a browser
+page could keep the extension unlocked and quietly test passwords against your vault; one bad
+attachment reference could stop a device syncing until you signed out; a change-password form saved
+the old password instead of the new one; and a change made in the same instant a device reconnected
+could go unnoticed until the next one. All fixed, on every client, with a test for each — and the
+twenty-five decisions the audit left to the household are decided and shipped too.*
+
+**The serious ones**
+- **Browser extension:** a web page can no longer hold the vault unlocked or test guessed passwords
+  against it — the password-reuse check now needs you to actually type, from the page you are on, at
+  most once a second. A card update that conflicts with another device keeps both versions.
+- **Sync:** a stale attachment reference is refused for that one item instead of blocking every save
+  behind it; large imports go up in bounded batches; a change made while a device was reconnecting is
+  caught up on every client; and editing the same item twice offline is one save, not a junk
+  "(conflict)" copy of your own draft.
+- **Autofill:** change-password forms now save the *new* password on the phone and in the extension;
+  the phone no longer fills the old password into the new-password box; sites with international
+  names match the way browsers spell them; and a box named "otp" or "2fa" is never treated as a
+  password field even without a hint.
+
+**Honest copy, and polish across all four clients**
+- An offline save on the phone or desktop appears in the list immediately, and the message is true
+  for the kind of vault you have. A damaged or newer-version account row now says so instead of
+  "wrong password". The desktop app stops at start if its encryption library will not load and tells
+  you — instead of "Sign-in failed" at the password field. The "last used" ledger never overwrites the
+  household's copy with one device's guess and is trimmed after every sync.
+- The verification run offers "open the item" or "generate a new password" after a wrong-password
+  verdict; admin device counts distinguish signed-out from live; the breach column stops asserting a
+  verdict about a password that no longer exists; screen-reader announcements, contrast, focus and
+  copy fixed in dozens of places; one loading/empty idiom, one back link, inline two-step confirms
+  instead of browser dialogs; printing hides secrets; an Appearance setting in the extension; the
+  brand mark in one geometry everywhere plus a web app manifest for "Add to Home screen"; auth
+  screens capped for foldables and tablets; real package metadata on the Linux and Windows installers.
+- Diagnostics: the desktop writes `~/.andvari-desktop/diagnostic.log` (owner-only, bounded, no vault
+  material; safe to delete) and About names it.
+
+**Sharing, recovery and the household**
+- Removing a member now sends the proof every client checks, so the removed device sees a plain
+  "you were removed" instead of a "server may be misbehaving" warning. A vault that reached you by
+  invitation can never become your personal vault. A pasted invite link's fingerprint is ignored on
+  every client until it arrives by app link or QR — the only channels that prove a handover.
+
+**Under the hood, for self-hosters and readers**
+- Master-key material is wiped after use on web as it was on the natives. The server heals a
+  mis-sized KDF policy, bounds every registration field, rate-limits and audits the admin recovery
+  path, and writes with `synchronous=FULL`. Reverse proxies are trusted only from
+  `ANDVARI_TRUSTED_PROXY_CIDRS` (default loopback). The KDF re-key routine is one implementation.
+- The web and extension suites now run in GitHub Actions; the doc-leak, PowerShell and lockfile gates
+  have fixtures; the GitHub release is assembled by `scripts/gh-release.sh`; the signing ceremony
+  reads the published channel back; installers are bound to their tag; 0.26.2's fixes got the
+  regression tests they shipped without. The container image still requires a login until the package
+  is made public.
+- Full report and the disposition of all 139 findings: `docs/design/2026-09-13-full-surface-audit.md`.
+
 ## 0.26.3 (2026-09-03) — Windows desktop sign-in fix · fleet 0.26.3, extension 0.26.0
 
 *The Windows desktop app could not sign in when installed the normal way (under `Program Files`):
