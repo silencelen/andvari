@@ -129,6 +129,17 @@ internal const val STATIC_CACHE_IMMUTABLE = "public, max-age=31536000, immutable
  *  instead of after a heuristic-freshness window nobody chose. */
 internal const val STATIC_CACHE_REVALIDATE = "no-cache"
 
+/** H76: Cache-Control for a static 404 — a NEGATIVE answer about a content-addressed asset must
+ *  never be stored by any intermediary. The 0.27.0 deploy (2026-09-14) showed why: for a few
+ *  seconds the web dir was mis-deployed, /assets/index.<newhash>.js answered with a bare 404
+ *  carrying no Cache-Control, and Cloudflare applied its DEFAULT edge TTL to it (observed:
+ *  `cf-cache-status: HIT`, `cache-control: max-age=14400`) — so the edge kept serving that 404
+ *  for hours after the origin had the file, to every browser holding the new index.html. That is
+ *  exactly the stranded-tab failure the loud 404 above exists to make visible, made permanent by
+ *  a cache. A 404 here is a statement about one instant on one origin, never a fact about the
+ *  name; no-store is what makes every hop agree. */
+internal const val STATIC_CACHE_NOSTORE = "no-store"
+
 /** Ceiling on the §8.2 usage-ledger blob, in base64 characters. An entry is roughly 70 bytes of
  *  plaintext (itemId + two numbers), so this clears a vault of tens of thousands of items with
  *  room to spare — generous on purpose, since refusing a legitimate write would silently freeze a
@@ -1174,6 +1185,8 @@ fun Application.andvariModule(services: Services) {
                 // under assets/ is treated this way because those are the only hash-named files.
                 val hashedAsset = safe.startsWith("assets/")
                 if (hashedAsset && !file.isFile) {
+                    // Negative answers are never cacheable — see STATIC_CACHE_NOSTORE.
+                    call.response.headers.append(HttpHeaders.CacheControl, STATIC_CACHE_NOSTORE, false)
                     call.respond(HttpStatusCode.NotFound, "not found")
                     return@get
                 }
@@ -1205,6 +1218,10 @@ fun Application.andvariModule(services: Services) {
                     )
                     call.respondFileContent(target)
                 } else {
+                    // No index.html at all: the web dir is absent or half-deployed. Same rule —
+                    // see STATIC_CACHE_NOSTORE. This is the branch the 0.27.0 incident actually
+                    // hit first, and the one an edge is most eager to keep.
+                    call.response.headers.append(HttpHeaders.CacheControl, STATIC_CACHE_NOSTORE, false)
                     call.respond(HttpStatusCode.NotFound, "not found")
                 }
             }
