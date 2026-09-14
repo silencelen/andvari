@@ -66,6 +66,13 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# gh resolves the target repository from the CURRENT directory's git remote. The upload step below
+# runs inside the stage dir (so asset names are bare basenames), which is not a git checkout — on
+# the first live run (0.27.0, 2026-09-14) that made every upload die with "not a git repository"
+# after the release had already been created. Pin the repo once, from the checkout, and export it:
+# gh honours GH_REPO everywhere, whatever the working directory.
+GH_REPO="${GH_REPO:-$(cd "$REPO_DIR" && gh repo view --json nameWithOwner --jq .nameWithOwner)}" || exit 1
+export GH_REPO
 
 VERSION="" EXT_VERSION="" STAGE="" MSI="" APK="" NOTES="" DRY=0 DRAFT=0 NO_ANDROID=0
 EXTRA=()
