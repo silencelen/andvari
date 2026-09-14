@@ -67,4 +67,53 @@ class StaticCachingTest : P4TestSupport() {
         // The CSP the SPA route always carried is untouched by the new headers.
         assertTrue(index.headers["Content-Security-Policy"]?.contains("default-src 'self'") == true)
     }
+
+    /**
+     * H76 follow-up (0.27.0 deploy, 2026-09-14): the loud 404 shipped with NO Cache-Control, so
+     * Cloudflare applied its default edge TTL to it (`cf-cache-status: HIT`,
+     * `cache-control: max-age=14400`, observed still serving at age 158 s while the origin had
+     * the file). A few seconds of a mis-deployed web dir became a multi-hour cached 404 for the
+     * bundle name every new index.html referenced. Pins no-store on the negative answer.
+     */
+    @Test
+    fun missingHashedAssetIsNeverCacheable() = testApplication {
+        val dist = File(tmpDir, "dist-${System.nanoTime()}").apply { mkdirs() }
+        File(dist, "index.html").writeText("<!doctype html><div id=root>unsealing…</div>")
+        File(dist, "assets").mkdirs()
+        File(dist, "assets/index.abc123.js").writeText("export {}")
+        application { andvariModule(buildServices(webConfig(dist), Notifier())) }
+        val client = jsonClient(this)
+
+        // The negative answer about a content-addressed name: 404 that no intermediary may store.
+        val gone = client.get("/assets/index.doesnotexist.js")
+        assertEquals(HttpStatusCode.NotFound, gone.status)
+        assertEquals(STATIC_CACHE_NOSTORE, gone.headers[HttpHeaders.CacheControl])
+
+        // A missing NON-asset path is not a negative answer at all — it is the SPA fallback, and
+        // its caching rule is unchanged: 200 index.html, no-cache (store + always revalidate).
+        val fallback = client.get("/vault/some/deep/link")
+        assertEquals(HttpStatusCode.OK, fallback.status)
+        assertEquals(STATIC_CACHE_REVALIDATE, fallback.headers[HttpHeaders.CacheControl])
+        assertTrue(fallback.bodyAsText().contains("unsealing"))
+
+        // The asset that IS present keeps its year+immutable — no-store must not leak sideways.
+        assertEquals(STATIC_CACHE_IMMUTABLE, client.get("/assets/index.abc123.js").headers[HttpHeaders.CacheControl])
+    }
+
+    /** The other 404 branch: a web dir with no index.html (absent or half-deployed) — the state
+     *  the 0.27.0 incident hit first, and the one an edge is most eager to keep. */
+    @Test
+    fun missingIndexHtmlIsNeverCacheable() = testApplication {
+        val dist = File(tmpDir, "dist-empty-${System.nanoTime()}").apply { mkdirs() }
+        application { andvariModule(buildServices(webConfig(dist), Notifier())) }
+        val client = jsonClient(this)
+
+        val root = client.get("/")
+        assertEquals(HttpStatusCode.NotFound, root.status)
+        assertEquals(STATIC_CACHE_NOSTORE, root.headers[HttpHeaders.CacheControl])
+
+        val deep = client.get("/vault/settings")
+        assertEquals(HttpStatusCode.NotFound, deep.status)
+        assertEquals(STATIC_CACHE_NOSTORE, deep.headers[HttpHeaders.CacheControl])
+    }
 }
