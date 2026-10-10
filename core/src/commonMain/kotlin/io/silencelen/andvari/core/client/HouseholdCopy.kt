@@ -530,6 +530,9 @@ object HouseholdCopy {
         "unknown_attachment", "attachment_mismatch" -> SAVE_REJECTED_ATTACHMENT
         // Named specifics.
         "bad_totp_code" -> BAD_TOTP_CODE
+        // First TOTP enrollment's password proof (spec 03 §2, security review 2026-10).
+        "reauth_failed" -> "That master password isn't right — try again."
+        "reauth_required" -> "Enter your master password to turn on two-factor sign-in."
         "recovery_piece_stale" -> "Your recovery phrase was replaced from another device — set up recovery again from Settings."
         "rate_limited" -> TOO_MANY_REQUESTS
         "upgrade_required" -> UPGRADE_REQUIRED
