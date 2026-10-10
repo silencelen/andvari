@@ -182,6 +182,15 @@ class Service(
      */
     @Volatile internal var policyReadThroughProbe: (() -> Unit)? = null
 
+    /**
+     * Test seam (security review 2026-10, server F5): invoked by [login] after the password (and
+     * any TOTP) has been verified and BEFORE the session-minting tx opens — exactly the window a
+     * concurrent password change or recovery can commit in. Lets LoginRevocationRaceTest drive
+     * that interleaving deterministically instead of hoping a thread lands in it. Runs on the
+     * login thread with no lock held. Null in production; nothing but a test ever sets it.
+     */
+    @Volatile internal var loginPreMintProbe: (() -> Unit)? = null
+
     fun policy(publicOrigin: Boolean = false): ClientPolicy {
         // Fast path: a published hit needs no lock at all (that IS the perf win). It can only ever
         // return a value that was current when the call began — the write that races it is not yet
@@ -491,11 +500,34 @@ class Service(
             mustEnrollTotp = true
         }
         loginBackoff.success(req.email) // §2.5: reset the consecutive-failure state
-        return repo.db.tx { c ->
-            val session = issueSession(c, user.userId, req.device.platform, req.device.name, clientVersion)
-            repo.auditOn(c, "login", user.userId, session.deviceId, ip)
-            session.toResponse(user, user.isAdmin, user.mustChangePassword, mustEnrollTotp = mustEnrollTotp)
+        loginPreMintProbe?.invoke()
+        // Security review 2026-10 (server F5): everything above checked a SNAPSHOT of the user row,
+        // outside any lock. A password change, self-recovery commit or admin recovery replaces the
+        // verifier and revokes every session in ONE tx; if one committed since that read, this login
+        // proved the OLD password and must not mint a session that outlives the remediation. Re-read
+        // the row inside the mint tx — SQLite serializes write txs, so the remediation either
+        // committed before this read (refused here) or runs after this tx (and revokes this session
+        // with the rest). The verifier string is the credential epoch: every password-set path
+        // writes a fresh argon2 string (fresh salt), even for an unchanged password. The response is
+        // built from the same in-tx row, never the stale snapshot.
+        var credentialChanged = false
+        val response = repo.db.tx { c ->
+            val current = c.queryOne("SELECT * FROM users WHERE userId=?", user.userId) { rs -> userRowPublic(rs) }
+            if (current == null || current.status != "active" || current.verifier != user.verifier) {
+                credentialChanged = true
+                return@tx null
+            }
+            val session = issueSession(c, current.userId, req.device.platform, req.device.name, clientVersion)
+            repo.auditOn(c, "login", current.userId, session.deviceId, ip)
+            session.toResponse(current, current.isAdmin, current.mustChangePassword, mustEnrollTotp = mustEnrollTotp)
         }
+        if (credentialChanged || response == null) {
+            // Audited in its own tx (a throw inside the mint tx would roll the row back), like the
+            // other login_fail branches; not a backoff failure — the password WAS right a moment ago.
+            repo.audit("login_fail", user.userId, null, ip, "credential_changed")
+            throw Unauthorized()
+        }
+        return response
     }
 
     // ---- server TOTP (spec 03 §2; secrets are server 2FA, never vault data) ----
