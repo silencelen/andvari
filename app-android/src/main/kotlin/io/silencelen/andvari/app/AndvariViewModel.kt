@@ -3957,8 +3957,11 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(screen = Screen.Settings)
     }
 
-    fun totpBegin() = totpOp {
-        _ui.value = _ui.value.copy(totpSetup = api!!.totpSetup(), busy = false)
+    fun totpBegin(password: String) = totpOp {
+        // Security review 2026-10: a first enrollment proves the master password (the server refuses
+        // a bare setup outside its fresh-login window). One argon2id pass — off the Main thread.
+        val setup = withContext(Dispatchers.Default) { api!!.totpSetupWithPassword(password) }
+        _ui.value = _ui.value.copy(totpSetup = setup, busy = false)
     }
 
     fun totpConfirm(code: String) = totpOp {

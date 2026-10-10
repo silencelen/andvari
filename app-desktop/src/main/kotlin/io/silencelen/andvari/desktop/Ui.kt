@@ -3146,6 +3146,7 @@ internal const val TOTP_URI_UNREADABLE = "This one-time code isn't set up right 
 
 @Composable
 private fun SettingsScreen(state: DesktopState) {
+    var totpPassword by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = state::closeSettings) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
         Text("Settings", style = MaterialTheme.typography.headlineMedium)
@@ -3264,9 +3265,15 @@ private fun SettingsScreen(state: DesktopState) {
                         Text("Not enrolled.", style = MaterialTheme.typography.bodyMedium)
                         if (status.pendingSetup) Text("A setup was started but never confirmed — Enable starts fresh.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(8.dp))
+                        // Security review 2026-10: the server wants the master password before a FIRST
+                        // second factor goes on, so a stolen session can't lock the owner out.
+                        Secret("Master password", totpPassword, onEnter = {
+                            if (totpPassword.isNotEmpty() && !state.busy) { state.beginTotpSetup(totpPassword); totpPassword = "" }
+                        }) { totpPassword = it }
                         state.totpError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                         Spacer(Modifier.height(8.dp))
-                        Button(onClick = state::beginTotpSetup, enabled = !state.busy) { Text("Enable") }
+                        Button(onClick = { state.beginTotpSetup(totpPassword); totpPassword = "" }, enabled = totpPassword.isNotEmpty() && !state.busy) { Text("Enable") }
                     }
                 }
             }

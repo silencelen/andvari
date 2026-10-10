@@ -9,7 +9,7 @@ DB="$WORK/andvari.db"
 STATE="$WORK/state.json"
 PORT=8099
 BASE="http://127.0.0.1:$PORT"
-BOOTSTRAP="e2e-bootstrap-$$"
+BOOTSTRAP="e2e-bootstrap-token-$$" # >= INVITE_TOKEN_MIN_CHARS whatever the PID
 LOCK=/tmp/andvari-gradle.lock
 
 cleanup() { [ -n "${SRV_PID:-}" ] && kill -9 "$SRV_PID" 2>/dev/null || true; rm -rf "$WORK"; }

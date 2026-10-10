@@ -514,6 +514,11 @@ data class TotpSetupResponse(val secretBase32: String, val otpauthUri: String)
 @Serializable
 data class TotpCodeRequest(val code: String)
 
+/** The optional POST /account/totp/setup body (spec 03 §2): `code` rotates an enrolled factor,
+ *  `currentAuthKey` is the password proof a first enrollment needs (security review 2026-10). */
+@Serializable
+data class TotpSetupRequest(val code: String? = null, val currentAuthKey: String? = null)
+
 @Serializable
 data class TotpStatus(val enrolled: Boolean, val pendingSetup: Boolean)
 

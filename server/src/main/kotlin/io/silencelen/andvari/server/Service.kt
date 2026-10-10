@@ -182,6 +182,15 @@ class Service(
      */
     @Volatile internal var policyReadThroughProbe: (() -> Unit)? = null
 
+    /**
+     * Test seam (security review 2026-10, server F5): invoked by [login] after the password (and
+     * any TOTP) has been verified and BEFORE the session-minting tx opens — exactly the window a
+     * concurrent password change or recovery can commit in. Lets LoginRevocationRaceTest drive
+     * that interleaving deterministically instead of hoping a thread lands in it. Runs on the
+     * login thread with no lock held. Null in production; nothing but a test ever sets it.
+     */
+    @Volatile internal var loginPreMintProbe: (() -> Unit)? = null
+
     fun policy(publicOrigin: Boolean = false): ClientPolicy {
         // Fast path: a published hit needs no lock at all (that IS the perf win). It can only ever
         // return a value that was current when the call began — the write that races it is not yet
@@ -307,6 +316,11 @@ class Service(
         requireKdfSalt(req.kdfSalt)
         val displayName = requireBoundedText(req.displayName, "display_name")
 
+        // Security review 2026-10: no real invite is this short (see INVITE_TOKEN_MIN_CHARS) — above
+        // all not the empty one, which an older server minted as a live admin invite whenever
+        // ANDVARI_BOOTSTRAP_TOKEN was present but blank. Refused before the lookup, so such a row
+        // left in an upgraded database can never be redeemed. Same answer as an unknown invite.
+        if (req.inviteToken.length < INVITE_TOKEN_MIN_CHARS) throw BadRequest("invalid_invite")
         val tokenHash = ServerCrypto.hashToken(req.inviteToken)
         requireUsableInvite(repo.db.read { c -> c.queryOne(INVITE_BY_HASH, tokenHash, map = ::inviteRowOf) }, req.email)
 
@@ -486,11 +500,34 @@ class Service(
             mustEnrollTotp = true
         }
         loginBackoff.success(req.email) // §2.5: reset the consecutive-failure state
-        return repo.db.tx { c ->
-            val session = issueSession(c, user.userId, req.device.platform, req.device.name, clientVersion)
-            repo.auditOn(c, "login", user.userId, session.deviceId, ip)
-            session.toResponse(user, user.isAdmin, user.mustChangePassword, mustEnrollTotp = mustEnrollTotp)
+        loginPreMintProbe?.invoke()
+        // Security review 2026-10 (server F5): everything above checked a SNAPSHOT of the user row,
+        // outside any lock. A password change, self-recovery commit or admin recovery replaces the
+        // verifier and revokes every session in ONE tx; if one committed since that read, this login
+        // proved the OLD password and must not mint a session that outlives the remediation. Re-read
+        // the row inside the mint tx — SQLite serializes write txs, so the remediation either
+        // committed before this read (refused here) or runs after this tx (and revokes this session
+        // with the rest). The verifier string is the credential epoch: every password-set path
+        // writes a fresh argon2 string (fresh salt), even for an unchanged password. The response is
+        // built from the same in-tx row, never the stale snapshot.
+        var credentialChanged = false
+        val response = repo.db.tx { c ->
+            val current = c.queryOne("SELECT * FROM users WHERE userId=?", user.userId) { rs -> userRowPublic(rs) }
+            if (current == null || current.status != "active" || current.verifier != user.verifier) {
+                credentialChanged = true
+                return@tx null
+            }
+            val session = issueSession(c, current.userId, req.device.platform, req.device.name, clientVersion)
+            repo.auditOn(c, "login", current.userId, session.deviceId, ip)
+            session.toResponse(current, current.isAdmin, current.mustChangePassword, mustEnrollTotp = mustEnrollTotp)
         }
+        if (credentialChanged || response == null) {
+            // Audited in its own tx (a throw inside the mint tx would roll the row back), like the
+            // other login_fail branches; not a backoff failure — the password WAS right a moment ago.
+            repo.audit("login_fail", user.userId, null, ip, "credential_changed")
+            throw Unauthorized()
+        }
+        return response
     }
 
     // ---- server TOTP (spec 03 §2; secrets are server 2FA, never vault data) ----
@@ -499,7 +536,8 @@ class Service(
         return TotpStatus(enrolled = u.totpSecret != null, pendingSetup = u.totpPendingSecret != null)
     }
 
-    fun totpSetup(userId: String, code: String? = null, ip: String? = null): TotpSetupResponse {
+    fun totpSetup(p: Principal, code: String? = null, ip: String? = null, currentAuthKey: String? = null): TotpSetupResponse {
+        val userId = p.userId
         val u = repo.userById(userId) ?: throw Unauthorized()
         // Rotation gate (polish audit 2026-07-27 bug-server--0): an ENROLLED account must prove
         // the CURRENT factor before staging a replacement — otherwise a hijacked session could
@@ -514,11 +552,40 @@ class Service(
                 c.exec("UPDATE users SET totpLastStep=? WHERE userId=? AND totpLastStep<?", step, userId, step)
             }
             if (consumed != 1) throw totpVerifyFail(userId, ip, "setup_replay")
+        } else {
+            requireTotpEnrollReauth(p, u, currentAuthKey, ip)
         }
         val secret = Base32.encode(crypto.randomBytes(20))
         repo.db.tx { c -> c.exec("UPDATE users SET totpPendingSecret=? WHERE userId=?", secret, userId) }
         val label = "andvari:${u.email}"
         return TotpSetupResponse(secret, "otpauth://totp/$label?secret=$secret&issuer=andvari&algorithm=SHA1&digits=6&period=30")
+    }
+
+    /**
+     * The FIRST-enrollment gate (security review 2026-10). A stolen access token alone used to be
+     * enough to enroll a factor the attacker owns — and since only a code from that factor can
+     * remove it (no admin or recovery path touches the TOTP columns), the member was locked out for
+     * good once their refresh chain lapsed. Any ONE of these proves the caller is the member:
+     *  - `currentAuthKey` verifies against the login verifier (the changePassword proof);
+     *  - the session's device was minted by a password login (or register) within
+     *    [TOTP_ENROLL_FRESH_LOGIN_MS] — refresh never moves devices.createdAt, so this is "the
+     *    password was typed recently", and it is the window every fielded client enrolls inside,
+     *    since none of them sends the key yet;
+     *  - the session is §2.6-restricted: it exists only to enroll, and the login that minted it
+     *    checked the password moments before (the finding's own carve-out).
+     * A WRONG key is audited like a failed password change; the route's totp_setup bucket bounds
+     * the argon2 cost.
+     */
+    private fun requireTotpEnrollReauth(p: Principal, u: UserRow, currentAuthKey: String?, ip: String?) {
+        if (currentAuthKey != null) {
+            if (ServerCrypto.verify(u.verifier, currentAuthKey)) return
+            repo.audit("totp_setup_reauth_fail", p.userId, p.deviceId, ip)
+            throw Forbidden("reauth_failed")
+        }
+        if (p.mustEnrollTotp) return
+        val loginAt = repo.db.read { c -> c.queryOne("SELECT createdAt FROM devices WHERE deviceId=?", p.deviceId) { it.getLong(1) } }
+        if (loginAt != null && now() - loginAt <= TOTP_ENROLL_FRESH_LOGIN_MS) return
+        throw Forbidden("reauth_required")
     }
 
     fun totpConfirm(userId: String, code: String, ip: String) {
@@ -612,8 +679,10 @@ class Service(
      * UVK + identity material bound to a single-use, short-TTL, userId-bound ticket.
      *
      * Anti-enumeration (§F.5): unknown email, a non-active account, OR a known email with NO
-     * member_recovery row all run a fixed DUMMY_RECOVERY_VERIFIER and return a uniform 401 — timing/
-     * shape-identical across every state, mirroring login's DUMMY_VERIFIER. (A disabled account is
+     * member_recovery row all run a fixed DUMMY_RECOVERY_VERIFIER and return a uniform 401, and
+     * every failure — wrong secret included — writes one recovery_self_verify_fail row, so the
+     * branches share both the argon2 cost and the audit commit (mirroring login's DUMMY_VERIFIER
+     * and F20 rows). (A disabled account is
      * admin-recoverable only; treating it as "no row" here also keeps the commit's not-active guard a
      * pure TOCTOU belt.) The stored recoveryVerifier is NOT NULL, so a null/absent verifier can never
      * match.
@@ -625,14 +694,25 @@ class Service(
         // already makes online guessing computationally unreachable (review 2026-07-16 D1; corrects the
         // design §2.5.3/B1-6 amendment, which wrongly copied login's backoff here). §F.5's uniform 401
         // across unknown-email / no-row / wrong-secret keeps this from being an account oracle.
-        val user = repo.userByEmail(req.email)?.takeIf { it.status == "active" }
+        //
+        // ONE path for every failure (security review 2026-10, server F3): exactly one argon2id verify
+        // and exactly one audit commit, whichever state the address is in. The old code audited only
+        // the wrong-secret branch, and that fsync'd commit was the one cost the other branches lacked
+        // — so it marked every address holding an account (all accounts get a recovery row at
+        // register). Rows follow login's F20 shape: an unknown address is fully anonymous (naming it
+        // would make the row itself the oracle), a known one is attributed with what went wrong.
+        val known = repo.userByEmail(req.email)
+        val user = known?.takeIf { it.status == "active" }
         val row = user?.let { repo.memberRecoveryRow(it.userId) }
-        if (user == null || row == null) {
-            ServerCrypto.verify(ServerCrypto.DUMMY_RECOVERY_VERIFIER, req.recoveryAuthKey) // uniform cost
-            throw Unauthorized()
-        }
-        if (!ServerCrypto.verify(row.recoveryVerifier, req.recoveryAuthKey)) {
-            repo.audit("recovery_self_verify_fail", user.userId, null, ip)
+        val matched = ServerCrypto.verify(row?.recoveryVerifier ?: ServerCrypto.DUMMY_RECOVERY_VERIFIER, req.recoveryAuthKey)
+        if (user == null || row == null || !matched) {
+            val meta = when {
+                known == null -> null
+                user == null -> "inactive"
+                row == null -> "no_row"
+                else -> null
+            }
+            repo.audit("recovery_self_verify_fail", known?.userId, null, ip, meta)
             throw Unauthorized()
         }
         val ticket = recoveryTickets.mint(user.userId)
@@ -925,9 +1005,10 @@ class Service(
         // stood — but a denied write is an intrusion event that MUST leave a row (spec 03 §5).
         // Same commit-survives-the-throw discipline as restoreItem's fv_downgrade audit.
         val deniedMetas = mutableListOf<String>()
+        val quota = ItemQuota(principal.userId)
         val results = try {
             repo.db.tx { c ->
-                mutations.map { m -> applyMutation(c, principal, m, affectedUsers, filesToUnlink, deniedMetas) }
+                mutations.map { m -> applyMutation(c, principal, m, affectedUsers, filesToUnlink, deniedMetas, quota) }
             }
         } finally {
             if (deniedMetas.isNotEmpty()) {
@@ -986,6 +1067,12 @@ class Service(
             // item+vault, and fit the quota. Shipped clients always restore with [] (the delete
             // dropped the rows), but the payload is client-supplied — never persist it unchecked.
             validateAttachmentRefs(c, itemId, existing.vaultId, upload.attachmentIds)
+            // F6: the same item cap and quota as push, in this route's thrown 413 form (a single
+            // direct request with no queue behind it). A tombstone holds no blob, so the whole
+            // restored blob is growth.
+            val size = upload.blob.length.toLong()
+            if (size > config.itemMaxBytes) throw PayloadTooLarge("item_too_large")
+            if (!ItemQuota(principal.userId).admit(c, size)) throw PayloadTooLarge("user_item_quota")
             affected = vaultMemberIds(c, existing.vaultId)
             val newRev = repo.nextRev(c, "item", itemId, existing.vaultId)
             c.exec(
@@ -1017,7 +1104,7 @@ class Service(
         return repo.db.read { repo.currentRev(it) }
     }
 
-    private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>, filesToUnlink: MutableList<String>, deniedMetas: MutableList<String>): MutationResult {
+    private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>, filesToUnlink: MutableList<String>, deniedMetas: MutableList<String>, quota: ItemQuota): MutationResult {
         // Idempotency: replay the stored result verbatim.
         c.queryOne("SELECT resultJson FROM mutations WHERE deviceId=? AND mutationId=?", principal.deviceId, m.mutationId) { rs ->
             rs.getString(1)
@@ -1042,7 +1129,7 @@ class Service(
             MutationResult(m.mutationId, "denied")
         } else {
             when (m.op) {
-                "put" -> applyPut(c, m, existing, affected, deniedMetas)
+                "put" -> applyPut(c, m, existing, affected, deniedMetas, quota)
                 "delete" -> applyDelete(c, m, existing, affected, filesToUnlink)
                 else -> throw BadRequest("bad_op")
             }
@@ -1064,8 +1151,15 @@ class Service(
         return result
     }
 
-    private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, deniedMetas: MutableList<String>): MutationResult {
+    private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, deniedMetas: MutableList<String>, quota: ItemQuota): MutationResult {
         val item = m.item ?: throw BadRequest("put_without_item")
+        // F6 (security review 2026-10): per-item cap, a per-mutation `rejected` for the same reason
+        // H03's are — a thrown 4xx would park the row at the head of the client's durable queue
+        // forever, and no re-send can cure an oversized blob. Checked before any other work.
+        val size = item.blob.length.toLong()
+        if (size > config.itemMaxBytes) {
+            return MutationResult(m.mutationId, "rejected", serverItem = existing, reason = "item_too_large")
+        }
         // H03 (audit 2026-09-13, spec 03 §5 amendment): a put whose attachment refs no longer
         // resolve is a PER-MUTATION `rejected` result, not a thrown 400. The throw failed the
         // WHOLE batch and — because no fielded client dequeues on a thrown push — left the row
@@ -1083,9 +1177,10 @@ class Service(
         checkAttachmentRefs(c, m.itemId, m.vaultId, item.attachmentIds)?.let { reason ->
             return MutationResult(m.mutationId, "rejected", serverItem = existing, reason = reason)
         }
-        affected.addAll(vaultMemberIds(c, m.vaultId))
         val t = now()
         if (existing == null) {
+            if (!quota.admit(c, size)) return MutationResult(m.mutationId, "rejected", reason = "user_item_quota")
+            affected.addAll(vaultMemberIds(c, m.vaultId))
             val rev = repo.nextRev(c, "item", m.itemId, m.vaultId)
             c.exec(
                 """INSERT INTO items(itemId,vaultId,rev,createdAt,updatedAt,deleted,conflict,formatVersion,attachmentIds,blob,blobSize)
@@ -1103,6 +1198,12 @@ class Service(
             deniedMetas += "fv_downgrade:${m.vaultId}:${m.itemId}"
             return MutationResult(m.mutationId, "denied")
         }
+        // F6: only GROWTH draws on the quota — an edit that shrinks or keeps an item's size is never
+        // refused, so a member at quota can still fix and trim what they have.
+        if (!quota.admit(c, size - (existing.blob?.length?.toLong() ?: 0L))) {
+            return MutationResult(m.mutationId, "rejected", serverItem = existing, reason = "user_item_quota")
+        }
+        affected.addAll(vaultMemberIds(c, m.vaultId))
         // Existing item. Conflict iff the client wrote against a stale rev, OR it's edit-over-tombstone.
         val stale = m.baseItemRev < existing.rev
         val conflict = stale || existing.deleted
@@ -1161,6 +1262,39 @@ class Service(
             else -> throw BadRequest(reason)
         }
     }
+
+    /**
+     * F6 (security review 2026-10): the per-user bound on LIVE item ciphertext, scoped like the
+     * attachment quota ([AttachmentStore.userBytes]) — every vault the user holds a live grant to.
+     * One instance per push batch: the SUM runs at most once, lazily on the first put that grows
+     * anything, and the batch's own admitted growth is added on top so 200 puts can't each see the
+     * pre-batch total. Archived versions are not counted: each item keeps at most 10, so they are
+     * bounded at 10× this quota by construction, and summing them would read every version blob.
+     */
+    private inner class ItemQuota(private val userId: String) {
+        private var used: Long? = null
+
+        fun admit(c: Connection, delta: Long): Boolean {
+            if (delta <= 0) {
+                used = used?.plus(delta)
+                return true
+            }
+            val current = used ?: userItemBytes(c, userId)
+            if (current + delta > config.userItemQuotaBytes) {
+                used = current
+                return false
+            }
+            used = current + delta
+            return true
+        }
+    }
+
+    private fun userItemBytes(c: Connection, userId: String): Long =
+        c.queryOne(
+            """SELECT COALESCE(SUM(i.blobSize),0) FROM items i
+               JOIN grants g ON g.vaultId=i.vaultId WHERE g.userId=? AND g.revokedAt IS NULL AND i.deleted=0""",
+            userId,
+        ) { it.getLong(1) } ?: 0
 
     private fun vaultMemberIds(c: Connection, vaultId: String): Set<String> =
         c.queryAll("SELECT userId FROM grants WHERE vaultId=? AND revokedAt IS NULL", vaultId) { it.getString(1) }.toSet()
@@ -1719,6 +1853,9 @@ class Service(
         // Single-use self-recovery ticket lifetime (design §F.3): a short window that still leaves a
         // human time to choose a new password (its Argon2id derivation is ~1 s). In-memory + userId-bound.
         const val RECOVERY_TICKET_TTL_MS = 5L * 60 * 1000
+        /** How recently a password login must have minted the session for a first TOTP enrollment
+         *  to go through without a `currentAuthKey` (security review 2026-10). */
+        const val TOTP_ENROLL_FRESH_LOGIN_MS = 10L * 60 * 1000
         /** H62: the cap on persisted, rendered free text (displayName, device name/platform) — a
          *  household name or a device label, never a paragraph. */
         internal const val TEXT_MAX = 128
