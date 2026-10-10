@@ -107,6 +107,18 @@ class Config(
     // §2.5 (B1-3): flat per-IP login bucket, decoupled from origin. Default 5 = the old PUBLIC
     // tightness; the old private-origin relaxation to 10/min is deliberately revoked.
     val loginRatePerMin: Int = 5,
+    // Item-ciphertext bounds (security review 2026-10, server F6). Attachments always had per-file,
+    // per-item and per-user quotas; item blobs had only the 8 MiB push body cap, so one member could
+    // fill the disk (or a co-member's /sync heap) with junk items. Units are the STORED blob — the
+    // base64url string `items.blobSize` already records. Defaults sit far above any real household
+    // item (a login is ~1 KB) so an existing deployment is unaffected.
+    //  itemMaxBytes       — one item's blob; a bigger put is a per-mutation `rejected` (item_too_large).
+    //  userItemQuotaBytes — live item ciphertext across every vault the pushing user holds a grant to
+    //                       (the attachment quota's scope); only a put that GROWS it can be refused.
+    //  pushRatePerMin     — per-user /sync/push bucket; a CSV import is a handful of 200-item batches.
+    val itemMaxBytes: Long = DEFAULT_ITEM_MAX_BYTES,
+    val userItemQuotaBytes: Long = DEFAULT_USER_ITEM_QUOTA_BYTES,
+    val pushRatePerMin: Int = DEFAULT_PUSH_RATE_PER_MIN,
 ) {
     /**
      * §3: the instance's canonical public origin — used as the invite-minting origin AND declared
@@ -229,6 +241,7 @@ class Config(
             "ANDVARI_SIGNUP_MODE", "ANDVARI_TOTP_REQUIRED", "ANDVARI_INSTANCE_NAME",
             "ANDVARI_CANONICAL_ORIGIN", "ANDVARI_SELFHOST_DOCS_URL", "ANDVARI_OFFLINE_CACHE_ALLOWED",
             "ANDVARI_FORCE_HSTS", "ANDVARI_LOGIN_RATE_PER_MIN", "ANDVARI_STRICT_ENV",
+            "ANDVARI_ITEM_MAX_BYTES", "ANDVARI_USER_ITEM_QUOTA_BYTES", "ANDVARI_PUSH_RATE_PER_MIN",
         )
 
         /**
@@ -257,6 +270,11 @@ class Config(
             "ANDVARI_VAULT_GRACE_DAYS" to 0L..3_650L,
             "ANDVARI_TRANSFER_TTL_DAYS" to 1L..3_650L, // a 0-day offer TTL expires every offer on sight
             "ANDVARI_LOGIN_RATE_PER_MIN" to 1L..100_000L,
+            // F6: an item cap under ~1 KiB would refuse ordinary logins; above the 8 MiB push body
+            // cap it is unreachable. The quota must hold at least one max-size item.
+            "ANDVARI_ITEM_MAX_BYTES" to 1_024L..BODY_CAP_PUSH_BYTES,
+            "ANDVARI_USER_ITEM_QUOTA_BYTES" to 1_024L..(1L shl 40),
+            "ANDVARI_PUSH_RATE_PER_MIN" to 1L..100_000L,
         )
         private val BOOL_ENV = setOf(
             "ANDVARI_JANITOR_DRYRUN", "ANDVARI_TOTP_REQUIRED", "ANDVARI_OFFLINE_CACHE_ALLOWED",
@@ -343,6 +361,12 @@ class Config(
          */
         val DEFAULT_TRUSTED_PROXY_CIDRS = listOf("127.0.0.0/8", "::1/128")
 
+        /** F6 defaults (see the [Config] params): 2 MiB per item, 128 MiB of live item ciphertext
+         *  per user, 120 pushes per user per minute. */
+        const val DEFAULT_ITEM_MAX_BYTES = 2L * 1024 * 1024
+        const val DEFAULT_USER_ITEM_QUOTA_BYTES = 128L * 1024 * 1024
+        const val DEFAULT_PUSH_RATE_PER_MIN = 120
+
         /** The ONE reader for every var in [NUM_ENV_RANGES]. FORGIVING, like the §2.1 vars below:
          *  a non-numeric or out-of-range value degrades to [default] rather than crashing the boot,
          *  and [envLint] is the loud channel that names it. */
@@ -419,6 +443,9 @@ class Config(
                 offlineCacheAllowedFloor = parseBool(env("ANDVARI_OFFLINE_CACHE_ALLOWED")) ?: true,
                 forceHsts = parseBool(env("ANDVARI_FORCE_HSTS")) ?: false,
                 loginRatePerMin = numEnv(env, "ANDVARI_LOGIN_RATE_PER_MIN", 5L).toInt(),
+                itemMaxBytes = numEnv(env, "ANDVARI_ITEM_MAX_BYTES", DEFAULT_ITEM_MAX_BYTES),
+                userItemQuotaBytes = numEnv(env, "ANDVARI_USER_ITEM_QUOTA_BYTES", DEFAULT_USER_ITEM_QUOTA_BYTES),
+                pushRatePerMin = numEnv(env, "ANDVARI_PUSH_RATE_PER_MIN", DEFAULT_PUSH_RATE_PER_MIN.toLong()).toInt(),
             )
         }
     }

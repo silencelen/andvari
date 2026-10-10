@@ -1005,9 +1005,10 @@ class Service(
         // stood — but a denied write is an intrusion event that MUST leave a row (spec 03 §5).
         // Same commit-survives-the-throw discipline as restoreItem's fv_downgrade audit.
         val deniedMetas = mutableListOf<String>()
+        val quota = ItemQuota(principal.userId)
         val results = try {
             repo.db.tx { c ->
-                mutations.map { m -> applyMutation(c, principal, m, affectedUsers, filesToUnlink, deniedMetas) }
+                mutations.map { m -> applyMutation(c, principal, m, affectedUsers, filesToUnlink, deniedMetas, quota) }
             }
         } finally {
             if (deniedMetas.isNotEmpty()) {
@@ -1066,6 +1067,12 @@ class Service(
             // item+vault, and fit the quota. Shipped clients always restore with [] (the delete
             // dropped the rows), but the payload is client-supplied — never persist it unchecked.
             validateAttachmentRefs(c, itemId, existing.vaultId, upload.attachmentIds)
+            // F6: the same item cap and quota as push, in this route's thrown 413 form (a single
+            // direct request with no queue behind it). A tombstone holds no blob, so the whole
+            // restored blob is growth.
+            val size = upload.blob.length.toLong()
+            if (size > config.itemMaxBytes) throw PayloadTooLarge("item_too_large")
+            if (!ItemQuota(principal.userId).admit(c, size)) throw PayloadTooLarge("user_item_quota")
             affected = vaultMemberIds(c, existing.vaultId)
             val newRev = repo.nextRev(c, "item", itemId, existing.vaultId)
             c.exec(
@@ -1097,7 +1104,7 @@ class Service(
         return repo.db.read { repo.currentRev(it) }
     }
 
-    private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>, filesToUnlink: MutableList<String>, deniedMetas: MutableList<String>): MutationResult {
+    private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>, filesToUnlink: MutableList<String>, deniedMetas: MutableList<String>, quota: ItemQuota): MutationResult {
         // Idempotency: replay the stored result verbatim.
         c.queryOne("SELECT resultJson FROM mutations WHERE deviceId=? AND mutationId=?", principal.deviceId, m.mutationId) { rs ->
             rs.getString(1)
@@ -1122,7 +1129,7 @@ class Service(
             MutationResult(m.mutationId, "denied")
         } else {
             when (m.op) {
-                "put" -> applyPut(c, m, existing, affected, deniedMetas)
+                "put" -> applyPut(c, m, existing, affected, deniedMetas, quota)
                 "delete" -> applyDelete(c, m, existing, affected, filesToUnlink)
                 else -> throw BadRequest("bad_op")
             }
@@ -1144,8 +1151,15 @@ class Service(
         return result
     }
 
-    private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, deniedMetas: MutableList<String>): MutationResult {
+    private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, deniedMetas: MutableList<String>, quota: ItemQuota): MutationResult {
         val item = m.item ?: throw BadRequest("put_without_item")
+        // F6 (security review 2026-10): per-item cap, a per-mutation `rejected` for the same reason
+        // H03's are — a thrown 4xx would park the row at the head of the client's durable queue
+        // forever, and no re-send can cure an oversized blob. Checked before any other work.
+        val size = item.blob.length.toLong()
+        if (size > config.itemMaxBytes) {
+            return MutationResult(m.mutationId, "rejected", serverItem = existing, reason = "item_too_large")
+        }
         // H03 (audit 2026-09-13, spec 03 §5 amendment): a put whose attachment refs no longer
         // resolve is a PER-MUTATION `rejected` result, not a thrown 400. The throw failed the
         // WHOLE batch and — because no fielded client dequeues on a thrown push — left the row
@@ -1163,9 +1177,10 @@ class Service(
         checkAttachmentRefs(c, m.itemId, m.vaultId, item.attachmentIds)?.let { reason ->
             return MutationResult(m.mutationId, "rejected", serverItem = existing, reason = reason)
         }
-        affected.addAll(vaultMemberIds(c, m.vaultId))
         val t = now()
         if (existing == null) {
+            if (!quota.admit(c, size)) return MutationResult(m.mutationId, "rejected", reason = "user_item_quota")
+            affected.addAll(vaultMemberIds(c, m.vaultId))
             val rev = repo.nextRev(c, "item", m.itemId, m.vaultId)
             c.exec(
                 """INSERT INTO items(itemId,vaultId,rev,createdAt,updatedAt,deleted,conflict,formatVersion,attachmentIds,blob,blobSize)
@@ -1183,6 +1198,12 @@ class Service(
             deniedMetas += "fv_downgrade:${m.vaultId}:${m.itemId}"
             return MutationResult(m.mutationId, "denied")
         }
+        // F6: only GROWTH draws on the quota — an edit that shrinks or keeps an item's size is never
+        // refused, so a member at quota can still fix and trim what they have.
+        if (!quota.admit(c, size - (existing.blob?.length?.toLong() ?: 0L))) {
+            return MutationResult(m.mutationId, "rejected", serverItem = existing, reason = "user_item_quota")
+        }
+        affected.addAll(vaultMemberIds(c, m.vaultId))
         // Existing item. Conflict iff the client wrote against a stale rev, OR it's edit-over-tombstone.
         val stale = m.baseItemRev < existing.rev
         val conflict = stale || existing.deleted
@@ -1241,6 +1262,39 @@ class Service(
             else -> throw BadRequest(reason)
         }
     }
+
+    /**
+     * F6 (security review 2026-10): the per-user bound on LIVE item ciphertext, scoped like the
+     * attachment quota ([AttachmentStore.userBytes]) — every vault the user holds a live grant to.
+     * One instance per push batch: the SUM runs at most once, lazily on the first put that grows
+     * anything, and the batch's own admitted growth is added on top so 200 puts can't each see the
+     * pre-batch total. Archived versions are not counted: each item keeps at most 10, so they are
+     * bounded at 10× this quota by construction, and summing them would read every version blob.
+     */
+    private inner class ItemQuota(private val userId: String) {
+        private var used: Long? = null
+
+        fun admit(c: Connection, delta: Long): Boolean {
+            if (delta <= 0) {
+                used = used?.plus(delta)
+                return true
+            }
+            val current = used ?: userItemBytes(c, userId)
+            if (current + delta > config.userItemQuotaBytes) {
+                used = current
+                return false
+            }
+            used = current + delta
+            return true
+        }
+    }
+
+    private fun userItemBytes(c: Connection, userId: String): Long =
+        c.queryOne(
+            """SELECT COALESCE(SUM(i.blobSize),0) FROM items i
+               JOIN grants g ON g.vaultId=i.vaultId WHERE g.userId=? AND g.revokedAt IS NULL AND i.deleted=0""",
+            userId,
+        ) { it.getLong(1) } ?: 0
 
     private fun vaultMemberIds(c: Connection, vaultId: String): Set<String> =
         c.queryAll("SELECT userId FROM grants WHERE vaultId=? AND revokedAt IS NULL", vaultId) { it.getString(1) }.toSet()
