@@ -80,6 +80,7 @@ class CardFillVectorTest {
                     CardFill.CcField(2, FieldKind.CC_EXP_MONTH, null, CardFill.AUTOFILL_TYPE_DATE, emptyList()),
                 ),
                 card,
+                fillFrame = null,
             )
             val expectedMs = case.getValue("expectedMs").jsonPrimitive.long
             assertEquals(CardFill.Value.DateMs(expectedMs), plan.firstOrNull { it.index == 1 }?.value, name)
@@ -102,6 +103,7 @@ class CardFillVectorTest {
                     CardFill.CcField(1, vectorFieldKind(case.getValue("kind").jsonPrimitive.content), null, CardFill.AUTOFILL_TYPE_LIST, case.strings("options")),
                 ),
                 card,
+                fillFrame = null,
             )
             val got = plan.firstOrNull { it.index == 1 }?.value
             assertEquals(case.int("expected")?.let { CardFill.Value.ListIndex(it) }, got, name)
@@ -119,6 +121,7 @@ class CardFillVectorTest {
                     CardFill.CcField(1, kind, null, CardFill.AUTOFILL_TYPE_TEXT, emptyList(), maxLength = case.int("maxLength")),
                 ),
                 card,
+                fillFrame = null,
             )
             val got = plan.firstOrNull { it.index == 1 }?.value
             assertEquals(case.str("expected")?.let { CardFill.Value.Text(it) }, got, "$section: $name")
@@ -164,7 +167,7 @@ class CardFillVectorTest {
             }
             val expected = case.getValue("expectedPlanned").jsonArray.map { it.jsonObject }
                 .map { it.getValue("index").jsonPrimitive.int to it.getValue("text").jsonPrimitive.content }
-            val actual = CardFill.plan(fields, card).map { it.index to (it.value as CardFill.Value.Text).text }
+            val actual = CardFill.plan(fields, card, fillFrame = fields.first().frameDomain).map { it.index to (it.value as CardFill.Value.Text).text }
             assertEquals(expected, actual, name)
         }
     }
@@ -196,6 +199,7 @@ class CardFillVectorTest {
                     CardFill.CcField(1, FieldKind.CC_POSTAL, null, target, options, maxLength = case.int("maxLength")),
                 ),
                 card,
+                fillFrame = null,
             )
             val got = plan.firstOrNull { it.index == 1 }?.value
             assertEquals(case.str("expected")?.let { CardFill.Value.Text(it) }, got, "postalText: $name")

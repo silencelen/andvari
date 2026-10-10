@@ -52,8 +52,20 @@ data class ParsedForm(
     override val appPackage: String,
     val ccFields: List<ParsedField> = emptyList(),
     val formKind: FormKind = FormKind.LOGIN,
+    /** The view the fill request is for — the SYSTEM's `FillContext.getFocusedId()`, never a
+     *  structure flag the requesting app could set. Null when unknown: card fill then fails closed. */
+    val focusedId: AutofillId? = null,
 ) : PackageBound {
     val allIds: List<AutofillId> get() = (fields + ccFields).map { it.id }
+
+    /**
+     * Security review 2026-10 (root cause E): the ONE frame card values may enter — the frame of the
+     * field the user is filling. Card items carry no origin, so the boundary is the focused frame:
+     * a processor's card iframe the user taps into fills, a third-party frame beside it that
+     * declares its own cc-number gets nothing. Null (focus unknown, or not one of our classified
+     * fields) → no card datasets at all.
+     */
+    val cardFillFrame: FillFrame? get() = (fields + ccFields).firstOrNull { it.id == focusedId }?.let { FillFrame(it.webDomain) }
 
     /** Anything for the fill path to act on? Login fields, or a PAN-ANCHORED card form —
      *  [formKind] != LOGIN ⟺ some frame cluster holds a CC_NUMBER (CardForm.refine), so a
@@ -61,6 +73,9 @@ data class ParsedForm(
      *  service where it stayed silent before 0.7.0. */
     val fillable: Boolean get() = fields.isNotEmpty() || formKind != FormKind.LOGIN
 }
+
+/** A frame identity for [ParsedForm.cardFillFrame]: [domain] null = native app / a frame with no domain. */
+data class FillFrame(val domain: String?)
 
 /**
  * Walks the latest AssistStructure and classifies the WHOLE FORM ONCE via the pure-Kotlin
@@ -87,7 +102,7 @@ object StructureParser {
         val isNewPassword: Boolean,
     )
 
-    fun parse(structure: AssistStructure): ParsedForm {
+    fun parse(structure: AssistStructure, focusedId: AutofillId?): ParsedForm {
         val appPackage = structure.activityComponent?.packageName ?: ""
         val candidates = ArrayList<Candidate>()
         for (i in 0 until structure.windowNodeCount) {
@@ -105,7 +120,7 @@ object StructureParser {
             }
             target.add(ParsedField(c.id, kind, c.domain, winningSignal(c.signal, kind), c.autofillType, c.options, c.signal.maxLength, c.isNewPassword))
         }
-        return ParsedForm(fields, appPackage, ccFields, refined.formKind)
+        return ParsedForm(fields, appPackage, ccFields, refined.formKind, focusedId)
     }
 
     private fun walk(node: AssistStructure.ViewNode, inheritedDomain: String?, depth: Int, out: MutableList<Candidate>) {

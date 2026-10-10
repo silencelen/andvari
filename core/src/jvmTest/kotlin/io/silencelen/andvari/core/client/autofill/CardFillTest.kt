@@ -47,10 +47,62 @@ class CardFillTest {
                 field(3, FieldKind.CC_EXP, frame = "evil.example"),
             ),
             fullCard,
+            fillFrame = "shop.example",
         )
         assertEquals(listOf(0, 1), plan.map { it.index })
         assertEquals(CardFill.Value.Text("4242424242424242"), plan.at(0))
         assertEquals(CardFill.Value.Text("986"), plan.at(1))
+    }
+
+    // Security review 2026-10 (root cause E): the anchor gate alone was not a frame boundary — a
+    // third-party iframe that declares a cc-number field of its OWN passed it, and the same dataset
+    // wrote the PAN, CSC and expiry into that frame while the user filled the merchant's form. Only
+    // the frame holding the field the user is filling (fillFrame) receives anything now.
+    @Test
+    fun aCrossOriginFrameWithItsOwnPanAnchorGetsNothing() {
+        val plan = CardFill.plan(
+            listOf(
+                field(0, FieldKind.CC_NUMBER, frame = "shop.example"),
+                field(1, FieldKind.CC_CSC, frame = "shop.example"),
+                // Attacker frame: hidden inputs carrying their OWN cc-number anchor.
+                field(2, FieldKind.CC_NUMBER, frame = "evil.example"),
+                field(3, FieldKind.CC_CSC, frame = "evil.example"),
+                field(4, FieldKind.CC_EXP, frame = "evil.example"),
+            ),
+            fullCard,
+            fillFrame = "shop.example",
+        )
+        assertEquals(listOf(0, 1), plan.map { it.index })
+    }
+
+    // The same rule keeps processor-hosted card frames working: the user taps the card number inside
+    // the payment provider's iframe, so that frame is the fill frame and the top page gets nothing.
+    @Test
+    fun theFocusedProcessorFrameIsTheOnlyOneFilled() {
+        val plan = CardFill.plan(
+            listOf(
+                field(0, FieldKind.CC_NAME, frame = "shop.example"),
+                field(1, FieldKind.CC_NUMBER, frame = "shop.example"),
+                field(2, FieldKind.CC_NUMBER, frame = "psp.example"),
+                field(3, FieldKind.CC_CSC, frame = "psp.example"),
+            ),
+            fullCard,
+            fillFrame = "psp.example",
+        )
+        assertEquals(listOf(2, 3), plan.map { it.index })
+        assertEquals(CardFill.Value.Text("4242424242424242"), plan.at(2))
+    }
+
+    // A fill frame holding no field plans nothing (and a frame without its own anchor still gets nothing).
+    @Test
+    fun aFillFrameWithNoAnchorPlansNothing() {
+        val fields = listOf(
+            field(0, FieldKind.CC_NUMBER, frame = "shop.example"),
+            field(1, FieldKind.CC_CSC, frame = "evil.example"),
+        )
+        assertTrue(CardFill.plan(fields, fullCard, fillFrame = "other.example").isEmpty())
+        assertTrue(CardFill.plan(fields, fullCard, fillFrame = "evil.example").isEmpty())
+        assertTrue(CardFill.plan(fields, fullCard, fillFrame = null).isEmpty())
     }
 
     // (b) LIST fields get ListIndex ONLY, matched numerically across option spellings.
@@ -67,6 +119,7 @@ class CardFillTest {
                 field(5, FieldKind.CC_EXP_YEAR, type = CardFill.AUTOFILL_TYPE_LIST, options = listOf("26", "27", "28")),
             ),
             card,
+            fillFrame = null,
         )
         assertEquals(CardFill.Value.ListIndex(1), plan.at(1)) // "1" matches month 01
         assertEquals(CardFill.Value.ListIndex(1), plan.at(2)) // "01"
@@ -88,6 +141,7 @@ class CardFillTest {
                 field(2, FieldKind.CC_EXP_YEAR, type = CardFill.AUTOFILL_TYPE_LIST, options = listOf("1999", "2001")),
             ),
             fullCard,
+            fillFrame = null,
         )
         assertEquals(listOf(0), plan.map { it.index })
     }
@@ -106,6 +160,7 @@ class CardFillTest {
                 field(5, FieldKind.CC_CSC),
             ),
             card,
+            fillFrame = null,
         )
         assertEquals(CardFill.Value.Text("4242424242424242"), plan.at(0)) // digits-only
         assertEquals(CardFill.Value.Text("Ada Lovelace"), plan.at(1))
@@ -126,6 +181,7 @@ class CardFillTest {
                 field(1, FieldKind.CC_CSC),
             ),
             noCvv,
+            fillFrame = null,
         )
         assertEquals(listOf(0), plan.map { it.index })
 
@@ -136,6 +192,7 @@ class CardFillTest {
                 field(2, FieldKind.CC_EXP),
             ),
             CardData(),
+            fillFrame = null,
         )
         assertEquals(emptyList(), empty)
     }
@@ -169,6 +226,7 @@ class CardFillTest {
                 field(3, FieldKind.CC_EXP_MONTH),
             ),
             fullCard,
+            fillFrame = null,
         )
         assertEquals(listOf(2, 3, 5), plan.map { it.index })
     }
@@ -191,6 +249,7 @@ class CardFillTest {
                 field(6, FieldKind.CC_EXP, maxLength = 3),           // no truthful expiry in 3 chars → skip
             ),
             fullCard,
+            fillFrame = null,
         )
         assertEquals(CardFill.Value.Text("27"), plan.at(1))
         assertEquals(CardFill.Value.Text("2027"), plan.at(2))
@@ -212,6 +271,7 @@ class CardFillTest {
                 field(3, FieldKind.CC_EXP_MONTH, type = CardFill.AUTOFILL_TYPE_LIST, options = listOf("November (11)", "December (12)")),
             ),
             card,
+            fillFrame = null,
         )
         assertEquals(CardFill.Value.ListIndex(1), plan.at(1))
         assertEquals(CardFill.Value.ListIndex(1), plan.at(2))
@@ -228,6 +288,7 @@ class CardFillTest {
                 field(2, FieldKind.CC_CSC, frame = null),
             ),
             fullCard,
+            fillFrame = null,
         )
         assertEquals(listOf(0, 1, 2), plan.map { it.index })
         assertEquals(CardFill.Value.Text("12/27"), plan.at(1))
