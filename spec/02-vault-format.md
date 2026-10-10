@@ -246,7 +246,10 @@ a saved host iff, in order:
   suffix). Intranet hosts (`pihole.lan`, `nas.local`) keep today's behavior; a
   **single-label** saved host (`com`, `router`, `localhost`) stays **exact-only**.
 - **IP-literal** hosts match exact-only. `androidapp://<pkg>` matches by exact package
-  string. An unparseable / empty saved URI never matches. Staleness: a suffix the snapshot
+  string, **and never a known browser package** (amended 2026-10, security review: a browser
+  is a window onto every web origin, so `androidapp://<browser>` would fill every site opened in
+  it — browsers fill web URIs only; a save from a browser with no trusted web domain stores no URI).
+  An unparseable / empty saved URI never matches. Staleness: a suffix the snapshot
   doesn't know **at TLD level** resolves UNKNOWN and degrades to the old rules
   (under-match). The one residual over-breadth is a multi-tenant hosting domain missing
   from the **private section** under a known TLD (`foo.newpaas.app` ↔ `bar.newpaas.app`

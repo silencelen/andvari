@@ -2,6 +2,7 @@ package io.silencelen.andvari.app.autofill
 
 import android.app.assist.AssistStructure
 import android.view.View
+import io.silencelen.andvari.core.client.autofill.BrowserCertPins
 import io.silencelen.andvari.core.client.autofill.CardForm
 import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.client.autofill.FieldKind
@@ -56,6 +57,15 @@ data class SavedCredentials(
      * A native app never has a web scheme (and never a domain) — unaffected.
      */
     fun uri(): String = webDomain?.let { "${if (webScheme == "http") "http" else "https"}://$it" } ?: "androidapp://$appPackage"
+
+    /**
+     * The `login.uris` a NEW item stores. Security review 2026-10: a browser save with no web domain
+     * (a browser-chrome dialog, or a domain the launder dropped) used to store `androidapp://<browser>`,
+     * an app identity for a window onto every web origin. `UriMatch` never matches one now, so it would
+     * be a dead entry: store no URI instead, and let the user give the item its site.
+     */
+    fun storedUris(): List<String> =
+        if (webDomain == null && appPackage in BrowserCertPins.TABLE) emptyList() else listOf(uri())
 
     /** A human title for the saved item: the site host, else a readable app name. */
     fun title(): String = webDomain ?: appPackage.substringAfterLast('.').replaceFirstChar { it.uppercase() }
