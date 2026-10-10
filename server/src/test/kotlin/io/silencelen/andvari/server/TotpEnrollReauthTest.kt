@@ -14,6 +14,7 @@ import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -27,7 +28,8 @@ import kotlin.test.assertTrue
  * setup body (verified like a password change), OR a session minted by a password login within
  * [TOTP_ENROLL_FRESH_LOGIN_MS] — the "just signed in" window every fielded client's enrollment
  * flow already falls inside, since they send no body. The §2.6 restricted session (instance
- * requires TOTP, member not enrolled) stays exempt: it exists only to be enrolled.
+ * requires TOTP, member not enrolled) gets NO exemption (security review 2026-10, follow-up): its
+ * stolen token was the same permanent lockout, so it needs the same password proof.
  */
 class TotpEnrollReauthTest : P4TestSupport() {
 
@@ -107,24 +109,86 @@ class TotpEnrollReauthTest : P4TestSupport() {
         assertTrue(client.totpStatus(vc).pendingSetup)
     }
 
-    @Test
-    fun restrictedSession_isExempt_evenWhenStale() = testApplication {
+    /** Enrollment state straight from the row — a restricted session is refused the status route. */
+    private fun staged(services: Services, vc: VirtualClient): Boolean =
+        services.repo.userById(vc.userId)!!.totpPendingSecret != null
+
+    /** An instance with ANDVARI_TOTP_REQUIRED on: every un-enrolled session is §2.6-restricted. */
+    private fun totpRequiredConfig(): Config {
         val base = config()
-        val cfg = Config(
+        return Config(
             host = base.host, port = 0, dbPath = base.dbPath, blobDir = base.blobDir, webDir = null,
             recoveryPublicKey = base.recoveryPublicKey, recoveryFingerprint = base.recoveryFingerprint,
             enumSecret = base.enumSecret, publicHostname = null, bootstrapToken = bootstrapToken,
             totpRequired = true,
         )
-        val services = buildServices(cfg, Notifier())
+    }
+
+    @Test
+    fun restrictedSession_stale_withoutPassword_isRefused() = testApplication {
+        val services = buildServices(totpRequiredConfig(), Notifier())
         application { andvariModule(services) }
         val client = jsonClient(this)
         val vc = VirtualClient("restricted@x.com", "restricted session password")
         val s = client.register(vc, bootstrapToken)
         assertTrue(s.mustEnrollTotp)
+        ageLogins(services, vc) // a restricted token lifted long after the password was typed
+
+        val resp = client.setup(vc)
+        assertEquals(HttpStatusCode.Forbidden, resp.status, resp.bodyAsText())
+        assertEquals("reauth_required", errorOf(resp))
+        assertFalse(staged(services, vc), "nothing may be staged")
+    }
+
+    @Test
+    fun restrictedSession_stale_wrongPassword_isRefusedAndAudited() = testApplication {
+        val services = buildServices(totpRequiredConfig(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val vc = VirtualClient("restrictedwrong@x.com", "the real password here")
+        assertTrue(client.register(vc, bootstrapToken).mustEnrollTotp)
         ageLogins(services, vc)
+
+        val other = VirtualClient("restrictedwrong@x.com", "a guessed password here")
+        val resp = client.setup(vc, """{"currentAuthKey":"${other.authKey}"}""")
+        assertEquals(HttpStatusCode.Forbidden, resp.status, resp.bodyAsText())
+        assertEquals("reauth_failed", errorOf(resp))
+        assertFalse(staged(services, vc))
+        assertEquals(1, services.repo.db.read { c ->
+            c.queryOne("SELECT COUNT(*) FROM audit WHERE type='totp_setup_reauth_fail' AND userId=?", vc.userId) { it.getLong(1) }
+        }, "the wrong key is audited on the restricted path too")
+    }
+
+    @Test
+    fun restrictedSession_stale_withPassword_enrolls() = testApplication {
+        val services = buildServices(totpRequiredConfig(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val vc = VirtualClient("restrictedpw@x.com", "restricted but proven")
+        assertTrue(client.register(vc, bootstrapToken).mustEnrollTotp)
+        ageLogins(services, vc)
+
+        val resp = client.setup(vc, """{"currentAuthKey":"${vc.authKey}"}""")
+        assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+        val setup = json.decodeFromString(TotpSetupResponse.serializer(), resp.bodyAsText())
+        val confirm = client.post("/api/v1/account/totp/confirm") {
+            contentType(ContentType.Application.Json); authed(vc)
+            setBody(TotpCodeRequest(totpCode(setup.secretBase32)))
+        }
+        assertEquals(HttpStatusCode.OK, confirm.status, confirm.bodyAsText())
+        assertEquals(TotpStatus(enrolled = true, pendingSetup = false), client.totpStatus(vc))
+    }
+
+    @Test
+    fun restrictedSession_fresh_withoutBody_stillEnrolls() = testApplication {
+        val services = buildServices(totpRequiredConfig(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val vc = VirtualClient("restrictedfresh@x.com", "just signed in, restricted")
+        assertTrue(client.register(vc, bootstrapToken).mustEnrollTotp)
 
         val resp = client.setup(vc)
         assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+        assertTrue(staged(services, vc))
     }
 }
