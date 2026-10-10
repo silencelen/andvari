@@ -10,6 +10,7 @@ import { BackLink } from "./BackLink";
 import { Busy } from "./Busy";
 import { scheduleClipboardClear, writeClipboard } from "./clipboard";
 import { DevicesCard } from "./Devices";
+import { beginTotpEnrolment } from "./totp-enrol";
 import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
@@ -519,6 +520,8 @@ function TotpCard({ client, policy }: Pick<Props, "client" | "policy">) {
   const [status, setStatus] = useState<TotpStatus | null>(null);
   const [setup, setSetup] = useState<TotpSetupResponse | null>(null);
   const [code, setCode] = useState("");
+  // Security review 2026-10: a first enrollment proves the master password (see totp-enrol.ts).
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
@@ -548,7 +551,9 @@ function TotpCard({ client, policy }: Pick<Props, "client" | "policy">) {
       setErr(
         e instanceof ApiError && e.code === "bad_totp_code"
           ? "That code is wrong or expired — try the current one."
-          : e instanceof TypeError
+          : e instanceof ApiError && e.code === "reauth_failed"
+            ? "That master password isn't right — try again."
+            : e instanceof TypeError
             ? UNREACHABLE
             : "Something went wrong — please try again.",
       );
@@ -559,7 +564,11 @@ function TotpCard({ client, policy }: Pick<Props, "client" | "policy">) {
 
   const begin = () =>
     run(async () => {
-      setSetup(await client.totpSetup());
+      try {
+        setSetup(await beginTotpEnrolment(client, password));
+      } finally {
+        setPassword("");
+      }
       setCode("");
     });
 
@@ -667,7 +676,13 @@ function TotpCard({ client, policy }: Pick<Props, "client" | "policy">) {
       ) : (
         <>
           {status.pendingSetup && <p className="muted">A setup was started earlier but never finished — turning it on again starts fresh.</p>}
-          <button type="button" className="ghost" disabled={busy} onClick={begin}>{busy ? <Busy>Working…</Busy> : "Turn on two-factor sign-in"}</button>
+          <div className="field">
+            <label>Master password (to turn it on)</label>
+            <div className="secret-row">
+              <input type="password" autoComplete="current-password" aria-label="Master password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && password && !busy) begin(); }} />
+            </div>
+          </div>
+          <button type="button" className="ghost" disabled={busy || !password} onClick={begin}>{busy ? <Busy>Working…</Busy> : "Turn on two-factor sign-in"}</button>
         </>
       )}
     </div>

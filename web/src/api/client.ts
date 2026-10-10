@@ -582,7 +582,13 @@ export class ApiClient {
     return this.json<TotpStatus>("GET", "/api/v1/account/totp");
   }
 
-  totpSetup() {
+  /** A FIRST enrollment outside the server's fresh-login window needs `currentAuthKey` — the
+   *  login authKey of the typed master password (spec 03 §2, security review 2026-10); see
+   *  ui/totp-enrol.ts. Without it the call keeps the fielded no-body shape. */
+  totpSetup(currentAuthKey?: string) {
+    if (currentAuthKey !== undefined) {
+      return this.json<TotpSetupResponse>("POST", "/api/v1/account/totp/setup", { currentAuthKey });
+    }
     return this.json<TotpSetupResponse>("POST", "/api/v1/account/totp/setup");
   }
 
