@@ -61,7 +61,10 @@ import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.SyncResponse
 import io.silencelen.andvari.core.model.TokenPair
+import io.silencelen.andvari.core.crypto.CryptoProvider
+import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.TotpCodeRequest
+import io.silencelen.andvari.core.model.TotpSetupRequest
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import kotlinx.coroutines.sync.Mutex
@@ -440,7 +443,22 @@ class AndvariApi(
     // ---- server TOTP + password change ----
 
     suspend fun totpStatus(): TotpStatus = call("GET", "/api/v1/account/totp")
-    suspend fun totpSetup(): TotpSetupResponse = call("POST", "/api/v1/account/totp/setup")
+    /** Stage a TOTP secret. A FIRST enrollment outside the server's fresh-login window needs
+     *  [currentAuthKey] (spec 03 §2, security review 2026-10) — use [totpSetupWithPassword]. */
+    suspend fun totpSetup(currentAuthKey: String? = null): TotpSetupResponse =
+        if (currentAuthKey == null) call("POST", "/api/v1/account/totp/setup")
+        else call("POST", "/api/v1/account/totp/setup", TotpSetupRequest(currentAuthKey = currentAuthKey))
+
+    /**
+     * First-enrollment path for the native clients: derive the login authKey from the typed master
+     * password under the account's OWN stored KDF salt/params (the values prelogin serves, so it
+     * verifies against the server's login verifier) and send it as the password proof. One argon2id
+     * pass — callers run this off the UI thread.
+     */
+    suspend fun totpSetupWithPassword(password: String, crypto: CryptoProvider = createCryptoProvider()): TotpSetupResponse {
+        val keys = accountKeys()
+        return totpSetup(Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, crypto))
+    }
     suspend fun totpConfirm(code: String): TotpStatus = call("POST", "/api/v1/account/totp/confirm", TotpCodeRequest(code))
     suspend fun totpDisable(code: String): TotpStatus = call("POST", "/api/v1/account/totp/disable", TotpCodeRequest(code))
 
