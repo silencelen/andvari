@@ -784,6 +784,10 @@ fun Application.andvariModule(services: Services) {
         post("/api/v1/sync/push") {
             val p = requirePrincipal(call, service)
             enforceVersion(call, service)
+            // F6 (security review 2026-10): per-user, before the up-to-8 MiB body is read. A
+            // household's pushes are one per edit plus a handful of 200-item batches for a CSV
+            // import, far under the default; ANDVARI_PUSH_RATE_PER_MIN tunes it.
+            if (!limiter.allow("sync_push:${p.userId}", config.pushRatePerMin, 60_000)) throw RateLimited()
             val req = call.receive<PushRequest>()
             call.respond(service.push(p, req.mutations, call.clientIp(config)))
         }
