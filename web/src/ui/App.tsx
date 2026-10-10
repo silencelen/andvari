@@ -29,6 +29,7 @@ import {
   makeClient,
   migrateCacheConsentOnce,
   pendingSyncCount,
+  REVOKE_UNCONFIRMED,
   revokeSessionBestEffort,
   SESSION_STORAGE_KEY,
   setOfflineCopyEnabled,
@@ -201,12 +202,14 @@ export function App() {
     // bug-web--0 (spec 03): a USER sign-out revokes the device session server-side BEFORE the
     // local wipe — bounded + best-effort, mirroring the natives; without it the refresh token
     // stays refreshable for ~30 days. "expired"/"revoked" skip it (already dead server-side).
-    if (kind === "user") await revokeSessionBestEffort(clientRef.current);
+    // Security review 2026-10: it resolves false when the server did not confirm the revocation —
+    // the wipe below still happens, but the member is told (REVOKE_UNCONFIRMED).
+    const revoked = kind === "user" ? await revokeSessionBestEffort(clientRef.current) : true;
     clearSession();
     clientRef.current?.setTokens(null);
     if (uid) void wipeVaultCache(uid);
     clearBreachCache(); // CR-08: the in-session HIBP breach map is dropped at the wipe choke point
-    setPhase({ kind: "welcome", notice: lostCount });
+    setPhase({ kind: "welcome", notice: revoked ? lostCount : [lostCount, REVOKE_UNCONFIRMED].filter(Boolean).join(" ") });
   }, []);
 
   // F26/F27 lock propagation channel: locking KEEPS the persisted session, so the
