@@ -1110,6 +1110,16 @@ class Service(
             rs.getString(1)
         }?.let { return json.decodeFromString(MutationResult.serializer(), it) }
 
+        // Security review 2026-10 (root cause D): an itemId is a path segment on every OTHER
+        // member's device — /items/deleted and /sync hand it out, and their clients put it into
+        // /items/{id}/purge|restore|versions under their own bearer token. The item routes'
+        // requireUuid never sees a planted `../admin/users/<id>/disable?`; this does, so no such row
+        // is ever stored. A per-mutation `rejected` (the H03 shape), never cached: the batch's
+        // other mutations land, and nothing about a re-send could make the id valid. Same for the
+        // vaultId, which no honest client sends in any other form.
+        if (!UUID_RE.matches(m.itemId) || !UUID_RE.matches(m.vaultId)) {
+            return MutationResult(m.mutationId, "rejected", reason = "bad_item_id")
+        }
         val role = repo.grantRole(c, principal.userId, m.vaultId)
         val existing = if (role == null || role == "reader") null else repo.itemById(c, m.itemId)
         val result = if (role == null || role == "reader") {
