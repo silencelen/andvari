@@ -208,6 +208,16 @@ raw uri (`normalizeHostUnicode`, the same normalizer stopped before the A-label 
 Vectors: `spec/test-vectors/urimatch-idna.json` (`normalize` pins the output bytes, `match`
 the outcome); the pre-existing vector files are byte-frozen and unchanged.
 
+**Length limits (amended 2026-10, security review).** The A-label result must obey RFC 1035:
+no label longer than 63 octets and no host longer than 253; a host that breaks either
+normalizes to null and matches nothing (no DNS name can break them). Implementations refuse a
+pre-encode label of more than 63 code points before running the encoder, refuse an
+intermediate host of more than 512 UTF-16 units before the `www.` strip, strip trailing dots
+by a linear scan (never a backtracking `\.+$`), and the PSL resolver refuses a host over 253
+octets. The rule bounds the work: a co-member's planted URI was otherwise quadratic in the
+punycode encoder, the trailing-dot regex and the suffix walk, on every member's device, on
+every fill and every Health open. Pinned by the `limits` section of `urimatch-idna.json`.
+
 **Captured scheme (client rule, 2026-09-13 audit H124).** A client that CREATES a uri from
 a page capture (extension auto-save / site-link, Android save) stores the scheme it actually
 observed: a plain-http page (loopback, intranet — the spec 05 F27 posture) stores `http://…`

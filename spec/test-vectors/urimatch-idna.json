@@ -42,5 +42,15 @@
     { "savedUri": "https://bü..cher.de", "webHost": "xn--bcher-kva.de", "packageName": "com.android.chrome", "expected": false },
     { "savedUri": "https://straẞe.de", "webHost": "xn--strae-oqa.de", "packageName": "com.android.chrome", "expected": false },
     { "savedUri": "https://straße.de", "webHost": "xn--strae-oqa.de", "packageName": "com.android.chrome", "expected": true }
+  ],
+  "limitsComment": "DNS length limits (spec 02 §3.1, amended 2026-10, security review 2026-10). NOT oracle-derived — WHATWG's non-strict host parser does not enforce them — these pin RFC 1035's rule, applied to normalizeHost's A-label output: a label longer than 63 octets or a host longer than 253 is no DNS name, so it normalizes to null and matches nothing. The rule exists to BOUND THE WORK: a co-member could otherwise plant a 300 KB label and make the punycode encoder (O(length × distinct code points)) and the PSL suffix walk (O(labels²)) freeze autofill and Health on every member's device. A run of trailing dots strips to the host in linear time (the old /\\.+$/ was quadratic).",
+  "limits": [
+    { "input": "https://example.com......................................../x", "expected": "example.com" },
+    { "input": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com/", "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com" },
+    { "input": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com/", "expected": null },
+    { "input": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/", "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" },
+    { "input": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/", "expected": null },
+    { "input": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd./", "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" },
+    { "input": "https://üüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüü.de/", "expected": null }
   ]
 }

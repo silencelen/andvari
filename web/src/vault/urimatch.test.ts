@@ -80,6 +80,33 @@ describe("urimatch-idna.json — A-label canonicalization (H22, 2026-09-13)", ()
   });
 });
 
+describe("urimatch-idna.json limits — DNS length rules bound the work (security review 2026-10)", () => {
+  it("over-long labels and hosts normalize to null; trailing dot runs strip", () => {
+    for (const c of v3.limits) {
+      const actual = normalizeHost(c.input);
+      expect(actual, `normalizeHost(${c.input.slice(0, 40)}…)`).toBe(c.expected);
+      if (actual !== null) expect(normalizeHost(actual)).toBe(actual);
+    }
+  });
+
+  // A co-member plants these in a shared login's uris; Health and every match re-run them.
+  // Before the fix each took seconds (O(n²)); the budget is generous for a slow CI box.
+  const fast = (label: string, fn: () => unknown) => {
+    const t = performance.now();
+    fn();
+    expect(performance.now() - t, label).toBeLessThan(250);
+  };
+  it("a planted pathological host returns promptly", () => {
+    let cjk = "";
+    for (let i = 0; i < 20000; i++) cjk += String.fromCodePoint(0x4e00 + i);
+    fast("50k dots then a letter (the /\\.+$/ backtrack)", () => normalizeHost("https://" + ".".repeat(50000) + "x"));
+    fast("50k trailing dots", () => expect(normalizeHost("https://example.com" + ".".repeat(50000))).toBe("example.com"));
+    fast("20k distinct code points in one label (punycode)", () => expect(normalizeHost("https://" + cjk + ".com")).toBeNull());
+    fast("8k labels (PSL suffix walk)", () => pslResolve("a.".repeat(8000) + "com"));
+    fast("8k labels through parseSavedUri", () => expect(parseSavedUri("https://" + "a.".repeat(8000) + "com")).toBeNull());
+  });
+});
+
 describe("urimatch.json — classification", () => {
   it("classifies fields per priority", () => {
     for (const c of v.classify) {

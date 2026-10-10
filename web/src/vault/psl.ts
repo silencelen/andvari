@@ -46,14 +46,20 @@ function sets(): NonNullable<typeof parsed> {
  */
 export const pslResolve: PslResolve = (host: string): PslResult => {
   // eslint-disable-next-line no-control-regex
-  if (!host || /[^\x00-\x7f]/.test(host) || host.includes(":")) return { kind: "unknown" };
+  // Self-guard (security review 2026-10): no DNS name exceeds 253 octets (normalizeHost already
+  // refuses one); without it a planted many-label host made this walk O(labels²).
+  if (!host || host.length > 253 || /[^\x00-\x7f]/.test(host) || host.includes(":")) return { kind: "unknown" };
   const labels = host.split(".");
   if (labels.some((l) => !l)) return { kind: "unknown" };
   if (labels.length === 4 && labels.every((l) => /^\d+$/.test(l))) return { kind: "unknown" }; // IPv4
+  // Each candidate suffix is a slice of `host` from a label's start offset — no per-step join.
+  const starts: number[] = [];
+  for (let i = 0, off = 0; i < labels.length; off += labels[i]!.length + 1, i++) starts.push(off);
+  const suffixFrom = (i: number): string => host.slice(starts[i]);
   const { exact, wildcards, exceptions } = sets();
   let suffixLen = 0;
   for (let i = 0; i < labels.length; i++) {
-    const cand = labels.slice(i).join(".");
+    const cand = suffixFrom(i);
     if (exceptions.has(cand)) {
       suffixLen = labels.length - i - 1;
       break;
@@ -62,12 +68,12 @@ export const pslResolve: PslResolve = (host: string): PslResult => {
       suffixLen = labels.length - i;
       break;
     }
-    if (labels.length - i >= 2 && wildcards.has(labels.slice(i + 1).join("."))) {
+    if (labels.length - i >= 2 && wildcards.has(suffixFrom(i + 1))) {
       suffixLen = labels.length - i;
       break;
     }
   }
   if (suffixLen === 0) return { kind: "unknown" };
   if (suffixLen >= labels.length) return { kind: "public-suffix" };
-  return { kind: "registrable", domain: labels.slice(labels.length - suffixLen - 1).join(".") };
+  return { kind: "registrable", domain: suffixFrom(labels.length - suffixLen - 1) };
 };

@@ -55,13 +55,19 @@ object Psl {
      * makes the longest rule win by construction.
      */
     fun resolve(host: String): PslResult {
-        if (host.isEmpty() || host.any { it.code >= 128 } || host.contains(':')) return PslResult.Unknown
+        // Self-guard (security review 2026-10): no DNS name exceeds 253 octets ([UriMatch.normalizeHost]
+        // already refuses one); without it a planted many-label host made this walk O(labels²).
+        if (host.isEmpty() || host.length > UriMatch.MAX_HOST_OCTETS || host.any { it.code >= 128 } || host.contains(':')) return PslResult.Unknown
         val labels = host.split('.')
         if (labels.any { it.isEmpty() }) return PslResult.Unknown
         if (labels.size == 4 && labels.all { l -> l.all { it.isDigit() } }) return PslResult.Unknown // IPv4
+        // Each candidate suffix is a substring of `host` from a label's start offset — no per-step join.
+        val starts = IntArray(labels.size)
+        for (i in 1 until labels.size) starts[i] = starts[i - 1] + labels[i - 1].length + 1
+        fun suffixFrom(i: Int) = host.substring(starts[i])
         var suffixLen = 0
         for (i in labels.indices) {
-            val cand = labels.subList(i, labels.size).joinToString(".")
+            val cand = suffixFrom(i)
             if (cand in exceptions) {
                 suffixLen = (labels.size - i) - 1
                 break
@@ -70,7 +76,7 @@ object Psl {
                 suffixLen = labels.size - i
                 break
             }
-            if (labels.size - i >= 2 && labels.subList(i + 1, labels.size).joinToString(".") in wildcards) {
+            if (labels.size - i >= 2 && suffixFrom(i + 1) in wildcards) {
                 suffixLen = labels.size - i
                 break
             }
@@ -78,7 +84,7 @@ object Psl {
         return when {
             suffixLen == 0 -> PslResult.Unknown
             suffixLen >= labels.size -> PslResult.PublicSuffix
-            else -> PslResult.Registrable(labels.subList(labels.size - suffixLen - 1, labels.size).joinToString("."))
+            else -> PslResult.Registrable(suffixFrom(labels.size - suffixLen - 1))
         }
     }
 }
