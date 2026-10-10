@@ -307,6 +307,11 @@ class Service(
         requireKdfSalt(req.kdfSalt)
         val displayName = requireBoundedText(req.displayName, "display_name")
 
+        // Security review 2026-10: no real invite is this short (see INVITE_TOKEN_MIN_CHARS) — above
+        // all not the empty one, which an older server minted as a live admin invite whenever
+        // ANDVARI_BOOTSTRAP_TOKEN was present but blank. Refused before the lookup, so such a row
+        // left in an upgraded database can never be redeemed. Same answer as an unknown invite.
+        if (req.inviteToken.length < INVITE_TOKEN_MIN_CHARS) throw BadRequest("invalid_invite")
         val tokenHash = ServerCrypto.hashToken(req.inviteToken)
         requireUsableInvite(repo.db.read { c -> c.queryOne(INVITE_BY_HASH, tokenHash, map = ::inviteRowOf) }, req.email)
 

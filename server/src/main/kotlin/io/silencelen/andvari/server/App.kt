@@ -80,6 +80,15 @@ import kotlin.time.Duration.Companion.minutes
 /** Bootstrap invite email sentinel: matches whatever email the first admin registers with. */
 const val BOOTSTRAP_ANY_EMAIL = "*"
 
+/**
+ * The shortest invite token register will even look up, and the shortest ANDVARI_BOOTSTRAP_TOKEN
+ * the server will start with (security review 2026-10). Admin-minted invites are 256-bit
+ * (43 base64url chars) and deploy/bringup.sh mints 24 random bytes (32 chars), so this refuses
+ * only junk: above all the EMPTY token, which an older server minted as a live admin invite
+ * whenever the variable was present but blank — the shipped template's own default.
+ */
+const val INVITE_TOKEN_MIN_CHARS = 16
+
 // Aliases the single release-version source in :core — Admin Status and the update
 // check lied for a whole release when this was a separate hand-bumped literal.
 const val SERVER_VERSION = io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
@@ -288,11 +297,24 @@ private suspend fun ApplicationCall.respondFileContent(file: File) {
     respondFile(file)
 }
 
-/** First-run: if no users exist and a bootstrap token is set, mint the admin invite. */
+/**
+ * First-run: if no users exist and a usable bootstrap token is set, mint the admin invite.
+ *
+ * A blank token is UNSET (security review 2026-10): it used to mint an any-email admin invite
+ * stored as sha256(""), redeemable by whoever reached register first on a fresh or wiped
+ * instance. [Config.fromEnv] already folds blank to null and refuses to start on a short one;
+ * this re-checks because a Config can be built without fromEnv, and says so loudly — an empty
+ * users table with no way in is an operator problem worth one line in the boot log.
+ */
 private fun seedBootstrap(repo: Repo, config: Config) {
     val userCount = repo.db.read { it.queryOne("SELECT COUNT(*) FROM users") { rs -> rs.getInt(1) } ?: 0 }
     if (userCount > 0) return
-    val token = config.bootstrapToken ?: return
+    val token = config.bootstrapToken?.takeIf { it.length >= INVITE_TOKEN_MIN_CHARS }
+    if (token == null) {
+        val why = if (config.bootstrapToken.isNullOrBlank()) "is unset or blank" else "is shorter than $INVITE_TOKEN_MIN_CHARS characters"
+        System.err.println("[andvari] WARNING: no users yet and ANDVARI_BOOTSTRAP_TOKEN $why — no admin invite minted; set a random token (deploy/bringup.sh mints one) to enroll the first admin")
+        return
+    }
     // #22 self-heal: with ZERO users no invite was ever redeemed (redeem creates the user in the
     // same tx), so an EXPIRED leftover row here is pure debris — yet it used to count as "existing"
     // and block re-minting until the janitor's 30-day prune, bricking a first-run admin whose 72 h
