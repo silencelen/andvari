@@ -2769,7 +2769,11 @@ class DesktopState(
         screen = DesktopScreen.Vault
     }
 
-    fun beginTotpSetup() = totpOp { totpSetupInfo = api!!.totpSetup() }
+    /** Security review 2026-10: a first enrollment proves the master password (the server refuses a
+     *  bare setup outside its fresh-login window). One argon2id pass — off the UI thread. */
+    fun beginTotpSetup(password: String) = totpOp {
+        totpSetupInfo = withContext(Dispatchers.Default) { api!!.totpSetupWithPassword(password) }
+    }
 
     fun confirmTotp(code: String) = totpOp {
         totpStatus = api!!.totpConfirm(code.trim())
