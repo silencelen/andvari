@@ -113,16 +113,20 @@ class AndvariAutofillService : AutofillService() {
     private fun lockedResponse(form: ParsedForm, inlineRequest: InlineSuggestionsRequest?, trusted: Boolean): FillResponse {
         // allIds covers login AND card fields, so unlock-and-refill works from a card-only checkout.
         val ids = form.allIds.toTypedArray()
-        // FLAG_MUTABLE lets the platform inject EXTRA_ASSIST_STRUCTURE + inline specs into the
+        // FLAG_MUTABLE lets the platform add the inline specs (and its EXTRA_ASSIST_STRUCTURE) to the
         // launch intent; the flag constant only exists from API 31, and pre-31 PendingIntents
         // are mutable by default (no FLAG_IMMUTABLE), so the behavior is the same either way.
+        // Root cause G (security review 2026-10): that fill-in is delivered through the HOST app, so
+        // nothing in it may say who is asking. The form THIS request parsed — package, field ids,
+        // frame domains — is baked into the base intent, which a fill-in cannot override, and the
+        // unlock activity fills from the bake alone (FillBinding / AutofillAuthGate).
         val flags = if (Build.VERSION.SDK_INT >= 31) {
             PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_CANCEL_CURRENT
         } else {
             PendingIntent.FLAG_CANCEL_CURRENT
         }
         val pi = PendingIntent.getActivity(
-            this, nextRequestCode(), Intent(this, AutofillUnlockActivity::class.java), flags,
+            this, nextRequestCode(), FillBinding.bake(Intent(this, AutofillUnlockActivity::class.java), form), flags,
         )
         val menu = DatasetBuilder.lockedPresentation(this, "Unlock andvari")
         val inline = if (Build.VERSION.SDK_INT >= 30) DatasetBuilder.lockedInline(this, inlineRequest) else null

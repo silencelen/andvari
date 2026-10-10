@@ -65,6 +65,7 @@ object AutofillDebugLog {
     /** Where the fill terminated — one enum per formerly-silent exit. */
     enum class FillReason {
         NO_STRUCTURE, // request carried no AssistStructure / no activity component
+        BINDING_REFUSED, // auth activity: no baked form, or the host-delivered structure named another app (root cause G)
         SELF_FILL, // the requester is andvari itself (self-guard)
         SIGNED_OUT, // no persisted session / empty token — no unlock row possible
         NO_FIELDS, // structure parsed but nothing fillable: no USERNAME/PASSWORD field and no PAN-anchored card form
@@ -226,7 +227,10 @@ object AutofillDebugLog {
                 fields = all.map {
                     FieldSummary(
                         kind = it.kind.name,
-                        host = it.webDomain?.let { d -> UriMatch.normalizeHost(d) },
+                        // The domain is whatever the requesting app put on its node: cap it on raw
+                        // length BEFORE normalising, or one huge label pins this thread in the
+                        // quadratic punycode encoder (security review 2026-10, wave-6 LOW; HostCap).
+                        host = it.webDomain?.let { d -> if (HostCap.withinDnsLimits(d)) UriMatch.normalizeHost(d) else null },
                         signal = it.signal,
                     )
                 }

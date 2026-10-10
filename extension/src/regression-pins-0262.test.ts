@@ -98,7 +98,10 @@ test("G21 — MatchItem carries readOnly so the page-side surfaces suppress the 
   assert.ok(messages.includes("readOnly: boolean;"), "messages.ts: the flag is part of the MatchItem contract");
   const toMatch = spanOf(bg, "function toMatchItem(", "\n}");
   assert.ok(toMatch.includes("readOnly: !writableItem(it),"), "the SW computes it from the same gate");
-  assert.ok(content.includes("if (!m.siteMatch && !m.readOnly) {"), "content.ts: no one-tap 'link this site' for a read-only item");
+  // Security review 2026-10 (root cause B): the in-page "Link <item> to <host>?" offer followed the
+  // in-page search-all fill, which is gone — and a page-overlayable one-tap WRITE that binds an item
+  // to the page's host was itself clickjackable. No in-page surface links a site any more.
+  assert.ok(!content.includes('type: "linkUri"'), "content.ts: no in-page 'link this site' offer at all");
   assert.ok(popup.includes("} else if (!it.readOnly) {"), "popup.ts: no TOTP paste-add affordance for a read-only item");
 });
 

@@ -1,6 +1,5 @@
 package io.silencelen.andvari.app.autofill
 
-import android.app.assist.AssistStructure
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -66,10 +65,15 @@ import java.io.IOException
 
 /**
  * Translucent activity for the LOCKED autofill path. The platform launches it from the
- * service's `setAuthentication` PendingIntent, injecting EXTRA_ASSIST_STRUCTURE (and, on
- * API 30+, the inline request). It prompts for the master password, unlocks the vault into
- * [VaultSession], rebuilds datasets exactly as the service would, and returns them via
+ * service's `setAuthentication` PendingIntent (adding, on API 30+, the inline request). It prompts
+ * for the master password, unlocks the vault into [VaultSession], builds datasets for the form the
+ * SERVICE parsed and baked into that PendingIntent ([FillBinding]), and returns them via
  * EXTRA_AUTHENTICATION_RESULT.
+ *
+ * Security review 2026-10 (root cause G): the launch also carries an EXTRA_ASSIST_STRUCTURE, but it
+ * arrives through the HOST app's process, which can replace it with one claiming to be a trusted
+ * browser on any domain. It is never parsed here — only cross-checked against the baked package, and
+ * a disagreement refuses the fill.
  *
  * Single token-holder invariant (binding blocker): the api is built EXACTLY like
  * AndvariViewModel.newApi — with an HttpClient engine AND the SessionStore.updateTokens
@@ -95,9 +99,10 @@ class AutofillUnlockActivity : FragmentActivity() {
         // Default result is CANCELED (back / dismiss returns cleanly with no fill).
         setResult(RESULT_CANCELED)
 
-        val structure = intent.assistStructure()
-        if (structure == null) {
-            trace.finish(applicationContext, AutofillDebugLog.FillReason.NO_STRUCTURE)
+        // Root cause G: identity comes from the service's bake, never from the host-delivered structure.
+        val form = FillBinding.resolve(intent)
+        if (form == null) {
+            trace.finish(applicationContext, AutofillDebugLog.FillReason.BINDING_REFUSED)
             finish(); return
         }
         val inlineRequest = intent.inlineRequest()
@@ -117,7 +122,7 @@ class AutofillUnlockActivity : FragmentActivity() {
             // Any throwable building the response must degrade to CANCELED, never crash the
             // host app's fill flow (an uncaught throw in this callback path kills the process).
             finishAfterUnlock(runCatching {
-                DatasetBuilder.responseForUnlocked(this, structure, unlocked.engine.items(), inlineRequest, trace)
+                DatasetBuilder.responseForUnlocked(this, form, unlocked.engine.items(), inlineRequest, trace)
             }.onFailure { recordException(it) }.getOrNull())
             return
         }
@@ -145,7 +150,7 @@ class AutofillUnlockActivity : FragmentActivity() {
                     busy = busy,
                     error = errorText,
                     offerBiometricHint = couldUseBiometrics,
-                    onUnlock = { pw -> unlockAndFinish(store, session, pw, structure, inlineRequest) },
+                    onUnlock = { pw -> unlockAndFinish(store, session, pw, form, inlineRequest) },
                     onCancel = { finish() },
                 )
             }
@@ -163,7 +168,7 @@ class AutofillUnlockActivity : FragmentActivity() {
             QuickUnlock.isEnrolled(dir, store.currentOriginKey(), session.userId) &&
             QuickUnlock.isFresh(store, session.userId)
         ) {
-            tryBiometricUnlock(store, session, structure, inlineRequest)
+            tryBiometricUnlock(store, session, form, inlineRequest)
         }
     }
 
@@ -172,7 +177,7 @@ class AutofillUnlockActivity : FragmentActivity() {
     private fun tryBiometricUnlock(
         store: SessionStore,
         session: Session,
-        structure: AssistStructure,
+        form: ParsedForm,
         inlineRequest: InlineSuggestionsRequest?,
     ) {
         if (busy) return
@@ -188,7 +193,7 @@ class AutofillUnlockActivity : FragmentActivity() {
                     result.onSuccess { unlocked ->
                         finishAfterUnlock(runCatching {
                             DatasetBuilder.responseForUnlocked(
-                                this@AutofillUnlockActivity, structure, unlocked.engine.items(), inlineRequest, trace,
+                                this@AutofillUnlockActivity, form, unlocked.engine.items(), inlineRequest, trace,
                             )
                         }.onFailure { recordException(it) }.getOrNull())
                     }.onFailure { t ->
@@ -216,7 +221,7 @@ class AutofillUnlockActivity : FragmentActivity() {
         store: SessionStore,
         session: Session,
         password: String,
-        structure: AssistStructure,
+        form: ParsedForm,
         inlineRequest: InlineSuggestionsRequest?,
     ) {
         if (busy) return
@@ -231,7 +236,7 @@ class AutofillUnlockActivity : FragmentActivity() {
                 // Any throwable here degrades to CANCELED rather than crashing the host app.
                 finishAfterUnlock(runCatching {
                     DatasetBuilder.responseForUnlocked(
-                        this@AutofillUnlockActivity, structure, unlocked.engine.items(), inlineRequest, trace,
+                        this@AutofillUnlockActivity, form, unlocked.engine.items(), inlineRequest, trace,
                     )
                 }.onFailure { recordException(it) }.getOrNull())
             }.onFailure { t ->
@@ -290,14 +295,6 @@ class AutofillUnlockActivity : FragmentActivity() {
         t is IOException -> HouseholdCopy.UNLOCK_OFFLINE_NO_KEYS
         else -> HouseholdCopy.forUnlockError(t)
     }
-
-    @Suppress("DEPRECATION")
-    private fun Intent.assistStructure(): AssistStructure? =
-        if (Build.VERSION.SDK_INT >= 33) {
-            getParcelableExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE, AssistStructure::class.java)
-        } else {
-            getParcelableExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE)
-        }
 
     @Suppress("DEPRECATION")
     private fun Intent.inlineRequest(): InlineSuggestionsRequest? {
