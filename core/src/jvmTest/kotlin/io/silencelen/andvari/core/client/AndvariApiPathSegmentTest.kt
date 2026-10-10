@@ -45,7 +45,7 @@ class AndvariApiPathSegmentTest {
             assertFailsWith<IllegalArgumentException>("purge $id") { a.purgeItem(id) }
             assertFailsWith<IllegalArgumentException>("restore $id") { a.restoreItem(id, ItemUpload(1, emptyList(), "x")) }
             assertFailsWith<IllegalArgumentException>("versions $id") { a.itemVersions(id) }
-            assertFailsWith<IllegalArgumentException>("download $id") { a.downloadAttachment(id) }
+            assertFailsWith<IllegalArgumentException>("download $id") { a.downloadAttachment(id, 42) }
             assertFailsWith<IllegalArgumentException>("leave $id") { a.leaveVault(id) }
         }
         assertTrue(seen.isEmpty(), "no request may leave for a refused id: $seen")

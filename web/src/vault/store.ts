@@ -11,7 +11,7 @@ import type {
   WireItem,
   WireVault,
 } from "../api/types";
-import { HEADER_BYTES, decryptAttachment, encryptAttachment } from "../crypto/attachments";
+import { HEADER_BYTES, decryptAttachment, encryptAttachment, wireLength } from "../crypto/attachments";
 import { concat, fromB64, toB64, toHexLower, utf8 } from "../crypto/bytes";
 import {
   acceptProof,
@@ -2461,7 +2461,13 @@ export class VaultStore {
   /** Fetch + decrypt one attachment blob (24-byte secretstream header ‖ chunks). */
   async downloadAttachment(item: VaultItem, ref: AttachmentRef): Promise<Uint8Array> {
     if (!item.doc.attachments?.some((a) => a.id === ref.id)) throw new Error("attachment does not belong to this item");
+    // ref.size is the item author's claim (a co-member's, in a shared vault — security review
+    // 2026-10): the body must be exactly the length it implies, so the backup cap that budgets with
+    // it holds what it says, and a lie is refused instead of decrypted. Core twin.
+    const expected = wireLength(ref.size);
+    if (expected === null) throw new Error("attachment does not match its declared size");
     const bytes = await this.api.downloadAttachment(ref.id);
+    if (bytes.length !== expected) throw new Error("attachment does not match its declared size");
     return decryptAttachment(fromB64(ref.fileKey), bytes.subarray(0, HEADER_BYTES), bytes.subarray(HEADER_BYTES));
   }
 

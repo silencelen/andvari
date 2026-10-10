@@ -439,6 +439,12 @@ master-password SHA-1; the relay keeps no state now, spec 03 §8.)
   the server persists header and chunks and never sees content or filename.
 - Decrypters MUST fail hard on: any chunk MAC failure, FINAL before last chunk,
   missing FINAL at end (truncation), or extra data after FINAL.
+- The ref's `size` (§3) is the exact plaintext length, and it is the item AUTHOR's claim —
+  a co-member's, in a shared vault. **Clients treat it as a claim (2026-10, security review):**
+  a download must be exactly `24 + size + 17·⌈size/65536⌉` bytes, and the client stops
+  reading and refuses the attachment once a body passes that length or ends short of it; the
+  backup planner (spec 07 §2.5) skips a non-positive claim and sums with overflow-safe
+  arithmetic; a client that scales a transfer timeout by `size` clamps it (desktop: 64 MiB).
 - Upload: blob first (`POST /attachments/{id}`), then the item update referencing it;
   orphaned blobs are GC'd after 24 h. Server enforces per-item and per-user quota
   from policy (v1 defaults: 25 MiB/attachment, 100 MiB/item, 1 GiB/user).
