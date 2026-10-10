@@ -154,8 +154,9 @@ object DesktopDiagnostics {
     private fun redactedLink(t: Throwable): String {
         val cls = t::class.qualifiedName ?: t::class.simpleName ?: "(anonymous throwable)"
         val detail: String? = when (t) {
-            // Wire-supplied text is never logged — the structured pair is.
-            is ApiException -> "status=${t.status} code=${t.code}"
+            // Wire-supplied text is never logged — the structured pair is, and the code half of it
+            // is wire-supplied too (a hostile server's `error` field), so it is allowlisted.
+            is ApiException -> "status=${t.status} code=${safeCode(t.code)}"
             is CsvImport.ImportException -> "code=${t.code}"
             is CryptoException -> safeMessage(t)
             is LinkageError -> safeMessage(t)
@@ -163,6 +164,14 @@ object DesktopDiagnostics {
         }
         return if (detail == null) cls else "$cls: $detail"
     }
+
+    /** Security review 2026-10: `ApiException.code` is the `error` field of whatever origin the
+     *  app is dialing. Raw, a CR/LF in it forged whole log lines ("crypto self-check FAILED: …" in
+     *  the file the About dialog calls safe to send) and a 300 KB value rotated real history out.
+     *  Every code a server legitimately sends is a short snake_case token. */
+    private val SAFE_CODE = Regex("^[A-Za-z0-9_.-]{1,64}$")
+
+    private fun safeCode(code: String): String = if (SAFE_CODE.matches(code)) code else "<invalid>"
 
     private fun safeMessage(t: Throwable): String? {
         val raw = t.message ?: return null
