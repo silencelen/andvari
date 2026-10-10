@@ -1014,7 +1014,7 @@ function captureNow(f: LoginForm): void {
   // The send happens NOW, before the page can unload — the SW keeps it as the tab's pending
   // save; the banner only appears if this document survives long enough to hear back.
   void (async () => {
-    const res = await safeSend({ type: "capturedCredential", url: location.href, username, password });
+    const res = await safeSend({ type: "capturedCredential", username, password });
     if (res?.pending) offerBanner(res.pending);
   })();
 }

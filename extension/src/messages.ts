@@ -343,7 +343,7 @@ export type Req =
    *  click/Enter, or the SW's own `fillItem` delivery — a popup fill is a user click this document
    *  cannot see, and the sites that auto-submit on fill are exactly the ones that would lose the
    *  banner without it. */
-  | { type: "capturedCredential"; url: string; username: string; password: string }
+  | { type: "capturedCredential"; username: string; password: string }
   /** Content (G2 [X2-A3]): a card form was submitted under a trusted gesture — the frame's OWN card
    *  inputs, Luhn-gated content-side, NEVER the CVV. The SW re-Luhns, discards any capture whose
    *  `sender.origin !== topOrigin(tabId)` ([X2-A2] same-origin gate — a cross-origin/PSP frame never

@@ -52,6 +52,7 @@ import { revealGate } from "./revealgate";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor, stepUsernameFor, type StepUsername } from "./savetarget";
 import { capturedSiteUri } from "./siteurl";
+import { captureBinding, requestHost } from "./senderorigin";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
@@ -1763,7 +1764,10 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return scheduleClipboardClear();
     case "matches": {
       if (!session) return { locked: true, matches: [] } satisfies Res<"matches">;
-      return { locked: false, matches: matchesFor(msg.host).map((i) => toMatchItem(i, true)) } satisfies Res<"matches">;
+      // Security review 2026-10 (root cause E): a page frame's matches are its BROWSER-SET origin's
+      // (senderorigin.ts) — `msg.host` is the frame's own claim and named any host it liked.
+      const host = requestHost(sender.tab !== undefined, sender.origin, msg.host);
+      return { locked: false, matches: host === null ? [] : matchesFor(host).map((i) => toMatchItem(i, true)) } satisfies Res<"matches">;
     }
     case "allItems": {
       // Popup ONLY (security review 2026-10): the in-page search-all that once needed the whole
@@ -1881,7 +1885,9 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return setTotp(msg, sender); // TOTP-add 2026-08-12 — popup paste-add, deliberately NOT passive
     case "pageInfo": {
       const locked = session === null;
-      const matchCount = locked ? 0 : matchesFor(msg.host).length;
+      // Security review 2026-10 (root cause E): the count is for the sender's browser-set origin.
+      const host = requestHost(sender.tab !== undefined, sender.origin, msg.host);
+      const matchCount = locked || host === null ? 0 : matchesFor(host).length;
       const tabId = sender.tab?.id;
       // V4: the badge is the tab's ONE authority now (refreshTabBadge — login count precedence, else
       // the card discovery dot). Top frame only — an iframe's load must not repaint the tab's signal.
@@ -3467,7 +3473,7 @@ async function revealCardForFill(
 
 // ---- capture → pending save → resolve ----
 
-/** Page host from a captured URL (content sends location.href), normalized like a match target. */
+/** Host of a URL (a browser-set origin), normalized like a match target. */
 function hostOfUrl(url: string): string | null {
   try {
     return normalizeHost(new URL(url).host);
@@ -3501,8 +3507,12 @@ async function capturedCredential(
   const tabId = sender.tab?.id;
   if (tabId === undefined) return { ok: false }; // captures come from pages only
   const frameId = sender.frameId ?? 0;
-  const host = hostOfUrl(msg.url);
-  if (!host) return { ok: false };
+  // Security review 2026-10 (root cause E): the capture is bound to the BROWSER-SET origin. The page
+  // URL the content script used to send let an opaque-origin (sandboxed) frame whose URL sits on a
+  // site be credited as that site, and mint a pending update of the user's login there.
+  const bound = captureBinding(sender.origin);
+  if (!bound) return { ok: false };
+  const host = bound.host;
   const st = tabs.get(tabId) ?? {};
 
   // A live pending belongs to the frame that captured it. Reject an overwrite from a DIFFERENT
@@ -3561,10 +3571,10 @@ async function capturedCredential(
     updatesItemUsername: updatable?.doc.login?.username ?? null,
     password: msg.password,
     frameId,
-    // H124: the uri a NEW item will store — `http://…` when the page was plain http (loopback /
-    // intranet), else the classic `https://<host>`. Decided at capture, where the page url is
-    // known; SW-side only (publicPending never carries it — the banner shows `host`).
-    uri: capturedSiteUri(msg.url, host),
+    // H124: the uri a NEW item will store — `http://…` when the origin is plain http (loopback /
+    // intranet), else the classic `https://<host>`. From the browser-set origin (captureBinding);
+    // SW-side only (publicPending never carries it — the banner shows `host`).
+    uri: bound.uri,
   };
   // Locked-capture posture (owner decisions 2026-08-18). A pending minted while locked holds a
   // plaintext page password in storage.session, so it carries a TTL stamp (LOCKED_PENDING_TTL_MS,
