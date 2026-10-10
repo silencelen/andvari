@@ -43,6 +43,7 @@ import type {
   WsTicketResponse,
 } from "./types";
 import { assertServerKdfParams } from "../crypto/keys";
+import { SAFE_ID } from "../vault/itemdoc-shape";
 
 export const CLIENT_VERSION = "0.27.0";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
@@ -50,6 +51,20 @@ const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
 /** A request body that is ALREADY JSON text and must not be re-serialized (see adminRecovery). */
 class PreSerializedJson {
   constructor(readonly text: string) {}
+}
+
+/**
+ * Every id interpolated into a request path goes through here (security review 2026-10, root
+ * cause D). Item and attachment ids arrive from OTHER members — a tombstone's itemId via
+ * /items/deleted, an attachment id from a decrypted doc — and every request carries this tab's
+ * bearer token, so a planted `../admin/users/<id>/disable?` once turned "Delete forever" into an
+ * admin action. A value that is not an id (SAFE_ID, spec 02 §3.2) is refused BEFORE any fetch; an
+ * accepted one is percent-encoded on top. The refusal is what matters: WHATWG URL parsing treats
+ * `%2e%2e` as `..` too. Core AndvariApi.pathSeg twin.
+ */
+export function pathSeg(id: string): string {
+  if (!SAFE_ID.test(id)) throw new ApiError(0, "bad_path_segment", "not an id path segment");
+  return encodeURIComponent(id);
 }
 
 export class ApiError extends Error {
@@ -397,8 +412,8 @@ export class ApiClient {
 
   /** Item history: the archived ciphertext versions of an item (server keeps the last 10),
    *  grant-checked. The caller decrypts each blob under the held VK (Account.decryptItemVersion). */
-  itemVersions(itemId: string) {
-    return this.json<ItemVersionsResponse>("GET", `/api/v1/items/${itemId}/versions`);
+  async itemVersions(itemId: string) {
+    return this.json<ItemVersionsResponse>("GET", `/api/v1/items/${pathSeg(itemId)}/versions`);
   }
 
   /** Item undelete: the caller's tombstoned items (grant-scoped server-side). */
@@ -407,13 +422,13 @@ export class ApiClient {
   }
 
   /** Item undelete: restore a tombstoned item from a re-encrypted version; returns the new rev. */
-  restoreItem(itemId: string, upload: ItemUpload) {
-    return this.json<ItemRestoreResponse>("POST", `/api/v1/items/${itemId}/restore`, upload);
+  async restoreItem(itemId: string, upload: ItemUpload) {
+    return this.json<ItemRestoreResponse>("POST", `/api/v1/items/${pathSeg(itemId)}/restore`, upload);
   }
 
   /** Item undelete (F49): "Delete forever" — hard-delete a tombstoned item + its versions. */
-  purgeItem(itemId: string) {
-    return this.json<ItemRestoreResponse>("POST", `/api/v1/items/${itemId}/purge`);
+  async purgeItem(itemId: string) {
+    return this.json<ItemRestoreResponse>("POST", `/api/v1/items/${pathSeg(itemId)}/purge`);
   }
 
   // ---- shared vaults (spec 03 §10) — refused on the public break-glass origin ----
@@ -426,61 +441,61 @@ export class ApiClient {
     return this.json<UserLookupResponse>("POST", "/api/v1/users/lookup", { email });
   }
 
-  vaultMembers(vaultId: string) {
-    return this.json<VaultMemberSummary[]>("GET", `/api/v1/vaults/${vaultId}/members`);
+  async vaultMembers(vaultId: string) {
+    return this.json<VaultMemberSummary[]>("GET", `/api/v1/vaults/${pathSeg(vaultId)}/members`);
   }
 
-  addVaultMember(vaultId: string, body: VaultMemberAdd) {
-    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${vaultId}/members`, body);
+  async addVaultMember(vaultId: string, body: VaultMemberAdd) {
+    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/members`, body);
   }
 
-  setVaultMemberRole(vaultId: string, userId: string, role: string) {
-    return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${vaultId}/members/${userId}`, { role });
+  async setVaultMemberRole(vaultId: string, userId: string, role: string) {
+    return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${pathSeg(vaultId)}/members/${pathSeg(userId)}`, { role });
   }
 
   /** DELETE member. `proof`/`nonce` (spec 03 §11 removal proof) are optional and additive:
    *  when supplied they ride the body so a 0.5.0 victim can verify the removal was a real
    *  owner action; omitted → the proofless 0.4.0 shape (no body). */
-  removeVaultMember(vaultId: string, userId: string, body?: VaultMemberRemoveRequest) {
+  async removeVaultMember(vaultId: string, userId: string, body?: VaultMemberRemoveRequest) {
     return this.json<CreateVaultResponse>(
       "DELETE",
-      `/api/v1/vaults/${vaultId}/members/${userId}`,
+      `/api/v1/vaults/${pathSeg(vaultId)}/members/${pathSeg(userId)}`,
       body && (body.proof || body.nonce) ? body : undefined,
     );
   }
 
   // ---- vault lifecycle (spec 03 §11) — refused on the public break-glass origin ----
 
-  deleteVault(vaultId: string, body: VaultDeleteRequest) {
-    return this.json<VaultDeleteResponse>("POST", `/api/v1/vaults/${vaultId}/delete`, body);
+  async deleteVault(vaultId: string, body: VaultDeleteRequest) {
+    return this.json<VaultDeleteResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/delete`, body);
   }
 
-  restoreVault(vaultId: string, body: VaultRestoreRequest) {
-    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${vaultId}/restore`, body);
+  async restoreVault(vaultId: string, body: VaultRestoreRequest) {
+    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/restore`, body);
   }
 
   deletedVaults() {
     return this.json<DeletedVaultSummary[]>("GET", "/api/v1/vaults/deleted");
   }
 
-  leaveVault(vaultId: string) {
-    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${vaultId}/leave`, {});
+  async leaveVault(vaultId: string) {
+    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/leave`, {});
   }
 
-  offerTransfer(vaultId: string, body: TransferOfferRequest) {
-    return this.json<TransferOfferResponse>("POST", `/api/v1/vaults/${vaultId}/transfer`, body);
+  async offerTransfer(vaultId: string, body: TransferOfferRequest) {
+    return this.json<TransferOfferResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/transfer`, body);
   }
 
-  cancelTransfer(vaultId: string) {
-    return this.json<CreateVaultResponse>("DELETE", `/api/v1/vaults/${vaultId}/transfer`);
+  async cancelTransfer(vaultId: string) {
+    return this.json<CreateVaultResponse>("DELETE", `/api/v1/vaults/${pathSeg(vaultId)}/transfer`);
   }
 
-  acceptTransfer(vaultId: string, body: TransferAcceptRequest) {
-    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${vaultId}/transfer/accept`, body);
+  async acceptTransfer(vaultId: string, body: TransferAcceptRequest) {
+    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/transfer/accept`, body);
   }
 
-  updateVaultMeta(vaultId: string, body: VaultMetaUpdateRequest) {
-    return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${vaultId}/meta`, body);
+  async updateVaultMeta(vaultId: string, body: VaultMetaUpdateRequest) {
+    return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${pathSeg(vaultId)}/meta`, body);
   }
 
   putEscrow(sealed: string, fingerprint: string) {
@@ -564,14 +579,14 @@ export class ApiClient {
   // ---- attachments (spec 02 §6: body = 24-byte header ‖ ciphertext chunks) ----
 
   async uploadAttachment(id: string, itemId: string, vaultId: string, body: Uint8Array): Promise<AttachmentMeta> {
-    const q = `vaultId=${encodeURIComponent(vaultId)}&itemId=${encodeURIComponent(itemId)}`;
-    const resp = await this.rawBytes("POST", `/api/v1/attachments/${id}?${q}`, body);
+    const q = `vaultId=${pathSeg(vaultId)}&itemId=${pathSeg(itemId)}`;
+    const resp = await this.rawBytes("POST", `/api/v1/attachments/${pathSeg(id)}?${q}`, body);
     if (!resp.ok) await this.throwApiError(resp);
     return (await resp.json()) as AttachmentMeta;
   }
 
   async downloadAttachment(id: string): Promise<Uint8Array> {
-    const resp = await this.rawBytes("GET", `/api/v1/attachments/${id}`, undefined);
+    const resp = await this.rawBytes("GET", `/api/v1/attachments/${pathSeg(id)}`, undefined);
     if (!resp.ok) await this.throwApiError(resp);
     return new Uint8Array(await resp.arrayBuffer());
   }
@@ -621,19 +636,19 @@ export class ApiClient {
     return this.json<InviteResponse>("POST", "/api/v1/admin/users", { email, isAdmin, ttlMinutes, sendEmail, escrowPolicy });
   }
 
-  adminDisableUser(userId: string) {
-    return this.text("POST", `/api/v1/admin/users/${userId}/disable`);
+  async adminDisableUser(userId: string) {
+    return this.text("POST", `/api/v1/admin/users/${pathSeg(userId)}/disable`);
   }
 
-  adminDevices(userId: string) {
-    return this.json<AdminDeviceSummary[]>("GET", `/api/v1/admin/users/${userId}/devices`);
+  async adminDevices(userId: string) {
+    return this.json<AdminDeviceSummary[]>("GET", `/api/v1/admin/users/${pathSeg(userId)}/devices`);
   }
 
   /** F59 recovery step 1 — the user's sealed escrow blob (base64url, text/plain) to carry to
    *  offline `recovery-cli recover`. Sealed to the org recovery PUBLIC key, so safe to hand
    *  out. Throws ApiError `no_escrow` (404) if the user never enrolled one. */
-  adminUserEscrow(userId: string) {
-    return this.text("GET", `/api/v1/admin/users/${userId}/escrow`);
+  async adminUserEscrow(userId: string) {
+    return this.text("GET", `/api/v1/admin/users/${pathSeg(userId)}/escrow`);
   }
 
   /** F59 recovery step 3 (spec 04 §4) — POST the recovery-cli bundle to `/admin/recovery`. H24
@@ -648,8 +663,8 @@ export class ApiClient {
     return this.text("POST", "/api/v1/admin/recovery", new PreSerializedJson(bundleText));
   }
 
-  adminRevokeDevice(deviceId: string) {
-    return this.text("POST", `/api/v1/admin/devices/${deviceId}/revoke`);
+  async adminRevokeDevice(deviceId: string) {
+    return this.text("POST", `/api/v1/admin/devices/${pathSeg(deviceId)}/revoke`);
   }
 
   adminAudit(params: { since?: number; type?: string; userId?: string; limit?: number }) {
@@ -675,7 +690,7 @@ export class ApiClient {
   }
 
   async hibpRange(prefix: string): Promise<string> {
-    const resp = await this.raw("GET", `/api/v1/hibp/range/${prefix}`);
+    const resp = await this.raw("GET", `/api/v1/hibp/range/${pathSeg(prefix)}`);
     if (!resp.ok) throw new ApiError(resp.status, "hibp_failed", "hibp range failed");
     return resp.text();
   }
