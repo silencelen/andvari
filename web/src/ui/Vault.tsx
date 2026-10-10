@@ -2139,7 +2139,7 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
           <Field label="TOTP secret (otpauth:// URI or base32)">
             {/* RAW text while typing — normalizing per keystroke rewrote the field to an
                 otpauth:// URI on the first character. Normalized once, in submit. */}
-            <input className="mono" value={login.totp ?? ""} onChange={(e) => setLogin({ totp: e.target.value })} placeholder="optional" />
+            <input className="mono" data-print-secret value={login.totp ?? ""} onChange={(e) => setLogin({ totp: e.target.value })} placeholder="optional" />
           </Field>
         </>
       )}
@@ -2160,7 +2160,7 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
           >
             {/* RAW text while typing (separators and all) — digits-only ONCE, in submit (the
                 TOTP idiom). The badge + Luhn line read the live digits; warn, never block. */}
-            <input className="mono" inputMode="numeric" autoComplete="off" value={card.number ?? ""} onChange={(e) => setCard({ number: e.target.value })} />
+            <input className="mono" inputMode="numeric" autoComplete="off" data-print-secret value={card.number ?? ""} onChange={(e) => setCard({ number: e.target.value })} />
           </Field>
           <div className="field">
             <label>Expiry</label>
