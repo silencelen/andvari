@@ -161,9 +161,7 @@ fun requireEscrowBlob(sealedB64: String) {
  * unauthenticated /auth/prelogin was fully heap-buffered — a concurrent flood away from
  * OOMing the single CT122 process). Three route classes:
  *   EXEMPT   — the attachment upload streams via receiveChannel and AttachmentStore
- *              enforces its own per-attachment/per-user quotas mid-stream; the /events
- *              WebSocket upgrade (draining its live bidirectional channel in the layer-2
- *              receive interceptor would block the handshake forever).
+ *              enforces its own per-attachment/per-user quotas mid-stream.
  *   GENEROUS — /sync/push: a CSV import lands here as ONE JSON body (up to 200
  *              mutations, item blobs uncapped upstream), so the ceiling is sized to
  *              bound the buffer without breaking a fat import batch.
@@ -171,6 +169,9 @@ fun requireEscrowBlob(sealedB64: String) {
  *              legitimate body (register, a single-item restore) sits well under it.
  * Enforced in two layers in [andvariModule]: a declared Content-Length over the cap is
  * refused before the handler runs; chunked/undeclared bodies are cut off at receive time.
+ * The /events WebSocket upgrade is TIGHT for layer 1 (its GET carries no body) but skips layer 2
+ * — draining its live bidirectional channel in the receive interceptor would block the handshake
+ * forever. Its post-upgrade input is bounded per frame by [WS_MAX_FRAME_BYTES] instead.
  * Breach ⇒ 413 [PayloadTooLarge] "body_too_large" via StatusPages' house error shape.
  */
 internal const val BODY_CAP_TIGHT_BYTES = 256L * 1024
@@ -181,11 +182,23 @@ internal const val BODY_CAP_PUSH_BYTES = 8L * 1024 * 1024
  *  generic 413: under TIGHT the documented 512 KiB ceiling was unreachable dead code. */
 internal const val BODY_CAP_USAGE_BYTES = USAGE_SEALED_MAX + 4L * 1024
 
-/** The request-body cap for [path], or null when exempt (the streamed attachment upload; the
- *  /events WebSocket upgrade, whose live channel must not be drained by the receive interceptor). */
+/**
+ * Inbound WebSocket frame ceiling for /api/v1/events (security review 2026-10). The handler only
+ * ever accepts a 4-byte "ping", but Ktor's default maxFrameSize is Long.MAX_VALUE and its frame
+ * reader allocates a buffer of the DECLARED length as soon as it has parsed a frame header —
+ * before any payload arrives. A few sockets each declaring hundreds of MiB and then going quiet
+ * pinned that much heap apiece. Over this cap the reader refuses from the header alone and the
+ * socket is closed 1009 TOO_BIG; the 60 s ping timeout below reaps a peer that stalls mid-frame.
+ */
+internal const val WS_MAX_FRAME_BYTES = 4L * 1024
+
+/** The /events WebSocket path — TIGHT for the declared-length layer, skipped by the receive layer. */
+internal const val EVENTS_PATH = "/api/v1/events"
+
+/** The request-body cap for [path], or null when exempt (the streamed attachment upload). The
+ *  /events upgrade answers TIGHT here; the receive layer skips it (see [EVENTS_PATH]). */
 internal fun bodyCapBytes(path: String): Long? = when {
     path.startsWith("/api/v1/attachments/") -> null
-    path == "/api/v1/events" -> null
     path == "/api/v1/sync/push" -> BODY_CAP_PUSH_BYTES
     // A single-item restore re-uploads that item's re-encrypted blob, which is uncapped upstream
     // exactly like a push mutation — so it gets the GENEROUS ceiling, not TIGHT. Otherwise a big
@@ -308,6 +321,7 @@ fun Application.andvariModule(services: Services) {
     install(WebSockets) {
         pingPeriodMillis = 30_000
         timeoutMillis = 60_000
+        maxFrameSize = WS_MAX_FRAME_BYTES
     }
     install(MicrometerMetrics) { registry = services.metrics }
     // quality-perf--1: for the streamed file responses (respondFileContent) these turn the file's
@@ -408,7 +422,11 @@ fun Application.andvariModule(services: Services) {
     // throws mid-stream: ktor-io's CloseToken rewraps a writer failure in IOException, which
     // would surface the house PayloadTooLarge as a 500 instead of a 413 at StatusPages.
     receivePipeline.intercept(ApplicationReceivePipeline.Before) {
-        val cap = bodyCapBytes(context.request.path()) ?: return@intercept
+        val path = context.request.path()
+        // The WS upgrade's live channel must never be drained here (it would hang the handshake);
+        // its layer-1 cap above still applies, and frames are bounded by WS_MAX_FRAME_BYTES.
+        if (path == EVENTS_PATH) return@intercept
+        val cap = bodyCapBytes(path) ?: return@intercept
         val body = subject as? ByteReadChannel ?: return@intercept
         val head = body.readRemaining(cap + 1).readByteArray()
         body.closedCause?.let { throw it } // a mid-body client abort stays an IO failure, as before
@@ -1106,7 +1124,7 @@ fun Application.andvariModule(services: Services) {
             val p = requirePrincipal(call, service)
             call.respond(WsTicketResponse(services.wsTickets.mint(p.userId, p.deviceId), 30))
         }
-        webSocket("/api/v1/events") {
+        webSocket(EVENTS_PATH) {
             // M8: bind the socket to (userId, deviceId) — ticket carries the minting device; the Bearer
             // fallback takes the token's own session device — so a single-device revoke can target it.
             val auth = call.request.queryParameters["ticket"]?.let { services.wsTickets.redeem(it) }
