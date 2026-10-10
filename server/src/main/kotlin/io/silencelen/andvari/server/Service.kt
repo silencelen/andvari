@@ -679,8 +679,10 @@ class Service(
      * UVK + identity material bound to a single-use, short-TTL, userId-bound ticket.
      *
      * Anti-enumeration (§F.5): unknown email, a non-active account, OR a known email with NO
-     * member_recovery row all run a fixed DUMMY_RECOVERY_VERIFIER and return a uniform 401 — timing/
-     * shape-identical across every state, mirroring login's DUMMY_VERIFIER. (A disabled account is
+     * member_recovery row all run a fixed DUMMY_RECOVERY_VERIFIER and return a uniform 401, and
+     * every failure — wrong secret included — writes one recovery_self_verify_fail row, so the
+     * branches share both the argon2 cost and the audit commit (mirroring login's DUMMY_VERIFIER
+     * and F20 rows). (A disabled account is
      * admin-recoverable only; treating it as "no row" here also keeps the commit's not-active guard a
      * pure TOCTOU belt.) The stored recoveryVerifier is NOT NULL, so a null/absent verifier can never
      * match.
@@ -692,14 +694,25 @@ class Service(
         // already makes online guessing computationally unreachable (review 2026-07-16 D1; corrects the
         // design §2.5.3/B1-6 amendment, which wrongly copied login's backoff here). §F.5's uniform 401
         // across unknown-email / no-row / wrong-secret keeps this from being an account oracle.
-        val user = repo.userByEmail(req.email)?.takeIf { it.status == "active" }
+        //
+        // ONE path for every failure (security review 2026-10, server F3): exactly one argon2id verify
+        // and exactly one audit commit, whichever state the address is in. The old code audited only
+        // the wrong-secret branch, and that fsync'd commit was the one cost the other branches lacked
+        // — so it marked every address holding an account (all accounts get a recovery row at
+        // register). Rows follow login's F20 shape: an unknown address is fully anonymous (naming it
+        // would make the row itself the oracle), a known one is attributed with what went wrong.
+        val known = repo.userByEmail(req.email)
+        val user = known?.takeIf { it.status == "active" }
         val row = user?.let { repo.memberRecoveryRow(it.userId) }
-        if (user == null || row == null) {
-            ServerCrypto.verify(ServerCrypto.DUMMY_RECOVERY_VERIFIER, req.recoveryAuthKey) // uniform cost
-            throw Unauthorized()
-        }
-        if (!ServerCrypto.verify(row.recoveryVerifier, req.recoveryAuthKey)) {
-            repo.audit("recovery_self_verify_fail", user.userId, null, ip)
+        val matched = ServerCrypto.verify(row?.recoveryVerifier ?: ServerCrypto.DUMMY_RECOVERY_VERIFIER, req.recoveryAuthKey)
+        if (user == null || row == null || !matched) {
+            val meta = when {
+                known == null -> null
+                user == null -> "inactive"
+                row == null -> "no_row"
+                else -> null
+            }
+            repo.audit("recovery_self_verify_fail", known?.userId, null, ip, meta)
             throw Unauthorized()
         }
         val ticket = recoveryTickets.mint(user.userId)
