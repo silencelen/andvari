@@ -6,13 +6,14 @@ package io.silencelen.andvari.server
  * grace window, (b) expire transfer offers past expiresAt, (c) purge item tombstones
  * past [ITEM_TOMBSTONE_RETENTION_MS], (d) prune `changes` below the fence AND advance
  * `oldestRetainedRev` in the same tx — floored at MAX(rev) so `currentRev` never
- * regresses (spec 02 §7 invariants (a)+(b)), (e)–(i) prune dead sessions
+ * regresses (spec 02 §7 invariants (a)+(b)), (e)–(h) prune dead sessions
  * ([SESSION_RETENTION_MS]) and then the device rows those sessions were the last evidence
  * of (H25 — same horizon, session-less rows only), the mutation-dedup journal ([MUTATION_RETENTION_MS]),
- * audit rows ([AUDIT_RETENTION_MS]), dead invites ([INVITE_RETENTION_MS]), and stale
- * hibp_cache rows ([HIBP_RETENTION_MS]). The changes fence REUSES the item-tombstone
- * horizon by construction: any cursor old enough to have missed a purged tombstone is
- * behind the fence too, so it gets 410 → full resync instead of resurrecting deletions.
+ * audit rows ([AUDIT_RETENTION_MS]) and dead invites ([INVITE_RETENTION_MS]). The old (i),
+ * stale hibp_cache rows, went with the table itself in schema v11 (Db.purgeHibpCache).
+ * The changes fence REUSES the item-tombstone horizon by construction: any cursor old
+ * enough to have missed a purged tombstone is behind the fence too, so it gets 410 → full
+ * resync instead of resurrecting deletions.
  *
  * Purge is andvari's first data-destruction code (design §14.1), so every destructive
  * statement re-checks `deletedAt/purgeAt/purgedAt` INSIDE the per-vault tx (closes the
@@ -58,7 +59,6 @@ class Janitor(
         val prunedMutations: Long,
         val prunedAudit: Long,
         val prunedInvites: Long,
-        val prunedHibp: Long,
         val dryRun: Boolean,
     )
 
@@ -72,7 +72,6 @@ class Janitor(
         prunedMutations = pruneOldMutations(nowMs),
         prunedAudit = pruneOldAudit(nowMs),
         prunedInvites = pruneOldInvites(nowMs),
-        prunedHibp = pruneStaleHibpCache(nowMs),
         dryRun = config.janitorDryRun,
     )
 
@@ -155,7 +154,7 @@ class Janitor(
             .getOrDefault(0L)
     }
 
-    // ---- (e)–(i) F49: bounded-retention prunes (sessions/mutations/audit/invites/hibp) ----
+    // ---- (e)–(h) F49: bounded-retention prunes (sessions/devices/mutations/audit/invites) ----
 
     /** Shared shape of the simple retention rules: one bounded DELETE, dry-run counts only. */
     private fun prune(table: String, label: String, where: String, vararg args: Any?): Long {
@@ -215,11 +214,6 @@ class Janitor(
         val cutoff = nowMs - INVITE_RETENTION_MS
         return prune("invites", "dead invite row(s) past 30d", "(usedAt IS NOT NULL AND usedAt<?) OR expiresAt<?", cutoff, cutoff)
     }
-
-    /** (i) hibp_cache rows not refreshed in 45d. Reads already ignore rows older than 7d
-     *  (HibpRelay.cacheMaxAgeMs / Repo.hibpCached) — this is space reclaim, not correctness. */
-    fun pruneStaleHibpCache(nowMs: Long): Long =
-        prune("hibp_cache", "stale hibp_cache row(s) past 45d", "fetchedAt<?", nowMs - HIBP_RETENTION_MS)
 
     // ---- (a) vault purge ----
 
@@ -340,6 +334,5 @@ class Janitor(
         internal const val MUTATION_RETENTION_MS = 180 * Service.DAY_MS
         internal const val AUDIT_RETENTION_MS = 365 * Service.DAY_MS
         internal const val INVITE_RETENTION_MS = 30 * Service.DAY_MS
-        internal const val HIBP_RETENTION_MS = 45 * Service.DAY_MS
     }
 }

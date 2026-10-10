@@ -70,6 +70,34 @@ class Db(path: String) : AutoCloseable {
         lock.withLock { conn.close() }
     }
 
+    /**
+     * v11 (security review 2026-10, root cause C): drop `hibp_cache`. The relay kept every prefix
+     * it fetched there for up to 45 days with a `fetchedAt`, and the row written seconds after a
+     * `register` / `password_change` audit row was 20 bits of that account's master-password SHA-1,
+     * in the same file as its Argon2id verifier. The relay is stateless now, so the rows go.
+     *
+     * A plain DROP only returns the pages to the freelist with their bytes intact, i.e. still
+     * readable in the file and in every later backup of it. So secure_delete is on for the drop
+     * (SQLite zeroes each freed page), and the WAL is checkpointed and truncated afterwards so the
+     * zeroed pages land in the main file and no older frame survives in the -wal. Backups taken
+     * BEFORE this migration ran still hold the rows; they age out with the backup rotation.
+     */
+    private fun purgeHibpCache() {
+        val prior = conn.createStatement().use { st -> st.executeQuery("PRAGMA secure_delete").use { rs -> rs.next(); rs.getInt(1) } }
+        conn.createStatement().use { it.execute("PRAGMA secure_delete=ON") }
+        try {
+            tx { c ->
+                c.createStatement().use { st ->
+                    st.executeUpdate("DROP TABLE IF EXISTS hibp_cache")
+                    st.executeUpdate("UPDATE meta SET value='11' WHERE key='schemaVersion'")
+                }
+            }
+            conn.createStatement().use { it.execute("PRAGMA wal_checkpoint(TRUNCATE)") }
+        } finally {
+            conn.createStatement().use { it.execute("PRAGMA secure_delete=$prior") }
+        }
+    }
+
     private fun migrate() {
         val version = conn.createStatement().use { st ->
             st.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -241,15 +269,6 @@ class Db(path: String) : AutoCloseable {
                         """.trimIndent(),
                     )
                     st.executeUpdate("CREATE TABLE policies(id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL)")
-                    st.executeUpdate(
-                        """
-                        CREATE TABLE hibp_cache(
-                          prefix TEXT PRIMARY KEY,
-                          body TEXT NOT NULL,
-                          fetchedAt INTEGER NOT NULL
-                        )
-                        """.trimIndent(),
-                    )
                     st.executeUpdate("INSERT INTO meta(key,value) VALUES('oldestRetainedRev','0')")
                     st.executeUpdate("INSERT INTO meta(key,value) VALUES('schemaVersion','1')")
                 }
@@ -472,5 +491,6 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 11) purgeHibpCache()
     }
 }
