@@ -568,16 +568,4 @@ class Repo(val db: Db) {
     }
 
     fun setPolicyJson(value: String) = db.tx { setPolicyJsonOn(it, value) }
-
-    // hibp cache
-    fun hibpCached(prefix: String, maxAgeMs: Long): String? = db.read {
-        it.queryOne("SELECT body FROM hibp_cache WHERE prefix=? AND fetchedAt>?", prefix, now() - maxAgeMs) { rs -> rs.getString(1) }
-    }
-
-    fun hibpStore(prefix: String, body: String) = db.tx {
-        it.exec(
-            "INSERT INTO hibp_cache(prefix,body,fetchedAt) VALUES(?,?,?) ON CONFLICT(prefix) DO UPDATE SET body=excluded.body, fetchedAt=excluded.fetchedAt",
-            prefix, body, now(),
-        )
-    }
 }
