@@ -569,10 +569,11 @@ class Service(
      *  - `currentAuthKey` verifies against the login verifier (the changePassword proof);
      *  - the session's device was minted by a password login (or register) within
      *    [TOTP_ENROLL_FRESH_LOGIN_MS] — refresh never moves devices.createdAt, so this is "the
-     *    password was typed recently", and it is the window every fielded client enrolls inside,
-     *    since none of them sends the key yet;
-     *  - the session is §2.6-restricted: it exists only to enroll, and the login that minted it
-     *    checked the password moments before (the finding's own carve-out).
+     *    password was typed recently", and it is the window older clients, which send no key,
+     *    enroll inside.
+     * A §2.6-restricted session gets no exemption (security review 2026-10, follow-up): a stolen
+     * restricted token enrolls a hostile factor just as permanently. One genuinely just minted by
+     * a password login passes on the fresh-login window like any other; a stale one must send the key.
      * A WRONG key is audited like a failed password change; the route's totp_setup bucket bounds
      * the argon2 cost.
      */
@@ -582,7 +583,6 @@ class Service(
             repo.audit("totp_setup_reauth_fail", p.userId, p.deviceId, ip)
             throw Forbidden("reauth_failed")
         }
-        if (p.mustEnrollTotp) return
         val loginAt = repo.db.read { c -> c.queryOne("SELECT createdAt FROM devices WHERE deviceId=?", p.deviceId) { it.getLong(1) } }
         if (loginAt != null && now() - loginAt <= TOTP_ENROLL_FRESH_LOGIN_MS) return
         throw Forbidden("reauth_required")
