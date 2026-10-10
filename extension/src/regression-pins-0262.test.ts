@@ -79,10 +79,9 @@ test("G21 — commitPendingSave lands a reader-vault update as a NEW personal it
   assert.ok(override < suppress, "the override runs before any branch consumes the decision");
 });
 
-test("G21 — the page TOTP-add target, linkUri and setTotp all refuse a reader-vault item", () => {
-  const target = spanOf(bg, "function pageTotpTarget(", "\n}");
-  assert.ok(target.includes("if (!writableItem(it)) return null;"), "pageTotpTarget: no offer at all for a reader item");
-
+test("G21 — linkUri and setTotp both refuse a reader-vault item", () => {
+  // (The page TOTP-add target that also carried this gate is gone with the page otpauth lane —
+  // security review 2026-10, root cause E; totppage.pins.test.ts pins its absence.)
   const link = spanOf(bg, "async function linkUri(", "\n}");
   const linkGate = at(link, 'if (!writableItem(it)) return { ok: false, error: "read-only vault" };', "linkUri gate");
   const linkPut = at(link, "putExisting(it, doc)", "linkUri push");
