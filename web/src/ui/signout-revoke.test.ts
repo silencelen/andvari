@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { REVOKE_UNCONFIRMED } from "./session";
 import { SIGN_OUT_QUESTION, signOutQuestion } from "./SignOutLink";
 
 /**
@@ -33,7 +34,15 @@ describe("App.signOut — revokes before the local teardown, and only for a USER
   });
 
   it("gates it on kind === \"user\" — an expired/revoked session is already dead server-side", () => {
-    expect(signOut).toMatch(/if \(kind === "user"\) await revokeSessionBestEffort\(/);
+    expect(signOut).toMatch(/kind === "user" \? await revokeSessionBestEffort\(/);
+  });
+
+  it("tells the member when the server did NOT confirm the revocation (security review 2026-10)", () => {
+    // revokeSessionBestEffort resolves false when the server refused, was unreachable, or hung —
+    // the local wipe still happens, but a stolen refresh token may still be live, so say so.
+    expect(signOut).toContain("REVOKE_UNCONFIRMED");
+    expect(signOut).toMatch(/revoked \? [^:]+ : /);
+    expect(REVOKE_UNCONFIRMED).toMatch(/didn.t confirm/);
   });
 
   it("issues it BEFORE the teardown — logout() reads the pair synchronously at call time", () => {

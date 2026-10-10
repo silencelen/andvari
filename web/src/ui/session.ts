@@ -468,6 +468,12 @@ export function makeClient(session: Session | null, baseUrl: string): ApiClient 
  * server-side) and NOT on lock (locking keeps the session — spec 05 T3). Resolves true when the
  * server confirmed the revocation, false otherwise, so a caller can say so.
  */
+/** Shown on the sign-in card after a USER sign-out whose server-side revocation was not confirmed
+ *  (security review 2026-10): the device is wiped either way, but a copied refresh token may still
+ *  be live, and a password change from another device is what ends every session. */
+export const REVOKE_UNCONFIRMED =
+  "Signed out of this browser, but the server didn't confirm it ended the session. If this was a shared computer, change your master password from another device to end every session.";
+
 export async function revokeSessionBestEffort(client: Pick<ApiClient, "logout"> | null): Promise<boolean> {
   if (!client) return false;
   return Promise.race([
