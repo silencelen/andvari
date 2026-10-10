@@ -42,4 +42,15 @@ class SavedCredentialsUriTest {
         assertEquals("androidapp://com.example.app", SavedCredentials("u", "p", null, "com.example.app").uri())
         assertEquals("androidapp://com.example.evil", creds("paypal.com", "http").copy(webDomain = null, appPackage = "com.example.evil").uri())
     }
+
+    /** Security review 2026-10: a browser save with no web domain used to mint `androidapp://<browser>`,
+     *  a URI that (before the UriMatch fix) filled every site opened in that browser. Such a save now
+     *  stores no URI at all: the item is kept, it just matches nothing until the user gives it a site. */
+    @Test
+    fun aBrowserCaptureWithNoDomainStoresNoUri() {
+        assertEquals(emptyList<String>(), creds(null, null).storedUris())
+        assertEquals(emptyList<String>(), SavedCredentials("u", "p", null, "org.mozilla.firefox").storedUris())
+        assertEquals(listOf("https://github.com"), creds("github.com", "https").storedUris())
+        assertEquals(listOf("androidapp://com.example.app"), SavedCredentials("u", "p", null, "com.example.app").storedUris())
+    }
 }

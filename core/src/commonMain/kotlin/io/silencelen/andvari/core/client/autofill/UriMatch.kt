@@ -129,7 +129,12 @@ object UriMatch {
     }
 
     fun matches(saved: SavedUri, target: FillTarget): Boolean = when (saved) {
-        is SavedUri.AndroidApp -> saved.pkg == target.packageName
+        // Security review 2026-10: an app-package URI names the APP, and a browser is a window onto
+        // every web origin — `androidapp://com.android.chrome` matched on package alone was offered
+        // on every site opened in Chrome, phishing pages included. A known browser (the pin table's
+        // keys, trusted or not) never matches an app URI; it fills web URIs only. Only a pinned
+        // browser ever carries a webHost, so this also keeps app URIs off every web request.
+        is SavedUri.AndroidApp -> saved.pkg == target.packageName && target.packageName !in BrowserCertPins.TABLE
         is SavedUri.Web -> {
             // Normalize the page host symmetrically with saved.host (case / www. / port / trailing
             // dot) — the browser reports it raw, so "GitHub.com" would otherwise miss "github.com".

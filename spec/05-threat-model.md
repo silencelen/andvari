@@ -230,7 +230,9 @@ The autofill service honors a fill request's web domain only from a browser it v
 **signing certificate** (package name alone is spoofable — an app can install under an
 absent browser's package id). A package that is not pinned, not installed, or whose cert
 does not match its pin **fails closed**: no web-domain trust → only `androidapp://<pkg>`
-URIs match it, never web items. Residual: a browser whose release cert we have not pinned
+URIs match it, never web items — and never for a KNOWN browser package (2026-10 security
+review): a browser shows every web origin, so `androidapp://<browser>` matches nothing, and an
+untrusted known browser gets no login fill at all. Residual: a browser whose release cert we have not pinned
 won't offer autofill until its digest is added (safe, functionality-only). The match rule
 (2026-07-10 amendment — spec 02 §3.1, `docs/design/2026-07-10-etld1-psl-matching.md`) is
 registrable-domain (eTLD+1) equality against the vendored PSL snapshot (explicit rules
