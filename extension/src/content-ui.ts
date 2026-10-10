@@ -978,22 +978,6 @@ export function showCardSaveBanner(
   });
 }
 
-/** TOTP-add offer (design 2026-08-12): the page shows an otpauth:// enrollment link and exactly
- *  one code-less login matches this host (the SW's gate) — offer to attach it. Only the item
- *  NAME renders; the href never does (it carries the secret), and it never rides this surface —
- *  content.ts holds it and sends it only on the Add click. */
-export function showTotpOffer(itemName: string, onAdd: () => Promise<{ ok: boolean; text: string }>): void {
-  offerBanner({
-    buildMsg: (msg) => msg.append("Add this site's one-time code to ", span("hl", itemName), "?"),
-    primaryLabel: "Add",
-    ghostLabel: "Not now",
-    idleMs: 30_000,
-    okMs: 4000,
-    errMs: 8000,
-    run: onAdd,
-  });
-}
-
 export function showToast(text: string, assertive = false): void {
   const root = ui();
   toastEl?.remove();
