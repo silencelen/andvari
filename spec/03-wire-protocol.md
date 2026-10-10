@@ -503,9 +503,15 @@ strips them degrades every client to the poll path (correct, just slower).
 ## 8. Misc
 
 - `GET /api/v1/hibp/range/{5-hex-prefix}` — authenticated relay of the HIBP
-  k-anonymity range API with a 7-day on-disk cache; response format identical to
-  upstream (`SUFFIX:COUNT` lines). Client computes SHA-1 locally and compares
-  suffixes locally; full hashes never leave the device.
+  k-anonymity range API, for **item passwords only** (the Health breach scan and the item
+  editor's on-demand check); response format identical to upstream (`SUFFIX:COUNT` lines).
+  Client computes SHA-1 locally and compares suffixes locally; full hashes never leave the
+  device. The relay is **stateless**: it stores no prefix, body or timestamp (schema v11
+  dropped the old cache). **A client MUST NOT send any value derived from the master password,
+  or from a backup passphrase, to this route or anywhere else on the server** (security review
+  2026-10): the server holds the Argon2id verifier and `wrappedUvk`, and a 20-bit SHA-1 prefix
+  lets it discard ~2^20 − 1 of every 2^20 offline guesses before paying for Argon2id. Clients
+  therefore run no breach check on those two secrets; the local strength floor is the only gate.
 - `GET /downloads` — web UI + `manifest.json`, the signed update channel. One object per
   platform key (`android`, `windows`, `linux`, `browserExtension`), each carrying at least
   `version` and `url` (plus `sha256`, and the extension's `firefoxUrl`); a platform whose key
