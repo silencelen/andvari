@@ -302,6 +302,33 @@ the hinted F11 cases are unchanged and stay pinned. Client-side only — no `for
 wire change — and carried by the whole 0.27.0 fleet at once (core/Android/desktop, web,
 extension); an older client keeps the hinted-only rule.
 
+### 3.2 Decrypted documents are untrusted input (2026-10 amendment, security review 2026-10)
+
+A plaintext that opens under a vault key proves only that its author HOLDS that key — and every
+writer of a shared vault does (spec 05). Every client therefore checks a decrypted item document's
+**shape** before anything reads it, at its one decrypt boundary (core `Account.decryptItem`, web
+`Account.decryptItem`, extension `decryptItems`), and **quarantines** a failing document exactly as
+it would an undecryptable envelope: kept by identity so a backup enumerates it (spec 07 §2.4), never
+rendered, never matched, never edited. A malformed item can never crash or blank another member's
+vault.
+
+The rule (one implementation per engine, graded by `spec/test-vectors/itemdoc-validate.json`):
+
+- the document is a JSON object; `type` and `name` are strings;
+- `notes`, `dupeAck` are absent, null, or strings; `favorite` is absent or a boolean;
+- `login`, `card`, `check` are absent, null, or objects. In `login`: `username`/`password`/`totp`
+  absent, null or strings; `uris` absent or an array of strings; `passwordHistory` absent or an
+  array of `{password: string, retiredAt: integer}`. In `card`: every §3 field absent, null or a
+  string. In `check`: `at` an integer, `result` a string, `okAt`/`until` absent, null or integers;
+- `attachments` is absent or an array of `{id, name, size, fileKey}` where `name` and `fileKey` are
+  strings, **`id` matches `^[A-Za-z0-9_-]{1,128}$`** (it goes into an authenticated URL path,
+  spec 03), and **`size` is an integer ≥ 0** (it is a claim, checked against the ciphertext, §6);
+- "integer" means a JSON number that is integral and within ±(2^53−1);
+- unknown keys at every level are allowed and never inspected (§3 forward compatibility).
+
+A vault metaBlob's `name` (§4) is displayed only when it is a JSON string; any other value falls
+back to the client's generic vault label.
+
 ## 4. Vaults
 
 ```
