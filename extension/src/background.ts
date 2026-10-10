@@ -162,9 +162,6 @@ const CARD_BADGE_TEXT = "•";
 // test here, so it is passive; the user's real save signal is `resolvePendingSave` (the banner
 // click), which still re-arms. The capture path itself is separately gesture-gated content-side
 // (content.ts consumeLoginGesture) — the SW cannot see a gesture, so it classifies by reachability.
-// `totpOffer` joins for the same reason as cardChipOffer: a page can mint otpauth links (and the
-// mutation ticks that re-ask) at will — DOM-driveable is not user activity. Its accept twin
-// `addTotpFromPage` stays OUT (a real banner click), as does the popup's `setTotp`.
 // H01 (2026-09-13 audit): `passwordReuse` was added in 0.23.0 AFTER F01 and never classified —
 // the F01 regression by later addition. It rides a `focusout`, and a page drives trusted focusout
 // with `HTMLElement.focus(); blur()` at frame rate on a two-password form it authored itself, so
@@ -182,7 +179,6 @@ const PASSIVE_MSGS = new Set<Req["type"]>([
   "cardChipOffer",
   "matches",
   "pendingSave",
-  "totpOffer",
   "capturedCredential",
   "passwordReuse",
 ]);
@@ -1883,10 +1879,6 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     }
     case "setTotp":
       return setTotp(msg, sender); // TOTP-add 2026-08-12 — popup paste-add, deliberately NOT passive
-    case "totpOffer":
-      return totpOffer(sender); // page-triggered (DOM-driveable), so it is in PASSIVE_MSGS ([K13])
-    case "addTotpFromPage":
-      return addTotpFromPage(msg, sender); // rides the banner's isTrusted Add click — NOT passive
     case "pageInfo": {
       const locked = session === null;
       const matchCount = locked ? 0 : matchesFor(msg.host).length;
@@ -3970,11 +3962,13 @@ async function putNewCard(rec: {
   return { ok: true };
 }
 
-// ---- TOTP add (design 2026-08-12: popup paste-add + page otpauth-link offer, ADD-ONLY) ----
+// ---- TOTP add (design 2026-08-12: popup paste-add, ADD-ONLY) ----
+// Security review 2026-10 (root cause E): the page otpauth-link offer (totpOffer / addTotpFromPage)
+// is retired — a page cannot prove a link is the site's own enrolment, so the popup is the only lane.
 
-/** The ONE add-only TOTP write, shared by the popup's paste-add and the page-link accept. Both
- *  contract invariants live HERE, not in any surface: (1) ADD-ONLY — an item already carrying
- *  login.totp is refused (`exists`), so neither surface (nor a hostile page driving the banner)
+/** The ONE add-only TOTP write (the popup's paste-add). Both contract invariants live HERE, not
+ *  in any surface: (1) ADD-ONLY — an item already carrying
+ *  login.totp is refused (`exists`), so no surface
  *  can ever ROTATE a stored second factor from the extension; replacing/removing stays a
  *  web-vault edit. (2) the SW re-runs the shared normalizeTotp + parse-accept gate — the web
  *  editors' exact save rule (A5 reject-don't-corrupt) — so an unparseable secret is refused,
@@ -3990,8 +3984,8 @@ async function writeTotp(target: DecryptedItem, rawTotp: string): Promise<{ ok: 
   return { ok: false, code: r.code === "conflict" ? "conflict" : "failed", error: r.error };
 }
 
-/** Popup paste-add. Popup-only (tab senders refused — a page must never reach the pick-any-item
- *  write; its lane is the origin-bound addTotpFromPage below). Login docs only. */
+/** Popup paste-add. Popup-only (tab senders refused — a page must never reach a TOTP write).
+ *  Login docs only. */
 async function setTotp(
   msg: Extract<Req, { type: "setTotp" }>,
   sender: chrome.runtime.MessageSender,
@@ -4003,52 +3997,8 @@ async function setTotp(
   // G21: the honest SW backstop for the suppressed popup offer (MatchItem.readOnly). A reader's
   // push is refused server-side (role=="reader" ⇒ Forbidden) and used to map to the lying
   // "Could not add the code — try again." — refuse here with the honest code instead of a doomed
-  // round-trip. Mirrors linkUri / pageTotpTarget's writableItem() guards.
+  // round-trip. Mirrors linkUri's writableItem() guard.
   if (!writableItem(target)) return { ok: false, code: "read_only", error: "read-only vault" };
-  return writeTotp(target, msg.totp);
-}
-
-/** The ONE derivation both page-path halves run — the offer gate and the accept MUST agree, or
- *  the accept becomes a write the offer never described. From browser-set `sender.origin` only
- *  (captureCard's [X2-A2] guard shape): the host's matches must be EXACTLY ONE login, and it
- *  must lack a code — two matches is ambiguity (an enrollment page can't say which account),
- *  and fails closed to the popup path where the user picks the item themselves. */
-function pageTotpTarget(sender: chrome.runtime.MessageSender): DecryptedItem | null {
-  if (typeof sender.origin !== "string" || sender.origin === "" || sender.origin === "null") return null;
-  const host = hostOfUrl(sender.origin);
-  if (!host) return null;
-  const matches = matchesFor(host);
-  if (matches.length !== 1) return null;
-  const it = matches[0]!;
-  if ((it.doc.login?.totp ?? "") !== "") return null;
-  // G21: a reader-vault login can't take the add (the server denies a reader's push) — never
-  // OFFER a write that is guaranteed to die in the banner's "Could not add the code" dead end.
-  if (!writableItem(it)) return null;
-  return it;
-}
-
-/** Offer gate for the in-page banner ([K13] PASSIVE — a page can drive this at will). Answers
- *  the display NAME only: no itemId, no uris — nothing the matches seam doesn't already give
- *  this page's own dropdown. */
-function totpOffer(sender: chrome.runtime.MessageSender): Res<"totpOffer"> {
-  const none: Res<"totpOffer"> = { offer: false };
-  if (sender.tab === undefined || sender.frameId !== 0) return none; // top-frame pages only
-  if (!session) return none;
-  const target = pageTotpTarget(sender);
-  return target ? { offer: true, itemName: target.doc.name } : none;
-}
-
-/** Banner accept: RE-DERIVE the target at commit time (never trust the offer round-trip — the
- *  vault may have synced between offer and click, and an itemId never crosses the page seam),
- *  then the shared add-only write. */
-async function addTotpFromPage(
-  msg: Extract<Req, { type: "addTotpFromPage" }>,
-  sender: chrome.runtime.MessageSender,
-): Promise<Res<"addTotpFromPage">> {
-  if (sender.tab === undefined || sender.frameId !== 0) return { ok: false, code: "not_allowed", error: "top-frame pages only" };
-  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
-  const target = pageTotpTarget(sender);
-  if (!target) return { ok: false, code: "not_allowed", error: "no single eligible match" };
   return writeTotp(target, msg.totp);
 }
 

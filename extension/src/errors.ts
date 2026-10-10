@@ -149,15 +149,13 @@ export function saveErrorCopy(code: SaveErrorCode | undefined): string {
   }
 }
 
-/** TOTP-add success line (design 2026-08-12), shared verbatim by the popup's paste-add result
- *  and the in-page banner — one sentence, both surfaces. */
+/** TOTP-add success line (design 2026-08-12) — the popup's paste-add result. */
 export const TOTP_ADDED = "One-time code added.";
 
-/** TOTP-add failure lines (setTotp / addTotpFromPage). `exists` is the ADD-ONLY contract
- *  speaking — the extension never replaces a stored second factor, so the copy routes to the
- *  web vault rather than hinting at a retry. `not_allowed` is the page path's ambiguity
- *  refusal (no single eligible login) — it names the popup as the way through, because that's
- *  where the user picks the item themselves. `conflict` reuses the save banner's sentence
+/** TOTP-add failure lines (setTotp). `exists` is the ADD-ONLY contract speaking — the
+ *  extension never replaces a stored second factor, so the copy routes to the web vault rather
+ *  than hinting at a retry. `not_allowed` is a refused non-popup sender — it names the popup as
+ *  the way through, because that's where the user picks the item themselves. `conflict` reuses the save banner's sentence
  *  deliberately (same situation, same advice). */
 export function totpAddErrorCopy(code: TotpAddCode | undefined): string {
   switch (code) {
