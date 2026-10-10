@@ -745,10 +745,11 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Pick<Props
       <Field label="Current master password">
         <input type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} />
       </Field>
-      {/* F31: same advisory pair as enrollment, on the other surface a master password is
-          CHOSEN. Warns only — a breached or pattern-weak choice never blocks the change (a
-          member locked out of changing their own password is the worse failure). */}
-      <Field label="New master password" hint={<MasterPasswordHint password={next} client={client} />}>
+      {/* F31: same advisory hint as enrollment, on the other surface a master password is
+          CHOSEN. Warns only — a pattern-weak choice never blocks the change (a member locked
+          out of changing their own password is the worse failure). Local only: no breach
+          lookup, since its prefix would reach this server (security review 2026-10). */}
+      <Field label="New master password" hint={<MasterPasswordHint password={next} />}>
         <input type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} />
       </Field>
       <Field

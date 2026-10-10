@@ -696,8 +696,6 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             account={account}
             store={store}
             policy={policy}
-            /* F31: the k-anonymity relay for the backup-passphrase breach check. */
-            client={client}
             onClose={() => { setExportMode(null); refresh(); }}
           />
         ) : importOpen ? (
@@ -2242,8 +2240,8 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
  * `caution` prop this one deliberately does NOT take. The divergence is a decision, not drift.
  *
  * `caution` exists to stop a bar affirming what a sentence beside it is denying: the export panel
- * renders <PasswordCautions> in the same hint, so a green bar over "this password shows up in
- * public breach lists" is the "strength: fair ✓" defect (passwordadvice.tsx) in another costume.
+ * renders <PasswordCautions> in the same hint, so a green bar over the pattern warning is the
+ * "strength: fair ✓" defect (passwordadvice.tsx) in another costume.
  * This editor renders no such sentence — no floor, no pattern line, and no breach check bound to
  * the field (an item password's breach exposure is on demand instead: HealthLine's "Check breach
  * exposure" on the detail view, and the Health panel across the whole vault). Holding the bar out
