@@ -504,7 +504,8 @@ class Service(
         return TotpStatus(enrolled = u.totpSecret != null, pendingSetup = u.totpPendingSecret != null)
     }
 
-    fun totpSetup(userId: String, code: String? = null, ip: String? = null): TotpSetupResponse {
+    fun totpSetup(p: Principal, code: String? = null, ip: String? = null, currentAuthKey: String? = null): TotpSetupResponse {
+        val userId = p.userId
         val u = repo.userById(userId) ?: throw Unauthorized()
         // Rotation gate (polish audit 2026-07-27 bug-server--0): an ENROLLED account must prove
         // the CURRENT factor before staging a replacement — otherwise a hijacked session could
@@ -519,11 +520,40 @@ class Service(
                 c.exec("UPDATE users SET totpLastStep=? WHERE userId=? AND totpLastStep<?", step, userId, step)
             }
             if (consumed != 1) throw totpVerifyFail(userId, ip, "setup_replay")
+        } else {
+            requireTotpEnrollReauth(p, u, currentAuthKey, ip)
         }
         val secret = Base32.encode(crypto.randomBytes(20))
         repo.db.tx { c -> c.exec("UPDATE users SET totpPendingSecret=? WHERE userId=?", secret, userId) }
         val label = "andvari:${u.email}"
         return TotpSetupResponse(secret, "otpauth://totp/$label?secret=$secret&issuer=andvari&algorithm=SHA1&digits=6&period=30")
+    }
+
+    /**
+     * The FIRST-enrollment gate (security review 2026-10). A stolen access token alone used to be
+     * enough to enroll a factor the attacker owns — and since only a code from that factor can
+     * remove it (no admin or recovery path touches the TOTP columns), the member was locked out for
+     * good once their refresh chain lapsed. Any ONE of these proves the caller is the member:
+     *  - `currentAuthKey` verifies against the login verifier (the changePassword proof);
+     *  - the session's device was minted by a password login (or register) within
+     *    [TOTP_ENROLL_FRESH_LOGIN_MS] — refresh never moves devices.createdAt, so this is "the
+     *    password was typed recently", and it is the window every fielded client enrolls inside,
+     *    since none of them sends the key yet;
+     *  - the session is §2.6-restricted: it exists only to enroll, and the login that minted it
+     *    checked the password moments before (the finding's own carve-out).
+     * A WRONG key is audited like a failed password change; the route's totp_setup bucket bounds
+     * the argon2 cost.
+     */
+    private fun requireTotpEnrollReauth(p: Principal, u: UserRow, currentAuthKey: String?, ip: String?) {
+        if (currentAuthKey != null) {
+            if (ServerCrypto.verify(u.verifier, currentAuthKey)) return
+            repo.audit("totp_setup_reauth_fail", p.userId, p.deviceId, ip)
+            throw Forbidden("reauth_failed")
+        }
+        if (p.mustEnrollTotp) return
+        val loginAt = repo.db.read { c -> c.queryOne("SELECT createdAt FROM devices WHERE deviceId=?", p.deviceId) { it.getLong(1) } }
+        if (loginAt != null && now() - loginAt <= TOTP_ENROLL_FRESH_LOGIN_MS) return
+        throw Forbidden("reauth_required")
     }
 
     fun totpConfirm(userId: String, code: String, ip: String) {
@@ -1724,6 +1754,9 @@ class Service(
         // Single-use self-recovery ticket lifetime (design §F.3): a short window that still leaves a
         // human time to choose a new password (its Argon2id derivation is ~1 s). In-memory + userId-bound.
         const val RECOVERY_TICKET_TTL_MS = 5L * 60 * 1000
+        /** How recently a password login must have minted the session for a first TOTP enrollment
+         *  to go through without a `currentAuthKey` (security review 2026-10). */
+        const val TOTP_ENROLL_FRESH_LOGIN_MS = 10L * 60 * 1000
         /** H62: the cap on persisted, rendered free text (displayName, device name/platform) — a
          *  household name or a device label, never a paragraph. */
         internal const val TEXT_MAX = 128
