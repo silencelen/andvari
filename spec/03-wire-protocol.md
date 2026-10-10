@@ -148,7 +148,12 @@ cache OFF.
 - AuthN header: `Authorization: Bearer <accessToken>`.
 - **Server-TOTP management** (authenticated): `GET /account/totp` → `{ enrolled,
   pendingSetup }`; `POST /account/totp/setup` → `{ secretBase32, otpauthUri }`
-  (pending until confirmed); `POST /account/totp/confirm { code }`;
+  (pending until confirmed). Its optional body is `{ code?, currentAuthKey? }`: an
+  enrolled account must send the current `code` to rotate; a **first** enrollment must
+  send `currentAuthKey` (verified like a password change) unless the session was minted
+  by a password login within the last 10 minutes or is TOTP-restricted (§2.6) —
+  otherwise `403 reauth_required` (`403 reauth_failed` for a wrong key, audited).
+  `POST /account/totp/confirm { code }`;
   `POST /account/totp/disable { code }`. Codes are RFC 6238 SHA-1/6-digit/30 s with a
   ±1-step window; an accepted step is single-use (replay-rejected), so a code that
   just confirmed enrollment cannot immediately re-authenticate — wait one step.

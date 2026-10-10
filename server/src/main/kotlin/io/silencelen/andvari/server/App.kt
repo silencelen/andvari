@@ -102,6 +102,15 @@ const val SERVER_VERSION = io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERS
  *   queued | skipped_rate_limited | not_requested | not_configured | failed
  * Status only — the recipient/link never ride it (A4).
  */
+/**
+ * The optional POST /api/v1/account/totp/setup body. Server-local and additive, like
+ * [InviteCreateResponse]: `code` is the rotation gate's current code (the old TotpCodeRequest
+ * shape, so a fielded rotation body still decodes), `currentAuthKey` is the password proof a first
+ * enrollment needs outside the fresh-login window (security review 2026-10).
+ */
+@Serializable
+data class TotpSetupBody(val code: String? = null, val currentAuthKey: String? = null)
+
 @Serializable
 data class InviteCreateResponse(val inviteToken: String, val email: String, val expiresAt: Long, val emailStatus: String)
 
@@ -660,14 +669,16 @@ fun Application.andvariModule(services: Services) {
             if (!limiter.allow(setupKey, 5, 60_000)) throw RateLimited()
             // Additive OPTIONAL body (bug-server--0): an ENROLLED account must present its current
             // code to stage a rotation (Service gates it — 400 totp_code_required when enrolled and
-            // absent); a fresh enrollment sends no body, exactly the fielded wire shape. Body parse
-            // rule mirrors /recovery/self/confirm: blank/absent ⇒ null; non-blank ⇒ TotpCodeRequest,
+            // absent). A FIRST enrollment may carry `currentAuthKey` (security review 2026-10):
+            // Service requires it unless the session is a fresh password login or a §2.6 restricted
+            // one, and the fielded no-body shape still works inside that window. Body parse rule
+            // mirrors /recovery/self/confirm: blank/absent ⇒ no fields; non-blank ⇒ TotpSetupBody,
             // decode failure ⇒ 400 bad_request.
             val text = call.receiveText()
-            val code = if (text.isBlank()) null else runCatching {
-                json.decodeFromString(TotpCodeRequest.serializer(), text).code
+            val body = if (text.isBlank()) TotpSetupBody() else runCatching {
+                json.decodeFromString(TotpSetupBody.serializer(), text)
             }.getOrElse { throw BadRequest("bad_request") }
-            call.respond(service.totpSetup(p.userId, code, call.clientIp(config)))
+            call.respond(service.totpSetup(p, body.code, call.clientIp(config), body.currentAuthKey))
         }
         post("/api/v1/account/totp/confirm") {
             val p = requirePrincipal(call, service)
