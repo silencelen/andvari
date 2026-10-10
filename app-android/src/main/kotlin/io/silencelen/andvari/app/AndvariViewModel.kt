@@ -300,12 +300,6 @@ data class UiState(
     // directing the user to change it in the WEB app; persists across nav/lock (backed by
     // SessionStore.mustChangePassword) until a fresh login returns false.
     val mustChangePassword: Boolean = false,
-    // F31: the master password chosen at enrollment turned up in the public breach corpus (the
-    // k-anonymity check enrollOp runs the moment a session exists — the relay is session-gated,
-    // so it cannot run while the form is still being typed). Advisory ONLY: nothing was blocked,
-    // the account exists, and the user may dismiss it. Never persisted — a warning about a
-    // password must not outlive the session that learned it.
-    val breachAdvisory: String? = null,
     // P5/A9 (design 2026-07-10): a 426/upgrade_required from ANY server contact (a user op or
     // the 5-min backgroundSync poll) pins this build out. Non-null → AndvariApp swaps the whole
     // app for a blocking "Update required" screen that carries a sign-out escape (A9). Cleared
@@ -494,9 +488,6 @@ internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     // zeroed by the caller); a fresh unlock re-derives everything.
     recoveryPhrase = null, recoverySetupWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false,
     recoverVerified = false,
-    // F31: the enrollment breach advisory is about the password of the session that just ended —
-    // it must not greet the next account (or hang over the lock screen) as if it were theirs.
-    breachAdvisory = null,
     // Vault health (design 2026-08-23 §8.1): the breach map is derived from decrypted passwords
     // and the usage ledger is a behavioural record of the user's own items. CR-08 / WC-13 §E.4
     // made "gone at the wipe choke point" the rule for the first; this file's deletedItems /
@@ -1195,44 +1186,6 @@ class AndvariViewModel(
     private fun newApi(tokens: Tokens? = null): AndvariApi =
         AndvariApi(store.baseUrl, HttpClient(OkHttp), tokens, { store.updateTokens(it) }) // platform defaults to "android"
 
-    /**
-     * F31 advisory: is [password] in the public breach corpus? The spec 03 §8 k-anonymity check
-     * over [AndvariApi.hibpRange] — only the 5-character hash prefix leaves the device, and the
-     * password is never logged or persisted (see [Strength.breachCount]).
-     *
-     * Returns the sentence to render, or null for "say nothing" — which deliberately covers BOTH
-     * "not in any breach" and "couldn't check": [Strength.breachCount] fails open, and so must
-     * every caller. A relay that is down may never stop a household member backing up their
-     * vault. No unlocked session ⇒ null without a request (the relay is session-gated).
-     */
-    suspend fun breachWarning(password: String): String? = api?.let { breachWarningVia(it, password) }
-
-    // Off the Main thread: the callers are a LaunchedEffect (composition context) and a
-    // viewModelScope launch, and createCryptoProvider() can pay a one-time native library load.
-    // The house rule for anything that touches crypto — it is never worth a dropped frame.
-    private suspend fun breachWarningVia(a: AndvariApi, password: String): String? = withContext(Dispatchers.Default) {
-        val count = Strength.breachCount(createCryptoProvider(), password) { a.hibpRange(it) }
-        if (count != null && count > 0) Strength.BREACHED_PASSWORD_WARNING else null
-    }
-
-    /** The F31 enrollment advisory's ONE affordance — it warns, so dismissing it is the whole
-     *  interaction (unlike the F58 must-change banner, which is a live credential problem). */
-    fun dismissBreachAdvisory() {
-        _ui.value = _ui.value.copy(breachAdvisory = null)
-    }
-
-    /** Detached F31 check of a just-enrolled master password (enrollOp). Silent on "clean" and
-     *  on "couldn't check" alike — only a positive count paints the banner. [a] is passed in
-     *  rather than read from the session so the check binds to the client the enroll used, even
-     *  if the user locks or signs out while the round trip is in flight (the call then fails,
-     *  and failing is silent). */
-    private fun checkEnrolledPasswordForBreach(a: AndvariApi, password: String) {
-        viewModelScope.launch {
-            val warning = breachWarningVia(a, password) ?: return@launch
-            _ui.value = _ui.value.copy(breachAdvisory = warning)
-        }
-    }
-
     fun start() {
         viewModelScope.launch {
             // §4.3 B2-9: a persisted pendingServer marker means a prior invite switch was left
@@ -1849,12 +1802,8 @@ class AndvariViewModel(
             // A1: a fresh enrollment typed the master password — stamp the window (already on the
             // policy KDF params, so no F61 re-key is due).
             store.stampFullPasswordUnlock(s.userId)
-            // F31: the master password that now wraps this whole vault, against the public breach
-            // corpus. It runs HERE, after register, because the relay is session-gated — this is
-            // the first moment on the enroll path a check can be made at all. DETACHED: the reveal
-            // gate below must never wait on a network round trip, and the verdict is advisory
-            // (a banner the user can dismiss), never a gate on the enrollment that already landed.
-            checkEnrolledPasswordForBreach(a, password)
+            // No breach check on the new master password (security review 2026-10, root cause C):
+            // its SHA-1 prefix would go to this server, which also receives the login authKey.
         } catch (t: Throwable) {
             // F74: same rule as signIn — close the transient client on ANY pre-bind throw,
             // never the VaultSession-owned success-path holder.
@@ -2249,11 +2198,8 @@ class AndvariViewModel(
             _ui.value = _ui.value.copy(error = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols.")
             return
         }
-        // F31, deliberately absent here: the reset's pattern warning DOES render (the screen shares
-        // MasterPasswordStrengthHints with enroll), but the breach check does not — this whole leg
-        // is pre-session (both recovery endpoints are unauthenticated) and the commit revokes every
-        // session of the account, so the session-gated relay is unreachable before AND after. A
-        // call would fail open on every single reset: a warning nobody could ever see.
+        // The reset's pattern warning renders (the screen shares MasterPasswordStrengthHints with
+        // enroll); there is no breach check on a master password anywhere (security review 2026-10).
         _ui.value = _ui.value.copy(busy = true, error = null)
         val originKey = store.currentOriginKey() // §4.2: newApi() below dials this same origin
         viewModelScope.launch {

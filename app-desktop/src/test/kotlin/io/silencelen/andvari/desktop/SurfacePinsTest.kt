@@ -130,14 +130,17 @@ class SurfacePinsTest {
     }
 
     @Test
-    fun theBreachCheckReachesASurfaceAUserCanSee() {
-        // The seam (core Strength.breachCount) had ZERO production call sites. These are them:
-        // the backup passphrase renders it inline, enrollment routes it into the root banner.
-        assertTrue(ui.contains("state.breachWarning(candidate)"), "the backup dialog must run the breach check")
-        assertTrue(ui.contains("breachNote?.let { Text(it,"), "the backup dialog must RENDER the breach sentence")
-        assertTrue(ui.contains("state.breachAdvisory?.let"), "the enrollment advisory needs a banner on screen")
-        assertTrue(state.contains("checkEnrolledPasswordForBreach(a, password)"), "enrollOp must run the check once a session exists")
-        assertTrue(state.contains("Strength.breachCount("), "the check must go through the shared core seam")
+    fun noMasterPasswordDerivedRequestReachesTheServer() {
+        // Security review 2026-10, root cause C: enrollment and the backup-passphrase dialog sent
+        // the SHA-1 prefix of the master password (or of a passphrase the dialog suggests making
+        // equal to it) to the vault server's relay, which also holds the Argon2id verifier, and
+        // the copy claimed nothing had been sent. The check is gone from both surfaces; item
+        // passwords keep theirs (the Health scan), which are not the server's KDF secret.
+        for (needle in listOf("breachWarning", "checkEnrolledPasswordForBreach", "breachAdvisory", "Strength.breachCount(", "BREACHED_PASSWORD_WARNING")) {
+            assertFalse(state.contains(needle), "DesktopState must not carry the master-password breach path ($needle)")
+            assertFalse(ui.contains(needle), "Ui.kt must not carry the master-password breach path ($needle)")
+        }
+        assertFalse(ui.contains("breachNote"), "the backup dialog must not run a breach check on its passphrase")
     }
 
     // ---- audit H10 (G10's remaining legs) ----

@@ -537,13 +537,6 @@ class DesktopState(
     // sign-out or a fresh sign-in that returns false (i.e. after the change actually happened).
     var mustChangePassword by mutableStateOf(false)
         private set
-    // F31: the master password chosen at enrollment turned up in the public breach corpus (the
-    // k-anonymity check enrollOp fires the moment a session exists — the relay is session-gated,
-    // so the enroll form itself cannot check). Advisory ONLY: nothing was blocked, the account
-    // exists, and [dismissBreachAdvisory] is a real exit. Never persisted, and dropped with the
-    // session (clearSecondary) — a warning about one account's password must not greet another.
-    var breachAdvisory by mutableStateOf<String?>(null)
-        private set
     // F57: this account's escrow is sealed to a superseded org recovery key (re-ceremony) — the
     // vault screen offers a re-seal. escrowFingerprint is the CURRENT org fingerprint (re-seal
     // target + the value the user verifies against the new printed sheet).
@@ -846,44 +839,6 @@ class DesktopState(
 
     private fun newApi(tokens: Tokens? = null) =
         AndvariApi(baseUrl, newHttpClient(), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
-
-    /**
-     * F31 advisory (twin of android's AndvariViewModel.breachWarning): is [password] in the public
-     * breach corpus? The spec 03 §8 k-anonymity check over [AndvariApi.hibpRange] — only the
-     * 5-character hash prefix leaves this machine, and the password is never logged or persisted
-     * ([Strength.breachCount]).
-     *
-     * Returns the sentence to render, or null for "say nothing" — deliberately covering BOTH "not
-     * in any breach" and "couldn't check": the check fails open, and so must every caller. A relay
-     * that is down may never stop someone backing up their vault. No unlocked session ⇒ null
-     * without a request (the relay is session-gated).
-     */
-    suspend fun breachWarning(password: String): String? = api?.let { breachWarningVia(it, password) }
-
-    // Off the Compose thread: the callers are a LaunchedEffect (composition context) and a
-    // scope.launch, and createCryptoProvider() can pay a one-time sodium load. Same house rule
-    // as every other crypto touch here — it is never worth a frozen window.
-    private suspend fun breachWarningVia(a: AndvariApi, password: String): String? = withContext(Dispatchers.Default) {
-        val count = Strength.breachCount(createCryptoProvider(), password) { a.hibpRange(it) }
-        if (count != null && count > 0) Strength.BREACHED_PASSWORD_WARNING else null
-    }
-
-    /** The F31 enrollment advisory's ONE affordance — it warns, so dismissing it is the whole
-     *  interaction (unlike the F58 must-change banner, which is a live credential problem). */
-    fun dismissBreachAdvisory() {
-        breachAdvisory = null
-    }
-
-    /** Detached F31 check of a just-enrolled master password (enrollOp). Silent on "clean" and on
-     *  "couldn't check" alike — only a positive count paints the banner. [a] is passed in rather
-     *  than read from [api] so the check binds to the client the enroll used, even if the user
-     *  locks or signs out while the round trip is in flight (the call then fails, and failing is
-     *  silent). */
-    private fun checkEnrolledPasswordForBreach(a: AndvariApi, password: String) {
-        scope.launch {
-            breachWarningVia(a, password)?.let { breachAdvisory = it }
-        }
-    }
 
     fun start() {
         scope.launch {
@@ -1481,12 +1436,8 @@ class DesktopState(
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
             mustChangePassword = s.mustChangePassword // F58: never true for a fresh enroll; wired for truth
-            // F31: the master password that now wraps this whole vault, against the public breach
-            // corpus. It runs HERE, after register, because the relay is session-gated — the first
-            // moment on the enroll path a check can be made at all. DETACHED: the shown-once reveal
-            // below must never wait on a network round trip, and the verdict is advisory (a
-            // dismissable banner), never a gate on an enrollment that already landed.
-            checkEnrolledPasswordForBreach(a, password)
+            // No breach check on the new master password (security review 2026-10, root cause C):
+            // its SHA-1 prefix would go to this server, which also holds the Argon2id verifier.
             // §F.4/§F.7: the recovery piece is MANDATORY and already committed in register(), but a
             // member who never SEES it is silently unrecoverable. Hold it transiently and route to the
             // shown-once reveal+confirm gate (RecoverySetup) instead of the vault; the gate zeroes it
@@ -1831,11 +1782,8 @@ class DesktopState(
             recoverError = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols."
             return
         }
-        // F31, deliberately absent here: the reset's pattern warning DOES render (the screen shares
-        // MasterPasswordStrengthHints with enroll), but the breach check does not — this whole leg
-        // is pre-session (both recovery endpoints are unauthenticated) and the commit revokes every
-        // session of the account, so the session-gated relay is unreachable before AND after. A
-        // call would fail open on every single reset: a warning nobody could ever see.
+        // The reset's pattern warning renders (the screen shares MasterPasswordStrengthHints with
+        // enroll); there is no breach check on a master password anywhere (security review 2026-10).
         busy = true; recoverError = null
         scope.launch {
             val a = newApi()
@@ -3251,7 +3199,6 @@ class DesktopState(
         cacheConsentPrompt = false // §5.3: an unanswered prompt dies with the session; re-asks at the next landing
         clearRecoverState() // §F.7 belt: the self-recovery stash never outlives a session teardown
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
-        breachAdvisory = null // F31: the advisory belongs to the session's own master password
         backupPreflight = null; backupResult = null; csvPreflight = null; csvPreflightVaults = emptyList()
         // F19: drop any in-flight move state + memoized gesture ids/fileKeys on lock/sign-out.
         moveError = null; moveProgress = null; moveGestures.clear()
