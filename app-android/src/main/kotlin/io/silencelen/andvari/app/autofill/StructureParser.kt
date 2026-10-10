@@ -49,10 +49,10 @@ data class ParsedField(
  */
 data class ParsedForm(
     val fields: List<ParsedField>,
-    val appPackage: String,
+    override val appPackage: String,
     val ccFields: List<ParsedField> = emptyList(),
     val formKind: FormKind = FormKind.LOGIN,
-) {
+) : PackageBound {
     val allIds: List<AutofillId> get() = (fields + ccFields).map { it.id }
 
     /** Anything for the fill path to act on? Login fields, or a PAN-ANCHORED card form —

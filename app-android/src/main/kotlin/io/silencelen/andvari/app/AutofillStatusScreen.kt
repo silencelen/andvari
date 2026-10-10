@@ -393,6 +393,7 @@ internal fun browserLabel(pkg: String): String = when {
 
 private fun outcomeHint(e: AutofillDebugLog.FillEvent): String? = when (e.reason) {
     "NO_STRUCTURE" -> "The system sent no form data — usually a transient platform issue."
+    "BINDING_REFUSED" -> "andvari refused to fill: the request did not come from the app it was opened for."
     "SELF_FILL" -> "andvari never fills its own screens."
     "SIGNED_OUT" -> "Not signed in on this device, so no suggestions are possible."
     "NO_FIELDS" -> "The screen had no field andvari recognizes as a username or password."

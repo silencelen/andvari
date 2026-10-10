@@ -1,7 +1,6 @@
 package io.silencelen.andvari.app.autofill
 
 import android.app.PendingIntent
-import android.app.assist.AssistStructure
 import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.Icon
@@ -46,15 +45,21 @@ import io.silencelen.andvari.core.client.autofill.UriMatch
 object DatasetBuilder {
     const val MAX_DATASETS = 10
 
-    /** Parse [structure], gate the browser trust, and build the unlocked response (or null). */
+    /**
+     * The authentication activities' entry point: gate the browser trust and build the unlocked
+     * response (or null) for [form] — the form the SERVICE parsed and baked into the PendingIntent
+     * ([FillBinding]). Security review 2026-10 (root cause G): this used to take the activity's
+     * `EXTRA_ASSIST_STRUCTURE` and parse it here, but that structure is delivered through the host
+     * app and so names whatever package and web domains the host likes. It takes no structure now,
+     * so no caller can re-derive identity from one.
+     */
     fun responseForUnlocked(
         context: Context,
-        structure: AssistStructure,
+        form: ParsedForm,
         items: List<VaultItem>,
         inlineRequest: InlineSuggestionsRequest?,
         trace: AutofillDebugLog.FillTrace? = null,
     ): FillResponse? {
-        val form = StructureParser.parse(structure)
         trace?.pkg = form.appPackage.ifEmpty { null }
         trace?.setForm(form)
         trace?.setTrust(context, form)
@@ -523,16 +528,18 @@ object DatasetBuilder {
             val menu = presentationRow(context, title, subtitle)
             val spec = inlineSpecs(inlineRequest).firstOrNull()
             val inline = if (Build.VERSION.SDK_INT >= 30 && spec != null) buildInline(context, title, subtitle, spec) else null
-            // MUTABLE so the platform injects EXTRA_ASSIST_STRUCTURE into the launch intent (as for
-            // openAppDataset) — after trusting, the activity re-runs the fill and returns it, so the
-            // dropdown updates in place instead of waiting for a page reload. Per-pkg request code so
-            // concurrent browsers don't share one PendingIntent's extras.
+            // MUTABLE so the platform can add the inline-suggestions request to the launch intent (as
+            // for openAppDataset) — after trusting, the activity re-runs the fill from the BAKED form
+            // and returns it, so the dropdown updates in place instead of waiting for a page reload.
+            // Per-pkg request code so concurrent browsers don't share one PendingIntent's extras.
             val flags = if (Build.VERSION.SDK_INT >= 31) {
                 PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_CANCEL_CURRENT
             } else {
                 PendingIntent.FLAG_CANCEL_CURRENT
             }
-            val launch = Intent(context, TrustBrowserActivity::class.java)
+            // Root cause G: the refill after trusting uses the form baked HERE, never the structure the
+            // host app delivers with the launch (FillBinding).
+            val launch = FillBinding.bake(Intent(context, TrustBrowserActivity::class.java), form)
                 .putExtra(TrustBrowserActivity.EXTRA_PKG, form.appPackage)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // fires from the browser's task; route to andvari's
             val pi = PendingIntent.getActivity(context, form.appPackage.hashCode(), launch, flags)

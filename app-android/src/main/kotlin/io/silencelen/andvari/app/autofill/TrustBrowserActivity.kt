@@ -1,6 +1,5 @@
 package io.silencelen.andvari.app.autofill
 
-import android.app.assist.AssistStructure
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -36,6 +35,11 @@ import io.silencelen.andvari.app.browserLabel
  * ([ApprovedBrowsers]). Then — so the dropdown updates without a page reload — it re-runs the fill
  * for THIS form (now that the browser is trusted) and returns it via EXTRA_AUTHENTICATION_RESULT.
  * The explicit tap is the security gate; a malicious app can't self-trust.
+ *
+ * Security review 2026-10 (root cause G): "this form" is the one the service baked into the
+ * PendingIntent ([FillBinding]) — never the EXTRA_ASSIST_STRUCTURE that arrives with the launch,
+ * which the host app delivers and can forge. A baked form for a different package than [EXTRA_PKG]
+ * (also baked) refuses the refill.
  */
 class TrustBrowserActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,13 +63,13 @@ class TrustBrowserActivity : ComponentActivity() {
         ApprovedBrowsers.approve(applicationContext, pkg, digest)
         // Re-run the fill for this form now that the browser is trusted, and hand it back so the
         // dropdown refreshes in place. Only possible when the vault is unlocked (the trust row only
-        // shows on the unlocked path) and the platform injected the structure; otherwise we just
-        // finish and the toast tells the user to tap the field again.
-        val structure = intent.assistStructure()
+        // shows on the unlocked path) and the baked form checks out; otherwise we just finish and
+        // the toast tells the user to tap the field again.
+        val form = FillBinding.resolve(intent)?.takeIf { it.appPackage == pkg }
         val unlocked = VaultSession.getIfFresh()
-        val response: FillResponse? = if (structure != null && unlocked != null) {
+        val response: FillResponse? = if (form != null && unlocked != null) {
             runCatching {
-                DatasetBuilder.responseForUnlocked(this, structure, unlocked.engine.items(), intent.inlineRequest(), null)
+                DatasetBuilder.responseForUnlocked(this, form, unlocked.engine.items(), intent.inlineRequest(), null)
             }.getOrNull()
         } else {
             null
@@ -78,14 +82,6 @@ class TrustBrowserActivity : ComponentActivity() {
         }
         finish()
     }
-
-    @Suppress("DEPRECATION")
-    private fun Intent.assistStructure(): AssistStructure? =
-        if (Build.VERSION.SDK_INT >= 33) {
-            getParcelableExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE, AssistStructure::class.java)
-        } else {
-            getParcelableExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE)
-        }
 
     @Suppress("DEPRECATION")
     private fun Intent.inlineRequest(): InlineSuggestionsRequest? {
