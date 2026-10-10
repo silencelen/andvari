@@ -52,7 +52,8 @@ class AndvariAutofillService : AutofillService() {
 
     private fun handleFill(request: FillRequest, trace: AutofillDebugLog.FillTrace): FillResponse? {
         val ctx = applicationContext
-        val structure = request.fillContexts.lastOrNull()?.structure
+        val fillContext = request.fillContexts.lastOrNull()
+        val structure = fillContext?.structure
             ?: return null.also { trace.finish(ctx, AutofillDebugLog.FillReason.NO_STRUCTURE) }
         val appPackage = structure.activityComponent?.packageName
             ?: return null.also { trace.finish(ctx, AutofillDebugLog.FillReason.NO_STRUCTURE) }
@@ -77,7 +78,9 @@ class AndvariAutofillService : AutofillService() {
         // last-known policy window even if no other component set it in this process.
         VaultSession.setAutoLockSeconds(store.autoLockSeconds)
 
-        val form = StructureParser.parse(structure)
+        // The focused view comes from the system's FillContext (security review 2026-10): card values
+        // are planned for that field's frame only (ParsedForm.cardFillFrame).
+        val form = StructureParser.parse(structure, fillContext.focusedId)
         trace.setForm(form)
         trace.setTrust(ctx, form)
         if (!form.fillable) {

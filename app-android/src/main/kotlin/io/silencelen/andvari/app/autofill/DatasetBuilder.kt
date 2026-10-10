@@ -36,7 +36,7 @@ import io.silencelen.andvari.core.client.autofill.UriMatch
  * login datasets under the same [MAX_DATASETS] cap — with [loginDatasetCap]'s [U20] headroom
  * so login rows can't consume every slot on a card-eligible form: every `type=="card"` item is offered
  * (deliberately NOT UriMatch-bound — wallet posture), values planned by the pure core
- * [CardFill.plan] (frame-cluster zero-fill + type-pinning), gated by an EXPLICIT browser-trust
+ * [CardFill.plan] (focused-frame-only fill + type-pinning), gated by an EXPLICIT browser-trust
  * check (a known-but-untrusted browser gets ZERO card datasets). Provides a dropdown
  * (RemoteViews) menu presentation always, plus an inline presentation when an
  * InlineSuggestionsRequest is present (API 30+). Item plaintext is read only from the
@@ -294,6 +294,7 @@ object DatasetBuilder {
     ) {
         if (form.ccFields.isEmpty()) return
         if (form.appPackage in BrowserCertPins.TABLE && !trusted) return // explicit trust gate
+        val frame = form.cardFillFrame ?: return // focus unknown → no card values anywhere
         val ccFields = ccFillFields(form)
         for (item in items) {
             if (out.size >= MAX_DATASETS) break
@@ -301,7 +302,7 @@ object DatasetBuilder {
             val card = item.doc.card ?: continue
             // Per-item rail: one malformed card degrades to a skip, not a dead response.
             runCatching {
-                val plan = CardFill.plan(ccFields, card)
+                val plan = CardFill.plan(ccFields, card, frame.domain)
                 if (plan.isEmpty()) return@runCatching
                 val spec = specForIndex(specs, out.size, maxInline)
                 buildCardDataset(context, item, form, plan, spec)?.let { out.add(it) }
@@ -322,10 +323,11 @@ object DatasetBuilder {
     private fun countBuildableCardDatasets(items: List<VaultItem>, form: ParsedForm, trusted: Boolean): Int {
         if (form.ccFields.isEmpty()) return 0
         if (form.appPackage in BrowserCertPins.TABLE && !trusted) return 0
+        val frame = form.cardFillFrame ?: return 0
         val ccFields = ccFillFields(form)
         return items.count { item ->
             item.doc.type == "card" && item.doc.card?.let { card ->
-                runCatching { CardFill.plan(ccFields, card).isNotEmpty() }.getOrDefault(false)
+                runCatching { CardFill.plan(ccFields, card, frame.domain).isNotEmpty() }.getOrDefault(false)
             } == true
         }
     }

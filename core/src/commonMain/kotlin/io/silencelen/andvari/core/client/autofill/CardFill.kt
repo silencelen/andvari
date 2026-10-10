@@ -17,9 +17,12 @@ import io.silencelen.andvari.core.client.ItemDoc
  *
  * The three safety rules (each pinned by CardFillTest):
  *  - **Hostile-iframe zero-fill:** fields are clustered by their own [CcField.frameDomain]
- *    (nulls cluster together = native app / main frame) and ONLY clusters that contain a
- *    [FieldKind.CC_NUMBER] field receive ANY value. A lone cc-hinted field in another frame —
- *    the classic embedded-attacker CSC/expiry probe — gets NOTHING.
+ *    (nulls cluster together = native app / main frame) and ONLY the fill frame's cluster —
+ *    the frame holding the field the user is filling — receives ANY value, and only when it
+ *    contains a [FieldKind.CC_NUMBER] field. A lone cc-hinted field in another frame (the
+ *    classic embedded-attacker CSC/expiry probe) gets NOTHING, and so does a third-party frame
+ *    that declares a cc-number of its own (security review 2026-10: the anchor gate alone let
+ *    any such frame receive the PAN and CSC beside the merchant's form).
  *  - **Type-pinning:** an [AUTOFILL_TYPE_TEXT] field only ever gets [Value.Text]; an
  *    [AUTOFILL_TYPE_LIST] field only ever gets [Value.ListIndex], resolved by [listIndexFor]'s
  *    PASS-MAJOR matching — numeric parses first ("1"/"01"/"January (01)" all match month 01,
@@ -104,12 +107,16 @@ object CardFill {
     data class Planned(val index: Int, val value: Value)
 
     /**
-     * Plan the fill of [fields] from [card] under the safety rules above. Output is
-     * deterministic: ordered by [CcField.index].
+     * Plan the fill of [fields] from [card] under the safety rules above. [fillFrame] is the
+     * [CcField.frameDomain] of the field the user is filling (null = native app / main frame);
+     * no other frame's fields are planned. Card items carry no origin (wallet posture), so the
+     * focused frame — not the top frame — is the boundary: a payment processor's card iframe the
+     * user taps into fills, and nothing leaks sideways into a frame the user never touched.
+     * Output is deterministic: ordered by [CcField.index].
      */
-    fun plan(fields: List<CcField>, card: CardData): List<Planned> {
+    fun plan(fields: List<CcField>, card: CardData, fillFrame: String?): List<Planned> {
         val out = ArrayList<Planned>()
-        for (cluster in fields.groupBy { it.frameDomain }.values) {
+        for (cluster in fields.filter { it.frameDomain == fillFrame }.groupBy { it.frameDomain }.values) {
             // Hostile-iframe rule: no CC_NUMBER anchor in this frame cluster → zero fill.
             if (cluster.none { it.kind == FieldKind.CC_NUMBER }) continue
             // [W1] split-PAN pre-pass (design §V1), PER cluster and AFTER the anchor gate (a
