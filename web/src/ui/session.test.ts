@@ -167,7 +167,7 @@ describe("revokeSessionBestEffort — sign-out revocation", () => {
         return jsonResp(404, { error: "not_found" });
       }),
     );
-    await revokeSessionBestEffort(client);
+    await expect(revokeSessionBestEffort(client)).resolves.toBe(true);
     expect(logoutAuth).toBe("Bearer xa0"); // the revocation actually fired, as this device
     // The POST does NOT clear the pair — dropping it is the sign-out path's own next line
     // (App.signOut, Welcome's two teardowns). See the late-resolve test below for why.
@@ -190,7 +190,57 @@ describe("revokeSessionBestEffort — sign-out revocation", () => {
     expect(signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("a 401 revocation does not rotate the refresh token — the session is already dead", async () => {
+  /**
+   * Security review 2026-10 (web sign-out): a 401 on the logout POST does NOT mean the session is
+   * dead server-side — access tokens expire after 1 h while the refresh token lives 30 days. The
+   * old "no refresh-retry on 401" premise left a copied refresh token alive after the member
+   * signed out of any tab that had sat locked past the hour. Logout now spends the refresh token
+   * it captured, ONCE, and revokes with the fresh access token — without adopting the new pair
+   * (the caller is about to drop it; persisting it would resurrect the session).
+   */
+  it("an EXPIRED access token: logout refreshes once with the held refresh token, then revokes", async () => {
+    saveSession(sess("user-x", { accessToken: "xa0", refreshToken: "xr0" }));
+    const client = makeClient(loadSession(), "http://server");
+    const calls: { path: string; auth: string | null; body: string | null }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const path = new URL(String(url)).pathname;
+        const auth = (init?.headers as Record<string, string>)["Authorization"] ?? null;
+        calls.push({ path, auth, body: (init?.body as string | undefined) ?? null });
+        if (path === "/api/v1/auth/refresh") return jsonResp(200, { accessToken: "na1", refreshToken: "nr1" });
+        if (path === "/api/v1/auth/logout") return auth === "Bearer na1" ? jsonResp(200, {}) : jsonResp(401, { error: "unauthorized" });
+        return jsonResp(404, { error: "not_found" });
+      }),
+    );
+    await expect(revokeSessionBestEffort(client)).resolves.toBe(true);
+    expect(calls.map((c) => c.path)).toEqual(["/api/v1/auth/logout", "/api/v1/auth/refresh", "/api/v1/auth/logout"]);
+    expect(JSON.parse(calls[1]!.body!)).toEqual({ refreshToken: "xr0" });
+    expect(calls[2]!.auth).toBe("Bearer na1");
+    // The rotated pair is spent on the revocation only — never adopted or persisted.
+    expect(client.getTokens()).toEqual({ accessToken: "xa0", refreshToken: "xr0" });
+    expect(loadSession()?.tokens).toEqual({ accessToken: "xa0", refreshToken: "xr0" });
+  });
+
+  it("every request of the expired-token revocation rides the ONE logout abort clock", async () => {
+    saveSession(sess("user-x", { accessToken: "xa0", refreshToken: "xr0" }));
+    const client = makeClient(loadSession(), "http://server");
+    const signals: (AbortSignal | null | undefined)[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        signals.push(init?.signal);
+        if (String(url).endsWith("/api/v1/auth/refresh")) return jsonResp(200, { accessToken: "na1", refreshToken: "nr1" });
+        return signals.length === 1 ? jsonResp(401, { error: "unauthorized" }) : jsonResp(200, {});
+      }),
+    );
+    await revokeSessionBestEffort(client);
+    expect(signals).toHaveLength(3);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(new Set(signals).size).toBe(1);
+  });
+
+  it("a refused refresh (dead pair, or the break-glass origin) stops there and reports not revoked", async () => {
     saveSession(sess("user-x", { accessToken: "xa0", refreshToken: "xr0" }));
     const client = makeClient(loadSession(), "http://server");
     const paths: string[] = [];
@@ -198,13 +248,12 @@ describe("revokeSessionBestEffort — sign-out revocation", () => {
       "fetch",
       vi.fn(async (url: string | URL) => {
         paths.push(new URL(String(url)).pathname);
-        return jsonResp(401, { error: "unauthorized" });
+        return url.toString().endsWith("/refresh") ? jsonResp(403, { error: "public_refresh_disabled" }) : jsonResp(401, { error: "unauthorized" });
       }),
     );
-    await revokeSessionBestEffort(client);
-    // raw()'s 401 retry would spend the (single-use) refresh token and re-POST the logout,
-    // stretching the in-flight window the bound is supposed to close.
-    expect(paths).toEqual(["/api/v1/auth/logout"]);
+    await expect(revokeSessionBestEffort(client)).resolves.toBe(false);
+    expect(paths).toEqual(["/api/v1/auth/logout", "/api/v1/auth/refresh"]);
+    expect(client.getTokens()).toEqual({ accessToken: "xa0", refreshToken: "xr0" }); // the caller drops it, not logout()
   });
 
   it("a logout abandoned at the bound never clears a LATER session's tokens", async () => {
@@ -231,7 +280,7 @@ describe("revokeSessionBestEffort — sign-out revocation", () => {
     saveSession(sess("user-x", { accessToken: "xa0", refreshToken: "xr0" }));
     const client = makeClient(loadSession(), "http://server");
     vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))));
-    await expect(revokeSessionBestEffort(client)).resolves.toBeUndefined();
+    await expect(revokeSessionBestEffort(client)).resolves.toBe(false);
   });
 
   it("a HUNG logout is abandoned at the 5 s bound — never a wedged sign-out", async () => {
@@ -251,6 +300,6 @@ describe("revokeSessionBestEffort — sign-out revocation", () => {
   });
 
   it("a null client (no tab client yet) is a no-op", async () => {
-    await expect(revokeSessionBestEffort(null)).resolves.toBeUndefined();
+    await expect(revokeSessionBestEffort(null)).resolves.toBe(false);
   });
 });
