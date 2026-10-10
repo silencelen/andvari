@@ -3,6 +3,7 @@ package io.silencelen.andvari.app
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -214,15 +215,19 @@ class SurfaceCopyPinsTest {
     }
 
     @Test
-    fun theBreachCheckReachesASurfaceAUserCanSee() {
-        // The seam (core Strength.breachCount) had ZERO production call sites. These are them:
-        // the backup passphrase renders it inline, enrollment routes it into the root banner.
-        assertTrue(mainActivity.contains("vm.breachWarning(candidate)"), "the backup dialog must run the breach check")
-        assertTrue(mainActivity.contains("breachNote?.let { Text(it,"), "the backup dialog must RENDER the breach sentence")
-        assertTrue(mainActivity.contains("BreachAdvisoryBanner(vm, ui)"), "the enrollment advisory needs a banner on screen")
-        assertTrue(mainActivity.contains("ui.breachAdvisory ?: return"), "the banner must read the state the enroll check writes")
-        assertTrue(viewModel.contains("checkEnrolledPasswordForBreach(a, password)"), "enrollOp must run the check once a session exists")
-        assertTrue(viewModel.contains("Strength.breachCount("), "the check must go through the shared core seam")
+    fun noMasterPasswordDerivedRequestReachesTheServer() {
+        // Security review 2026-10, root cause C: enrollment and the backup-passphrase dialog sent
+        // the SHA-1 prefix of the master password (or of a passphrase the dialog suggests making
+        // equal to it) to the vault server's relay, which also receives the Argon2id-derived
+        // authKey. The check is gone from both surfaces; item passwords keep the Health scan,
+        // which is not the server's KDF secret.
+        for (needle in listOf("breachWarning", "checkEnrolledPasswordForBreach", "breachAdvisory", "BreachAdvisoryBanner", "Strength.breachCount(", "BREACHED_PASSWORD_WARNING")) {
+            assertFalse(viewModel.contains(needle), "AndvariViewModel must not carry the master-password breach path ($needle)")
+            assertFalse(mainActivity.contains(needle), "MainActivity must not carry the master-password breach path ($needle)")
+        }
+        assertFalse(mainActivity.contains("breachNote"), "the backup dialog must not run a breach check on its passphrase")
+        // The item-password scan is the relay's one remaining caller, on purpose.
+        assertTrue(viewModel.contains("a.hibpRange(prefix)"), "the Health breach scan keeps the relay")
     }
 
     // ---- H15 (recheck R21): the two recovery ladders name a crypto-unavailable device ----

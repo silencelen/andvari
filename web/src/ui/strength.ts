@@ -52,12 +52,6 @@ export const BACKUP_FLOOR = 3;
 export const PATTERN_WARNING =
   "This repeats a short pattern, so it is weaker than its length suggests — a few unrelated words are stronger than one block twice.";
 
-/** F31 advisory (never blocks): this exact password is in a public breach corpus. Says what
- *  left the device, because on a zero-knowledge product that is the first thing a careful
- *  reader asks. Byte-twin of core Strength.BREACHED_PASSWORD_WARNING. */
-export const BREACHED_PASSWORD_WARNING =
-  "This password shows up in public breach lists — pick a different one. andvari checked without sending it anywhere: only the first five characters of its hash left this device.";
-
 /** F31: the master-password gate is the PRE-pattern proxy on purpose (module doc). */
 export function meetsMasterPasswordFloor(pw: string): boolean {
   return entropyProxyScore(pw) >= MASTER_PW_MIN_SCORE;

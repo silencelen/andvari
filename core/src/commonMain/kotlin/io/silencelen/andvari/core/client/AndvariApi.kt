@@ -431,8 +431,10 @@ class AndvariApi(
      * ("SUFFIX:COUNT" lines) for [io.silencelen.andvari.core.crypto.Hibp.countInRange] to match
      * LOCALLY — the server is never told which suffix the caller wanted.
      *
-     * Authenticated (the route is session-gated server-side), which is why the pre-session
-     * surfaces can't use it — see [Strength.breachCount]'s callers.
+     * ITEM passwords only (the Health scan). Never call it with a prefix of the master password
+     * or of a backup passphrase: the server holds the Argon2id verifier, and 20 bits of SHA-1
+     * cut an offline guess at it by ~2^20 (security review 2026-10; spec 03 §8). The route is
+     * session-gated and the relay keeps nothing.
      */
     suspend fun hibpRange(prefix: String): String {
         val resp = request("GET", "/api/v1/hibp/range/$prefix")

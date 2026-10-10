@@ -36,7 +36,7 @@ import {
 } from "./session";
 import { BrandSigil } from "./Sigil";
 import { clampClipboardClearSeconds } from "./policyclamp";
-import { MasterPasswordHint, breachWarningFor } from "./passwordadvice";
+import { MasterPasswordHint } from "./passwordadvice";
 import { meetsMasterPasswordFloor } from "./strength";
 import { useAutoLock } from "./useAutoLock";
 
@@ -692,10 +692,6 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   // One settlement per reveal (the confirm is now awaited, so the button outlives the first click).
   const settlingRef = useRef(false);
   const aliveRef = useRef(true);
-  // F31: BREACHED_PASSWORD_WARNING for the master password this enrollment just committed, or null
-  // for "clean" and "couldn't check" alike (see the fire site in `submit`). Advisory only — it is
-  // never read by canSubmit, by `submit`, or by anything that decides where this card goes next.
-  const [breachAdvisory, setBreachAdvisory] = useState<string | null>(null);
 
   // §F.7: zero the raw recovery secret on unmount as well as on confirm (mirrors Recover.tsx's
   // cleanup) — if the reveal is interrupted (navigate away / lock), the secret never lingers in memory.
@@ -801,18 +797,8 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       secretRef.current = recoverySecret;
       clearPendingEnroll();
       client.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
-      // F31: the master password that now wraps this whole vault, against the public breach corpus.
-      // It runs HERE, and not from the form's own MasterPasswordHint, because the relay is
-      // session-gated (App.kt `requirePrincipal`): the hint's check 401s for an enrollee who has no
-      // account yet, fails open, and says nothing — so this is the first moment on the web enroll
-      // path a check can be made at all. Same hole, same fix, as the natives'
-      // checkEnrolledPasswordForBreach. DETACHED: the reveal gate below must never wait on a network
-      // round trip, and the verdict is advisory (a dismissible line), never a gate on an enrollment
-      // that already landed. breachWarningFor is total and resolves null for BOTH "clean" and
-      // "couldn't check", so there is no failure path to handle and nothing to say on one.
-      void breachWarningFor(client, password).then((warning) => {
-        if (warning && aliveRef.current) setBreachAdvisory(warning);
-      });
+      // No breach check on the new master password (security review 2026-10, root cause C): its
+      // SHA-1 prefix would go to this server, which now holds the Argon2id verifier for it.
       saveSession({
         baseUrl: client.baseUrl,
         userId: s.userId,
@@ -834,24 +820,10 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
     }
   };
 
-  // F31: every screen this card can show wears the enrollment breach advisory, wrapped in ONE place
-  // rather than repeated per branch so a future branch cannot silently drop it. The three parts keep
-  // fixed positions in the fragment: React reconciles by position, so the <Announcer> is the SAME
-  // node across the form → reveal → settling transitions and is therefore already mounted (and
-  // empty) when the verdict lands — the mutation is what a polite region actually announces
-  // (Msg.tsx BL-1; a conditionally-mounted `.msg info` box on its own is not reliably spoken).
-  const withBreachAdvisory = (content: React.ReactNode) => (
-    <>
-      {content}
-      {breachAdvisory && <BreachAdvisory advisory={breachAdvisory} onDismiss={() => setBreachAdvisory(null)} />}
-      <Announcer text={breachAdvisory ?? ""} />
-    </>
-  );
-
   // design 2026-07-13: the stale-confirm notice — un-skippable acknowledgment BEFORE vault landing, so
   // the user never walks away believing the (dead) phrase they saved still works.
   if (ready && pieceStale) {
-    return withBreachAdvisory(
+    return (
       <div>
         <Msg kind="err">{RECOVERY_PIECE_STALE_NOTICE}</Msg>
         <button
@@ -865,7 +837,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
         >
           I understand — continue
         </button>
-      </div>,
+      </div>
     );
   }
 
@@ -873,10 +845,10 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   // reveal (whose secret zero() nulls mid-flight), so the screen never blanks on the slow tunnel path.
   // Ordered after the stale branch (a 409 during settle wins) and before the reveal.
   if (ready && settling) {
-    return withBreachAdvisory(
+    return (
       <div>
         <p className="muted"><Busy>Saving your confirmation…</Busy></p>
-      </div>,
+      </div>
     );
   }
 
@@ -884,7 +856,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   // register, holding the secret in secretRef, and it won't hand the account to the vault until the
   // member types the phrase back (confirmMatches). No skip affordance (silent-total-loss guard).
   if (ready && secretRef.current) {
-    return withBreachAdvisory(
+    return (
       <RecoveryReveal
         secretRef={secretRef}
         clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
@@ -908,11 +880,11 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
             },
           });
         }}
-      />,
+      />
     );
   }
 
-  return withBreachAdvisory(
+  return (
     <form onSubmit={submit}>
       {err && <Msg kind="err">{err}</Msg>}
       {linkValid && (
@@ -935,10 +907,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="optional" />
         </Field>
       </div>
-      {/* F31: `client` is what turns the breach check on — the k-anonymised prefix goes to the
-          relay this client already talks to (never upstream direct), and an unreachable relay
-          simply means no warning. Enrollment stays completable either way. */}
-      <Field label="Master password" hint={<MasterPasswordHint password={password} client={client} />}>
+      <Field label="Master password" hint={<MasterPasswordHint password={password} />}>
         <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
       </Field>
       <Field
@@ -969,35 +938,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       />
 
       <button className="primary" disabled={busy || !canSubmit}>{busy ? "Forging your vault…" : "Create vault"}</button>
-    </form>,
-  );
-}
-
-/**
- * F31 enrollment advisory — the master password this account was just created with is in the
- * public breach corpus. Twin of the natives' banners (Android `BreachAdvisoryBanner`, desktop
- * Ui.kt `state.breachAdvisory`), including the posture: the account exists and works, nothing was
- * blocked, and Dismiss is a real exit. F31's rule is that the pattern/breach signals warn and
- * never refuse.
- *
- * `info`, not `err`: an error strip here would read like a live credential failure (the temporary-
- * password bar) when this is a "you can do better" nudge. Where the natives' copy has to send the
- * user to a browser — neither app can change a master password yet — web names the screen it
- * already ships, two clicks away and reachable the moment this card hands over.
- *
- * Placement (the one deliberate divergence from desktop, which keeps this banner OFF its two
- * recovery gates so the shown-once phrase competes with nothing): web's enroll card has no surface
- * AFTER the gate — confirming the phrase hands the account straight to the vault shell and unmounts
- * this component — so the advisory rides the same card, rendered BELOW the reveal. It is read after
- * the phrase is saved rather than instead of it, and the gate above it is untouched.
- */
-function BreachAdvisory({ advisory, onDismiss }: { advisory: string; onDismiss: () => void }) {
-  return (
-    <div className="msg info" style={{ display: "block", marginTop: 12 }}>
-      <strong>Master password found in a breach.</strong> {advisory} Your vault is set up and safe to use —
-      change this password whenever you like, in Settings → Change master password.{" "}
-      <button type="button" className="ghost" onClick={onDismiss}>Dismiss</button>
-    </div>
+    </form>
   );
 }
 
@@ -1429,6 +1370,6 @@ export function enrollError(code: string): string {
 }
 
 // The F60 master-password hint used to live here and Settings imported it from this file. It
-// moved to passwordadvice.tsx when F31's breach check + pattern caution had to reach Recover too:
+// moved to passwordadvice.tsx when F31's pattern caution had to reach Recover too:
 // Welcome imports Recover, so a hint defined HERE could never be shared with it, and Recover grew
 // a near-copy instead that then drifted. Three surfaces, one component, no import cycle.
