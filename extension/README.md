@@ -118,14 +118,16 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     The extension is its own origin and keeps its own preference — same mechanism, separate store.
   - `src/content.ts` + `src/detect.ts` + `src/content-ui.ts` — the **detection engine + in-page UI**:
     delegated focusin + a MutationObserver re-scan catch SPA/late-rendered/multi-step forms; fill uses
-    the native value setter (React/Vue-safe); a fill dropdown (matches / search-all / strong-password)
-    → SW `reveal` → fields set; captured logins raise a "Save to andvari?" / "Update password?" banner
+    the native value setter (React/Vue-safe); a fill dropdown (matches / strong-password, plus a
+    search-all row that opens the popup — cross-site picks are confirmed there, never in-page)
+    → SW `reveal` → fields set; every in-page activation passes an IntersectionObserver-v2
+    visibility check (`src/visibilityguard.ts`) and is refused on engines without it; captured logins raise a "Save to andvari?" / "Update password?" banner
     that survives the post-login navigation. The UI renders in a **closed shadow root** styled by a
     constructed `CSSStyleSheet` (`adoptedStyleSheets`) — page-CSS-isolated AND immune to the site's
     `style-src`, so it works on strict-CSP sites (github.com, banks), not just fill.dev.
   - `src/background.ts` session custody: the unlocked vault survives MV3 SW death via
     `chrome.storage.session` (memory-backed, never disk); `chrome.alarms` drive policy autolock +
-    periodic resync. Secret egress stays `reveal`-only, host-bound or by an explicit gesture in our UI.
+    periodic resync. Secret egress stays `reveal`-only: host-bound for page frames, or by a click in the popup.
   - **KDF in a Web Worker** (`src/kdf-worker.ts`) — the ~5.8 s Argon2id runs off the SW event loop,
     with an inline fallback where nested workers aren't allowed.
   - **Member (shared-vault) grants** — `sealedVk` opened via `crypto_box_seal_open` reconstructed

@@ -1014,7 +1014,8 @@ describe("2026-07-27 polish-release audit pins (extension lane) — in-page a11y
     expect(offer.match(/if \(!e\.isTrusted\) return;/g), "both buttons stay isTrusted-gated").toHaveLength(2);
     // …and the three exports are thin: no second copy of the shell may reappear.
     expect(cu.match(/bannerShell\(\)/g), "bannerShell has exactly one caller").toHaveLength(2); // decl + call
-    for (const fn of ["export function showSaveBanner(", "export function showCardSaveBanner(", "export function showLinkOffer("]) {
+    // (showLinkOffer left with the in-page search-all fill — security review 2026-10, root cause B.)
+    for (const fn of ["export function showSaveBanner(", "export function showCardSaveBanner(", "export function showTotpOffer("]) {
       const at = cu.indexOf(fn);
       expect(at, `${fn} missing`).toBeGreaterThan(-1);
       const wrap = cu.slice(at, cu.indexOf("\n}", at));
@@ -1299,24 +1300,22 @@ describe("2026-08-13 audit pins (extension lane) — F18 caller binding on the t
     ).toBeGreaterThanOrEqual(2);
   });
 
-  it("reveal's `explicit` bypass is stated as deliberate, and stays narrow on the page side", () => {
-    // `msg.explicit === true` short-circuits AHEAD of the host gate, so senderHost's fail-closed
-    // property does not hold on that path. Deliberate — a search-all pick exists precisely to fill
-    // an item this host does NOT match — but undocumented it reads as the same class of oversight
-    // F18 fixed, so the contract now says so where the contract is stated.
+  it("reveal's `explicit` is popup-only — a page frame never bypasses the host gate (security review 2026-10)", () => {
+    // `msg.explicit === true` used to short-circuit AHEAD of the host gate for every sender, on the
+    // theory that only a trusted click in our closed-shadow dropdown set it. The page owns that
+    // shadow root's HOST element, so it could make the dropdown transparent and steer the click:
+    // root cause B. A tab sender's flag is now ignored (extension/src/revealgate.ts) and a
+    // cross-site fill into a page needs the popup's one-shot grant.
     const c = spanOf(msgs, "/** Secret for a fill.", '| { type: "fillFromPopup"');
-    expect(c).toContain("deliberate BYPASS");
-    expect(c).toContain("`explicit` is checked AHEAD of the host gate");
-    // The ordering the comment describes is the code's: no host is computed into the decision first.
+    expect(c).toContain("`explicit` from a TAB sender is IGNORED");
+    expect(c).not.toContain("deliberate BYPASS");
     const r = spanOf(bg, "function reveal(msg: Extract<", "/** Card copy egress");
-    expect(r).toContain("msg.explicit === true ||");
-    // And the claim it rests on must stay true: the page side sets `explicit` at exactly ONE call
-    // site, the closed-shadow search-all pick. Every other in-page fill goes through the host gate.
-    expect(
-      ct.match(/fill(?:Item|FromDropdown)\([^)]*, true\)/g) ?? [],
-      "only the search-all pick may bypass the host gate",
-    ).toHaveLength(1);
-    expect(ct).toContain("const o = await fillFromDropdown(m.itemId, f, true);");
+    expect(r).toContain("revealGate({");
+    expect(r).toContain("fromTab: sender.tab !== undefined,");
+    expect(r).not.toContain("msg.explicit === true ||");
+    // …and the page side never asks for it at all.
+    expect(ct).not.toMatch(/explicit:\s*true/);
+    expect(ct.match(/fill(?:Item|FromDropdown)\([^)]*, true\)/g) ?? []).toHaveLength(0);
   });
 });
 

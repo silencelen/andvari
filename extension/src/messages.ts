@@ -10,18 +10,11 @@
  *    fill grant minted by an explicit user click in the popup (`fillFromPopup`).
  *  - List/match responses never carry passwords — name/username/uris only. Card lists
  *    carry a MASKED identity line ("Visa ••4242"), never the number/expiry/CVV.
- *  - `allItems` answers ANY injected frame while unlocked, query or no query — i.e. the whole
- *    login inventory (name/username/uris per item) is readable from every frame of every page the
- *    user has granted, not just the top one. This is DELIBERATE, not an oversight: the in-page
- *    dropdown's "Search all logins…" must work inside iframe-hosted login forms, so there is no
- *    popup-vs-content distinction to draw here (the popup issues the identical call). The exposure
- *    is bounded by the content script's ISOLATED WORLD plus the CLOSED shadow root the results
- *    render into — page JS can neither read the response nor reach chrome.runtime — and by the
- *    rule above: no password, no TOTP, ever rides a list. `matches` is additionally host-scoped.
- *    Two consequences worth stating so nobody erodes them by accident: any NEW in-page surface
- *    that echoes list data back into page-reachable DOM breaks this, and so would relaxing a
- *    frame gate on a path that does carry a secret. Note `allItems` is where the trade lives —
- *    `reveal` is not: it is host-matched or one-shot-grant gated, per the first invariant.
+ *  - `allItems` answers the POPUP only (security review 2026-10). It used to answer any injected
+ *    frame, because the in-page dropdown's "Search all logins…" rendered the whole inventory in a
+ *    closed shadow root; that in-page search could be clickjacked into a cross-site fill, so it now
+ *    hands off to the popup and no page frame needs the inventory any more. A tab sender gets an
+ *    empty list. `matches` stays answerable from pages — it is host-scoped and the dropdown needs it.
  *  - A card secret leaves the SW two ways, both explicit-user-action gated: (1) `revealCardField`
  *    — popup-only (the SW refuses tab senders), one field per request, straight to a clipboard
  *    write; (2) `revealCardForFill` — the S3 in-page fill path, redeemable ONLY by the exact frame
@@ -305,7 +298,8 @@ export type Req =
    *  open-query rides the same trusted focusin a page can drive with HTMLElement.focus(), so it
    *  must never re-arm the idle autolock — the pick (`reveal`) is the user-activity signal. */
   | { type: "matches"; host: string }
-  /** Popup/content: all logins, optionally filtered by a query (name/username/uri contains). */
+  /** Popup ONLY: all logins, optionally filtered by a query (name/username/uri contains). A tab
+   *  sender gets an empty list (contract header). */
   | { type: "allItems"; query?: string }
   /** Content, SIGNUP FORMS ONLY: is this just-typed password already used by another login?
    *  Answers a COUNT — no password, and no item identity, ever comes back. UNLOCKED-ONLY by
@@ -316,21 +310,18 @@ export type Req =
   /** Popup: all cards for the copy-only Cards group (query filters name/subtitle). */
   | { type: "cardItems"; query?: string }
   /** Secret for a fill. The SW hands out the secret only when (a) the caller's host matches the
-   *  item's uris, (b) a one-shot popup grant covers it, or (c) `explicit` is set — the user picked
-   *  the item from the search-all list rendered in OUR closed-shadow UI. The matched host is the
-   *  browser-set `sender.origin`'s host for TAB senders ([A2], fail-closed on a missing/opaque
-   *  origin); `host` is read only from the popup, which has no tab and reads `activeTabHost()`.
-   *  (c) is a deliberate BYPASS, not an oversight: `explicit` is checked AHEAD of the host gate, so
-   *  the fail-closed origin rule constrains (a) only. It has to be — the whole point of a search-all
-   *  pick is to fill an item this host does NOT match — and it carries its own, different gate: the
-   *  pick exists only in OUR closed-shadow UI (isTrusted-gated rows a page can neither query,
-   *  hit-test, nor synthesize a click into — [S5]) or in the popup. Two surfaces set it and no
-   *  other: `fillExplicit` (the content script's search-all pick) and the popup's own reveal/copy,
-   *  which has no tab and so was never subject to the origin gate anyway. A page has no route to
-   *  this SW at all. Trust model: pages cannot send runtime messages here (no
-   *  externally_connectable) and cannot reach into the closed shadow root; the content script
-   *  additionally requires `isTrusted` events on fill/save clicks, and a submit additionally needs a
-   *  fresh user gesture. */
+   *  item's uris, (b) a one-shot popup grant covers it, or (c) the POPUP sets `explicit` — its own
+   *  reveal/copy buttons, extension-owned UI with no tab. The matched host is the browser-set
+   *  `sender.origin`'s host for TAB senders ([A2], fail-closed on a missing/opaque origin); `host`
+   *  is read only from the popup, which has no tab and reads `activeTabHost()`.
+   *  Security review 2026-10 (root cause B): `explicit` from a TAB sender is IGNORED. It used to be
+   *  checked ahead of the host gate for the in-page search-all pick, on the theory that a trusted
+   *  click inside our closed shadow root could not be steered; it could — the shadow HOST is page
+   *  DOM, so a page could make the dropdown transparent or paint a decoy over it. A cross-site fill
+   *  into a page now needs (b): the user confirms the item in the popup, which mints the grant.
+   *  The decision lives in revealgate.ts. Trust model otherwise unchanged: pages cannot send runtime
+   *  messages here (no externally_connectable), and the content script requires `isTrusted` events
+   *  that pass the in-page visibility guard (visibilityguard.ts) on fill/save clicks. */
   | { type: "reveal"; itemId: string; host: string; explicit?: boolean }
   /** Popup ONLY (the SW refuses senders with a tab, i.e. content scripts — the grant is minted for
    *  whatever tab is ACTIVE, which need not be the sender's): user explicitly picked an item to
@@ -453,6 +444,13 @@ export type Req =
    *  it is EXPECTED to reject, and the content script's toolbar toast is the primary path there).
    *  NON-passive: it rides a real isTrusted click, i.e. genuine user activity. */
   | { type: "openPopupForCards" }
+  /** Content: the in-page dropdown's "Search all logins…" row was activated under a trusted,
+   *  visibility-guarded gesture → the SW ATTEMPTS `chrome.action.openPopup()`, where the user
+   *  searches and fills (cross-site fills are confirmed in extension-owned UI only — security
+   *  review 2026-10). The chip's contract verbatim: no members, mints nothing, selects nothing,
+   *  enumerates nothing, `opened` is the honest result of the one call (EXPECTED to reject on
+   *  Firefox, where the content script's toolbar toast is the primary path). NON-passive. */
+  | { type: "openPopupForSearch" }
   /** Popup ONLY (the SW refuses tab senders): may the Cards group show a Fill button for the
    *  active tab, and to which origin? `fillable` iff a recorded card form's origin equals the
    *  tab's CURRENT top-level origin (SW-derived from `tab.url` under `activeTab`, [A4]). */
@@ -600,7 +598,10 @@ export type Res<T extends Req["type"]> = T extends "status"
                                                     : /** Unlock-prompt (2026-08-12): the same one-call honesty as the card twin. */
                                                       T extends "openPopupForSave"
                                                       ? { opened: boolean }
-                                                      : never;
+                                                      : /** Security review 2026-10: the search-all hand-off, same one-call honesty. */
+                                                        T extends "openPopupForSearch"
+                                                        ? { opened: boolean }
+                                                        : never;
 
 /** SW → content (chrome.tabs.sendMessage): fill this item now (popup-granted). The
  *  content script performs its normal `reveal` round-trip with its own host — the SW
