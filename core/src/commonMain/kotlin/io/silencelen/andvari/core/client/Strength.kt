@@ -1,9 +1,5 @@
 package io.silencelen.andvari.core.client
 
-import io.silencelen.andvari.core.crypto.CryptoProvider
-import io.silencelen.andvari.core.crypto.Hibp
-import kotlin.coroutines.cancellation.CancellationException
-
 /**
  * Shared passphrase-strength estimator — an EXACT Kotlin mirror of web/src/ui/strength.ts
  * (same class weights, same 40/60/80/110-bit thresholds, same pattern collapse, scores 0..4)
@@ -42,12 +38,6 @@ object Strength {
     const val PATTERN_WARNING =
         "This repeats a short pattern, so it is weaker than its length suggests — a few unrelated words are stronger than one block twice."
 
-    /** F31 advisory (never blocks): shown when the k-anonymity check finds this exact
-     *  password in a public breach corpus. Says what left the device, because on a
-     *  zero-knowledge product that is the first thing a careful reader asks. */
-    const val BREACHED_PASSWORD_WARNING =
-        "This password shows up in public breach lists — pick a different one. andvari checked without sending it anywhere: only the first five characters of its hash left this device."
-
     /** F31: the master-password gate is the PRE-pattern proxy on purpose (class KDoc). */
     fun meetsMasterPasswordFloor(pw: String): Boolean = entropyProxyScore(pw) >= MASTER_PW_MIN_SCORE
 
@@ -74,52 +64,12 @@ object Strength {
     fun patternWarning(pw: String): String? =
         if (estimateStrength(pw) < entropyProxyScore(pw)) PATTERN_WARNING else null
 
-    /**
-     * spec 03 §8 k-anonymity breach check for a MASTER password / backup passphrase (audit F31 —
-     * until now only item passwords were ever checked, on web, and core's Hibp.kt had no
-     * production consumer at all).
-     *
-     * Native call sites (each renders [BREACHED_PASSWORD_WARNING] and nothing else):
-     *  - the backup-passphrase dialogs (android MainActivity.BackupPreflightDialog, desktop
-     *    Ui.BackupPreflightDialog) — fired once per CANDIDATE passphrase, when both fields agree,
-     *    never per keystroke: a chain of prefixes for "p", "pa", "pas"… would narrow the password
-     *    far more than one prefix for the finished one does;
-     *  - enrollment (AndvariViewModel.enrollOp, DesktopState.enrollOp), on the master password,
-     *    immediately after `register` — the relay is session-gated ([AndvariApi.hibpRange]), so
-     *    that is the FIRST moment on the native enroll path a check can be made at all. The
-     *    recovery-reset leg has no session at any point (the commit revokes every session of the
-     *    account), so it deliberately does NOT call this: a check that could only ever fail open
-     *    is a warning the user would never see.
-     *
-     * Privacy contract, and the reason this is a seam rather than a call: SHA-1 is computed on
-     * this device and ONLY the 5-hex-character prefix is handed to [fetchRange] — never the
-     * password, never the full hash, never anything derived from it that leaves here. Nothing is
-     * logged or persisted; the hash is a local and the caller gets a count, not a digest. Callers
-     * MUST pass the relay (`GET /api/v1/hibp/range/{prefix}`), never a direct upstream call: the
-     * relay is what keeps the client's IP out of it.
-     *
-     * FAILS OPEN and SILENT: any transport, decode or crypto failure returns null — "unknown",
-     * never "breached", never an error the caller has to render. A password manager must not
-     * refuse an enrollment because a breach API was unreachable, and this check is advisory
-     * anyway ([BREACHED_PASSWORD_WARNING] warns, nothing blocks).
-     *
-     * @return the breach count (0 = not found), or null when the check could not be made.
-     */
-    suspend fun breachCount(
-        crypto: CryptoProvider,
-        password: String,
-        fetchRange: suspend (prefix: String) -> String,
-    ): Long? {
-        if (password.isEmpty()) return null
-        return try {
-            val hash = Hibp.sha1UpperHex(crypto, password)
-            Hibp.countInRange(fetchRange(Hibp.prefix(hash)), hash)
-        } catch (c: CancellationException) {
-            throw c
-        } catch (t: Throwable) {
-            null // fail open — the network, not the password, is what failed
-        }
-    }
+    // No breach check lives here (security review 2026-10, root cause C). `breachCount` used to
+    // hash a MASTER password or backup passphrase and hand its SHA-1 prefix to the vault server's
+    // relay — the one party that also holds the Argon2id verifier, for which 20 bits of SHA-1
+    // cut offline guessing by ~2^20. Nothing derived from those two secrets may reach the server
+    // (spec 03 §8), so the floors above are the whole master-password check. Item passwords are
+    // still checked, by the Health scan, through Hibp directly.
 
     fun label(score: Int): String = LABELS[score.coerceIn(0, LABELS.size - 1)]
 

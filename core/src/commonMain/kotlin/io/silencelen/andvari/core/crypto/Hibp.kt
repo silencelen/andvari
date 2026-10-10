@@ -3,7 +3,8 @@ package io.silencelen.andvari.core.crypto
 /**
  * HIBP k-anonymity range check (spec 03 §8): SHA-1 computed locally, 5-char prefix
  * queried via the server relay, suffixes compared locally. Full hashes never leave
- * the device.
+ * the device. For ITEM passwords only — never the master password or a backup
+ * passphrase, whose prefix would help the server that holds the Argon2id verifier.
  */
 object Hibp {
     fun sha1UpperHex(crypto: CryptoProvider, password: String): String =

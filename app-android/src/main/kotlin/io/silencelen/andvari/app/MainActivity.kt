@@ -297,11 +297,6 @@ fun AndvariApp(vm: AndvariViewModel) {
             // F58: sits ABOVE the screen switch so it survives every in-app navigation —
             // no screen can compose it away while the flag is true.
             MustChangePasswordBanner(ui)
-            // F31: same placement rule as the AttentionArea below — above the screen switch so
-            // the enrollment breach advisory survives navigation, but NEVER over the two recovery
-            // gates: the shown-once phrase is the one thing on screen that cannot be recovered if
-            // the reader is distracted, and this advisory keeps until dismissed.
-            if (ui.screen !is Screen.RecoverySetup && ui.screen !is Screen.RecoveryCapture) BreachAdvisoryBanner(vm, ui)
             // P4/A7 (design 2026-07-10): break-glass notices live HERE, above the screen switch,
             // so they render ONCE on every screen — no longer duplicated on both the Vault list
             // AND Sharing. Critical items stay direct; only two genuinely-FYI items collapse.
@@ -369,49 +364,6 @@ private fun MustChangePasswordBanner(ui: UiState) {
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
             }
-        }
-    }
-}
-
-/**
- * F31: the master password chosen at enrollment is in the public breach corpus (the k-anonymity
- * check [AndvariViewModel.breachWarning] ran once the register response gave this device a
- * session — the relay is session-gated, so the enroll form itself cannot check). ADVISORY: the
- * account exists and works, nothing was blocked, and Dismiss is a real exit — the owner rule for
- * F31 is that the pattern/breach signals warn and never refuse.
- *
- * Tertiary, not error: an error container here would read like the F58 temporary-password banner
- * (a live credential failure) when this is a "you can do better" nudge. Like that banner, the fix
- * itself is in the WEB app — the natives have no change-master-password screen yet — so the copy
- * names the place rather than implying a button that isn't there.
- */
-@Composable
-private fun BreachAdvisoryBanner(vm: AndvariViewModel, ui: UiState) {
-    val advisory = ui.breachAdvisory ?: return
-    Card(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-    ) {
-        Column(Modifier.padding(12.dp)) {
-            // a11y (Cut B): on tertiaryContainer the readable ink is onTertiaryContainer — the
-            // same pairing rule the F58 banner and PendingSwitchNotice follow.
-            Text("Master password found in a breach", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
-            Text(
-                advisory,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-            Text(
-                "Your vault is set up and safe to use. To change this password, open andvari in your web browser.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-            TextButton(
-                onClick = vm::dismissBreachAdvisory,
-                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
-            ) { Text("Dismiss") }
         }
     }
 }
@@ -3050,19 +3002,8 @@ private fun BackupPreflightDialog(
     val pattern = Strength.patternWarning(passphrase)
     val ready = selected.isNotEmpty() && passphrase.isNotEmpty() && passphrase == confirm &&
         score >= Strength.BACKUP_FLOOR && !ui.busy
-    // F31 breach check, on the CANDIDATE passphrase only — when both fields agree, never per
-    // keystroke: a prefix for every prefix of what is being typed ("p", "pa", "pas"…) narrows the
-    // real passphrase far more than one prefix for the finished one does, and this way the relay
-    // sees one request per passphrase the user actually meant. Debounced so a retype doesn't
-    // queue several. Silent when the check fails or the vault is locked (vm.breachWarning).
-    var breachNote by remember(pre) { mutableStateOf<String?>(null) }
-    val candidate = if (passphrase.isNotEmpty() && passphrase == confirm) passphrase else ""
-    LaunchedEffect(candidate) {
-        breachNote = null // an edited passphrase drops the verdict about the old one immediately
-        if (candidate.isEmpty()) return@LaunchedEffect
-        delay(500)
-        breachNote = vm.breachWarning(candidate)
-    }
+    // No breach check on the backup passphrase (security review 2026-10, root cause C): its SHA-1
+    // prefix would go to the vault server, and people reuse their master password here.
     AlertDialog(
         onDismissRequest = { if (!ui.busy) vm.backupDismiss() },
         confirmButton = {
@@ -3115,7 +3056,6 @@ private fun BackupPreflightDialog(
                 // The WHY behind a refusal (or a caveated pass): the shared sentence, in the
                 // canon's words, so web and the natives explain a floor miss identically.
                 pattern?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
-                breachNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
                 if (confirm.isNotEmpty() && confirm != passphrase) {
                     Text("Passphrases don't match.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }

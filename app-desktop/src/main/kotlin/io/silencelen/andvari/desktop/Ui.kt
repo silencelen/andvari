@@ -188,32 +188,6 @@ fun DesktopApp(state: DesktopState) {
                 )
             }
         }
-        // F31: the master password chosen at enrollment is in the public breach corpus (the
-        // k-anonymity check DesktopState.enrollOp runs once register hands this app a session —
-        // the relay is session-gated, so the enroll form itself cannot check). ADVISORY: the
-        // account exists and works, nothing was blocked, and Dismiss is a real exit — F31's rule
-        // is that these signals warn and never refuse. secondaryContainer, not errorContainer:
-        // an error tone here would read like the F58 temp-password banner (a live credential
-        // failure) when this is a "you can do better" nudge. Like that banner, the fix lives in
-        // the WEB app (no native change-password screen yet), so the copy names the place.
-        // NOT painted over the two recovery gates, for the AttentionArea's reason below: the
-        // shown-once phrase must not compete with anything, and this banner keeps until dismissed.
-        state.breachAdvisory?.let { advisory ->
-            val onGate = state.screen is DesktopScreen.RecoverySetup || state.screen is DesktopScreen.RecoveryCapture
-            if (!onGate) {
-                Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite }) {
-                    Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "$advisory Your vault is set up and safe to use. To change this password, open ${state.baseUrl} in your browser.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer, // a11ydesk-01 pairing rule
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = state::dismissBreachAdvisory) { Text("Dismiss") }
-                    }
-                }
-            }
-        }
         // quality-deadcode--13: the app-level sign-out confirm the menu bar's "Sign out…" needs.
         // Hoisted here (not into a screen) for the same reason the banners are: the menu is
         // reachable from every signed-in screen, so its confirm must be too.
@@ -3369,19 +3343,8 @@ private fun BackupPreflightDialog(
     val pattern = Strength.patternWarning(passphrase)
     val ready = selected.isNotEmpty() && passphrase.isNotEmpty() && passphrase == confirm &&
         score >= Strength.BACKUP_FLOOR && !state.busy
-    // F31 breach check, on the CANDIDATE passphrase only — when both fields agree, never per
-    // keystroke: a prefix for every prefix of what is being typed ("p", "pa", "pas"…) narrows the
-    // real passphrase far more than one prefix for the finished one does, and this way the relay
-    // sees one request per passphrase the user actually meant. Debounced so a retype doesn't
-    // queue several. Silent when the check fails or the vault is locked (state.breachWarning).
-    var breachNote by remember(pre) { mutableStateOf<String?>(null) }
-    val candidate = if (passphrase.isNotEmpty() && passphrase == confirm) passphrase else ""
-    LaunchedEffect(candidate) {
-        breachNote = null // an edited passphrase drops the verdict about the old one immediately
-        if (candidate.isEmpty()) return@LaunchedEffect
-        delay(500)
-        breachNote = state.breachWarning(candidate)
-    }
+    // No breach check on the backup passphrase (security review 2026-10, root cause C): its SHA-1
+    // prefix would go to the vault server, and people reuse their master password here.
     // F72: Enter in either passphrase field = the confirm button (the AWT save dialog it opens
     // is modal, so key autorepeat dies there); Escape = Cancel, same busy gate as the scrim.
     // `ready` is captured at composition, so re-read state.busy live like the other forms.
@@ -3445,7 +3408,6 @@ private fun BackupPreflightDialog(
                 // The WHY behind a refusal (or a caveated pass): the shared sentence, in the
                 // canon's words, so web and the natives explain a floor miss identically.
                 pattern?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
-                breachNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
                 if (confirm.isNotEmpty() && confirm != passphrase) {
                     Text("Passphrases don't match.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
