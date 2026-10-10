@@ -3,7 +3,7 @@
  * UI layer (content-ui.ts), and the service worker (messages.ts contract). Runs in every
  * http(s) frame (all_frames); srcdoc/about:blank frames have an empty hostname and are skipped
  * entirely. The SW holds the decrypted vault and enforces the reveal rules — a secret reaches
- * this frame only host-bound, popup-granted, or via an explicit search-all pick (ZK).
+ * this frame only host-bound or popup-granted (ZK). Cross-site picks happen in the popup.
  */
 import {
   cardChipIsOpen,
@@ -15,7 +15,6 @@ import {
   openDropdown,
   showCardChip,
   showCardSaveBanner,
-  showLinkOffer,
   showSaveBanner,
   showToast,
   showTotpOffer,
@@ -32,7 +31,6 @@ import {
   type CardFillFields,
   type CardFillOutcome,
   type FillOutcome,
-  type MatchItem,
   type PendingCardSave,
   type PendingSave,
   type Req,
@@ -797,18 +795,17 @@ async function openFor(anchor: HTMLInputElement, f: LoginForm): Promise<void> {
     isSignup: f.isSignup,
   };
   openDropdown(anchor, state, {
-    onPick: (m) => void fillFromDropdown(m.itemId, f, false),
+    onPick: (m) => void fillFromDropdown(m.itemId, f),
     onStrongPassword: () => void useStrongPassword(f),
-    onSearch: async (query) => {
-      const r = await safeSend({ type: "allItems", query });
-      return r && !r.locked ? r.items : [];
-    },
-    onSearchPick: (m) => void fillExplicit(m, f),
+    onSearchAll: () => void searchAllInPopup(),
   });
 }
 
-async function fillItem(itemId: string, f: LoginForm, explicit: boolean): Promise<FillOutcome> {
-  const r = await safeSend({ type: "reveal", itemId, host: location.hostname, explicit });
+/** Every in-page fill is host-bound: the SW hands a page frame only items whose saved URIs match
+ *  the frame's browser-set origin, or the one the popup granted (security review 2026-10, root
+ *  cause B — this script never asks for the `explicit` path; revealgate.ts would ignore it). */
+async function fillItem(itemId: string, f: LoginForm): Promise<FillOutcome> {
+  const r = await safeSend({ type: "reveal", itemId, host: location.hostname });
   closeDropdown();
   if (!r) return { filled: "nothing", code: "unreachable" };
   if (!r.ok || !r.secret) return { filled: "nothing", code: r.code ?? "not_allowed" };
@@ -820,29 +817,23 @@ async function fillItem(itemId: string, f: LoginForm, explicit: boolean): Promis
  *  Success names exactly what landed (a username-step fill is NOT "Login filled"); failures
  *  render the canon line. A TOTP side-copy toast may follow and supersede the success one —
  *  the 2FA instruction is the more urgent of the two. */
-async function fillFromDropdown(itemId: string, f: LoginForm, explicit: boolean): Promise<FillOutcome> {
-  const o = await fillItem(itemId, f, explicit);
+async function fillFromDropdown(itemId: string, f: LoginForm): Promise<FillOutcome> {
+  const o = await fillItem(itemId, f);
   if (o.filled === "nothing") showToast(fillErrorCopy(o.code));
   else showToast(o.filled === "both" ? "Login filled" : o.filled === "username" ? "Username filled" : "Password filled");
   return o;
 }
 
-/** Search-all pick: explicit reveal (user chose it in OUR closed-shadow UI), then offer the
- *  one-tap URI backfill so the item matches this site next time — but only after a REAL fill
- *  (Cut M: linking a site the fill never reached would compound the silent failure). */
-async function fillExplicit(m: MatchItem, f: LoginForm): Promise<void> {
-  const o = await fillFromDropdown(m.itemId, f, true);
-  if (o.filled === "nothing") return;
-  // G21: the fill itself is a READ (fine for a reader), but the URI-backfill it offers is a WRITE
-  // the server denies on a reader-role vault (SW linkUri refuses it too). Don't offer a one-tap
-  // "link this site" that can only dead-end in a refusal — suppress it for read-only items.
-  if (!m.siteMatch && !m.readOnly) {
-    showLinkOffer(
-      m.name,
-      location.hostname,
-      async () => (await safeSend({ type: "linkUri", itemId: m.itemId, host: location.hostname }))?.ok === true,
-    );
-  }
+/** "Search all logins…": a login saved for ANOTHER site is picked and confirmed in the popup, never
+ *  in this page. The in-page search it replaces was the clickjacking chain of the 2026-10 security
+ *  review: a page made the dropdown transparent, steered two real clicks onto "Search all" and a
+ *  result row, and received an arbitrary vault login. The popup is extension-owned UI the page can
+ *  neither draw over nor script, and its Fill mints the one-shot grant the SW honours. Opening it
+ *  is best effort (Firefox refuses a gesture-less openPopup); the toast is the fallback. */
+async function searchAllInPopup(): Promise<void> {
+  closeDropdown();
+  const r = isTop ? await safeSend({ type: "openPopupForSearch" }) : undefined;
+  if (!r?.opened) showToast("Click the andvari toolbar icon to search all your logins");
 }
 
 async function useStrongPassword(f: LoginForm): Promise<void> {
@@ -1382,7 +1373,7 @@ function init(): void {
         // can fire synchronously inside the input/change events fillForm dispatches — arming after
         // the round-trip would arm it too late to be consumed.
         recordLoginGesture();
-        void fillItem(msg.itemId, f, false).then(sendResponse);
+        void fillItem(msg.itemId, f).then(sendResponse);
         return true; // keep the channel open for the async outcome
       }
       if (msg.type === "fillCard") {

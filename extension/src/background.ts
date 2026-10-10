@@ -47,6 +47,7 @@ import type {
 } from "./messages";
 import { currentCode, isValidTotp, normalizeTotp } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
+import { revealGate } from "./revealgate";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor, stepUsernameFor, type StepUsername } from "./savetarget";
 import { capturedSiteUri } from "./siteurl";
@@ -68,8 +69,8 @@ import { applyServerSwitch, purgeServerDataFor } from "./serverswitch";
  * where `chrome` aliases `browser`.)
  *
  * Message protocol = src/messages.ts (THE CONTRACT). Secret egress is `reveal` only, gated on
- * host-match ∨ a one-shot popup fill grant ∨ an explicit user pick — see the contract's trust
- * model. Lock policy: chrome.alarms "autolock" re-armed by every message answered with a live
+ * host-match ∨ a one-shot popup fill grant ∨ the popup's own explicit reveal (never a page's —
+ * revealgate.ts) — see the contract's trust model. Lock policy: chrome.alarms "autolock" re-armed by every message answered with a live
  * session (client-policy autoLockSeconds; 0 disables), "resync" refreshes items every 5 min —
  * the alarm floor under the live dirty-bell WebSocket (events.ts), which nudges the same resync
  * within ~1–2 s of a peer write while a session exists.
@@ -1766,10 +1767,9 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return { locked: false, matches: matchesFor(msg.host).map((i) => toMatchItem(i, true)) } satisfies Res<"matches">;
     }
     case "allItems": {
-      // Deliberately NOT sender-gated: the in-page "Search all logins…" dropdown must work inside
-      // iframe-hosted login forms, so this answers any injected frame while unlocked — the popup
-      // issues the identical call. See the messages.ts contract header for the full statement of
-      // the trade (isolated world + closed shadow root bound it; no secret ever rides a list).
+      // Popup ONLY (security review 2026-10): the in-page search-all that once needed the whole
+      // inventory in every frame now hands off to the popup, so a page frame gets nothing here.
+      if (sender.tab !== undefined) return { locked: !session, items: [] } satisfies Res<"allItems">;
       if (!session) return { locked: true, items: [] } satisfies Res<"allItems">;
       const q = (msg.query ?? "").trim().toLowerCase();
       const items = loginItems()
@@ -1927,6 +1927,8 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return cardChipOffer(sender); // C1 §C2 — page-triggered, so it is in PASSIVE_MSGS ([K13])
     case "openPopupForCards":
       return openPopupForCards(sender); // C1 §C4 — a real isTrusted click, deliberately NOT passive
+    case "openPopupForSearch":
+      return openPopupForSearch(sender); // root cause B hand-off — a real, visibility-guarded click; NOT passive
     case "cardFillOffers":
       return cardFillOffers(sender);
     case "fillCardFromPopup":
@@ -2744,7 +2746,7 @@ function senderHost(sender: chrome.runtime.MessageSender): string | null {
   return hostOfUrl(sender.origin);
 }
 
-/** Contract reveal rules: host-match ∨ one-shot popup grant (consumed) ∨ explicit user pick.
+/** Contract reveal rules: host-match ∨ one-shot popup grant (consumed) ∨ the popup's explicit pick.
  *  Cut M (v2 #14): failures carry a seam `code` so the fill surfaces render canon copy — the
  *  raw `error` strings here are debug detail and must never reach a user. */
 // ---- usage ledger (spec 02 §8.2, design 2026-08-22-login-health) ----
@@ -2877,8 +2879,15 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
   // without allow-same-origin has an opaque origin but a perfectly real `location.hostname`.
   // The popup keeps `msg.host` (no tab; its host comes from `activeTabHost()` under activeTab).
   const webHost = sender.tab !== undefined ? senderHost(sender) : normalizeHost(msg.host);
+  // Security review 2026-10 (root cause B): a TAB sender's `explicit` no longer skips the host
+  // match — the in-page click that set it could be steered by the page (revealgate.ts). A page
+  // frame gets a host-mismatched item only through the popup's one-shot grant below.
   let allowed =
-    msg.explicit === true || (webHost !== null && matchLogins(it.doc.login?.uris ?? [], { webHost, packageName: "" }, pslResolve));
+    revealGate({
+      fromTab: sender.tab !== undefined,
+      explicit: msg.explicit === true,
+      hostMatched: webHost !== null && matchLogins(it.doc.login?.uris ?? [], { webHost, packageName: "" }, pslResolve),
+    }) === "allow";
   const tabId = sender.tab?.id;
   // A popup fill grant is redeemable ONLY by the tab's TOP frame (fillFromPopup targets frameId 0).
   // Without this, a host-matched top frame leaves the grant armed and a hostile cross-origin
@@ -3262,6 +3271,28 @@ async function openPopupForSave(sender: chrome.runtime.MessageSender): Promise<R
     return { opened: true }; // resolve ⇒ opened (the popup renders the locked unlock screen)
   } catch {
     return { opened: false }; // reject ⇒ not opened (the banner line names the toolbar)
+  }
+}
+
+/** Security review 2026-10 (root cause B): the in-page "Search all logins…" row hands off HERE
+ *  instead of revealing anything in the page. Cross-site picks happen in the popup — extension-owned
+ *  UI a page can neither draw over nor script — whose Fill mints the one-shot grant reveal() honours.
+ *  The chip's contract ([S9] focused-window active tab, frame 0, [A5] mints/selects/enumerates
+ *  nothing, honest `opened`); FORBIDDEN, as for the chip: opening popup.html as a tab or window.
+ *  Frame 0 only, because the popup fills the top frame only — opening it from a sub-frame's pick
+ *  would offer to fill a different form than the one the user clicked in. */
+async function openPopupForSearch(sender: chrome.runtime.MessageSender): Promise<Res<"openPopupForSearch">> {
+  const tabId = sender.tab?.id;
+  if (tabId === undefined || sender.tab?.active !== true || sender.frameId !== 0) return { opened: false };
+  const [current] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (current?.id === undefined || current.id !== tabId) return { opened: false };
+  const fn = (chrome.action as unknown as { openPopup?: () => Promise<unknown> }).openPopup;
+  if (typeof fn !== "function") return { opened: false }; // absent → honest false
+  try {
+    await fn.call(chrome.action);
+    return { opened: true };
+  } catch {
+    return { opened: false }; // reject ⇒ not opened (the toast names the toolbar)
   }
 }
 

@@ -2702,7 +2702,9 @@ class AndvariViewModel(
             // every other unlocked view. Idle-class reason (F26): the autofill gate only
             // drops a session because its idle window expired. The two §F.9 recovery screens
             // are unlocked views too — a reveal over a dead session must die with it.
-            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus || s.screen is Screen.Trash || s.screen is Screen.RecoverySetup || s.screen is Screen.RecoveryCapture) lock(idleReason)
+            // Security review 2026-10 (wave-6 LOW): Health was missing — it renders item names,
+            // usernames, URIs and breach/reuse verdicts, all decrypted state that must die with the lock.
+            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus || s.screen is Screen.Trash || s.screen is Screen.RecoverySetup || s.screen is Screen.RecoveryCapture || s.screen is Screen.Health) lock(idleReason)
             return
         }
         // A-copyGate: the rescue copy holds `busy`, but any OTHER op finishing mid-copy
