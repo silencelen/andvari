@@ -94,15 +94,6 @@ const val INVITE_TOKEN_MIN_CHARS = 16
 const val SERVER_VERSION = io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
 
 /**
- * The POST /api/v1/admin/users wire shape (#21): InviteResponse + the email-dispatch outcome, so
- * "she never got it" is debuggable from the Admin UI. Server-local (NOT core Wire.kt) — the shape
- * is additive and every client decodes with ignoreUnknownKeys, so older ones simply don't see it.
- * emailStatus reports the dispatch ATTEMPT honestly: the send runs off-thread AFTER the tx commits
- * (A3), so "queued" is the ceiling — never a delivery claim. Values:
- *   queued | skipped_rate_limited | not_requested | not_configured | failed
- * Status only — the recipient/link never ride it (A4).
- */
-/**
  * The optional POST /api/v1/account/totp/setup body. Server-local and additive, like
  * [InviteCreateResponse]: `code` is the rotation gate's current code (the old TotpCodeRequest
  * shape, so a fielded rotation body still decodes), `currentAuthKey` is the password proof a first
@@ -111,6 +102,15 @@ const val SERVER_VERSION = io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERS
 @Serializable
 data class TotpSetupBody(val code: String? = null, val currentAuthKey: String? = null)
 
+/**
+ * The POST /api/v1/admin/users wire shape (#21): InviteResponse + the email-dispatch outcome, so
+ * "she never got it" is debuggable from the Admin UI. Server-local (NOT core Wire.kt) — the shape
+ * is additive and every client decodes with ignoreUnknownKeys, so older ones simply don't see it.
+ * emailStatus reports the dispatch ATTEMPT honestly: the send runs off-thread AFTER the tx commits
+ * (A3), so "queued" is the ceiling — never a delivery claim. Values:
+ *   queued | skipped_rate_limited | not_requested | not_configured | failed
+ * Status only — the recipient/link never ride it (A4).
+ */
 @Serializable
 data class InviteCreateResponse(val inviteToken: String, val email: String, val expiresAt: Long, val emailStatus: String)
 
