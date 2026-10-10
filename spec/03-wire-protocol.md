@@ -148,7 +148,12 @@ cache OFF.
 - AuthN header: `Authorization: Bearer <accessToken>`.
 - **Server-TOTP management** (authenticated): `GET /account/totp` → `{ enrolled,
   pendingSetup }`; `POST /account/totp/setup` → `{ secretBase32, otpauthUri }`
-  (pending until confirmed); `POST /account/totp/confirm { code }`;
+  (pending until confirmed). Its optional body is `{ code?, currentAuthKey? }`: an
+  enrolled account must send the current `code` to rotate; a **first** enrollment must
+  send `currentAuthKey` (verified like a password change) unless the session was minted
+  by a password login within the last 10 minutes or is TOTP-restricted (§2.6) —
+  otherwise `403 reauth_required` (`403 reauth_failed` for a wrong key, audited).
+  `POST /account/totp/confirm { code }`;
   `POST /account/totp/disable { code }`. Codes are RFC 6238 SHA-1/6-digit/30 s with a
   ±1-step window; an accepted step is single-use (replay-rejected), so a code that
   just confirmed enrollment cannot immediately re-authenticate — wait one step.
@@ -294,8 +299,12 @@ cache OFF.
 - `rejected` (audit 2026-09-13 H03) — a `put` the server can never apply AS
   SENT, answered per mutation with a `reason`: `unknown_attachment` (an `attachmentIds`
   entry names no stored attachment), `attachment_mismatch` (it exists but is bound to a
-  different item or vault — §9), or `item_attachment_quota` (the referenced total exceeds
-  `itemAttachmentsMaxBytes`). Nothing written; the rest of the batch proceeds; NOT
+  different item or vault — §9), `item_attachment_quota` (the referenced total exceeds
+  `itemAttachmentsMaxBytes`), `item_too_large` (the blob exceeds the operator's per-item
+  cap, `ANDVARI_ITEM_MAX_BYTES`, default 2 MiB of stored base64url), or
+  `user_item_quota` (the put would GROW the pusher's live item ciphertext — across every
+  vault they hold a grant to — past `ANDVARI_USER_ITEM_QUOTA_BYTES`, default 128 MiB; a
+  put that shrinks or keeps an item's size, and every delete, is never refused). Nothing written; the rest of the batch proceeds; NOT
   audited (a writer's stale reference is not an intrusion event); NEVER dedup-cached (a
   replay of the same `mutationId` is re-evaluated against the live attachment rows, so a
   client that re-uploads the file and re-sends the identical put lands). `serverItem`
@@ -310,6 +319,10 @@ cache OFF.
   since-removed file — stopped the device syncing until a sign-out that discarded every
   other queued edit. A pre-H03 client treats any status it does not know as
   "definitive — dequeue", which is why this is a status and not a new error code.
+
+`POST /sync/push` is rate-limited per user (`ANDVARI_PUSH_RATE_PER_MIN`, default 120);
+a `429 rate_limited` is transient — the rows stay queued. `POST /items/{id}/restore`
+applies the same item cap and quota as a thrown `413 item_too_large` / `413 user_item_quota`.
 
 Batch limit 200 mutations; server applies the batch in order inside ONE transaction:
 a thrown validation failure (a malformed request — `put_without_item`, `bad_op`,
@@ -376,6 +389,9 @@ client handler that existed for it was deleted as dead code, so it is struck rat
 reserved (audit H111). A policy change reaches clients through the ordinary
 `/client-policy` poll and the `rev` bell; if a dedicated frame is ever wanted it is a new
 design (backlog F54), not a promise this document already made.
+**Frame cap:** the server accepts client frames of at most **4 KiB** (the only meaningful one
+is the 4-byte `ping`); a frame header declaring more is refused from the header alone and the
+socket is closed `1009` (too big). The upgrade request itself is under the 256 KiB body cap.
 **Liveness:** browser clients reconnect a dropped bell with exponential backoff (1 s
 doubling to a 60 s cap, jittered), minting a fresh single-use ticket per attempt, and
 pull `/sync` on every (re)open to recover bells missed while down (the notifier has no

@@ -465,12 +465,22 @@ export function makeClient(session: Session | null, baseUrl: string): ApiClient 
  * so even a fire-and-forget `void` call from a sync path revokes correctly as long as it is
  * issued first, and clearing the pair is the CALLER's job (logout() no longer does it).
  * Deliberately NOT used for the "expired"/"revoked" sign-out kinds (the session is already dead
- * server-side) and NOT on lock (locking keeps the session — spec 05 T3).
+ * server-side) and NOT on lock (locking keeps the session — spec 05 T3). Resolves true when the
+ * server confirmed the revocation, false otherwise, so a caller can say so.
  */
-export async function revokeSessionBestEffort(client: Pick<ApiClient, "logout"> | null): Promise<void> {
-  if (!client) return;
-  await Promise.race([
-    client.logout().catch(() => {}), // refused/unreachable — revocation is best-effort
-    new Promise<void>((resolve) => setTimeout(resolve, LOGOUT_TIMEOUT_MS)),
+/** Shown on the sign-in card after a USER sign-out whose server-side revocation was not confirmed
+ *  (security review 2026-10): the device is wiped either way, but a copied refresh token may still
+ *  be live, and a password change from another device is what ends every session. */
+export const REVOKE_UNCONFIRMED =
+  "Signed out of this browser, but the server didn't confirm it ended the session. If this was a shared computer, change your master password from another device to end every session.";
+
+export async function revokeSessionBestEffort(client: Pick<ApiClient, "logout"> | null): Promise<boolean> {
+  if (!client) return false;
+  return Promise.race([
+    // true only when the server CONFIRMED the revocation (security review 2026-10) — an expired
+    // access token is refreshed once inside logout(), so false now means refused/unreachable/hung,
+    // never "the access token had merely expired".
+    client.logout().then((resp) => resp.ok, () => false), // refused/unreachable — best-effort
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), LOGOUT_TIMEOUT_MS)),
   ]);
 }

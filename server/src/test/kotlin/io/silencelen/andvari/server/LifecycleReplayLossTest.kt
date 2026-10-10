@@ -47,7 +47,7 @@ class LifecycleReplayLossTest {
     private val crypto = createCryptoProvider()
     private val recovery = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
     private val fingerprint = Escrow.fingerprint(crypto, recovery.publicKey)
-    private val bootstrap = "lc1-bootstrap"
+    private val bootstrap = "lc1-bootstrap-token"
     private val tmp = Files.createTempDirectory("andvari-lc1").toFile()
 
     private fun config() = Config(

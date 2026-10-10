@@ -103,11 +103,13 @@ class BodyCapTest : P4TestSupport() {
     }
 
     @Test
-    fun bodyCapBytes_exemptsStreamsAndWebSocket_capsTheRest() {
-        // Fast pin (the WS + attachment integration tests are the slow guard): the /events
-        // WebSocket upgrade and the streamed attachment upload are EXEMPT — draining a live WS
-        // channel in the layer-2 receive interceptor hangs the handshake (regressed 4 WS tests).
-        assertNull(bodyCapBytes("/api/v1/events"))
+    fun bodyCapBytes_exemptsTheStreamedUpload_capsTheRestIncludingTheWsUpgrade() {
+        // Fast pin (the WS + attachment integration tests are the slow guard): the streamed
+        // attachment upload is EXEMPT. The /events WebSocket upgrade is TIGHT for the declared-
+        // length layer (security review 2026-10) — the receive layer still skips it, because
+        // draining a live WS channel there hangs the handshake (regressed 4 WS tests once); its
+        // frames are bounded by WS_MAX_FRAME_BYTES instead (WsFrameCapTest).
+        assertEquals(BODY_CAP_TIGHT_BYTES, bodyCapBytes("/api/v1/events"))
         assertNull(bodyCapBytes("/api/v1/attachments/abc"))
         assertEquals(BODY_CAP_PUSH_BYTES, bodyCapBytes("/api/v1/sync/push"))
         // a single-item restore re-uploads that item's uncapped blob — generous, not tight, else a
