@@ -2722,6 +2722,7 @@ fun TrashScreen(vm: AndvariViewModel, ui: UiState) {
 fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
     val ctx = LocalContextCompat()
     var code by remember { mutableStateOf("") }
+    var totpPassword by remember { mutableStateOf("") }
     // The org's clipboard window, clamped exactly as every other secret-copy surface clamps it
     // (§2.3: a server value of 0 still clears — never "keep forever" for a secret).
     val clipClear = (ui.policy?.clipboardClearSeconds ?: 30).coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS)
@@ -2860,9 +2861,15 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                                 if (status.pendingSetup) "A previous setup was never confirmed — enable to restart it." else "Not enrolled.",
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            Spacer(Modifier.height(8.dp))
+                            // Security review 2026-10: the server wants the master password before a
+                            // FIRST second factor goes on, so a stolen session can't lock the owner out.
+                            SecretField("Master password", totpPassword, imeAction = ImeAction.Done, onDone = {
+                                if (totpPassword.isNotEmpty() && !ui.busy) { vm.totpBegin(totpPassword); totpPassword = "" }
+                            }) { totpPassword = it }
                             InlineError(ui.totpMessage)
                             Spacer(Modifier.height(8.dp))
-                            PrimaryButton("Enable", enabled = !ui.busy, busy = ui.busy) { vm.totpBegin() }
+                            PrimaryButton("Enable", enabled = totpPassword.isNotEmpty() && !ui.busy, busy = ui.busy) { vm.totpBegin(totpPassword); totpPassword = "" }
                         }
                     }
                 }
