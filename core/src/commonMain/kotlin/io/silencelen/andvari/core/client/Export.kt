@@ -81,9 +81,9 @@ object ExportCsv {
         val extraUris: List<String>,
         /** Login items with empty username AND password — written, but a reimport skips them. */
         val emptyUsernameAndPassword: List<String>,
-        /** Audit F08: login items whose WRITTEN text cells (name, url, username, note) lead
-         *  with a spreadsheet formula character. The no-mangling rule above is only safe
-         *  because the UI says so — this is that warning's input. */
+        /** Audit F08: login items with ANY written cell (name, url, username, password, note,
+         *  totp) that leads with a spreadsheet formula character. The no-mangling rule above is
+         *  only safe because the UI says so — this is that warning's input. */
         val formulaRisk: List<String>,
     )
 
@@ -126,11 +126,15 @@ object ExportCsv {
                 if ((doc.login?.uris?.size ?: 0) > 1) uris.add(doc.name)
                 if (doc.login?.username.isNullOrEmpty() && doc.login?.password.isNullOrEmpty()) empty.add(doc.name)
                 // Login-only because only login rows are WRITTEN: a note's name never reaches the
-                // file. The password and totp cells are deliberately NOT scanned — a generated
-                // password beginning `-` or `@` is ordinary, and a list that fires on most exports
-                // is a list nobody reads. The copy therefore steers away from spreadsheets
-                // entirely, which is the honest advice for every column.
-                val written = listOf(doc.name, doc.login?.uris?.firstOrNull() ?: "", doc.login?.username ?: "", doc.notes ?: "")
+                // file. EVERY written cell is scanned (security review 2026-10): in a shared vault a
+                // co-member authors the password and totp cells too, and a formula there reads the
+                // OTHER rows — the exporter's own passwords. The old exemption (a generated password
+                // may begin `-` or `@`) made the warning silent on exactly the cell an attacker
+                // would pick; a name that occasionally appears for an honest password costs less.
+                val written = listOf(
+                    doc.name, doc.login?.uris?.firstOrNull() ?: "", doc.login?.username ?: "",
+                    doc.login?.password ?: "", doc.notes ?: "", doc.login?.totp ?: "",
+                )
                 if (written.any { startsWithFormulaChar(it) }) formula.add(doc.name)
             }
         }

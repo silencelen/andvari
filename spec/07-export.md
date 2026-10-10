@@ -41,7 +41,10 @@ Writer rules (both impls, byte-identical output — vector-pinned):
   deterministic). `url` = `login.uris[0]` (may be empty), `note` = `notes`,
   `totp` = `login.totp` verbatim (otpauth URI or bare base32).
 - **No formula-injection mangling** (leading `=+-@` written verbatim — mangling would
-  corrupt real secrets; Chrome/Bitwarden/KeePass behave the same). Warn instead.
+  corrupt real secrets; Chrome/Bitwarden/KeePass behave the same). Warn instead — and the
+  warning covers **every written cell, password and totp included** (2026-10, security
+  review): a shared vault's co-member authors those cells, and a formula in one reads the
+  other rows of the file.
 
 The export UI MUST enumerate, **by item name** (not by count): note-type items
 (skipped), card-type items (skipped — enumerated separately, pointing the user at a

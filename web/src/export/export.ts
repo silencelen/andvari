@@ -77,9 +77,9 @@ export interface CsvWarnings {
   extraUris: string[];
   /** Login items with empty username AND password — written, but a reimport skips them. */
   emptyUsernameAndPassword: string[];
-  /** Audit F08: login items whose WRITTEN text cells (name, url, username, note) lead with a
-   *  spreadsheet formula character. The no-mangling rule above is only safe because the UI
-   *  says so — this is that warning's input. */
+  /** Audit F08: login items with ANY written cell (name, url, username, password, note, totp)
+   *  that leads with a spreadsheet formula character. The no-mangling rule above is only safe
+   *  because the UI says so — this is that warning's input. */
   formulaRisk: string[];
 }
 
@@ -122,11 +122,19 @@ export function csvWarnings(items: ItemDoc[]): CsvWarnings {
       if ((doc.login?.uris?.length ?? 0) > 1) extraUris.push(doc.name);
       if (!doc.login?.username && !doc.login?.password) emptyUsernameAndPassword.push(doc.name);
       // Login-only because only login rows are WRITTEN: a note's name never reaches the file.
-      // The password and totp cells are deliberately NOT scanned — a generated password
-      // beginning `-` or `@` is ordinary, and a list that fires on most exports is a list
-      // nobody reads. The copy therefore steers away from spreadsheets entirely, which is
-      // the honest advice for every column.
-      if ([doc.name, doc.login?.uris?.[0] ?? "", doc.login?.username ?? "", doc.notes ?? ""].some(startsWithFormulaChar)) {
+      // EVERY written cell is scanned (security review 2026-10): in a shared vault a co-member
+      // authors the password and totp cells too, and a formula there reads the OTHER rows — the
+      // exporter's own passwords. The old exemption (a generated password may begin `-` or `@`)
+      // made the warning silent on exactly the cell an attacker would pick. Core twin.
+      const written = [
+        doc.name,
+        doc.login?.uris?.[0] ?? "",
+        doc.login?.username ?? "",
+        doc.login?.password ?? "",
+        doc.notes ?? "",
+        doc.login?.totp ?? "",
+      ];
+      if (written.some(startsWithFormulaChar)) {
         formulaRisk.push(doc.name);
       }
     }
