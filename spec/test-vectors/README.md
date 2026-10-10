@@ -1,6 +1,6 @@
 # Test vectors — provenance manifest
 
-These 26 files are the shared corpus every implementation is graded against: the Kotlin
+These 27 files are the shared corpus every implementation is graded against: the Kotlin
 reference (`core/`, jvmTest), the web TypeScript engine (`web/`, vitest), and the
 extension's @noble engine (`extension/`, `node --test`). `scripts/verify.sh` greens all
 three suites off *these* bytes, so a divergence in any engine reds that engine rather
@@ -73,7 +73,7 @@ reference implementation named in each row.
 | `urimatch.json` | URI matching + autofill field classification (spec 02 §3), incl. the H65 one-time-code override (hintless `<input type=password name=otp>` → NONE) | core `autofill/UriMatchVectorTest` / `CardClassifyVectorTest` / `PslVectorTest` / `UriMatchIdnaVectorTest`, web `vault/urimatch.test.ts`, ext `urimatch.vectors.test.ts` |
 | `vaulthealth.json` | vault-health rankings: strength/reuse rows, staleness buckets + ORDER, duplicate clusters + refusals (design 2026-08-23); and since 2026-09-13 (audit H42) the **`writes` block** — what the engines WRITE: the composed merge doc, `planKeep` (passwordHistory's only writer), `planDismiss`, `planCheck` (okAt carry-forward, snooze horizon), `planUnsnooze`, every reader / cross-vault refusal verbatim under a real `roles` map. Its own item list, so the frozen derived keys kept their bytes. Docs are compared as canonical JSON — null-valued keys and empty arrays dropped on both sides (absent vs `null`/`[]` is one value to every reader and two encodings across the language boundary); everything else, array ORDER included, exact | core `VaultHealthVectorsTest`, web `ui/vaulthealth.vectors.test.ts` |
 
-## Hand-authored (9)
+## Hand-authored (10)
 
 No generator writes these. Each is edited by hand, in the same change that moves the
 behaviour it pins, and reviewed as a fleet-wide behaviour change.
@@ -87,6 +87,7 @@ behaviour it pins, and reviewed as a fleet-wide behaviour change.
 | `card.json` | card number normalize + brand derivation | table-shaped expectations (digit stripping, brand ranges) authored against the card-brand specs | core `autofill/CardNormalizeVectorTest` / `CardFillTest`, web `vault/card.test.ts` / `extension-pins.test.ts`, ext `card.test.ts` |
 | `cardform.json` | card-form detection + field-kind refinement | synthetic form fixtures drawn from a real checkout corpus, including the negative cases (a login form that must stay a login form) | core `autofill/CardFormVectorTest` / `CardFillTest`, ext `detect.cards.test.ts` / `cardfill.test.ts` |
 | `cardfill.json` | card fill fidelity: expiry adaptation, select matching, brand synonyms | its `tables` block is the **normative** copy of the brand-synonym / contains-word / month tables that both engines deep-equal their compiled-in tables against — the vector is the source, not a derivative | core `autofill/CardFillVectorTest` / `CardFillTest`, ext `cardfill.test.ts` |
+| `itemdoc-validate.json` | the decrypted-document shape check (spec 02 §3.2, 2026-10, security review 2026-10): which co-member-authored item docs every engine quarantines, and when a vault meta `name` is displayable | the verdicts are policy decisions written from the spec text (what counts as malformed, path-safe, an integer); no engine derives them. Canonical integer tokens only — `1.0`/exponent forms are a parse-representation difference no writer emits | core `ItemDocShapeVectorTest`, web `vault/itemdoc-shape.test.ts`, ext `itemdocshape.test.ts` |
 | `usagekey.json` | the usage-ledger key derivation `usageKey = HKDF(VK(personal))` + its AD (spec 02 §8.2) | the expected value was computed by an **independent third implementation**, so it pins "correct", not merely "the engines agree" — two mirrored-but-equally-wrong impls would still match each other | core `UsageKeyVectorTest`, web `vault/usage.test.ts`, ext `usage.test.ts` |
 | `usageledger.json` | the usage ledger's parse / merge / record / prune / serialize rules (spec 02 §8.2, 2026-09-13, audit H92): string-typed numbers rejected, one malformed entry costs that entry and never the ledger, max-merge, backwards-clock clamp, the byte-exact wire shape | the parse-tolerance decisions are a contract three hand-mirrored suites had already drifted on while green; `expected` is written from the spec text, not derived from any engine. Integers only — fractional stamps/counts are a double-vs-long representational difference no writer emits and this file does not grade | core `UsageLedgerVectorsTest`, web `vault/usage.vectors.test.ts`, ext `usage.vectors.test.ts` |
 
