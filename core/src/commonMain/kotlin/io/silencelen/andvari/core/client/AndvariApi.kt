@@ -7,15 +7,19 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.prepareGet
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentLength
 import io.ktor.http.contentType
 import io.ktor.http.encodeURLPathPart
 import io.ktor.serialization.kotlinx.json.json
+import io.ktor.utils.io.readAvailable
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ApiError
 import io.silencelen.andvari.core.model.AttachmentMeta
@@ -62,6 +66,7 @@ import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.SyncResponse
 import io.silencelen.andvari.core.model.TokenPair
+import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.CryptoProvider
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.TotpCodeRequest
@@ -81,6 +86,8 @@ open class ApiException(val status: Int, val code: String, message: String) : Ex
  * natives wire it via their state holders' upgradeRequired surface).
  */
 class UpgradeRequiredException(code: String, message: String) : ApiException(426, code, message)
+
+private const val ATTACHMENT_SIZE_MISMATCH = "attachment does not match its declared size"
 
 data class Tokens(val accessToken: String, val refreshToken: String)
 
@@ -432,10 +439,54 @@ class AndvariApi(
         return resp.body()
     }
 
-    suspend fun downloadAttachment(attachmentId: String): ByteArray {
-        val resp = request("GET", "/api/v1/attachments/${pathSeg(attachmentId)}")
-        if (!resp.status.isSuccess()) throw errorFrom(resp)
-        return resp.body()
+    /**
+     * Download an attachment's stored bytes, which MUST be exactly [expectedBytes] long
+     * ([Attachments.wireLength] of the ref's declared size — security review 2026-10). The size is
+     * authored by whoever wrote the item, so it is a claim: the body is STREAMED and the read stops
+     * the moment it passes [expectedBytes], so no response — however long — is buffered beyond the
+     * claim, and a body of any other length is refused. That is what makes the declared size safe
+     * for the backup cap and the desktop transfer bound to rely on.
+     */
+    suspend fun downloadAttachment(attachmentId: String, expectedBytes: Long): ByteArray {
+        val path = "/api/v1/attachments/${pathSeg(attachmentId)}"
+        if (expectedBytes <= 0 || expectedBytes > Int.MAX_VALUE - 8) throw CryptoException("attachment size out of range")
+        return downloadBounded(path, expectedBytes.toInt(), retry = true)
+    }
+
+    private suspend fun downloadBounded(path: String, expected: Int, retry: Boolean): ByteArray {
+        var refresh = false
+        val bytes = http.prepareGet(baseUrl + path) { common(auth = true) }.execute { resp ->
+            if (resp.status == HttpStatusCode.Unauthorized && retry && tokens != null) {
+                refresh = true
+                null
+            } else {
+                if (!resp.status.isSuccess()) throw errorFrom(resp)
+                readExactly(resp, expected)
+            }
+        }
+        // Same one-shot refresh as request(): a failed refresh re-sends once and surfaces its 401.
+        if (refresh) {
+            tryRefresh()
+            return downloadBounded(path, expected, retry = false)
+        }
+        return bytes!!
+    }
+
+    private suspend fun readExactly(resp: HttpResponse, expected: Int): ByteArray {
+        resp.contentLength()?.let { if (it != expected.toLong()) throw CryptoException(ATTACHMENT_SIZE_MISMATCH) }
+        val ch = resp.bodyAsChannel()
+        // Grow toward the claim instead of allocating it up front: a lie must not cost its size.
+        var buf = ByteArray(minOf(expected + 1, 1 shl 16))
+        var n = 0
+        while (true) {
+            if (n == buf.size) buf = buf.copyOf(minOf(buf.size.toLong() * 2, expected + 1L).toInt())
+            val r = ch.readAvailable(buf, n, buf.size - n)
+            if (r < 0) break
+            n += r
+            if (n > expected) throw CryptoException(ATTACHMENT_SIZE_MISMATCH)
+        }
+        if (n != expected) throw CryptoException(ATTACHMENT_SIZE_MISMATCH)
+        return if (n == buf.size) buf else buf.copyOf(n)
     }
 
     /**

@@ -80,7 +80,9 @@ export function planAttachments(orderedItems: VaultItem[], cap: number = MAX_TOT
   let totalBytes = 0;
   for (const item of orderedItems) {
     for (const ref of item.doc.attachments ?? []) {
-      if (totalBytes + ref.size > cap) {
+      // ref.size is the author's claim: a non-positive one is skipped like an over-cap one
+      // (security review 2026-10; store.downloadAttachment refuses a body that contradicts it).
+      if (ref.size <= 0 || ref.size > cap - totalBytes) {
         overCap.push(ref.name);
       } else {
         included.push({ item, ref });
