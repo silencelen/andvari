@@ -31,6 +31,7 @@ object FillBinding {
     private const val K_FIELDS = "fields"
     private const val K_CC = "cc"
     private const val K_FORM_KIND = "formKind"
+    private const val K_FOCUSED = "focused"
     private const val F_ID = "id"
     private const val F_KIND = "kind"
     private const val F_DOMAIN = "domain"
@@ -59,6 +60,7 @@ object FillBinding {
         putParcelableArrayList(K_FIELDS, ArrayList(form.fields.map(::fieldBundle)))
         putParcelableArrayList(K_CC, ArrayList(form.ccFields.map(::fieldBundle)))
         putString(K_FORM_KIND, form.formKind.name)
+        form.focusedId?.let { putParcelable(K_FOCUSED, it) }
     }
 
     private fun fieldBundle(f: ParsedField): Bundle = Bundle().apply {
@@ -78,7 +80,7 @@ object FillBinding {
         val fields = b.bundleList(K_FIELDS)?.map { fieldFrom(it) ?: return null } ?: return null
         val cc = b.bundleList(K_CC)?.map { fieldFrom(it) ?: return null } ?: return null
         val formKind = b.getString(K_FORM_KIND)?.let { n -> FormKind.entries.firstOrNull { it.name == n } } ?: return null
-        return ParsedForm(fields, pkg, cc, formKind)
+        return ParsedForm(fields, pkg, cc, formKind, b.autofillId(K_FOCUSED))
     }
 
     private fun fieldFrom(b: Bundle): ParsedField? {

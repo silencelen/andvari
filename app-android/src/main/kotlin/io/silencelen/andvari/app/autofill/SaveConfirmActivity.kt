@@ -401,7 +401,7 @@ class SaveConfirmActivity : ComponentActivity() {
                         val doc = ItemDoc(
                             type = "login",
                             name = creds.title(),
-                            login = LoginData(username = creds.username, password = creds.password, uris = listOf(creds.uri())),
+                            login = LoginData(username = creds.username, password = creds.password, uris = creds.storedUris()),
                         )
                         withContext(Dispatchers.IO) { engine.save(null, doc) } // new item in the personal vault
                     }

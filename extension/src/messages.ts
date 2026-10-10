@@ -204,9 +204,9 @@ export type UnlockCode =
  *  SW error string, which used to leak "locked"/"save failed (conflict)" into the banner). */
 export type SaveErrorCode = "locked" | "conflict" | "rejected" | "failed";
 
-/** TOTP-add failure code (setTotp / addTotpFromPage, design 2026-08-12) — mapped to copy by the
- *  surface. `exists` = the add-only contract refused a replace; `not_allowed` = wrong sender or
- *  the page path's exactly-one-eligible-match derivation failed; `invalid` = the shared
+/** TOTP-add failure code (setTotp, design 2026-08-12) — mapped to copy by the
+ *  surface. `exists` = the add-only contract refused a replace; `not_allowed` = a tab sender (the
+ *  write is popup-only — security review 2026-10 retired the page lane); `invalid` = the shared
  *  normalize + parse gate rejected the secret; `read_only` (G21) = a reader-role vault the server
  *  would refuse the push against — the honest SW backstop for the suppressed page-side offer. */
 export type TotpAddCode = "locked" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
@@ -302,11 +302,15 @@ export type Req =
    *  sender gets an empty list (contract header). */
   | { type: "allItems"; query?: string }
   /** Content, SIGNUP FORMS ONLY: is this just-typed password already used by another login?
-   *  Answers a COUNT — no password, and no item identity, ever comes back. UNLOCKED-ONLY by
-   *  design: answering it while locked would require a membership oracle over the vault's
-   *  PASSWORDS, which is strictly more disclosure than the locked compartment already carries
-   *  (see content.ts checkPasswordReuse for the full argument). Locked ⇒ {locked:true,count:0}. */
+   *  UNLOCKED-ONLY by design: answering it while locked would require a membership oracle over the
+   *  vault's PASSWORDS, which is strictly more disclosure than the locked compartment already
+   *  carries (see content.ts checkPasswordReuse for the full argument). Security review 2026-10:
+   *  NOTHING comes back to the page side — `ok` only says the ask was received. A hit is kept
+   *  SW-side for the tab and shown on the toolbar badge and in the popup (`reuseNotice`). */
   | { type: "passwordReuse"; password: string }
+  /** Popup ONLY: the active tab's pending reuse warning, if any (consumed by the read). A tab
+   *  sender gets null — the count must never reach a page frame. */
+  | { type: "reuseNotice" }
   /** Popup: all cards for the copy-only Cards group (query filters name/subtitle). */
   | { type: "cardItems"; query?: string }
   /** Secret for a fill. The SW hands out the secret only when (a) the caller's host matches the
@@ -343,7 +347,7 @@ export type Req =
    *  click/Enter, or the SW's own `fillItem` delivery — a popup fill is a user click this document
    *  cannot see, and the sites that auto-submit on fill are exactly the ones that would lose the
    *  banner without it. */
-  | { type: "capturedCredential"; url: string; username: string; password: string }
+  | { type: "capturedCredential"; username: string; password: string }
   /** Content (G2 [X2-A3]): a card form was submitted under a trusted gesture — the frame's OWN card
    *  inputs, Luhn-gated content-side, NEVER the CVV. The SW re-Luhns, discards any capture whose
    *  `sender.origin !== topOrigin(tabId)` ([X2-A2] same-origin gate — a cross-origin/PSP frame never
@@ -395,21 +399,6 @@ export type Req =
    *  the shared normalizeTotp + parse-accept gate itself (a surface's validation is a
    *  convenience, never the gate). */
   | { type: "setTotp"; itemId: string; totp: string }
-  /** Content (TOP frame, PASSIVE): the page shows an otpauth:// enrollment link — may the
-   *  banner offer to add it? EXACTLY this literal — **no host/href member** ([A2]: the SW
-   *  derives the host from browser-set `sender.origin` only; a page-controlled member would be
-   *  an offer-manufacture input). Answers yes IFF the vault is unlocked, the host has EXACTLY
-   *  ONE matching login, and that login has no code yet — ambiguity fails closed to the popup
-   *  path. Carries back only the item's display NAME (metadata the matches seam already exposes
-   *  to this page's own dropdown). [K13]: a page can mint otpauth links at will, so this stream
-   *  is DOM-driveable → PASSIVE (never defers the idle autolock). */
-  | { type: "totpOffer" }
-  /** Content (TOP frame, banner Add click): commit the page-offered otpauth secret. The SW
-   *  RE-DERIVES the single eligible login from `sender.origin` at accept time — an itemId
-   *  never crosses this seam — and re-runs the full gate: unlocked ∧ exactly-one-match ∧
-   *  target still code-less ∧ normalize + parse-accept. NON-passive: rides the banner's
-   *  isTrusted click, i.e. genuine user activity. */
-  | { type: "addTotpFromPage"; totp: string }
   /** Content (each frame load): report host so the SW can badge the tab. */
   | { type: "pageInfo"; host: string }
   /** Surface → SW: a secret was just copied — arm the SW backstop clipboard-clear alarm (E1-4).
@@ -512,7 +501,9 @@ export type Res<T extends Req["type"]> = T extends "status"
         : T extends "matches"
           ? { locked: boolean; matches: MatchItem[] }
           : T extends "passwordReuse"
-            ? { locked: boolean; count: number }
+            ? { ok: boolean }
+          : T extends "reuseNotice"
+            ? { count: number } | null
           : T extends "allItems"
             ? { locked: boolean; items: MatchItem[] }
             : T extends "reveal"
@@ -544,11 +535,6 @@ export type Res<T extends Req["type"]> = T extends "status"
                             ? { ok: boolean; code?: string; secondsLeft?: number }
                             : T extends "setTotp"
                               ? { ok: boolean; code?: TotpAddCode; error?: string }
-                              : /** The offer carries the item NAME only — never an id, never a uri list. */
-                                T extends "totpOffer"
-                                ? { offer: boolean; itemName?: string }
-                                : T extends "addTotpFromPage"
-                                  ? { ok: boolean; code?: TotpAddCode; error?: string }
                             : T extends "pageInfo"
                               ? { matchCount: number; locked: boolean }
                               : T extends "cardItems"
