@@ -360,6 +360,14 @@ class Config(
             val enumSecret = env("ANDVARI_ENUM_SECRET")?.takeIf { it.isNotBlank() }?.let { Bytes.fromB64(it) }
                 ?: error("ANDVARI_ENUM_SECRET must be set (>=32 random bytes, base64url) — refusing to start with a guessable enumeration secret")
             require(enumSecret.size >= 32) { "ANDVARI_ENUM_SECRET must decode to >=32 bytes" }
+            // Security review 2026-10: blank is UNSET, never "the empty token" — an older server minted a
+            // live any-email admin invite for "" whenever the variable was present but blank, which is
+            // the shipped template's own default and the documented post-enrollment state. A non-blank
+            // token too short to be a secret is a misconfiguration: fail closed like ENUM_SECRET.
+            val bootstrapToken = env("ANDVARI_BOOTSTRAP_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
+            if (bootstrapToken != null && bootstrapToken.length < INVITE_TOKEN_MIN_CHARS) {
+                error("ANDVARI_BOOTSTRAP_TOKEN must be blank (no bootstrap) or at least $INVITE_TOKEN_MIN_CHARS random characters — refusing to start with a guessable admin invite")
+            }
             return Config(
                 host = env("ANDVARI_HOST") ?: "127.0.0.1",
                 port = numEnv(env, "ANDVARI_PORT", 8080).toInt(),
@@ -371,7 +379,7 @@ class Config(
                 recoveryFingerprint = env("ANDVARI_RECOVERY_FINGERPRINT") ?: "",
                 enumSecret = enumSecret,
                 publicHostname = env("ANDVARI_PUBLIC_HOSTNAME"),
-                bootstrapToken = env("ANDVARI_BOOTSTRAP_TOKEN"),
+                bootstrapToken = bootstrapToken,
                 // Production KDF floor (spec 01 §9's hard rule: never below 64 MiB / ops 3).
                 minKdfMemBytes = numEnv(env, "ANDVARI_MIN_KDF_MEM", 67_108_864L),
                 minKdfOps = numEnv(env, "ANDVARI_MIN_KDF_OPS", 3L),

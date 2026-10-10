@@ -37,7 +37,7 @@ class SaveRetryAttachmentTest {
     private val crypto = createCryptoProvider()
     private val recovery = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
     private val fingerprint = Escrow.fingerprint(crypto, recovery.publicKey)
-    private val bootstrap = "retry-bootstrap"
+    private val bootstrap = "retry-bootstrap-token"
     private val tmp = Files.createTempDirectory("andvari-retry").toFile()
 
     private fun config() = Config(
