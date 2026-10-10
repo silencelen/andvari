@@ -356,11 +356,13 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     // path (design §G2 [X2-A3]) — a shadow-blind Enter in a card field must retarget the same way.
     // PLUS one added 2026-08-22 by the signup reuse alert's `focusout` listener: a new-password
     // field inside a shadow root blurs shadow-blind exactly like it focuses, so it retargets the
-    // same way or the warning silently never fires on those checkouts. SIX total; reverting any to
+    // same way or the warning silently never fires on those checkouts. PLUS one added 2026-10 by
+    // the reuse alert's per-value custody `input` listener (security review, root cause E) — it
+    // must see the same shadow-retargeted field the keydown armed. SEVEN total; reverting any to
     // e.target drops the count. The submit listener and the click submit-control probe stay
     // deliberate non-members (submit does not compose; the control probe walks the WHOLE path).
     // The `[=(]` prefix keeps the count over CODE shapes only.
-    expect(ct.match(/[=(] ?e\.composedPath\(\)\[0\]/g)).toHaveLength(6);
+    expect(ct.match(/[=(] ?e\.composedPath\(\)\[0\]/g)).toHaveLength(7);
     // [K15] RE-SCOPED (design 2026-07-26 §Gate+pins, deliberate): the C1 chip adds a SECOND
     // consumer to the focusin listener, and the design's binding resolution is
     // `const t = e.composedPath()[0] ?? null; maybeOpen(t); void maybeCardChip(t);` — ONE retarget
@@ -523,7 +525,8 @@ describe("Tier-3 card autofill pins (design 2026-07-23-…-tier3.md §7) — V1�
       bg.match(/onUpdated\.addListener\(\(tabId, changeInfo\) => \{\s*if \(changeInfo\.status !== "loading"\) return;[\s\S]*?\n\}\);/)?.[0] ?? "";
     expect(handler.length, "the status===loading card-clear handler must exist").toBeGreaterThan(0);
     expect(handler).toContain("getBadgeText({ tabId })");
-    expect(handler).toContain('cur === CARD_BADGE_TEXT ? chrome.action.setBadgeText({ tabId, text: "" })');
+    // (2026-10: the reuse warning's "!" is nav-lifetime too — it was about the page the user left.)
+    expect(handler).toContain('cur === CARD_BADGE_TEXT || cur === REUSE_BADGE_TEXT ? chrome.action.setBadgeText({ tabId, text: "" })');
     expect(handler).toContain("delete st.cardForms");
   });
 });
@@ -1436,7 +1439,7 @@ describe("2026-08-30 audit pins (extension lane) — KLKEY residency/wipe, pendi
   it("checkPasswordReuse gates BEFORE the send, and the password egresses at exactly one call site", () => {
     const fn = spanOf(ct, "async function checkPasswordReuse(", "// ---- capture engine ----");
     expect(fn).toContain("!shouldAskReuse({");
-    expect(fn).toContain('const r = await safeSend({ type: "passwordReuse", password: value });');
+    expect(fn).toContain('await safeSend({ type: "passwordReuse", password: value });');
     // Gate ahead of egress — reordering the send above shouldAskReuse trips this, not just review.
     expect(fn.indexOf("!shouldAskReuse({")).toBeGreaterThan(-1);
     expect(fn.indexOf("!shouldAskReuse({")).toBeLessThan(fn.indexOf('safeSend({ type: "passwordReuse"'));

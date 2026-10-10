@@ -196,20 +196,21 @@ test("H01 — passwordReuse is in PASSIVE_MSGS (page-driveable: value-set + trus
   assert.ok(set.includes('"passwordReuse"'), "passwordReuse must be passive");
 });
 
-// ---- H02 (recheck R04): the typed mark is consumed by the ask, so each answer costs a keystroke ----
+// ---- H02, per value since the 2026-10 security review: only the user-typed VALUE is askable ----
 
-test("H02 — checkPasswordReuse CONSUMES the typed mark right after it records the ask", () => {
+test("H02 — checkPasswordReuse asks only about the value the user's keystrokes produced", () => {
   const content = readFileSync(new URL("./content.ts", import.meta.url), "utf-8");
   const ask = spanOf(content, "async function checkPasswordReuse(", "// ---- capture engine ----");
+  const gate = "typedByUser: reuseCustody.askable(input, value),";
   const rec = "reuseAsked.set(input, value);";
-  const consume = "reuseTyped.delete(input);";
   const send = 'await safeSend({ type: "passwordReuse", password: value });';
-  for (const a of [rec, consume, send]) assert.ok(ask.includes(a), `checkPasswordReuse anchor missing: ${a}`);
-  // The mark is per-FIELD and a page drives trusted focus/blur at will: without the consume, one
-  // real keystroke armed the membership oracle for every later `value = guess; blur()`.
-  assert.ok(ask.indexOf(rec) < ask.indexOf(consume) && ask.indexOf(consume) < ask.indexOf(send), "record → consume → send, in that order");
-  // The mark is still only ever SET by a trusted keydown (the listener) — never by the ask path.
-  assert.ok(!ask.includes("reuseTyped.add("), "the ask path must never mint the mark");
+  for (const a of [gate, rec, send]) assert.ok(ask.includes(a), `checkPasswordReuse anchor missing: ${a}`);
+  assert.ok(ask.indexOf(gate) < ask.indexOf(rec) && ask.indexOf(rec) < ask.indexOf(send), "gate → record → send, in that order");
+  // The per-FIELD mark it replaces let a page swap a guess in after each real keystroke; custody is
+  // only ever fed by the trusted keydown/input listeners — never by the ask path.
+  assert.ok(!/reuseCustody\.(keydown|input)\(/.test(ask), "the ask path must never feed custody");
+  assert.ok(content.includes("if (reuseTracked(t)) reuseCustody.keydown(t, {"), "the trusted keydown listener arms custody");
+  assert.ok(content.includes("reuseCustody.input(t, t.value,"), "the trusted input listener settles it");
 });
 
 // ---- H20 (recheck R01/R03): every put path lands a `conflict` and materializes the displaced version ----

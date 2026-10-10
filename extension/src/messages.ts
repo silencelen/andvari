@@ -302,11 +302,15 @@ export type Req =
    *  sender gets an empty list (contract header). */
   | { type: "allItems"; query?: string }
   /** Content, SIGNUP FORMS ONLY: is this just-typed password already used by another login?
-   *  Answers a COUNT — no password, and no item identity, ever comes back. UNLOCKED-ONLY by
-   *  design: answering it while locked would require a membership oracle over the vault's
-   *  PASSWORDS, which is strictly more disclosure than the locked compartment already carries
-   *  (see content.ts checkPasswordReuse for the full argument). Locked ⇒ {locked:true,count:0}. */
+   *  UNLOCKED-ONLY by design: answering it while locked would require a membership oracle over the
+   *  vault's PASSWORDS, which is strictly more disclosure than the locked compartment already
+   *  carries (see content.ts checkPasswordReuse for the full argument). Security review 2026-10:
+   *  NOTHING comes back to the page side — `ok` only says the ask was received. A hit is kept
+   *  SW-side for the tab and shown on the toolbar badge and in the popup (`reuseNotice`). */
   | { type: "passwordReuse"; password: string }
+  /** Popup ONLY: the active tab's pending reuse warning, if any (consumed by the read). A tab
+   *  sender gets null — the count must never reach a page frame. */
+  | { type: "reuseNotice" }
   /** Popup: all cards for the copy-only Cards group (query filters name/subtitle). */
   | { type: "cardItems"; query?: string }
   /** Secret for a fill. The SW hands out the secret only when (a) the caller's host matches the
@@ -497,7 +501,9 @@ export type Res<T extends Req["type"]> = T extends "status"
         : T extends "matches"
           ? { locked: boolean; matches: MatchItem[] }
           : T extends "passwordReuse"
-            ? { locked: boolean; count: number }
+            ? { ok: boolean }
+          : T extends "reuseNotice"
+            ? { count: number } | null
           : T extends "allItems"
             ? { locked: boolean; items: MatchItem[] }
             : T extends "reveal"

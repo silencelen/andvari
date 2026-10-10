@@ -172,9 +172,11 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     empty).
   - **Signup reuse alert (`src/reusealert.ts`)** — when you type your own password into a
     registration form instead of taking the generated one, the extension says so if that password
-    is already on another login in the vault. It fires on **blur**, never on input, so a typed
-    value never streams to the SW keystroke by keystroke, and only for a signup form's
-    new-password field — a sign-in re-typing its saved password is not reuse, and warning there
+    is already on another login in the vault: the toolbar badge shows **!** and the popup says how
+    many other logins use it. The warning is never drawn in the page, which could otherwise read
+    it back, and only a value your own keystrokes produced is ever checked. It fires on **blur**,
+    never on input, so a typed value never streams to the SW keystroke by keystroke, and only for
+    a signup form's new-password field — a sign-in re-typing its saved password is not reuse, and warning there
     would fire on every login the user ever performs. Never while *we* are filling (a generated
     password is unique by construction), never twice for the same settled value, and never below
     four characters. **Locked, it stays quiet rather than implying uniqueness:** answering the

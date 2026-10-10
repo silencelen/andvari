@@ -139,6 +139,10 @@ const BADGE_INK = "#1a1509"; // …treasury charcoal (web --gold / --btn-ink)
 // (refreshTabBadge), and it is the sentinel the [A4] loading handler clears so it never outlives the
 // form. Same gold/charcoal chip — no separate color, no new permission.
 const CARD_BADGE_TEXT = "•";
+// Security review 2026-10 (root cause E): the signup reuse warning's extension-owned signal. It
+// outranks the login count while it is live (the user just typed a reused password on this tab);
+// the popup shows the sentence and consumes it. Same chip, no new permission.
+const REUSE_BADGE_TEXT = "!";
 // formatVersion discipline lives in format.ts (MAX_ITEM_FORMAT_VERSION read ceiling;
 // LOGIN_FORMAT_VERSION new-login seal fv) — chrome-free so the web pin suite imports it.
 // Automated (non-user) messages that must NOT re-arm the idle lock — else a page auto-reloading
@@ -1113,6 +1117,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   chipRepairLast.delete(tabId);
   pendingCardSave.delete(tabId); // [X2-A2b] a top-level nav voids any pending card save (PAN)
   cardCaptureDedupe.delete(tabId);
+  reuseNotices.delete(tabId); // the warning was about the page the user left
   // V4 (design §V4): a nav invalidates this tab's card registry (below), so a "card here" dot must
   // not outlive the form — clear it NOW, but ONLY when the badge IS that dot. A login count outranks
   // the dot and is repainted by the destination's own pageInfo, so it is left untouched (getBadgeText/
@@ -1120,7 +1125,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   // origins) where no pageInfo would ever arrive to clear a stale dot.
   chrome.action
     .getBadgeText({ tabId })
-    .then((cur) => (cur === CARD_BADGE_TEXT ? chrome.action.setBadgeText({ tabId, text: "" }) : undefined))
+    .then((cur) => (cur === CARD_BADGE_TEXT || cur === REUSE_BADGE_TEXT ? chrome.action.setBadgeText({ tabId, text: "" }) : undefined))
     .catch(() => {});
   void (async () => {
     try {
@@ -1151,6 +1156,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   topOriginPendingClear.delete(tabId);
   chipOfferLast.delete(tabId);
   reuseAskLast.delete(tabId); // H02: same lifetime as the chip throttle
+  reuseNotices.delete(tabId);
   chipRepairLast.delete(tabId);
   void (async () => {
     await ensureLoaded();
@@ -1382,6 +1388,7 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   cardGrants.clear();
   pendingCardSave.clear(); // [X2-A2b] pending card saves hold the PAN — locked means no PAN at rest
   cardCaptureDedupe.clear();
+  reuseNotices.clear(); // a reuse answer is an unlocked-vault fact — it never outlives the session
 
   // Arm decision (attemptArm, computed by armGate above). `signout` skips arming and forces a full wipe;
   // idle/manual attempt to arm — but ONLY when the storage.session compartment is trusted-only (breaker
@@ -1831,9 +1838,11 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // UNLOCKED-ONLY (messages.ts contract): no session ⇒ no answer, and deliberately no
       // locked-state digest fallback — that would be a vault-wide PASSWORD oracle living in the
       // locked compartment. The comparison happens HERE, against already-decrypted items in SW
-      // memory; the count is the only thing that leaves, so a caller learns "yes, N others" and
-      // never which item or which password.
-      if (!session) return { locked: true, count: 0 } satisfies Res<"passwordReuse">;
+      // memory. Security review 2026-10 (root cause E): the count no longer leaves for the page
+      // side at all — the in-page toast it drove was page-readable. A hit is recorded for the tab
+      // and shown in extension-owned UI (REUSE_BADGE_TEXT + the popup's `reuseNotice`); every
+      // answer to the frame is the same bare `ok`.
+      if (!session) return { ok: false } satisfies Res<"passwordReuse">;
       // H02 (2026-09-13 audit): the unlocked side WAS the oracle — the trigger (a trusted
       // focusout) is page-driveable and the answer is page-readable by hit-testing the toast. The
       // real gate is content-side (a trusted keystroke, reusealert.ts typedByUser); this is the
@@ -1841,17 +1850,30 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // own content script and its own toast, so it could run the probe entirely inside itself;
       // (2) one answer per tab per REUSE_ASK_MIN_GAP_MS — a human settles one password at a time,
       // a probe loop wants hundreds a second. Both refusals answer the silent shape (count 0),
-      // which reuseWarning renders as nothing; silence is never an all-clear on this path.
+      // which records nothing; silence is never an all-clear on this path.
       const tabId = sender.tab?.id;
-      if (tabId === undefined || sender.frameId !== 0) return { locked: false, count: 0 } satisfies Res<"passwordReuse">;
+      if (tabId === undefined || sender.frameId !== 0) return { ok: false } satisfies Res<"passwordReuse">;
       const now = Date.now();
       const last = reuseAskLast.get(tabId);
-      if (last !== undefined && now - last < REUSE_ASK_MIN_GAP_MS) return { locked: false, count: 0 } satisfies Res<"passwordReuse">;
+      if (last !== undefined && now - last < REUSE_ASK_MIN_GAP_MS) return { ok: false } satisfies Res<"passwordReuse">;
       reuseAskLast.set(tabId, now);
       const pw = msg.password;
-      if (!pw) return { locked: false, count: 0 } satisfies Res<"passwordReuse">;
-      const count = session.items.filter((i) => i.doc.type === "login" && i.doc.login?.password === pw).length;
-      return { locked: false, count } satisfies Res<"passwordReuse">;
+      if (!pw) return { ok: false } satisfies Res<"passwordReuse">;
+      const hits = session.items.filter((i) => i.doc.type === "login" && i.doc.login?.password === pw).length;
+      if (hits > 0) reuseNotices.set(tabId, { count: hits });
+      else reuseNotices.delete(tabId); // the user changed their mind to a unique one: drop the stale warning
+      refreshTabBadge(tabId);
+      return { ok: true } satisfies Res<"passwordReuse">;
+    }
+    case "reuseNotice": {
+      // Popup ONLY — the count must never reach a page frame (that was the oracle).
+      if (sender.tab !== undefined) return null satisfies Res<"reuseNotice">;
+      const tabId = await contextTabId(sender);
+      const n = tabId === undefined ? undefined : reuseNotices.get(tabId);
+      if (tabId === undefined || n === undefined || !session) return null satisfies Res<"reuseNotice">;
+      reuseNotices.delete(tabId); // shown once; the badge goes back to its normal signal
+      refreshTabBadge(tabId);
+      return { count: n.count } satisfies Res<"reuseNotice">;
     }
     case "totp": {
       // G14 (2026-08-30 audit): POPUP ONLY — enforce the messages.ts "Popup: live TOTP code"
@@ -3102,7 +3124,8 @@ function refreshTabBadge(tabId: number): void {
     }
   }
   const loginCount = host !== "" ? matchesFor(host).length : 0;
-  const text = loginCount > 0 ? String(loginCount) : top !== null && eligibleCardFrames(tabId, top).length > 0 ? CARD_BADGE_TEXT : "";
+  const reuse = session !== null && reuseNotices.has(tabId); // outranks the count: it is about what the user just typed
+  const text = reuse ? REUSE_BADGE_TEXT : loginCount > 0 ? String(loginCount) : top !== null && eligibleCardFrames(tabId, top).length > 0 ? CARD_BADGE_TEXT : "";
   chrome.action.setBadgeText({ tabId, text }).catch(() => {});
 }
 
@@ -3128,6 +3151,9 @@ const chipRepairLast = new Map<number, number>();
  *  settles two new passwords inside a second. Cleared with the tab (tabs.onRemoved). */
 const REUSE_ASK_MIN_GAP_MS = 1000;
 const reuseAskLast = new Map<number, number>();
+/** Security review 2026-10: tab → the live signup reuse warning (an exact-match count). SW memory
+ *  only, like pendingCardSave: cleared on navigation, lock, tab close, and by the popup's read. */
+const reuseNotices = new Map<number, { count: number }>();
 
 /** [S4b] Repair on MISSING RECORD — the post-idle and post-lock states. `pageInfo` fires once at
  *  content init and `rescanCardForms` re-sends only `cardFormInfo`, so once the recorded top origin
