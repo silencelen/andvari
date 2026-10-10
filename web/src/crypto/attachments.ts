@@ -14,6 +14,17 @@ export const STREAM_ABYTES = 17; // secretstream per-chunk overhead
 export const CIPHER_CHUNK = CHUNK + STREAM_ABYTES;
 export const HEADER_BYTES = 24;
 
+/**
+ * The exact stored/wire length (header ‖ chunks) of a `plainSize`-byte attachment (spec 02 §6) —
+ * what the server must serve for a ref that declares that size. Strictly increasing, so a body of
+ * exactly this length decrypts to exactly `plainSize` bytes or not at all. Null for a size no
+ * attachment can have. Core `Attachments.wireLength` twin (security review 2026-10).
+ */
+export function wireLength(plainSize: number): number | null {
+  if (!Number.isSafeInteger(plainSize) || plainSize <= 0) return null;
+  return HEADER_BYTES + plainSize + Math.ceil(plainSize / CHUNK) * STREAM_ABYTES;
+}
+
 export interface EncryptedAttachment {
   header: Uint8Array;
   ciphertext: Uint8Array;

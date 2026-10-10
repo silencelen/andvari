@@ -7,14 +7,19 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.prepareGet
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentLength
 import io.ktor.http.contentType
+import io.ktor.http.encodeURLPathPart
 import io.ktor.serialization.kotlinx.json.json
+import io.ktor.utils.io.readAvailable
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ApiError
 import io.silencelen.andvari.core.model.AttachmentMeta
@@ -61,6 +66,7 @@ import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.SyncResponse
 import io.silencelen.andvari.core.model.TokenPair
+import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.CryptoProvider
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.TotpCodeRequest
@@ -80,6 +86,8 @@ open class ApiException(val status: Int, val code: String, message: String) : Ex
  * natives wire it via their state holders' upgradeRequired surface).
  */
 class UpgradeRequiredException(code: String, message: String) : ApiException(426, code, message)
+
+private const val ATTACHMENT_SIZE_MISMATCH = "attachment does not match its declared size"
 
 data class Tokens(val accessToken: String, val refreshToken: String)
 
@@ -117,6 +125,20 @@ class AndvariApi(
     }
 
     fun currentTokens(): Tokens? = tokens
+
+    /**
+     * Every id interpolated into a request path goes through here (security review 2026-10, root
+     * cause D). Item and attachment ids arrive from OTHER members — a tombstone's itemId via
+     * /items/deleted, an attachment id from a decrypted doc — and request() attaches this device's
+     * bearer token, so a planted `../admin/users/<id>/disable#` once turned "Delete forever" into
+     * an admin action. A value that is not an id ([ItemDocShape.SAFE_ID]) is refused with an
+     * IllegalArgumentException BEFORE any request; an accepted one is percent-encoded on top.
+     * The refusal is what matters: `%2e%2e` is still `..` to a WHATWG-style resolver.
+     */
+    private fun pathSeg(id: String): String {
+        require(ItemDocShape.SAFE_ID.matches(id)) { "not an id path segment" }
+        return id.encodeURLPathPart()
+    }
 
     fun setTokens(t: Tokens?) {
         tokens = t
@@ -294,7 +316,7 @@ class AndvariApi(
     /** Feature: item history — the archived ciphertext versions of an item, newest rev first
      *  (server keeps the last 10). Grant-checked; the caller decrypts each blob under the held VK. */
     suspend fun itemVersions(itemId: String): List<ItemVersion> =
-        call<ItemVersionsResponse>("GET", "/api/v1/items/$itemId/versions").versions
+        call<ItemVersionsResponse>("GET", "/api/v1/items/${pathSeg(itemId)}/versions").versions
 
     /** Item undelete (feature): the caller's tombstoned items (grant-scoped server-side). */
     suspend fun deletedItems(): List<DeletedItem> =
@@ -302,11 +324,11 @@ class AndvariApi(
 
     /** Item undelete (feature): restore a tombstoned item from a re-encrypted version; returns the new rev. */
     suspend fun restoreItem(itemId: String, upload: ItemUpload): Long =
-        call<ItemRestoreResponse>("POST", "/api/v1/items/$itemId/restore", body = upload).rev
+        call<ItemRestoreResponse>("POST", "/api/v1/items/${pathSeg(itemId)}/restore", body = upload).rev
 
     /** Item undelete (F49): "Delete forever" — hard-delete a tombstoned item + its versions. */
     suspend fun purgeItem(itemId: String): Long =
-        call<ItemRestoreResponse>("POST", "/api/v1/items/$itemId/purge").rev
+        call<ItemRestoreResponse>("POST", "/api/v1/items/${pathSeg(itemId)}/purge").rev
 
     suspend fun prelogin(email: String): PreloginResponse {
         // H1 fence (spec 05 T1): the login KDF params the fresh-device client is about to derive
@@ -348,13 +370,13 @@ class AndvariApi(
 
     suspend fun lookupUser(email: String): UserLookupResponse = call("POST", "/api/v1/users/lookup", UserLookupRequest(email))
 
-    suspend fun vaultMembers(vaultId: String): List<VaultMemberSummary> = call("GET", "/api/v1/vaults/$vaultId/members")
+    suspend fun vaultMembers(vaultId: String): List<VaultMemberSummary> = call("GET", "/api/v1/vaults/${pathSeg(vaultId)}/members")
 
     suspend fun addVaultMember(vaultId: String, req: VaultMemberAdd): CreateVaultResponse =
-        call("POST", "/api/v1/vaults/$vaultId/members", req)
+        call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/members", req)
 
     suspend fun setVaultMemberRole(vaultId: String, userId: String, role: String): CreateVaultResponse =
-        call("PUT", "/api/v1/vaults/$vaultId/members/$userId", VaultMemberRole(role))
+        call("PUT", "/api/v1/vaults/${pathSeg(vaultId)}/members/${pathSeg(userId)}", VaultMemberRole(role))
 
     /**
      * [removal] is the removal proof (spec 03 §10/§11): minted by the removing owner's unlocked
@@ -373,39 +395,39 @@ class AndvariApi(
      * the server test harness's bare-removal cases.
      */
     suspend fun removeVaultMember(vaultId: String, userId: String, removal: VaultMemberRemoveRequest? = null): CreateVaultResponse =
-        call("DELETE", "/api/v1/vaults/$vaultId/members/$userId", removal?.takeIf { it.proof != null || it.nonce != null })
+        call("DELETE", "/api/v1/vaults/${pathSeg(vaultId)}/members/${pathSeg(userId)}", removal?.takeIf { it.proof != null || it.nonce != null })
 
     // ---- vault lifecycle (spec 03 §11) — refused on the public break-glass origin.
     // Foreground REST only: lifecycle ops are NEVER queued durably offline (design §2).
 
     suspend fun deleteVault(vaultId: String, req: VaultDeleteRequest): VaultDeleteResponse =
-        call("POST", "/api/v1/vaults/$vaultId/delete", req)
+        call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/delete", req)
 
     suspend fun restoreVault(vaultId: String, req: VaultRestoreRequest): CreateVaultResponse =
-        call("POST", "/api/v1/vaults/$vaultId/restore", req)
+        call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/restore", req)
 
     suspend fun deletedVaults(): List<DeletedVaultSummary> = call("GET", "/api/v1/vaults/deleted")
 
     suspend fun leaveVault(vaultId: String): CreateVaultResponse =
-        call("POST", "/api/v1/vaults/$vaultId/leave")
+        call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/leave")
 
     suspend fun offerTransfer(vaultId: String, req: TransferOfferRequest): TransferOfferResponse =
-        call("POST", "/api/v1/vaults/$vaultId/transfer", req)
+        call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/transfer", req)
 
     /** Owner cancel or target decline. */
     suspend fun cancelTransfer(vaultId: String): CreateVaultResponse =
-        call("DELETE", "/api/v1/vaults/$vaultId/transfer")
+        call("DELETE", "/api/v1/vaults/${pathSeg(vaultId)}/transfer")
 
     suspend fun acceptTransfer(vaultId: String, req: TransferAcceptRequest): CreateVaultResponse =
-        call("POST", "/api/v1/vaults/$vaultId/transfer/accept", req)
+        call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/transfer/accept", req)
 
     suspend fun updateVaultMeta(vaultId: String, req: VaultMetaUpdateRequest): CreateVaultResponse =
-        call("PUT", "/api/v1/vaults/$vaultId/meta", req)
+        call("PUT", "/api/v1/vaults/${pathSeg(vaultId)}/meta", req)
 
     // ---- attachments (spec 02 §6: body = header || ciphertext chunks) ----
 
     suspend fun uploadAttachment(attachmentId: String, itemId: String, vaultId: String, body: ByteArray): AttachmentMeta {
-        val path = "/api/v1/attachments/$attachmentId?vaultId=$vaultId&itemId=$itemId"
+        val path = "/api/v1/attachments/${pathSeg(attachmentId)}?vaultId=${pathSeg(vaultId)}&itemId=${pathSeg(itemId)}"
         suspend fun send(): HttpResponse = http.post(baseUrl + path) {
             common(auth = true)
             contentType(ContentType.Application.OctetStream)
@@ -417,10 +439,54 @@ class AndvariApi(
         return resp.body()
     }
 
-    suspend fun downloadAttachment(attachmentId: String): ByteArray {
-        val resp = request("GET", "/api/v1/attachments/$attachmentId")
-        if (!resp.status.isSuccess()) throw errorFrom(resp)
-        return resp.body()
+    /**
+     * Download an attachment's stored bytes, which MUST be exactly [expectedBytes] long
+     * ([Attachments.wireLength] of the ref's declared size — security review 2026-10). The size is
+     * authored by whoever wrote the item, so it is a claim: the body is STREAMED and the read stops
+     * the moment it passes [expectedBytes], so no response — however long — is buffered beyond the
+     * claim, and a body of any other length is refused. That is what makes the declared size safe
+     * for the backup cap and the desktop transfer bound to rely on.
+     */
+    suspend fun downloadAttachment(attachmentId: String, expectedBytes: Long): ByteArray {
+        val path = "/api/v1/attachments/${pathSeg(attachmentId)}"
+        if (expectedBytes <= 0 || expectedBytes > Int.MAX_VALUE - 8) throw CryptoException("attachment size out of range")
+        return downloadBounded(path, expectedBytes.toInt(), retry = true)
+    }
+
+    private suspend fun downloadBounded(path: String, expected: Int, retry: Boolean): ByteArray {
+        var refresh = false
+        val bytes = http.prepareGet(baseUrl + path) { common(auth = true) }.execute { resp ->
+            if (resp.status == HttpStatusCode.Unauthorized && retry && tokens != null) {
+                refresh = true
+                null
+            } else {
+                if (!resp.status.isSuccess()) throw errorFrom(resp)
+                readExactly(resp, expected)
+            }
+        }
+        // Same one-shot refresh as request(): a failed refresh re-sends once and surfaces its 401.
+        if (refresh) {
+            tryRefresh()
+            return downloadBounded(path, expected, retry = false)
+        }
+        return bytes!!
+    }
+
+    private suspend fun readExactly(resp: HttpResponse, expected: Int): ByteArray {
+        resp.contentLength()?.let { if (it != expected.toLong()) throw CryptoException(ATTACHMENT_SIZE_MISMATCH) }
+        val ch = resp.bodyAsChannel()
+        // Grow toward the claim instead of allocating it up front: a lie must not cost its size.
+        var buf = ByteArray(minOf(expected + 1, 1 shl 16))
+        var n = 0
+        while (true) {
+            if (n == buf.size) buf = buf.copyOf(minOf(buf.size.toLong() * 2, expected + 1L).toInt())
+            val r = ch.readAvailable(buf, n, buf.size - n)
+            if (r < 0) break
+            n += r
+            if (n > expected) throw CryptoException(ATTACHMENT_SIZE_MISMATCH)
+        }
+        if (n != expected) throw CryptoException(ATTACHMENT_SIZE_MISMATCH)
+        return if (n == buf.size) buf else buf.copyOf(n)
     }
 
     /**
@@ -437,7 +503,7 @@ class AndvariApi(
      * session-gated and the relay keeps nothing.
      */
     suspend fun hibpRange(prefix: String): String {
-        val resp = request("GET", "/api/v1/hibp/range/$prefix")
+        val resp = request("GET", "/api/v1/hibp/range/${pathSeg(prefix)}")
         if (!resp.status.isSuccess()) throw errorFrom(resp)
         return resp.bodyAsText()
     }

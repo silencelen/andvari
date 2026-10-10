@@ -111,7 +111,12 @@ export function idnaToAscii(host: string): string | null {
     if (ASCII_ONLY.test(label)) {
       out.push(label);
     } else {
-      const encoded = punycodeEncode(label.normalize("NFC"));
+      const nfc = label.normalize("NFC");
+      // A label of more code points than an A-label has octets can never encode to a valid one;
+      // refusing BEFORE the O(length × distinct code points) encoder runs is the bound (2026-10).
+      let cps = 0;
+      for (const _ of nfc) if (++cps > MAX_LABEL_OCTETS) return null;
+      const encoded = punycodeEncode(nfc);
       if (encoded === null) return null;
       out.push("xn--" + encoded);
     }
@@ -119,9 +124,19 @@ export function idnaToAscii(host: string): string | null {
   return out.join(".");
 }
 
+/** RFC 1035: a DNS label is at most 63 octets and a host name at most 253 (spec 02 §3.1 limits). */
+export const MAX_LABEL_OCTETS = 63;
+export const MAX_HOST_OCTETS = 253;
+/** The coarse pre-check bound in normalizeHostUnicode (2 × 253, rounded up) — never a real host. */
+const MAX_HOST_INPUT_CHARS = 512;
+
 export function normalizeHost(raw: string): string | null {
   const u = normalizeHostUnicode(raw);
-  return u === null ? null : idnaToAscii(u);
+  const a = u === null ? null : idnaToAscii(u);
+  // spec 02 §3.1 limits (2026-10, security review): no DNS name breaks these, so nothing that does
+  // can match anything — and holding to them is what bounds the punycode and PSL work.
+  if (a === null || a.length > MAX_HOST_OCTETS || a.split(".").some((l) => l.length > MAX_LABEL_OCTETS)) return null;
+  return a;
 }
 
 /** R46: the SAME normalizer stopped before the A-label step — every ASCII rule applied, the
@@ -154,7 +169,15 @@ export function normalizeHostUnicode(raw: string): string | null {
   // but a cross-origin fill. Every other omitted UTS46 mapping encodes to a label no registry
   // can hold (an under-match); this is the one that lands on a real one. Core UriMatch.kt twin.
   if (s.includes("\u1E9E")) return null;
-  s = s.trim().replace(/\.+$/, "").toLowerCase();
+  // Trailing dots stripped by a LINEAR scan (security review 2026-10): the old /\.+$/ backtracked
+  // O(n²) on a co-member-planted "....x", freezing Health and the extension's service worker.
+  s = s.trim();
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 0x2e) end--;
+  s = s.slice(0, end).toLowerCase();
+  // No real host is this long in ANY form (an A-label host is ≤ 253 octets, its U-label at most
+  // twice that in UTF-16 units); refusing here bounds every later step. Core UriMatch.kt twin.
+  if (s.length > MAX_HOST_INPUT_CHARS) return null;
   // Strip EVERY leading "www." label (not just one) — normalizeHost must be idempotent,
   // and a single-strip made normalize(normalize("www.www.x")) != normalize("www.www.x"),
   // which had the extension (which pre-normalizes) disagreeing with core/Android.

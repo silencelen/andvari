@@ -2655,12 +2655,19 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
                         }
                     } else TextButton(enabled = !state.busy, onClick = {
                         val dialog = FileDialog(null as Frame?, "Save attachment", FileDialog.SAVE)
-                        dialog.file = ref.name
+                        // The name is the item author's text (a co-member's, in a shared vault):
+                        // pre-fill a bare safe file name, and write only directly inside the folder
+                        // the dialog showed (SaveTarget — security review 2026-10).
+                        dialog.file = SaveTarget.defaultName(ref.name)
                         dialog.isVisible = true
                         val dir = dialog.directory; val file = dialog.file
                         if (dir != null && file != null) {
-                            val dest = File(dir, file)
-                            overwrite.request(dest) { state.saveAttachmentTo(ref, dest) }
+                            val dest = SaveTarget.resolve(dir, file)
+                            if (dest == null) {
+                                state.error = SAVE_OUTSIDE_FOLDER
+                            } else {
+                                overwrite.request(dest) { state.saveAttachmentTo(ref, dest) }
+                            }
                         }
                     }) { Text("Save") }
                 }

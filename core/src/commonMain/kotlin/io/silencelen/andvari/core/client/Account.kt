@@ -41,7 +41,6 @@ import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
@@ -773,7 +772,8 @@ class Account private constructor(
     /** Decrypt a vault's display name from its metaBlob (null when the VK is missing). */
     fun decryptVaultName(vaultId: String, metaBlob: String): String? = runCatching {
         val plain = Envelope.openB64(crypto, vk(vaultId), metaBlob, Ad.vaultMeta(vaultId)).decodeToString()
-        Json.parseToJsonElement(plain).jsonObject["name"]?.jsonPrimitive?.content
+        // spec 02 §4: only a JSON string is a name (web/extension parity — ItemDocShape.vaultName).
+        ItemDocShape.vaultName(Json.parseToJsonElement(plain))
     }.getOrNull()
 
     // ---- vault lifecycle (spec 03 §11) — narrow accessors, mirrors of web account.ts ----
@@ -844,7 +844,7 @@ class Account private constructor(
             Envelope.openB64(crypto, uvk, grant.wrappedVk, Ad.vk(grant.vaultId, userId))
         }
         val plain = Envelope.openB64(crypto, heldVk, metaBlob, Ad.vaultMeta(grant.vaultId)).decodeToString()
-        Json.parseToJsonElement(plain).jsonObject["name"]?.jsonPrimitive?.content
+        ItemDocShape.vaultName(Json.parseToJsonElement(plain))
     }.getOrNull()
 
     private fun vk(vaultId: String): ByteArray =
@@ -915,7 +915,13 @@ class Account private constructor(
         // paths ("undecryptable, retried on hydrate") — never a crash, envelope persists.
         if (item.formatVersion > ITEM_FORMAT_VERSION) throw CryptoException("item formatVersion ${item.formatVersion} is newer than this client supports")
         val plain = Envelope.openB64(crypto, vk(item.vaultId), blob, Ad.item(item.vaultId, item.itemId, item.formatVersion))
-        val doc = json.decodeFromString(ItemDoc.serializer(), plain.decodeToString())
+        // spec 02 §3.2 (security review 2026-10): the plaintext opened under the VK, but any writer
+        // of a shared vault holds that VK — check its shape BEFORE anything reads it. A failure
+        // rides the same runCatching paths as an undecryptable envelope: quarantined, never a crash.
+        val tree = runCatching { json.parseToJsonElement(plain.decodeToString()) }
+            .getOrElse { throw MalformedItemException("item document is not JSON") }
+        ItemDocShape.problem(tree)?.let { throw MalformedItemException("item document is malformed: $it") }
+        val doc = json.decodeFromJsonElement(ItemDoc.serializer(), tree)
         // Remember the fv monotonically (an OLDER archived version arriving via
         // decryptItemVersion must not lower it) so a later re-seal can't downgrade.
         itemFv[item.itemId] = maxOf(itemFv[item.itemId] ?: 1, item.formatVersion)

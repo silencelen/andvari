@@ -9,6 +9,7 @@ import { generate as generateMemberRecovery, openUvk as openMemberRecoveryUvk } 
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
 import { CryptoError } from "../crypto/sodium";
+import { itemDocProblem, vaultMetaName } from "./itemdoc-shape";
 import type {
   AccountKeys,
   CreateVaultRequest,
@@ -92,6 +93,19 @@ export class VaultKeyDamagedError extends Error {
     /** Debug detail only — the SENTENCE is `message`; surfaces render that, never this. */
     (this as { detail?: string }).detail = detail;
     if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+/**
+ * A decrypted item document failed the spec 02 §3.2 shape check ({@link itemDocProblem}). Thrown by
+ * {@link Account.decryptItem}; every store path catches a decrypt failure and files the item under
+ * undecryptable — QUARANTINED, kept by identity for a backup, never rendered. Not a CryptoError:
+ * the envelope opened fine, its author is what is wrong (core MalformedItemException twin).
+ */
+export class MalformedItemError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MalformedItemError";
   }
 }
 
@@ -623,7 +637,18 @@ export class Account {
     // CONTRACT (spec 02 §3): the parsed doc may carry fields this client version does not
     // know — they MUST survive a rewrite. Never rebuild a decrypted doc field-by-field;
     // edit via spread/structuredClone only, so unknown keys round-trip through encryptItem.
-    const doc = JSON.parse(fromUtf8(plain)) as ItemDoc;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fromUtf8(plain));
+    } catch {
+      throw new MalformedItemError("item document is not JSON");
+    }
+    // spec 02 §3.2 (security review 2026-10): the plaintext opened under the VK, but any writer
+    // of a shared vault holds that VK — check its shape BEFORE anything reads it. Every caller
+    // already treats a throw here as undecryptable: the item is quarantined, never rendered.
+    const problem = itemDocProblem(parsed);
+    if (problem !== null) throw new MalformedItemError(`item document is malformed: ${problem}`);
+    const doc = parsed as ItemDoc;
     // Remember the fv monotonically (an OLDER archived version arriving via
     // decryptItemVersion must not lower it) so a later re-seal can't downgrade.
     this.itemFv.set(item.itemId, Math.max(this.itemFv.get(item.itemId) ?? 1, item.formatVersion));
@@ -653,7 +678,8 @@ export class Account {
 
   decryptVaultName(vaultId: string, metaBlob: string): string {
     try {
-      return (this.decryptVaultMeta(vaultId, metaBlob).name as string) ?? "(vault)";
+      // spec 02 §4: only a JSON string is a name (core/extension parity — vaultMetaName).
+      return vaultMetaName(this.decryptVaultMeta(vaultId, metaBlob)) ?? "(vault)";
     } catch {
       return "(vault)";
     }
