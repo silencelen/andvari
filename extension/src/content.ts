@@ -19,7 +19,7 @@ import {
   showToast,
   type DropdownState,
 } from "./content-ui";
-import { reuseWarning, shouldAskReuse } from "./reusealert.ts";
+import { ReuseCustody, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import { bumpLabelGeneration, demoteCsc, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
@@ -183,11 +183,10 @@ const nativeSelectedIndexSetter = Object.getOwnPropertyDescriptor(HTMLSelectElem
  *  success under the [T7] canonical verify; a masker that re-clears after the single re-assert
  *  ends as a truthful miss, accepted). */
 function setValue(input: HTMLInputElement, value: string): void {
-  // H02: a fill replaces whatever the user typed, so the field's typed mark is cleared here — the
-  // mark is per-FIELD (not bound to a value); it is earned by a trusted keydown, cleared by a fill
-  // and consumed by each reuse ask (checkPasswordReuse), and the keydown we dispatch below is
-  // synthetic, !isTrusted, so it never re-sets it. Applies to every fill path through here.
-  reuseTyped.delete(input);
+  // H02 / security review 2026-10: a fill replaces whatever the user typed, so the field's typed
+  // custody is dropped here; the keydown and input we dispatch below are synthetic (!isTrusted), so
+  // they never feed it. Applies to every fill path through here.
+  reuseCustody.reset(input);
   input.focus();
   input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, composed: true }));
   nativeValueSetter.call(input, value);
@@ -868,12 +867,20 @@ async function useStrongPassword(f: LoginForm): Promise<void> {
 /** The last value we asked about, per field. A tab-through, or a blur that changed nothing, must
  *  not re-ask. WeakMap so an SPA's replaced field GCs away with its entry. */
 const reuseAsked = new WeakMap<HTMLInputElement, string>();
-/** H02 (2026-09-13 audit): fields that received a TRUSTED keystroke since their last fill. The
- *  one signal on this path a page cannot forge — it can author the form, set `.value` and drive
- *  trusted focus/blur with `HTMLElement.focus()`, but no page API mints a trusted keydown. Set by
- *  the capture-phase keydown listener in wiring, cleared by setValue; consulted by shouldAskReuse
- *  as `typedByUser` so a page-driven blur never reaches the SW with a guessed password. */
-const reuseTyped = new WeakSet<HTMLInputElement>();
+/** H02 (2026-09-13 audit), per VALUE since the 2026-10 security review: the value each password
+ *  field's user actually typed, as a chain of TRUSTED keystrokes ([ReuseCustody]). The one signal on
+ *  this path a page cannot forge — it can author the form, set `.value` and drive trusted focus/blur
+ *  with `HTMLElement.focus()`, but no page API mints a trusted keydown or the browser's own edit.
+ *  Fed by the capture-phase keydown + input listeners in wiring, reset by setValue; consulted by
+ *  shouldAskReuse as `typedByUser`, so a page-swapped guess never reaches the SW. */
+const reuseCustody = new ReuseCustody<HTMLInputElement>();
+
+/** Only password-shaped inputs are tracked (the reuse ask's own scope) — custody is a copy of what
+ *  was typed, and other fields' text has no business in it. A field that changes type mid-way is
+ *  simply untracked, which can only cost a warning. */
+function reuseTracked(t: HTMLInputElement): boolean {
+  return t.type === "password" || /\bnew-password\b/i.test(t.autocomplete);
+}
 
 /**
  * Warn when the password typed at REGISTRATION is one the vault already uses somewhere else.
@@ -891,7 +898,10 @@ const reuseTyped = new WeakSet<HTMLInputElement>();
  *
  * The typed value crosses to the SW on BLUR — never per keystroke — and only from a signup form's
  * new-password field. That is the same content-script→SW channel the save capture already uses,
- * so it is no new exposure; and only a COUNT comes back.
+ * so it is no new exposure. NOTHING comes back (security review 2026-10): the warning used to be
+ * a toast drawn in the page, and the page read its presence by hit-testing — a 1-bit answer per
+ * guess. The SW now keeps the count and shows it on the toolbar badge and in the popup, UI the page
+ * can neither see nor measure.
  */
 async function checkPasswordReuse(input: HTMLInputElement): Promise<void> {
   const value = typeof input.value === "string" ? input.value : "";
@@ -903,22 +913,14 @@ async function checkPasswordReuse(input: HTMLInputElement): Promise<void> {
       filling,
       isSignup: f?.isSignup ?? false,
       isNewPasswordField: f?.newPasswords.includes(input) ?? false,
-      typedByUser: reuseTyped.has(input),
+      typedByUser: reuseCustody.askable(input, value),
     })
   ) {
     return;
   }
   reuseAsked.set(input, value);
-  // H02 (recheck R04): the typed mark is CONSUMED by the ask. It is per-field, and a page can
-  // drive trusted focus/blur on its own field at will — so without this, one real keystroke
-  // would arm the membership oracle for every later `input.value = guess; blur()` at the
-  // throttle rate. Each answered ask now costs a fresh trusted keystroke; a real user re-arms it
-  // by typing (the paste-gets-no-warning tradeoff the module header documents is unchanged).
-  reuseTyped.delete(input);
-  const r = await safeSend({ type: "passwordReuse", password: value });
-  if (!r) return;
-  const warning = reuseWarning(r.count, r.locked);
-  if (warning) showToast(warning, true);
+  // Fire and forget: the answer is the SW's to show, in extension-owned UI.
+  await safeSend({ type: "passwordReuse", password: value });
 }
 
 // ---- capture engine ----
@@ -1122,15 +1124,28 @@ function init(): void {
   // isSignup/new-password itself, so this stays a cheap unconditional hand-off.
   // H02 (2026-09-13 audit): the blur alone was page-driveable (focus(); blur() fires a TRUSTED
   // focusout), which made the unlocked vault a password oracle for any granted page. The ask now
-  // also needs a trusted keystroke on THAT field — the `reuseTyped` mark, recorded by the login
-  // keydown listener below (the Enter-capture one: it already retargets shadow-blind keydowns the
-  // [U17] way, so the mark rides the same node the capture engine sees).
+  // also needs the value to be the one the user typed on THAT field — `reuseCustody`, armed by the
+  // login keydown listener below (the Enter-capture one: it already retargets shadow-blind keydowns
+  // the [U17] way, so custody rides the same node the capture engine sees) and settled here.
   document.addEventListener(
     "focusout",
     (e) => {
       if (!e.isTrusted) return;
       const t = e.composedPath()[0] as HTMLInputElement | null;
       if (t) void checkPasswordReuse(t);
+    },
+    true,
+  );
+  // Security review 2026-10: the other half of the per-value custody — the browser's own edit after
+  // a trusted keystroke. Our synthetic fill events are !isTrusted and never reach it.
+  document.addEventListener(
+    "input",
+    (e) => {
+      if (!e.isTrusted) return;
+      const t = e.composedPath()[0] ?? e.target;
+      if (!(t instanceof HTMLInputElement) || !reuseTracked(t)) return;
+      const ie = e as InputEvent;
+      reuseCustody.input(t, t.value, typeof ie.inputType === "string" ? ie.inputType : "", typeof ie.data === "string" ? ie.data : null);
     },
     true,
   );
@@ -1194,13 +1209,12 @@ function init(): void {
     (e) => {
       const t = e.composedPath()[0] ?? e.target;
       if (!e.isTrusted || !(t instanceof HTMLInputElement)) return;
-      // H02 (2026-09-13 audit): ANY trusted keystroke in a field marks it as typed-by-the-user —
-      // the one signal on the reuse-alert path a page cannot forge (it can set `.value` and drive
-      // trusted focus/blur; no page API mints a trusted keydown — and not `input`, since
-      // execCommand("insertText") fires a trusted input event from script). The mark says "a human
-      // is typing here"; shouldAskReuse owns the value rules. Recorded BEFORE the Enter check so a
-      // plain keystroke counts; decides nothing and sends nothing.
-      reuseTyped.add(t);
+      // H02 (2026-09-13 audit), per value since 2026-10: a trusted keystroke ARMS the field's typed
+      // custody with the value and caret it starts from; the input listener below checks that the
+      // browser's edit turned exactly that into the new value (execCommand("insertText") fires a
+      // trusted input too, but with no matching keystroke behind it). Recorded BEFORE the Enter
+      // check so a plain keystroke counts; decides nothing and sends nothing.
+      if (reuseTracked(t)) reuseCustody.keydown(t, { value: t.value, selStart: t.selectionStart, selEnd: t.selectionEnd, key: e.key });
       if (e.key !== "Enter") return;
       // F01: Enter in a field IS the user's submit gesture even when the page's own JS does the
       // submitting — recorded before the dropdown check, because a row pick is user activity too
