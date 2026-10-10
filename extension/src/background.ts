@@ -52,6 +52,7 @@ import { revealGate } from "./revealgate";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor, stepUsernameFor, type StepUsername } from "./savetarget";
 import { capturedSiteUri } from "./siteurl";
+import { captureBinding, requestHost } from "./senderorigin";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
@@ -138,6 +139,10 @@ const BADGE_INK = "#1a1509"; // …treasury charcoal (web --gold / --btn-ink)
 // (refreshTabBadge), and it is the sentinel the [A4] loading handler clears so it never outlives the
 // form. Same gold/charcoal chip — no separate color, no new permission.
 const CARD_BADGE_TEXT = "•";
+// Security review 2026-10 (root cause E): the signup reuse warning's extension-owned signal. It
+// outranks the login count while it is live (the user just typed a reused password on this tab);
+// the popup shows the sentence and consumes it. Same chip, no new permission.
+const REUSE_BADGE_TEXT = "!";
 // formatVersion discipline lives in format.ts (MAX_ITEM_FORMAT_VERSION read ceiling;
 // LOGIN_FORMAT_VERSION new-login seal fv) — chrome-free so the web pin suite imports it.
 // Automated (non-user) messages that must NOT re-arm the idle lock — else a page auto-reloading
@@ -162,9 +167,6 @@ const CARD_BADGE_TEXT = "•";
 // test here, so it is passive; the user's real save signal is `resolvePendingSave` (the banner
 // click), which still re-arms. The capture path itself is separately gesture-gated content-side
 // (content.ts consumeLoginGesture) — the SW cannot see a gesture, so it classifies by reachability.
-// `totpOffer` joins for the same reason as cardChipOffer: a page can mint otpauth links (and the
-// mutation ticks that re-ask) at will — DOM-driveable is not user activity. Its accept twin
-// `addTotpFromPage` stays OUT (a real banner click), as does the popup's `setTotp`.
 // H01 (2026-09-13 audit): `passwordReuse` was added in 0.23.0 AFTER F01 and never classified —
 // the F01 regression by later addition. It rides a `focusout`, and a page drives trusted focusout
 // with `HTMLElement.focus(); blur()` at frame rate on a two-password form it authored itself, so
@@ -182,7 +184,6 @@ const PASSIVE_MSGS = new Set<Req["type"]>([
   "cardChipOffer",
   "matches",
   "pendingSave",
-  "totpOffer",
   "capturedCredential",
   "passwordReuse",
 ]);
@@ -1116,6 +1117,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   chipRepairLast.delete(tabId);
   pendingCardSave.delete(tabId); // [X2-A2b] a top-level nav voids any pending card save (PAN)
   cardCaptureDedupe.delete(tabId);
+  reuseNotices.delete(tabId); // the warning was about the page the user left
   // V4 (design §V4): a nav invalidates this tab's card registry (below), so a "card here" dot must
   // not outlive the form — clear it NOW, but ONLY when the badge IS that dot. A login count outranks
   // the dot and is repainted by the destination's own pageInfo, so it is left untouched (getBadgeText/
@@ -1123,7 +1125,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   // origins) where no pageInfo would ever arrive to clear a stale dot.
   chrome.action
     .getBadgeText({ tabId })
-    .then((cur) => (cur === CARD_BADGE_TEXT ? chrome.action.setBadgeText({ tabId, text: "" }) : undefined))
+    .then((cur) => (cur === CARD_BADGE_TEXT || cur === REUSE_BADGE_TEXT ? chrome.action.setBadgeText({ tabId, text: "" }) : undefined))
     .catch(() => {});
   void (async () => {
     try {
@@ -1154,6 +1156,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   topOriginPendingClear.delete(tabId);
   chipOfferLast.delete(tabId);
   reuseAskLast.delete(tabId); // H02: same lifetime as the chip throttle
+  reuseNotices.delete(tabId);
   chipRepairLast.delete(tabId);
   void (async () => {
     await ensureLoaded();
@@ -1385,6 +1388,7 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   cardGrants.clear();
   pendingCardSave.clear(); // [X2-A2b] pending card saves hold the PAN — locked means no PAN at rest
   cardCaptureDedupe.clear();
+  reuseNotices.clear(); // a reuse answer is an unlocked-vault fact — it never outlives the session
 
   // Arm decision (attemptArm, computed by armGate above). `signout` skips arming and forces a full wipe;
   // idle/manual attempt to arm — but ONLY when the storage.session compartment is trusted-only (breaker
@@ -1767,7 +1771,10 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return scheduleClipboardClear();
     case "matches": {
       if (!session) return { locked: true, matches: [] } satisfies Res<"matches">;
-      return { locked: false, matches: matchesFor(msg.host).map((i) => toMatchItem(i, true)) } satisfies Res<"matches">;
+      // Security review 2026-10 (root cause E): a page frame's matches are its BROWSER-SET origin's
+      // (senderorigin.ts) — `msg.host` is the frame's own claim and named any host it liked.
+      const host = requestHost(sender.tab !== undefined, sender.origin, msg.host);
+      return { locked: false, matches: host === null ? [] : matchesFor(host).map((i) => toMatchItem(i, true)) } satisfies Res<"matches">;
     }
     case "allItems": {
       // Popup ONLY (security review 2026-10): the in-page search-all that once needed the whole
@@ -1831,9 +1838,11 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // UNLOCKED-ONLY (messages.ts contract): no session ⇒ no answer, and deliberately no
       // locked-state digest fallback — that would be a vault-wide PASSWORD oracle living in the
       // locked compartment. The comparison happens HERE, against already-decrypted items in SW
-      // memory; the count is the only thing that leaves, so a caller learns "yes, N others" and
-      // never which item or which password.
-      if (!session) return { locked: true, count: 0 } satisfies Res<"passwordReuse">;
+      // memory. Security review 2026-10 (root cause E): the count no longer leaves for the page
+      // side at all — the in-page toast it drove was page-readable. A hit is recorded for the tab
+      // and shown in extension-owned UI (REUSE_BADGE_TEXT + the popup's `reuseNotice`); every
+      // answer to the frame is the same bare `ok`.
+      if (!session) return { ok: false } satisfies Res<"passwordReuse">;
       // H02 (2026-09-13 audit): the unlocked side WAS the oracle — the trigger (a trusted
       // focusout) is page-driveable and the answer is page-readable by hit-testing the toast. The
       // real gate is content-side (a trusted keystroke, reusealert.ts typedByUser); this is the
@@ -1841,17 +1850,30 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // own content script and its own toast, so it could run the probe entirely inside itself;
       // (2) one answer per tab per REUSE_ASK_MIN_GAP_MS — a human settles one password at a time,
       // a probe loop wants hundreds a second. Both refusals answer the silent shape (count 0),
-      // which reuseWarning renders as nothing; silence is never an all-clear on this path.
+      // which records nothing; silence is never an all-clear on this path.
       const tabId = sender.tab?.id;
-      if (tabId === undefined || sender.frameId !== 0) return { locked: false, count: 0 } satisfies Res<"passwordReuse">;
+      if (tabId === undefined || sender.frameId !== 0) return { ok: false } satisfies Res<"passwordReuse">;
       const now = Date.now();
       const last = reuseAskLast.get(tabId);
-      if (last !== undefined && now - last < REUSE_ASK_MIN_GAP_MS) return { locked: false, count: 0 } satisfies Res<"passwordReuse">;
+      if (last !== undefined && now - last < REUSE_ASK_MIN_GAP_MS) return { ok: false } satisfies Res<"passwordReuse">;
       reuseAskLast.set(tabId, now);
       const pw = msg.password;
-      if (!pw) return { locked: false, count: 0 } satisfies Res<"passwordReuse">;
-      const count = session.items.filter((i) => i.doc.type === "login" && i.doc.login?.password === pw).length;
-      return { locked: false, count } satisfies Res<"passwordReuse">;
+      if (!pw) return { ok: false } satisfies Res<"passwordReuse">;
+      const hits = session.items.filter((i) => i.doc.type === "login" && i.doc.login?.password === pw).length;
+      if (hits > 0) reuseNotices.set(tabId, { count: hits });
+      else reuseNotices.delete(tabId); // the user changed their mind to a unique one: drop the stale warning
+      refreshTabBadge(tabId);
+      return { ok: true } satisfies Res<"passwordReuse">;
+    }
+    case "reuseNotice": {
+      // Popup ONLY — the count must never reach a page frame (that was the oracle).
+      if (sender.tab !== undefined) return null satisfies Res<"reuseNotice">;
+      const tabId = await contextTabId(sender);
+      const n = tabId === undefined ? undefined : reuseNotices.get(tabId);
+      if (tabId === undefined || n === undefined || !session) return null satisfies Res<"reuseNotice">;
+      reuseNotices.delete(tabId); // shown once; the badge goes back to its normal signal
+      refreshTabBadge(tabId);
+      return { count: n.count } satisfies Res<"reuseNotice">;
     }
     case "totp": {
       // G14 (2026-08-30 audit): POPUP ONLY — enforce the messages.ts "Popup: live TOTP code"
@@ -1883,13 +1905,11 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     }
     case "setTotp":
       return setTotp(msg, sender); // TOTP-add 2026-08-12 — popup paste-add, deliberately NOT passive
-    case "totpOffer":
-      return totpOffer(sender); // page-triggered (DOM-driveable), so it is in PASSIVE_MSGS ([K13])
-    case "addTotpFromPage":
-      return addTotpFromPage(msg, sender); // rides the banner's isTrusted Add click — NOT passive
     case "pageInfo": {
       const locked = session === null;
-      const matchCount = locked ? 0 : matchesFor(msg.host).length;
+      // Security review 2026-10 (root cause E): the count is for the sender's browser-set origin.
+      const host = requestHost(sender.tab !== undefined, sender.origin, msg.host);
+      const matchCount = locked || host === null ? 0 : matchesFor(host).length;
       const tabId = sender.tab?.id;
       // V4: the badge is the tab's ONE authority now (refreshTabBadge — login count precedence, else
       // the card discovery dot). Top frame only — an iframe's load must not repaint the tab's signal.
@@ -3104,7 +3124,8 @@ function refreshTabBadge(tabId: number): void {
     }
   }
   const loginCount = host !== "" ? matchesFor(host).length : 0;
-  const text = loginCount > 0 ? String(loginCount) : top !== null && eligibleCardFrames(tabId, top).length > 0 ? CARD_BADGE_TEXT : "";
+  const reuse = session !== null && reuseNotices.has(tabId); // outranks the count: it is about what the user just typed
+  const text = reuse ? REUSE_BADGE_TEXT : loginCount > 0 ? String(loginCount) : top !== null && eligibleCardFrames(tabId, top).length > 0 ? CARD_BADGE_TEXT : "";
   chrome.action.setBadgeText({ tabId, text }).catch(() => {});
 }
 
@@ -3130,6 +3151,9 @@ const chipRepairLast = new Map<number, number>();
  *  settles two new passwords inside a second. Cleared with the tab (tabs.onRemoved). */
 const REUSE_ASK_MIN_GAP_MS = 1000;
 const reuseAskLast = new Map<number, number>();
+/** Security review 2026-10: tab → the live signup reuse warning (an exact-match count). SW memory
+ *  only, like pendingCardSave: cleared on navigation, lock, tab close, and by the popup's read. */
+const reuseNotices = new Map<number, { count: number }>();
 
 /** [S4b] Repair on MISSING RECORD — the post-idle and post-lock states. `pageInfo` fires once at
  *  content init and `rescanCardForms` re-sends only `cardFormInfo`, so once the recorded top origin
@@ -3475,7 +3499,7 @@ async function revealCardForFill(
 
 // ---- capture → pending save → resolve ----
 
-/** Page host from a captured URL (content sends location.href), normalized like a match target. */
+/** Host of a URL (a browser-set origin), normalized like a match target. */
 function hostOfUrl(url: string): string | null {
   try {
     return normalizeHost(new URL(url).host);
@@ -3509,8 +3533,12 @@ async function capturedCredential(
   const tabId = sender.tab?.id;
   if (tabId === undefined) return { ok: false }; // captures come from pages only
   const frameId = sender.frameId ?? 0;
-  const host = hostOfUrl(msg.url);
-  if (!host) return { ok: false };
+  // Security review 2026-10 (root cause E): the capture is bound to the BROWSER-SET origin. The page
+  // URL the content script used to send let an opaque-origin (sandboxed) frame whose URL sits on a
+  // site be credited as that site, and mint a pending update of the user's login there.
+  const bound = captureBinding(sender.origin);
+  if (!bound) return { ok: false };
+  const host = bound.host;
   const st = tabs.get(tabId) ?? {};
 
   // A live pending belongs to the frame that captured it. Reject an overwrite from a DIFFERENT
@@ -3569,10 +3597,10 @@ async function capturedCredential(
     updatesItemUsername: updatable?.doc.login?.username ?? null,
     password: msg.password,
     frameId,
-    // H124: the uri a NEW item will store — `http://…` when the page was plain http (loopback /
-    // intranet), else the classic `https://<host>`. Decided at capture, where the page url is
-    // known; SW-side only (publicPending never carries it — the banner shows `host`).
-    uri: capturedSiteUri(msg.url, host),
+    // H124: the uri a NEW item will store — `http://…` when the origin is plain http (loopback /
+    // intranet), else the classic `https://<host>`. From the browser-set origin (captureBinding);
+    // SW-side only (publicPending never carries it — the banner shows `host`).
+    uri: bound.uri,
   };
   // Locked-capture posture (owner decisions 2026-08-18). A pending minted while locked holds a
   // plaintext page password in storage.session, so it carries a TTL stamp (LOCKED_PENDING_TTL_MS,
@@ -3970,11 +3998,13 @@ async function putNewCard(rec: {
   return { ok: true };
 }
 
-// ---- TOTP add (design 2026-08-12: popup paste-add + page otpauth-link offer, ADD-ONLY) ----
+// ---- TOTP add (design 2026-08-12: popup paste-add, ADD-ONLY) ----
+// Security review 2026-10 (root cause E): the page otpauth-link offer (totpOffer / addTotpFromPage)
+// is retired — a page cannot prove a link is the site's own enrolment, so the popup is the only lane.
 
-/** The ONE add-only TOTP write, shared by the popup's paste-add and the page-link accept. Both
- *  contract invariants live HERE, not in any surface: (1) ADD-ONLY — an item already carrying
- *  login.totp is refused (`exists`), so neither surface (nor a hostile page driving the banner)
+/** The ONE add-only TOTP write (the popup's paste-add). Both contract invariants live HERE, not
+ *  in any surface: (1) ADD-ONLY — an item already carrying
+ *  login.totp is refused (`exists`), so no surface
  *  can ever ROTATE a stored second factor from the extension; replacing/removing stays a
  *  web-vault edit. (2) the SW re-runs the shared normalizeTotp + parse-accept gate — the web
  *  editors' exact save rule (A5 reject-don't-corrupt) — so an unparseable secret is refused,
@@ -3990,8 +4020,8 @@ async function writeTotp(target: DecryptedItem, rawTotp: string): Promise<{ ok: 
   return { ok: false, code: r.code === "conflict" ? "conflict" : "failed", error: r.error };
 }
 
-/** Popup paste-add. Popup-only (tab senders refused — a page must never reach the pick-any-item
- *  write; its lane is the origin-bound addTotpFromPage below). Login docs only. */
+/** Popup paste-add. Popup-only (tab senders refused — a page must never reach a TOTP write).
+ *  Login docs only. */
 async function setTotp(
   msg: Extract<Req, { type: "setTotp" }>,
   sender: chrome.runtime.MessageSender,
@@ -4003,52 +4033,8 @@ async function setTotp(
   // G21: the honest SW backstop for the suppressed popup offer (MatchItem.readOnly). A reader's
   // push is refused server-side (role=="reader" ⇒ Forbidden) and used to map to the lying
   // "Could not add the code — try again." — refuse here with the honest code instead of a doomed
-  // round-trip. Mirrors linkUri / pageTotpTarget's writableItem() guards.
+  // round-trip. Mirrors linkUri's writableItem() guard.
   if (!writableItem(target)) return { ok: false, code: "read_only", error: "read-only vault" };
-  return writeTotp(target, msg.totp);
-}
-
-/** The ONE derivation both page-path halves run — the offer gate and the accept MUST agree, or
- *  the accept becomes a write the offer never described. From browser-set `sender.origin` only
- *  (captureCard's [X2-A2] guard shape): the host's matches must be EXACTLY ONE login, and it
- *  must lack a code — two matches is ambiguity (an enrollment page can't say which account),
- *  and fails closed to the popup path where the user picks the item themselves. */
-function pageTotpTarget(sender: chrome.runtime.MessageSender): DecryptedItem | null {
-  if (typeof sender.origin !== "string" || sender.origin === "" || sender.origin === "null") return null;
-  const host = hostOfUrl(sender.origin);
-  if (!host) return null;
-  const matches = matchesFor(host);
-  if (matches.length !== 1) return null;
-  const it = matches[0]!;
-  if ((it.doc.login?.totp ?? "") !== "") return null;
-  // G21: a reader-vault login can't take the add (the server denies a reader's push) — never
-  // OFFER a write that is guaranteed to die in the banner's "Could not add the code" dead end.
-  if (!writableItem(it)) return null;
-  return it;
-}
-
-/** Offer gate for the in-page banner ([K13] PASSIVE — a page can drive this at will). Answers
- *  the display NAME only: no itemId, no uris — nothing the matches seam doesn't already give
- *  this page's own dropdown. */
-function totpOffer(sender: chrome.runtime.MessageSender): Res<"totpOffer"> {
-  const none: Res<"totpOffer"> = { offer: false };
-  if (sender.tab === undefined || sender.frameId !== 0) return none; // top-frame pages only
-  if (!session) return none;
-  const target = pageTotpTarget(sender);
-  return target ? { offer: true, itemName: target.doc.name } : none;
-}
-
-/** Banner accept: RE-DERIVE the target at commit time (never trust the offer round-trip — the
- *  vault may have synced between offer and click, and an itemId never crosses the page seam),
- *  then the shared add-only write. */
-async function addTotpFromPage(
-  msg: Extract<Req, { type: "addTotpFromPage" }>,
-  sender: chrome.runtime.MessageSender,
-): Promise<Res<"addTotpFromPage">> {
-  if (sender.tab === undefined || sender.frameId !== 0) return { ok: false, code: "not_allowed", error: "top-frame pages only" };
-  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
-  const target = pageTotpTarget(sender);
-  if (!target) return { ok: false, code: "not_allowed", error: "no single eligible match" };
   return writeTotp(target, msg.totp);
 }
 

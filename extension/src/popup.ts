@@ -13,6 +13,7 @@ import { send, type CardItem, type MatchItem, type Req, type Res } from "./messa
 import { DEFAULT_SERVER_URL, getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
 import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
 import { displaySite, safeSiteUrl } from "./siteurl";
+import { reuseWarning } from "./reusealert";
 
 const FLASH_MS = 1200;
 const TOTP_PERIOD_S = 30; // ring denominator (web Vault parity)
@@ -181,6 +182,11 @@ async function refresh(): Promise<void> {
     // last focus wins, so this beats the focus race rather than relying on an appears-populated
     // role=alert. No-op if the strip is hidden (e.g. a mid-load relock).
     if (s.mustChangePassword) el("must-change").focus();
+    // Security review 2026-10: the signup reuse warning lives here (and on the badge), never in
+    // the page — an in-page toast was readable by the page, one membership bit per guess.
+    const reuse = await ask({ type: "reuseNotice" });
+    const warning = reuse ? reuseWarning(reuse.count) : null;
+    if (warning) showMsg("info", warning);
     return;
   }
   // 0.16.3: a live TOTP challenge (popup reopened mid-code-entry — the common case, since copying a
