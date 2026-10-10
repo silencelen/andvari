@@ -15,6 +15,7 @@
  * drawn as SVG geometry (sigilSpan), never a runic codepoint that tofus on font-poor hosts.
  */
 import type { MatchItem, PendingCardSave, PendingSave } from "./messages";
+import { createVisibilityGuard, type ActivationVerdict, type IoCtorLike, type VisibilityGuard } from "./visibilityguard";
 
 const UI_CSS = `
 :host { all: initial; }
@@ -100,7 +101,12 @@ const UI_CSS = `
 .hdr .sigil svg { filter: drop-shadow(0 1px 12px rgba(208, 169, 74, .4)); }
 .hdr .a-mark { color: var(--anv-gold); }
 
-.list { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+/* Security review 2026-10 (root cause B, the [S3] discipline the chip already had): ONE fixed
+   height in every state. A content-sized list made the box's painted height — which a page reads by
+   hit-testing below its own field, since elementFromPoint retargets to our host — a live monitor of
+   the lock state and of how many logins the user keeps for this site. Locked, empty and N matches
+   now all paint the same box; more rows scroll inside it. */
+.list { height: 154px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .list > * + * { border-top: 1px solid var(--anv-edge); }
 
 .row {
@@ -121,20 +127,6 @@ const UI_CSS = `
 
 .state { padding: 14px 12px; color: var(--anv-ink-dim); font-size: 12.5px; cursor: default; }
 
-.search { padding: 10px 12px; }
-.search-input {
-  width: 100%; box-sizing: border-box;
-  font: 13px var(--anv-sans);
-  color: var(--anv-ink);
-  background: var(--anv-bg-input);
-  border: 1px solid var(--anv-edge);
-  border-radius: 7px;
-  padding: 7px 9px;
-  outline: none;
-  user-select: text;
-}
-.search-input:focus { border-color: var(--anv-gold); }
-.search-input::placeholder { color: var(--anv-ink-dim); }
 
 .banner {
   position: fixed; top: 16px; right: 16px; z-index: 2147483647;
@@ -241,8 +233,9 @@ export interface DropdownState {
 export interface DropdownHandlers {
   onPick(item: MatchItem): void;
   onStrongPassword(): void;
-  onSearch(query: string): Promise<MatchItem[]>;
-  onSearchPick(item: MatchItem): void;
+  /** "Search all logins…" — hands off to the popup (security review 2026-10: a cross-site pick is
+   *  confirmed in extension-owned UI, never in this page-overlayable surface). */
+  onSearchAll(): void;
 }
 
 let shadow: ShadowRoot | null = null;
@@ -296,6 +289,40 @@ let activeIdx = -1;
  *  content.ts would instantly reopen the dropdown it just closed. A short suppression window
  *  keeps Escape meaning closed (a fresh click/refocus after it reopens normally). */
 let suppressOpenUntil = 0;
+
+/** Security review 2026-10 (root cause B): the anti-clickjacking gate every activation consults —
+ *  rationale in visibilityguard.ts. Lazy, so a frame that never shows a surface never builds the
+ *  observer. */
+let visGuard: VisibilityGuard | null = null;
+function guard(): VisibilityGuard {
+  visGuard ??= createVisibilityGuard(
+    typeof IntersectionObserver === "function" ? (IntersectionObserver as unknown as IoCtorLike) : undefined,
+    () => Date.now(),
+  );
+  return visGuard;
+}
+
+/** One refusal toast per burst — a pointer pick is a mousedown AND a click, both refused. */
+let lastRefusalToast = 0;
+
+/** May this surface be activated NOW? Reads the host's computed style at the moment of the gesture
+ *  (the observer's view lags by its delay) and tells the user, once, why a refused pick did nothing.
+ *  "arming" stays silent: it is a click in the first instants after the surface appeared, and the
+ *  next click works. */
+function activationAllowed(surface: HTMLElement | null): boolean {
+  if (!surface || !hostEl || !surface.isConnected) return false;
+  const v: ActivationVerdict = guard().check(surface, getComputedStyle(hostEl));
+  if (v === "ok") return true;
+  if (v !== "arming" && Date.now() - lastRefusalToast > 1500) {
+    lastRefusalToast = Date.now();
+    showToast(
+      v === "unsupported"
+        ? "This browser can't confirm andvari's menu is unobstructed — use the andvari toolbar icon instead"
+        : "Something on this page is covering andvari — use the andvari toolbar icon instead",
+    );
+  }
+  return false;
+}
 
 /** a11y 6d (AM-7) / Cut N: clear-then-set into a persistent off-screen region so a repeated
  *  message re-announces; assertive is reserved for the safety-critical 2FA-clipboard fallback. */
@@ -366,6 +393,7 @@ export function showCardChip(
   handlers: { onActivate: () => void; onDismiss: () => void },
 ): void {
   const root = ui();
+  if (chipEl) guard().forget(chipEl);
   chipEl?.remove(); // one live chip at a time — the module slot, cleared like closeDropdown
   chipAnchor = anchor;
   chipDismissed = handlers.onDismiss;
@@ -394,6 +422,7 @@ export function showCardChip(
   const activate = (e: Event): void => {
     if (!e.isTrusted) return;
     e.preventDefault(); // keep focus in the page field — the chip must never take it
+    if (!activationAllowed(chip)) return; // root cause B: never on a covered or transparent chip
     closeCardChip(); // [K9] the surface goes before the action: the popup is about to cover the page
     handlers.onActivate();
   };
@@ -409,6 +438,7 @@ export function showCardChip(
   chipActivate = () => handlers.onActivate();
   root.appendChild(chip);
   chipEl = chip;
+  guard().watch(chip);
   positionChip();
   // focus never enters the chip — without this it is invisible to AT. The chord rides along
   // because an untabbable surface advertises its key or the key does not exist for the user.
@@ -425,6 +455,7 @@ export function repositionCardChip(): void {
 /** The surface primitive: content.ts's [K8] dismissal calls THIS (it has already dropped its own
  *  mirror), so it must never call back — dismissChipSurface below is the direction that does. */
 export function closeCardChip(): void {
+  if (chipEl) guard().forget(chipEl);
   chipEl?.remove();
   chipEl = null;
   chipAnchor = null;
@@ -513,8 +544,7 @@ function ui(): ShadowRoot {
     if (chipEl && !(chipAnchor && path.includes(chipAnchor))) dismissChipSurface(); // [K8]
   });
   // Cut N (v2 #18): keyboard operability, on document-level CAPTURE so the keys are seen while
-  // focus sits in the page's own input (or in our shadow search box, whose stopPropagation runs
-  // later at target phase). Keys are swallowed ONLY while a surface is live — Escape while either
+  // focus sits in the page's own input. Keys are swallowed ONLY while a surface is live — Escape while either
   // is, everything else only for the dropdown, and Enter only while a row is active, so a plain
   // Enter still submits the page's form. isTrusted-gated like
   // every activation path here (anti-spoof: a page-synthesized KeyboardEvent cannot fill).
@@ -559,6 +589,7 @@ function ui(): ShadowRoot {
       if (chipEl && !dropdownEl && e.altKey && e.key === "ArrowDown") {
         e.preventDefault();
         e.stopPropagation();
+        if (!activationAllowed(chipEl)) return; // root cause B: the key path is gated like the pointer
         const act = chipActivate;
         dismissChipSurface(); // [K9] the surface goes before the action, exactly as the pointer path does
         act?.();
@@ -575,6 +606,9 @@ function ui(): ShadowRoot {
         if (activeIdx < 0) return; // no selection — the page's own submit proceeds untouched
         e.preventDefault();
         e.stopPropagation();
+        // Root cause B: a page can steer keystrokes as easily as clicks (a "press Enter to play"
+        // game over a transparent dropdown) — the key path passes the same visibility gate.
+        if (!activationAllowed(dropdownEl)) return;
         listRows[activeIdx]?.act();
       } else if (e.key === "Tab") {
         closeDropdown(); // never trap — the Tab itself proceeds (a login-field target reopens naturally)
@@ -646,7 +680,7 @@ function stateCard(text: string): HTMLElement {
   d.className = "state";
   d.textContent = text;
   // Cut N review: a state message is NOT a listbox option — hide it from AT so it never appears
-  // as an invalid listbox child. Its content is spoken via the live region on open / search-run.
+  // as an invalid listbox child. Its content is spoken via the live region on open.
   d.setAttribute("aria-hidden", "true");
   return d;
 }
@@ -670,6 +704,10 @@ function bindRowActivation(row: HTMLElement, act: () => void): void {
   const activate = (e: Event): void => {
     if (!e.isTrusted) return;
     e.preventDefault(); // keep focus on the page field so it stays fillable
+    // Security review 2026-10 (root cause B): isTrusted proves a human clicked, not that the human
+    // could SEE this row — the page owns our host element and can make it transparent or paint a
+    // decoy over it. Refused unless the dropdown is provably visible and unoccluded (IOv2).
+    if (!activationAllowed(dropdownEl)) return;
     act();
   };
   row.addEventListener("mousedown", activate);
@@ -731,54 +769,8 @@ function renderMain(body: HTMLElement, state: DropdownState, h: DropdownHandlers
   if (state.kind === "empty") body.appendChild(stateCard(`No saved login for ${state.host}`));
   else for (const m of state.matches) body.appendChild(matchRow(m, () => h.onPick(m)));
   if (state.isSignup) body.appendChild(actionRow("Use a strong password", () => h.onStrongPassword()));
-  body.appendChild(actionRow("Search all logins…", () => renderSearch(body, h)));
-}
-
-function renderSearch(body: HTMLElement, h: DropdownHandlers): void {
-  body.textContent = "";
-  resetRows();
-  // Cut N (v2 #18): in search mode the listbox is the RESULTS container (the search box is not
-  // an option) — move the role off the body it sat on in renderMain.
-  body.removeAttribute("role");
-  body.removeAttribute("aria-label");
-  const wrap = document.createElement("div");
-  wrap.className = "search";
-  const inp = document.createElement("input");
-  inp.className = "search-input";
-  inp.type = "text";
-  inp.placeholder = "Search all logins…";
-  inp.setAttribute("aria-label", "Search all logins"); // a11y 1b: placeholder is not a name
-  wrap.appendChild(inp);
-  const results = document.createElement("div");
-  results.setAttribute("role", "listbox");
-  results.setAttribute("aria-label", "andvari — matching logins");
-  body.append(wrap, results);
-
-  // Key/input events are composed — without this, page-level listeners see every
-  // keystroke typed into OUR search box. (Capture-phase snooping remains possible;
-  // our own Escape-close is capture too, so it still runs.)
-  for (const type of ["keydown", "keyup", "keypress", "input"] as const) {
-    inp.addEventListener(type, (e) => e.stopPropagation());
-  }
-
-  let seq = 0;
-  const run = async (query: string): Promise<void> => {
-    const mine = ++seq;
-    const items = await h.onSearch(query);
-    if (mine !== seq || !dropdownEl) return; // stale response, or closed while in flight
-    results.textContent = "";
-    resetRows(); // Cut N: the keyboard model tracks the freshly rendered result set
-    if (items.length === 0) results.appendChild(stateCard("No logins found"));
-    else for (const m of items) results.appendChild(matchRow(m, () => h.onSearchPick(m)));
-    // Cut N (v2 #18): result counts are invisible to a screen reader otherwise (focus stays in
-    // the search box and options never take focus).
-    announceLive(items.length === 0 ? "No logins found" : `${items.length} login${items.length === 1 ? "" : "s"} found, arrows to browse`);
-    positionDropdown(); // result list changes our height
-  };
-  inp.addEventListener("input", () => void run(inp.value));
-  void run("");
-  inp.focus();
-  positionDropdown();
+  // Root cause B: the search itself lives in the popup now — this row only opens it.
+  body.appendChild(actionRow("Search all logins…", () => h.onSearchAll()));
 }
 
 /** Cut N review: content.ts's Enter-capture hook (a document-capture keydown registered at load,
@@ -804,6 +796,7 @@ export function openDropdown(anchor: HTMLElement, state: DropdownState, handlers
   renderMain(body, state, handlers);
   root.appendChild(box);
   dropdownEl = box;
+  guard().watch(box);
   positionDropdown();
   // Cut N (v2 #18): announce availability on open — focus never enters the dropdown, so without
   // this a screen-reader user cannot know the listbox exists at all.
@@ -818,6 +811,7 @@ export function openDropdown(anchor: HTMLElement, state: DropdownState, handlers
 }
 
 export function closeDropdown(): void {
+  if (dropdownEl) guard().forget(dropdownEl);
   dropdownEl?.remove();
   dropdownEl = null;
   anchorEl = null;
@@ -826,6 +820,7 @@ export function closeDropdown(): void {
 
 function bannerShell(): { bar: HTMLElement; body: HTMLElement } {
   const root = ui();
+  if (bannerEl) guard().forget(bannerEl);
   bannerEl?.remove(); // one banner at a time — newest wins
   const bar = document.createElement("div");
   bar.className = "banner";
@@ -841,10 +836,12 @@ function bannerShell(): { bar: HTMLElement; body: HTMLElement } {
   bar.appendChild(body);
   root.appendChild(bar);
   bannerEl = bar;
+  guard().watch(bar);
   return { bar, body };
 }
 
 function closeBanner(which: HTMLElement): void {
+  guard().forget(which);
   which.remove();
   if (bannerEl === which) {
     bannerEl = null;
@@ -905,6 +902,9 @@ function offerBanner(spec: BannerSpec): void {
   bannerDecline = decline;
   primary.addEventListener("click", (e) => {
     if (!e.isTrusted) return;
+    // Root cause B: Save/Update/Add write to the vault — never on a covered or transparent banner.
+    // The ghost (decline) stays ungated: the way out is always safe.
+    if (!activationAllowed(bar)) return;
     window.clearTimeout(idle);
     bannerDecline = null; // answered: Escape must not decline what is already being saved
     primary.disabled = true;
@@ -975,23 +975,6 @@ export function showCardSaveBanner(
     errMs: 8000,
     run: onSave,
     onDismiss,
-  });
-}
-
-/** Post-fill URI backfill offer for an out-of-match (search-all) fill. The only offer whose action
- *  answers a bare boolean (there is no seam code to render) — adapted to the shared shape here. */
-export function showLinkOffer(itemName: string, host: string, onLink: () => Promise<boolean>): void {
-  offerBanner({
-    buildMsg: (msg) => msg.append("Link ", span("hl", itemName), " to ", span("hl", host), "?"),
-    primaryLabel: "Link",
-    ghostLabel: "No",
-    idleMs: 20_000,
-    okMs: 3000,
-    errMs: 6000,
-    run: async () => {
-      const ok = await onLink();
-      return { ok, text: ok ? "Linked." : "Could not link." };
-    },
   });
 }
 
