@@ -305,7 +305,12 @@ cache OFF.
   cap, `ANDVARI_ITEM_MAX_BYTES`, default 2 MiB of stored base64url), or
   `user_item_quota` (the put would GROW the pusher's live item ciphertext — across every
   vault they hold a grant to — past `ANDVARI_USER_ITEM_QUOTA_BYTES`, default 128 MiB; a
-  put that shrinks or keeps an item's size, and every delete, is never refused). Nothing written; the rest of the batch proceeds; NOT
+  put that shrinks or keeps an item's size, and every delete, is never refused), or
+  `bad_item_id` (2026-10, security review — a `put` OR `delete` whose `itemId` or `vaultId`
+  is not a canonical lowercase UUID: an itemId is handed to every other member of the vault
+  by `/items/deleted` and `/sync` and becomes a path segment of THEIR authenticated
+  `/items/{id}/…` requests, so a planted `../admin/…` must never be stored. Clients also
+  refuse any non-id path segment before sending, spec 02 §3.2). Nothing written; the rest of the batch proceeds; NOT
   audited (a writer's stale reference is not an intrusion event); NEVER dedup-cached (a
   replay of the same `mutationId` is re-evaluated against the live attachment rows, so a
   client that re-uploads the file and re-sends the identical put lands). `serverItem`

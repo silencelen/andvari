@@ -85,6 +85,30 @@ test("urimatch-idna.json match vectors — Unicode saved host ↔ punycode page 
   }
 });
 
+// Security review 2026-10: the DNS length rules that bound the work on a planted host — twin of the
+// web block in web/src/vault/urimatch.test.ts and core UriMatchIdnaVectorTest.limits.
+test("urimatch-idna.json limits — over-long labels/hosts normalize to null; trailing dot runs strip", () => {
+  for (const c of v3.limits) {
+    const actual = normalizeHost(c.input);
+    assert.equal(actual, c.expected, `normalizeHost(${c.input.slice(0, 40)}…)`);
+    if (actual !== null) assert.equal(normalizeHost(actual), actual);
+  }
+});
+
+test("a planted pathological host returns promptly (the SW runs this on unlock and every page event)", () => {
+  const fast = (label: string, fn: () => unknown) => {
+    const t = performance.now();
+    fn();
+    assert.ok(performance.now() - t < 250, `${label} took ${Math.round(performance.now() - t)} ms`);
+  };
+  let cjk = "";
+  for (let i = 0; i < 20000; i++) cjk += String.fromCodePoint(0x4e00 + i);
+  fast("50k dots then a letter", () => normalizeHost("https://" + ".".repeat(50000) + "x"));
+  fast("50k trailing dots", () => assert.equal(normalizeHost("https://example.com" + ".".repeat(50000)), "example.com"));
+  fast("20k distinct code points in one label", () => assert.equal(normalizeHost("https://" + cjk + ".com"), null));
+  fast("8k labels (PSL suffix walk)", () => pslResolve("a.".repeat(8000) + "com"));
+});
+
 // H65 (2026-09-13 audit, spec 02 §3.1 amendment) — twin of the web block in
 // web/src/vault/urimatch.test.ts. The shared classify vectors grade the one-time-code override
 // itself; these pin the edges that cannot live in a card-free shared section because core answers

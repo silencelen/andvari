@@ -12,6 +12,21 @@ object Attachments {
     const val CIPHER_CHUNK = CHUNK + STREAM_ABYTES
     const val HEADER_BYTES = 24
 
+    /**
+     * The exact stored/wire length (header ‖ chunks) of a [plainSize]-byte attachment — what the
+     * server must serve for a ref that declares that size (spec 02 §6). Strictly increasing in
+     * [plainSize], so a body of exactly this length decrypts to exactly [plainSize] bytes or not
+     * at all. Throws for a size no attachment can have (≤ 0, or beyond any representable body).
+     */
+    fun wireLength(plainSize: Long): Long {
+        if (plainSize <= 0 || plainSize > MAX_PLAIN_FOR_WIRE_LENGTH) throw CryptoException("attachment size out of range")
+        val chunks = (plainSize + CHUNK - 1) / CHUNK
+        return HEADER_BYTES + plainSize + chunks * STREAM_ABYTES
+    }
+
+    /** Far above any attachment a client could hold in one array; keeps [wireLength] overflow-free. */
+    private const val MAX_PLAIN_FOR_WIRE_LENGTH = 1L shl 50
+
     class Encrypted(val header: ByteArray, val ciphertext: ByteArray)
 
     /** Chunk + encrypt. Empty plaintext is rejected (spec: last chunk is 1..65536 bytes). */

@@ -3510,13 +3510,19 @@ class DesktopState(
         /** Audit G10: floor transfer rate for the size-scaled attachment cap — anything slower
          *  than this is indistinguishable from a stalled/black-holed server. */
         const val ATTACHMENT_MIN_BYTES_PER_SEC = 16_384L
+        /** Security review 2026-10: the most bytes the size-scaled bound will ever budget for.
+         *  An attachment's declared size is its author's claim — a co-member's, in a shared vault —
+         *  and 1e14 "bytes" deferred the idle lock for ~190 years on a stalled transfer. 64 MiB is
+         *  the most a backup ever embeds and above the 25 MiB default per-attachment cap, so an
+         *  honest single file never loses window; the worst-case deferral is ~70 minutes. */
+        const val ATTACHMENT_TIMEOUT_CEILING_BYTES = 64L * 1024 * 1024
         /** Audit G10: whole-op cap for ONE attachment download — [SYNC_TIMEOUT_MS] as the floor
          *  plus time for the bytes at [ATTACHMENT_MIN_BYTES_PER_SEC], so a legitimately large
          *  file over a slow household link is never severed while a black-holed server cannot
          *  hold [busy] — and with it the idle-lock deferral — open-endedly (the shared client's
          *  connect-only posture, [newHttpClient], is deliberate and unchanged). */
         fun attachmentTimeoutMs(sizeBytes: Long): Long =
-            SYNC_TIMEOUT_MS + sizeBytes.coerceAtLeast(0) * 1000L / ATTACHMENT_MIN_BYTES_PER_SEC
+            SYNC_TIMEOUT_MS + sizeBytes.coerceIn(0, ATTACHMENT_TIMEOUT_CEILING_BYTES) * 1000L / ATTACHMENT_MIN_BYTES_PER_SEC
         /** Audit G03: bound on the teardown usage flush ([flushUsageThenClose] / signOut) — a
          *  ranking hint may briefly outlive the keys' drop (the transport is handed to it), but
          *  it must never hold a transport — or a sign-out — open-endedly. */

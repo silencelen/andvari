@@ -47,6 +47,7 @@ import type {
 } from "./messages";
 import { currentCode, isValidTotp, normalizeTotp } from "./totp";
 import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
+import { itemDocProblem } from "./itemdocshape";
 import { revealGate } from "./revealgate";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor, stepUsernameFor, type StepUsername } from "./savetarget";
@@ -1194,7 +1195,9 @@ function ensureLoaded(): Promise<void> {
         vaultRoles: new Map(Object.entries(snap.vaultRoles ?? {})),
         // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
-        items: snap.items.map((i) => ({ ...i, formatVersion: i.formatVersion ?? 1 })),
+        // spec 02 §3.2: a snapshot persisted by a pre-check build may hold a malformed doc — the
+        // restore applies the same shape check decryptItems does (security review 2026-10).
+        items: snap.items.filter((i) => itemDocProblem(i.doc) === null).map((i) => ({ ...i, formatVersion: i.formatVersion ?? 1 })),
       };
       // Re-clamp on restore (§2.3/B1-1 defense-in-depth): a snapshot persisted by a pre-clamp
       // build could carry a server value the ceilings would have refused.
@@ -2659,10 +2662,13 @@ function decryptItems(sync: SyncResponse, vaultKeys: Map<string, Uint8Array>): D
     const vk = vaultKeys.get(it.vaultId);
     if (!vk) continue;
     try {
-      const doc = JSON.parse(
+      const doc: unknown = JSON.parse(
         new TextDecoder().decode(open(vk, fromB64(it.blob), adItem(it.vaultId, it.itemId, it.formatVersion))),
-      ) as ItemDoc;
-      items.push({ itemId: it.itemId, vaultId: it.vaultId, rev: it.rev, formatVersion: it.formatVersion, doc });
+      );
+      // spec 02 §3.2 (security review 2026-10): any writer of a shared vault can seal any JSON
+      // under its VK — a malformed doc is skipped like an undecryptable one, never admitted.
+      if (itemDocProblem(doc) !== null) continue;
+      items.push({ itemId: it.itemId, vaultId: it.vaultId, rev: it.rev, formatVersion: it.formatVersion, doc: doc as ItemDoc });
     } catch {
       /* undecryptable — skip */
     }

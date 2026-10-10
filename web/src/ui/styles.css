@@ -702,9 +702,13 @@ input.token { font-size: 15px; color: var(--gold-bright); }
 .print-note { display: none; }
 
 @media print {
-  /* Revealed passwords, card numbers, security codes (`.secret-row` covers detail, editor and
-     version history), the live TOTP digits, secure-note bodies, and every data table — Vault
-     health, staleness, the admin user and audit lists.
+  /* Revealed passwords, card numbers, security codes (`.secret-row` covers detail, the editor's
+     password and security-code rows, and version history), the live TOTP digits, secure-note
+     bodies, and every data table — Vault health, staleness, the admin user and audit lists.
+
+     `[data-print-secret]` is the opt-in for a secret-bearing control that is NOT in a
+     `.secret-row`: the editor renders the stored TOTP seed and the full card number as plain
+     inputs inside a Field, and printed both until the 2026-10 security review.
 
      `.qr-card` is here because a QR code is a MACHINE-READABLE copy of the same secret: the TOTP
      enrollment QR (Settings) encodes the otpauth URI with its base32 seed, and the admin enroll QR
@@ -714,6 +718,7 @@ input.token { font-size: 15px; color: var(--gold-bright); }
      call site; the pin in print-styles.test.ts asserts exactly that (no `<QrSvg` outside it). */
   .secret-row input,
   .secret-row textarea,
+  [data-print-secret],
   textarea,
   .totp,
   .table,

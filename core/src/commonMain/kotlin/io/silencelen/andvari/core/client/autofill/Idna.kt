@@ -51,7 +51,12 @@ internal object Idna {
             if (isAscii(label)) {
                 out.append(label)
             } else {
-                val encoded = Punycode.encode(nfc(label)) ?: return null
+                val composed = nfc(label)
+                // A label of more code points than an A-label has octets can never encode to a valid
+                // one; refusing BEFORE the O(length × distinct code points) encoder runs is the bound
+                // (security review 2026-10 — a planted 60k-code-point label stalled autofill).
+                if (codePointCount(composed) > UriMatch.MAX_LABEL_OCTETS) return null
+                val encoded = Punycode.encode(composed) ?: return null
                 out.append("xn--").append(encoded)
             }
         }
@@ -59,6 +64,13 @@ internal object Idna {
     }
 
     private fun isAscii(s: String): Boolean = s.all { it.code < 128 }
+
+    /** UTF-16 units minus low surrogates that complete a pair — JS `[...s].length`. */
+    private fun codePointCount(s: String): Int {
+        var n = 0
+        for (i in s.indices) if (!(s[i].isLowSurrogate() && i > 0 && s[i - 1].isHighSurrogate())) n++
+        return n
+    }
 }
 
 /**

@@ -208,6 +208,16 @@ raw uri (`normalizeHostUnicode`, the same normalizer stopped before the A-label 
 Vectors: `spec/test-vectors/urimatch-idna.json` (`normalize` pins the output bytes, `match`
 the outcome); the pre-existing vector files are byte-frozen and unchanged.
 
+**Length limits (amended 2026-10, security review).** The A-label result must obey RFC 1035:
+no label longer than 63 octets and no host longer than 253; a host that breaks either
+normalizes to null and matches nothing (no DNS name can break them). Implementations refuse a
+pre-encode label of more than 63 code points before running the encoder, refuse an
+intermediate host of more than 512 UTF-16 units before the `www.` strip, strip trailing dots
+by a linear scan (never a backtracking `\.+$`), and the PSL resolver refuses a host over 253
+octets. The rule bounds the work: a co-member's planted URI was otherwise quadratic in the
+punycode encoder, the trailing-dot regex and the suffix walk, on every member's device, on
+every fill and every Health open. Pinned by the `limits` section of `urimatch-idna.json`.
+
 **Captured scheme (client rule, 2026-09-13 audit H124).** A client that CREATES a uri from
 a page capture (extension auto-save / site-link, Android save) stores the scheme it actually
 observed: a plain-http page (loopback, intranet — the spec 05 F27 posture) stores `http://…`
@@ -301,6 +311,33 @@ amendment makes the two halves agree. **One frozen vector moves with it:**
 the hinted F11 cases are unchanged and stay pinned. Client-side only — no `formatVersion`, no
 wire change — and carried by the whole 0.27.0 fleet at once (core/Android/desktop, web,
 extension); an older client keeps the hinted-only rule.
+
+### 3.2 Decrypted documents are untrusted input (2026-10 amendment, security review 2026-10)
+
+A plaintext that opens under a vault key proves only that its author HOLDS that key — and every
+writer of a shared vault does (spec 05). Every client therefore checks a decrypted item document's
+**shape** before anything reads it, at its one decrypt boundary (core `Account.decryptItem`, web
+`Account.decryptItem`, extension `decryptItems`), and **quarantines** a failing document exactly as
+it would an undecryptable envelope: kept by identity so a backup enumerates it (spec 07 §2.4), never
+rendered, never matched, never edited. A malformed item can never crash or blank another member's
+vault.
+
+The rule (one implementation per engine, graded by `spec/test-vectors/itemdoc-validate.json`):
+
+- the document is a JSON object; `type` and `name` are strings;
+- `notes`, `dupeAck` are absent, null, or strings; `favorite` is absent or a boolean;
+- `login`, `card`, `check` are absent, null, or objects. In `login`: `username`/`password`/`totp`
+  absent, null or strings; `uris` absent or an array of strings; `passwordHistory` absent or an
+  array of `{password: string, retiredAt: integer}`. In `card`: every §3 field absent, null or a
+  string. In `check`: `at` an integer, `result` a string, `okAt`/`until` absent, null or integers;
+- `attachments` is absent or an array of `{id, name, size, fileKey}` where `name` and `fileKey` are
+  strings, **`id` matches `^[A-Za-z0-9_-]{1,128}$`** (it goes into an authenticated URL path,
+  spec 03), and **`size` is an integer ≥ 0** (it is a claim, checked against the ciphertext, §6);
+- "integer" means a JSON number that is integral and within ±(2^53−1);
+- unknown keys at every level are allowed and never inspected (§3 forward compatibility).
+
+A vault metaBlob's `name` (§4) is displayed only when it is a JSON string; any other value falls
+back to the client's generic vault label.
 
 ## 4. Vaults
 
@@ -402,6 +439,12 @@ master-password SHA-1; the relay keeps no state now, spec 03 §8.)
   the server persists header and chunks and never sees content or filename.
 - Decrypters MUST fail hard on: any chunk MAC failure, FINAL before last chunk,
   missing FINAL at end (truncation), or extra data after FINAL.
+- The ref's `size` (§3) is the exact plaintext length, and it is the item AUTHOR's claim —
+  a co-member's, in a shared vault. **Clients treat it as a claim (2026-10, security review):**
+  a download must be exactly `24 + size + 17·⌈size/65536⌉` bytes, and the client stops
+  reading and refuses the attachment once a body passes that length or ends short of it; the
+  backup planner (spec 07 §2.5) skips a non-positive claim and sums with overflow-safe
+  arithmetic; a client that scales a transfer timeout by `size` clamps it (desktop: 64 MiB).
 - Upload: blob first (`POST /attachments/{id}`), then the item update referencing it;
   orphaned blobs are GC'd after 24 h. Server enforces per-item and per-user quota
   from policy (v1 defaults: 25 MiB/attachment, 100 MiB/item, 1 GiB/user).

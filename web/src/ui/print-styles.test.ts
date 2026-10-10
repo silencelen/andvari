@@ -92,3 +92,25 @@ describe("H137 — secrets are blanked on paper", () => {
     expect(app).toContain("Secrets are hidden when printing");
   });
 });
+
+/**
+ * Security review 2026-10: the selector list above covered `.secret-row`, but the item EDITOR renders
+ * the stored TOTP seed (otpauth URI or base32) and the full card number as plain inputs inside a
+ * Field (`div.field`), so Ctrl+P put both on paper. Every secret-bearing control now opts in with
+ * `data-print-secret`, which the print block blanks wherever it appears.
+ */
+describe("security review 2026-10 — the editor's TOTP seed and card number are blanked too", () => {
+  const block = printBlock();
+  const vault = readFileSync(here("./Vault.tsx"), "utf8");
+
+  it("the print block blanks [data-print-secret]", () => {
+    const hidden = /([^{}]*)\{\s*visibility:\s*hidden;?\s*\}/.exec(block)![1]!;
+    expect(hidden).toContain("[data-print-secret]");
+  });
+
+  it("every editor input bound to the TOTP seed or the card number carries it", () => {
+    const inputs = vault.match(/<input[^>]*value=\{(?:login\.totp|card\.number)[^>]*>/g) ?? [];
+    expect(inputs.length, "the TOTP and card-number inputs must still exist to be checked").toBe(2);
+    for (const input of inputs) expect(input, input).toContain("data-print-secret");
+  });
+});

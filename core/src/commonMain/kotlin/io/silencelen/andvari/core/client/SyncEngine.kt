@@ -1549,7 +1549,11 @@ class SyncEngine(
 
     /** Download + decrypt one attachment (hard failure on any corruption, spec 02 §6). */
     suspend fun downloadAttachment(ref: AttachmentRef): ByteArray {
-        val bytes = api.downloadAttachment(ref.id)
+        // ref.size is the item author's claim (a co-member's, in a shared vault — security review
+        // 2026-10). The body must be exactly the length that claim implies, and the API stops
+        // reading past it, so the claim callers budget with (the backup cap, the desktop transfer
+        // bound) is the bytes actually held — and the plaintext is exactly ref.size bytes.
+        val bytes = api.downloadAttachment(ref.id, Attachments.wireLength(ref.size))
         if (bytes.size <= Attachments.HEADER_BYTES) throw CryptoException("attachment response truncated")
         return Attachments.decrypt(
             account.cryptoProvider(),

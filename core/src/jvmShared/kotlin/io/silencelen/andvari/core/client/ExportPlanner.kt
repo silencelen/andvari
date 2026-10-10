@@ -109,13 +109,19 @@ object ExportPlanner {
     }
 
     /** Greedy §2.5 plan over [items] (already in export order): every attachment that
-     *  would push the total embedded plaintext past 64 MiB is skipped by name. */
+     *  would push the total embedded plaintext past 64 MiB is skipped by name.
+     *
+     *  `ref.size` is the item author's CLAIM (a co-member's, in a shared vault — security review
+     *  2026-10). A claim of zero or less, or one that would overflow the running total, is
+     *  skipped like an over-cap one; [SyncEngine.downloadAttachment] refuses any body that
+     *  contradicts the claim, so the planned total is the plaintext the backup actually holds. */
     fun planAttachments(items: List<VaultItem>): AttachmentPlan {
         val included = ArrayList<PlannedAttachment>()
         val overCap = ArrayList<String>()
         var total = 0L
         for (item in items) for (ref in item.doc.attachments) {
-            if (total + ref.size > Backup.MAX_TOTAL_ATTACHMENT_PLAINTEXT) {
+            // Overflow-safe: compared against the headroom, never summed first.
+            if (ref.size <= 0 || ref.size > Backup.MAX_TOTAL_ATTACHMENT_PLAINTEXT - total) {
                 overCap.add(ref.name)
             } else {
                 included.add(PlannedAttachment(item, ref))

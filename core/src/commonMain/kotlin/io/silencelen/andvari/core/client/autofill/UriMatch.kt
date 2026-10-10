@@ -44,7 +44,22 @@ object UriMatch {
      * The result is always ASCII: a Unicode (U-label) host comes back as its punycode A-label,
      * so a saved `bücher.de` and the browser-reported `xn--bcher-kva.de` are one string (H22).
      */
-    fun normalizeHost(raw: String): String? = normalizeHostUnicode(raw)?.let { Idna.toAscii(it) }
+    fun normalizeHost(raw: String): String? {
+        val a = normalizeHostUnicode(raw)?.let { Idna.toAscii(it) } ?: return null
+        // spec 02 §3.1 limits (2026-10, security review): no DNS name breaks RFC 1035's lengths, so
+        // nothing that does can match anything — and holding to them bounds the punycode and PSL
+        // work a co-member's planted host could otherwise make quadratic. web/extension twins.
+        if (a.length > MAX_HOST_OCTETS || a.split('.').any { it.length > MAX_LABEL_OCTETS }) return null
+        return a
+    }
+
+    /** RFC 1035: a DNS label is at most 63 octets, a host name at most 253. */
+    const val MAX_LABEL_OCTETS = 63
+    const val MAX_HOST_OCTETS = 253
+
+    /** The coarse pre-check bound in [normalizeHostUnicode] (2 × 253, rounded up): an A-label host
+     *  is ≤ 253 octets and its U-label at most twice that in UTF-16 units — never a real host. */
+    private const val MAX_HOST_INPUT_CHARS = 512
 
     /**
      * R46: the SAME normalizer stopped before the A-label step — every ASCII rule applied, the
@@ -79,7 +94,12 @@ object UriMatch {
         // not an under-match but a cross-origin fill. Every other omitted UTS46 mapping encodes to
         // a label no registry can hold (an under-match); this is the one that lands on a real one.
         if (s.any { it.code == 0x1E9E }) return null
-        s = s.trim().trimEnd('.').lowercase()
+        s = s.trim().trimEnd('.')
+        // Refused before the www.-strip loop below, whose substring copies are O(n²) on a planted
+        // "www.www.…" (security review 2026-10). trimEnd is a linear scan — the TS twins replaced
+        // their backtracking /\.+$/ with the same loop.
+        if (s.length > MAX_HOST_INPUT_CHARS) return null
+        s = s.lowercase()
         // Strip EVERY leading "www." label (not just one) — normalizeHost must be idempotent,
         // and a single-strip made normalize(normalize("www.www.x")) ≠ normalize("www.www.x"),
         // which had the extension (which pre-normalizes) disagreeing with core/Android.
