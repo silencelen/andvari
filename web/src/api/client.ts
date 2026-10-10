@@ -332,25 +332,43 @@ export class ApiClient {
 
   /**
    * bug-web--0: best-effort sign-out revocation. Deliberately NOT routed through raw(), and
-   * deliberately NOT clearing the token pair:
-   *  - it carries its own AbortSignal, so the caller's bound (revokeSessionBestEffort's race)
-   *    actually CANCELS the POST. Abandoning a race leaves the request running, and a slow
-   *    revocation that lands after the user signed back in on this same client would have
-   *    nulled the NEW session's tokens from a `.finally` — a sign-out with a one-request lag;
-   *  - no 401 refresh-retry (raw's): a refused access token means this device session is
-   *    already gone server-side, and rotating for it would only extend that window.
+   * deliberately NOT clearing or replacing the token pair:
+   *  - ONE AbortSignal bounds every request it makes, so the caller's bound
+   *    (revokeSessionBestEffort's race) actually CANCELS them. Abandoning a race leaves requests
+   *    running, and a slow revocation that lands after the user signed back in on this same
+   *    client would have nulled the NEW session's tokens from a `.finally` — a sign-out with a
+   *    one-request lag;
+   *  - a 401 does NOT mean the session is dead (security review 2026-10): the access token
+   *    expires after 1 h, the refresh token lives 30 days, so a tab that sat locked past the hour
+   *    got a 401 here while a copied refresh token stayed valid for a month. On a 401 this spends
+   *    the CAPTURED refresh token once and revokes with the fresh access token. It never goes
+   *    through tryRefresh: that adopts and persists the new pair (setTokens), which would
+   *    resurrect the session the caller is tearing down. A refused refresh (a dead pair, or the
+   *    break-glass origin, which refuses refresh) ends it there — the 401 is returned;
    * Dropping the pair is each call site's own job, done synchronously right after (App's
    * signOut, Welcome's two capture teardowns). The pair is read HERE, synchronously at call
-   * time, so a fire-and-forget `void` call from a sync path still revokes the right session.
+   * time (before the first await), so a fire-and-forget `void` call from a sync path still
+   * revokes the right session. Resolves with the final logout response: `ok` = revoked.
    */
-  logout(): Promise<Response> {
-    const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
-    if (this.tokens) headers["Authorization"] = `Bearer ${this.tokens.accessToken}`;
-    return fetch(this.baseUrl + "/api/v1/auth/logout", {
+  async logout(): Promise<Response> {
+    const pair = this.tokens;
+    const signal = timeoutSignal(LOGOUT_TIMEOUT_MS);
+    const post = (accessToken: string | null) => {
+      const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
+      if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+      return fetch(this.baseUrl + "/api/v1/auth/logout", { method: "POST", headers, signal });
+    };
+    const first = await post(pair?.accessToken ?? null);
+    if (first.status !== 401 || !pair) return first;
+    const refreshed = await fetch(this.baseUrl + "/api/v1/auth/refresh", {
       method: "POST",
-      headers,
-      signal: timeoutSignal(LOGOUT_TIMEOUT_MS),
+      headers: { "Content-Type": "application/json", "X-Andvari-Client": CLIENT_HEADER },
+      body: JSON.stringify({ refreshToken: pair.refreshToken }),
+      signal,
     });
+    if (!refreshed.ok) return first;
+    const fresh = (await refreshed.json()) as Tokens;
+    return post(fresh.accessToken);
   }
 
   async accountKeys() {
