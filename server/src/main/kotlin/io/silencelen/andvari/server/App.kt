@@ -263,7 +263,7 @@ fun buildServices(config: Config, notifier: Notifier): Services {
     if (email == null && anyEmailEnv) {
         System.err.println("[andvari] email-invite is OFF — ${config.canonicalOriginIssue() ?: "email transport config incomplete (a full SMTP or Graph set)"}")
     }
-    return Services(repo, service, AdminService(repo, config), HibpRelay(repo, http), notifier, config, metrics, janitor, email)
+    return Services(repo, service, AdminService(repo, config), HibpRelay(http), notifier, config, metrics, janitor, email)
 }
 
 /** A purge stalled this long past its due time means the janitor is dead — alert-worthy. */
@@ -477,7 +477,7 @@ fun Application.andvariModule(services: Services) {
 
     // Lifecycle + retention janitor (spec 03 §11, spec 02 §7): vault purge, transfer-offer
     // expiry, item-tombstone GC, `changes` pruning + the oldestRetainedRev fence, and the
-    // bounded-retention prunes (sessions/mutations/audit/invites/hibp) — Janitor.kt's
+    // bounded-retention prunes (sessions/devices/mutations/audit/invites) — Janitor.kt's
     // header has the full sweep set. Daily at 04:30 local, plus one delayed on-boot pass
     // (a server down over 04:30 must not defer a due purge a whole day).
     // ANDVARI_JANITOR_DRYRUN → log-only.
@@ -1009,10 +1009,12 @@ fun Application.andvariModule(services: Services) {
         // ---- hibp relay ----
         get("/api/v1/hibp/range/{prefix}") {
             val p = requirePrincipal(call, service)
+            // Item passwords only (the Health scan, the editor's on-demand check): no client sends
+            // a master-password prefix here (security review 2026-10), and HibpRelay keeps nothing.
             // bug-server--2: a per-user bucket in the shape of its siblings (lookup 20/min,
             // client-policy 60/min), sized for the Health breach scan — one request per UNIQUE
-            // password prefix, awaited sequentially and mostly served from the 7-day cache on a
-            // rescan — so a big-vault scan never trips it while a runaway loop stays bounded.
+            // password prefix, awaited sequentially — so a big-vault scan never trips it while a
+            // runaway loop stays bounded.
             if (!limiter.allow("hibp:${p.userId}", 600, 60_000)) throw RateLimited()
             val prefix = call.parameters["prefix"] ?: throw BadRequest("no_prefix")
             // PT-L11 (CR-04): validate the k-anonymity prefix in-route → a clean 400 (bad_prefix)

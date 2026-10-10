@@ -73,8 +73,6 @@ class JanitorTest : LifecycleTestSupport() {
                 "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt,usedAt) VALUES(?,?,0,?,?,NULL)",
                 "i-live", "c@x.com", t, t + Service.DAY_MS, // in
             )
-            c.exec("INSERT INTO hibp_cache(prefix,body,fetchedAt) VALUES('AAAAA','x',?)", t - 46 * Service.DAY_MS) // out
-            c.exec("INSERT INTO hibp_cache(prefix,body,fetchedAt) VALUES('BBBBB','y',?)", t - Service.DAY_MS) // in
         }
         val changesBefore = services.count("changes")
         val mutationsBefore = services.count("mutations")
@@ -88,7 +86,6 @@ class JanitorTest : LifecycleTestSupport() {
         assertEquals(1L, res.prunedMutations)
         assertEquals(1L, res.prunedAudit)
         assertEquals(2L, res.prunedInvites)
-        assertEquals(1L, res.prunedHibp)
 
         // Survivors: exactly the inside-horizon rows (and the live rows the flow created).
         assertEquals(1L, services.count("changes"))
@@ -102,10 +99,6 @@ class JanitorTest : LifecycleTestSupport() {
         assertEquals(invitesBefore - 2, services.count("invites"))
         assertTrue(services.repo.db.read { c -> c.queryAll("SELECT tokenHash FROM invites") { it.getString(1) } }.contains("i-live"))
         assertEquals(0L, services.repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM audit WHERE type='old_event'") { it.getLong(1) } })
-        assertEquals(
-            listOf("BBBBB"),
-            services.repo.db.read { c -> c.queryAll("SELECT prefix FROM hibp_cache") { it.getString(1) } },
-        )
         // The registered device's LIVE session survived and the fence didn't over-advance:
         // an up-to-date cursor still syncs cleanly.
         val resp = client.sync(owner, maxRev)
@@ -349,9 +342,8 @@ class JanitorTest : LifecycleTestSupport() {
                 "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt,usedAt) VALUES(?,?,0,?,?,NULL)",
                 "i-expired-old", "b@x.com", t - 40 * Service.DAY_MS, t - 31 * Service.DAY_MS,
             )
-            c.exec("INSERT INTO hibp_cache(prefix,body,fetchedAt) VALUES('AAAAA','x',?)", t - 46 * Service.DAY_MS)
         }
-        val before = listOf("changes", "sessions", "mutations", "audit", "invites", "hibp_cache")
+        val before = listOf("changes", "sessions", "mutations", "audit", "invites")
             .associateWith { services.count(it) }
         assertEquals(0L, services.fence())
 
@@ -364,7 +356,6 @@ class JanitorTest : LifecycleTestSupport() {
         assertEquals(1L, res.prunedMutations)
         assertEquals(1L, res.prunedAudit)
         assertEquals(1L, res.prunedInvites)
-        assertEquals(1L, res.prunedHibp)
         // ...but nothing went, and the fence did NOT advance.
         for ((table, n) in before) assertEquals(n, services.count(table), "dry-run must not delete from $table")
         assertEquals(0L, services.fence())

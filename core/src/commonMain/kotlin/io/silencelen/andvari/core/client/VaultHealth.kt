@@ -13,9 +13,9 @@ package io.silencelen.andvari.core.client
  * Strength comes from [Strength.estimateStrength], which is ALREADY the twin of web's
  * `strength.ts` — no second scoring implementation exists or should.
  *
- * BREACH COUNTS ARE DELIBERATELY ABSENT from this type. They are fetched on demand
- * ([Strength.breachCount]), cost a network round trip, and — per CR-08 / WC-13 §E.4 — may be
- * cached only in memory, per-account, and dropped at the sign-out choke point. Threading them
+ * BREACH COUNTS ARE DELIBERATELY ABSENT from this type. They are fetched on demand (the
+ * Health scan, via [io.silencelen.andvari.core.crypto.Hibp]), cost a network round trip, and
+ * — per CR-08 / WC-13 §E.4 — may be cached only in memory, per-account, and dropped at the sign-out choke point. Threading them
  * through a pure derivation would invite exactly the at-rest cache that audit removed once.
  */
 object VaultHealth {

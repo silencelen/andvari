@@ -183,9 +183,9 @@ export function Recover({
               same vault; nothing you stored is lost.
             </div>
             {/* F31: the third surface where a master password is chosen, and the one most likely
-                to be reached BECAUSE the old one was lost — so it gets the same breach + pattern
-                cautions as enrollment and change-password. Advisory only; the reset still commits. */}
-            <Field label="New master password" hint={<MasterPasswordHint password={password} client={client} />}>
+                to be reached BECAUSE the old one was lost — so it gets the same pattern caution
+                as enrollment and change-password. Advisory only; the reset still commits. */}
+            <Field label="New master password" hint={<MasterPasswordHint password={password} />}>
               <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
             </Field>
             <Field
