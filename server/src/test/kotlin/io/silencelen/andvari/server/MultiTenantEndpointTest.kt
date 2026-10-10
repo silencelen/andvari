@@ -763,6 +763,8 @@ class MultiTenantEndpointTest : P4TestSupport() {
             "ANDVARI_REQUEST_READ_TIMEOUT_S" to "300", "ANDVARI_RESPONSE_WRITE_TIMEOUT_S" to "120",
             "ANDVARI_VAULT_GRACE_DAYS" to "30", "ANDVARI_TRANSFER_TTL_DAYS" to "21",
             "ANDVARI_LOGIN_RATE_PER_MIN" to "9",
+            "ANDVARI_ITEM_MAX_BYTES" to "65536", "ANDVARI_USER_ITEM_QUOTA_BYTES" to "1048576",
+            "ANDVARI_PUSH_RATE_PER_MIN" to "60",
         )
         assertEquals(Config.NUM_ENV_RANGES.keys, legal.keys, "keep this table in lockstep with NUM_ENV_RANGES")
         assertTrue(Config.envLint(legal).problems.isEmpty(), Config.envLint(legal).problems.toString())
@@ -777,6 +779,9 @@ class MultiTenantEndpointTest : P4TestSupport() {
         assertEquals(30, c.vaultGraceDays)
         assertEquals(21, c.transferTtlDays)
         assertEquals(9, c.loginRatePerMin)
+        assertEquals(65_536L, c.itemMaxBytes)
+        assertEquals(1_048_576L, c.userItemQuotaBytes)
+        assertEquals(60, c.pushRatePerMin)
     }
 
     // ---- §8.1: /selfhost is a real route, registered before the SPA fallback ----
