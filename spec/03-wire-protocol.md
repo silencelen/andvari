@@ -376,6 +376,9 @@ client handler that existed for it was deleted as dead code, so it is struck rat
 reserved (audit H111). A policy change reaches clients through the ordinary
 `/client-policy` poll and the `rev` bell; if a dedicated frame is ever wanted it is a new
 design (backlog F54), not a promise this document already made.
+**Frame cap:** the server accepts client frames of at most **4 KiB** (the only meaningful one
+is the 4-byte `ping`); a frame header declaring more is refused from the header alone and the
+socket is closed `1009` (too big). The upgrade request itself is under the 256 KiB body cap.
 **Liveness:** browser clients reconnect a dropped bell with exponential backoff (1 s
 doubling to a 60 s cap, jittered), minting a fresh single-use ticket per attempt, and
 pull `/sync` on every (re)open to recover bells missed while down (the notifier has no
