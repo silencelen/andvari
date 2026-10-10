@@ -9,7 +9,6 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -23,12 +22,10 @@ import kotlin.test.assertFailsWith
  */
 class HibpRelayTest : P4TestSupport() {
 
-    private fun bareRepo() = Repo(Db(File(tmpDir, "hibp-${System.nanoTime()}.db").absolutePath))
-
     @Test
     fun upstreamNon2xx_surfacesAsBadGateway_not400() {
         val http = HttpClient(MockEngine { respond("", HttpStatusCode.ServiceUnavailable) })
-        val relay = HibpRelay(bareRepo(), http)
+        val relay = HibpRelay(http)
         val e = assertFailsWith<BadGateway> { runBlocking { relay.range("ABCDE") } }
         assertEquals("hibp_upstream_503", e.reason)
     }
@@ -38,9 +35,20 @@ class HibpRelayTest : P4TestSupport() {
         // A handler that never answers inside the bound; the relay's withTimeout must cut it off
         // (timeoutMs is injectable so this test doesn't park for the production 10 s).
         val http = HttpClient(MockEngine { delay(60_000); respond("never") })
-        val relay = HibpRelay(bareRepo(), http, timeoutMs = 100)
+        val relay = HibpRelay(http, timeoutMs = 100)
         val e = assertFailsWith<BadGateway> { runBlocking { relay.range("ABCDE") } }
         assertEquals("hibp_timeout", e.reason)
+    }
+
+    /** Security review 2026-10, root cause C: the relay keeps nothing between calls, so every
+     *  lookup goes upstream and there is no prefix left behind to line up with an account event. */
+    @Test
+    fun relayIsStateless_everyLookupGoesUpstream() {
+        val seen = ArrayList<String>()
+        val http = HttpClient(MockEngine { req -> seen.add(req.url.encodedPath); respond("0123456789ABCDEF0123456789ABCDEF012:3\r\n") })
+        val relay = HibpRelay(http)
+        repeat(2) { assertEquals("0123456789ABCDEF0123456789ABCDEF012:3\r\n", runBlocking { relay.range("abcde") }) }
+        assertEquals(listOf("/range/ABCDE", "/range/ABCDE"), seen)
     }
 
     @Test
