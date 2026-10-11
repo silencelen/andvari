@@ -165,7 +165,27 @@ cache OFF.
 
 ## 3. Account key material
 
-- `GET /account/keys` → `accountKeys` (as in login).
+- `GET /account/keys` → `accountKeys` (as in login). `accountKeys.personalWrap: { vaultId,
+  wrappedVk } | null` (security review 2026-10, root cause A §4; spec 01 §6) is the ONLY input that
+  decides which vault is personal.
+- `PUT /account/personal-wrap { vaultId, wrappedVk, currentAuthKey? }` → `ok` — store the personal
+  wrap. A FIRST set (the spec 02 §4 migration) needs only a session; REPLACING an existing wrap
+  (re-designation, owner decision Q9) needs a fresh `currentAuthKey` (verified like the password
+  change) and is otherwise `409 personal_wrap_exists`; a wrong key is `401`. The caller must hold an
+  active grant on `vaultId` (`403 no_grant`); `vaultId` a uuid, `wrappedVk` ≤ 1 KiB. Audited
+  (`personal_wrap_set` / `personal_wrap_redesignate`). The server cannot check the AEAD: the
+  write-once rule guards against buggy clients, not against the server.
+- `GET /account/state` → `{ sealedState: string | null, seq }`; `PUT /account/state { sealedState,
+  baseSeq }` → `{ sealedState, seq }` or `409 stale_state` (root cause A §4.2). ONE opaque blob per
+  user, `Envelope(UVK, JSON, "andvari/v1|account-state|{userId}")`, holding the verified contact
+  pins (pairwise, owner decision Q4), the verified org recovery fingerprint and consumed lifecycle
+  nonces. `seq` is a compare-and-set counter only (`baseSeq` must equal it); the authenticated seq
+  lives inside the blob. Clients merge on every read and on a 409 (contacts union by userId, newest
+  `verifiedAt` wins, a tombstone not older than a pin removes it; nonces unioned, newest 256 per
+  vault) and keep a local high-water seq: a served seq below it, or a withheld blob after one was
+  seen, is a rollback and the local copy wins. The server can withhold or roll back (both only
+  REMOVE pins, failing safe) but cannot add a pin. Capped at 64 KiB (`bad_account_state`),
+  version-pinned, NOT audited. Vectors: `spec/test-vectors/accountstate.json`.
 - `PUT /account/password { currentAuthKey, newAuthKey, newKdfSalt, newKdfParams,
   newWrappedUvk }` — atomic; server verifies currentAuthKey, swaps verifier + salt +
   params + wrappedUvk, revokes all sessions except the calling one, audits. Used for
@@ -432,14 +452,22 @@ strips them degrades every client to the poll path (correct, just slower).
   `required`; the emailed-invite compose path sets `waived` explicitly, the in-person QR
   path defaults `required`. It is stored on the invite row (`invites.escrowPolicy`) and
   read **server-side at register** — the register body never carries it. The enroll-link
-  payload additionally gains **`rfp`** (org recovery **short** fingerprint, 16 hex),
-  authoritative **only** on a client-composed in-person QR and `null` on the
-  server-composed emailed link — provenance semantics: spec 04 §6.5.
+  payload additionally gains **`rfp`** (the org recovery fingerprint, FULL 64 lowercase hex; it
+  was a 16-hex short id until security review 2026-10, A5, and a link carrying any other shape is
+  rejected whole), and an in-person QR also carries **`ifp`** (the minting admin's FULL identity
+  fingerprint) and **`iu`** (the admin's userId), together or not at all. None of them is
+  authoritative by itself (the server composes emailed links too): the admin's screen shows an
+  **in-person code** beside the QR — the first 32 hex of `SHA-256("andvari/v1|enroll-check|" +
+  (rfp or "-") + "|" + (ifp or "-") + "|" + (iu or "-"))` — and the invitee's client honours
+  `rfp`/`ifp`/`iu` only after the human TYPES it. Provenance semantics: spec 04 §6.5; vectors:
+  `spec/test-vectors/enrolllink.json` (`checkCodes`).
   Registration is **invite-only, always** (even break-glass): `POST /auth/register
   { inviteToken, email, displayName, kdfSalt, kdfParams, authKey, wrappedUvk,
   identityPub, encryptedIdentitySeed, escrow?: { sealed, fingerprint },
   memberRecovery: { recoveryWrappedUvk, recoveryAuthKey },
-  personalVault: { vaultId, wrappedVk, metaBlob }, device: { platform, name } }` —
+  personalVault: { vaultId, wrappedVk, metaBlob }, device: { platform, name },
+  personalWrap?: { vaultId, wrappedVk } }` (`personalWrap.vaultId` MUST equal
+  `personalVault.vaultId`; spec 01 §6) —
   one shot, atomic (user + [escrow] + `member_recovery` row + personal vault + owner
   grant + first device + session; response = the login response **plus
   `recoveryPieceId`** — the register-committed recovery piece's opaque id, presented by the
@@ -639,6 +667,11 @@ sit-at-home operation). Every call is audited (ids/roles only, never names).
   invited household members** so an owner can find whom to share with; rate-limited
   20/min/account, audited `user_lookup` (meta = target **userId**, never the email — 0.4.0 PII fix). The unauthenticated
   anti-enumeration guarantees of §2 are unchanged — this is an authed-only path.
+- `GET /api/v1/users/{userId}/identity` → `{ userId, displayName, identityPub }` or `404
+  no_such_user` (security review 2026-10, root cause A §7.2) — the key the server holds for an
+  ACTIVE user, served for a HUMAN to verify (the enrolment pin of the admin via `ifp`/`iu`, a QR
+  scan on "Verify a household member"). A client never pins it on its own. Same preamble, bucket and
+  audit shape as the lookup above (`user_identity_lookup`).
 - `GET /api/v1/vaults/{vaultId}/members` → `[{ userId, email, displayName, role,
   identityPub, addedAt, status? }]` (active grants only). Any active member may call
   (transparency: every member can re-verify who holds the VK). Foreign vaultId → 403

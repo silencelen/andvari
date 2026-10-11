@@ -368,8 +368,27 @@ server rejects writes without writer role). Membership (which userId holds which
 which vaultId) is server-visible via the grants row; membership-management audit events
 record only ids and roles, never names or decrypted content.
 
-**`type` is a SERVER label, and it MUST NOT choose the personal vault on its own (2026-09-13
-amendment, audit H64).** `type` is plaintext in the vault row and is bound into no AD — the
+**`type` is a SERVER label, and it MUST NOT choose the personal vault (security review 2026-10,
+root cause A §4, superseding the 2026-09-13 H64 amendment below).** The personal vault is the vault
+named by the UVK-authenticated `AccountKeys.personalWrap` (spec 01 §6) and nothing else. The
+`type` label is ignored for every decision: the default save destination, the usage-ledger key,
+copy-to-Personal, the import target, the "(shared)" tag (now `vaultId != personalVaultId`) and the
+sort order. An account with no openable wrap has no personal vault (no default destination, usage
+paused, a banner saying so).
+
+**Once-per-account migration (root cause A §8.5).** An account created before the wrap existed mints
+it AUTOMATICALLY only when exactly one held vault (1) is labelled `personal` by the server and (2)
+has a VK that opened from a UVK wrap on the caller's OWN grant row and from no seal, AND its
+decrypted name is exactly `Personal` (the enrolment value), AND, when the device remembers the
+personal vault it last used, it is that vault; the wrap is then stored with `PUT
+/account/personal-wrap` (no reauth needed while none is stored). Otherwise the client asks "Which
+vault is your Personal vault?", listing only vaults passing (1) and (2). This is the one step where
+the server's pre-upgrade label still matters (a server already hostile before the upgrade could
+have relabelled); the strict rule plus re-designation (`PUT /account/personal-wrap` with
+`currentAuthKey`, owner decision Q9) bound it. Vectors: `spec/test-vectors/personalwrap.json`
+(`migration`).
+
+**Historical (2026-09-13 amendment, audit H64), kept for the record.** `type` is plaintext in the vault row and is bound into no AD — the
 vaultMeta AD is `andvari/v1|vaultmeta|{vaultId}` and nothing else — so after enrollment nothing a
 client holds authenticates WHICH vault is its own: `personalVaultId` is rebuilt on every unlock
 from the first row the server labels `personal` whose key that client happens to hold. A client
@@ -386,14 +405,10 @@ explicit destination fails loudly rather than filing the user's item into somebo
 vault. Without the rule, a hostile server that withheld the real personal row and relabelled a
 shared vault would have moved the §8.2 usage key onto a VK every other member of that vault holds.
 
-> **Known residue, and why it is deferred rather than papered over.** This rule cannot tell an
-> OWNER-CREATED SHARED vault from a personal one — that grant is `wrappedVk` too. Closing the gap
-> means putting `"type":"personal"` inside the AUTHENTICATED vaultMeta plaintext at enrollment,
-> preferring that over the server row, and having owners rewrite legacy personal meta once on a
-> later unlock (`metaV` bump, unknown fields preserved, per the rename rule above). That is a wire
-> change to the meta plaintext and is **DEFERRED to a spec revision**; until it lands, `type`
-> stays a server-asserted hint everywhere it appears, and the refusal above is what stands between
-> that hint and the usage key.
+> **Residue CLOSED (security review 2026-10, root cause A, branch A5).** The H64 rule could not
+> tell an OWNER-CREATED SHARED vault (or a member self-wrap whose seal the server stripped and whose
+> role it relabelled `owner`) from a personal one. The personal wrap closes it without touching the
+> vaultMeta plaintext: a `vk-personal` wrap exists only for the vault the account itself designated.
 
 ## 5. Server-visible plaintext — the zero-knowledge contract
 
@@ -684,8 +699,8 @@ server-visible table — the property §8 states holds unchanged.
   (§8 MUST NOT list, unchanged), so the ledger is still readable only in memory after an unlock,
   and the server and a stolen locked device both hold opaque bytes. Spec 05 T3 is unchanged.
   An account with no personal vault simply has no ledger — clients MUST degrade to "—", not error.
-  **WHICH vault that is comes from §4's rule, never from the server's label alone (2026-09-13
-  amendment, audit H64):** a client MUST NOT key the ledger from a vault whose VK arrived by
+  **WHICH vault that is comes from §4's rule — the personal wrap (security review 2026-10, root
+  cause A) — never from the server's label (originally the 2026-09-13 H64 amendment):** a client MUST NOT key the ledger from a vault whose VK arrived by
   member grant (`sealedVk`), because that VK is held by every other member of the vault and
   `andvari/v1|usage|{userId}` is public — a relabelled shared vault would hand a colluding
   co-member the itemId → {lastUsedAt, useCount} log this whole single-blob design exists to keep
