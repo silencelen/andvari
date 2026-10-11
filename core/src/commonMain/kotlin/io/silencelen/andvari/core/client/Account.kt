@@ -800,8 +800,11 @@ class Account private constructor(
 
     /**
      * True when we hold this vault's key from a v1 seal and the row has no UVK wrap of ours yet:
-     * the member self-wrap of root cause A §3.2 should be built ([buildSelfWrap]) and posted, so
-     * every other device of this account reads the key from the wrap instead of the seal.
+     * a candidate for the member self-wrap of root cause A §3.2 ([buildSelfWrap]).
+     *
+     * NOT A TRUST SIGNAL. A v1 seal is server-mintable, so wrapping its key under our UVK would
+     * launder a possibly server-chosen key into the canonical slot for every device. No caller
+     * posts on this alone: posting waits for a verified v2 grant or a confirmed legacy grant.
      */
     fun needsSelfWrap(grant: WireGrant): Boolean =
         vaultKeys.containsKey(grant.vaultId) && grant.wrappedVk.isEmpty() && !grant.sealedVk.isNullOrEmpty() &&
@@ -935,7 +938,7 @@ class Account private constructor(
      * holds, wrapped under its OWN UVK with the same construction as [buildOwnerWrap], round-trip
      * verified, for `PUT /vaults/{id}/grant/self-wrap`. Once it is on the row, every device of
      * this member takes the key from the wrap (precedence rule 2) and the seal stops being
-     * load-bearing.
+     * load-bearing. Call it only for a key whose origin is authenticated (see [needsSelfWrap]).
      */
     fun buildSelfWrap(vaultId: String): String = roundTripWrap(vaultId, "self wrap")
 

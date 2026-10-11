@@ -226,11 +226,14 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
     failure here is never a wrong password), the vault is "key unreadable — tell your
     admin" and the client MUST NOT fall back to the seal. The same order governs every
     path that opens a grant, including the holding-area name peek (spec 03 §11).
-  - **Member self-wrap.** After adopting a VK from a `sealedVk`, a member's client wraps it
-    as `Envelope(key = UVK, plaintext = VK, ad = "andvari/v1|vk|{vaultId}|{userId}")` — the
-    owner-wrap construction — verifies the round trip, and stores it on its own grant with
-    `PUT /vaults/{id}/grant/self-wrap` (spec 03 §10). From then on every device of that
-    member reads the VK from the wrap. Because a member row can now carry a `wrappedVk`, the
+  - **Member self-wrap.** A member's client MAY wrap a VK it holds as
+    `Envelope(key = UVK, plaintext = VK, ad = "andvari/v1|vk|{vaultId}|{userId}")` — the
+    owner-wrap construction — verify the round trip, and store it on its own grant with
+    `PUT /vaults/{id}/grant/self-wrap` (spec 03 §10); from then on every device of that member
+    reads the VK from the wrap. A client MUST NOT self-wrap a key whose only origin is a v1
+    `sealedVk`: the seal is server-mintable, and wrapping it would make a server-chosen key the
+    canonical one on every device. Clients therefore do not post a self-wrap yet; it follows
+    verification of an authenticated (v2) grant or an explicit legacy confirmation. Because a member row can now carry a `wrappedVk`, the
     personal-vault refusal of spec 02 §4 (audit H64) treats a row as member-granted when the
     key came from a seal, when the row carries any `sealedVk`, or when its role is not
     `owner`.
