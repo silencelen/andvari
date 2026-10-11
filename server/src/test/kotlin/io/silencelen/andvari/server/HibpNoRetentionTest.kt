@@ -61,7 +61,7 @@ class HibpNoRetentionTest : P4TestSupport() {
             c.createStatement().use { st ->
                 st.executeQuery("SELECT value FROM meta WHERE key='schemaVersion'").use { rs ->
                     rs.next()
-                    assertEquals("13", rs.getString(1))
+                    assertEquals("14", rs.getString(1))
                 }
             }
         }

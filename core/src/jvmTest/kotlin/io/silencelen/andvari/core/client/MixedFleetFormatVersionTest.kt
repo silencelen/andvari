@@ -179,6 +179,7 @@ class MixedFleetFormatVersionTest {
         val vaultId = "44444444-4444-4444-8444-444444444444"
         val vk = crypto.randomBytes(32)
         member.addGrant(WireGrant(vaultId, member.userId, "writer", wrappedVk = "", rev = 1, sealedVk = Bytes.toB64(SharedGrant.seal(crypto, member.identityPub, vaultId, vk))))
+        member.authorizeLegacyKey(vaultId) // A6 §8.2: a vouched-for v1 key (an unconfirmed one is read-only)
 
         val itemId = member.newItemId()
         val fv2LoginBlob = Envelope.sealB64(crypto, vk, json.encodeToString(ItemDoc.serializer(), loginDoc).encodeToByteArray(), Ad.item(vaultId, itemId, 2))

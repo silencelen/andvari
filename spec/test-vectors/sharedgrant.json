@@ -21,5 +21,17 @@
         "expectedVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "v": 2,
         "sealedB64": "_ANuthFwupuUzthDupzxzbWFlDkYBt2e9XqO5sIaby58EyzjDw2rSZo62eXV07ICxmP7GUnX5124YzDqsrVsfGV2RV_jbkthpsTg4rDEoTF9jyDmwLpxF_9CTrP0C0rAVYjhlX7anp4weRIh9KrzWog6zw0YM3Nh9T9GkaHD9NCVlRUcJjEbKfyGJEBFs_2dtoGW60jUYypaPlM"
+    },
+    "legacyMode": {
+        "_about": "Security review 2026-10, root cause A §8.2/§8.6 (branch A6): what a client does with a vault key whose ONLY origin is a v1 sealedVk (this file's seals; anyone holding the member's public key, the server included, can mint one). 'evidence' = this device's cache held the vault's grant row and an item that decrypted under the key BEFORE the upgrade; 'confirmed' = the human pressed Accept on the review card (trust on first use). frozen/confirmed -> the client mints the member self-wrap; read_only -> readable, never written under (INV-WRITE-KEY), listed for review; refused -> not adopted. Release N is in_window; post_window is branch A8 and is pinned here so the rule is written down once.",
+        "rows": [
+            {"window": "in_window", "evidence": true, "confirmed": false, "expect": "frozen"},
+            {"window": "in_window", "evidence": false, "confirmed": false, "expect": "read_only"},
+            {"window": "in_window", "evidence": false, "confirmed": true, "expect": "confirmed"},
+            {"window": "in_window", "evidence": true, "confirmed": true, "expect": "frozen"},
+            {"window": "post_window", "evidence": true, "confirmed": false, "expect": "frozen"},
+            {"window": "post_window", "evidence": false, "confirmed": false, "expect": "refused"},
+            {"window": "post_window", "evidence": false, "confirmed": true, "expect": "refused"}
+        ]
     }
 }

@@ -383,7 +383,7 @@ class Repo(val db: Db) {
             WireGrant(
                 vaultId = rs.getString("vaultId"), userId = rs.getString("userId"),
                 role = rs.getString("role"), wrappedVk = rs.getString("wrappedVk"), rev = rs.getLong("rev"),
-                sealedVk = rs.getString("sealedVk"),
+                sealedVk = rs.getString("sealedVk"), signedGrant = rs.getString("signedGrant"),
             )
         }
         // F56: the natural `(i.rev>? OR g.rev>?)` OR-join defeats idx_items_vault_rev's rev

@@ -169,10 +169,12 @@ class SyncEngineVaultKeyPrecedenceTest {
         val firstEngine = SyncEngine(api(server), first, InMemoryVaultCache())
         firstEngine.sync()
         firstEngine.sync()
-        assertTrue(first.hasVault(shared.vaultId), "v1 seal still adopted for a vault with no wrap (legacy)")
+        assertTrue(first.hasVault(shared.vaultId), "v1 seal still adopted for a vault with no wrap (legacy, read-only)")
         assertTrue(server.selfWraps.isEmpty(), "a seal-derived key must never be auto-wrapped under the UVK")
 
-        // A row that carries our wrap (as A6 will post once the grant is verified): read from it, seal absent.
+        // A row that carries our wrap (as A6 posts once the grant is verified or accepted): read from it, seal absent.
+        assertTrue(first.isLegacyReadOnly(shared.vaultId), "A6: the v1-only key is read-only until vouched for")
+        first.authorizeLegacyKey(shared.vaultId)
         val wrap = first.buildSelfWrap(shared.vaultId)
         server.feed = server.feed.copy(
             rev = 8,

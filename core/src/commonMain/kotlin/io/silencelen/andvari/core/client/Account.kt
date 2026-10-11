@@ -6,12 +6,17 @@ import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.CryptoProvider
 import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
+import io.silencelen.andvari.core.crypto.GrantOutcome
+import io.silencelen.andvari.core.crypto.GrantPin
+import io.silencelen.andvari.core.crypto.GrantVerdict
+import io.silencelen.andvari.core.crypto.LegacyGrant
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.KeyPairBytes
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.UsageKey
 import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.SharedGrant
+import io.silencelen.andvari.core.crypto.SignedGrant
 import io.silencelen.andvari.core.crypto.SignedStatement
 import io.silencelen.andvari.core.crypto.Statement
 import io.silencelen.andvari.core.crypto.createCryptoProvider
@@ -286,6 +291,20 @@ class VaultGrantKeyUnreadableException(val vaultId: String, reason: String, caus
     Exception("vault key for $vaultId is unreadable ($reason)", cause)
 
 /**
+ * INV-WRITE-KEY (security review 2026-10, root cause A §5.1, §8.2; branch A6): this vault's key came ONLY from
+ * a v1 `sealedVk`, which anyone holding our public key (the server included) can mint, and nobody has vouched
+ * for it yet: no verified v2 grant, no pre-upgrade evidence, no human "Accept". It is readable, but nothing is
+ * ever sealed under it. Deliberately NOT a [CryptoException]: the save ladders read a CryptoException as "wrong
+ * master password" ([HouseholdCopy.forSaveError]); this one has its own copy.
+ */
+class VaultKeyNotVerifiedException(val vaultId: String) :
+    Exception("the key for vault $vaultId is not verified yet (legacy grant): review the vault before writing to it")
+
+/** §1.6: a v2 grant from a sender this account has not pinned (or whose pin is not current on this device). The
+ *  vault is NOT adopted; [fromUserId] is unverified routing data naming whom to verify. */
+data class PendingGrant(val vaultId: String, val fromUserId: String, val grantIdB64: String)
+
+/**
  * An unlocked account — the Kotlin sibling of web/src/vault/account.ts. Holds the
  * in-memory UVK + personal vault key and performs item AEAD (AD-bound to
  * userId/vaultId/itemId, spec 02 §2). Nothing here is persisted in the clear.
@@ -379,6 +398,54 @@ class Account private constructor(
 
     /** Vaults whose UVK wrap is present but does not open ("key unreadable — tell your admin"). */
     private val unreadableKeyVaults: MutableSet<String> = mutableSetOf()
+
+    /** Where a held vault key came from (root cause A §3.1 precedence), recorded when it is adopted. */
+    enum class KeySource {
+        /** `AccountKeys.personalWrap`, under our UVK with the `vk-personal` AD (rule 1). */
+        PERSONAL_WRAP,
+
+        /** Our own UVK wrap on our grant row: owner wrap, transfer wrap, member self-wrap (rule 2). */
+        UVK_WRAP,
+
+        /** A v2 grant verified per §1.4 against our PIN for the sender it names (rule 3). */
+        SIGNED_GRANT,
+
+        /** A v1 `sealedVk` (rule 4): legacy-read-only until frozen or confirmed ([authorizeLegacyKey]). */
+        LEGACY_SEAL,
+    }
+
+    private val keySources: MutableMap<String, KeySource> = mutableMapOf()
+
+    /** For keys adopted from a verified v2 grant: the userId the VERIFIED statement names as sender. */
+    private val signedGrantFrom: MutableMap<String, String> = mutableMapOf()
+
+    /**
+     * Pins as the grant verifier sees them (root cause A §1.4 step 7). The host (SyncEngine) wires this to the
+     * account-state contacts, reporting a pin as current only when it may skip verification on this device
+     * (A5 review L-3). The default knows no one: every v2 grant is a pending invitation.
+     */
+    var grantPins: (String) -> GrantPin? = { null }
+
+    /**
+     * v1-only keys this device vouches for (§8.2: pre-upgrade evidence, or the human accepted), by vaultId → the
+     * [legacyKeyTag] of the EXACT key vouched for. Binding the decision to the key means a server that later
+     * swaps the seal for the same vaultId (before the self-wrap reached the row) is not covered by it.
+     */
+    private val legacyAuthorized: MutableMap<String, String> = mutableMapOf()
+
+    private fun tagOf(vk: ByteArray): String = Bytes.toHexLower(crypto.sha256(vk))
+
+    private fun legacyVouched(vaultId: String, vk: ByteArray?): Boolean =
+        vk != null && legacyAuthorized[vaultId]?.let { it == tagOf(vk) } == true
+
+    /** SHA-256 (hex) of the held key for [vaultId]: what a host persists beside a §8.2 vouch. Null when not held. */
+    fun legacyKeyTag(vaultId: String): String? = vaultKeys[vaultId]?.let { tagOf(it) }
+
+    /** §1.6 pending invitations, by vaultId (rebuilt from the cached rows on every hydrate). */
+    private val pendingGrants: LinkedHashMap<String, PendingGrant> = LinkedHashMap()
+
+    /** §1.4 anomaly verdicts by vaultId (display only; nothing was adopted). */
+    private val grantAnomalies: MutableMap<String, GrantVerdict> = mutableMapOf()
 
     companion object {
         /** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed). */
@@ -819,6 +886,26 @@ class Account private constructor(
         if (grant.role.isNotEmpty()) vaultRoles[grant.vaultId] = grant.role
         val held = vaultKeys[grant.vaultId]
         if (held != null) {
+            // A key held ONLY from a v1 seal is confirmed (same key) by a verified v2 grant on a re-delivered row:
+            // the owner's re-issue, root cause A §8.2 step 3 first bullet. A verified grant naming a DIFFERENT key
+            // replaces the unauthenticated one (then the v1 seal was the forgery) and the mismatch is flagged.
+            if (keySources[grant.vaultId] == KeySource.LEGACY_SEAL && !grant.signedGrant.isNullOrEmpty()) {
+                when (val o = openSigned(grant, heldVk = null)) {
+                    is GrantOutcome.Adopted -> {
+                        if (!Bytes.ctEquals(o.vk, held)) {
+                            vaultKeys[grant.vaultId] = o.vk
+                            vkMismatchVaults.add(grant.vaultId)
+                        }
+                        keySources[grant.vaultId] = KeySource.SIGNED_GRANT
+                        signedGrantFrom[grant.vaultId] = o.from
+                        pendingGrants.remove(grant.vaultId)
+                        grantAnomalies.remove(grant.vaultId)
+                        return
+                    }
+                    is GrantOutcome.Pending -> pendingGrants[grant.vaultId] = PendingGrant(grant.vaultId, o.from, o.grantIdB64)
+                    is GrantOutcome.Refused -> if (o.verdict.anomaly) grantAnomalies[grant.vaultId] = o.verdict
+                }
+            }
             // Already held: the row cannot change our key (the warm-session guard), but a
             // re-delivered row that now carries a DIFFERENT key is still worth surfacing.
             if (rowCarriesOtherKey(grant, held)) vkMismatchVaults.add(grant.vaultId)
@@ -829,6 +916,15 @@ class Account private constructor(
         } catch (e: VaultGrantKeyUnreadableException) {
             unreadableKeyVaults.add(grant.vaultId)
             throw e
+        } catch (e: GrantPendingException) {
+            // §1.6: not adopted, and no fallback to the v1 seal on the same row.
+            pendingGrants[grant.vaultId] = e.pending
+            grantAnomalies.remove(grant.vaultId)
+            return
+        } catch (e: GrantRefusedException) {
+            grantAnomalies[grant.vaultId] = e.verdict
+            pendingGrants.remove(grant.vaultId)
+            return
         }
         val vk = opened.vk
         // The same 32-byte assertion [SharedGrant.open] makes on the sealed branch, on the
@@ -839,9 +935,13 @@ class Account private constructor(
         // same broken grant produced two different verdicts depending on which branch minted it.
         if (vk.size != 32) throw CryptoException("vault key for ${grant.vaultId} is not 32 bytes")
         vaultKeys[grant.vaultId] = vk
+        keySources[grant.vaultId] = opened.source
+        opened.from?.let { signedGrantFrom[grant.vaultId] = it }
+        pendingGrants.remove(grant.vaultId)
+        grantAnomalies.remove(grant.vaultId)
         unreadableKeyVaults.remove(grant.vaultId)
         if (opened.sealMismatch) vkMismatchVaults.add(grant.vaultId)
-        if (!opened.viaSeal && grant.userId == userId) uvkWrappedVaults.add(grant.vaultId)
+        if (opened.source == KeySource.UVK_WRAP && grant.userId == userId) uvkWrappedVaults.add(grant.vaultId)
         // Provenance of the KEY, recorded at the one moment it is knowable (audit H64), and NOT
         // re-stamped by a later re-delivery (the early return above). Since root cause A §3.2 a
         // member's own row can carry a UVK self-wrap, so "opened from a seal" alone no longer
@@ -850,14 +950,29 @@ class Account private constructor(
         // that retains one), OR its role is not owner (a member self-wrap whose seal the server
         // dropped). Since root cause A §4 this bit no longer decides "personal" (the personal wrap
         // does); it feeds only the display and the §8.5 migration's candidate filter.
-        if (opened.viaSeal || !grant.sealedVk.isNullOrEmpty() || grant.role != "owner") {
+        if (opened.viaSeal || !grant.sealedVk.isNullOrEmpty() || !grant.signedGrant.isNullOrEmpty() || grant.role != "owner") {
             memberGrantedVaults.add(grant.vaultId)
         }
     }
 
+    private class GrantPendingException(val pending: PendingGrant) : Exception("grant pending verification")
+    private class GrantRefusedException(val verdict: GrantVerdict) : Exception("grant refused: ${verdict.code}")
+
+    /** Run §1.4 on the row's v2 grant ([SignedGrant.open]); [heldVk] only when held from our OWN wrap. */
+    private fun openSigned(grant: WireGrant, heldVk: ByteArray?): GrantOutcome {
+        val sealed = try {
+            Bytes.fromB64(grant.signedGrant ?: "")
+        } catch (e: CryptoException) {
+            return GrantOutcome.Refused(GrantVerdict.UNOPENABLE)
+        }
+        return SignedGrant.open(crypto, userId, identityPub, identityPriv, grant.vaultId, sealed, grantPins, heldVk)
+    }
+
     /** A key opened from a grant row, with how it was reached ([viaSeal]) and whether a seal on
      *  the same row opened to a different key ([sealMismatch], the §3.1 anomaly). */
-    private class OpenedVk(val vk: ByteArray, val viaSeal: Boolean, val sealMismatch: Boolean)
+    private class OpenedVk(val vk: ByteArray, val source: KeySource, val sealMismatch: Boolean, val from: String? = null) {
+        val viaSeal: Boolean get() = source == KeySource.LEGACY_SEAL || source == KeySource.SIGNED_GRANT
+    }
 
     /**
      * Canonical-key precedence (security review 2026-10, root cause A §3.1). The VK comes from
@@ -897,13 +1012,36 @@ class Account private constructor(
             // classification (still terminal, still no seal fallback).
             if (vk.size != 32) throw CryptoException("vault key for ${grant.vaultId} is not 32 bytes")
             val sealVk = if (sealed.isNullOrEmpty()) null else openSealOrNull(grant.vaultId, sealed)
-            return OpenedVk(vk, viaSeal = false, sealMismatch = sealVk != null && !Bytes.ctEquals(sealVk, vk))
+            // A v2 grant beside our wrap is compared too; only a VERIFIED one can disagree with it.
+            val signedDiffers = !grant.signedGrant.isNullOrEmpty() && openSigned(grant, heldVk = vk).verdict == GrantVerdict.VK_MISMATCH
+            return OpenedVk(vk, KeySource.UVK_WRAP, sealMismatch = (sealVk != null && !Bytes.ctEquals(sealVk, vk)) || signedDiffers)
         }
-        // (3) v2 signed grant: verified per root cause A §1.4 once that construction exists.
-        if (!sealed.isNullOrEmpty()) {
+        // (3) v2 signed grant, verified per root cause A §1.4 against our PIN for the sender it names.
+        if (!grant.signedGrant.isNullOrEmpty()) {
+            when (val o = openSigned(grant, heldVk = null)) {
+                is GrantOutcome.Adopted -> return OpenedVk(o.vk, KeySource.SIGNED_GRANT, sealMismatch = false, from = o.from)
+                is GrantOutcome.Pending -> {
+                    // A pending invitation is never satisfied by the v1 seal on the same row, EXCEPT for a vault
+                    // this device already vouched for (§8.2 freeze or the human's Accept) whose self-wrap has not
+                    // reached the row yet: that key stays exactly as trusted as it was.
+                    if (grant.vaultId in legacyAuthorized && !sealed.isNullOrEmpty()) {
+                        openSealOrNull(grant.vaultId, sealed)?.takeIf { legacyVouched(grant.vaultId, it) }
+                            ?.let { return OpenedVk(it, KeySource.LEGACY_SEAL, sealMismatch = false) }
+                    }
+                    throw GrantPendingException(PendingGrant(grant.vaultId, o.from, o.grantIdB64))
+                }
+                is GrantOutcome.Refused ->
+                    // An anomaly (misaddressed, wrong vault, wrong signer, bad signature) refuses the ROW: the
+                    // server tampered, so the v1 seal beside it is no fallback. A field that does not open or
+                    // parse at all is ignored (§1.4 "ignore row") and the legacy rule below decides.
+                    if (o.verdict.anomaly) throw GrantRefusedException(o.verdict)
+            }
+        }
+        // (4) v1 `sealedVk`, compatibility window only: LEGACY_SEAL, read-only until vouched for (§8.2).
+        if (!sealed.isNullOrEmpty() && LegacyGrant.IN_WINDOW) {
             return OpenedVk(
                 SharedGrant.open(crypto, identityPub, identityPriv, grant.vaultId, Bytes.fromB64(sealed)),
-                viaSeal = true, sealMismatch = false,
+                KeySource.LEGACY_SEAL, sealMismatch = false,
             )
         }
         throw CryptoException("grant for ${grant.vaultId} carries no key")
@@ -918,7 +1056,8 @@ class Account private constructor(
             Envelope.openB64(crypto, uvk, grant.wrappedVk, Ad.vk(grant.vaultId, userId))
         }.getOrNull()
         val fromSeal = grant.sealedVk?.takeIf { it.isNotEmpty() }?.let { openSealOrNull(grant.vaultId, it) }
-        return listOfNotNull(fromWrap, fromSeal).any { !Bytes.ctEquals(it, held) }
+        val fromSigned = if (grant.signedGrant.isNullOrEmpty()) null else (openSigned(grant, heldVk = null) as? GrantOutcome.Adopted)?.vk
+        return listOfNotNull(fromWrap, fromSeal, fromSigned).any { !Bytes.ctEquals(it, held) }
     }
 
     /** True when a grant row for this vault carried a seal whose key differs from the one we
@@ -941,11 +1080,70 @@ class Account private constructor(
      *
      * NOT A TRUST SIGNAL. A v1 seal is server-mintable, so wrapping its key under our UVK would
      * launder a possibly server-chosen key into the canonical slot for every device. No caller
-     * posts on this alone: posting waits for a verified v2 grant or a confirmed legacy grant.
+     * posts on this alone: [selfWrapAuthorized] (a verified v2 grant, or a v1 key this device
+     * froze or the human confirmed) is the gate.
      */
     fun needsSelfWrap(grant: WireGrant): Boolean =
-        vaultKeys.containsKey(grant.vaultId) && grant.wrappedVk.isEmpty() && !grant.sealedVk.isNullOrEmpty() &&
+        vaultKeys.containsKey(grant.vaultId) && grant.wrappedVk.isEmpty() &&
+            (!grant.sealedVk.isNullOrEmpty() || !grant.signedGrant.isNullOrEmpty()) &&
             grant.role != "owner" && grant.userId == userId
+
+    /**
+     * Root cause A §3.2 / §8.2, the ONLY gate on minting a member self-wrap: the held key came from a v2 grant
+     * VERIFIED against our pin for its sender, or from a v1 seal this device vouched for (pre-upgrade evidence,
+     * or the human's Accept, [authorizeLegacyKey]). A key only an unconfirmed v1 seal vouches for is never
+     * wrapped: that auto-post was the A1 trust-laundering bug.
+     */
+    fun selfWrapAuthorized(vaultId: String): Boolean = vaultKeys.containsKey(vaultId) && when (keySources[vaultId]) {
+        KeySource.SIGNED_GRANT -> true
+        KeySource.LEGACY_SEAL -> legacyVouched(vaultId, vaultKeys[vaultId])
+        else -> false
+    }
+
+    /** Where this vault's held key came from (null when not held). */
+    fun keySource(vaultId: String): KeySource? = if (vaultKeys.containsKey(vaultId)) keySources[vaultId] else null
+
+    /** INV-WRITE-KEY: a key only an unconfirmed v1 seal vouches for. Readable; never written under. */
+    fun isLegacyReadOnly(vaultId: String): Boolean =
+        vaultKeys.containsKey(vaultId) && keySources[vaultId] == KeySource.LEGACY_SEAL && !legacyVouched(vaultId, vaultKeys[vaultId])
+
+    /** Vault ids [isLegacyReadOnly] answers true for. */
+    fun legacyReadOnlyVaultIds(): Set<String> = vaultKeys.keys.filter { isLegacyReadOnly(it) }.toSet()
+
+    /**
+     * §8.2: this device vouches for the v1-only key of [vaultId], because it holds pre-upgrade evidence (the
+     * freeze) or because the human accepted it on the review card (trust on first use). The host persists the
+     * decision; this lifts the read-only state and permits the self-wrap.
+     */
+    fun authorizeLegacyKey(vaultId: String, keyTag: String? = null) {
+        val tag = keyTag ?: legacyKeyTag(vaultId) ?: return
+        legacyAuthorized[vaultId] = tag
+    }
+
+    /** The sender the VERIFIED v2 grant for [vaultId] names (null unless the key came from one). */
+    fun signedGrantSender(vaultId: String): String? = if (keySources[vaultId] == KeySource.SIGNED_GRANT) signedGrantFrom[vaultId] else null
+
+    /** §1.6 pending invitations (vaults NOT adopted). */
+    fun pendingGrants(): List<PendingGrant> = pendingGrants.values.toList()
+
+    /** §1.4 anomaly verdicts by vaultId (nothing adopted for these rows). */
+    fun grantAnomalies(): Map<String, GrantVerdict> = grantAnomalies.toMap()
+
+    /**
+     * Owner side (root cause A §1.5): grant v2 for [vaultId] to the member [pin] names. The statement's `toKey`
+     * is the PINNED key and the frame is sealed to it, never to a key fresh from `/users/lookup`. Refuses a key
+     * this account itself holds only from an unconfirmed v1 seal (signing it would launder it to the member).
+     */
+    fun buildSignedGrant(vaultId: String, pin: Contact): String {
+        if (isLegacyReadOnly(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
+        if (pin.userId == userId) throw CryptoException("a vault grant cannot be addressed to its sender")
+        val pinKey = Bytes.fromB64(pin.identityPub)
+        val st = Statement.VaultGrant(
+            from = userId, to = pin.userId, toKey = pinKey, vaultId = vaultId,
+            grantId = crypto.randomBytes(16), issuedAt = nowMs(), vk = vk(vaultId),
+        )
+        return Bytes.toB64(SignedGrant.seal(crypto, pinKey, signStatement(st)))
+    }
 
     /**
      * True when this vault's VK reached us through a member grant (`sealedVk`,
@@ -1062,6 +1260,7 @@ class Account private constructor(
         val held = vaultKeys[wrap.vaultId]
         if (held != null && !Bytes.ctEquals(held, vk)) vkMismatchVaults.add(wrap.vaultId)
         vaultKeys[wrap.vaultId] = vk
+        keySources[wrap.vaultId] = KeySource.PERSONAL_WRAP
         unreadableKeyVaults.remove(wrap.vaultId)
         uvkWrappedVaults.add(wrap.vaultId)
         personalVaultId = wrap.vaultId
@@ -1109,8 +1308,15 @@ class Account private constructor(
 
     fun hasVault(vaultId: String): Boolean = vaultKeys.containsKey(vaultId)
 
-    /** Server-declared role for a vault we hold (null when unknown). */
-    fun roleFor(vaultId: String): String? = vaultRoles[vaultId]
+    /**
+     * The EFFECTIVE role for a vault we hold (null when unknown): the server-declared role, except that a vault
+     * whose key is legacy-read-only ([isLegacyReadOnly], INV-WRITE-KEY) reads as `reader`, so every write path
+     * that already refuses readers (save, conflict copy, health actions, autofill targets) refuses it too.
+     */
+    fun roleFor(vaultId: String): String? = if (isLegacyReadOnly(vaultId)) "reader" else vaultRoles[vaultId]
+
+    /** The role exactly as the server declared it. */
+    fun serverRoleFor(vaultId: String): String? = vaultRoles[vaultId]
 
     /** Drop a vault's key + role (removedGrants purge) so later writes fail fast client-side. */
     fun removeVault(vaultId: String) {
@@ -1120,6 +1326,11 @@ class Account private constructor(
         uvkWrappedVaults.remove(vaultId)
         vkMismatchVaults.remove(vaultId)
         unreadableKeyVaults.remove(vaultId)
+        keySources.remove(vaultId)
+        signedGrantFrom.remove(vaultId)
+        legacyAuthorized.remove(vaultId)
+        pendingGrants.remove(vaultId)
+        grantAnomalies.remove(vaultId)
     }
 
     // ---- shared vaults (spec 01 §6 / spec 03 §10) ----
@@ -1138,6 +1349,7 @@ class Account private constructor(
         )
         vaultKeys[vaultId] = svk
         vaultRoles[vaultId] = "owner"
+        keySources[vaultId] = KeySource.UVK_WRAP
         uvkWrappedVaults.add(vaultId)
         return NewSharedVault(req, vaultId)
     }
@@ -1178,7 +1390,11 @@ class Account private constructor(
      * (`seal(UVK, VK, Ad.vk(vaultId, me))`). Round-trip-verified before returning, so a
      * garbage wrap that would lock the new owner out never gets posted.
      */
-    fun buildOwnerWrap(vaultId: String): String = roundTripWrap(vaultId, "owner wrap")
+    fun buildOwnerWrap(vaultId: String): String {
+        // A transfer accept must not launder a key only an unconfirmed v1 seal vouches for (root cause A §8.2).
+        if (isLegacyReadOnly(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
+        return roundTripWrap(vaultId, "owner wrap")
+    }
 
     /**
      * Member self-wrap (security review 2026-10, root cause A §3.2): the VK this member already
@@ -1187,7 +1403,10 @@ class Account private constructor(
      * this member takes the key from the wrap (precedence rule 2) and the seal stops being
      * load-bearing. Call it only for a key whose origin is authenticated (see [needsSelfWrap]).
      */
-    fun buildSelfWrap(vaultId: String): String = roundTripWrap(vaultId, "self wrap")
+    fun buildSelfWrap(vaultId: String): String {
+        if (!selfWrapAuthorized(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
+        return roundTripWrap(vaultId, "self wrap")
+    }
 
     private fun roundTripWrap(vaultId: String, what: String): String {
         val vk = vk(vaultId)
@@ -1213,6 +1432,7 @@ class Account private constructor(
      * (base64url). The name stays E2E ciphertext; the server only ever sees an opaque blob.
      */
     fun buildRenameMeta(vaultId: String, metaBlob: String, newName: String): String {
+        if (isLegacyReadOnly(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
         val meta = decryptVaultMeta(vaultId, metaBlob)
         // spec 02 §4: metaV via the SINGLE [parseMetaV] rule SyncEngine.metaV also applies, so
         // write and apply agree on every client (a string primitive is not a counter → 0).
@@ -1274,6 +1494,7 @@ class Account private constructor(
      * monotonically ([decryptItem]/[decryptItemVersion] feed the per-item memory).
      */
     fun encryptItem(vaultId: String, itemId: String, doc: ItemDoc): ItemUpload {
+        if (isLegacyReadOnly(vaultId)) throw VaultKeyNotVerifiedException(vaultId) // INV-WRITE-KEY
         val fv = maxOf(docFloor(doc), itemFv[itemId] ?: 1)
         itemFv[itemId] = fv
         val blob = Envelope.sealB64(crypto, vk(vaultId), json.encodeToString(ItemDoc.serializer(), doc).encodeToByteArray(), Ad.item(vaultId, itemId, fv))
