@@ -1016,7 +1016,14 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
       };
     case "grant-anomaly":
       // Root cause A §1.4 (A6): a v2 grant failed a check only a misbehaving server explains; nothing was adopted.
-      // TWIN of core HouseholdCopy.GRANT_ANOMALY_NOTICE, byte-equal, pinned by vault-copy.test.ts.
+      // TWINS of core HouseholdCopy.GRANT_VK_MISMATCH_NOTICE (with the recovery path, A6 re-review LOW-C) and
+      // GRANT_ANOMALY_NOTICE, byte-equal, pinned by vault-copy.test.ts.
+      if (n.reason === "vk_mismatch") {
+        return {
+          warn: true,
+          body: "A shared-vault invitation named a different key than the one this device already trusts for that vault, so andvari kept its own key and changed nothing. If the vault looks wrong or empty, leave it and ask its owner to add you again (the key this device trusted before the upgrade may itself be the wrong one), and tell your admin — the server may be misbehaving.",
+        };
+      }
       return {
         warn: true,
         body: "A shared-vault invitation could not be verified, so andvari ignored it and changed nothing. Tell your admin — the server may be misbehaving.",

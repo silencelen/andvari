@@ -163,6 +163,13 @@ describe("Vault.tsx key-precedence notices — the core HouseholdCopy twins", ()
     expect(vaultTsx).toContain(JSON.stringify(m![1]!));
   });
 
+  it("grant-anomaly vk_mismatch carries HouseholdCopy.GRANT_VK_MISMATCH_NOTICE byte-equal, with the recovery path (A6 re-review LOW-C)", () => {
+    const m = householdKt.match(/const val GRANT_VK_MISMATCH_NOTICE: String =\s*"([^"]+)"/);
+    expect(m, "HouseholdCopy.GRANT_VK_MISMATCH_NOTICE missing — update the pin").not.toBeNull();
+    expect(m![1]!).toContain("leave it and ask its owner to add you again");
+    expect(vaultTsx).toContain(JSON.stringify(m![1]!));
+  });
+
   it("added carries both branches of HouseholdCopy.addedNotice byte-equal (A6)", () => {
     const fn = householdKt.match(/fun addedNotice\(vaultName: String, byLabel: String\?\): String =\s*if \(byLabel\.isNullOrBlank\(\)\) "([^"]+)" else "([^"]+)"/);
     expect(fn, "HouseholdCopy.addedNotice moved or was renamed — update the pin").not.toBeNull();

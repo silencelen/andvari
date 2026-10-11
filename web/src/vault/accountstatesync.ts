@@ -227,7 +227,8 @@ export class AccountStateSync {
         // A human compared this key on THIS device: record it (after the write landed).
         const k = AccountStateSync.confirmKey(contact.userId, contact.identityPub);
         if (k) {
-          const set = this.confirmedHere();
+          // Replace this user's earlier confirmation (core recordConfirmed parity, A6 re-review LOW-A).
+          const set = new Set([...this.confirmedHere()].filter((e) => !e.startsWith(`${contact.userId}|`)));
           set.add(k);
           this.saveConfirmed(set);
         }
