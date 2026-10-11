@@ -7,10 +7,13 @@ import io.silencelen.andvari.core.crypto.CryptoProvider
 import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
+import io.silencelen.andvari.core.crypto.KeyPairBytes
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.UsageKey
 import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.SharedGrant
+import io.silencelen.andvari.core.crypto.SignedStatement
+import io.silencelen.andvari.core.crypto.Statement
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.CreateVaultRequest
@@ -293,6 +296,14 @@ class Account private constructor(
     private val uvk: ByteArray,
     val identityPub: ByteArray,
     private val identityPriv: ByteArray,
+    /**
+     * The JOINT Ed25519 signing key (security review 2026-10, root cause A §1.1, owner decision: joint key):
+     * `crypto_sign_seed_keypair` over the same identity seed, so `ed25519PkToCurve25519(signPub) ==
+     * identityPub` and no fingerprint changes. Derived at enrol/unlock from the UVK-sealed seed, held
+     * in memory for the session exactly like [identityPriv], never persisted or sent anywhere.
+     */
+    val signPub: ByteArray,
+    private val signSecret: ByteArray,
     var personalVaultId: String,
     private val vaultKeys: MutableMap<String, ByteArray>,
     private val vaultRoles: MutableMap<String, String> = mutableMapOf(),
@@ -468,8 +479,9 @@ class Account private constructor(
                     ),
                     device = DeviceInfo(platform, deviceName),
                 )
+                val signing = crypto.signKeypairFromSeed(identitySeed)
                 val account = Account(
-                    crypto, userId, uvk, identity.publicKey, identity.privateKey, personalVaultId,
+                    crypto, userId, uvk, identity.publicKey, identity.privateKey, signing.publicKey, signing.privateKey, personalVaultId,
                     mutableMapOf(personalVaultId to vk), mutableMapOf(personalVaultId to "owner"),
                 )
                 return EnrollResult(req, account, recovery.recoverySecret)
@@ -644,11 +656,15 @@ class Account private constructor(
             }
             Envelope.structuralRefusal(seedEnvelope)?.let { throw VaultKeyDamagedException("encryptedIdentitySeed: $it") }
             val identitySeed = Envelope.open(crypto, uvk, seedEnvelope, Ad.idkey(userId))
-            // ZEROIZATION (audit H80): the seed's only job is to derive the keypair the Account
+            // ZEROIZATION (audit H80): the seed's only job is to derive the keypairs the Account
             // holds — it never needs to be resident after that (a compromise of the seed IS a
-            // compromise of the identity key, so it gets the same care as the MK).
-            val identity = try {
-                crypto.boxKeypairFromSeed(identitySeed)
+            // compromise of the identity key, so it gets the same care as the MK). Both the X25519
+            // identity and the joint Ed25519 signing key (root cause A §1.1) come from it here.
+            val identity: KeyPairBytes
+            val signing: KeyPairBytes
+            try {
+                identity = crypto.boxKeypairFromSeed(identitySeed)
+                signing = crypto.signKeypairFromSeed(identitySeed)
             } finally {
                 identitySeed.fill(0)
             }
@@ -657,17 +673,28 @@ class Account private constructor(
             // SAME "possible server compromise" CryptoException, never a generic base64 decode error.
             val serverIdentityPub = runCatching { Bytes.fromB64(keys.identityPub) }.getOrNull()
             if (serverIdentityPub == null || !identity.publicKey.contentEquals(serverIdentityPub)) {
+                // The signing secret embeds the seed (libsodium's seed ‖ pk layout): never leave it
+                // behind on the refusal path.
+                signing.privateKey.fill(0)
                 throw CryptoException(
                     "identity key mismatch — the server returned an identity public key that " +
                         "your account's sealed seed does not derive; possible server compromise. Do not proceed.",
                 )
             }
-            return Account(crypto, userId, uvk, identity.publicKey, identity.privateKey, "", mutableMapOf())
+            return Account(crypto, userId, uvk, identity.publicKey, identity.privateKey, signing.publicKey, signing.privateKey, "", mutableMapOf())
         }
 
         private fun uuid(crypto: CryptoProvider): String =
             Bytes.uuidV4FromBytes(crypto.randomBytes(16)) // RFC 4122 v4 from 16 random bytes
     }
+
+    /**
+     * Sign [statement] with this account's joint key and return the v2 frame (spec 01 §5.1). A3 ships
+     * it with NO product caller: escrow v2 and signed grants (later branches) seal the frame to the
+     * recipient. Internal so only core can sign.
+     */
+    internal fun signStatement(statement: Statement): ByteArray =
+        SignedStatement.build(crypto, KeyPairBytes(signPub, signSecret), statement)
 
     /**
      * Apply an incoming grant (spec 01 §6). The ROLE update is unconditional — a role

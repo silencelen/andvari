@@ -72,13 +72,36 @@ interface CryptoProvider {
     fun secretstreamDecrypt(key: ByteArray, header: ByteArray, chunks: List<ByteArray>): List<ByteArray>
 
     /**
-     * Ed25519 detached-signature VERIFY (crypto_sign_verify_detached) — the signed-update channel
-     * (H2). True iff [signature] (64 bytes) is a valid signature of [message] by [publicKey] (32
-     * bytes). Verify-only on purpose: clients never sign; the release-signing private key lives on
-     * the owner's workstation (design 2026-07-13-signed-updates §A/§F). Never throws — bad sizes or
-     * a bad signature return false (fail-closed).
+     * Ed25519 detached-signature VERIFY (crypto_sign_verify_detached). True iff [signature] (64
+     * bytes) is a valid signature of [message] by [publicKey] (32 bytes). Never throws — bad sizes
+     * or a bad signature return false (fail-closed). Two callers: the signed-update channel (H2,
+     * whose release-signing key lives on the owner's workstation, design 2026-07-13-signed-updates)
+     * and [SignedStatement.verify] (security review 2026-10, root cause A).
      */
     fun signVerifyDetached(publicKey: ByteArray, signature: ByteArray, message: ByteArray): Boolean
+
+    /**
+     * Ed25519 keypair from a 32-byte seed (crypto_sign_seed_keypair): public 32 bytes, secret 64
+     * bytes (seed ‖ public, libsodium's layout). Clients DO sign, with exactly one key: the JOINT
+     * key over the existing identity seed (security review 2026-10, root cause A §1.1; owner
+     * decision: joint key). Both this and [boxKeypairFromSeed] take the clamped low half of SHA-512(seed) as
+     * the scalar, so `ed25519PkToCurve25519(sign.publicKey) == box.publicKey` for every account and
+     * no identity fingerprint changes. The secret is as sensitive as the seed itself (it CONTAINS
+     * the seed): derive it at unlock, never persist it, and give its input the seed's zeroization.
+     */
+    fun signKeypairFromSeed(seed: ByteArray): KeyPairBytes
+
+    /** Ed25519 detached signature (crypto_sign_detached) with a 64-byte [secretKey]; deterministic. */
+    fun signDetached(secretKey: ByteArray, message: ByteArray): ByteArray
+
+    /**
+     * crypto_sign_ed25519_pk_to_curve25519: the Montgomery (X25519) image of an Ed25519 public key.
+     * The input is attacker-supplied in every use (a signerPub shipped inside an envelope), so a
+     * wrong length, a non-point or a small-order point throws [CryptoException] and never returns.
+     * NOTE: `A` and `−A` map to the SAME output; the mapping check alone is not authentication,
+     * the signature check that follows it is ([SignedStatement.verify] does both, in order).
+     */
+    fun ed25519PkToCurve25519(ed25519PublicKey: ByteArray): ByteArray
 }
 
 /** Platform factory; each target wires its libsodium binding here. */
