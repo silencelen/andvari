@@ -373,7 +373,13 @@ key signs only through the flows that need it (today: escrow v2).
     served later for the same vault is read-only again, and a verified v2 grant naming a key other
     than the vouched one is `vk_mismatch` decided from that local tag alone (the vouched key is kept
     when the row's seal still opens to it; otherwise the row is refused with no key), whether or not
-    the server still serves the v1 seal; a removed vault forgets it. The decision is
+    the server still serves the v1 seal; a removed vault forgets it. This is ONE rule, enforced by a
+    single gate on every key-source path: while a device holds a vouch for a vault, any key for it
+    whose SHA-256 differs from the vouch tag is never adopted writable, never promoted by a v2 grant
+    (even one carrying that same key), never self-wrapped, owner-wrapped, signed onward or
+    transferred, and never offered for "Accept"; a v1 seal or v2 grant carrying it is `vk_mismatch`
+    with no key; only the caller's own UVK wrap (rule 1 of the precedence, canonical) is still used,
+    and it is flagged `vk_mismatch`. The decision is
     the graded function of `legacyMode` (window, evidence for this key, confirmation of this key). After the window closes (branch A8) a v1-only key for a vault
     with no evidence is refused. Pinned as `sharedgrant.json` → `legacyMode`.
   - **Canonical-key precedence (NORMATIVE; security review 2026-10).** A `sealedVk` is an
