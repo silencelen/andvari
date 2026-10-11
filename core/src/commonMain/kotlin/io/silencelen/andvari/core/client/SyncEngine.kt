@@ -155,6 +155,13 @@ class SyncEngine(
     /** ux-error--4: where anti-replay diagnostics go. Defaults to [CoreLog.Silent] — a host
      *  that wires nothing behaves exactly as before. */
     private val log: CoreLog = CoreLog.Silent,
+    /**
+     * Where the personal wrap this device last authenticated, and the vault id it pinned, are kept (security
+     * review 2026-10, root cause A, A5b, M-1). Native hosts pass a [FileDeviceState] in the (origin, user)
+     * namespace, which no cache policy or purge removes; null falls back to [VaultCache.clientState], which
+     * is only as durable as the cache.
+     */
+    private val deviceState: DeviceState? = null,
 ) {
     companion object {
         const val SERVER_BATCH_MAX = 200 // server rejects a push batch larger than this (Service.push)
@@ -410,8 +417,9 @@ class SyncEngine(
      * Vaults whose key we hold, personal first then shared by name (mirrors web vaults()).
      *
      * [VaultInfo.type] is DERIVED, not copied (security review 2026-10, root cause A §4.3): "personal"
-     * iff the vault is [Account.personalVaultId], which only the UVK-authenticated personal wrap (or the
-     * §8.5 migration) sets. The server's plaintext `type` label is ignored for every decision this feeds:
+     * iff the vault is [Account.personalVaultId], which only a UVK-authenticated personal wrap sets: one the
+     * server served, one this device cached, or one minted from the human's confirmed choice (there is no
+     * automatic migration pick any more). The server's plaintext `type` label is ignored for every decision this feeds:
      * the default destination, the "(shared)" tag, copy-to-Personal, the import target and the sort.
      */
     fun vaultInfos(): List<VaultInfo> = cache.vaults()
@@ -445,6 +453,24 @@ class SyncEngine(
     private val wrapCacheKey = "personal.wrap"
     private val wrapJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
 
+    // A5b M-1: the device's personal memory lives in [deviceState] when the host gives one (it outlives the
+    // cache); it is mirrored into the cache's client state so a host without one behaves as before.
+    private fun personalGet(key: String): String? = deviceState?.get(key) ?: cache.clientState(key)
+    private fun personalSet(key: String, value: String?) {
+        deviceState?.set(key, value)
+        cache.setClientState(key, value)
+    }
+
+    /** The wrap this device cached the last time it authenticated one (UVK-sealed; null if none). */
+    private fun cachedPersonalWrap(): io.silencelen.andvari.core.model.PersonalWrap? = personalGet(wrapCacheKey)?.let {
+        runCatching { wrapJson.decodeFromString(io.silencelen.andvari.core.model.PersonalWrap.serializer(), it) }.getOrNull()
+    }
+
+    private fun rememberPersonalWrap(wrap: io.silencelen.andvari.core.model.PersonalWrap) {
+        personalSet(wrapCacheKey, wrapJson.encodeToString(io.silencelen.andvari.core.model.PersonalWrap.serializer(), wrap))
+        personalSet(lastPersonalKey, wrap.vaultId)
+    }
+
     /** The question's choices, from the cached rows and this client's own key provenance. The server's
      *  `type` label and `role` are not read. */
     fun personalCandidates(): List<PersonalVaultMigration.Candidate> {
@@ -464,47 +490,113 @@ class SyncEngine(
     }
 
     /**
-     * Root cause A §4.3 as amended by the A5 review (H-1), local only, never minting:
-     *  - CONFIRMED (a served wrap opened): cache that wrap on this device (it is UVK-sealed) and remember it;
-     *  - ABSENT with a cached wrap: the server WITHHELD it — an anomaly; the cached wrap stands
-     *    ([Account.PersonalStatus.WITHHELD]); no question, no label;
+     * Root cause A §4.3 as amended by the A5 review (H-1) and re-review (A5b), local only, never minting:
+     *  - CONFIRMED (a served wrap opened): if this device cached a wrap for a DIFFERENT vault, the device does
+     *    not switch: the cached wrap stays in force and the change waits for the human
+     *    ([Account.PersonalStatus.CHANGED], [personalChange]; also covers an older wrap replayed, L-2).
+     *    Otherwise cache the served wrap (it is UVK-sealed) and remember its vault;
+     *  - ABSENT with a cached wrap: the server WITHHELD it, an anomaly; the cached wrap stands; no question;
      *  - ABSENT with nothing cached: ask the human ([personalVaultChoices]); nothing is picked;
-     *  - UNREADABLE: no personal vault; only a re-designation (password reauth) replaces it.
+     *  - UNREADABLE with a cached wrap that opens: the junk does not discard it
+     *    ([Account.PersonalStatus.UNREADABLE_CACHED], L-1);
+     *  - UNREADABLE with nothing usable cached: no personal vault; only a re-designation replaces it.
      */
     private fun decidePersonalLocally() {
+        val cached = cachedPersonalWrap()
         when (account.personalStatus) {
             Account.PersonalStatus.CONFIRMED -> {
-                account.personalWrap?.let { cache.setClientState(wrapCacheKey, wrapJson.encodeToString(io.silencelen.andvari.core.model.PersonalWrap.serializer(), it)) }
-                cache.setClientState(lastPersonalKey, account.personalVaultId)
                 personalVaultChoices = null
+                if (cached != null && account.holdPersonalChange(cached)) return
+                account.personalWrap?.let { rememberPersonalWrap(it) }
             }
-            Account.PersonalStatus.WITHHELD -> personalVaultChoices = null
-            Account.PersonalStatus.UNREADABLE -> personalVaultChoices = emptyList()
+            Account.PersonalStatus.WITHHELD, Account.PersonalStatus.CHANGED, Account.PersonalStatus.UNREADABLE_CACHED ->
+                personalVaultChoices = null
+            Account.PersonalStatus.UNREADABLE -> {
+                if (cached != null) account.applyCachedPersonalWrap(cached)
+                personalVaultChoices = if (account.personalStatus == Account.PersonalStatus.UNREADABLE_CACHED) null else emptyList()
+            }
             Account.PersonalStatus.ABSENT -> {
-                val cached = cache.clientState(wrapCacheKey)?.let {
-                    runCatching { wrapJson.decodeFromString(io.silencelen.andvari.core.model.PersonalWrap.serializer(), it) }.getOrNull()
-                }
                 if (cached != null) {
                     account.applyCachedPersonalWrap(cached)
                     personalVaultChoices = if (account.personalStatus == Account.PersonalStatus.WITHHELD) null else emptyList()
                     return
                 }
-                personalVaultChoices = PersonalVaultMigration.choices(personalCandidates(), cache.clientState(lastPersonalKey))
+                personalVaultChoices = PersonalVaultMigration.choices(personalCandidates(), personalGet(lastPersonalKey))
             }
         }
     }
 
+    // ---- A5b (M-2): an informed, confirmed choice ----
+
+    private val coHoldersByVault = HashMap<String, List<CoHolder>>()
+    private var pendingProposal: PersonalVaultProposal? = null
+
+    /** The vault this device already had as personal: its cached wrap, else the last one it used (L-1). */
+    fun devicePersonalVaultId(): String? = cachedPersonalWrap()?.vaultId ?: personalGet(lastPersonalKey)
+
+    private fun originOf(vaultId: String): PersonalChoiceInfo.Origin =
+        if (cache.vaults().firstOrNull { it.vaultId == vaultId }?.lastTransfer?.newOwnerUserId == account.userId) {
+            PersonalChoiceInfo.Origin.RECEIVED_BY_TRANSFER
+        } else PersonalChoiceInfo.Origin.CREATED
+
+    /** One vault as the question and the Settings list show it. [PersonalChoiceInfo.coHolders] is null until
+     *  [refreshPersonalChoiceDetails] (or a proposal) loaded it. */
+    fun personalChoiceInfo(vaultId: String): PersonalChoiceInfo {
+        val row = cache.vaults().firstOrNull { it.vaultId == vaultId }
+        return PersonalChoiceInfo(
+            vaultId = vaultId,
+            name = row?.let { account.decryptVaultName(vaultId, it.metaBlob) }?.takeIf { it != VAULT_NAME_FALLBACK },
+            itemCount = items().count { it.vaultId == vaultId },
+            origin = originOf(vaultId),
+            coHolders = coHoldersByVault[vaultId],
+            onThisDevice = vaultId == devicePersonalVaultId(),
+        )
+    }
+
+    private suspend fun loadCoHolders(vaultId: String): List<CoHolder> {
+        val list = api.vaultMembers(vaultId).filter { it.userId != account.userId }
+            .map { CoHolder(it.userId, it.displayName, it.email, it.role) }
+        coHoldersByVault[vaultId] = list
+        return list
+    }
+
+    /** Best effort: load who else holds each of [vaultIds] for the lists (an unreachable server leaves null). */
+    suspend fun refreshPersonalChoiceDetails(vaultIds: Collection<String>) {
+        for (id in vaultIds) runCatching { loadCoHolders(id) }
+    }
+
     /**
-     * The human's answer to "Which vault is your Personal vault?" (§8.5), or a Settings re-designation
-     * ("This is my personal vault", owner decision Q9). Only a vault whose VK opened under our own UVK
-     * is accepted. [currentAuthKey] (from a FRESH full-password entry) is required by the server to
-     * REPLACE an existing wrap; a first designation may omit it.
+     * Step 1 of a designation (the first-time question, a Settings re-designation, or keeping the current vault
+     * over a [PersonalChange]): describe the chosen vault for the confirmation. Mints NOTHING and sends nothing
+     * but the member lookup. Refuses a vault not keyed from our own UVK wrap, and fails if the co-holders cannot
+     * be loaded: the confirmation must be able to name them. Supersedes any earlier proposal.
      */
-    suspend fun designatePersonalVault(vaultId: String, currentAuthKey: String?) {
-        val wrap = account.buildPersonalWrap(vaultId)
+    suspend fun proposePersonalVault(vaultId: String): PersonalVaultProposal {
+        pendingProposal = null
+        if (!account.keyFromOwnUvkWrap(vaultId)) throw CryptoException("vault $vaultId is not wrapped under this account's key")
+        val coHolders = loadCoHolders(vaultId)
+        val info = personalChoiceInfo(vaultId)
+        return PersonalVaultProposal(vaultId, info.name, info.origin, coHolders, account.personalVaultId.ifEmpty { null })
+            .also { pendingProposal = it }
+    }
+
+    /** Drop a proposal the human cancelled. */
+    fun cancelPersonalProposal() { pendingProposal = null }
+
+    /**
+     * Step 2: the human confirmed [proposal] (after reading its name and co-holders). Only the pending proposal
+     * this engine issued is accepted, once; anything else throws [IllegalStateException] and mints nothing.
+     * [currentAuthKey] (from a FRESH full-password entry) is required by the server to REPLACE an existing
+     * wrap (re-designation, Q9); a first designation may omit it.
+     */
+    suspend fun confirmPersonalVault(proposal: PersonalVaultProposal, currentAuthKey: String?) {
+        check(proposal === pendingProposal) { "that personal-vault choice was not confirmed here (or is stale)" }
+        pendingProposal = null
+        val wrap = account.buildPersonalWrap(proposal.vaultId)
         api.putPersonalWrap(io.silencelen.andvari.core.model.PersonalWrapPut(wrap.vaultId, wrap.wrappedVk, currentAuthKey))
+        rememberPersonalWrap(wrap) // before applying, so the new wrap is never mistaken for a change
         account.applyPersonalWrap(wrap)
-        decidePersonalLocally() // caches the new wrap and clears the question
+        decidePersonalLocally() // clears the question
         onPersonalWrapStored?.invoke(wrap)
     }
 
@@ -512,16 +604,35 @@ class SyncEngine(
     fun redesignationChoices(): List<VaultInfo> = vaultInfos().filter { account.keyFromOwnUvkWrap(it.vaultId) }
 
     /**
-     * Settings → "This is my personal vault" (owner decision Q9): re-designation with a FRESH master-password
-     * reauth. The authKey is derived here from [password] and the account's own salt/params, and the server
-     * refuses the replacement without it.
+     * Settings → "This is my personal vault" (owner decision Q9), confirmed: re-designation with a FRESH
+     * master-password reauth. The authKey is derived here from [password] and the account's own salt/params,
+     * and the server refuses the replacement without it.
      */
-    suspend fun redesignatePersonalVault(vaultId: String, password: String) {
+    suspend fun redesignatePersonalVault(proposal: PersonalVaultProposal, password: String) {
+        check(proposal === pendingProposal) { "that personal-vault choice was not confirmed here (or is stale)" }
         val keys = api.accountKeys()
         val authKey = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, account.cryptoProvider())
         }
-        designatePersonalVault(vaultId, authKey)
+        confirmPersonalVault(proposal, authKey)
+    }
+
+    /** Non-null while a served wrap names another vault than this device's and the human has not decided. */
+    fun personalChange(): PersonalChange? {
+        if (account.personalStatus != Account.PersonalStatus.CHANGED) return null
+        val served = account.pendingPersonalChange ?: return null
+        return PersonalChange(account.personalVaultId, served.vaultId)
+    }
+
+    /**
+     * The human confirmed the change named by [personalChange]: the served wrap (authenticated under our UVK)
+     * is now in force and cached. Mints nothing. Keeping the current vault instead is a re-designation
+     * ([proposePersonalVault] + [redesignatePersonalVault]), which replaces the server's copy.
+     */
+    fun acceptPersonalChange() {
+        account.acceptPersonalChange()
+        account.personalWrap?.let { rememberPersonalWrap(it) } // before deciding, or it would read as a change again
+        decidePersonalLocally()
     }
 
     // ---- "Verify a household member" (root cause A §7.2), shared by the native screens ----
@@ -601,9 +712,9 @@ class SyncEngine(
         for (g in cache.grants()) {
             runCatching { account.addGrant(g) } // role applies unconditionally; key opens if missing
         }
-        // Root cause A §4.3: the personal vault came from the personal wrap at unlock. Only when there is
-        // none does the §8.5 migration rule run, offline here, over the replayed provenance; the server's
-        // `type` label is one of its inputs but never the decision.
+        // Root cause A §4.3 (A5 H-1, A5b): the served personal wrap was judged at unlock; here it is checked
+        // against the wrap this device cached (withheld, junk, or naming another vault). With no wrap anywhere
+        // the human is asked; nothing is picked automatically and the server's `type` label is not an input.
         decidePersonalLocally()
         for (w in cache.envelopes()) {
             if (w.deleted || !account.hasVault(w.vaultId)) continue

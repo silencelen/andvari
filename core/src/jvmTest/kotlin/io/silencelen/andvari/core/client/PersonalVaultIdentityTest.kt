@@ -73,6 +73,7 @@ class PersonalVaultIdentityTest {
             val ct = headersOf(HttpHeaders.ContentType, "application/json")
             when {
                 path == "/api/v1/sync" -> respond(json.encodeToString(SyncResponse.serializer(), server.feed), HttpStatusCode.OK, ct)
+                path.startsWith("/api/v1/vaults/") && path.endsWith("/members") && req.method == HttpMethod.Get -> respond("[]", HttpStatusCode.OK, ct)
                 path == "/api/v1/account/personal-wrap" && req.method == HttpMethod.Put -> {
                     server.personalWrapPuts.add((req.body as TextContent).text)
                     if (server.personalWrapStatus == HttpStatusCode.OK) respond("ok", HttpStatusCode.OK)
@@ -198,7 +199,7 @@ class PersonalVaultIdentityTest {
         assertTrue(server.personalWrapPuts.isEmpty(), "nothing minted without the human")
         assertEquals(setOf(victim.reg.personalVault.vaultId, other.vaultId), engine.personalVaultChoices!!.map { it.vaultId }.toSet())
 
-        engine.designatePersonalVault(victim.reg.personalVault.vaultId, null)
+        engine.confirmPersonalVault(engine.proposePersonalVault(victim.reg.personalVault.vaultId), null)
         assertEquals(victim.reg.personalVault.vaultId, account.personalVaultId)
         assertEquals(Account.PersonalStatus.CONFIRMED, account.personalStatus)
         val put = json.decodeFromString(PersonalWrapPut.serializer(), server.personalWrapPuts.single())
@@ -237,15 +238,15 @@ class PersonalVaultIdentityTest {
         assertEquals("", account.personalVaultId, "two candidates: no automatic pick, no default destination")
         assertEquals(setOf(victim.reg.personalVault.vaultId, owned.vaultId), engine.personalVaultChoices!!.map { it.vaultId }.toSet(), "the seal-delivered vault is never offered")
         assertTrue(server.personalWrapPuts.isEmpty())
-        assertFailsWith<Exception> { engine.designatePersonalVault(sealedVault.vaultId, null) }
+        assertFailsWith<Exception> { engine.proposePersonalVault(sealedVault.vaultId) }
 
-        engine.designatePersonalVault(victim.reg.personalVault.vaultId, null)
+        engine.confirmPersonalVault(engine.proposePersonalVault(victim.reg.personalVault.vaultId), null)
         assertEquals(victim.reg.personalVault.vaultId, account.personalVaultId)
         assertNull(engine.personalVaultChoices)
 
         // Q9: a wrong pick is not permanent. The re-designation sends the fresh reauth proof.
         assertEquals(setOf(victim.reg.personalVault.vaultId, owned.vaultId), engine.redesignationChoices().map { it.vaultId }.toSet())
-        engine.designatePersonalVault(owned.vaultId, "fresh-auth-key")
+        engine.confirmPersonalVault(engine.proposePersonalVault(owned.vaultId), "fresh-auth-key")
         assertEquals(owned.vaultId, account.personalVaultId)
         assertEquals("fresh-auth-key", json.decodeFromString(PersonalWrapPut.serializer(), server.personalWrapPuts.last()).currentAuthKey)
     }
