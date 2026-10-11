@@ -2639,6 +2639,10 @@ class DesktopState(
     // ---- household verification + personal vault (security review 2026-10, root cause A §4, §7.2; A5) ----
     // Thin seams over the shared core (SyncEngine): no pin and no personal-vault decision is made here.
 
+    /** A6 review MED-1: a pin is current only when a human confirmed it on THIS device; a synced one needs
+     *  "verify again on this device" before it can skip the add-member check or auto-adopt a grant. */
+    fun householdContactConfirmedHere(c: io.silencelen.andvari.core.client.Contact): Boolean = engine?.accountState?.isCurrent(c) == true
+
     fun householdContacts(): List<io.silencelen.andvari.core.client.Contact> = engine?.accountState?.contacts().orEmpty()
 
     fun householdAnomaly(): io.silencelen.andvari.core.client.AccountStateSync.Anomaly? = engine?.accountState?.anomaly

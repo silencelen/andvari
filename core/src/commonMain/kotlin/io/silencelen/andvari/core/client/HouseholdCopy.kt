@@ -296,13 +296,14 @@ object HouseholdCopy {
         if (byLabel.isNullOrBlank()) "You were added to “$vaultName”." else "You were added to “$vaultName” by $byLabel."
 
     /**
-     * Root cause A §1.4 (branch A6): a vault grant failed verification in a way only a misbehaving server (or a
-     * forger) explains: addressed to someone else, for another vault, signed by someone other than the sender it
-     * names, or a bad signature. Nothing was adopted; the vault's name is unknown. Danger tone. TWIN of web
+     * Root cause A §1.4 (branch A6): a vault grant failed verification: addressed to someone else, for another
+     * vault, signed by someone other than the sender it names, a bad signature, a field that does not open or
+     * parse, or a verified grant carrying a different key than the one held (the held key is kept). Nothing was
+     * adopted or switched; the vault's name may be unknown. Danger tone. TWIN of web
      * Vault.tsx noticeBody "grant-anomaly".
      */
     const val GRANT_ANOMALY_NOTICE: String =
-        "A shared-vault invitation failed its signature check, so andvari ignored it. Nothing was added. Tell your admin — the server may be misbehaving."
+        "A shared-vault invitation could not be verified, so andvari ignored it and changed nothing. Tell your admin — the server may be misbehaving."
 
     /**
      * TWIN of web Vault.tsx noticeBody's "replay-denied" branch (android SharingScreen +
