@@ -253,25 +253,15 @@ test("H03 — saveFailure maps the server's `rejected` verdict to its own rung, 
 
 // ---- H64: the personal vault (and so the usage key) never follows a server label alone ----
 
-test("H64 — both session builds pick the personal vault through pickPersonalVaultId, which skips member grants", () => {
-  // Behaviour, not decoration: `Vault.type` is server plaintext bound into no AD (spec 02 §4), so
-  // a hostile server can relabel a SHARED vault the user only holds by member grant. The extension
-  // keys the usage ledger from VK(personalVault) (crypto.ts usageKey), so adopting a relabelled
-  // vault would seal the user's per-item behavioural log under a key every OTHER member of that
-  // vault already holds. Core (Account.setPersonalVault) and web (account.ts) refuse the same way;
-  // this file is where a revert in the SW would otherwise stay green.
-  assert.match(
-    bg,
-    /function pickPersonalVaultId\([\s\S]*?v\.type === "personal" && vaultKeys\.has\(v\.vaultId\) && !memberGranted\.has\(v\.vaultId\)/,
-    "pickPersonalVaultId must exclude member-granted vaults",
-  );
-  assert.match(bg, /memberGranted\.add\(g\.vaultId\)/, "buildVaultKeys must record sealedVk provenance");
-  // Both session builds — the full password unlock and the quick redeem — go through it, and
-  // NEITHER re-derives the id inline (an inline `.find(... type === "personal" ...)` is exactly the
-  // shape that carried the bug).
-  const inline = bg.match(/vaults\.find\(\(v\) => v\.type === "personal"/g) ?? [];
-  assert.equal(inline.length, 1, `only pickPersonalVaultId may scan for type="personal" (found ${inline.length})`);
-  assert.equal((bg.match(/pickPersonalVaultId\(sync, vaultKeys, memberGranted\)/g) ?? []).length, 2, "hydrateSession and the redeem path must both call it");
+test("A5 — both session builds pick the personal vault through personalpick.ts, never a server label on its own", () => {
+  // Security review 2026-10, root cause A §4: "personal" is AccountKeys.personalWrap (UVK AEAD under the
+  // vk-personal purpose). The SW itself reads no server label; personalpick.ts consults it only for the
+  // strict §8.5 migration while the wrap is absent (graded in personalpick.test.ts).
+  assert.match(bg, /export function pickPersonalVaultId\([\s\S]*?return pickPersonal\(wrap, uvk, userId, vaultKeys, sync\.vaults, memberGranted\)\.vaultId;/);
+  assert.equal((bg.match(/type === "personal"/g) ?? []).length, 0, "no SW decision reads the server's personal label");
+  assert.equal((bg.match(/pickPersonalVaultId\(s\.accountKeys\.personalWrap, uvk, s\.userId, vaultKeys, sync, memberGranted\)/g) ?? []).length, 1, "the password unlock picks from the wrap");
+  assert.equal((bg.match(/pickPersonalVaultId\(keys\.personalWrap, begin\.uvk, begin\.userId, vaultKeys, sync, memberGranted\)/g) ?? []).length, 1, "the quick redeem picks from the wrap");
+  assert.match(bg, /memberGranted\.add\(g\.vaultId\)/, "buildVaultKeys still records sealedVk provenance");
 });
 
 // ---- H67 / R38 / R39: the damaged-account-keys terminal, wired in the SW ----

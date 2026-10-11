@@ -15,6 +15,7 @@ import {
   adItem,
   adUvk,
   adVk,
+  adVkPersonal,
   authKey,
   boxKeypairFromSeed,
   deriveMasterKey,
@@ -184,4 +185,21 @@ test("seal.json — sealOpen reads a libsodium crypto_box_seal (the shared-vault
 
   const wrong = boxKeypairFromSeed(fromB64(v.rejectWrongKey.wrongSeedB64));
   assert.throws(() => sealOpen(wrong.publicKey, wrong.privateKey, fromB64(v.rejectWrongKey.sealedB64)));
+});
+
+// Security review 2026-10, root cause A §4.1 (A5): the extension opens AccountKeys.personalWrap at unlock
+// (background.ts pickPersonalVaultId) — graded by the same personalwrap.json core and web run.
+test("personalwrap.json — a personal wrap opens only under its own AD purpose", () => {
+  const v = load("personalwrap.json");
+  const w = v.wrap;
+  assert.equal(fromUtf8(adVkPersonal(w.vaultId, w.userId)), w.adPersonalUtf8);
+  assert.equal(fromUtf8(adVk(w.vaultId, w.userId)), w.adOwnerUtf8);
+  const uvk = fromB64(w.uvkB64);
+  const adOf = (text: string) => {
+    const [, purpose, vaultId, userId] = text.split("|");
+    return purpose === "vk-personal" ? adVkPersonal(vaultId!, userId!) : adVk(vaultId!, userId!);
+  };
+  const blob = (which: string) => fromB64(which === "personal" ? w.personalWrapB64 : w.ownerWrapB64);
+  for (const r of v.open) assert.equal(toB64(open(uvk, blob(r.wrap), adOf(r.adUtf8))), r.vkB64, r.name);
+  for (const r of v.reject) assert.throws(() => open(uvk, blob(r.wrap), adOf(r.adUtf8)), undefined, r.name);
 });

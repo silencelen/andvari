@@ -21,6 +21,8 @@ export interface AccountKeys {
   wrappedUvk: string;
   encryptedIdentitySeed: string;
   identityPub: string;
+  /** Root cause A §4.1: the ONLY thing that decides which vault is personal (absent until migrated). */
+  personalWrap?: { vaultId: string; wrappedVk: string } | null;
 }
 export interface SessionResponse {
   userId: string;
@@ -54,7 +56,8 @@ export interface WireItem {
 }
 export interface WireVault {
   vaultId: string;
-  type: string; // "personal" | "shared"
+  type: string; // "personal" | "shared" — a server HINT, consulted only by the §8.5 migration (personalpick.ts)
+  metaBlob?: string;
 }
 export interface SyncResponse {
   rev: number;

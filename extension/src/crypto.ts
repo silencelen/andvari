@@ -70,6 +70,9 @@ function ad(...parts: string[]): Uint8Array {
 }
 export const adUvk = (userId: string): Uint8Array => ad("uvk", userId);
 export const adVk = (vaultId: string, userId: string): Uint8Array => ad("vk", vaultId, userId);
+/** Security review 2026-10, root cause A §4.1: the PERSONAL wrap `AccountKeys.personalWrap`, a distinct AD
+ *  purpose so an owner wrap never opens as a personal wrap (core `Ad.vkPersonal` / web `adVkPersonal`). */
+export const adVkPersonal = (vaultId: string, userId: string): Uint8Array => ad("vk-personal", vaultId, userId);
 export const adIdkey = (userId: string): Uint8Array => ad("idkey", userId);
 /** Usage ledger (spec 02 §8.2) AAD: "andvari/v1|usage|<userId>" — binds the blob to the user's
  *  slot so a hostile endpoint cannot serve one member's ledger into another's. */
