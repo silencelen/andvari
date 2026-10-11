@@ -94,6 +94,7 @@ class LifecycleProofVectorTest {
                 proofV = c["proofV"]?.takeIf { it != JsonNull }?.jsonPrimitive?.intOrNull,
                 proof = str("proof"), nonce = str("nonce"), issuedAt = lng("issuedAt"),
                 consumed = c.getValue("consumed").jsonArray.map { it.jsonPrimitive.content }.toSet(),
+                consumedAccount = c.getValue("consumedAccount").jsonArray.map { it.jsonPrimitive.content }.toSet(),
                 liveSince = lng("liveSince"), now = lng("now")!!,
             )
             assertEquals(str("expect"), d.verdict.code, "verdict: $name")

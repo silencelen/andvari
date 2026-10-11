@@ -61,7 +61,7 @@
         }
     ],
     "verdicts": {
-        "note": "Hand-authored (security review 2026-10, root cause A §6.3/§8.6, branch A7); MACs computed by an independent HKDF/HMAC oracle, not by vector-gen. Graded against the verifier production calls: core RemovalProof.decide, web decideRemoval. vaultId and myUserId are fixed; `consumed` is the union of the device and account-state sets for the vault; `consume` is [nonce, issuedAt] recorded on a valid verdict.",
+        "note": "Hand-authored (security review 2026-10, root cause A §6.3/§8.6, branch A7); MACs computed by an independent HKDF/HMAC oracle, not by vector-gen. Graded against the verifier production calls: core RemovalProof.decide, web decideRemoval. vaultId and myUserId are fixed; `consumed` is THIS device's consumed set for the vault and `consumedAccount` the account-state set (A7 review MEDIUM-2: a nonce found only in account state, inside the window, is `already_recorded`, a calm verdict; one in this device's set is `replay_denied`); `consume` is [nonce, issuedAt] recorded on a valid verdict.",
         "vaultId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
         "myUserId": "f42e08cb-8cd4-435c-9599-83b519815789",
         "skewMs": 600000,
@@ -74,6 +74,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "valid",
@@ -91,6 +92,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "valid",
@@ -108,6 +110,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -121,6 +124,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -134,6 +138,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -147,6 +152,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000000001,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -160,13 +166,14 @@
                 "nonce": "EBESExQVFhcYGRobHB0eHw",
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
                 "step": "mac"
             },
             {
-                "name": "consumed nonce (device or account state)",
+                "name": "nonce consumed on THIS device: replay denied",
                 "reason": "removed",
                 "proofV": 2,
                 "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
@@ -175,6 +182,7 @@
                 "consumed": [
                     "AAECAwQFBgcICQoLDA0ODw"
                 ],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "replay_denied",
@@ -191,6 +199,7 @@
                     "EBESExQVFhcYGRobHB0eHw",
                     "AAECAwQFBgcICQoLDA0ODw"
                 ],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "replay_denied",
@@ -206,6 +215,7 @@
                 "consumed": [
                     "AAECAwQFBgcICQoLDA0ODw"
                 ],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -221,6 +231,7 @@
                 "consumed": [
                     "AAECAwQFBgcICQoLDA0ODw"
                 ],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "replay_denied",
@@ -234,6 +245,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1759995799999,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -247,6 +259,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1759995800000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "valid",
@@ -264,6 +277,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000660001,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -277,6 +291,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000660000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "valid",
@@ -294,6 +309,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": null,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -307,6 +323,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -320,6 +337,7 @@
                 "nonce": null,
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -333,6 +351,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": null,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -346,6 +365,7 @@
                 "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -359,6 +379,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": 1760000000000,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -372,6 +393,7 @@
                 "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
                 "issuedAt": null,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "valid_legacy",
@@ -391,6 +413,7 @@
                 "consumed": [
                     "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60"
                 ],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "replay_denied",
@@ -404,6 +427,7 @@
                 "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
                 "issuedAt": null,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -417,6 +441,7 @@
                 "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
                 "issuedAt": null,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "valid_legacy",
@@ -434,6 +459,7 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": null,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -447,6 +473,7 @@
                 "nonce": null,
                 "issuedAt": null,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
@@ -460,6 +487,7 @@
                 "nonce": null,
                 "issuedAt": null,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "left_unproven",
@@ -473,10 +501,133 @@
                 "nonce": "AAECAwQFBgcICQoLDA0ODw",
                 "issuedAt": null,
                 "consumed": [],
+                "consumedAccount": [],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
                 "expect": "anomaly",
                 "step": "fields"
+            },
+            {
+                "name": "nonce only in account state (another of my devices consumed it): already recorded, consumed here too",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "consumedAccount": [
+                    "AAECAwQFBgcICQoLDA0ODw"
+                ],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "already_recorded",
+                "step": "recorded",
+                "consume": [
+                    "AAECAwQFBgcICQoLDA0ODw",
+                    1760000000000
+                ]
+            },
+            {
+                "name": "leave nonce only in account state: already recorded",
+                "reason": "left",
+                "proofV": 2,
+                "proof": "oUjy9QAWcBXoBSN1yrlXLHgmi9CM_hleWJNfJeEjU-Q",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "consumedAccount": [
+                    "AAECAwQFBgcICQoLDA0ODw"
+                ],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "already_recorded",
+                "step": "recorded",
+                "consume": [
+                    "AAECAwQFBgcICQoLDA0ODw",
+                    1760000000000
+                ]
+            },
+            {
+                "name": "nonce in this device's set AND account state: replay denied",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [
+                    "AAECAwQFBgcICQoLDA0ODw"
+                ],
+                "consumedAccount": [
+                    "AAECAwQFBgcICQoLDA0ODw"
+                ],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "replay_denied",
+                "step": "nonce"
+            },
+            {
+                "name": "order: the window is checked before the account-state set (a replay after a re-add this device saw)",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "r0d3Ks0x4kd6riaP9EPDmnUhVT6Is4LlFi1YK_Z2w5M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1759995799999,
+                "consumed": [],
+                "consumedAccount": [
+                    "AAECAwQFBgcICQoLDA0ODw"
+                ],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "window"
+            },
+            {
+                "name": "v1 proof whose nonce is only in account state: already recorded",
+                "reason": "removed",
+                "proofV": null,
+                "proof": "77OOwg_Vz7zdfBgeaUI3IqUGzXlgB7vjbkGHRpuMt0w",
+                "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                "issuedAt": null,
+                "consumed": [],
+                "consumedAccount": [
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60"
+                ],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "already_recorded",
+                "step": "recorded",
+                "consume": [
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                    1760000060000
+                ]
+            },
+            {
+                "name": "a reason that is neither removed nor left",
+                "reason": "deleted",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "consumedAccount": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "reason"
+            },
+            {
+                "name": "an unknown reason string",
+                "reason": "transferred",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "consumedAccount": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "reason"
             }
         ]
     }

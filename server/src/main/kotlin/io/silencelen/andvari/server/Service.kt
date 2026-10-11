@@ -1600,14 +1600,16 @@ class Service(
             requireOwnerOfShared(c, p, vaultId)
             if (repo.grantRole(c, targetUserId, vaultId) == null) throw NotFound("not_a_member")
             val v = repo.vaultRowById(c, vaultId) ?: throw NotFound("not_a_member")
-            if (nonce != null) claimRemovalNonce(c, vaultId, nonce)
             val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
             // Store the removal proof/nonce ON the revoked grant row (durable relay — spec
             // 03 §3/§5); NULLs when the owner's client sent none (→ victim retain-and-warn).
-            c.exec(
+            val revoked = c.exec(
                 "UPDATE grants SET revokedAt=?, revokedReason='member_remove', removeProof=?, removeNonce=?, removeProofV=?, removeIssuedAt=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL",
                 now(), proof, nonce, if (proof != null) (proofV ?: 1) else null, issuedAt, grantRev, vaultId, targetUserId,
             )
+            // A7 review LOW-5: the nonce is claimed only when this call actually revoked a grant.
+            if (revoked == 0) throw NotFound("not_a_member")
+            if (nonce != null) claimRemovalNonce(c, vaultId, nonce)
             // Removing the pending transfer target cancels the offer (spec 03 §11).
             if (v.pendingOfferId != null && v.pendingOwnerId == targetUserId) {
                 clearPendingTransfer(c, vaultId, "target_removed", p, ip, bumpVaultRev = true)
@@ -1818,12 +1820,13 @@ class Service(
             val v = repo.vaultRowById(c, vaultId) ?: throw Forbidden("no_grant")
             // Pre-capture: remaining members + the leaver (their own pull delivers removedGrants).
             val members = vaultMemberIds(c, vaultId)
-            body?.nonce?.let { claimRemovalNonce(c, vaultId, it) }
             val gr = repo.nextRev(c, "grant", vaultId, vaultId)
-            c.exec(
+            val revoked = c.exec(
                 "UPDATE grants SET revokedAt=?, revokedReason='member_leave', removeProof=?, removeNonce=?, removeProofV=?, removeIssuedAt=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL",
                 now(), body?.proof, body?.nonce, body?.proofV, body?.issuedAt, gr, vaultId, p.userId,
             )
+            // A7 review LOW-5: claim the nonce only when a grant was actually revoked.
+            if (revoked > 0) body?.nonce?.let { claimRemovalNonce(c, vaultId, it) }
             // Leaving while pending-transfer-target auto-cancels the offer (spec 03 §11).
             if (v.pendingOfferId != null && v.pendingOwnerId == p.userId) {
                 clearPendingTransfer(c, vaultId, "target_left", p, ip, bumpVaultRev = true)

@@ -455,9 +455,19 @@ class Account private constructor(
     /** The held-key tags to persist. */
     fun heldKeyTagsSnapshot(): Map<String, String> = heldKeyTags.toMap()
 
-    /** Record the tag of a key just adopted for [vaultId], unless one is recorded or the key contradicts the gate. */
-    private fun recordHeldKey(vaultId: String, vk: ByteArray) {
-        if (heldKeyTags.containsKey(vaultId) || vouchGate(vaultId, vk) == VouchGate.MISMATCH) return
+    /**
+     * Record the tag of a key just adopted for [vaultId] from a TRUSTED source (A7 review LOW-1): our own UVK wrap, a
+     * verified v2 grant, a vouched legacy key, or a vault this device created. An unvouched read-only v1 seal is
+     * server-mintable and records nothing (its vouch, if the human or the freeze gives one, records it then). No-op
+     * when a tag is recorded or the key contradicts the gate.
+     */
+    private fun recordHeldKey(vaultId: String, vk: ByteArray, source: KeySource) {
+        val trusted = when (source) {
+            KeySource.UVK_WRAP, KeySource.SIGNED_GRANT -> true
+            KeySource.LEGACY_SEAL -> legacyVouched(vaultId, vk)
+            KeySource.PERSONAL_WRAP -> false
+        }
+        if (!trusted || heldKeyTags.containsKey(vaultId) || vouchGate(vaultId, vk) == VouchGate.MISMATCH) return
         heldKeyTags[vaultId] = tagOf(vk)
     }
 
@@ -971,6 +981,7 @@ class Account private constructor(
                             return
                         }
                         keySources[grant.vaultId] = KeySource.SIGNED_GRANT
+                        recordHeldKey(grant.vaultId, held, KeySource.SIGNED_GRANT) // LOW-1: now a trusted key
                         signedGrantFrom[grant.vaultId] = o.from
                         pendingGrants.remove(grant.vaultId)
                         grantAnomalies.remove(grant.vaultId)
@@ -1009,7 +1020,7 @@ class Account private constructor(
         // SyncEngine's runCatching paths classify differently from a CryptoException, so the
         // same broken grant produced two different verdicts depending on which branch minted it.
         if (vk.size != 32) throw CryptoException("vault key for ${grant.vaultId} is not 32 bytes")
-        recordHeldKey(grant.vaultId, vk)
+        recordHeldKey(grant.vaultId, vk, opened.source)
         vaultKeys[grant.vaultId] = vk
         keySources[grant.vaultId] = opened.source
         opened.from?.let { signedGrantFrom[grant.vaultId] = it }
@@ -1219,6 +1230,8 @@ class Account private constructor(
     fun authorizeLegacyKey(vaultId: String, keyTag: String? = null, frozen: Boolean = false) {
         val tag = keyTag ?: legacyKeyTag(vaultId) ?: return
         legacyAuthorized[vaultId] = LegacyVouch(tag, frozen)
+        // A7 review LOW-1: a vouched key is a trusted key; its tag joins the held-key memory (never overwriting one).
+        if (Regex("^[0-9a-f]{64}$").matches(tag)) heldKeyTags.getOrPut(vaultId) { tag }
     }
 
     /** The sender the VERIFIED v2 grant for [vaultId] names (null unless the key came from one). */
@@ -1419,6 +1432,15 @@ class Account private constructor(
     /** The role exactly as the server declared it. */
     fun serverRoleFor(vaultId: String): String? = vaultRoles[vaultId]
 
+    /**
+     * A7 review MEDIUM-1: forget this device's key memory for [vaultId] (the §8.2 vouch and the held-key tag). Only for
+     * a drop the USER initiated on this device (their own leave or delete); a server-driven drop keeps both.
+     */
+    fun forgetKeyMemory(vaultId: String) {
+        legacyAuthorized.remove(vaultId)
+        heldKeyTags.remove(vaultId)
+    }
+
     /** Drop a vault's key + role (removedGrants purge) so later writes fail fast client-side. */
     fun removeVault(vaultId: String) {
         vaultKeys.remove(vaultId)
@@ -1429,8 +1451,7 @@ class Account private constructor(
         unreadableKeyVaults.remove(vaultId)
         keySources.remove(vaultId)
         signedGrantFrom.remove(vaultId)
-        legacyAuthorized.remove(vaultId)
-        heldKeyTags.remove(vaultId) // A7: the held-key memory dies with the vault, like a vouch
+        // A7 review MEDIUM-1: the vouch and the held-key tag are NOT dropped here; see [forgetKeyMemory].
         pendingGrants.remove(vaultId)
         grantAnomalies.remove(vaultId)
     }

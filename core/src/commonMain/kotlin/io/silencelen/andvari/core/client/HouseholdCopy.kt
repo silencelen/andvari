@@ -353,6 +353,21 @@ object HouseholdCopy {
      */
     fun leftUnprovenNotice(vaultName: String): String = "You left “$vaultName”. Didn't do this? Tell your admin."
 
+    /**
+     * A7 review MEDIUM-2: a genuine removal whose nonce another of this user's devices already consumed (it is in
+     * account state, not in this device's own set). Calm. TWIN of web Vault.tsx noticeBody, byte-equal.
+     */
+    fun removalAlreadyRecordedNotice(vaultName: String): String = "Your access to “$vaultName” was removed — already recorded on another of your devices."
+
+    /** A7 review MEDIUM-2, the `left` twin of [removalAlreadyRecordedNotice]. Calm. Byte-equal on web. */
+    fun leftAlreadyRecordedNotice(vaultName: String): String = "You left “$vaultName” — already recorded on another of your devices."
+
+    /**
+     * A7 review LOW-3: a removal attributed by a v1 proof (in-window only): MAC-verified and single-use, but with no
+     * time window, so it is qualified rather than shown as fully genuine. Calm. Byte-equal on web.
+     */
+    fun removedLegacyNotice(vaultName: String): String = "Your access to “$vaultName” was removed (sent by an older app version)."
+
     fun replayDeniedNotice(count: Int, vaultName: String): String =
         if (count == 1) {
             "A recovered edit to “$vaultName” couldn't be applied — your access may have changed while the vault was deleted."
