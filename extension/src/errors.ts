@@ -361,3 +361,10 @@ export function lockNoticeCopy(seconds: number): string {
   const s = Math.max(1, Math.round(seconds));
   return `Locked after ${s} second${s === 1 ? "" : "s"} of inactivity.`;
 }
+
+/** Security review 2026-10, root cause A §1.7 (A6, Q8): the popup line for shared vaults whose grant the extension
+ *  will not open — they wait for a full client to verify them. Empty for none. */
+export function waitingGrantsLine(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "";
+  return n === 1 ? "1 shared vault waiting — open andvari to review." : `${n} shared vaults waiting — open andvari to review.`;
+}

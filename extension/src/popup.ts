@@ -7,7 +7,7 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
 import { DEFAULT_SERVER_URL, getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
@@ -149,6 +149,7 @@ function showView(unlocked: boolean): void {
     stopTotp();
     el("must-change").hidden = true; // unlocked-session chrome — refresh() re-derives it
     el("personal-change").hidden = true; // A5b: likewise
+    el("grants-waiting").hidden = true; // A6: likewise
     el("qu-offer").hidden = true; // quick-unlock offer/enroll are unlocked-only chrome (spec 01 §8.4)
     el("qu-enroll").hidden = true;
     el("qu-settings").hidden = true;
@@ -177,6 +178,11 @@ async function refresh(): Promise<void> {
   // whole unlocked session; it clears only via a fresh unlock whose response drops the flag.
   el("must-change").hidden = !(s.unlocked && s.mustChangePassword);
   el("personal-change").hidden = !(s.unlocked && s.personalChange); // A5b M-2: never a silent switch
+  if (s.unlocked && s.personalChangeText) el("personal-change-text").textContent = s.personalChangeText; // LOW-3: both vaults named
+  // A6 (§1.7, Q8): grants the extension will not open wait for a full client.
+  const waiting = s.unlocked ? s.waitingGrants ?? 0 : 0;
+  el("grants-waiting").hidden = waiting <= 0;
+  el("grants-waiting").textContent = waitingGrantsLine(waiting);
   if (s.unlocked) {
     await loadUnlocked();
     // a11y 2c: on a recovery-password session, move focus onto the critical notice so a screen
@@ -1445,7 +1451,11 @@ el("forgot").addEventListener("click", () => void openServerPage("/#recover"));
 el("must-change").addEventListener("click", () => void openServerPage());
 el("personal-change-accept").addEventListener("click", async () => {
   const r = await ask({ type: "personalAcceptChange" });
-  if (!r?.ok) showMsg("err", "Couldn't switch the personal vault. Lock and unlock, then try again.");
+  // A5b LOW-4 (A6): the staged record is re-authenticated under the UVK, which a session woken from an eviction
+  // does not hold; and a record that no longer opens is refused rather than trusted.
+  if (r?.code === "need_full_unlock") showMsg("err", "To switch the personal vault, lock and unlock with your master password first.");
+  else if (r?.code === "unverified") showMsg("err", "The new personal-vault record could not be verified, so nothing changed. Tell your admin.");
+  else if (!r?.ok) showMsg("err", "Couldn't switch the personal vault. Lock and unlock, then try again.");
   await refresh();
 });
 

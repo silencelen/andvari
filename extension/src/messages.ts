@@ -479,9 +479,14 @@ export type Res<T extends Req["type"]> = T extends "status"
       /** A5b: a served personal-vault record names another vault than this browser's; it keeps saving to its
        *  own until the user confirms (popup notice). */
       personalChange: boolean;
+      /** A5b LOW-3 (A6): the notice naming both the current and the new vault; null when nothing pends. */
+      personalChangeText: string | null;
+      /** Root cause A §1.7 (A6): shared vaults whose grant has no UVK wrap yet — the extension never opens a
+       *  grant seal (Q8), so they wait for a full client ("open andvari to review"). */
+      waitingGrants: number;
     }
   : T extends "personalAcceptChange"
-    ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" }
+    ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" | "need_full_unlock" | "unverified" }
   : T extends "unlock"
     ? { ok: boolean; code?: UnlockCode; error?: string }
     : T extends "unlockTotp"
