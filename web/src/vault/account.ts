@@ -6,8 +6,9 @@ import { fingerprint as recoveryFingerprint, sealUvk } from "../crypto/escrow";
 import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
 import { lifecycleKey } from "../crypto/lifecycleproof";
 import { generate as generateMemberRecovery, openUvk as openMemberRecoveryUvk } from "../crypto/member-recovery";
-import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
+import { boxKeypairFromSeed, randomBytes, signKeypairFromSeed } from "../crypto/provider";
 import { identityFingerprint, openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
+import { buildSignedStatement, type Statement } from "../crypto/signedstatement";
 import { CryptoError } from "../crypto/sodium";
 import { itemDocProblem, vaultMetaName } from "./itemdoc-shape";
 import type {
@@ -166,6 +167,14 @@ export class Account {
     private readonly uvk: Uint8Array,
     private readonly identityPriv: Uint8Array,
     readonly identityPub: Uint8Array,
+    /**
+     * The JOINT Ed25519 signing key (security review 2026-10, root cause A §1.1, owner decision: joint key):
+     * crypto_sign_seed_keypair over the same identity seed, so `ed25519PkToCurve25519(signPub)`
+     * equals `identityPub` and no fingerprint changes. Derived at enrol/unlock, held for the session
+     * exactly like `identityPriv`, never persisted. Twin of core `Account.signPub`.
+     */
+    readonly signPub: Uint8Array,
+    private readonly signSecret: Uint8Array,
     public personalVaultId: string, // "" until discovered from the personal-vault grant on first sync
     private readonly vaultKeys: Map<string, Uint8Array>,
   ) {}
@@ -264,7 +273,8 @@ export class Account {
       };
 
       const vaultKeys = new Map([[personalVaultId, vk]]);
-      const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, personalVaultId, vaultKeys);
+      const signing = signKeypairFromSeed(identitySeed);
+      const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, personalVaultId, vaultKeys);
       account.vaultRoles.set(personalVaultId, "owner");
       return { request, account, recoverySecret: recovery.recoverySecret };
     } finally {
@@ -429,11 +439,14 @@ export class Account {
     const seedRefusal = structuralRefusal(seedEnvelope);
     if (seedRefusal !== null) throw new VaultKeyDamagedError(`encryptedIdentitySeed: ${seedRefusal}`);
     const identitySeed = open(uvk, seedEnvelope, adIdkey(userId));
-    // ZEROIZATION (audit H80): the seed's only job is to derive the keypair the Account holds —
-    // a compromise of the seed IS a compromise of the identity key, so it gets the MK's care.
+    // ZEROIZATION (audit H80): the seed's only job is to derive the keypairs the Account holds —
+    // a compromise of the seed IS a compromise of the identity key, so it gets the MK's care. Both
+    // the X25519 identity and the joint Ed25519 signing key (root cause A §1.1) come from it here.
     let identity: ReturnType<typeof boxKeypairFromSeed>;
+    let signing: ReturnType<typeof signKeypairFromSeed>;
     try {
       identity = boxKeypairFromSeed(identitySeed);
+      signing = signKeypairFromSeed(identitySeed);
     } finally {
       identitySeed.fill(0);
     }
@@ -444,9 +457,11 @@ export class Account {
       /* undecodable → treated as a mismatch below */
     }
     if (serverIdentityPub === null || !ctEquals(identity.publicKey, serverIdentityPub)) {
+      // The signing secret embeds the seed (libsodium's seed ‖ pk layout): never leave it behind.
+      signing.privateKey.fill(0);
       throw new IdentityMismatchError();
     }
-    return new Account(userId, uvk, identity.privateKey, identity.publicKey, "", new Map());
+    return new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, "", new Map());
   }
 
   /**
@@ -647,6 +662,15 @@ export class Account {
     this.vaultKeys.set(vaultId, vk);
     this.vaultRoles.set(vaultId, "owner");
     return { request, vaultId };
+  }
+
+  /**
+   * Sign `statement` with this account's joint key and return the v2 frame (spec 01 §5.1). Twin of
+   * core `Account.signStatement`. A3 ships it with NO product caller: escrow v2 and signed grants
+   * (later branches) seal the frame to the recipient.
+   */
+  signStatement(statement: Statement): Uint8Array {
+    return buildSignedStatement({ publicKey: this.signPub, privateKey: this.signSecret }, statement);
   }
 
   /**
