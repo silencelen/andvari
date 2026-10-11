@@ -5,6 +5,7 @@ import com.goterl.lazysodium.interfaces.AEAD
 import com.goterl.lazysodium.interfaces.Box
 import com.goterl.lazysodium.interfaces.PwHash
 import com.goterl.lazysodium.interfaces.SecretStream
+import com.goterl.lazysodium.interfaces.Sign
 import com.sun.jna.NativeLong
 import java.security.MessageDigest
 import javax.crypto.Mac
@@ -166,9 +167,38 @@ internal class LazySodiumCryptoProvider(private val ls: LazySodium) : CryptoProv
         }
     }
 
-    // H2 signed-update channel: Ed25519 crypto_sign_verify_detached. Verify-only (clients never sign).
+    // Ed25519 crypto_sign_verify_detached (H2 update channel + root cause A SignedStatement).
     // Fail-closed on bad sizes; lazysodium returns false on a bad signature (never throws here).
     override fun signVerifyDetached(publicKey: ByteArray, signature: ByteArray, message: ByteArray): Boolean =
         signature.size == 64 && publicKey.size == 32 &&
             ls.cryptoSignVerifyDetached(signature, message, message.size, publicKey)
+
+    override fun signKeypairFromSeed(seed: ByteArray): KeyPairBytes {
+        require(seed.size == Sign.SEEDBYTES) { "sign seed must be ${Sign.SEEDBYTES} bytes" }
+        val pk = ByteArray(Sign.PUBLICKEYBYTES)
+        val sk = ByteArray(Sign.SECRETKEYBYTES)
+        if (!ls.cryptoSignSeedKeypair(pk, sk, seed)) throw CryptoException("crypto_sign_seed_keypair failed")
+        return KeyPairBytes(pk, sk)
+    }
+
+    override fun signDetached(secretKey: ByteArray, message: ByteArray): ByteArray {
+        // Our own key on the way in (encrypt-side classification: a wrong length is a bug, so require).
+        require(secretKey.size == Sign.SECRETKEYBYTES) { "sign secret key must be ${Sign.SECRETKEYBYTES} bytes" }
+        val sig = ByteArray(Sign.BYTES)
+        if (!ls.cryptoSignDetached(sig, message, message.size.toLong(), secretKey)) {
+            throw CryptoException("crypto_sign_detached failed")
+        }
+        return sig
+    }
+
+    override fun ed25519PkToCurve25519(ed25519PublicKey: ByteArray): ByteArray {
+        // Attacker-supplied (a signerPub inside an envelope): F32-style length guard before native code,
+        // and libsodium's own refusal (non-point / small order) surfaces as CryptoException, never a key.
+        if (ed25519PublicKey.size != Sign.PUBLICKEYBYTES) throw CryptoException("ed25519 public key must be ${Sign.PUBLICKEYBYTES} bytes")
+        val out = ByteArray(Box.PUBLICKEYBYTES)
+        if (!ls.convertPublicKeyEd25519ToCurve25519(out, ed25519PublicKey)) {
+            throw CryptoException("ed25519 public key has no curve25519 image (invalid or small-order point)")
+        }
+        return out
+    }
 }
