@@ -14,6 +14,7 @@ import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
+import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.GrantOutcome
@@ -26,6 +27,7 @@ import io.silencelen.andvari.core.model.AccountStatePut
 import io.silencelen.andvari.core.model.AccountStateResponse
 import io.silencelen.andvari.core.model.GrantReissueRequest
 import io.silencelen.andvari.core.model.RegisterRequest
+import io.silencelen.andvari.core.model.RemovedGrantInfo
 import io.silencelen.andvari.core.model.SelfWrapRequest
 import io.silencelen.andvari.core.model.SyncResponse
 import io.silencelen.andvari.core.model.UserLookupResponse
@@ -98,6 +100,9 @@ class SignedGrantEngineTest {
         val members = HashMap<String, List<VaultMemberSummary>>()
         var accountState: String? = null
         var accountSeq: Long = 0
+        /** A7 review: answer the next delta pull with 410, forcing a since=0 resync. */
+        var resyncOnce = false
+        val leaves = mutableListOf<String>()
     }
 
     private fun body(req: io.ktor.client.request.HttpRequestData): String = when (val b = req.body) {
@@ -114,6 +119,14 @@ class SignedGrantEngineTest {
             val reissue = Regex("^/api/v1/vaults/([^/]+)/members/([^/]+)/grant$").find(path)
             val identity = Regex("^/api/v1/users/([^/]+)/identity$").find(path)
             when {
+                path == "/api/v1/sync" && server.resyncOnce && (req.url.parameters["since"]?.toLongOrNull() ?: 0L) > 0L -> {
+                    server.resyncOnce = false
+                    respond("""{"error":"resync_required","message":"gone"}""", HttpStatusCode.Gone, ct)
+                }
+                path.endsWith("/leave") -> {
+                    server.leaves.add(path)
+                    respond("""{"rev":${server.feed.rev + 1}}""", HttpStatusCode.OK, ct)
+                }
                 path == "/api/v1/sync" -> {
                     val since = req.url.parameters["since"]?.toLongOrNull() ?: 0L
                     val resp = when {
@@ -723,6 +736,8 @@ class SignedGrantEngineTest {
         if (heldIsKPrime) {
             assertFalse(device.selfWrapAuthorized(w.vaultId), "$label: K' never self-wrapped")
             assertFailsWith<VaultKeyNotVerifiedException>("$label: K' never owner-wrapped") { device.buildOwnerWrap(w.vaultId) }
+            // A6 final review LOW-G: nor signed onward to anyone.
+            assertFailsWith<VaultKeyNotVerifiedException>("$label: K' never signed onward") { device.buildSignedGrant(w.vaultId, pinOf(w.owner, "Owner")) }
         }
         for ((_, wrap) in server.selfWraps) {
             assertFalse(Bytes.ctEquals(kPrime, Envelope.openB64(crypto, ownerUvk(w.member), wrap, Ad.vk(w.vaultId, w.member.userId))), "$label: no self-wrap of K'")
@@ -742,6 +757,8 @@ class SignedGrantEngineTest {
             "pending+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), forgeSigned(w, third, k)) },
             "broken+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), Bytes.toB64(crypto.randomBytes(200))) },
             "absent" to { _, _ -> null },
+            // A6 final review LOW-G: the seal IS the vouched key K and the v2 grant carries K'.
+            "seal(K)+v2(K')" to { w, k -> memberRow(w, 0, sealOf(w, w.vk), forgeSigned(w, w.owner, k)) },
         )
         for ((name, shape) in shapes) {
             for (twoPull in listOf(false, true)) {
@@ -752,6 +769,151 @@ class SignedGrantEngineTest {
                 assertVouchHolds(w, kPrime, device, engine, server, ruleTwo = name == "wrap", label = "$name/${if (twoPull) "two-pull" else "single"}")
             }
         }
+    }
+
+    /** A6 final review LOW-G: the same table on a WARM session — rows served to the very engine that vouched, with
+     *  no restart in between (the held branch of addGrant, not the cold path). */
+    @Test
+    fun theVouchGateHoldsOnAWarmSessionToo() = runBlocking<Unit> {
+        val third = enroll("a7-unpinned-sender")
+        val shapes: List<Pair<String, (World, ByteArray) -> WireGrant?>> = listOf(
+            "wrap" to { w, k -> memberRow(w, 0, null, null).copy(wrappedVk = wrapOf(w, k)) },
+            "v2" to { w, k -> memberRow(w, 0, null, forgeSigned(w, w.owner, k)) },
+            "v2+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), forgeSigned(w, w.owner, k)) },
+            "seal" to { w, k -> memberRow(w, 0, sealOf(w, k), null) },
+            "pending+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), forgeSigned(w, third, k)) },
+            "broken+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), Bytes.toB64(crypto.randomBytes(200))) },
+            "seal(K)+v2(K')" to { w, k -> memberRow(w, 0, sealOf(w, w.vk), forgeSigned(w, w.owner, k)) },
+        )
+        for ((name, shape) in shapes) {
+            val w = world()
+            val kPrime = crypto.randomBytes(32)
+            val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)))
+            val device = unlock(w.member)
+            val engine = SyncEngine(api(server), device, InMemoryVaultCache())
+            engine.sync()
+            engine.acceptLegacyVault(w.vaultId)
+            engine.accountState.pin(pinOf(w.owner, "Owner"))
+            server.selfWraps.clear()
+            var rev = 12L
+            for (row in listOf(memberRow(w, 0, sealOf(w, kPrime), null), shape(w, kPrime))) {
+                server.feed = feed(w, rev, row?.copy(rev = rev))
+                engine.sync()
+                rev += 3
+            }
+            // Warm: the vouched key K is still the one held, whatever the rows carried.
+            assertEquals(tag(w.vk), device.legacyKeyTag(w.vaultId), "warm/$name: K stays held")
+            assertVouchHolds(w, kPrime, device, engine, server, ruleTwo = false, label = "warm/$name")
+        }
+    }
+
+    /** A6 final review LOW-G: a held LEGACY_SEAL key whose vouch (seeded directly) names ANOTHER key is never promoted,
+     *  even by a verified v2 grant carrying the held key itself. Removing the held-branch gate reds this test. */
+    @Test
+    fun aHeldLegacyKeyWithAMismatchingVouchIsNeverPromoted() {
+        val w = world()
+        val device = unlock(w.member)
+        device.grantPins = { uid -> if (uid == w.owner.userId) GrantPin(Bytes.fromB64(w.owner.reg.identityPub), true) else null }
+        val ks = crypto.randomBytes(32)
+        device.addGrant(memberRow(w, 9, sealOf(w, ks), null))
+        assertEquals(Account.KeySource.LEGACY_SEAL, device.keySource(w.vaultId))
+        device.authorizeLegacyKey(w.vaultId, tag(w.vk), frozen = false) // the vouch is for K, the held key is K_s
+        device.addGrant(memberRow(w, 12, sealOf(w, ks), forgeSigned(w, w.owner, ks)))
+        assertEquals(Account.KeySource.LEGACY_SEAL, device.keySource(w.vaultId), "never promoted to SIGNED_GRANT")
+        assertEquals(io.silencelen.andvari.core.crypto.GrantVerdict.VK_MISMATCH, device.grantAnomalies()[w.vaultId])
+        assertFalse(device.selfWrapAuthorized(w.vaultId))
+        assertFailsWith<VaultKeyNotVerifiedException> { device.buildSignedGrant(w.vaultId, pinOf(w.owner, "Owner")) }
+    }
+
+    /** A6 final review LOW-H: rule 2 meeting a mismatching vouch also raises the "vault key mismatch" flag. */
+    @Test
+    fun ruleTwoAgainstTheVouchAlsoFlagsVkMismatch() = runBlocking<Unit> {
+        val w = world()
+        val kPrime = crypto.randomBytes(32)
+        val (device, engine, _) = vouchedThenServe(w, listOf(memberRow(w, 0, null, null).copy(wrappedVk = wrapOf(w, kPrime))))
+        assertTrue(device.vkMismatch(w.vaultId), "vkMismatchVaults carries it")
+        assertTrue(engine.notices().any { it.kind == "vk-mismatch" && it.vaultId == w.vaultId })
+    }
+
+    // ---- branch A7: per-vault held-key memory (closes R15(g) on a device that held the vault) ----
+
+    /** A vault adopted from a verified v2 grant and self-wrapped; the server then strips the wrap and serves a grant
+     *  for K' signed by a pinned contact. Warm: flagged, K kept. After a restart: refused, never adopted. */
+    @Test
+    fun aV2AdoptedVaultServedWithAnotherKeyIsFlaggedWarmAndRefusedAfterARestart() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 5, null))
+        val cache = InMemoryVaultCache()
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, cache)
+        engine.sync()
+        assertNotNull(engine.verifyMemberTyped(served(w.owner, "Owner"), w.owner.account.identityFingerprintShort()))
+        server.feed = feed(w, 9, memberRow(w, 9, null, ownerSignedGrant(w)))
+        engine.sync()
+        assertEquals(Account.KeySource.SIGNED_GRANT, device.keySource(w.vaultId))
+        assertEquals(1, server.selfWraps.size)
+        val kPrime = crypto.randomBytes(32)
+        server.feed = feed(w, 12, memberRow(w, 12, null, forgeSigned(w, w.owner, kPrime)))
+        engine.sync()
+        assertEquals(tag(w.vk), device.legacyKeyTag(w.vaultId), "warm: K stays")
+        assertTrue(device.vkMismatch(w.vaultId), "warm: flagged")
+        // Restart over the same cache: the cached row now carries only the v2 grant for K'.
+        val again = unlock(w.member)
+        val restarted = SyncEngine(api(server), again, cache)
+        restarted.hydrate()
+        restarted.sync()
+        assertFalse(again.legacyKeyTag(w.vaultId) == tag(kPrime), "K' is never adopted")
+        assertFalse(again.hasVault(w.vaultId), "the row is refused with no key")
+        assertEquals(io.silencelen.andvari.core.crypto.GrantVerdict.VK_MISMATCH, again.grantAnomalies()[w.vaultId])
+        assertEquals(1, server.selfWraps.size, "and nothing is wrapped for K'")
+    }
+
+    /** A vault held from our own UVK wrap; the server strips it and serves a v1 seal or a v2 grant for K'. */
+    @Test
+    fun aWrapAdoptedVaultServedWithAnotherKeyIsRefusedAfterARestart() = runBlocking<Unit> {
+        for (shape in listOf("seal", "v2")) {
+            val w = world()
+            val server = FakeServer(feed(w, 5, null))
+            val cache = InMemoryVaultCache()
+            val device = unlock(w.member)
+            val engine = SyncEngine(api(server), device, cache)
+            engine.sync()
+            engine.accountState.pin(pinOf(w.owner, "Owner"))
+            server.feed = feed(w, 9, memberRow(w, 9, null, null).copy(wrappedVk = wrapOf(w, w.vk)))
+            engine.sync()
+            assertEquals(Account.KeySource.UVK_WRAP, device.keySource(w.vaultId))
+            val kPrime = crypto.randomBytes(32)
+            val swapped = if (shape == "seal") memberRow(w, 12, sealOf(w, kPrime), null) else memberRow(w, 12, null, forgeSigned(w, w.owner, kPrime))
+            server.feed = feed(w, 12, swapped)
+            engine.sync()
+            assertEquals(tag(w.vk), device.legacyKeyTag(w.vaultId), "$shape warm: K stays")
+            assertTrue(device.vkMismatch(w.vaultId), "$shape warm: flagged")
+            val again = unlock(w.member)
+            val restarted = SyncEngine(api(server), again, cache)
+            restarted.hydrate()
+            restarted.sync()
+            assertFalse(again.hasVault(w.vaultId), "$shape: K' is refused after a restart, never adopted")
+            assertTrue(restarted.legacyReviewVaults().none { it.vaultId == w.vaultId }, "$shape: never offered for Accept")
+        }
+    }
+
+    /** A7 review MEDIUM-1: the memory survives a server-driven removal (only the user's own leave clears it). */
+    @Test
+    fun theHeldKeyMemorySurvivesAServerDrivenRemoval() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 5, null))
+        val cache = InMemoryVaultCache()
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, cache)
+        engine.sync()
+        server.feed = feed(w, 9, memberRow(w, 9, null, null).copy(wrappedVk = wrapOf(w, w.vk)))
+        engine.sync()
+        assertTrue(cache.clientState(SyncEngine.HELD_KEYS_KEY).orEmpty().contains(w.vaultId))
+        server.feed = feed(w, 12, null).copy(removedGrants = listOf(w.vaultId))
+        engine.sync()
+        assertFalse(device.hasVault(w.vaultId))
+        assertTrue(cache.clientState(SyncEngine.HELD_KEYS_KEY).orEmpty().contains(w.vaultId))
+        assertTrue(device.heldKeyTagsSnapshot()[w.vaultId] != null)
     }
 
     /** MEDIUM-B, named: pull 1 holds K_s from a seal (≠ vouched K); pull 2 brings a verified v2 for K_s. */
@@ -909,4 +1071,145 @@ class SignedGrantEngineTest {
     private fun ownerRowWrap(w: World): String = Envelope.sealB64(crypto, ownerUvk(w.owner), w.vk, Ad.vk(w.vaultId, w.owner.userId))
 
     private fun seedOf(e: Enrolled): ByteArray = Envelope.openB64(crypto, ownerUvk(e), e.keys.encryptedIdentitySeed, Ad.idkey(e.userId))
+
+    // ---- A7 review MEDIUM-1: a server-driven drop never resets the held-key memory or the vouch ----
+
+    /** A member holding K from a verified v2 grant (pinned owner), self-wrapped. */
+    private suspend fun adoptedV2(w: World): Triple<Account, SyncEngine, FakeServer> {
+        val server = FakeServer(feed(w, 5, null))
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, InMemoryVaultCache())
+        engine.sync()
+        engine.accountState.pin(pinOf(w.owner, "Owner"))
+        server.feed = feed(w, 9, memberRow(w, 9, null, forgeSigned(w, w.owner, w.vk)))
+        engine.sync()
+        assertEquals(Account.KeySource.SIGNED_GRANT, device.keySource(w.vaultId))
+        return Triple(device, engine, server)
+    }
+
+    private fun removalFeed(w: World, rev: Long, info: RemovedGrantInfo?) =
+        feed(w, rev, null).copy(full = false, removedGrants = listOf(w.vaultId), removedGrantsInfo = listOfNotNull(info))
+
+    private fun validRemoval(w: World, nonce: String = LifecycleProof.newNonce(crypto)): RemovedGrantInfo {
+        val at = System.currentTimeMillis()
+        val key = w.owner.account.lifecycleKeyFor(w.vaultId)
+        return RemovedGrantInfo(w.vaultId, "removed", removeProof = LifecycleProof.removeV2(crypto, key, w.vaultId, w.member.userId, nonce, at), removeNonce = nonce, proofV = 2, issuedAt = at)
+    }
+
+    /** After the drop, the server re-adds the vault under K' (a pinned contact signs it): never adopted. */
+    private suspend fun assertReAddWithKPrimeRefused(w: World, device: Account, engine: SyncEngine, server: FakeServer, rev: Long, label: String) {
+        val kPrime = crypto.randomBytes(32)
+        server.selfWraps.clear()
+        server.feed = feed(w, rev, memberRow(w, rev, sealOf(w, kPrime), forgeSigned(w, w.owner, kPrime)))
+        engine.sync()
+        assertFalse(device.hasVault(w.vaultId) && device.legacyKeyTag(w.vaultId) == tag(kPrime), "$label: K' never adopted")
+        assertEquals(io.silencelen.andvari.core.crypto.GrantVerdict.VK_MISMATCH, device.grantAnomalies()[w.vaultId], "$label: vk_mismatch")
+        assertTrue(server.selfWraps.isEmpty(), "$label: never self-wrapped")
+        assertTrue(runCatching { device.buildOwnerWrap(w.vaultId) }.isFailure, "$label: never owner-wrapped")
+    }
+
+    @Test
+    fun anAnomalyRemovalThenAReAddWithAnotherKeyIsRefused() = runBlocking<Unit> {
+        val w = world()
+        val (device, engine, server) = adoptedV2(w)
+        server.feed = removalFeed(w, 12, null) // bare revocation: anomaly
+        engine.sync()
+        assertEquals("anomaly", engine.notices().last { it.vaultId == w.vaultId }.kind)
+        assertReAddWithKPrimeRefused(w, device, engine, server, 15, "anomaly")
+    }
+
+    @Test
+    fun aReplayDeniedRemovalThenAReAddWithAnotherKeyIsRefused() = runBlocking<Unit> {
+        val w = world()
+        val (device, engine, server) = adoptedV2(w)
+        val info = validRemoval(w)
+        server.feed = removalFeed(w, 12, info)
+        engine.sync()
+        server.feed = feed(w, 15, memberRow(w, 15, null, forgeSigned(w, w.owner, w.vk))) // re-add, same K
+        engine.sync()
+        assertTrue(device.hasVault(w.vaultId))
+        server.feed = removalFeed(w, 18, info) // the same proof again
+        engine.sync()
+        assertEquals("replay-denied", engine.notices().last { it.vaultId == w.vaultId }.kind)
+        assertReAddWithKPrimeRefused(w, device, engine, server, 21, "replay-denied")
+    }
+
+    @Test
+    fun aResyncDropThenAReAddWithAnotherKeyIsRefused() = runBlocking<Unit> {
+        val w = world()
+        val (device, engine, server) = adoptedV2(w)
+        server.feed = feed(w, 12, null) // the snapshot no longer carries the vault
+        server.feed = server.feed.copy(removedGrants = listOf(w.vaultId))
+        server.resyncOnce = true
+        engine.sync()
+        assertFalse(device.hasVault(w.vaultId), "the silent resync drop ran")
+        assertReAddWithKPrimeRefused(w, device, engine, server, 15, "resync")
+    }
+
+    @Test
+    fun aValidRemovalThenAReAddWithTheSameKeyWorksNormally() = runBlocking<Unit> {
+        val w = world()
+        val (device, engine, server) = adoptedV2(w)
+        server.feed = removalFeed(w, 12, validRemoval(w))
+        engine.sync()
+        assertEquals("removed", engine.notices().last { it.vaultId == w.vaultId }.kind)
+        server.selfWraps.clear()
+        server.feed = feed(w, 15, memberRow(w, 15, null, forgeSigned(w, w.owner, w.vk)))
+        engine.sync()
+        assertEquals(Account.KeySource.SIGNED_GRANT, device.keySource(w.vaultId))
+        assertTrue(device.selfWrapAuthorized(w.vaultId), "self-wrap allowed again")
+        assertTrue(device.grantAnomalies()[w.vaultId] == null)
+    }
+
+    @Test
+    fun aSelfInitiatedLeaveThenAReAddWithANewKeyIsAdopted() = runBlocking<Unit> {
+        val w = world()
+        val (device, engine, server) = adoptedV2(w)
+        server.feed = removalFeed(w, 12, RemovedGrantInfo(w.vaultId, "left"))
+        engine.leaveSharedVault(w.vaultId)
+        assertEquals(1, server.leaves.size)
+        assertFalse(device.hasVault(w.vaultId))
+        val k2 = crypto.randomBytes(32)
+        server.feed = feed(w, 15, memberRow(w, 15, null, forgeSigned(w, w.owner, k2)))
+        engine.sync()
+        assertEquals(tag(k2), device.legacyKeyTag(w.vaultId), "the user's own leave cleared the memory: the new key is adopted")
+        assertEquals(Account.KeySource.SIGNED_GRANT, device.keySource(w.vaultId))
+    }
+
+    // ---- A7 review LOW-1: only trusted sources record a held-key tag ----
+
+    @Test
+    fun aServerChosenFirstSealDoesNotBlockTheGenuineKey() = runBlocking<Unit> {
+        val w = world()
+        val ks = crypto.randomBytes(32)
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, sealOf(w, ks), null)))
+        val cache = InMemoryVaultCache()
+        val first = SyncEngine(api(server), unlock(w.member), cache)
+        first.sync()
+        first.accountState.pin(pinOf(w.owner, "Owner"))
+        assertFalse(cache.clientState(SyncEngine.HELD_KEYS_KEY).orEmpty().contains(w.vaultId), "an unvouched seal records no tag")
+        // The genuine v2 grant for K replaces the row; the next cold start adopts K.
+        server.feed = feed(w, 12, memberRow(w, 12, null, forgeSigned(w, w.owner, w.vk)))
+        first.sync()
+        val again = unlock(w.member)
+        val restarted = SyncEngine(api(server), again, cache)
+        restarted.hydrate()
+        restarted.sync()
+        assertEquals(tag(w.vk), again.legacyKeyTag(w.vaultId), "K is adopted")
+        assertEquals(Account.KeySource.SIGNED_GRANT, again.keySource(w.vaultId))
+    }
+
+    @Test
+    fun aVouchRecordsTheHeldKeyTag() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)))
+        val cache = InMemoryVaultCache()
+        val engine = SyncEngine(api(server), unlock(w.member), cache)
+        engine.sync()
+        assertFalse(cache.clientState(SyncEngine.HELD_KEYS_KEY).orEmpty().contains(w.vaultId))
+        engine.acceptLegacyVault(w.vaultId)
+        engine.sync()
+        assertTrue(cache.clientState(SyncEngine.HELD_KEYS_KEY).orEmpty().contains("${w.vaultId}|${tag(w.vk)}"))
+    }
 }
+

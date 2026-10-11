@@ -1485,7 +1485,15 @@ function armAutoLock(): void {
 
 /** Periodic refresh while unlocked — new/changed items under keys we already hold. A grant to a
  *  brand-new vault needs uvk/identity (never persisted), so it lands at the next real unlock.
- *  Failures are silent by design: offline now, the next alarm retries. */
+ *  Failures are silent by design: offline now, the next alarm retries.
+ *
+ *  Removals (security review 2026-10, root cause A §6, branch A7): the extension never reads
+ *  `removedGrants` / `removedGrantsInfo` and never verifies a removal or leave proof. It pulls a full
+ *  snapshot (since=0) every time, so a vault whose grant was revoked simply stops contributing items
+ *  and its role entry is dropped below (its key is forgotten at the next unlock, which rebuilds the key
+ *  set from the live grants); it shows no removal banner, keeps no holding area, consumes
+ *  no nonce and keeps no liveSince. Attributing a removal, refusing a replayed proof and the 30-day
+ *  holding area are the FULL clients' job (core SyncEngine, web store). */
 async function resync(): Promise<void> {
   await ensureLoaded();
   if (!session || writesInFlight > 0) return; // a save is landing — don't race its rev

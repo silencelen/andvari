@@ -115,7 +115,11 @@ class AccountStateSync(
                     unreadable = true
                 }
             }
-            val localDoc = loadLocal() ?: doc.takeIf { it.seq > 0 || it.contacts.isNotEmpty() }
+            // Root cause A §6.2 (branch A7): this device's consumed removal nonces merge into account state at the next
+            // flush. The merge is a union that never drops a local entry, so served state can never shrink the set.
+            val baseDoc = loadLocal() ?: doc.takeIf { it.seq > 0 || it.contacts.isNotEmpty() || it.consumedNonces.isNotEmpty() }
+            val deviceNonces = local.consumedNonces()
+            val localDoc = if (deviceNonces.isEmpty()) baseDoc else AccountState.withConsumed(baseDoc ?: AccountState.empty(account.userId), deviceNonces)
             val hw = highWater()
             val merged = AccountState.merge(account.userId, localDoc, served, hw)
             anomaly = when {

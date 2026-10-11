@@ -369,8 +369,8 @@ data class SyncResponse(
 /**
  * Why the caller lost a grant (spec 03 §11). `reason` derives from the caller's OWN
  * grant's revokedReason: 'removed' | 'left' | 'deleted'. Tombstone fields ride along only
- * for reason='deleted'; removeProof/removeNonce only for reason='removed' when the removing
- * owner supplied a removal proof. (restoreProof is NOT delivered here — a revoked grant is
+ * for reason='deleted'; removeProof/removeNonce (and, v2, proofV/issuedAt — branch A7) for
+ * reason='removed' or 'left' when the removing owner / leaving member supplied a proof. (restoreProof is NOT delivered here — a revoked grant is
  * never live at the same instant a restore populates restoreProof; the consumed-deleteId
  * marker rides WireVault.restoreProof/deleteId on the live restored vault instead — #4.)
  */
@@ -384,6 +384,11 @@ data class RemovedGrantInfo(
     val deleteProof: String? = null,
     val removeProof: String? = null,
     val removeNonce: String? = null,
+    /** Removal proofs v2 (security review 2026-10, root cause A §6.2; branch A7): `2` for a v2 remove or leave
+     *  proof, absent for a v1 proof or none. Rides `removed` AND `left` rows. */
+    val proofV: Int? = null,
+    /** The acting client's wall clock (ms) bound into a v2 proof; checked against the device's own window. */
+    val issuedAt: Long? = null,
 )
 
 // ---- shared vaults (spec 03 §10) ----
@@ -479,7 +484,27 @@ data class VaultMetaUpdateRequest(val metaBlob: String, val baseVaultRev: Long? 
 
 /** Optional removal-proof body for the existing member-remove route (spec 03 §10). */
 @Serializable
-data class VaultMemberRemoveRequest(val proof: String? = null, val nonce: String? = null)
+data class VaultMemberRemoveRequest(
+    val proof: String? = null,
+    val nonce: String? = null,
+    /** `2` for a v2 removal proof (root cause A §6.2, branch A7): `nonce` is then 16 bytes base64url and
+     *  `issuedAt` is required. Absent: the v1 shape (`nonce` a UUID). */
+    val proofV: Int? = null,
+    val issuedAt: Long? = null,
+)
+
+/**
+ * `POST /vaults/{id}/leave` body (root cause A §6.2, branch A7): the leaving member's v2 leave proof, so the
+ * member's OTHER devices can tell their own leave from a server's forged `left`. Sent by every v2 client; the
+ * server still accepts the empty body of older clients while the compatibility window is open.
+ */
+@Serializable
+data class VaultLeaveRequest(
+    val proofV: Int? = null,
+    val proof: String? = null,
+    val nonce: String? = null,
+    val issuedAt: Long? = null,
+)
 
 @Serializable
 data class ItemUpload(

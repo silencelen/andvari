@@ -349,7 +349,7 @@ class SharedVaultTest : P4TestSupport() {
                 val s = c.queryOne("SELECT sealedVk FROM grants WHERE userId='u'") { rs -> rs.getString(1) }
                 v to s
             }
-            assertEquals("14", version)
+            assertEquals("15", version)
             assertNull(sealed, "the pre-existing v2 grant reads back sealedVk=NULL")
             db.read { c ->
                 // v6 recovery migration landed: member_recovery table + invites.escrowPolicy default.
@@ -364,7 +364,7 @@ class SharedVaultTest : P4TestSupport() {
         }
         // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("14", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("15", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

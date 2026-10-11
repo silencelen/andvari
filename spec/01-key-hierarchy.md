@@ -379,7 +379,19 @@ key signs only through the flows that need it (today: escrow v2).
     (even one carrying that same key), never self-wrapped, owner-wrapped, signed onward or
     transferred, and never offered for "Accept"; a v1 seal or v2 grant carrying it is `vk_mismatch`
     with no key; only the caller's own UVK wrap (rule 1 of the precedence, canonical) is still used,
-    and it is flagged `vk_mismatch`. The decision is
+    and it is flagged `vk_mismatch` (and raises the "vault key mismatch" notice). **Held-key memory
+    (security review 2026-10, root cause A, branch A7):** the same gate also carries, for every vault a
+    device has adopted a key for from a TRUSTED source (its own UVK wrap, a verified v2 grant, a legacy
+    key this device vouched for — recorded at the freeze or the human's Accept — and every vault it
+    created; never an unvouched read-only v1 seal), a device-local tag = SHA-256 of the FIRST such key,
+    stored durably beside the vouches. The tag AND the vouch survive every server-driven drop (every
+    removal verdict, the resync drop, holding expiry); only a drop the user initiated on this device —
+    their own leave or delete — clears them, which keeps "leave and ask the owner to add you again" the
+    recovery for `vk_mismatch`. No step of root cause A re-keys a vault, so a vault's key never legitimately changes; a later
+    different key for that vault meets the gate exactly like a vouch mismatch (never adopted, promoted,
+    self-wrapped, owner-wrapped or signed onward; rule 1 still used but flagged). A held-key tag vouches for
+    nothing: it never lifts a legacy key's read-only state and never makes a seal key acceptable on its own.
+    A future VK rotation (P6) must update the tag in the same step that installs the new key. The decision is
     the graded function of `legacyMode` (window, evidence for this key, confirmation of this key). After the window closes (branch A8) a v1-only key for a vault
     with no evidence is refused. Pinned as `sharedgrant.json` → `legacyMode`.
   - **Canonical-key precedence (NORMATIVE; security review 2026-10).** A `sealedVk` is an
@@ -416,7 +428,10 @@ key signs only through the flows that need it (today: escrow v2).
     one would be a new dependency). It adopts a vault key only from what opens under the UVK: the
     personal wrap and the caller's `wrappedVk` (owner wraps and member self-wraps a full client
     minted). A grant row with no wrap is counted and the popup says "N shared vault(s) waiting —
-    open andvari to review"; after an MV3 eviction (no UVK in memory) nothing new is adopted.
+    open andvari to review"; after an MV3 eviction (no UVK in memory) nothing new is adopted. It
+    also never verifies a removal or leave proof (branch A7): it pulls full snapshots, so a revoked
+    vault simply stops contributing items; it shows no removal banner, keeps no holding area and
+    consumes no nonce. Attribution, replay refusal and the holding area are the full clients' job.
   - Roles: `owner` (exactly one per vault at every instant; reassignable ONLY via the
     two-phase offer/accept transfer of spec 03 §11, in which the new owner's client
     re-wraps VK under its own UVK and the old owner demotes to `writer`, retaining VK —
@@ -437,7 +452,28 @@ key signs only through the flows that need it (today: escrow v2).
   0.5.0 client verifies the proof under its held VK before treating a delete/transfer/remove
   as a genuine owner action. Proofs are MACs, not signatures — any current VK holder can
   mint one, so they remove only the *server* from the forgery set (server-side owner authz
-  stays the real gate). Vectors: `spec/test-vectors/lifecycleproof.json`.
+  stays the real gate; owner decision Q11 keeps delete, restore and transfer proofs as MACs).
+  Vectors: `spec/test-vectors/lifecycleproof.json`.
+- **Removal proofs v2 (NORMATIVE; security review 2026-10, root cause A §6, branch A7).** Every
+  removal and every leave carries a freshness-bound, single-use MAC under the same `lifecycleKey`:
+  `remove-v2` (minted by the owner removing `targetUserId`) and `leave` (minted by the leaving
+  member's own client), each over a 16-byte CSPRNG nonce (base64url) and the actor's wall clock
+  `issuedAt` (ms). The target's EACH device verifies, in order, the first failure being the verdict:
+  `proofV == 2` with every field present (in the compatibility window: a v1 `remove` proof is "valid
+  (legacy)" iff its nonce is unconsumed, and a `left` with no proof is shown as "You left" plus
+  "Didn't do this? Tell your admin"); the MAC for the reason's domain with target = its own userId
+  (constant time); the nonce absent from THIS device's consumed set — else `replay-denied`; and
+  `liveSince − 10 min <= issuedAt <= now + 10 min`; then (A7 review, a refinement of design §6.3
+  step 5) a nonce found only in the account state's consumed set (`/account/state`, spec 03 §3) was
+  consumed by another of the user's devices for the same genuine removal: the calm "already recorded
+  on another of your devices" notice, and it is consumed here too. A "valid (legacy)" v1 verdict is
+  shown qualified: "(sent by an older app version)". `liveSince` is the device-local wall-clock time this device last saw the vault go from
+  not-live (absent, held, removed) to live; it is persisted with the device's cache and never comes
+  from the server, so a re-add the device saw moves it past every earlier proof. A valid verdict
+  records `(vaultId, nonce, issuedAt)` in the device's durable consumed set in the same transaction
+  that moves the vault to the holding area, and merges it into account state at the next flush
+  (union, never shrunk by a served copy). Every verdict keeps the same data handling: the holding
+  area, 30 days.
 
 ## 7. Password change and KDF upgrade
 
