@@ -391,7 +391,7 @@ private fun AttentionArea(vm: AndvariViewModel, ui: UiState) {
     val personalNeedsAttention = vm.personalStatus().let { it != null && it != io.silencelen.andvari.core.client.Account.PersonalStatus.CONFIRMED }
     val hasAnything = ((ui.escrowStale || ui.escrowNeedsV2) && ui.escrowFingerprint.isNotEmpty()) ||
         ui.incomingTransfers.isNotEmpty() || ui.lifecycleNotices.isNotEmpty() ||
-        ui.needsUpdateCount > 0 || fyiUnopenable || personalNeedsAttention
+        ui.needsUpdateCount > 0 || fyiUnopenable || personalNeedsAttention || signedGrantNeedsAttention(vm)
     if (!hasAnything) return
     // Capped + scrollable so a pile-up (many lifecycle rows + several simultaneous incoming
     // transfers) can't clip its own lower items or squeeze the vault list below to ~0 — it's a
@@ -402,6 +402,8 @@ private fun AttentionArea(vm: AndvariViewModel, ui: UiState) {
         if ((ui.escrowStale || ui.escrowNeedsV2) && ui.escrowFingerprint.isNotEmpty()) ReSealCard(vm, ui)
         // Root cause A §4.3 / §8.5 (A5): no confirmed personal vault ⇒ no default destination; ask when needed.
         PersonalVaultBanner(vm) { vm.refresh() }
+        // Root cause A §1.6 / §8.2 (A6): invitations from someone not verified here, and legacy vaults to review.
+        SignedGrantCards(vm) { vm.refresh() }
         IncomingTransferCards(vm, ui)
         LifecycleNoticesBanner(ui.lifecycleNotices, vm::dismissNotice)
         if (ui.needsUpdateCount > 0 && ui.items.isEmpty()) { // A2: the "vault looks empty" explanation

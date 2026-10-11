@@ -155,6 +155,7 @@ private fun VerifyMemberDialog(vm: DesktopState, onDone: () -> Unit) {
  */
 internal fun personalChoiceDetail(info: PersonalChoiceInfo?): String {
     if (info == null) return ""
+    // A5b review LOW-2 (closed in A6): the origin and the co-holders are what the SERVER reports; say so.
     val origin = when (info.origin) {
         PersonalChoiceInfo.Origin.CREATED -> "created by this account"
         PersonalChoiceInfo.Origin.RECEIVED_BY_TRANSFER -> "received from someone else by transfer"
@@ -167,7 +168,7 @@ internal fun personalChoiceDetail(info: PersonalChoiceInfo?): String {
         }
     }
     val device = if (info.onThisDevice) " · this device's personal vault" else ""
-    return "${origin.replaceFirstChar { it.uppercase() }} · $holders$device"
+    return "As reported by the server: $origin · $holders$device"
 }
 
 /** The confirmation every designation goes through (A5b, M-2): it names the vault and everyone else on it. */
@@ -180,13 +181,13 @@ private fun ConfirmPersonalText(p: PersonalVaultProposal) {
             Text("The server reports nobody else on this vault.", style = MaterialTheme.typography.bodySmall)
         } else {
             Text(
-                "These people can also read everything in it: " + p.coHolders.joinToString(", ") { "${it.displayName} (${it.email})" } +
+                "The server reports that these people can also read everything in it: " + p.coHolders.joinToString(", ") { "${it.displayName} (${it.email})" } +
                     ". Choose it only if that is what you want.",
                 color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
             )
         }
         if (p.origin == PersonalChoiceInfo.Origin.RECEIVED_BY_TRANSFER) {
-            Text("Someone else created this vault and transferred it to you.", style = MaterialTheme.typography.bodySmall)
+            Text("The server reports that someone else created this vault and transferred it to you.", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -318,27 +319,49 @@ fun PersonalVaultBanner(vm: DesktopState, onChanged: () -> Unit) {
         return
     }
     if (status == Account.PersonalStatus.CHANGED) {
-        // A5 re-review M-2 / L-2: never a silent switch.
+        // A5 re-review M-2 / L-2: never a silent switch. A5b review LOW-1 (closed in A6): keeping the current vault
+        // comes FIRST, and "Use new" is offered only after the new vault's co-holders loaded (core enforces it too).
         val change = vm.personalChange() ?: return
-        LaunchedEffect(change.servedVaultId) { vm.refreshPersonalChoiceDetails(listOf(change.servedVaultId)); tick++ }
-        val served = remember(tick, change) { vm.personalChoiceInfo(change.servedVaultId) }
-        val newName = served?.name ?: vm.vaultDisplayName(change.servedVaultId)
-        val oldName = vm.vaultDisplayName(change.currentVaultId)
+        var details by remember(change.servedVaultId) { mutableStateOf<io.silencelen.andvari.core.client.PersonalChangeDetails?>(null) }
+        var lookupFailed by remember(change.servedVaultId) { mutableStateOf(false) }
+        LaunchedEffect(change.servedVaultId, tick) {
+            runCatching { vm.describePersonalChange() }.onSuccess { details = it; lookupFailed = false }.onFailure { lookupFailed = true }
+        }
+        val newName = details?.servedName ?: vm.vaultDisplayName(change.servedVaultId)
+        val oldName = details?.currentName ?: vm.vaultDisplayName(change.currentVaultId)
         Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             Column(Modifier.padding(12.dp)) {
-                Text("Your personal vault was changed to $newName.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)
+                Text("Your personal vault was changed from $oldName to $newName.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)
                 Text("Another of your devices changed it, or the server sent an older record. This device still uses $oldName until you decide.", style = MaterialTheme.typography.bodySmall)
-                Text("$newName: ${personalChoiceDetail(served)}", style = MaterialTheme.typography.bodySmall)
-                androidx.compose.foundation.layout.Row {
-                    OutlinedButton(onClick = {
+                OutlinedButton(enabled = !busy, onClick = {
+                    scope.launch {
+                        busy = true
+                        err = null
+                        runCatching { vm.proposePersonalVault(change.currentVaultId) }
+                            .onSuccess { proposal = it }
+                            .onFailure { err = "Couldn't check who else holds $oldName. Try again when you're connected." }
+                        busy = false
+                    }
+                }) { Text("Keep $oldName") }
+                val d = details
+                if (d != null) {
+                    val holders = if (d.servedCoHolders.isEmpty()) "nobody else" else d.servedCoHolders.joinToString(", ") { "${it.displayName} (${it.role})" }
+                    val origin = if (d.servedOrigin == PersonalChoiceInfo.Origin.RECEIVED_BY_TRANSFER) "received by transfer" else "created by this account"
+                    Text("$newName, as reported by the server: $origin · also held by $holders.", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = {
                         err = runCatching { vm.acceptPersonalChange() }.exceptionOrNull()?.let { "Couldn't switch. Try again." }
                         onChanged()
                     }) { Text("Use $newName") }
+                } else if (lookupFailed) {
+                    Text("Couldn't check who else holds $newName, so switching to it isn't offered yet.", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = { tick++ }) { Text("Try again") }
                 }
-                Text("If you didn't do this, keep $oldName: choose it again in Settings, Personal vault (it asks for your master password), and tell your admin.", style = MaterialTheme.typography.bodySmall)
+                Text("If you didn't change it, keep $oldName (it asks for your master password) and tell your admin.", style = MaterialTheme.typography.bodySmall)
                 err?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         }
+        val p = proposal
+        if (p != null) KeepCurrentDialog(vm, p, onDone = { proposal = null; onChanged() })
         return
     }
     val choices = vm.personalVaultChoices().orEmpty()
@@ -391,4 +414,42 @@ fun PersonalVaultBanner(vm: DesktopState, onChanged: () -> Unit) {
             dismissButton = { TextButton(onClick = { vm.cancelPersonalProposal(); proposal = null }) { Text("Cancel") } },
         )
     }
+}
+
+/** "Keep <current>" over a personal-vault change (A5b review LOW-1): a re-designation of the current vault, which
+ *  replaces the server's copy and needs a fresh master-password reauth (Q9). */
+@Composable
+private fun KeepCurrentDialog(vm: DesktopState, p: PersonalVaultProposal, onDone: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var password by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var err by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = { vm.cancelPersonalProposal(); onDone() },
+        title = { Text("Keep ${p.name ?: "this vault"} as your personal vault?") },
+        text = {
+            Column {
+                ConfirmPersonalText(p)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    password, { password = it }, Modifier.fillMaxWidth(), label = { Text("Master password (required)") },
+                    singleLine = true, visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                )
+                err?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = !busy && password.isNotEmpty(), onClick = {
+                scope.launch {
+                    busy = true
+                    val failed = runCatching { vm.redesignatePersonalVault(p, password) }.isFailure
+                    password = ""
+                    busy = false
+                    if (failed) err = "Couldn't keep it: wrong master password, or the server refused." else onDone()
+                }
+            }) { Text("Keep it") }
+        },
+        dismissButton = { TextButton(onClick = { vm.cancelPersonalProposal(); onDone() }) { Text("Cancel") } },
+    )
 }
