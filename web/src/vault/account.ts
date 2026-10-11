@@ -1,15 +1,15 @@
 import { adAccountState, adIdkey, adItem, adUsage, adUvk, adVaultMeta, adVk, adVkPersonal } from "../crypto/ad";
 import { type AccountStateDoc, decodeAccountState, encodeAccountState } from "./accountstate";
 import { usageKey } from "../crypto/usagekey";
-import { ctEquals, fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
+import { ctEquals, fromB64, fromUtf8, toB64, toHexLower, utf8 } from "../crypto/bytes";
 import { open, seal, structuralRefusal } from "../crypto/envelope";
 import { fingerprint as recoveryFingerprint, sealUvkV2 } from "../crypto/escrow";
 import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
 import { lifecycleKey } from "../crypto/lifecycleproof";
 import { generate as generateMemberRecovery, openUvk as openMemberRecoveryUvk } from "../crypto/member-recovery";
-import { boxKeypairFromSeed, randomBytes, signKeypairFromSeed } from "../crypto/provider";
+import { boxKeypairFromSeed, randomBytes, sha256Sync, signKeypairFromSeed } from "../crypto/provider";
 import { identityFingerprint, openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
-import { buildGrantFrame, type GrantOutcome, type GrantPin, type GrantVerdict, LEGACY_IN_WINDOW, openSignedGrant, sealGrantFrame } from "../crypto/signedgrant";
+import { buildGrantFrame, decideLegacyGrant, type GrantOutcome, type GrantPin, type GrantVerdict, LEGACY_IN_WINDOW, type LegacyGrantMode, openSignedGrant, sealGrantFrame } from "../crypto/signedgrant";
 import type { Contact } from "./accountstate";
 import { CryptoError } from "../crypto/sodium";
 import { itemDocProblem, vaultMetaName } from "./itemdoc-shape";
@@ -129,6 +129,20 @@ export class VaultKeyNotVerifiedError extends Error {
   }
 }
 
+/** How this device vouched for a v1-only key (§8.2): pre-upgrade evidence, or the human's Accept. */
+export type LegacyVouchKind = "frozen" | "confirmed";
+
+/** A vouch is bound to the KEY it was given for: `tag` = lowercase hex SHA-256 of that vault key (A6 review HIGH-1). */
+export interface LegacyVouch {
+  tag: string;
+  kind: LegacyVouchKind;
+}
+
+/** The tag a legacy-key vouch is bound to: lowercase hex SHA-256 of the vault key. */
+export function legacyTagOf(vk: Uint8Array): string {
+  return toHexLower(sha256Sync(vk));
+}
+
 /** Where a held vault key came from (root cause A §3.1 precedence; core `Account.KeySource`). */
 export type KeySource = "personal-wrap" | "uvk-wrap" | "signed-grant" | "legacy-seal";
 
@@ -206,8 +220,8 @@ export class Account {
   private readonly keySources = new Map<string, KeySource>();
   /** For keys from a verified v2 grant: the sender the VERIFIED statement names. */
   private readonly signedGrantFrom = new Map<string, string>();
-  /** v1-only keys this device vouches for (§8.2: pre-upgrade evidence, or the human's Accept). */
-  private readonly legacyAuthorized = new Set<string>();
+  /** v1-only keys this device vouches for (§8.2), each bound to the key it was given for (HIGH-1). */
+  private readonly legacyVouches = new Map<string, LegacyVouch>();
   /** §1.6 pending invitations by vaultId. */
   private readonly pendingGrantsByVault = new Map<string, PendingGrant>();
   /** §1.4 anomaly verdicts by vaultId (nothing adopted). */
@@ -593,30 +607,35 @@ export class Account {
     if (grant.role) this.vaultRoles.set(grant.vaultId, grant.role);
     const held = this.vaultKeys.get(grant.vaultId);
     if (held) {
-      // A key held ONLY from a v1 seal is confirmed (same key) by a verified v2 grant on a re-delivered row (the
-      // owner's re-issue, §8.2 step 3); a verified grant naming a DIFFERENT key replaces it and is flagged.
+      // A key held ONLY from a v1 seal is confirmed by a verified v2 grant carrying the SAME key (the owner's
+      // re-issue, §8.2 step 3). A v2 grant never silently REPLACES a held key (A6 review MED-2): a different key is
+      // the vk_mismatch anomaly, and the held key and its source stay (an unvouched one stays read-only). A field
+      // that is present but fails §1.4 in any way is an anomaly too (LOW-2).
       if (this.keySources.get(grant.vaultId) === "legacy-seal" && grant.signedGrant) {
         const o = this.openSigned(grant, null);
         if (o.verdict === "adopt") {
-          if (!ctEquals(o.vk, held)) {
-            this.vaultKeys.set(grant.vaultId, o.vk);
-            this.vkMismatchVaults.add(grant.vaultId);
+          if (ctEquals(o.vk, held)) {
+            this.keySources.set(grant.vaultId, "signed-grant");
+            this.signedGrantFrom.set(grant.vaultId, o.from);
+            this.pendingGrantsByVault.delete(grant.vaultId);
+            this.grantAnomaliesByVault.delete(grant.vaultId);
+          } else {
+            this.grantAnomaliesByVault.set(grant.vaultId, "vk_mismatch");
           }
-          this.keySources.set(grant.vaultId, "signed-grant");
-          this.signedGrantFrom.set(grant.vaultId, o.from);
-          this.pendingGrantsByVault.delete(grant.vaultId);
-          this.grantAnomaliesByVault.delete(grant.vaultId);
           return;
         }
         if (o.verdict === "pending_invitation") this.pendingGrantsByVault.set(grant.vaultId, { vaultId: grant.vaultId, fromUserId: o.from, grantIdB64: o.grantIdB64 });
-        else if (o.anomaly) this.grantAnomaliesByVault.set(grant.vaultId, o.verdict);
+        else {
+          this.grantAnomaliesByVault.set(grant.vaultId, o.verdict);
+          return;
+        }
       }
       // Already held: the row cannot change our key, but a re-delivered row that now carries a
       // DIFFERENT key is still worth surfacing.
       if (this.rowCarriesOtherKey(grant, held)) this.vkMismatchVaults.add(grant.vaultId);
       return;
     }
-    let opened: { vk: Uint8Array; source: KeySource; sealMismatch: boolean; from?: string };
+    let opened: { vk: Uint8Array; source: KeySource; sealMismatch: boolean; from?: string; anomaly?: GrantVerdict };
     try {
       opened = this.openGrantVk(grant);
     } catch (e) {
@@ -639,7 +658,8 @@ export class Account {
     this.keySources.set(grant.vaultId, opened.source);
     if (opened.from) this.signedGrantFrom.set(grant.vaultId, opened.from);
     this.pendingGrantsByVault.delete(grant.vaultId);
-    this.grantAnomaliesByVault.delete(grant.vaultId);
+    if (opened.anomaly) this.grantAnomaliesByVault.set(grant.vaultId, opened.anomaly);
+    else this.grantAnomaliesByVault.delete(grant.vaultId);
     this.unreadableKeyVaults.delete(grant.vaultId);
     if (opened.sealMismatch) this.vkMismatchVaults.add(grant.vaultId);
     if (opened.source === "uvk-wrap" && grant.userId === this.userId) this.uvkWrappedVaults.add(grant.vaultId);
@@ -677,7 +697,7 @@ export class Account {
    * different → `sealMismatch`, unopenable → ignored). A wrap that is present but does not open
    * throws {@link VaultGrantKeyUnreadableError} and the seal is never tried.
    */
-  private openGrantVk(grant: WireGrant): { vk: Uint8Array; source: KeySource; sealMismatch: boolean; from?: string } {
+  private openGrantVk(grant: WireGrant): { vk: Uint8Array; source: KeySource; sealMismatch: boolean; from?: string; anomaly?: GrantVerdict } {
     if (grant.wrappedVk) {
       let vk: Uint8Array;
       try {
@@ -699,25 +719,57 @@ export class Account {
     }
     // (3) v2 signed grant, verified per root cause A §1.4 against our PIN for the sender it names.
     if (grant.signedGrant) {
+      // The v1 seal on this row, only if it opens to the key this device VOUCHED for (HIGH-1: a vouch is bound to
+      // its key; a different v1 key for the same vault is not covered).
+      const vouched = this.vouchedSealKey(grant);
       const o = this.openSigned(grant, null);
-      if (o.verdict === "adopt") return { vk: o.vk, source: "signed-grant", sealMismatch: false, from: o.from };
+      if (o.verdict === "adopt") {
+        // MED-2: a vouched legacy key is never silently replaced by a v2 grant carrying another key: keep the
+        // vouched key (as legacy) and flag the mismatch.
+        if (vouched && !ctEquals(vouched, o.vk)) return { vk: vouched, source: "legacy-seal", sealMismatch: false, anomaly: "vk_mismatch" };
+        return { vk: o.vk, source: "signed-grant", sealMismatch: false, from: o.from };
+      }
       if (o.verdict === "pending_invitation") {
-        // Never satisfied by the v1 seal on the same row, EXCEPT for a vault this device already vouched for
-        // (§8.2 freeze or the human's Accept) whose self-wrap has not reached the row yet.
-        if (this.legacyAuthorized.has(grant.vaultId) && grant.sealedVk) {
-          const k = this.openSealOrNull(grant.vaultId, grant.sealedVk);
-          if (k) return { vk: k, source: "legacy-seal", sealMismatch: false };
-        }
+        // Never satisfied by the v1 seal on the same row, EXCEPT for the key this device already vouched for (§8.2
+        // freeze or the human's Accept) whose self-wrap has not reached the row yet.
+        if (vouched) return { vk: vouched, source: "legacy-seal", sealMismatch: false };
         throw new GrantPendingSignal({ vaultId: grant.vaultId, fromUserId: o.from, grantIdB64: o.grantIdB64 });
       }
-      // An anomaly refuses the ROW (no v1 fallback); a field that does not open or parse is ignored (§1.4).
-      if (o.anomaly) throw new GrantRefusedSignal(o.verdict);
+      // LOW-2: a field that is PRESENT and fails §1.4 in ANY way (anomaly or not) refuses the row: no v1 fallback.
+      throw new GrantRefusedSignal(o.verdict);
     }
-    // (4) v1 `sealedVk`, compatibility window only: legacy-read-only until vouched for (§8.2).
-    if (grant.sealedVk && LEGACY_IN_WINDOW) {
-      return { vk: openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk)), source: "legacy-seal", sealMismatch: false };
+    // (4) v1 `sealedVk`, compatibility window only: legacy-read-only until vouched for (§8.2). The decision runs
+    // through the graded function (LOW-3): post-window, a key with no pre-upgrade evidence is refused outright.
+    if (grant.sealedVk) {
+      const vk = openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk));
+      if (this.legacyModeFor(grant.vaultId, vk) === "refused") throw new CryptoError(`legacy grant for ${grant.vaultId} refused (compatibility window closed)`);
+      return { vk, source: "legacy-seal", sealMismatch: false };
     }
     throw new CryptoError(`grant for ${grant.vaultId} carries no key`);
+  }
+
+  /** The row's v1 seal key, only when it is the key this device vouched for (tag match). */
+  private vouchedSealKey(grant: WireGrant): Uint8Array | null {
+    const v = this.legacyVouches.get(grant.vaultId);
+    if (!v || !grant.sealedVk) return null;
+    const k = this.openSealOrNull(grant.vaultId, grant.sealedVk);
+    return k && legacyTagOf(k) === v.tag ? k : null;
+  }
+
+  /**
+   * §8.2 / §8.6 (A6 review LOW-3): the legacy decision for [vk] as a v1-only key of [vaultId], routed through the
+   * graded `decideLegacyGrant`. A vouch counts only for the key it was given for (HIGH-1).
+   */
+  private legacyModeFor(vaultId: string, vk: Uint8Array): LegacyGrantMode {
+    const v = this.legacyVouches.get(vaultId);
+    const matches = !!v && legacyTagOf(vk) === v.tag;
+    return decideLegacyGrant(LEGACY_IN_WINDOW, matches && v!.kind === "frozen", matches && v!.kind === "confirmed");
+  }
+
+  private heldLegacyMode(vaultId: string): LegacyGrantMode | null {
+    const held = this.vaultKeys.get(vaultId);
+    if (!held || this.keySources.get(vaultId) !== "legacy-seal") return null;
+    return this.legacyModeFor(vaultId, held);
   }
 
   private openSealOrNull(vaultId: string, sealedVk: string): Uint8Array | null {
@@ -781,7 +833,9 @@ export class Account {
   selfWrapAuthorized(vaultId: string): boolean {
     if (!this.vaultKeys.has(vaultId)) return false;
     const src = this.keySources.get(vaultId);
-    return src === "signed-grant" || (src === "legacy-seal" && this.legacyAuthorized.has(vaultId));
+    if (src === "signed-grant") return true;
+    const mode = this.heldLegacyMode(vaultId);
+    return mode === "frozen" || mode === "confirmed";
   }
 
   /** Where this vault's held key came from (null when not held). */
@@ -791,16 +845,43 @@ export class Account {
 
   /** INV-WRITE-KEY: a key only an unconfirmed v1 seal vouches for. Readable; never written under. */
   isLegacyReadOnly(vaultId: string): boolean {
-    return this.vaultKeys.has(vaultId) && this.keySources.get(vaultId) === "legacy-seal" && !this.legacyAuthorized.has(vaultId);
+    return this.heldLegacyMode(vaultId) === "read_only";
   }
 
   legacyReadOnlyVaultIds(): string[] {
     return [...this.vaultKeys.keys()].filter((id) => this.isLegacyReadOnly(id));
   }
 
-  /** §8.2: this device vouches for the v1-only key of `vaultId` (freeze evidence, or the human's Accept). */
-  authorizeLegacyKey(vaultId: string): void {
-    this.legacyAuthorized.add(vaultId);
+  /** The tag of the key held for `vaultId` (lowercase hex SHA-256), or null when none is held. */
+  legacyKeyTag(vaultId: string): string | null {
+    const k = this.vaultKeys.get(vaultId);
+    return k ? legacyTagOf(k) : null;
+  }
+
+  /**
+   * §8.2: this device vouches for the v1-only key of `vaultId` (freeze evidence: "frozen"; the human's Accept:
+   * "confirmed"), BOUND to the key with tag `tag` (default: the key held now). With no tag and no held key nothing is
+   * recorded: a vouch for "whatever key arrives" is exactly what HIGH-1 forbids.
+   */
+  authorizeLegacyKey(vaultId: string, tag?: string, kind: LegacyVouchKind = "confirmed"): void {
+    const t = tag ?? this.legacyKeyTag(vaultId);
+    if (!t || !/^[0-9a-f]{64}$/.test(t)) return;
+    this.legacyVouches.set(vaultId, { tag: t, kind });
+  }
+
+  /** The vouch recorded for `vaultId`, for the store to persist. */
+  legacyVouch(vaultId: string): LegacyVouch | null {
+    return this.legacyVouches.get(vaultId) ?? null;
+  }
+
+  /** True when a v2 grant for `vaultId` is waiting on verification (§1.6). */
+  hasPendingGrant(vaultId: string): boolean {
+    return this.pendingGrantsByVault.has(vaultId);
+  }
+
+  /** True when a v2 grant for `vaultId` failed §1.4 (the review card must not offer TOFU over it, LOW-2). */
+  hasGrantAnomaly(vaultId: string): boolean {
+    return this.grantAnomaliesByVault.has(vaultId);
   }
 
   /** The sender the VERIFIED v2 grant for `vaultId` names (null unless the key came from one). */
@@ -894,7 +975,7 @@ export class Account {
     this.unreadableKeyVaults.delete(vaultId);
     this.keySources.delete(vaultId);
     this.signedGrantFrom.delete(vaultId);
-    this.legacyAuthorized.delete(vaultId);
+    this.legacyVouches.delete(vaultId);
     this.pendingGrantsByVault.delete(vaultId);
     this.grantAnomaliesByVault.delete(vaultId);
   }

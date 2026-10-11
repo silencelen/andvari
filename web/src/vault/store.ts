@@ -27,7 +27,7 @@ import {
 } from "../crypto/lifecycleproof";
 import { randomBytes, sha256 } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
-import { ITEM_FORMAT_VERSION, type Account } from "./account";
+import { ITEM_FORMAT_VERSION, type Account, type LegacyVouchKind } from "./account";
 import type { Contact } from "./accountstate";
 import { pinFromQr, pinFromTyped, pinState } from "./contacts";
 import { AccountStateSync, type ClientStateStore, localClientState } from "./accountstatesync";
@@ -192,9 +192,10 @@ export interface PersonalChangeDetails {
   servedOrigin: "created" | "received";
 }
 
-// Root cause A §8.2 (A6) client-state keys (per user, survive a reload). Core SyncEngine twins.
+// Root cause A §8.2 (A6) client-state keys (per user, survive a reload). Core SyncEngine twins. The legacy vouches
+// are lines "vaultId|tag|kind" (tag = hex SHA-256 of the vouched key, kind = frozen | confirmed; A6 review HIGH-1).
+// The freeze marker lives in the durable cache itself (VaultCache.freezeDone, A6 review LOW-1).
 const LEGACY_AUTHORIZED_KEY = "grant.legacy.authorized";
-const FREEZE_DONE_KEY = "grant.freeze.done";
 const DECLINED_KEY = "grant.declined";
 
 /** A restorable in-grace deleted vault (GET /vaults/deleted), name decrypted locally. */
@@ -730,21 +731,41 @@ export class VaultStore {
    * here (hydrate is the only caller, and only rows from disk are in memory then). Every v1-only vault that
    * arrives later is legacy-read-only until the human accepts it (or the owner re-issues).
    */
-  private freezeOnce(): void {
-    if (this.clientState.get(FREEZE_DONE_KEY) !== null) return;
+  private async freezeOnce(): Promise<void> {
+    if (await this.cache.freezeDone()) return;
     const decrypted = new Set<string>();
     for (const it of this.itemsById.values()) decrypted.add(it.vaultId);
-    const evidence: string[] = [];
     for (const g of this.grantWireByVault.values()) {
-      if (g.userId === this.account.userId && decrypted.has(g.vaultId) && this.account.keySource(g.vaultId) === "legacy-seal") evidence.push(g.vaultId);
+      if (g.userId !== this.account.userId || !decrypted.has(g.vaultId) || this.account.keySource(g.vaultId) !== "legacy-seal") continue;
+      // Bound to the key the evidence is about (HIGH-1), with kind "frozen" (LOW-3).
+      this.vouch(g.vaultId, "frozen");
     }
-    if (evidence.length > 0) {
-      const auth = this.persistedSet(LEGACY_AUTHORIZED_KEY);
-      for (const id of evidence) auth.add(id);
-      this.persistSet(LEGACY_AUTHORIZED_KEY, auth);
+    await this.cache.setFreezeDone();
+  }
+
+  /** Persisted vouches: lines "vaultId|tag|kind". A line with no tag is ignored; no kind reads as "confirmed". */
+  private persistedVouches(): Map<string, { vaultId: string; tag: string; kind: LegacyVouchKind }> {
+    const out = new Map<string, { vaultId: string; tag: string; kind: LegacyVouchKind }>();
+    for (const line of this.persistedSet(LEGACY_AUTHORIZED_KEY)) {
+      const [vaultId, tag, kind] = line.split("|");
+      if (!vaultId || !tag || !/^[0-9a-f]{64}$/.test(tag)) continue;
+      out.set(vaultId, { vaultId, tag, kind: kind === "frozen" ? "frozen" : "confirmed" });
     }
-    for (const id of evidence) this.account.authorizeLegacyKey(id);
-    this.clientState.set(FREEZE_DONE_KEY, "1");
+    return out;
+  }
+
+  private persistVouches(m: Map<string, { vaultId: string; tag: string; kind: LegacyVouchKind }>): void {
+    this.persistSet(LEGACY_AUTHORIZED_KEY, new Set([...m.values()].map((v) => `${v.vaultId}|${v.tag}|${v.kind}`)));
+  }
+
+  /** Vouch for the key HELD for `vaultId` now (its tag is recorded, so no other key for the vault is covered). */
+  private vouch(vaultId: string, kind: LegacyVouchKind): void {
+    const tag = this.account.legacyKeyTag(vaultId);
+    if (!tag) return;
+    this.account.authorizeLegacyKey(vaultId, tag, kind);
+    const m = this.persistedVouches();
+    m.set(vaultId, { vaultId, tag, kind });
+    this.persistVouches(m);
   }
 
   /** Re-run §1.4 for rows whose key is not held (pending, refused) or held only from a v1 seal; make the items of
@@ -802,7 +823,8 @@ export class VaultStore {
     const declined = this.persistedSet(DECLINED_KEY);
     return this.account
       .pendingGrants()
-      .filter((p) => !declined.has(p.grantIdB64) && !this.account.hasVault(p.vaultId))
+      // A held LEGACY key with a pending v2 grant is listed too: verifying the sender upgrades it.
+      .filter((p) => !declined.has(p.grantIdB64) && (!this.account.hasVault(p.vaultId) || this.account.keySource(p.vaultId) === "legacy-seal"))
       .map((p) => ({ vaultId: p.vaultId, fromUserId: p.fromUserId, grantIdB64: p.grantIdB64 }));
   }
 
@@ -869,6 +891,8 @@ export class VaultStore {
     const out: LegacyVaultReview[] = [];
     for (const v of this.vaultsById.values()) {
       if (!ids.has(v.vaultId)) continue;
+      // LOW-2: never offer trust-on-first-use over a v2 grant that is pending verification or failed it.
+      if (this.account.hasPendingGrant(v.vaultId) || this.account.hasGrantAnomaly(v.vaultId)) continue;
       const n = this.account.decryptVaultName(v.vaultId, v.metaBlob);
       out.push({ vaultId: v.vaultId, name: n && n !== "(vault)" ? n : null, itemCount: counts.get(v.vaultId) ?? 0 });
     }
@@ -884,10 +908,10 @@ export class VaultStore {
   /** "Accept anyway" on the review card (Q7, trust on first use): vouch for the v1-only key, post the self-wrap. */
   async acceptLegacyVault(vaultId: string): Promise<void> {
     if (!this.account.isLegacyReadOnly(vaultId)) throw new Error("that vault is not awaiting review");
-    const auth = this.persistedSet(LEGACY_AUTHORIZED_KEY);
-    auth.add(vaultId);
-    this.persistSet(LEGACY_AUTHORIZED_KEY, auth);
-    this.account.authorizeLegacyKey(vaultId);
+    if (this.account.hasPendingGrant(vaultId) || this.account.hasGrantAnomaly(vaultId)) {
+      throw new Error("that vault has a newer-format grant waiting on verification, or one that failed it: verify the sender instead");
+    }
+    this.vouch(vaultId, "confirmed");
     const g = this.grantWireByVault.get(vaultId);
     if (g) await this.postSelfWrapIfAuthorized(g);
   }
@@ -1001,7 +1025,7 @@ export class VaultStore {
         return null;
       }
     };
-    for (const id of this.persistedSet(LEGACY_AUTHORIZED_KEY)) this.account.authorizeLegacyKey(id);
+    for (const v of this.persistedVouches().values()) this.account.authorizeLegacyKey(v.vaultId, v.tag, v.kind);
     // CR-01 (compliance 2026-07-15): the moment this cache's IndexedDB connection closes out
     // from under us — a browser-forced close (eviction/corruption) or a sibling tab / session-
     // level wipe firing deleteDatabase → versionchange — idbcache invokes onClosed. Demote to
@@ -1106,7 +1130,7 @@ export class VaultStore {
   async sync(): Promise<void> {
     // §8.2: evidence is what THIS cache held before the upgrade; if no hydrate looked at it, nothing pulled from
     // now on may count as pre-upgrade evidence.
-    if (this.clientState.get(FREEZE_DONE_KEY) === null) this.clientState.set(FREEZE_DONE_KEY, "1");
+    if (!(await this.cache.freezeDone())) await this.cache.setFreezeDone();
     await this.flushQueue();
     await this.pull();
     // H38 (audit 2026-09-13): a bell that rang DURING that pull joined it and got a snapshot
@@ -1839,7 +1863,7 @@ export class VaultStore {
     // the §8.5 rule run, offline, over the replayed provenance (core hydrate parity).
     this.decidePersonalLocally();
     for (const item of await this.cache.envelopes()) this.applyWireItem(item);
-    this.freezeOnce();
+    await this.freezeOnce();
     for (const rec of await this.cache.heldVaults()) {
       this.holding.set(rec.vault.vaultId, { ...rec, cachedName: this.peekHeldName(rec) });
     }
@@ -2333,8 +2357,8 @@ export class VaultStore {
     this.account.removeVault(vaultId);
     // A vouched-for legacy key dies with the vault: a later v1 grant for the same vaultId (a re-add, or a server
     // replay) starts read-only again instead of inheriting this device's old trust.
-    const auth = this.persistedSet(LEGACY_AUTHORIZED_KEY);
-    if (auth.delete(vaultId)) this.persistSet(LEGACY_AUTHORIZED_KEY, auth);
+    const vouches = this.persistedVouches();
+    if (vouches.delete(vaultId)) this.persistVouches(vouches);
     // §D.1: inside a pull, mirror the drop to disk (grant + vault row + items — the
     // removedGrants purge, spec 03 §4). C4: queue rows are NOT dropped vault-wide here — a
     // commit-time dropPending also erased rows staged AFTER moveToHolding's fold-read but

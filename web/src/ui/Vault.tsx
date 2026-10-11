@@ -1019,7 +1019,7 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
       // TWIN of core HouseholdCopy.GRANT_ANOMALY_NOTICE, byte-equal, pinned by vault-copy.test.ts.
       return {
         warn: true,
-        body: "A shared-vault invitation failed its signature check, so andvari ignored it. Nothing was added. Tell your admin — the server may be misbehaving.",
+        body: "A shared-vault invitation could not be verified, so andvari ignored it and changed nothing. Tell your admin — the server may be misbehaving.",
       };
     case "meta-regression":
       // spec 02 §4 warn-and-keep-newer: a delivered metaBlob whose metaV regressed below the

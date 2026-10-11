@@ -111,7 +111,7 @@ async function scenario(role = "reader"): Promise<Scenario> {
   const sealedVk = owner.wrapVkForMember(member.identityPub, vaultId);
   // A6: this fixture's member vouched for the v1-only key (as after "Accept" on the review card), so the
   // legacy key is writable here; signedgrant.store.test.ts covers the unconfirmed path.
-  member.authorizeLegacyKey(vaultId);
+  member.authorizeLegacyKey(vaultId, owner.legacyKeyTag(vaultId)!); // bound to the vault key (A6 HIGH-1)
   const itemId = owner.newItemId();
   return {
     owner,
