@@ -261,6 +261,9 @@ export type Req =
   /** A5b (security review 2026-10, root cause A): the popup confirms that the personal vault changed (a served
    *  wrap named another vault than this browser's). Extension pages only; mints nothing. */
   | { type: "personalAcceptChange" }
+  /** A6 fix round (A5b LOW-1 parity): load who the server reports on the NEW personal vault; "Use new" is
+   *  offered (and accepted by the SW) only after this succeeded for that vault. Extension pages only. */
+  | { type: "personalDescribeChange" }
   | { type: "unlock"; email: string; password: string }
   /** Popup: finish a TOTP-gated sign-in with the authenticator code (0.16.3). Follows an `unlock`
    *  that answered `totp_required`; the SW holds the already-derived keys so no second KDF runs.
@@ -486,7 +489,9 @@ export type Res<T extends Req["type"]> = T extends "status"
       waitingGrants: number;
     }
   : T extends "personalAcceptChange"
-    ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" | "need_full_unlock" | "unverified" }
+    ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" | "need_full_unlock" | "unverified" | "coholders_not_loaded" }
+  : T extends "personalDescribeChange"
+    ? { ok: boolean; code?: "locked" | "none" | "not_allowed" | "coholders_unavailable"; coHoldersLine?: string }
   : T extends "unlock"
     ? { ok: boolean; code?: UnlockCode; error?: string }
     : T extends "unlockTotp"

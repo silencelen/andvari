@@ -111,10 +111,44 @@ export function vaultNameFromMeta(vk: Uint8Array | undefined, vaultId: string, m
   }
 }
 
-/** A5b review LOW-3 (closed in A6): the popup's change notice names BOTH vaults. */
+/** A5b review LOW-3 (closed in A6): the popup's change notice names BOTH vaults, and (fix round, LOW-1 parity)
+ *  says how to KEEP the current one first, before anything about the new one. */
 export function personalChangeNotice(currentName: string | null, newName: string | null): string {
   const cur = currentName ? `“${currentName}”` : "your current vault";
   const next = newName ? `“${newName}”` : "another vault";
-  return `Your personal vault was changed to ${next} on another device (or the server sent an older record). ` +
-    `This browser keeps saving to ${cur} until you confirm. To keep ${cur}, choose it again in the web vault (Settings, Personal vault).`;
+  return `This browser keeps saving to ${cur}. To keep ${cur}, choose it again in the web vault (Settings, Personal vault). ` +
+    `The server says your personal vault was changed to ${next} on another device (or it sent an older record).`;
+}
+
+/** A co-holder as the popup shows it: what the SERVER reports (it informs; it decides nothing). */
+export interface CoHolderView {
+  displayName: string;
+  email: string;
+  role: string;
+}
+
+/** Everyone the server reports on the vault except this account. */
+export function coHoldersOf(members: readonly { userId: string; displayName: string; email: string; role: string }[], myUserId: string): CoHolderView[] {
+  return members.filter((m) => m.userId !== myUserId).map((m) => ({ displayName: m.displayName, email: m.email, role: m.role }));
+}
+
+/** A5b review LOW-2 parity: the co-holder line, labelled as server-reported. */
+export function coHoldersLine(coHolders: readonly CoHolderView[]): string {
+  if (coHolders.length === 0) return "Who else holds the new vault, as reported by the server: no one else.";
+  return "Who else holds the new vault, as reported by the server: " +
+    coHolders.map((c) => `${c.displayName} (${c.email}, ${c.role})`).join(", ") + ".";
+}
+
+/**
+ * A5b review LOW-1 parity (A6 fix round): the service worker accepts "Use the new personal vault" only after a
+ * describe step loaded the co-holders of THAT served vault, for THIS account, in this SW lifetime. Null = may
+ * proceed (the wrap is still re-opened under the UVK afterwards, LOW-4).
+ */
+export function acceptGate(
+  described: { vaultId: string; userId: string } | null,
+  servedVaultId: string,
+  userId: string,
+): "coholders_not_loaded" | null {
+  if (!described || described.vaultId !== servedVaultId || described.userId !== userId) return "coholders_not_loaded";
+  return null;
 }

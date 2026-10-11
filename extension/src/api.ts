@@ -43,6 +43,13 @@ export interface WireGrant {
   /** Grant v2 (root cause A §1.5): a signed, sealed grant. Never opened or verified by the extension (Q8). */
   signedGrant?: string | null;
 }
+/** One row of `GET /vaults/{id}/members` — server-reported, informative only. */
+export interface VaultMemberSummary {
+  userId: string;
+  email: string;
+  displayName: string;
+  role: string;
+}
 export interface WireItem {
   itemId: string;
   vaultId: string;
@@ -364,6 +371,12 @@ export class AndvariApi {
       await this.onTokensChanged?.();
       return "transient";
     }
+  }
+
+  /** Who the SERVER reports on a vault (spec 03 §10). Read only to show the co-holders of a new personal
+   *  vault before "Use the new personal vault" is offered (security review 2026-10, A6, A5b LOW-1 parity). */
+  vaultMembers(vaultId: string): Promise<VaultMemberSummary[]> {
+    return this.json("GET", `/api/v1/vaults/${encodeURIComponent(vaultId)}/members`);
   }
 
   /** Full snapshot when since=0: vaults/grants/items as deltas over the global rev. */
