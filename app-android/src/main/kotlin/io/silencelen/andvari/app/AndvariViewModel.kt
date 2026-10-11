@@ -3020,6 +3020,41 @@ class AndvariViewModel(
         requireNotNull(engine) { "locked" }.acceptPersonalChange()
     }
 
+    /** A5b review LOW-1 (closed in A6): load the NEW vault's co-holders; "Use new" is offered only after this
+     *  succeeds (and the engine refuses the switch otherwise). */
+    suspend fun describePersonalChange(): io.silencelen.andvari.core.client.PersonalChangeDetails =
+        requireNotNull(engine) { "locked" }.describePersonalChange()
+
+    // ---- signed grants (security review 2026-10, root cause A §1.6, §8.2; branch A6) ----
+    // Thin seams over core SyncEngine: no key is adopted and no self-wrap is minted here.
+
+    /** §1.6 invitations from someone not verified on this device (the vault is not adopted). */
+    fun pendingInvitations(): List<io.silencelen.andvari.core.client.PendingInvitation> = engine?.pendingInvitations().orEmpty()
+
+    /** Who the SERVER says sent [inv] (untrusted until the human compares codes). */
+    suspend fun invitationSender(inv: io.silencelen.andvari.core.client.PendingInvitation): io.silencelen.andvari.core.model.UserLookupResponse =
+        requireNotNull(engine) { "locked" }.invitationSender(inv)
+
+    /** Verify the sender (their 32 hex, typed from THEIR screen), then re-run the grant check. */
+    suspend fun acceptInvitation(inv: io.silencelen.andvari.core.client.PendingInvitation, typed: String): Boolean =
+        requireNotNull(engine) { "locked" }.acceptInvitation(inv, typed)
+
+    fun declineInvitation(inv: io.silencelen.andvari.core.client.PendingInvitation) {
+        engine?.declineInvitation(inv)
+    }
+
+    /** §8.2 "Review your shared vaults": readable only through a legacy grant nobody vouched for yet. */
+    fun legacyReviewVaults(): List<io.silencelen.andvari.core.client.LegacyVaultReview> = engine?.legacyReviewVaults().orEmpty()
+
+    /** The owner the server reports for [vaultId] (labelled as server-reported). Null when unavailable. */
+    suspend fun reportedOwner(vaultId: String): io.silencelen.andvari.core.client.CoHolder? =
+        runCatching { engine?.reportedOwner(vaultId) }.getOrNull()
+
+    /** Q7 "Accept" (trust on first use): this device vouches for the legacy key and posts the self-wrap. */
+    suspend fun acceptLegacyVault(vaultId: String) {
+        requireNotNull(engine) { "locked" }.acceptLegacyVault(vaultId)
+    }
+
     /** A vault's display name for the personal-vault notices. */
     fun vaultDisplayName(vaultId: String): String =
         engine?.vaultInfos()?.firstOrNull { it.vaultId == vaultId }?.name ?: engine?.personalChoiceInfo(vaultId)?.name ?: "another vault"

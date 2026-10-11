@@ -1895,7 +1895,9 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
         // Canon now; web carries the byte-equal template and is pinned to the Kotlin source.
         "replay-denied" -> Pair(HouseholdCopy.replayDeniedNotice(n.parkedCount ?: 0, name), false)
         // H71 (web F20 twin): a genuinely new non-owner grant — calm, informational.
-        "added" -> Pair("You were added to “$name”.", false)
+        // Root cause A §1.6 (A6): a verified grant names the PINNED contact who signed it (core canon).
+        "added" -> Pair(io.silencelen.andvari.core.client.HouseholdCopy.addedNotice(name, n.byLabel), false)
+        "grant-anomaly" -> Pair(io.silencelen.andvari.core.client.HouseholdCopy.GRANT_ANOMALY_NOTICE, true)
         // H03/H19: queued changes the server definitively refused and the drain dropped —
         // the canon lead sentence (web appends its revert tail; core has no optimistic apply).
         "write-rejected" -> Pair(HouseholdCopy.writeRejectedNotice(n.parkedCount ?: 0, name, n.reason), true)
@@ -2015,12 +2017,14 @@ private fun AttentionArea(state: DesktopState) {
     val personalUnconfirmed = state.personalStatus().let { it != null && it != io.silencelen.andvari.core.client.Account.PersonalStatus.CONFIRMED }
     val hasAnything = ((state.escrowStale || state.escrowNeedsV2) && state.escrowFingerprint.isNotEmpty()) ||
         state.incomingTransfers.isNotEmpty() || state.lifecycleNotices.isNotEmpty() ||
-        state.undecryptableSharedVaultCount > 0 || personalUnconfirmed
+        state.undecryptableSharedVaultCount > 0 || personalUnconfirmed || signedGrantNeedsAttention(state)
     if (!hasAnything) return
     Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
         if ((state.escrowStale || state.escrowNeedsV2) && state.escrowFingerprint.isNotEmpty()) ReSealCard(state)
         // Root cause A §4.3 / §8.5 (A5): no confirmed personal vault ⇒ no default destination; ask when needed.
         PersonalVaultBanner(state) { state.refresh() }
+        // Root cause A §1.6 / §8.2 (A6): invitations from someone not verified here, and legacy vaults to review.
+        SignedGrantCards(state) { state.refresh() }
         IncomingTransferCards(state)
         LifecycleNoticesBanner(state.lifecycleNotices, state::dismissNotice)
         if (state.undecryptableSharedVaultCount > 0) UnopenableVaultWarning(state.undecryptableSharedVaultCount)
