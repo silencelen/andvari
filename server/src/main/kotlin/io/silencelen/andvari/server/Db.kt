@@ -492,5 +492,30 @@ class Db(path: String) : AutoCloseable {
             }
         }
         if (version < 11) purgeHibpCache()
+        if (version < 12) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Escrow v2 migration safety (security review 2026-10, root cause A §2.5 / §8.4):
+                    // when PUT /escrow/self replaces a member's blob, the PREVIOUS one is kept here
+                    // until the admin's next fleet `verify` drill passes on the new one (POST
+                    // /admin/escrow/drill with the drilled blob's hash). A defective v2 seal therefore
+                    // cannot strand a member: the admin download still carries the last good blob.
+                    // One row per member, the OLDEST undrilled blob wins (INSERT OR IGNORE), so a
+                    // second re-seal before a drill never pushes the last drilled-good copy out.
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE IF NOT EXISTS escrow_legacy(
+                          userId TEXT PRIMARY KEY REFERENCES users(userId),
+                          sealed TEXT NOT NULL,
+                          fingerprint TEXT NOT NULL,
+                          updatedAt INTEGER NOT NULL,
+                          retainedAt INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate("UPDATE meta SET value='12' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }

@@ -138,6 +138,10 @@ const val ESCROW_SEAL_OVERHEAD = 48
 const val ESCROW_SEALED_MIN = ESCROW_SEAL_OVERHEAD + 150
 const val ESCROW_SEALED_MAX = ESCROW_SEAL_OVERHEAD + 1024
 
+/** A v1 escrow seal is exactly this long (fixed-width canonical payload); escrow v2 (security review
+ *  2026-10, root cause A) is a SignedStatement frame and is longer. Used only for the migration hint. */
+const val ESCROW_V1_SEALED_BYTES = ESCROW_SEAL_OVERHEAD + 178
+
 /** H76: Cache-Control for the SPA's hash-named assets/ bundles — content-addressed by Vite, so a
  *  year + immutable is exact (a release never changes bytes under an existing name). */
 internal const val STATIC_CACHE_IMMUTABLE = "public, max-age=31536000, immutable"
@@ -919,6 +923,14 @@ fun Application.andvariModule(services: Services) {
             if (body.fingerprint != config.recoveryFingerprint) throw BadRequest("escrow_fingerprint_mismatch")
             requireEscrowBlob(body.sealed)
             services.repo.db.tx { c ->
+                // §8.4 retention (security review 2026-10, root cause A): the blob being replaced is
+                // kept as `escrow_legacy` until a fleet drill passes on the new one, so a defective
+                // (e.g. first-generation v2) seal can never strand the member. INSERT OR IGNORE keeps
+                // the OLDEST undrilled blob; an identical re-upload retains nothing.
+                c.exec(
+                    "INSERT OR IGNORE INTO escrow_legacy(userId,sealed,fingerprint,updatedAt,retainedAt) SELECT userId,sealed,fingerprint,updatedAt,? FROM escrow WHERE userId=? AND sealed<>?",
+                    now(), p.userId, body.sealed,
+                )
                 c.exec(
                     "INSERT INTO escrow(userId,sealed,fingerprint,updatedAt) VALUES(?,?,?,?) ON CONFLICT(userId) DO UPDATE SET sealed=excluded.sealed, fingerprint=excluded.fingerprint, updatedAt=excluded.updatedAt",
                     p.userId, body.sealed, body.fingerprint, now(),
@@ -1119,8 +1131,23 @@ fun Application.andvariModule(services: Services) {
             // 404, not 400: the id was well-formed, the row simply isn't there — the same stance
             // every other state-of-the-world miss takes (no_such_user, not_a_member). A 400 told
             // the Admin UI "you sent a bad id" for a member who is merely waived (bug-server--9).
-            val sealed = services.admin.userSealed(targetId) ?: throw NotFound("no_escrow")
-            call.respondText(sealed)
+            // Design §2.5 (security review 2026-10, root cause A): the download now carries the
+            // account's identity file beside the blob — the recovery CLI's `--identity-file`, which it
+            // checks the escrowed key against (never trusts) — and the retained legacy blob (§8.4).
+            val download = services.admin.escrowDownload(targetId) ?: throw NotFound("no_escrow")
+            call.respond(download)
+        }
+        post("/api/v1/admin/escrow/drill") {
+            val p = requireAdmin(call, service)
+            if (!limiter.allow("escrow_drill:${p.userId}", 10, 60_000)) throw RateLimited()
+            // The §8.4 drill hook: the admin uploads the receipt `recovery-cli verify` printed after a
+            // fleet drill. For each account whose CURRENT blob is the one the drill opened (hash
+            // match), the retained legacy blob is dropped; any other account keeps it. Admin-asserted
+            // (the drill is offline); a hostile server can drop a legacy copy anyway, which is an
+            // availability risk the design already accepts (spec 05 T1), never a key disclosure.
+            val receipt = call.receive<io.silencelen.andvari.core.model.EscrowDrillReceipt>()
+            if (receipt.passed.size > 1000) throw BadRequest("too_many_rows")
+            call.respond(services.admin.applyDrillReceipt(receipt, p.userId, call.clientIp(config)))
         }
         post("/api/v1/admin/recovery") {
             val p = requireAdmin(call, service)

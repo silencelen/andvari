@@ -1,6 +1,6 @@
 # Test vectors — provenance manifest
 
-These 29 files are the shared corpus every implementation is graded against: the Kotlin
+These 30 files are the shared corpus every implementation is graded against: the Kotlin
 reference (`core/`, jvmTest), the web TypeScript engine (`web/`, vitest), and the
 extension's @noble engine (`extension/`, `node --test`). `scripts/verify.sh` greens all
 three suites off *these* bytes, so a divergence in any engine reds that engine rather
@@ -8,7 +8,7 @@ than quietly forking the fleet.
 
 **The corpus has two provenances**, and an auditor should be able to tell them apart.
 `tools/vector-gen` emits 17 of the files from the Kotlin reference implementation — those
-are *derived* artifacts and are regenerated when the spec changes. The other 12 are
+are *derived* artifacts and are regenerated when the spec changes. The other 13 are
 **hand-authored**: they encode classification/parsing decisions and corpus-derived
 fixtures that no generator produces, so they are edited deliberately, by hand, as part of
 the change that needs them. Neither kind may be edited casually — a vector edit is a
@@ -73,7 +73,7 @@ reference implementation named in each row.
 | `urimatch.json` | URI matching + autofill field classification (spec 02 §3), incl. the H65 one-time-code override (hintless `<input type=password name=otp>` → NONE) | core `autofill/UriMatchVectorTest` / `CardClassifyVectorTest` / `PslVectorTest` / `UriMatchIdnaVectorTest`, web `vault/urimatch.test.ts`, ext `urimatch.vectors.test.ts` |
 | `vaulthealth.json` | vault-health rankings: strength/reuse rows, staleness buckets + ORDER, duplicate clusters + refusals (design 2026-08-23); and since 2026-09-13 (audit H42) the **`writes` block** — what the engines WRITE: the composed merge doc, `planKeep` (passwordHistory's only writer), `planDismiss`, `planCheck` (okAt carry-forward, snooze horizon), `planUnsnooze`, every reader / cross-vault refusal verbatim under a real `roles` map. Its own item list, so the frozen derived keys kept their bytes. Docs are compared as canonical JSON — null-valued keys and empty arrays dropped on both sides (absent vs `null`/`[]` is one value to every reader and two encodings across the language boundary); everything else, array ORDER included, exact | core `VaultHealthVectorsTest`, web `ui/vaulthealth.vectors.test.ts` |
 
-## Hand-authored (12)
+## Hand-authored (13)
 
 No generator writes these. Each is edited by hand, in the same change that moves the
 behaviour it pins, and reviewed as a fleet-wide behaviour change.
@@ -86,6 +86,7 @@ behaviour it pins, and reviewed as a fleet-wide behaviour change.
 | `enrolllink.json` | the enroll-link encoding `<origin>/enroll#a1.<payload>` | a hand-picked adversarial corpus (malformed, mangled, over-long links) whose point is inputs the composer would never emit | core `EnrollLinkVectorTest`, web `enroll/enrolllink.test.ts` |
 | `fingerprint.json` | the 128-bit (32-hex) HUMAN short-form fingerprint matcher + display grouping (spec 04 §2 / spec 01 §5, security review 2026-10 §7) | table-shaped accept/reject decisions (separators, case, 16/31/33-digit rejection) and the full-vs-short machine-compare invariant, written from the spec text; no engine derives them | core `crypto/FingerprintTest`, web `crypto/fingerprint.test.ts` |
 | `signedstatement.json` | the v2 `SignedStatement` frame + canonical statement and the joint Ed25519 key (spec 01 §5 / §5.1, security review 2026-10, root cause A): the joint-key mapping for the `sharedgrant.json` member seed, M bytes, deterministic signatures, frame bytes, format detection, and a REJECTION row with its exact verdict for every strictness rule (bad magic and version, reserved purpose codes, lengths, whitespace, key order, duplicate/unknown/missing keys, grammar breaches, trailing bytes, purpose mismatch, signer not mapping to the pin, `−A`, small-order keys, flipped signature) | the expected bytes were computed by an **independent oracle** (Node/OpenSSL Ed25519 + X25519 and BigInt Edwards-to-Montgomery, no libsodium), and the rejection rows are policy decisions written from the spec text. The extension does not verify signed statements (design §1.7), so it has no consumer | core `crypto/SignedStatementVectorTest`, web `crypto/signedstatement.test.ts` |
+| `escrow-v2.json` | escrow v2 (spec 04 §3–§4, security review 2026-10, root cause A §2): the v2 statement + frame layout for a fixed member (the `signedstatement.json` / `sharedgrant.json` member seed, the `seal.json` org key, UVK and userId — so `seal.json`'s v1 `escrowUvk` blob IS that member's legacy escrow), seal-side refusals of a non-full fingerprint, and `Escrow.open` rows in recovery order: valid v2 anchored / unanchored-with-acknowledgment, valid v1-legacy under the identity check, and a REJECTION row with its exact verdict for wrong `expectedUserId`, the A-2 swap, a non-full or wrong identity anchor, an unanchored open without the acknowledgment, a v1 blob failing the identity check (incl. a forged UVK with a self-consistent forged seed), a signer not mapping to the anchored identity, a valid signature naming another identity, a flipped signature, malformed frames and v1 payloads. One row pins the documented RESIDUAL: a server-minted identity opens in unanchored mode, reported `anchored: false` | every blob was produced by an **independent oracle** (Node/OpenSSL SHA-2, X25519, Ed25519; tweetnacl XSalsa20-Poly1305; @noble blake2b + XChaCha20-Poly1305 — no libsodium) with FIXED ephemeral keys, and the verdict order is a policy decision written from the spec text. The extension never opens escrow | core `crypto/EscrowV2VectorTest`, web `crypto/escrow-v2.test.ts` |
 | `card.json` | card number normalize + brand derivation | table-shaped expectations (digit stripping, brand ranges) authored against the card-brand specs | core `autofill/CardNormalizeVectorTest` / `CardFillTest`, web `vault/card.test.ts` / `extension-pins.test.ts`, ext `card.test.ts` |
 | `cardform.json` | card-form detection + field-kind refinement | synthetic form fixtures drawn from a real checkout corpus, including the negative cases (a login form that must stay a login form) | core `autofill/CardFormVectorTest` / `CardFillTest`, ext `detect.cards.test.ts` / `cardfill.test.ts` |
 | `cardfill.json` | card fill fidelity: expiry adaptation, select matching, brand synonyms | its `tables` block is the **normative** copy of the brand-synonym / contains-word / month tables that both engines deep-equal their compiled-in tables against — the vector is the source, not a derivative | core `autofill/CardFillVectorTest` / `CardFillTest`, ext `cardfill.test.ts` |

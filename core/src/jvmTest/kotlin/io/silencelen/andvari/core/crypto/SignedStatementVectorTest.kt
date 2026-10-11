@@ -112,6 +112,19 @@ class SignedStatementVectorTest {
         }
     }
 
+    /**
+     * Escrow statements verify only through the ANCHORED wrapper (A4 / A3 review); the anchor used for
+     * the vector rows is the valid escrow case's own account and org key, which is what an honest
+     * recovery would supply out of band.
+     */
+    private fun verifyAny(frame: ByteArray, code: Int, pin: ByteArray): VerifiedStatement {
+        if (code == StatementPurpose.ESCROW_UVK.code) {
+            val f = v.getValue("valid").jsonArray[1].jsonObject.getValue("fields").jsonObject
+            return SignedStatement.verifyEscrow(crypto, frame, f.s("userId"), pin, f.s("recoveryFp"))
+        }
+        return SignedStatement.verify(crypto, frame, StatementPurpose.fromCode(code)!!, pin)
+    }
+
     @Test
     fun valid_encodeSignBuildAndVerifyAreByteExact() {
         val seed = jk.b("seedB64")
@@ -126,9 +139,8 @@ class SignedStatementVectorTest {
             assertContentEquals(c.b("signatureB64"), crypto.signDetached(signer.privateKey, m), "${c.s("name")}: deterministic Ed25519")
             assertContentEquals(c.b("frameB64"), SignedStatement.build(crypto, signer, st), "${c.s("name")}: frame bytes")
 
-            assertSameStatement(st, SignedStatement.parseStatement(code, statementBytes))
-            val purpose = StatementPurpose.fromCode(code)!!
-            val verified = SignedStatement.verify(crypto, c.b("frameB64"), purpose, pinned)
+            assertSameStatement(st, SignedStatement.parseStatement(code, statementBytes).parsed)
+            val verified = verifyAny(c.b("frameB64"), code, pinned)
             assertSameStatement(st, verified.statement)
             assertContentEquals(signer.publicKey, verified.signerPub)
         }
@@ -163,9 +175,8 @@ class SignedStatementVectorTest {
         val rows = v.getValue("reject").jsonArray.map { it.jsonObject }
         for (c in rows) {
             val pin = if (c.containsKey("pinnedIdentityPubB64")) c.b("pinnedIdentityPubB64") else pinned
-            val purpose = StatementPurpose.fromCode(c.getValue("expectedPurposeCode").jsonPrimitive.int)!!
             val e = assertFailsWith<SignedStatementException>(c.s("why")) {
-                SignedStatement.verify(crypto, c.b("frameB64"), purpose, pin)
+                verifyAny(c.b("frameB64"), c.getValue("expectedPurposeCode").jsonPrimitive.int, pin)
             }
             assertEquals(c.s("verdict"), e.verdict.code, c.s("why"))
         }
