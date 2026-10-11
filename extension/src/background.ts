@@ -1,3 +1,4 @@
+import { pickPersonal, type PersonalWrapWire } from "./personalpick";
 import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
 import type { BioReq, BioResult } from "./bioprotocol";
 import { brand, cardSubtitle, composeShortExpiry, digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
@@ -2102,24 +2103,21 @@ function buildVaultKeys(
 }
 
 /**
- * The personal vault (save target, and the VK the usage ledger is keyed from — crypto.ts
- * `usageKey`). Core/web parity, including the H64 refusal:
- *
- * `Vault.type` is a SERVER plaintext column bound into no AD (spec 02 §4), and nothing else the
- * client holds says which vault is its own. A hostile server could withhold the real personal row
- * and relabel a SHARED vault the user is merely a member of; `usageKey = HKDF(VK,
- * "andvari/v1|usage")` would then be computable by every other member of that vault, and the AD
- * `andvari/v1|usage|{userId}` is public — so a colluding housemate could read the user's per-item
- * behavioural log, exactly what the single-blob ledger design (spec 02 §8.2) exists to prevent.
- * A personal vault is always wrapped under our own UVK, never delivered as a member grant, so
- * skipping member-granted candidates costs an honest account nothing.
- *
- * Fail-closed: "" means no personal vault, which the ledger paths already treat as "no ledger"
- * and which makes a save with no explicit vault fail loudly rather than file the user's new
- * logins into somebody else's shared vault. Core twin: `Account.setPersonalVault`.
+ * The personal vault (save target, and the VK the usage ledger is keyed from — crypto.ts `usageKey`).
+ * Security review 2026-10, root cause A §4 / §8.5 (branch A5): decided by `AccountKeys.personalWrap`
+ * (UVK AEAD, `vk-personal` purpose), never by the server's `type` label or a `role`; only while the wrap is
+ * ABSENT does the strict §8.5 rule adopt (never mint) a vault. See personalpick.ts. "" = no personal vault:
+ * the ledger paths treat that as "no ledger" and a save with no explicit vault fails loudly.
  */
-function pickPersonalVaultId(sync: SyncResponse, vaultKeys: Map<string, Uint8Array>, memberGranted: Set<string>): string {
-  return sync.vaults.find((v) => v.type === "personal" && vaultKeys.has(v.vaultId) && !memberGranted.has(v.vaultId))?.vaultId ?? "";
+export function pickPersonalVaultId(
+  wrap: PersonalWrapWire | null | undefined,
+  uvk: Uint8Array,
+  userId: string,
+  vaultKeys: Map<string, Uint8Array>,
+  sync: SyncResponse,
+  memberGranted: Set<string>,
+): string {
+  return pickPersonal(wrap, uvk, userId, vaultKeys, sync.vaults, memberGranted).vaultId;
 }
 
 /** Policy fetch — a failed fetch must never mean "no idle lock at all" (web resolveAutoLockSeconds
@@ -2299,8 +2297,8 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
       return { ok: false, code: "aborted" };
     }
     const { vaultKeys, vaultRoles, memberGranted } = buildVaultKeys(sync, uvk, identity, s.userId);
+    const personalVaultId = pickPersonalVaultId(s.accountKeys.personalWrap, uvk, s.userId, vaultKeys, sync, memberGranted);
     const items = decryptItems(sync, vaultKeys);
-    const personalVaultId = pickPersonalVaultId(sync, vaultKeys, memberGranted);
     // uvk RETAINED in memory (breaker B1) so enroll can wrap it; provenance PASSWORD + a fresh
     // lastFullUnlockAt stamp — the only place that mints `now` (breaker A4).
     session = {
@@ -2545,8 +2543,8 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
           await fetchPolicyInto(); // breaker B6: re-fetch autoLockSeconds — done BEFORE the final owns-check so
           if (gen !== redeemGen) return { ok: false, code: "aborted" }; // no network await follows the session build
           const { vaultKeys, vaultRoles, memberGranted } = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
+          const personalVaultId = pickPersonalVaultId(keys.personalWrap, begin.uvk, begin.userId, vaultKeys, sync, memberGranted);
           const items = decryptItems(sync, vaultKeys);
-          const personalVaultId = pickPersonalVaultId(sync, vaultKeys, memberGranted);
           // Provenance QUICK + the COPIED stamp (breaker A4). mustChangePassword is false by construction —
           // a rescue would have revoked the session and the forced refresh above would have 401'd (breaker B6).
           session = {
